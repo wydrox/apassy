@@ -511,6 +511,26 @@ pub enum OwnerAction {
         device_ids: Vec<u64>,
         device_name: String,
     },
+    /// Connect a remote agent to this Mac: allow the connect request `id` of the MCP
+    /// authorization flow (plan "Bouncer section" decision 4). The proof names the
+    /// request, the client name, and the match code exactly as Decisions showed them. A
+    /// denial is stricter and needs no check.
+    AllowConnect {
+        id: String,
+        client_name: String,
+        code: String,
+        /// Where the code goes back, as the dialog showed it (review 0.5.16).
+        redirect_host: String,
+    },
+    /// Make a remote agent with a bearer token for the command line (`apassy agents
+    /// add-remote`). The proof names the name and the token lifetime in days.
+    AddRemoteAgent {
+        name: String,
+        days: u32,
+    },
+    /// Turn remote access on: Tailscale Funnel routes the internet to the node of this
+    /// Mac. Off is stricter and needs no check.
+    TurnOnRemoteAccess,
 }
 
 /// A change of a Connect group that needs the owner check (connect-billing-v1 section 6).
@@ -684,7 +704,11 @@ impl OwnerAction {
             Self::CopyField { .. } => "Copy a secret",
             Self::BackupVault { .. } => "Back up Apassy",
             Self::ExportDecisions => "Export decisions",
-            Self::RegisterAgent { .. } | Self::RegisterSetupAgent { .. } => "Connect an agent",
+            Self::RegisterAgent { .. }
+            | Self::RegisterSetupAgent { .. }
+            | Self::AddRemoteAgent { .. } => "Connect an agent",
+            Self::AllowConnect { .. } => "Connect a remote agent",
+            Self::TurnOnRemoteAccess => "Turn on remote access",
             Self::ChangeOwnerFrequency { .. } => "Change owner checks",
             Self::RemoveOlderIphone { device, .. } if device.kind == TrustedDeviceKind::Watch => {
                 "Remove an Apple Watch"
@@ -946,6 +970,31 @@ impl OwnerAction {
                 "revoke the device \"{}\"; it can no longer see or answer questions",
                 short_device_name(device_name)
             ),
+            Self::AllowConnect {
+                client_name,
+                redirect_host,
+                ..
+            } => {
+                // Where the code goes back (review 0.5.16); a loopback host is "localhost".
+                let back = if redirect_host.is_empty()
+                    || crate::questions::envelope::is_local_redirect_host(redirect_host)
+                {
+                    "localhost".to_owned()
+                } else {
+                    short_device_name(redirect_host)
+                };
+                format!(
+                    "connect \"{}\", which returns to {back}, to this Mac",
+                    short_device_name(client_name)
+                )
+            }
+            Self::AddRemoteAgent { name, .. } => format!(
+                "add the remote agent \"{}\" and issue its token",
+                short_device_name(name)
+            ),
+            Self::TurnOnRemoteAccess => {
+                "let remote agents reach this Mac through Tailscale Funnel".to_owned()
+            }
         }
     }
 
@@ -957,10 +1006,14 @@ impl OwnerAction {
     /// or a vault store, or end the account, so each asks again too. Turning way C off
     /// gives runs the long-lived key again (contract private-sharing-v1 rule 3), so it
     /// asks again as well; turning it on gives runs less and stays in the window.
+    /// `AddRemoteAgent` mints a bearer token that works from the internet and goes back
+    /// to the caller of the command line, whose session proves no owner at the Mac
+    /// (owner-cli-v1 §4, review 0.5.16).
     pub fn needs_fresh_local_check(&self) -> bool {
         matches!(
             self,
-            Self::ChangeBouncerHosting { .. }
+            Self::AddRemoteAgent { .. }
+                | Self::ChangeBouncerHosting { .. }
                 | Self::ChangeBouncerTraining { .. }
                 | Self::ChangeShortLivedSettings { .. }
                 | Self::ChangeDelivery { on: false, .. }
@@ -1524,6 +1577,10 @@ impl OwnerGate {
                 heartbeat_age_ms = self.window.heartbeat_age_ms(),
                 "owner window reuse refused"
             );
+            return None;
+        }
+        if action.needs_fresh_local_check() {
+            tracing::info!(reason = "fresh_only", "owner window reuse refused");
             return None;
         }
         // ticket() synchronously probes the same lifecycle helper that observed
@@ -2163,9 +2220,22 @@ mod evaluation_tests {
                 relay_url: "https://example.invalid".into(),
                 team_id: None,
             },
+            OwnerAction::AllowConnect {
+                id: "cr_synthetic".into(),
+                client_name: "Grok Bot".into(),
+                code: "K7Q-4MD".into(),
+                redirect_host: "grok.example".into(),
+            },
+            OwnerAction::TurnOnRemoteAccess,
         ] {
             assert!(LocalWindowSource::LocalOwner.permits(&action), "{action:?}");
         }
+        // A new remote agent always asks again (review 0.5.16).
+        let remote = OwnerAction::AddRemoteAgent {
+            name: "Grok Bot".into(),
+            days: 90,
+        };
+        assert!(!LocalWindowSource::LocalOwner.permits(&remote));
     }
 
     /// The Apassy Connect account actions (plan s7 M1) always need a fresh check on this
@@ -2614,7 +2684,7 @@ pub(crate) enum LocalWindowSource {
 impl LocalWindowSource {
     fn permits(self, action: &OwnerAction) -> bool {
         match self {
-            // A change of the bouncer brain host or trainer always asks again.
+            // An action of `needs_fresh_local_check` always asks again.
             Self::LocalOwner => !action.needs_fresh_local_check(),
             Self::BrowserDebuggingClick => matches!(action, OwnerAction::BrowserDebugging { .. }),
             Self::BrowserGesture => matches!(
@@ -2674,6 +2744,32 @@ impl OwnerDeliveryFence {
 #[cfg(test)]
 mod touch_id_title_tests {
     use super::OwnerAction;
+
+    /// Review 0.5.16: the Touch ID text of a connect says where the code goes back.
+    #[test]
+    fn the_touch_id_text_of_a_connect_names_where_the_code_goes_back() {
+        let connect = |host: &str| OwnerAction::AllowConnect {
+            id: "cr_1".into(),
+            client_name: "Grok Bot".into(),
+            code: "K7Q-4MD".into(),
+            redirect_host: host.into(),
+        };
+        assert_eq!(
+            connect("grok.example").reason(),
+            "connect \"Grok Bot\", which returns to grok.example, to this Mac"
+        );
+        for host in ["127.0.0.1", "localhost", "[::1]", ""] {
+            assert_eq!(
+                connect(host).reason(),
+                "connect \"Grok Bot\", which returns to localhost, to this Mac",
+                "{host}"
+            );
+        }
+        assert_eq!(
+            connect("grok.example").touch_id_title(),
+            "Connect a remote agent"
+        );
+    }
 
     #[test]
     fn untrusted_login_text_cannot_become_the_authentication_title() {

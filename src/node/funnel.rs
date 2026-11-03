@@ -15,6 +15,8 @@
 //! the handlers of other programs. The app refuses when 443 is public through Funnel
 //! (something else would be on the internet), and when 8443 serves another target; then
 //! it names port 10000, the only other Funnel port. It turns off only its own handler.
+//! When the owner chooses "Use Port 10000", the route uses 10000 instead of 8443
+//! ([`Funnel::set_port`]; the node keeps the choice in its directory).
 //! A refusal of the tailnet policy keeps the text of the command line and its link to
 //! the admin console.
 
@@ -22,6 +24,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -163,8 +166,13 @@ pub enum FunnelError {
     NoTailscale,
     /// "Tailscale is not connected."
     NotConnected(String),
-    /// 8443 serves another target. The app does not change it.
-    PortTaken { target: String, alternative: u16 },
+    /// The Funnel port serves another target. The app does not change it. `alternative`:
+    /// the other Funnel port, when the route is not on it already.
+    PortTaken {
+        port: u16,
+        target: String,
+        alternative: Option<u16>,
+    },
     /// 443 is public through Funnel. The app adds nothing while it is.
     HttpsPublic,
     /// The tailnet policy does not allow Funnel for this Mac.
@@ -185,10 +193,18 @@ impl FunnelError {
             Self::NoTailscale => "Install Tailscale and sign in.".to_owned(),
             Self::NotConnected(state) => format!("Tailscale is not connected ({state})."),
             Self::PortTaken {
+                port,
                 target,
-                alternative,
+                alternative: Some(alternative),
             } => format!(
-                "Port {FUNNEL_PORT} of Tailscale Serve already serves {target}. Apassy does not change it. Remove that handler, or move it to port {alternative}."
+                "Port {port} of Tailscale Serve already serves {target}. Apassy does not change it. Remove that handler, or use port {alternative}."
+            ),
+            Self::PortTaken {
+                port,
+                target,
+                alternative: None,
+            } => format!(
+                "Port {port} of Tailscale Serve already serves {target}. Apassy does not change it. Remove that handler."
             ),
             Self::HttpsPublic => format!(
                 "Port {NEVER_PORT} of this Mac is public through Tailscale Funnel. Apassy adds no route while it is: check `tailscale serve status`."
@@ -210,9 +226,24 @@ pub fn target_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// The origin of the node for agents.
+/// The origin of the node for agents on the usual Funnel port.
 pub fn public_origin(dns_name: &str) -> String {
-    format!("https://{dns_name}:{FUNNEL_PORT}")
+    public_origin_on(dns_name, FUNNEL_PORT)
+}
+
+/// The origin of the node for agents on the Funnel `port`.
+pub fn public_origin_on(dns_name: &str, port: u16) -> String {
+    format!("https://{dns_name}:{port}")
+}
+
+/// A Funnel port that the app may use: 8443, or 10000 when the owner chose it.
+pub fn is_funnel_port(port: u16) -> bool {
+    port == FUNNEL_PORT || port == OTHER_FUNNEL_PORT
+}
+
+/// The other Funnel port of `port`, for "Use Port 10000"; `None` on 10000.
+pub fn alternative_port(port: u16) -> Option<u16> {
+    (port == FUNNEL_PORT).then_some(OTHER_FUNNEL_PORT)
 }
 
 /// Printable text without control characters, cut at a character boundary.
@@ -311,8 +342,18 @@ fn handler_target(handler: &Value) -> String {
     "another handler".to_owned()
 }
 
-/// `tailscale serve status --json`, for the route to `own_target`.
+/// `tailscale serve status --json`, for the route to `own_target` on port 8443.
 pub fn parse_serve_status(json: &str, own_target: &str) -> Result<ServeState, FunnelError> {
+    parse_serve_status_on(json, own_target, FUNNEL_PORT)
+}
+
+/// `tailscale serve status --json`, for the route to `own_target` on the Funnel port
+/// `funnel_port`.
+pub fn parse_serve_status_on(
+    json: &str,
+    own_target: &str,
+    funnel_port: u16,
+) -> Result<ServeState, FunnelError> {
     let trimmed = json.trim();
     // An empty configuration prints nothing or `{}`.
     let root: Value = if trimmed.is_empty() {
@@ -331,11 +372,11 @@ pub fn parse_serve_status(json: &str, own_target: &str) -> Result<ServeState, Fu
     let mut uses = Vec::new();
     for (config, foreground) in configs(&root) {
         https_public |= funnel_on(config, NEVER_PORT);
-        funnel_port_public |= funnel_on(config, FUNNEL_PORT);
+        funnel_port_public |= funnel_on(config, funnel_port);
         let tcp = config
             .get("TCP")
             .and_then(Value::as_object)
-            .and_then(|map| map.get(&FUNNEL_PORT.to_string()));
+            .and_then(|map| map.get(&funnel_port.to_string()));
         if let Some(forward) = tcp
             .and_then(|port| port.get("TCPForward"))
             .and_then(Value::as_str)
@@ -350,13 +391,13 @@ pub fn parse_serve_status(json: &str, own_target: &str) -> Result<ServeState, Fu
             .and_then(Value::as_object)
             .map(|web| {
                 web.iter()
-                    .filter(|(key, _)| key.ends_with(&format!(":{FUNNEL_PORT}")))
+                    .filter(|(key, _)| key.ends_with(&format!(":{funnel_port}")))
                     .map(|(_, site)| site)
                     .collect()
             })
             .unwrap_or_default();
         if webs.is_empty() {
-            if tcp.is_some() || has_port_key(config.get("Web"), FUNNEL_PORT) {
+            if tcp.is_some() || has_port_key(config.get("Web"), funnel_port) {
                 uses.push(PortUse::Other {
                     target: "another handler".to_owned(),
                 });
@@ -445,11 +486,38 @@ pub fn parse_refusal(text: &str) -> Option<FunnelError> {
 #[derive(Clone)]
 pub struct Funnel {
     cli: Arc<dyn TailscaleCli>,
+    /// The Funnel port of the route: [`FUNNEL_PORT`], or [`OTHER_FUNNEL_PORT`] when the
+    /// owner chose it.
+    port: Arc<AtomicU16>,
 }
 
 impl Funnel {
     pub fn new(cli: Arc<dyn TailscaleCli>) -> Self {
-        Self { cli }
+        Self {
+            cli,
+            port: Arc::new(AtomicU16::new(FUNNEL_PORT)),
+        }
+    }
+
+    /// The Funnel port of the route.
+    pub fn port(&self) -> u16 {
+        self.port.load(Ordering::SeqCst)
+    }
+
+    /// Use the Funnel `port` from now on. Only 8443 and 10000 are taken; another port
+    /// changes nothing and returns false. The caller turns the route on the old port off
+    /// first.
+    pub fn set_port(&self, port: u16) -> bool {
+        if !is_funnel_port(port) {
+            return false;
+        }
+        self.port.store(port, Ordering::SeqCst);
+        true
+    }
+
+    /// The origin of the node for agents on this Mac's name.
+    pub fn origin(&self, dns_name: &str) -> String {
+        public_origin_on(dns_name, self.port())
     }
 
     /// `tailscale status --json`.
@@ -476,7 +544,7 @@ impl Funnel {
                 MAX_MESSAGE_BYTES,
             )));
         }
-        parse_serve_status(&output.stdout, &target_url(port))
+        parse_serve_status_on(&output.stdout, &target_url(port), self.port())
     }
 
     /// Turn the route on to the loopback `port` and return the name of this Mac. The
@@ -501,13 +569,14 @@ impl Funnel {
             }
             PortUse::Other { target } => {
                 return Err(FunnelError::PortTaken {
+                    port: self.port(),
                     target: target.clone(),
-                    alternative: OTHER_FUNNEL_PORT,
+                    alternative: alternative_port(self.port()),
                 });
             }
             PortUse::Free | PortUse::Ours => {}
         }
-        let https = format!("--https={FUNNEL_PORT}");
+        let https = format!("--https={}", self.port());
         let target = target_url(port);
         let output = self
             .cli
@@ -542,7 +611,7 @@ impl Funnel {
     }
 
     fn turn_off(&self) -> Result<(), FunnelError> {
-        let https = format!("--https={FUNNEL_PORT}");
+        let https = format!("--https={}", self.port());
         let output = self
             .cli
             .run(&["funnel", &https, "off"])
@@ -580,8 +649,19 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn serve_with_8443(target: &str, public: bool) -> String {
+        serve_with_port(FUNNEL_PORT, target, public)
+    }
+
+    pub(crate) fn serve_with_port(port: u16, target: &str, public: bool) -> String {
         format!(
-            r#"{{"TCP":{{"443":{{"HTTPS":true}},"8443":{{"HTTPS":true}}}},"Web":{{"{DNS}:443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:3773"}}}}}},"{DNS}:8443":{{"Handlers":{{"/":{{"Proxy":"{target}"}}}}}}}},"AllowFunnel":{{"{DNS}:8443":{public}}}}}"#
+            r#"{{"TCP":{{"443":{{"HTTPS":true}},"{port}":{{"HTTPS":true}}}},"Web":{{"{DNS}:443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:3773"}}}}}},"{DNS}:{port}":{{"Handlers":{{"/":{{"Proxy":"{target}"}}}}}}}},"AllowFunnel":{{"{DNS}:{port}":{public}}}}}"#
+        )
+    }
+
+    /// 8443 serves another program, and the route of the app is on 10000.
+    pub(crate) fn serve_other_8443_and_10000(target: &str) -> String {
+        format!(
+            r#"{{"TCP":{{"8443":{{"HTTPS":true}},"10000":{{"HTTPS":true}}}},"Web":{{"{DNS}:8443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:8080"}}}}}},"{DNS}:10000":{{"Handlers":{{"/":{{"Proxy":"{target}"}}}}}}}},"AllowFunnel":{{"{DNS}:8443":true,"{DNS}:10000":true}}}}"#
         )
     }
 
@@ -637,7 +717,10 @@ pub(crate) mod tests {
                 ["status", "--json"] => ok(self.status.lock().unwrap().clone()),
                 ["serve", "status", "--json"] => ok(self.serve.lock().unwrap().clone()),
                 ["funnel", "--bg", https, target] => {
-                    assert_eq!(*https, "--https=8443", "only 8443");
+                    assert!(
+                        *https == "--https=8443" || *https == "--https=10000",
+                        "only 8443 or 10000: {https}"
+                    );
                     if let Some(text) = self.refusal.lock().unwrap().clone() {
                         return Some(CliOutput {
                             success: false,
@@ -645,11 +728,18 @@ pub(crate) mod tests {
                             stderr: String::new(),
                         });
                     }
-                    *self.serve.lock().unwrap() = serve_with_8443(target, true);
+                    *self.serve.lock().unwrap() = if *https == "--https=10000" {
+                        serve_other_8443_and_10000(target)
+                    } else {
+                        serve_with_8443(target, true)
+                    };
                     ok(String::new())
                 }
                 ["funnel", https, "off"] => {
-                    assert_eq!(*https, "--https=8443", "only 8443");
+                    assert!(
+                        *https == "--https=8443" || *https == "--https=10000",
+                        "only 8443 or 10000: {https}"
+                    );
                     *self.serve.lock().unwrap() = serve_443_only();
                     ok(String::new())
                 }
@@ -799,8 +889,9 @@ pub(crate) mod tests {
         assert_eq!(
             funnel.enable(49200, Some(49100)),
             Err(FunnelError::PortTaken {
+                port: FUNNEL_PORT,
                 target: "http://127.0.0.1:8080".to_owned(),
-                alternative: OTHER_FUNNEL_PORT
+                alternative: Some(OTHER_FUNNEL_PORT)
             })
         );
         assert_eq!(funnel.disable(49200), Ok(false));
@@ -829,5 +920,50 @@ pub(crate) mod tests {
             r#"{{"AllowFunnel":{{"{DNS}:443":true}},"Web":{{"{DNS}:443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:3773"}}}}}}}}}}"#
         );
         assert_eq!(funnel.enable(49200, None), Err(FunnelError::HttpsPublic));
+    }
+
+    #[test]
+    fn port_10000_takes_the_route_when_8443_is_taken() {
+        let cli = Arc::new(FakeCli::connected(serve_with_8443(
+            "http://127.0.0.1:8080",
+            true,
+        )));
+        let funnel = Funnel::new(cli.clone());
+        assert_eq!(funnel.port(), FUNNEL_PORT);
+        assert!(matches!(
+            funnel.enable(49200, None),
+            Err(FunnelError::PortTaken {
+                alternative: Some(OTHER_FUNNEL_PORT),
+                ..
+            })
+        ));
+        // Only the two Funnel ports are taken.
+        assert!(!funnel.set_port(443));
+        assert!(!funnel.set_port(8080));
+        assert_eq!(funnel.port(), FUNNEL_PORT);
+        assert!(funnel.set_port(OTHER_FUNNEL_PORT));
+        assert_eq!(
+            funnel.origin(DNS),
+            format!("https://{DNS}:{OTHER_FUNNEL_PORT}")
+        );
+        cli.calls.lock().unwrap().clear();
+        assert_eq!(funnel.enable(49200, None), Ok(DNS.to_owned()));
+        assert!(
+            cli.calls()
+                .contains(&"funnel --bg --https=10000 http://127.0.0.1:49200".to_owned()),
+            "{:?}",
+            cli.calls()
+        );
+        // The handler of the other program on 8443 stays; off turns 10000 off only.
+        assert_eq!(funnel.disable(49200), Ok(true));
+        assert!(cli.calls().contains(&"funnel --https=10000 off".to_owned()));
+        assert!(!cli.calls().iter().any(|call| call.contains("--https=8443")));
+        // A port taken on 10000 offers no other port.
+        let taken = FunnelError::PortTaken {
+            port: OTHER_FUNNEL_PORT,
+            target: "x".to_owned(),
+            alternative: alternative_port(OTHER_FUNNEL_PORT),
+        };
+        assert!(!taken.message().contains("use port"));
     }
 }

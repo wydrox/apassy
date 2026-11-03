@@ -665,6 +665,8 @@ fn directory_1001_migrates_to_1005_without_losing_teams_codes_or_audit() {
 fn unknown_directory_versions_are_refused_without_changes() {
     let relay = start(UpstreamOptions::default());
     let (config, _dir) = relay.stop_keep();
+    // 1005 (node pairing codes, docs/SPEC.md section 32.6) is the current version: 1006 is
+    // the next unknown one.
     for version in [0, 1000, 1006, 2000] {
         let conn = directory_connection(&config);
         conn.execute_batch(&format!("PRAGMA user_version = {version}"))

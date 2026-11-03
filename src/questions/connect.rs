@@ -68,6 +68,9 @@ pub struct PendingConnectCard {
     pub code: String,
     /// When the connect request ends on the node (Unix seconds).
     pub expires_at: u64,
+    /// The host of the redirect URI (`PendingConnect.redirect_host`): the card says
+    /// where the code goes back (review 0.5.16). `None` only when the node gave none.
+    pub redirect_host: Option<String>,
 }
 
 impl PendingConnectCard {
@@ -78,6 +81,7 @@ impl PendingConnectCard {
             mac_name: self.mac_name.clone(),
             code: self.code.clone(),
             expires_at: self.expires_at,
+            redirect_host: self.redirect_host.clone(),
         }
     }
 }
@@ -746,6 +750,7 @@ mod tests {
             mac_name: "Synthetic Mac mini".to_owned(),
             code: "482 913".to_owned(),
             expires_at: NOW + 270,
+            redirect_host: None,
         };
         super::super::envelope::connect_digest_hex("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect)
     }
@@ -935,6 +940,7 @@ mod tests {
             mac_name: "Synthetic Mac mini".to_owned(),
             code: "482 913".to_owned(),
             expires_at: unix_now() + 300,
+            redirect_host: Some("grok.example".to_owned()),
         };
         assert_eq!(lane.post(connect.clone()), Ok(()));
         let mut again = connect.clone();
@@ -950,8 +956,13 @@ mod tests {
         soon.id = "cr_2".to_owned();
         soon.expires_at = unix_now() + 5;
         assert_eq!(lane.post(soon), Err(ConnectPostError::Expired));
-        let mut bad = connect;
+        let mut bad = connect.clone();
         bad.id = "cr 3".to_owned();
         assert_eq!(lane.post(bad), Err(ConnectPostError::Invalid));
+        // A redirect host of a bad form stays on this Mac too (review 0.5.16).
+        let mut host = connect;
+        host.id = "cr_4".to_owned();
+        host.redirect_host = Some("grok example".to_owned());
+        assert_eq!(lane.post(host), Err(ConnectPostError::Invalid));
     }
 }

@@ -11,16 +11,18 @@
 //!
 //! An embedded node has a second listener (`Scope::Public`) that serves only `POST /mcp`
 //! and the proxy, and each listener of a node counts failed authentications
-//! (`AuthFailures`, docs/SPEC.md section 30). With `RelayConfig::oauth` (an embedded node)
+//! (`AuthFailures` for its other paths, `AgentAuthFailures` by source address for `/mcp`
+//! and `/p/`, docs/SPEC.md section 30.5). With `RelayConfig::oauth` (an embedded node)
 //! both listeners also serve the MCP authorization flow (`oauth`, docs/SPEC.md section
 //! 31), and a 401 of `POST /mcp` carries `WWW-Authenticate`. A node on the tailnet has a
 //! third listener (`Scope::Tailnet`, docs/SPEC.md section 32) that its TLS front forwards
 //! to: the device routes, and on the Linux node the team routes too; never the OAuth
-//! flow, `/v1/connect`, or anything else (404).
+//! flow, `/v1/connect`, or anything else (404). It counts failed authentications by
+//! tailnet peer on every path (`FailureKeys::PerPeer`).
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -63,11 +65,21 @@ const LISTENER_PROBE_FAILURES: u32 = 3;
 const MAINTENANCE_SECS: u64 = 5;
 /// Seconds between two sweeps of a Connect team that had no request since its last one.
 const IDLE_MAINTENANCE_SECS: u64 = 60;
-/// Bad bearer tokens and session keys that one listener takes in one window
-/// (`AuthFailures`). One more request in the window gets 429 `rate_limited`.
+/// Bad bearer tokens and session keys that one listener takes in one window on its
+/// paths other than `/mcp` and `/p/` (`AuthFailures`), that one source address takes
+/// on `/mcp` and `/p/` (`AgentAuthFailures`), and that one tailnet peer takes on the
+/// tailnet listener. One more request in the window gets 429 `rate_limited`.
 pub const AUTH_FAILURES_MAX: u32 = 20;
 /// The window of `AUTH_FAILURES_MAX`, in seconds, and the `Retry-After` of its 429.
 pub const AUTH_FAILURE_WINDOW_SECS: u64 = 60;
+/// Bad bearer tokens and session keys on `/mcp` and `/p/` of one listener without a
+/// source address, in one window: they share one count (`AgentAuthFailures`), so it is
+/// high enough that the agents of the owner keep working while a stranger floods it,
+/// and a flood is still bounded (review 0.5.16, docs/SPEC.md section 30.5).
+pub const AGENT_SHARED_FAILURES_MAX: u32 = 600;
+/// The source addresses whose failures one listener keeps. A failure of a further
+/// source counts in the shared window until a window of the table ends.
+pub const AUTH_SOURCES_MAX: usize = 4096;
 
 /// What a listener serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,19 +179,56 @@ impl Scope {
     }
 }
 
-/// The failed authentications of one listener: bad bearer tokens and session keys in a
-/// fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its first failure, for each
-/// key. With `AUTH_FAILURES_MAX` of them, every request of that key gets 429
-/// `rate_limited` until the window ends; then the count starts again. In memory only.
+/// A fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its first failure, and
+/// the failures in it.
+#[derive(Debug, Default, Clone, Copy)]
+struct Window {
+    start: u64,
+    count: u32,
+}
+
+impl Window {
+    fn ended(&self, now: u64) -> bool {
+        now >= self.start.saturating_add(AUTH_FAILURE_WINDOW_SECS)
+    }
+
+    /// The failures of the window at `now`: none once it ended.
+    fn count(&mut self, now: u64) -> u32 {
+        if self.ended(now) {
+            *self = Self {
+                start: now,
+                count: 0,
+            };
+        }
+        self.count
+    }
+
+    fn record(&mut self, now: u64) {
+        if self.count == 0 || self.ended(now) {
+            *self = Self {
+                start: now,
+                count: 0,
+            };
+        }
+        self.count = self.count.saturating_add(1);
+    }
+}
+
+/// The failed authentications of one listener on its paths other than `/mcp` and `/p/`:
+/// bad bearer tokens in a fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its
+/// first failure, for each key. With `AUTH_FAILURES_MAX` of them, every request of those
+/// paths and that key gets 429 `rate_limited` until the window ends; then the count
+/// starts again. In memory only.
 ///
-/// The node and public listeners use one key for the whole listener
-/// (`AuthFailures::limited`, `AuthFailures::record`). The tailnet listener that the TLS
-/// front forwards to uses the tailnet peer of each request (`Listener::failure_key`,
-/// N8-1), so one peer with bad tokens never locks out another peer.
+/// The node and public listeners, and the Mac's local route, use one key for the whole
+/// listener (`AuthFailures::limited`, `AuthFailures::record`). The tailnet listener that
+/// the TLS front forwards to uses the tailnet peer of each request for every path
+/// (`Listener::counted`, N8-1), so one peer with bad tokens never locks out another
+/// peer.
 #[derive(Debug, Default)]
 pub struct AuthFailures {
-    /// For each key: the start of its window and the failures in it.
-    windows: Mutex<HashMap<IpAddr, (u64, u32)>>,
+    /// For each key: its window.
+    windows: Mutex<HashMap<IpAddr, Window>>,
 }
 
 /// The key of a listener that counts as one.
@@ -205,78 +254,237 @@ impl AuthFailures {
         let Some(window) = windows.get_mut(&key) else {
             return false;
         };
-        if now >= window.0.saturating_add(AUTH_FAILURE_WINDOW_SECS) {
+        if window.ended(now) {
             windows.remove(&key);
             return false;
         }
-        window.1 >= AUTH_FAILURES_MAX
+        window.count >= AUTH_FAILURES_MAX
     }
 
     /// Counts one bad bearer token or session key of `key`.
     pub fn record_for(&self, key: IpAddr, now: u64) {
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
         if !windows.contains_key(&key) && windows.len() >= AUTH_FAILURE_KEYS_MAX {
-            windows.retain(|_, window| now < window.0.saturating_add(AUTH_FAILURE_WINDOW_SECS));
+            windows.retain(|_, window| !window.ended(now));
             if windows.len() >= AUTH_FAILURE_KEYS_MAX {
                 return;
             }
         }
-        let window = windows.entry(key).or_insert((now, 0));
-        if window.1 == 0 || now >= window.0.saturating_add(AUTH_FAILURE_WINDOW_SECS) {
-            *window = (now, 0);
-        }
-        window.1 = window.1.saturating_add(1);
+        windows.entry(key).or_default().record(now);
     }
 }
 
 /// How a listener keys its failed authentications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKeys {
-    /// One window for the whole listener: the node and public listeners, and the local
-    /// route of the Mac (`Serving::local_route`).
+    /// One window for the whole listener on its paths other than `/mcp` and `/p/`, and
+    /// the source addresses of `X-Forwarded-For` on those two (`AgentAuthFailures`): the
+    /// node and public listeners, and the local route of the Mac
+    /// (`Serving::local_route`).
     Whole,
-    /// One window for each tailnet peer: the tailnet listener at this address, which the
-    /// TLS front forwards to. The front names the peer of each connection in process
-    /// (`apassy::net::front_peers`); a connection that it did not make is keyed by its
-    /// own address, the loopback.
+    /// One window for each tailnet peer, on every path: the tailnet listener at this
+    /// address, which the TLS front forwards to. The front names the peer of each
+    /// connection in process (`apassy::net::front_peers`); a connection that it did not
+    /// make is keyed by its own address, the loopback. No header is read: a peer could
+    /// forge `X-Forwarded-For`.
     PerPeer(SocketAddr),
 }
 
-/// One listener: what it serves, and its failed-auth count (`None` when
-/// `RelayConfig::auth_limiter` is off).
+/// The client address of a request to `/mcp` or `/p/`: the last address of
+/// `X-Forwarded-For`, which Tailscale Funnel sets to the address that connected to it.
+/// An IPv6 address counts by its /64, as one host can use any address of it. Only the
+/// failed-auth count reads it: it gives no identity and no authority, and a value that
+/// a local program forges only puts its own failures in another count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Source(IpAddr);
+
+impl Source {
+    /// `None` without the header or with a value that is not one address.
+    pub fn from_forwarded(value: Option<&str>) -> Option<Self> {
+        let last = value?.rsplit(',').next()?.trim();
+        let addr = match last.parse::<IpAddr>().ok()? {
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => IpAddr::V4(v4),
+                None => {
+                    let s = v6.segments();
+                    IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+                }
+            },
+            v4 => v4,
+        };
+        Some(Self(addr))
+    }
+}
+
+/// The failed authentications of one listener on `/mcp` and `/p/` (review 0.5.16): a
+/// window for each source address (`AUTH_FAILURES_MAX`), so a stranger with bad tokens
+/// holds only their own address at 429, and one shared window for the requests without
+/// an address (`AGENT_SHARED_FAILURES_MAX`). A source that the full table
+/// (`AUTH_SOURCES_MAX`) cannot take counts, and is checked, in the shared window. In
+/// memory only. The tailnet listener does not use it (`FailureKeys::PerPeer`).
+#[derive(Debug, Default)]
+pub struct AgentAuthFailures {
+    state: Mutex<AgentFailureState>,
+}
+
+#[derive(Debug, Default)]
+struct AgentFailureState {
+    sources: HashMap<Source, Window>,
+    shared: Window,
+}
+
+impl AgentFailureState {
+    /// True when `source` has a window in the table or the table has room for it. A
+    /// full table first drops the windows that ended.
+    fn has_room(&mut self, source: &Source, now: u64) -> bool {
+        if self.sources.contains_key(source) {
+            return true;
+        }
+        if self.sources.len() >= AUTH_SOURCES_MAX {
+            self.sources.retain(|_, window| !window.ended(now));
+        }
+        self.sources.len() < AUTH_SOURCES_MAX
+    }
+}
+
+impl AgentAuthFailures {
+    /// True while `source` (or, without one, the shared window) is at its limit.
+    pub fn limited(&self, source: Option<Source>, now: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(source) = source
+            && state.has_room(&source, now)
+        {
+            return state
+                .sources
+                .get_mut(&source)
+                .is_some_and(|window| window.count(now) >= AUTH_FAILURES_MAX);
+        }
+        state.shared.count(now) >= AGENT_SHARED_FAILURES_MAX
+    }
+
+    /// Counts one bad bearer token or session key of `source`.
+    pub fn record(&self, source: Option<Source>, now: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(source) = source
+            && state.has_room(&source, now)
+        {
+            state.sources.entry(source).or_default().record(now);
+            return;
+        }
+        state.shared.record(now);
+    }
+}
+
+/// Which failed-auth count a request is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Counted {
+    /// Every path but `/mcp`, `/p/`, and the MCP authorization flow: the listener's.
+    Listener,
+    /// `/mcp` and `/p/`: the count of the source address, or the shared one.
+    Agent(Option<Source>),
+    /// Every path of the tailnet listener: the count of the tailnet peer (N8-1).
+    Peer(IpAddr),
+}
+
+impl Counted {
+    /// The count of a request to `path`, with its `X-Forwarded-For`, on a listener that
+    /// counts as one (`FailureKeys::Whole`).
+    fn of(path: &str, forwarded: Option<&str>) -> Self {
+        if path == paths::MCP || path.starts_with(paths::PROXY_PREFIX) {
+            Self::Agent(Source::from_forwarded(forwarded))
+        } else {
+            Self::Listener
+        }
+    }
+
+    /// The `bucket` of the audit row of a 429.
+    fn bucket(self) -> &'static str {
+        match self {
+            Self::Listener => "listener",
+            Self::Agent(Some(_)) => "source",
+            Self::Agent(None) => "shared",
+            Self::Peer(_) => "peer",
+        }
+    }
+}
+
+/// One listener: what it serves, and its failed-auth counts (`None` when
+/// `RelayConfig::auth_limiter` is off). The MCP authorization flow is in neither: it
+/// has a count for each client (`oauth::ClientFailures`).
 pub struct Listener {
     pub scope: Scope,
     pub failures: Option<AuthFailures>,
+    pub agent_failures: Option<AgentAuthFailures>,
     pub keys: FailureKeys,
     /// The tailnet scope on the Mac's own local route (`Serving::local_route`).
     pub local_route: bool,
 }
 
 impl Listener {
-    /// The key of `request` in the failed-auth count.
-    pub fn failure_key(&self, request: &Request) -> IpAddr {
-        match self.keys {
-            FailureKeys::Whole => WHOLE_LISTENER,
-            FailureKeys::PerPeer(listen) => {
-                let Some(remote) = request.remote_addr().copied() else {
-                    return WHOLE_LISTENER;
-                };
-                apassy::net::front_peers::peer_of(remote, listen)
-                    .unwrap_or_else(|| remote.ip().to_canonical())
+    /// A listener with the counts on or off.
+    pub fn new(scope: Scope, limiter: bool, keys: FailureKeys, local_route: bool) -> Self {
+        Self {
+            scope,
+            failures: limiter.then(AuthFailures::default),
+            agent_failures: limiter.then(AgentAuthFailures::default),
+            keys,
+            local_route,
+        }
+    }
+
+    fn counts(&self) -> bool {
+        self.failures.is_some() || self.agent_failures.is_some()
+    }
+
+    /// The failed-auth count of `request` to `path`.
+    fn counted(&self, request: &Request, path: &str) -> Counted {
+        let FailureKeys::PerPeer(listen) = self.keys else {
+            let forwarded = header_value(request, "X-Forwarded-For");
+            return Counted::of(path, forwarded.as_deref());
+        };
+        let Some(remote) = request.remote_addr().copied() else {
+            return Counted::Peer(WHOLE_LISTENER);
+        };
+        let peer = apassy::net::front_peers::peer_of(remote, listen)
+            .unwrap_or_else(|| remote.ip().to_canonical());
+        Counted::Peer(peer)
+    }
+
+    fn record_failure(&self, counted: Counted, now: u64) {
+        match counted {
+            Counted::Listener => {
+                if let Some(failures) = &self.failures {
+                    failures.record(now);
+                }
+            }
+            Counted::Peer(key) => {
+                if let Some(failures) = &self.failures {
+                    failures.record_for(key, now);
+                }
+            }
+            Counted::Agent(source) => {
+                if let Some(failures) = &self.agent_failures {
+                    failures.record(source, now);
+                }
             }
         }
     }
 
-    fn record_failure(&self, key: IpAddr, now: u64) {
-        if let Some(failures) = &self.failures {
-            failures.record_for(key, now);
+    fn limited(&self, counted: Counted, now: u64) -> bool {
+        match counted {
+            Counted::Listener => self
+                .failures
+                .as_ref()
+                .is_some_and(|failures| failures.limited(now)),
+            Counted::Peer(key) => self
+                .failures
+                .as_ref()
+                .is_some_and(|failures| failures.limited_for(key, now)),
+            Counted::Agent(source) => self
+                .agent_failures
+                .as_ref()
+                .is_some_and(|failures| failures.limited(source, now)),
         }
-    }
-
-    fn limited(&self, key: IpAddr, now: u64) -> bool {
-        self.failures
-            .as_ref()
-            .is_some_and(|failures| failures.limited_for(key, now))
     }
 
     /// The kind of the audit row of a listener (or one of its peers) at its limit.
@@ -810,12 +1018,12 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         (Scope::Tailnet { .. }, Some(addr)) if !local_route => FailureKeys::PerPeer(addr),
         _ => FailureKeys::Whole,
     };
-    let listener = Arc::new(Listener {
+    let listener = Arc::new(Listener::new(
         scope,
-        failures: hub.config.auth_limiter.then(AuthFailures::default),
+        hub.config.auth_limiter,
         keys,
         local_route,
-    });
+    ));
     let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
     let slots = Arc::new(Slots {
         all: AtomicUsize::new(0),
@@ -1092,23 +1300,27 @@ fn respond_ok(request: Request, result: Value) {
     respond_json(request, 200, &Envelope::success(result), false);
 }
 
-/// 429 `rate_limited` with `Retry-After` for a listener (or a tailnet peer, `key`) at its
-/// failed-auth limit, and a row in the relay audit at most once per ten seconds for each
-/// listener. A per-peer row names the peer.
-fn respond_auth_limited(hub: &Hub, listener: &Listener, key: IpAddr, request: Request, now: u64) {
-    let detail = match listener.keys {
-        FailureKeys::PerPeer(_) => json!({
-            "code": codes::RATE_LIMITED,
-            "scope": listener.scope.name(),
-            "peer": key.to_string(),
-        }),
-        FailureKeys::Whole if listener.local_route => json!({
-            "code": codes::RATE_LIMITED,
-            "scope": listener.scope.name(),
-            "listener": "local_route",
-        }),
-        FailureKeys::Whole => json!({"code": codes::RATE_LIMITED, "scope": listener.scope.name()}),
-    };
+/// 429 `rate_limited` with `Retry-After` for a request whose failed-auth count is at its
+/// limit, and a row in the relay audit at most once per ten seconds for each listener.
+/// The row names the count; a per-peer row also names the tailnet peer.
+fn respond_auth_limited(
+    hub: &Hub,
+    listener: &Listener,
+    counted: Counted,
+    request: Request,
+    now: u64,
+) {
+    let mut detail = json!({
+        "code": codes::RATE_LIMITED,
+        "scope": listener.scope.name(),
+        "bucket": counted.bucket(),
+    });
+    if let Counted::Peer(peer) = counted {
+        detail["peer"] = json!(peer.to_string());
+    }
+    if listener.local_route {
+        detail["listener"] = json!("local_route");
+    }
     hub.refusal(now, listener.limit_kind(), "rate_limited", &detail);
     let error = RelayError::new(
         codes::RATE_LIMITED,
@@ -1189,23 +1401,15 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         );
         return;
     }
-    let failure_key = listener.failure_key(&request);
-    if listener.limited(failure_key, now) {
-        respond_auth_limited(hub, listener, failure_key, request, now);
+    // The flow has its own count for each client (31.5): a stranger's bad tokens on
+    // `/mcp` never hold the owner's client away from its metadata, page, or refresh.
+    if let Some(route) = oauth_route {
+        respond_oauth(hub, request, route, &method, &path, &query, now);
         return;
     }
-    if let Some(route) = oauth_route {
-        respond_oauth(
-            hub,
-            listener,
-            failure_key,
-            request,
-            route,
-            &method,
-            &path,
-            &query,
-            now,
-        );
+    let counted = listener.counted(&request, &path);
+    if listener.limited(counted, now) {
+        respond_auth_limited(hub, listener, counted, request, now);
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
@@ -1218,8 +1422,8 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             .and_then(|rest| rest.split('/').next());
         // A key that names no live session counts against the listener. The proxy
         // refuses it itself, with its own answer and audit row.
-        if listener.failures.is_some() && key.is_none_or(|key| hub.find(key, now).is_none()) {
-            listener.record_failure(failure_key, now);
+        if listener.counts() && key.is_none_or(|key| hub.find(key, now).is_none()) {
+            listener.record_failure(counted, now);
         }
         // Parse only: the proxy still validates and finds the session itself.
         let core = key
@@ -1373,7 +1577,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
     let authorization = header_value(&request, "Authorization");
     let token = auth::bearer(authorization.as_deref());
     let Some(core) = token.and_then(|token| hub.for_token(token)) else {
-        listener.record_failure(failure_key, now);
+        listener.record_failure(counted, now);
         hub.refusal(
             now,
             "token",
@@ -1396,7 +1600,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             // Anyone can send a token with the team's id: for a Connect team the row
             // goes to the relay audit, not the team's capped file.
             if error.code == codes::UNAUTHENTICATED || error.code == codes::TOKEN_EXPIRED {
-                listener.record_failure(failure_key, now);
+                listener.record_failure(counted, now);
                 core.outside_refusal(
                     now,
                     "token",
@@ -1871,13 +2075,11 @@ fn respond_auth_error(
 }
 
 /// One request of the MCP authorization flow (`oauth::handle`): its body (at most
-/// `oauth::MAX_BODY`), its answer, and a bad code or refresh token counted in the
-/// listener's failed-auth limiter.
+/// `oauth::MAX_BODY`) and its answer. A bad code or refresh token counts for its client
+/// (`oauth::ClientFailures`), not in the listener's failed-auth limiter.
 #[allow(clippy::too_many_arguments)]
 fn respond_oauth(
     hub: &Hub,
-    listener: &Listener,
-    failure_key: IpAddr,
     mut request: Request,
     route: oauth::Route,
     method: &str,
@@ -1903,13 +2105,9 @@ fn respond_oauth(
         Vec::new()
     };
     let content_type = header_value(&request, "Content-Type");
+    // A bad code or refresh token counts for its client only (`oauth::ClientFailures`),
+    // never in the listener's limiter: one stranger must not lock every client out.
     let reply = oauth::handle(hub, route, path, query, &body, content_type.as_deref(), now);
-    if let oauth::Reply::Json {
-        auth_failed: true, ..
-    } = reply
-    {
-        listener.record_failure(failure_key, now);
-    }
     write_oauth(request, reply, false);
 }
 
@@ -2800,6 +2998,111 @@ mod tests {
             spread.record(10 * u64::from(n));
         }
         assert!(!spread.limited(10 * u64::from(AUTH_FAILURES_MAX)));
+    }
+
+    #[test]
+    fn a_source_is_the_last_forwarded_address_and_an_ipv6_address_counts_by_its_64() {
+        let source = |value: &str| Source::from_forwarded(Some(value));
+        assert_eq!(source("203.0.113.9"), source(" 203.0.113.9 "));
+        assert_eq!(source("198.51.100.1, 203.0.113.9"), source("203.0.113.9"));
+        assert_ne!(source("203.0.113.9"), source("203.0.113.10"));
+        assert_eq!(
+            source("2001:db8:1:2:aaaa::1"),
+            source("2001:db8:1:2:bbbb::7")
+        );
+        assert_ne!(source("2001:db8:1:2::1"), source("2001:db8:1:3::1"));
+        assert_eq!(source("::ffff:203.0.113.9"), source("203.0.113.9"));
+        for bad in ["", "unknown", "203.0.113.9:443", "not an address, "] {
+            assert_eq!(source(bad), None, "{bad:?}");
+        }
+        assert_eq!(Source::from_forwarded(None), None);
+    }
+
+    /// Review 0.5.16: bad tokens of one source hold only that source at 429, never an
+    /// agent from another address or one without an address; requests without an
+    /// address share a much higher limit, so a flood is still bounded.
+    #[test]
+    fn agent_routes_count_failures_by_source_and_share_a_high_limit_without_one() {
+        let failures = AgentAuthFailures::default();
+        let stranger = Source::from_forwarded(Some("198.51.100.66"));
+        let agent = Source::from_forwarded(Some("203.0.113.9"));
+        let start = 5_000;
+        for n in 0..AUTH_FAILURES_MAX {
+            assert!(!failures.limited(stranger, start), "{n}");
+            failures.record(stranger, start);
+        }
+        assert!(failures.limited(stranger, start + 1));
+        assert!(!failures.limited(agent, start + 1));
+        assert!(!failures.limited(None, start + 1));
+        // The window of the source ends 60 s after its first failure.
+        assert!(!failures.limited(stranger, start + AUTH_FAILURE_WINDOW_SECS));
+        // Without an address: the shared window, at `AGENT_SHARED_FAILURES_MAX`.
+        for n in 0..AGENT_SHARED_FAILURES_MAX {
+            assert!(!failures.limited(None, start), "{n}");
+            failures.record(None, start);
+        }
+        assert!(failures.limited(None, start + 1));
+        assert!(!failures.limited(agent, start + 1), "a source has its own");
+        assert!(!failures.limited(None, start + AUTH_FAILURE_WINDOW_SECS));
+    }
+
+    #[test]
+    fn a_full_source_table_counts_new_sources_in_the_shared_window() {
+        let failures = AgentAuthFailures::default();
+        let start = 9_000;
+        for n in 0..AUTH_SOURCES_MAX {
+            let addr = std::net::Ipv4Addr::from(0x0A00_0000_u32 + n as u32);
+            failures.record(Source::from_forwarded(Some(&addr.to_string())), start);
+        }
+        let late = Source::from_forwarded(Some("203.0.113.200"));
+        for _ in 0..AGENT_SHARED_FAILURES_MAX {
+            failures.record(late, start);
+        }
+        // The late source went to the shared window, and is checked there.
+        assert!(failures.limited(late, start + 1));
+        assert!(failures.limited(None, start + 1));
+        // A source of the table keeps its own count.
+        let first = Source::from_forwarded(Some("10.0.0.0"));
+        assert!(!failures.limited(first, start + 1));
+        // When the windows of the table end, the late source gets a window of its own.
+        let later = start + AUTH_FAILURE_WINDOW_SECS;
+        assert!(!failures.limited(late, later));
+        failures.record(late, later);
+        assert!(!failures.limited(late, later));
+    }
+
+    #[test]
+    fn only_mcp_and_the_proxy_count_by_source() {
+        let forwarded = Some("203.0.113.9");
+        let source = Source::from_forwarded(forwarded);
+        assert_eq!(Counted::of("/mcp", forwarded), Counted::Agent(source));
+        assert_eq!(
+            Counted::of("/p/apassy_ses_x/api.example.com/", forwarded),
+            Counted::Agent(source)
+        );
+        assert_eq!(Counted::of("/mcp", None), Counted::Agent(None));
+        assert_eq!(Counted::of("/v1/me", forwarded), Counted::Listener);
+        assert_eq!(Counted::Agent(None).bucket(), "shared");
+        assert_eq!(Counted::Agent(source).bucket(), "source");
+        assert_eq!(Counted::Listener.bucket(), "listener");
+        assert_eq!(Counted::Peer(WHOLE_LISTENER).bucket(), "peer");
+    }
+
+    /// N8-1: the keys of the tailnet listener (its peers) have windows of their own, and
+    /// none of them is the window of the whole listener.
+    #[test]
+    fn each_failure_key_has_its_own_window() {
+        let failures = AuthFailures::default();
+        let peer_a: IpAddr = "100.64.0.11".parse().unwrap();
+        let peer_b: IpAddr = "100.64.0.12".parse().unwrap();
+        let start = 7_000;
+        for _ in 0..AUTH_FAILURES_MAX {
+            failures.record_for(peer_a, start);
+        }
+        assert!(failures.limited_for(peer_a, start + 1));
+        assert!(!failures.limited_for(peer_b, start + 1));
+        assert!(!failures.limited(start + 1));
+        assert!(!failures.limited_for(peer_a, start + AUTH_FAILURE_WINDOW_SECS));
     }
 
     #[test]

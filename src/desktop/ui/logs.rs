@@ -488,21 +488,18 @@ fn cells(event: &LogEvent, several: bool, open: bool, offset: i64) -> Vec<Cell> 
         Some(credential) => Cell::plain(credential),
         None => Cell::secondary("—"),
     });
-    let chevron = if open && event.expandable() {
-        "  ⌄"
-    } else {
-        "  ›"
-    };
-    let outcome = format!("{}{chevron}", event.outcome.text());
+    let open = open && event.expandable();
+    let text = event.outcome.text();
     let tone = match &event.outcome {
         LogOutcome::WaitsForYou => Some(Tone::Warning),
         outcome if outcome.denied() => Some(Tone::Critical),
         _ => None,
     };
-    cells.push(match tone {
-        Some(tone) => Cell::Text(kit::medium(outcome, Font::Body).color(tone.text())),
-        None => Cell::plain(outcome),
-    });
+    let value = match tone {
+        Some(tone) => kit::medium(text, Font::Body).color(tone.text()),
+        None => kit::text(text, Font::Body).color(kit::palette().label),
+    };
+    cells.push(Cell::Disclosure { value, open });
     cells
 }
 

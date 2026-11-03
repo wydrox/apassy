@@ -11,6 +11,13 @@ owner-check window cannot replace those checks. Restore still verifies the typed
 backup passphrase and opens the restored vault locked. This supersedes earlier
 wording below that allowed these commands using only an open CLI session.
 
+Superseded 2026-11-02 by the global window of ADR 0030: inside an open window
+these commands, `agent_rotate` and `agent_connect` complete without a
+new check. Exception (review 0.5.16, 2026-11-03): `agent_add_remote` always asks
+for a fresh local Touch ID or passphrase check, also inside an open window,
+because its bearer token works from the internet and the CLI session proves no
+owner at the Mac (`OwnerAction::needs_fresh_local_check`).
+
 
 ## 1. Transport
 
@@ -39,9 +46,9 @@ Item and agent references are text: an ID, or the exact name without regard to c
 { "ok": true, "code": "ok", "message": "CLI key is added with ID 7.", "data": { "type": "items", "items": [ … ] } }
 ```
 
-`message` is text for the owner. It has no secret value. `data.type` is one of `none`, `status`, `code`, `session`, `items`, `item`, `events`, `agents`, `agent`, `token`, `lifetime`, `requests`, `runs`, `patterns`, `activity`, `export`, `bindings`, `added`.
+`message` is text for the owner. It has no secret value. `data.type` is one of `none`, `status`, `code`, `session`, `items`, `item`, `events`, `agents`, `agent`, `token`, `remote_token`, `lifetime`, `requests`, `runs`, `patterns`, `activity`, `export`, `bindings`, `added`.
 
-Only two types hold a token: `session` (after `login`) and `token` (after `agent_add` and `agent_rotate`). `code` holds a generated current TOTP code after a fresh exact owner check, with `seconds_left` and `copied: false`; `copy: true` omits the code and returns `copied: true`. No type holds a stored secret or OTP seed. `item` names the secret fields and the hidden details, without values. CLI code cannot reuse the Touch ID window because a bearer session does not prove interactive-owner provenance (ADR 0034).
+Only three types hold a token: `session` (after `login`), `token` (after `agent_add` and `agent_rotate`), and `remote_token` (after `agent_add_remote`: `agent`, `token`, and `mcp_url`, the MCP address of this Mac's node). `code` holds a generated current TOTP code after a fresh exact owner check, with `seconds_left` and `copied: false`; `copy: true` omits the code and returns `copied: true`. No type holds a stored secret or OTP seed. `item` names the secret fields and the hidden details, without values. CLI code cannot reuse the Touch ID window because a bearer session does not prove interactive-owner provenance (ADR 0034).
 
 ## 4. Commands
 
@@ -74,6 +81,7 @@ S: needs a session. C: asks for the owner check in the window, then answers.
 | `agent_list` | | S | | |
 | `agent_show` | `agent` | S | | Process grants with rules, operations, requests. |
 | `agent_add` | `name` | S | | `data.token`, one time. |
+| `agent_add_remote` | `name`, `days` | S | C | 2026-11-03, plan "Bouncer section" decision 4, the CLI fallback of the MCP authorization flow. A remote agent of this Mac's node for a client that cannot connect by itself: a vault agent of kind `cloud` with no item (`see_all` 0, `connected_with = token`) and a relay agent with a bearer token of `days` days (1 to 365, default 90). A name that another active agent has gets a number (`Grok Bot 2`). Remote access must run, else `remote_access_off` before the check. The fresh check `AddRemoteAgent` names the name and the days; an open owner-check window never covers it. `data.remote_token`, one time: the token and `mcp_url`. The window does not show the token. Every run of the agent asks the owner. `apassy agent add-remote NAME [--days N]` uses it. |
 | `agent_revoke` | `agent` | S | | |
 | `agent_rotate` | `agent` | S | C | `data.token`, one time. The window does not show it. |
 | `agent_see_all` | `agent`, `on` | S | C when `on` | |
@@ -113,6 +121,7 @@ The folder of a grant is checked before the owner check: it must be an existing 
 | `refused` | The owner check passed, and the vault refused the action. The message says why. |
 | `timeout` | The app did not answer in 230 s. An open owner check can still finish in the window. |
 | `stopped` | The app is stopping. |
+| `remote_access_off` | `agent_add_remote`: remote access of this Mac (the node) does not run. Nothing changed. |
 | `not_found`, `ambiguous`, `invalid_input`, `category_locked`, `conflict`, `vault_locked`, `already_exists`, `broker_stopped` | As the message says. |
 
 ## 6. Command-line exit codes

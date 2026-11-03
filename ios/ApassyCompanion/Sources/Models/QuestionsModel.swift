@@ -47,9 +47,11 @@ struct AnswerBar: Equatable {
     var primary: Choice?
     var menu: [Choice]
 
-    /// Unknown item facts take precedence over confirmed production items.
+    /// Unknown item facts take precedence over confirmed production items. "Allow as dev"
+    /// and "Allow as prod" name no item: the Mac labels the one unconfirmed item, so a card
+    /// with two or more unconfirmed items offers "Allow", as the Mac does.
     static func make(for card: QuestionCard) -> AnswerBar {
-        let unknown = card.question.items.contains(where: \.unconfirmed)
+        let unknown = card.question.items.filter(\.unconfirmed).count == 1
         return AnswerBar(
             deny: Choice(answer: RemoteAnswer(kind: .deny), label: "Dismiss", destructive: true),
             secondaryApproval: unknown ? Choice(answer: RemoteAnswer(kind: .approveAsProduction), label: "Allow as prod") : nil,
@@ -234,7 +236,7 @@ final class QuestionsModel {
     @ObservationIgnored private weak var push: (any PushPermission)?
     /// The summary keys for the Notification Service Extension (push-gateway-v1 section 12).
     @ObservationIgnored private let summaryKeys: (any PushSummaryKeyStore)?
-    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let defaults: any SettingsStore
     /// Keeps the name of a connection for the next one.
     @ObservationIgnored private let onDeviceName: @MainActor (String) -> Void
     @ObservationIgnored private let now: @MainActor () -> Date
@@ -273,7 +275,7 @@ final class QuestionsModel {
 
     init(
         service: any VaultService, signers: any AnswerSigners, push: (any PushPermission)?, deviceName: String,
-        defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
+        defaults: any SettingsStore = UserDefaults.standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
         summaryKeys: (any PushSummaryKeyStore)? = KeychainPushSummaryKeyStore.forThisApp(watch: false),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
@@ -308,7 +310,7 @@ final class QuestionsModel {
     /// One answer key for every team: the tests with one vault.
     convenience init(
         service: any VaultService, signer: any AnswerSigner, push: (any PushPermission)?, deviceName: String,
-        defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
+        defaults: any SettingsStore = UserDefaults.standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
             "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."
@@ -669,15 +671,27 @@ final class QuestionsModel {
             reason: Self.faceIDReason(agent: card.run.agent, answer: offered.label))
     }
 
-    /// The text of the Face ID prompt of a connect request: the client and the Mac, with control
-    /// characters and `"` removed, at most 40 characters each.
-    static func connectFaceIDReason(client: String, mac: String) -> String {
+    /// The warning line of a connect request: the owner allows only the request whose code the
+    /// browser page shows. A client id is public, so a request that someone else started can show
+    /// the same client name with another code.
+    static func connectCodeWarning(code: String) -> String {
+        "Allow only if the page in your browser shows this code: \(code)."
+    }
+
+    /// The text of the Face ID prompt of a connect request: the client, where the code goes back
+    /// ("localhost" for a program on a computer), and the Mac, with control characters and `"`
+    /// removed, at most 40 characters each. A card of a Mac before 0.5.16 has no host.
+    static func connectFaceIDReason(client: String, mac: String, host: String? = nil, local: Bool = false)
+        -> String
+    {
         let clean = { (text: String) -> String in
             String(String(String.UnicodeScalarView(
                 text.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && $0 != "\"" }))
                 .prefix(40))
         }
-        return "allow \"\(clean(client))\" to connect to \(clean(mac))"
+        guard let host else { return "allow \"\(clean(client))\" to connect to \(clean(mac))" }
+        let back = local ? "localhost" : clean(host)
+        return "allow \"\(clean(client))\", which returns to \(back), to connect to \(clean(mac))"
     }
 
     /// Answer a connect request (card v2 `kind = connect`): Allow asks for Face ID for this answer,
@@ -690,7 +704,9 @@ final class QuestionsModel {
         guard isCurrentUnanswered(question), scopedDeliveries[question.requestIdentity] != .sending,
             let connect = question.connect else { return }
         await deliver(RemoteAnswer(kind: allow ? .allowConnect : .deny), for: question,
-            reason: Self.connectFaceIDReason(client: connect.clientName, mac: connect.macName))
+            reason: Self.connectFaceIDReason(
+                client: connect.clientName, mac: connect.macName, host: connect.redirectHost,
+                local: connect.localRedirect))
     }
 
     /// Whether Deny and Allow of the connect request `question` can be used at `now`.

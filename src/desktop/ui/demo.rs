@@ -135,67 +135,6 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     });
 }
 
-/// The list column of Decisions in the demo: the requests that wait.
-pub(super) fn decisions_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let waiting = app
-        .model
-        .list_requests()
-        .iter()
-        .filter(|request| request.status == RequestStatus::Pending)
-        .count();
-    let subtitle = if waiting == 0 {
-        "Nothing needs you".to_owned()
-    } else {
-        format!("{waiting} waiting")
-    };
-    columns::list_toolbar(ui, "Decisions", &subtitle, |_| {});
-    columns::list_note(
-        ui,
-        "The fixture requests and their history are on the right.",
-    );
-}
-
-pub(super) fn decisions_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    columns::detail_toolbar(ui, |_| {});
-    columns::detail_body(ui, "demo-decisions", |ui| draw_activity(app, ui));
-}
-
-/// The list column of Agents in the demo: the catalog agents.
-pub(super) fn agents_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let agents = app.model.catalog_agents();
-    let connected = agents.iter().filter(|agent| agent.connected).count();
-    columns::list_toolbar(ui, "Agents", &format!("{connected} connected"), |_| {});
-    let groups = vec![columns::Group {
-        title: "Catalog".to_owned(),
-        rows: agents.to_vec(),
-    }];
-    columns::grouped_rows(
-        ui,
-        "demo-agents",
-        &groups,
-        false,
-        |ui, agent| {
-            kit::list_row(
-                ui,
-                &kit::ListRow {
-                    tile: kit::Tile::letter(kit::palette().accent, &agent.name),
-                    title: &agent.name,
-                    subtitle: &agent.summary,
-                    meta: agent.connected.then_some(agent.status_label),
-                    production: false,
-                    selected: false,
-                },
-            );
-        },
-        |_| {},
-    );
-}
-
-pub(super) fn agents_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    columns::detail_toolbar(ui, |_| {});
-    columns::detail_body(ui, "demo-agents-detail", |ui| draw_agents(app, ui));
-}
-
 fn selected(app: &DesktopApp) -> Option<(String, ItemDetails)> {
     let id = app.selected_item_id.clone()?;
     let details = app.model.item_details(&id).ok()?;
@@ -675,50 +614,6 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-pub(super) fn draw_agents(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    kit::page_header(
-        ui,
-        "Agents",
-        Some(
-            "You can connect a synthetic catalog agent. Revoke stops future sample use. This is not a verified isolation boundary.",
-        ),
-        |_| {},
-    );
-    let agents = app.model.catalog_agents();
-    kit::section(ui, None, None, |s| {
-        for agent in agents {
-            s.row(|ui| {
-                egui::Sides::new().shrink_left().wrap().show(
-                    ui,
-                    |ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                kit::medium(&agent.name, Font::Body).color(kit::palette().label),
-                            );
-                            kit::note(ui, &agent.summary);
-                        });
-                    },
-                    |ui| {
-                        if agent.connected {
-                            if kit::small_button(ui, "Revoke agent", Style::Destructive).clicked() {
-                                let message = format!("{} is revoked.", agent.name);
-                                let result = app.model.revoke_agent(&agent.id);
-                                let _ = app.apply(result, &message);
-                            }
-                            kit::tag(ui, agent.status_label, Tone::Good);
-                        } else if kit::small_button(ui, "Connect agent", Style::Prominent).clicked()
-                        {
-                            let message = format!("{} is connected.", agent.name);
-                            let result = app.model.connect_agent(&agent.id);
-                            let _ = app.apply(result, &message);
-                        }
-                    },
-                );
-            });
-        }
-    });
-}
-
 fn decision_tone(decision: Decision) -> (&'static str, Tone) {
     match decision {
         Decision::Allow => ("Permit", Tone::Good),
@@ -861,43 +756,76 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 // ---- The Bouncer pages (mockup docs/design/cloud-agents-mockup.html). ----
 
-/// The frame of the mockup that Overview and Logs show in the demo build. The toolbar
-/// menu of both pages picks it, and `APASSY_DEMO_FRAME` (1, 6, 9, 10, 11, 12, 14) sets it
-/// at start, for screenshots.
+/// The frame of the mockup that the Bouncer pages show in the demo build. The toolbar
+/// menu of each page picks it, and `APASSY_DEMO_FRAME` (1–6, 8a–8d, 9–11, 11a, 12, 12a,
+/// 13a, 13b, 14) sets it at start, for screenshots.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum BouncerFrame {
-    /// 1 Overview and 6 Logs: three Macs, a week of runs, one remote run open.
+    /// 1 Overview, 2 and 3 Agents, 4 agent pages, 5 Decisions, 6 Logs: three Macs, a
+    /// week of runs, Grok Bot waits.
     #[default]
     AllEnvironments,
-    /// 9a and 9d: one Mac, no agents, no runs.
+    /// 8a: Tailscale is not installed.
+    NotInstalled,
+    /// 8b: Tailscale is not connected.
+    NotConnected,
+    /// 8c: the tailnet policy blocks Funnel.
+    PolicyBlocks,
+    /// 8d: another app uses port 8443.
+    PortTaken,
+    /// 9a–9d: one Mac, no agents, no runs.
     FirstRun,
-    /// 10b: a quiet week; one Mac silent since 1 Nov.
+    /// 10a and 10b: a quiet week; one Mac silent since 1 Nov.
     QuietDay,
+    /// 11a: a new Mac without agents.
+    NewMac,
     /// 11b: a project without runs this week.
     EmptyProject,
+    /// 12a: a Mac of the vault that never reported.
+    NeverReported,
     /// 12b: the only Mac; its environment menu says so.
     OneMac,
+    /// 13a: Grok Bot just connected and sees nothing yet.
+    NewRemoteAgent,
+    /// 13b: remote access on, no remote agent yet.
+    NoRemoteAgentYet,
     /// 14: Logs with filters that match nothing.
     FilteredLogs,
 }
 
 impl BouncerFrame {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 14] = [
         Self::AllEnvironments,
+        Self::NotInstalled,
+        Self::NotConnected,
+        Self::PolicyBlocks,
+        Self::PortTaken,
         Self::FirstRun,
         Self::QuietDay,
+        Self::NewMac,
         Self::EmptyProject,
+        Self::NeverReported,
         Self::OneMac,
+        Self::NewRemoteAgent,
+        Self::NoRemoteAgentYet,
         Self::FilteredLogs,
     ];
 
     fn label(self) -> &'static str {
         match self {
-            Self::AllEnvironments => "Frames 1, 6: All Environments",
+            Self::AllEnvironments => "Frames 1–6: All Environments",
+            Self::NotInstalled => "Frame 8a: Not Installed",
+            Self::NotConnected => "Frame 8b: Not Connected",
+            Self::PolicyBlocks => "Frame 8c: Funnel Not Allowed",
+            Self::PortTaken => "Frame 8d: Port 8443 in Use",
             Self::FirstRun => "Frame 9: First Run",
             Self::QuietDay => "Frame 10: Quiet Day",
+            Self::NewMac => "Frame 11a: New Mac",
             Self::EmptyProject => "Frame 11b: Empty Project",
+            Self::NeverReported => "Frame 12a: Never Reported",
             Self::OneMac => "Frame 12b: One Mac",
+            Self::NewRemoteAgent => "Frame 13a: New Remote Agent",
+            Self::NoRemoteAgentYet => "Frame 13b: No Remote Agent Yet",
             Self::FilteredLogs => "Frame 14: Filtered Logs",
         }
     }
@@ -905,14 +833,30 @@ impl BouncerFrame {
     /// The frame of `APASSY_DEMO_FRAME`.
     fn from_env() -> Option<Self> {
         match std::env::var("APASSY_DEMO_FRAME").ok()?.trim() {
-            "1" | "6" => Some(Self::AllEnvironments),
+            "1" | "2" | "3" | "4" | "5" | "6" => Some(Self::AllEnvironments),
+            "8a" => Some(Self::NotInstalled),
+            "8b" => Some(Self::NotConnected),
+            "8c" => Some(Self::PolicyBlocks),
+            "8d" => Some(Self::PortTaken),
             "9" => Some(Self::FirstRun),
             "10" => Some(Self::QuietDay),
-            "11" => Some(Self::EmptyProject),
-            "12" => Some(Self::OneMac),
+            "11a" => Some(Self::NewMac),
+            "11" | "11b" => Some(Self::EmptyProject),
+            "12a" => Some(Self::NeverReported),
+            "12" | "12b" => Some(Self::OneMac),
+            "13a" => Some(Self::NewRemoteAgent),
+            "13" | "13b" => Some(Self::NoRemoteAgentYet),
             "14" => Some(Self::FilteredLogs),
             _ => None,
         }
+    }
+
+    /// A frame of remote access problems (8a–8d).
+    fn problem(self) -> bool {
+        matches!(
+            self,
+            Self::NotInstalled | Self::NotConnected | Self::PolicyBlocks | Self::PortTaken
+        )
     }
 }
 
@@ -952,12 +896,26 @@ pub(super) fn frame_picker(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 /// Pick a frame with the scope and the filters of its mockup frame.
 pub(crate) fn select_frame_scope(app: &mut DesktopApp, frame: BouncerFrame) {
-    use super::bouncer::{ActivityScope, DeviceScope, LogFilter};
+    use super::bouncer::{ActivityScope, AgentRef, DeviceScope, LogFilter, LogKindFilter};
     app.ui.demo_frame = frame;
     app.ui.activity_scope = ActivityScope::default();
     app.ui.logs = Default::default();
+    app.ui.agent_page = Default::default();
+    app.ui.decision_history = Default::default();
     app.ui.bouncer.invalidate();
     match frame {
+        BouncerFrame::NewMac => {
+            app.ui.activity_scope.device = DeviceScope::Other(DEMO_LAB.to_owned());
+        }
+        BouncerFrame::NeverReported => {
+            app.ui.activity_scope.device = DeviceScope::Other(DEMO_HOME.to_owned());
+        }
+        BouncerFrame::NewRemoteAgent => {
+            app.ui.activity_scope.device = DeviceScope::ThisMac;
+            app.ui.agent_page.open = Some(AgentRef::Local(DEMO_GROK));
+        }
+        frame if frame.problem() => app.ui.activity_scope.device = DeviceScope::ThisMac,
+        BouncerFrame::NoRemoteAgentYet => app.ui.activity_scope.device = DeviceScope::ThisMac,
         BouncerFrame::EmptyProject => {
             app.ui.activity_scope.project = Some("billing-v2".to_owned());
         }
@@ -965,10 +923,11 @@ pub(crate) fn select_frame_scope(app: &mut DesktopApp, frame: BouncerFrame) {
         BouncerFrame::FilteredLogs => {
             app.ui.activity_scope.device = DeviceScope::ThisMac;
             app.ui.activity_scope.project = Some("acme-billing".to_owned());
+            // The mockup's filters of frame 14: Denied, Grok Bot, "delete".
             app.ui.logs.filter = LogFilter {
+                kind: LogKindFilter::Denied,
                 agent: Some("Grok Bot".to_owned()),
                 text: "delete".to_owned(),
-                ..LogFilter::default()
             };
         }
         _ => {}
@@ -1009,6 +968,30 @@ pub(super) fn proxied_requests(relay_run: u64) -> Vec<super::bouncer::ProxyRow> 
 
 /// The Bouncer data of a frame at `now`. Synthetic names and numbers of the mockup.
 pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::BouncerData {
+    let mut data = frame_data(frame, now);
+    agree_denials(&mut data, now);
+    data
+}
+
+/// "Denied" of each agent counts at least the denied runs that its page lists: the
+/// counts and the runs come from the same 7 days ([`super::bouncer::BouncerData::runs_of`]).
+fn agree_denials(data: &mut super::bouncer::BouncerData, now: u64) {
+    let denied: Vec<u64> = data
+        .agents
+        .iter()
+        .map(|line| {
+            data.runs_of(line, usize::MAX, now)
+                .iter()
+                .filter(|event| event.outcome.denied())
+                .count() as u64
+        })
+        .collect();
+    for (line, denied) in data.agents.iter_mut().zip(denied) {
+        line.not_allowed = line.not_allowed.max(denied);
+    }
+}
+
+fn frame_data(frame: BouncerFrame, now: u64) -> super::bouncer::BouncerData {
     use super::bouncer::{
         AgentLine, BouncerData, DayBar, DeviceScope, EnvStats, Environment, ProductionUse,
     };
@@ -1057,7 +1040,14 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
                 not_allowed: 0,
                 last_active: ago.map(|ago| now.saturating_sub(ago)),
                 waits: false,
-                projects: vec![project.to_owned()],
+                projects: if project.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![project.to_owned()]
+                },
+                id: Some(demo_agent_ref(&env.scope, name)),
+                runs_today: Some(runs.div_ceil(7)),
+                connected_at: None,
             }
         };
     let mut data = BouncerData::default();
@@ -1074,7 +1064,15 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
             data.environments = vec![env];
             return data;
         }
-        BouncerFrame::OneMac => {
+        BouncerFrame::OneMac
+        | BouncerFrame::NewMac
+        | BouncerFrame::NeverReported
+        | BouncerFrame::NewRemoteAgent
+        | BouncerFrame::NoRemoteAgentYet
+        | BouncerFrame::NotInstalled
+        | BouncerFrame::NotConnected
+        | BouncerFrame::PolicyBlocks
+        | BouncerFrame::PortTaken => {
             let env = office();
             data.stats.insert(
                 env.scope.clone(),
@@ -1096,9 +1094,48 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
                 },
             ];
             data.has_agents = true;
-            data.environments = vec![env];
             data.projects = vec!["acme-billing".to_owned()];
-            data.remote_access_on = true;
+            data.remote_access_on = !frame.problem() || frame == BouncerFrame::PortTaken;
+            match frame {
+                BouncerFrame::NewRemoteAgent => {
+                    // Just connected: no run and no credential yet.
+                    if let Some(grok) = data.agents.iter_mut().find(|a| a.name == "Grok Bot") {
+                        grok.runs = Some(0);
+                        grok.runs_today = Some(0);
+                        grok.asked = 0;
+                        grok.last_active = None;
+                        grok.connected_at = Some(now.saturating_sub(60));
+                    }
+                }
+                BouncerFrame::NoRemoteAgentYet => data.agents.retain(|a| !a.remote),
+                _ => {
+                    data.events = bouncer_events(now, false)
+                        .into_iter()
+                        .filter(|event| event.env == DeviceScope::ThisMac)
+                        .collect();
+                }
+            }
+            let mut envs = vec![env];
+            if frame == BouncerFrame::NewMac {
+                // Reported this morning at 08:12, with no agent yet.
+                envs.push(Environment {
+                    scope: DeviceScope::Other(DEMO_LAB.to_owned()),
+                    name: "Mac mini (lab)".to_owned(),
+                    reported_at: Some(now.saturating_sub(6 * 3_600)),
+                    never_reported: false,
+                    note: None,
+                });
+            }
+            if frame == BouncerFrame::NeverReported {
+                envs.push(Environment {
+                    scope: DeviceScope::Other(DEMO_HOME.to_owned()),
+                    name: "iMac (home)".to_owned(),
+                    reported_at: None,
+                    never_reported: true,
+                    note: None,
+                });
+            }
+            data.environments = envs;
             return data;
         }
         BouncerFrame::QuietDay => {
@@ -1173,6 +1210,8 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
         BouncerFrame::AllEnvironments | BouncerFrame::FilteredLogs => {}
     }
     let (o, s, l) = (office(), studio(), laptop());
+    // Today first. The days add up to the mockup's bars of frame 1 (Wed 48 … today
+    // 104); the MacBook Pro has no runs after its last report on 1 Nov.
     data.stats.insert(
         o.scope.clone(),
         stats(
@@ -1181,7 +1220,7 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
             22,
             3,
             12,
-            days([38, 30, 31, 29, 33, 28, 26], [5, 3, 4, 2, 3, 3, 2]),
+            days([60, 55, 6, 10, 32, 32, 20], [5, 4, 1, 1, 4, 4, 3]),
         ),
     );
     data.stats.insert(
@@ -1192,7 +1231,7 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
             25,
             4,
             16,
-            days([30, 25, 22, 24, 26, 21, 21], [6, 4, 3, 3, 4, 3, 2]),
+            days([44, 40, 6, 8, 24, 27, 20], [6, 5, 1, 1, 4, 4, 4]),
         ),
     );
     data.stats.insert(
@@ -1203,14 +1242,18 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
             4,
             0,
             14,
-            days([0, 0, 8, 7, 9, 8, 8], [0, 0, 1, 1, 1, 0, 1]),
+            days([0, 0, 6, 4, 10, 12, 8], [0, 0, 0, 0, 1, 2, 1]),
         ),
     );
     data.agents = vec![
         agent("Claude Code", &o, 142, 9, Some(120), "acme-billing"),
         agent("Claude Code", &s, 98, 4, Some(300), "shop"),
         agent("Codex", &o, 61, 7, Some(25 * 60), "acme-billing"),
-        agent("Codex", &s, 44, 13, Some(3_600), "shop"),
+        // Frame 4b: Denied 3.
+        AgentLine {
+            not_allowed: 3,
+            ..agent("Codex", &s, 44, 13, Some(3_600), "shop")
+        },
         agent(
             "Claude Code",
             &l,
@@ -1244,7 +1287,57 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
     ];
     data.events = bouncer_events(now, true);
     data.remote_access_on = true;
+    // Frame 2: one disconnected agent on this Mac; frame 3: the studio's access is off.
+    data.disconnected = vec![AgentLine {
+        name: "Old agent".to_owned(),
+        last_active: Some(now.saturating_sub(30 * 86_400)),
+        ..agent("Old agent", &office(), 0, 0, None, "")
+    }];
+    data.remote_access_of.insert(
+        DeviceScope::Other(STUDIO.to_owned()),
+        super::bouncer::RemoteAccessWord::Off,
+    );
+    data.agent_answer_p50
+        .insert(super::bouncer::AgentRef::Local(DEMO_GROK), 21);
+    data.connects = vec![super::bouncer::ConnectLine {
+        id: "demo-connect".to_owned(),
+        name: "Grok Bot".to_owned(),
+        code: "K7Q-4MD".to_owned(),
+        at: now.saturating_sub(29),
+        expires_at: now + 271,
+        returns_to: DEMO_RETURNS_TO.to_owned(),
+        local: false,
+    }];
+    for line in &mut data.agents {
+        if line.remote {
+            line.connected_at = Some(now.saturating_sub(6 * 86_400));
+        }
+    }
     data
+}
+
+/// The other Macs of frames 11a and 12a.
+const DEMO_LAB: &str = "3e5f7a9b-1c2d-4e6f-8a0b-2c4d6e8f0a1b";
+const DEMO_HOME: &str = "7c9e1a3b-5d7f-4b9d-8f1a-3b5d7f9b1d3f";
+/// The vault id of Grok Bot in the demo.
+const DEMO_GROK: u64 = 3;
+
+/// The agent of a demo line: an agent of this Mac by a small id, else by its name.
+fn demo_agent_ref(scope: &super::bouncer::DeviceScope, name: &str) -> super::bouncer::AgentRef {
+    use super::bouncer::{AgentRef, DeviceScope};
+    match scope {
+        DeviceScope::Other(device) => AgentRef::Other {
+            device: device.clone(),
+            id: name.to_owned(),
+        },
+        _ => AgentRef::Local(match name {
+            "Claude Code" => 1,
+            "Codex" => 2,
+            "Grok Bot" => DEMO_GROK,
+            "T3 Code" => 4,
+            _ => 9,
+        }),
+    }
 }
 
 /// The rows of frame 6, newest first.
@@ -1990,5 +2083,483 @@ pub(super) fn devices_overlays(app: &mut DesktopApp, ctx: &egui::Context) {
         Some(Choice::Confirm) => select_devices_frame(app, DevicesFrame::AfterRevoke),
         Some(_) => select_devices_frame(app, DevicesFrame::TailnetOn),
         None => app.ui.devices.sheet = Some(sheet),
+    }
+}
+
+// ---- Agents and Decisions of the Bouncer section in the demo. ----
+
+/// The MCP address of the demo (the mockup's).
+const DEMO_ADDRESS: &str = "https://rafals-mac-mini.tail71fdd0.ts.net:8443/mcp";
+
+/// The remote access block of a frame.
+fn demo_access(frame: BouncerFrame) -> super::agents_page::AccessView {
+    use super::agents_page::{AccessProblem, AccessView};
+    let (on, problem) = match frame {
+        BouncerFrame::FirstRun => (false, None),
+        BouncerFrame::NotInstalled => (false, Some(AccessProblem::NotInstalled)),
+        BouncerFrame::NotConnected => (false, Some(AccessProblem::NotConnected)),
+        // The mockup's frames show the switch disabled: the owner tries to turn it on.
+        BouncerFrame::PolicyBlocks => (false, Some(AccessProblem::Policy { link: None })),
+        BouncerFrame::PortTaken => (
+            false,
+            Some(AccessProblem::PortTaken {
+                port: 8443,
+                alternative: Some(10000),
+            }),
+        ),
+        _ => (true, None),
+    };
+    AccessView {
+        on,
+        address: on.then(|| DEMO_ADDRESS.to_owned()),
+        problem,
+        no_remote_agents: frame == BouncerFrame::NoRemoteAgentYet,
+        reading: false,
+    }
+}
+
+/// What an agent of this Mac of the demo can see (frame 4: Grok Bot; 13a: nothing yet).
+fn demo_facts(
+    frame: BouncerFrame,
+    agent: &super::bouncer::AgentRef,
+    now: u64,
+) -> Option<super::agents_page::LocalFacts> {
+    use super::agents_page::{CanSee, LocalFacts, SeeKind, SeeRow};
+    let super::bouncer::AgentRef::Local(id) = agent else {
+        return None;
+    };
+    let name = match *id {
+        1 => "Claude Code",
+        2 => "Codex",
+        DEMO_GROK => "Grok Bot",
+        4 => "T3 Code",
+        _ => "Old agent",
+    };
+    let remote = *id == DEMO_GROK;
+    let row = |item, name: &str, kind| SeeRow {
+        item,
+        name: name.to_owned(),
+        kind,
+    };
+    let can_see = match (remote, frame) {
+        (true, BouncerFrame::NewRemoteAgent) => CanSee::default(),
+        (true, _) => CanSee {
+            all: false,
+            rows: vec![
+                row(11, "httpbin test token", SeeKind::Only),
+                row(12, "GitHub token", SeeKind::Only),
+                row(13, "Stripe test", SeeKind::Only),
+                row(14, "Stripe live", SeeKind::Never),
+            ],
+        },
+        (false, _) => CanSee {
+            all: true,
+            rows: vec![row(14, "Stripe live", SeeKind::Never)],
+        },
+    };
+    Some(LocalFacts {
+        id: *id,
+        name: name.to_owned(),
+        remote,
+        revoked: *id == 9,
+        created_at: if frame == BouncerFrame::NewRemoteAgent {
+            now.saturating_sub(60)
+        } else {
+            now.saturating_sub(6 * 86_400)
+        },
+        token_end: (!remote).then_some(now + 60 * 86_400),
+        oauth: remote,
+        can_see,
+        note: String::new(),
+    })
+}
+
+/// Bouncer > Agents in the demo: the page of the frame, or the open agent page.
+pub(super) fn agents_wide(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::agents_page::{self, Action, AgentPage, AgentsView};
+    let now = demo_now();
+    let offset = super::bouncer::local_offset(now);
+    let frame = app.ui.demo_frame;
+    let mut action = None;
+    if let Some(agent) = app.ui.agent_page.open.clone() {
+        let facts = demo_facts(frame, &agent, now);
+        let Some(page) = AgentPage::of(&app.ui.bouncer.data, &agent, facts.as_ref(), now, offset)
+        else {
+            app.ui.agent_page.open = None;
+            return;
+        };
+        columns::wide_toolbar(ui, "", "", |ui| frame_picker(app, ui));
+        if columns::wide_inset(ui, |ui| kit::back_link(ui, "Agents")) {
+            action = Some(Action::Back);
+        }
+        columns::wide_body(ui, ("demo-agent", &agent), |ui| {
+            if let Some(chosen) = agents_page::draw_agent(ui, &page, now) {
+                action = Some(chosen);
+            }
+        });
+    } else {
+        let view = AgentsView::of(
+            &app.ui.bouncer.data,
+            &app.ui.activity_scope,
+            Some(demo_access(frame)),
+            now,
+            offset,
+        );
+        let subtitle = if view.count == 0 {
+            String::new()
+        } else {
+            columns::count_label(view.count, "agent", "agents")
+        };
+        columns::wide_toolbar(ui, "Agents", &subtitle, |ui| frame_picker(app, ui));
+        let changed = columns::wide_inset(ui, |ui| {
+            super::scope_bar::bouncer_bar(
+                ui,
+                &mut app.ui.activity_scope,
+                &app.ui.bouncer.data.environments,
+                &app.ui.bouncer.data.projects,
+                now,
+                offset,
+            )
+        });
+        if changed {
+            ui.ctx().request_repaint();
+        }
+        columns::wide_body(ui, "demo-agents", |ui| {
+            if let Some(chosen) = agents_page::draw_page(ui, &view, &app.ui.agent_page) {
+                action = Some(chosen);
+            }
+        });
+    }
+    let Some(action) = action else {
+        return;
+    };
+    match action {
+        Action::Open(agent) => app.ui.agent_page.open = Some(agent),
+        Action::Back => app.ui.agent_page.open = None,
+        Action::ToggleDisconnected(scope) => {
+            if !app.ui.agent_page.disconnected.remove(&scope) {
+                app.ui.agent_page.disconnected.insert(scope);
+            }
+        }
+        Action::ShowAllEnvironments => {
+            app.ui.activity_scope.device = super::bouncer::DeviceScope::All;
+        }
+        Action::ShowAllProjects => app.ui.activity_scope.project = None,
+        Action::ShowInLogs { env, name } => {
+            app.ui.activity_scope.device = env;
+            super::logs::show_agent(app, Some(name));
+            super::sidebar::navigate(app, crate::desktop::Place::Logs);
+        }
+        Action::CopyAddress(address) => {
+            ui.ctx().copy_text(address);
+            app.set_ok("The MCP address is copied.");
+        }
+        _ => app.set_note("The demo changes nothing. The vault build does this."),
+    }
+}
+
+/// The keys of the two cards of the demo in Decisions.
+const DEMO_CONNECT_KEY: u64 = 1;
+/// The redirect line of the demo connect request (`crate::node::connect_returns_to`).
+const DEMO_RETURNS_TO: &str = "Returns to grok.com";
+const DEMO_CLOUD_KEY: u64 = 2;
+
+/// The list column of Decisions in the demo: what waits (frame 5), then History.
+pub(super) fn decisions_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::decisions_bouncer::{self as cards, HistoryAction, HistoryView};
+    let ctx = ui.ctx().clone();
+    bouncer_refresh(app, &ctx);
+    let now = demo_now();
+    let offset = super::bouncer::local_offset(now);
+    let totals = app.ui.bouncer.data.totals(&app.ui.activity_scope.device);
+    let subtitle = totals.runs.map_or_else(String::new, |_| {
+        format!(
+            "{} by you · {} automatic this week",
+            totals.asked, totals.allowed_by_bouncer
+        )
+    });
+    columns::list_toolbar(ui, "Decisions", &subtitle, |_| {});
+    columns::list_inset(ui, |ui| {
+        super::scope_bar::bouncer_bar(
+            ui,
+            &mut app.ui.activity_scope,
+            &app.ui.bouncer.data.environments,
+            &app.ui.bouncer.data.projects,
+            now,
+            offset,
+        )
+    });
+    let waiting = app.ui.demo_frame == BouncerFrame::AllEnvironments;
+    let view = HistoryView::of(
+        &app.ui.bouncer.data,
+        &app.ui.activity_scope,
+        &app.ui.decision_history,
+        now,
+        offset,
+    );
+    let selected = app.ui.decision_history.selected;
+    let mut action = None;
+    egui::ScrollArea::vertical()
+        .id_salt("demo-decisions")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if waiting {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.label(
+                        kit::medium("Waiting  2", Font::Callout).color(kit::palette().secondary),
+                    );
+                });
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(8, 2))
+                    .show(ui, |ui| {
+                        // Frame 5: the cloud badge of a remote agent and the time left at
+                        // the right. The red dot marks production only: httpbin test
+                        // token is Development.
+                        let mark = cards::Mark::Agent("Grok Bot".to_owned());
+                        for (key, title, subtitle, left, dot) in [
+                            (
+                                DEMO_CONNECT_KEY,
+                                "Grok Bot wants to connect",
+                                "Mac mini (office)",
+                                "4:31",
+                                false,
+                            ),
+                            (
+                                DEMO_CLOUD_KEY,
+                                "httpbin test token",
+                                "Grok Bot · Mac mini (office)",
+                                "4:02",
+                                false,
+                            ),
+                        ] {
+                            let row = cards::decision_row(
+                                ui,
+                                &cards::DecisionRow {
+                                    mark: &mark,
+                                    remote: true,
+                                    title,
+                                    subtitle,
+                                    production: dot,
+                                    left: Some(left),
+                                    selected: selected == Some(key),
+                                },
+                            );
+                            if row.clicked() {
+                                action = Some(HistoryAction::Select(key));
+                            }
+                        }
+                    });
+            }
+            if let Some(chosen) =
+                cards::draw_history(ui, &view, &app.ui.decision_history, !waiting, &[])
+            {
+                action = Some(chosen);
+            }
+        });
+    match action {
+        Some(HistoryAction::Select(key)) => app.ui.decision_history.selected = Some(key),
+        Some(HistoryAction::Filter(filter)) => {
+            app.ui.decision_history.filter = filter;
+            app.ui.decision_history.selected = None;
+        }
+        Some(HistoryAction::Agent(agent)) => {
+            app.ui.decision_history.agent = agent;
+            app.ui.decision_history.selected = None;
+        }
+        None => {}
+    }
+}
+
+/// The detail of Decisions in the demo: the connect card, the cloud run card, a run of
+/// History, or the week.
+pub(super) fn decisions_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::decisions_bouncer::{self as cards, CardAnswer};
+    let now = demo_now();
+    columns::detail_toolbar(ui, |ui| frame_picker(app, ui));
+    let answer = match app.ui.decision_history.selected {
+        Some(DEMO_CONNECT_KEY) => {
+            let answer = cards::card_bar(ui, "demo-connect", "Allow", true);
+            columns::detail_body(ui, "demo-connect", |ui| {
+                cards::connect_card(
+                    ui,
+                    &cards::ConnectCard {
+                        name: "Grok Bot".to_owned(),
+                        mac: "Mac mini (office)".to_owned(),
+                        left: "4:31".to_owned(),
+                        code: "K7Q-4MD".to_owned(),
+                        returns_to: DEMO_RETURNS_TO.to_owned(),
+                        local: false,
+                    },
+                );
+            });
+            answer
+        }
+        Some(DEMO_CLOUD_KEY) => {
+            let answer = cards::card_bar(ui, "demo-cloud", "Allow Once", true);
+            columns::detail_body(ui, "demo-cloud", |ui| {
+                cards::cloud_card(
+                    ui,
+                    &cards::CloudCard {
+                        agent: "Grok Bot".to_owned(),
+                        credential: "httpbin test token".to_owned(),
+                        environment: Some(("Development".to_owned(), false)),
+                        mac: "Mac mini (office)".to_owned(),
+                        left: "4:02".to_owned(),
+                        sends_to: "httpbin.org".to_owned(),
+                        request: "Test my httpbin token with curl.".to_owned(),
+                        command: "curl -H \"Authorization: Bearer $HTTPBIN_TOKEN\" $APASSY_BASE_HTTPBIN_TOKEN/bearer".to_owned(),
+                    },
+                );
+            });
+            answer
+        }
+        Some(key) => {
+            let event = cards::find(&app.ui.bouncer.data, &app.ui.activity_scope, key).cloned();
+            columns::detail_body(ui, ("demo-past", key), |ui| match &event {
+                Some(event) => cards::history_detail(ui, event, None, now),
+                None => demo_week(app, ui),
+            });
+            None
+        }
+        None => {
+            columns::detail_body(ui, "demo-week", |ui| {
+                demo_week(app, ui);
+                if app.ui.demo_frame == BouncerFrame::AllEnvironments {
+                    ui.add_space(12.0);
+                    draw_activity(app, ui);
+                }
+            });
+            None
+        }
+    };
+    if let Some(answer) = answer {
+        app.ui.decision_history.selected = None;
+        app.set_note(match answer {
+            CardAnswer::Allow => "The demo allows nothing. The vault build asks for Touch ID.",
+            CardAnswer::Deny => "The demo denies nothing. The vault build does.",
+        });
+    }
+}
+
+/// The week of Decisions in the demo (frames 9c and 10a): "All clear" when nothing
+/// waits, the totals, the environments, and the most active agents.
+fn demo_week(app: &DesktopApp, ui: &mut egui::Ui) {
+    let data = &app.ui.bouncer.data;
+    let scope = &app.ui.activity_scope.device;
+    let first_run = !data.has_agents;
+    let now = demo_now();
+    // Frames 1–6 have two requests waiting: no "All clear" over them.
+    let waiting = app.ui.demo_frame == BouncerFrame::AllEnvironments;
+    if !first_run && !waiting {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            kit::paint_icon_in(ui, Icon::CheckCircle, 16.0, Tone::Good.mark());
+            ui.label(kit::medium("All clear", Font::Body).color(kit::palette().label));
+        });
+        ui.add_space(14.0);
+    }
+    ui.label(kit::text("This week", Font::Title3).color(kit::palette().label));
+    ui.add_space(6.0);
+    let totals = data.totals(scope);
+    let width = ((ui.available_width() - 8.0) / 2.0).floor();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        kit::stat_tile(
+            ui,
+            width,
+            "By you",
+            &totals.asked.to_string(),
+            "Questions you answered",
+        );
+        kit::stat_tile(
+            ui,
+            width,
+            "Automatic",
+            &totals.allowed_by_bouncer.to_string(),
+            "Allowed without a question",
+        );
+    });
+    ui.add_space(20.0);
+    if first_run {
+        return;
+    }
+    kit::section(ui, Some("Environments"), None, |s| {
+        for env in data.environments_in(scope) {
+            let value = data.stats.get(&env.scope).map_or_else(
+                || "No counts".to_owned(),
+                |stats| {
+                    let counts = format!(
+                        "{} by you · {} automatic",
+                        stats.asked, stats.allowed_by_bouncer
+                    );
+                    match env.reported_at.filter(|_| env.stale(now)) {
+                        Some(at) => format!("{counts} · {}", super::bouncer::day_month(at, 0)),
+                        None => counts,
+                    }
+                },
+            );
+            s.labeled(&env.name, value);
+        }
+    });
+    let mut agents = data.agents_in(&app.ui.activity_scope);
+    agents.truncate(3);
+    kit::section(ui, Some("Most active"), None, |s| {
+        for agent in agents {
+            s.labeled(
+                &agent.name,
+                format!("{} · {}", agent.runs.unwrap_or(0), agent.env_name),
+            );
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frame 4: "Denied" of each agent page counts at least the denied runs it lists
+    /// (Grok Bot: 2, as the mockup), and frame 1 still lists the mockup's three items of
+    /// "Needs attention".
+    #[test]
+    fn each_agent_page_counts_the_denied_runs_that_it_lists() {
+        let now = 1_790_000_000;
+        for frame in BouncerFrame::ALL {
+            let data = bouncer_data(frame, now);
+            for line in &data.agents {
+                let listed = data
+                    .runs_of(line, usize::MAX, now)
+                    .iter()
+                    .filter(|event| event.outcome.denied())
+                    .count() as u64;
+                assert!(
+                    line.not_allowed >= listed,
+                    "{frame:?} {}: Denied {} < {listed} listed",
+                    line.name,
+                    line.not_allowed
+                );
+            }
+        }
+        let data = bouncer_data(BouncerFrame::AllEnvironments, now);
+        let grok = data
+            .agents
+            .iter()
+            .find(|line| line.name == "Grok Bot")
+            .expect("Grok Bot");
+        assert_eq!(grok.not_allowed, 2);
+        let titles: Vec<String> = data
+            .attention(&super::super::bouncer::ActivityScope::default(), now)
+            .iter()
+            .map(super::super::bouncer::Attention::title)
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "MacBook Pro not reporting",
+                "Stripe live used 3 times",
+                "Codex asks often",
+            ]
+        );
     }
 }

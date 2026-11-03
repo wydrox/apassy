@@ -98,9 +98,10 @@ pub const DEFAULT_NODE_PORT: u16 = 8444;
 pub const EMBEDDED_SESSION_TTL_SECS: u64 = 600;
 /// How long a run of an embedded node waits for the owner: the broker's question wait.
 pub const EMBEDDED_APPROVAL_TIMEOUT_SECS: u64 = 300;
-/// The name of the Mac on the connect page until the app gives its own
-/// (`EmbeddedRelay::start` sets the computer name).
-pub const EMBEDDED_MAC_NAME: &str = "this Mac";
+/// The name of the Mac on the connect page: "your Mac". The page is public (anyone with
+/// its address reads it), so it never shows the computer name; only the owner's own
+/// prompts, on the Mac and the iPhone, name the Mac.
+pub const EMBEDDED_MAC_NAME: &str = "your Mac";
 /// The requests that the public listener of an embedded node handles at once. It has
 /// no member reserve: only agents use it (`Scope::Public`).
 pub const PUBLIC_MAX_ACTIVE: usize = 32;
@@ -355,6 +356,12 @@ pub struct RelayConfig {
     /// 429 `rate_limited` until the window ends (docs/SPEC.md section 30.5). On for an
     /// embedded node; off on the hosted relay, whose edge limits callers.
     pub auth_limiter: bool,
+    /// The operator socket `admin.sock` is served (`server::operator`, docs/SPEC.md
+    /// section 22). On for the hosted relay. Off for an embedded node: its data
+    /// directory belongs to the Mac user, and the coding agents of that Mac run as the
+    /// same user, so a socket of mode 0600 would let them suspend or delete the personal
+    /// team or make team codes (review 0.5.16, docs/SPEC.md section 30.4).
+    pub operator_socket: bool,
     /// The MCP authorization flow of an embedded node (OAuth 2.1, docs/SPEC.md section
     /// 31): its metadata, `/oauth/...`, and `WWW-Authenticate` on a 401 of `/mcp`. `None`
     /// on the hosted relay: every OAuth path is 404 there.
@@ -365,7 +372,8 @@ pub struct RelayConfig {
 /// 31). The defaults are the product's; tests shorten the times.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthConfig {
-    /// The name of the Mac on the connect page, such as "Mac mini (office)".
+    /// The name of the Mac on the connect page: `EMBEDDED_MAC_NAME` ("your Mac") on a node
+    /// of the app. Never the computer name: the page is public.
     pub mac_name: String,
     /// The lifetime of an access token (`oauth::ACCESS_TOKEN_SECS`).
     pub access_token_secs: u64,
@@ -622,10 +630,11 @@ impl RelayConfig {
     /// listener on `127.0.0.1:0`, the public listener of `options`, no edge, shared team
     /// vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs that wait
     /// `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, the MCP authorization
-    /// flow on (`OAuthConfig::new` with `EMBEDDED_MAC_NAME`; the app sets the name of the
-    /// Mac), and the operator socket in the data directory. With `node_origin`, the
-    /// tailnet listener of `options` (docs/SPEC.md section 32), the sign-in origins (the
-    /// node origin, then `public_url` when the public route is on), and push through
+    /// flow on (`OAuthConfig::new` with `EMBEDDED_MAC_NAME`, "your Mac", also for the app),
+    /// and no operator socket (`operator_socket` false; the Linux node turns it on in
+    /// `node::config::relay_config`). With `node_origin`, the tailnet
+    /// listener of `options` (docs/SPEC.md section 32), the sign-in origins (the node
+    /// origin, then `public_url` when the public route is on), and push through
     /// `push_gateway`; without it, one sign-in origin (`public_url`) and no push.
     pub fn embedded(options: EmbeddedOptions) -> RelayResult<Self> {
         let public_url = checked_public_url(&options.public_url)?;
@@ -684,6 +693,7 @@ impl RelayConfig {
             connect_teams_max: 0,
             connect_sync_bytes: DEFAULT_CONNECT_SYNC_BYTES,
             auth_limiter: true,
+            operator_socket: false,
             oauth: Some(OAuthConfig::new(EMBEDDED_MAC_NAME)),
         };
         config.check_listeners()?;
@@ -820,6 +830,7 @@ impl RelayConfig {
             connect_teams_max,
             connect_sync_bytes,
             auth_limiter: false,
+            operator_socket: true,
             oauth: None,
         })
     }
@@ -986,6 +997,7 @@ mod tests {
         assert_eq!(config.edge.secret().map(SecretString::expose), Some(EDGE));
         assert!(config.public_listen.is_none());
         assert!(!config.auth_limiter);
+        assert!(config.operator_socket);
         assert!(config.oauth.is_none());
         config.check_listeners().unwrap();
         assert_eq!(config.connect_teams_per_day, DEFAULT_CONNECT_TEAMS_PER_DAY);
@@ -1411,8 +1423,12 @@ mod tests {
             (0, 0)
         );
         assert!(config.auth_limiter);
+        // No operator socket: the agents of the Mac run as its user (review 0.5.16).
+        assert!(!config.operator_socket);
         let oauth = config.oauth.as_ref().expect("an embedded node has OAuth");
         assert_eq!(oauth.mac_name, EMBEDDED_MAC_NAME);
+        // The public page never names the computer (security review finding 5).
+        assert_eq!(EMBEDDED_MAC_NAME, "your Mac");
         assert_eq!(oauth.access_token_secs, 86_400);
         assert_eq!(oauth.refresh_token_secs, 90 * 86_400);
         assert_eq!((oauth.connect_secs, oauth.code_secs), (300, 300));

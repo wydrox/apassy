@@ -223,8 +223,19 @@ struct ConnectRequestDetail: View {
                 }
                 .accessibilityIdentifier("connect.code")
             } footer: {
-                Label("Deny unless you just added Apassy to \(connect.clientName).", systemImage: "exclamationmark.triangle")
+                Label(QuestionsModel.connectCodeWarning(code: connect.code), systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
+            }
+            // Where the code goes back (review 0.5.16); a program on a computer is a warning.
+            if let returnsTo = connect.returnsTo {
+                Section {
+                    Label(
+                        returnsTo,
+                        systemImage: connect.localRedirect ? "exclamationmark.triangle" : "arrow.uturn.backward"
+                    )
+                    .foregroundStyle(connect.localRedirect ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .accessibilityIdentifier("connect.returnsTo")
+                }
             }
             Section {
                 LabeledContent("Asked on", value: question.askerName)

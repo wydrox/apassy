@@ -235,6 +235,7 @@ impl DesktopApp {
         ui.focus_search = false;
         ui.decisions = Default::default();
         ui.agents = Default::default();
+        ui.agent_page = Default::default();
         ui.agent_setup = Default::default();
         ui.agent_onboarding = Default::default();
 

@@ -14,9 +14,21 @@
 //! Activity: the broker writes the row of a refusal; this host writes the row of an
 //! approval ("cloud run", the agent, the items, the decision) and, when the session
 //! ends, a row with the proxied requests of the session (ADR 0011 §5), counted from the
-//! `proxy_request` rows of the node's audit. Every few seconds the thread checks the
-//! released runs for their end, makes the catalog mirror again, and sends revocations
-//! that the node has not seen.
+//! `proxy_request` rows of the node's audit, and it keeps a `cloud_run` row for each
+//! run that the broker decided (schema 27) with the counts at the end of its session.
+//! Every few seconds the thread checks the released runs for their end, makes the
+//! catalog mirror again, and sends revocations that the node has not seen.
+//!
+//! One question of a cloud agent at a time: the approval queue holds one waiting question
+//! for each agent (`question_waiting` for a second one), so the host asks about one run
+//! of an agent at a time. A second run of the same agent waits in the node and is asked
+//! when the first is settled; a `question_waiting` of the broker is retried the same
+//! way, never denied. The relay's run timeout (300 s) bounds the wait.
+//!
+//! Connect requests of the MCP authorization flow: after each return of the wait (it
+//! also returns when they change) the thread reads them from the node
+//! (`RunningNode::pending_connects`), so [`super::Node::pending_connects`] answers
+//! without a call to the node.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -29,12 +41,12 @@ use serde_json::Value;
 
 use super::backend::{
     CreatedAgent, NewCloudAgent, NodeAgentId, NodeError, NodeRunId, NodeSecret, NodeTeamId,
-    PendingRun, RunStatus, RunningNode, TokenIssue,
+    PendingConnect, PendingRun, RunStatus, RunningNode, TokenIssue,
 };
 use super::catalog::{self, Checked};
 use crate::broker::decide::BrokerContext;
 use crate::broker::{CloudContext, CloudDecision, CloudRequest, SharedVault, evaluate_cloud};
-use crate::vault::{ActivityDecision, EnvDelivery, NewActivity, Vault, format_utc};
+use crate::vault::{ActivityDecision, EnvDelivery, NewActivity, NewCloudRun, Vault, format_utc};
 
 /// The longest wait for pending runs. The wait holds the node, and a stop waits for it
 /// (on the UI thread), so it is short.
@@ -51,6 +63,16 @@ const MAX_RUN_AUDIT: u32 = 500;
 const MAX_LABEL_BYTES: usize = 64;
 /// The text of an approved release, for the agent.
 const RELEASED_NOTE: &str = "The owner approved this run in Apassy.";
+/// A run that waits for another question of its agent is tried again after this pause.
+pub(super) const RETRY_PAUSE: Duration = Duration::from_secs(1);
+/// A retry mark of a run that the node no longer gives is dropped after this time (the
+/// relay times a run out after 300 s).
+const RETRY_FORGET: Duration = Duration::from_secs(600);
+/// The error code of [`Shared::add_agent`] when the vault did not take the agent: the
+/// node agent is revoked again.
+pub(super) const AGENT_NOT_SAVED: &str = "agent_not_saved";
+/// The refusal code of the broker for a second question of one agent.
+const QUESTION_WAITING: &str = "question_waiting";
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -73,6 +95,9 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
 }
+
+/// What the host calls when the connect requests of the node change.
+pub(super) type ConnectsHook = Arc<dyn Fn() + Send + Sync>;
 
 /// A released run whose session may still be live.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +137,15 @@ pub(super) struct Shared {
     pub(super) public_url: String,
     pub(super) stop: Arc<AtomicBool>,
     in_flight: Mutex<HashSet<NodeRunId>>,
+    /// Runs that wait for another question of their agent: not tried again before this.
+    retry_at: Mutex<HashMap<NodeRunId, Instant>>,
+    /// The vault agents whose run the broker is asking about now: one at a time.
+    asking: Mutex<HashSet<u64>>,
+    /// The connect requests that wait for the owner, as the node gave them last.
+    pub(super) connects: Mutex<Vec<PendingConnect>>,
+    /// Called when that list changes (the desktop wakes its window). Shared with the
+    /// service, so a hook set later reaches a running node.
+    pub(super) on_connects: Arc<Mutex<Option<ConnectsHook>>>,
     sessions: Mutex<Vec<LiveSession>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     pub(super) catalog: Mutex<CatalogState>,
@@ -137,6 +171,10 @@ impl Shared {
             public_url,
             stop: Arc::new(AtomicBool::new(false)),
             in_flight: Mutex::new(HashSet::new()),
+            retry_at: Mutex::new(HashMap::new()),
+            asking: Mutex::new(HashSet::new()),
+            connects: Mutex::new(Vec::new()),
+            on_connects: Arc::new(Mutex::new(None)),
             sessions: Mutex::new(Vec::new()),
             workers: Mutex::new(Vec::new()),
             catalog: Mutex::new(CatalogState::default()),
@@ -233,69 +271,114 @@ impl Shared {
         Ok(mirror)
     }
 
-    /// Make a cloud agent in the node and in the vault, for `items` (vault ids). The
-    /// catalog state is held from the mirror to the save, so the periodic refresh does
-    /// not archive the new items in between. A failed save revokes the node agent.
-    /// Returns the vault agent and the node agent with its token.
+    /// Make a remote agent with no item in the node and in the vault: an agent of the
+    /// MCP authorization flow (`TokenIssue::Later`, with the OAuth `client_id` of its
+    /// connect request) or of the command line (`TokenIssue::Now`, no client). A name
+    /// that another active agent has gets a number ("Grok Bot 2"). The catalog state is
+    /// held from the mirror to the save, so the periodic refresh does not send an item
+    /// list for the agent in between. A failed save revokes the node agent. Returns the
+    /// vault agent, its name, and the node agent with its token.
     pub(super) fn add_agent(
         &self,
         name: &str,
-        items: &[u64],
-        days: u32,
-    ) -> Result<(u64, CreatedAgent), NodeError> {
+        token: TokenIssue,
+        client_id: Option<&str>,
+    ) -> Result<(u64, String, CreatedAgent), NodeError> {
         let guard = self.node.read().unwrap_or_else(PoisonError::into_inner);
         let node: &dyn RunningNode = guard
             .as_deref()
             .ok_or_else(|| NodeError::new("node_stopped", "The node is not running."))?;
         let mut state = lock(&self.catalog);
-        let mirror = self.refresh_with(node, &mut state, items)?;
-        let mut uids = Vec::with_capacity(items.len());
-        for item in items {
-            let Some(uid) = mirror
-                .by_uid
-                .iter()
-                .find(|(_, id)| *id == item)
-                .map(|(uid, _)| uid.clone())
-            else {
-                let why = mirror
-                    .skipped
-                    .iter()
-                    .find(|(id, _)| id == item)
-                    .map_or("not available", |(_, why)| *why);
-                return Err(NodeError::new(
-                    "not_eligible",
-                    format!("Item {item} cannot be offered to a cloud agent: {why}."),
-                ));
-            };
-            uids.push(uid);
-        }
+        self.refresh_with(node, &mut state, &[])?;
+        let name = self
+            .with_vault(|vault| {
+                let taken: Vec<String> = vault
+                    .list_agents()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|agent| !agent.revoked)
+                    .map(|agent| agent.name)
+                    .collect();
+                super::unique_name(&taken, name)
+            })
+            .ok_or_else(|| NodeError::new("vault_locked", "The vault is locked."))?;
         let created = node.create_agent(
             &self.team,
             &NewCloudAgent {
-                name: name.trim().to_owned(),
-                items: uids.clone(),
-                token: TokenIssue::Now {
-                    lifetime_days: days,
-                },
+                name: name.clone(),
+                items: Vec::new(),
+                token,
             },
         )?;
+        let expires_at = match token {
+            TokenIssue::Now { .. } => created.expires_at,
+            // The node refreshes the tokens of the flow: the vault keeps no end.
+            TokenIssue::Later => super::NO_TOKEN_EXPIRY,
+        };
         let saved = self.with_vault(|vault| {
-            vault.add_cloud_agent(name, items, created.agent_id.0, created.expires_at)
+            vault.add_remote_agent(&name, created.agent_id.0, expires_at, client_id)
         });
         match saved {
             Some(Ok(agent_id)) => {
-                state.lists.insert(created.agent_id, uids);
-                Ok((agent_id, created))
+                state.lists.insert(created.agent_id, Vec::new());
+                Ok((agent_id, name, created))
             }
             _ => {
                 let _ = node.revoke_agent(&self.team, created.agent_id);
                 let _ = self.refresh_with(node, &mut state, &[]);
                 Err(NodeError::new(
-                    "vault_error",
-                    "The cloud agent cannot be saved in the vault. Nothing was made.",
+                    AGENT_NOT_SAVED,
+                    "The remote agent cannot be saved in the vault. Nothing was made.",
                 ))
             }
         }
+    }
+
+    /// Read the connect requests of the node again, and call the hook when they changed.
+    pub(super) fn poll_connects(&self) {
+        let Some(Ok(list)) = self.with_node(|node| node.pending_connects()) else {
+            return;
+        };
+        let changed = {
+            let mut connects = lock(&self.connects);
+            let changed = *connects != list;
+            *connects = list;
+            changed
+        };
+        if changed {
+            let hook = lock(&self.on_connects).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+    }
+
+    /// Call `f` with the vault while the session of the node lasts (for the service).
+    pub(super) fn in_vault<R>(&self, f: impl FnOnce(&mut Vault) -> R) -> Option<R> {
+        self.with_vault(f)
+    }
+}
+
+/// The question slot of one cloud agent: held while the broker asks about one of its
+/// runs. It is given back on drop.
+struct AgentSlot<'a> {
+    shared: &'a Shared,
+    agent_id: u64,
+}
+
+impl<'a> AgentSlot<'a> {
+    /// The slot of `agent_id`, unless a run of the agent holds it.
+    fn take(shared: &'a Shared, agent_id: u64) -> Option<Self> {
+        // The lock ends before a slot exists: a slot that is not given must never be
+        // made, since its drop would give back the slot of the run that holds it.
+        let free = lock(&shared.asking).insert(agent_id);
+        free.then(|| Self { shared, agent_id })
+    }
+}
+
+impl Drop for AgentSlot<'_> {
+    fn drop(&mut self) {
+        lock(&self.shared.asking).remove(&self.agent_id);
     }
 }
 
@@ -312,6 +395,8 @@ fn run(shared: &Arc<Shared>) {
         let pending = shared
             .with_node(|node| node.wait_pending(&shared.team, WAIT))
             .unwrap_or_else(|| Ok(Vec::new()));
+        // The wait also returns when the connect requests change.
+        shared.poll_connects();
         match pending {
             Ok(runs) => {
                 let mut started = false;
@@ -338,8 +423,15 @@ fn run(shared: &Arc<Shared>) {
     }
 }
 
-/// Start a worker for `run`, unless one runs for it. Returns true when it started one.
+/// Start a worker for `run`, unless one runs for it or it waits for its retry. Returns
+/// true when it started one.
 fn begin(shared: &Arc<Shared>, run: PendingRun) -> bool {
+    if lock(&shared.retry_at)
+        .get(&run.run_id)
+        .is_some_and(|at| Instant::now() < *at)
+    {
+        return false;
+    }
     if !lock(&shared.in_flight).insert(run.run_id) {
         return false;
     }
@@ -363,8 +455,9 @@ fn begin(shared: &Arc<Shared>, run: PendingRun) -> bool {
     }
 }
 
-/// Join the workers that ended.
+/// Join the workers that ended, and forget old retry marks.
 fn reap(shared: &Shared) {
+    lock(&shared.retry_at).retain(|_, at| at.elapsed() < RETRY_FORGET);
     let mut workers = lock(&shared.workers);
     let (done, live): (Vec<_>, Vec<_>) = std::mem::take(&mut *workers)
         .into_iter()
@@ -384,13 +477,21 @@ enum Outcome {
         items: Vec<u64>,
         label: String,
         decided_by: String,
+        /// When the broker started to decide (for the `cloud_run` row).
+        asked_at: u64,
     },
     Deny {
         reason: String,
         /// The activity row, when the broker did not write one.
         record: Option<NewActivity>,
         items: Vec<u64>,
+        /// The vault agent and when the broker started to decide, when the broker
+        /// decided (for the `cloud_run` row).
+        decided: Option<(u64, u64)>,
     },
+    /// Another question of the agent waits: leave the run pending in the node and try
+    /// it again after [`RETRY_PAUSE`].
+    Retry,
 }
 
 fn deny(reason: impl Into<String>, record: Option<NewActivity>, items: Vec<u64>) -> Outcome {
@@ -398,7 +499,19 @@ fn deny(reason: impl Into<String>, record: Option<NewActivity>, items: Vec<u64>)
         reason: reason.into(),
         record,
         items,
+        decided: None,
     }
+}
+
+/// Store the `cloud_run` row of a run that the broker decided, with its decision log row.
+fn record_run(vault: &mut Vault, run: &PendingRun, agent_id: u64, asked_at: u64) {
+    let decision_log_id = vault.newest_decision_id(agent_id, asked_at).ok().flatten();
+    let _ = vault.record_cloud_run(&NewCloudRun {
+        relay_run_id: run.run_id.0,
+        decision_log_id,
+        agent_id,
+        at: run.created_at,
+    });
 }
 
 /// The activity row of a run that the host refused before the broker saw it.
@@ -415,13 +528,20 @@ fn refused_row(run: &PendingRun, agent_id: Option<u64>, reason: &str) -> NewActi
 
 fn decide(shared: &Shared, run: &PendingRun) {
     match outcome(shared, run) {
+        Outcome::Retry => {
+            // The worker ends and drops its in-flight mark; the next poll after the pause
+            // starts a new one.
+            lock(&shared.retry_at).insert(run.run_id, Instant::now() + RETRY_PAUSE);
+        }
         Outcome::Release {
             values,
             agent_id,
             items,
             label,
             decided_by,
+            asked_at,
         } => {
+            lock(&shared.retry_at).remove(&run.run_id);
             let released = shared.with_node(|node| {
                 node.release(&shared.team, run.run_id, values, Some(RELEASED_NOTE))
             });
@@ -472,6 +592,7 @@ fn decide(shared: &Shared, run: &PendingRun) {
                     },
                     items.get(1..).unwrap_or_default(),
                 );
+                record_run(vault, run, agent_id, asked_at);
             });
             if let Some(expires_at) = live {
                 lock(&shared.sessions).push(LiveSession {
@@ -488,19 +609,26 @@ fn decide(shared: &Shared, run: &PendingRun) {
             reason,
             record,
             items,
+            decided,
         } => {
+            lock(&shared.retry_at).remove(&run.run_id);
             let _ = shared.with_node(|node| {
                 node.deny(&shared.team, run.run_id, cut(&reason, MAX_REASON_BYTES))
             });
-            if let Some(row) = record {
+            if record.is_some() || decided.is_some() {
                 shared.with_vault(|vault| {
-                    let _ = vault.record_activity_for_items(
-                        &NewActivity {
-                            item_id: items.first().copied(),
-                            ..row
-                        },
-                        items.get(1..).unwrap_or_default(),
-                    );
+                    if let Some(row) = record {
+                        let _ = vault.record_activity_for_items(
+                            &NewActivity {
+                                item_id: items.first().copied(),
+                                ..row
+                            },
+                            items.get(1..).unwrap_or_default(),
+                        );
+                    }
+                    if let Some((agent_id, asked_at)) = decided {
+                        record_run(vault, run, agent_id, asked_at);
+                    }
                 });
             }
         }
@@ -563,7 +691,11 @@ fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
         );
     }
 
-    // 2. The broker: the owner decides.
+    // 2. The broker: the owner decides, about one run of the agent at a time.
+    let Some(slot) = AgentSlot::take(shared, agent_id) else {
+        return Outcome::Retry;
+    };
+    let asked_at = now();
     let context = CloudContext {
         relay_run: run.run_id.0,
         agent_cwd: run.cwd.clone(),
@@ -575,10 +707,24 @@ fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
         purpose: &run.purpose,
         user_request: run.user_request.as_deref(),
     };
-    let approval = match evaluate_cloud(&shared.broker, agent_id, &request, &context) {
+    let decision = evaluate_cloud(&shared.broker, agent_id, &request, &context);
+    drop(slot);
+    let approval = match decision {
         CloudDecision::Approved(approval) => approval,
+        // A question of the agent that the host did not start (or one that is still
+        // being settled) waits: this run is asked later, not denied.
+        CloudDecision::Refused { code, .. } if code == QUESTION_WAITING => {
+            return Outcome::Retry;
+        }
         // The broker wrote the activity row.
-        CloudDecision::Refused { reason, .. } => return deny(reason, None, items),
+        CloudDecision::Refused { reason, .. } => {
+            return Outcome::Deny {
+                reason,
+                record: None,
+                items,
+                decided: Some((agent_id, asked_at)),
+            };
+        }
     };
 
     // 3. The values, in the order of the run, in the session and with the bindings of
@@ -622,6 +768,7 @@ fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
             items,
             label,
             decided_by: approval.decided_by,
+            asked_at,
         },
         Some(Err(reason)) => deny(
             reason,
@@ -660,6 +807,18 @@ impl ProxyCounts {
             }
         }
         counts
+    }
+
+    /// Store the end of the session of `run` and these counts in its `cloud_run` row.
+    fn end_run(&self, vault: &mut Vault, run: NodeRunId, at: u64) {
+        let wide = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        let _ = vault.end_cloud_run(
+            run.0,
+            at,
+            wide(self.forwarded),
+            wide(self.refused),
+            wide(self.failed),
+        );
     }
 
     pub(super) fn text(&self) -> String {
@@ -710,6 +869,7 @@ fn check_sessions(shared: &Shared) {
             Err(error) => error.code.clone(),
         };
         let written = shared.with_vault(|vault| {
+            counts.end_run(vault, session.run_id, at);
             vault.record_activity_for_items(
                 &NewActivity {
                     agent_id: Some(session.agent_id),
@@ -743,6 +903,7 @@ pub(super) fn end_all_sessions(shared: &Shared, why: &str) {
             .unwrap_or_default();
         let counts = ProxyCounts::of(&rows);
         shared.with_vault(|vault| {
+            counts.end_run(vault, session.run_id, now());
             let _ = vault.record_activity_for_items(
                 &NewActivity {
                     agent_id: Some(session.agent_id),

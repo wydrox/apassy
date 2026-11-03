@@ -443,6 +443,7 @@ fn local_training_on_a_synthetic_log() {
                     purpose: purpose.clone(),
                     env_names: env_names.clone(),
                     instruction: String::new(),
+                    task_provenance: String::new(),
                 })
             }
             _ => apassy::broker::bouncer::BouncerVerdict::Unavailable("not asked".to_owned()),

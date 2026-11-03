@@ -334,18 +334,6 @@ pub(super) fn pop_menu<T: PartialEq + Clone>(
     pop_menu_styled(ui, value, options, shown, name, false)
 }
 
-/// [`pop_menu`] on white with a thin border, for a menu inside a sentence, as the scope
-/// bar of Agents and Decisions.
-pub(super) fn bordered_pop_menu<T: PartialEq + Clone>(
-    ui: &mut Ui,
-    value: &mut T,
-    options: &[(T, String)],
-    shown: &str,
-    name: &str,
-) -> Response {
-    pop_menu_styled(ui, value, options, shown, name, true)
-}
-
 fn pop_menu_styled<T: PartialEq + Clone>(
     ui: &mut Ui,
     value: &mut T,

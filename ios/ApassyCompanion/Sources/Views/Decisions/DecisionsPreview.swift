@@ -95,7 +95,9 @@ import SwiftUI
 
             func body(content: Content) -> some View {
                 content.task {
-                    guard let mode = UserDefaults.standard.string(forKey: "ApassyPreviewDecisions"),
+                    // The demo has its own content (`DemoVault`): no fixture replaces it.
+                    guard root?.isDemo != true,
+                        let mode = UserDefaults.standard.string(forKey: "ApassyPreviewDecisions"),
                         let model, let service = vault?.service as? PreviewVaultService
                     else { return }
                     // The rows of this iPhone hold the answer key of each team (software keys in

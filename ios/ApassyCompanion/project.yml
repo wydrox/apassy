@@ -29,7 +29,7 @@ settings:
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
     # The app has no App Intents. This stops the note "Metadata extraction skipped".
     LM_SKIP_METADATA_EXTRACTION: YES
-    MARKETING_VERSION: 0.5.15
+    MARKETING_VERSION: 0.5.16
     CURRENT_PROJECT_VERSION: 1
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1"
@@ -47,6 +47,9 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+      # The privacy manifest (required reason APIs, collected data): docs/store/app-store/app-privacy.md.
+      - path: Privacy/App/PrivacyInfo.xcprivacy
+        buildPhase: resources
       # The notices and license texts of the code and data in the app (Settings > Licenses).
       - path: ../../licenses
         type: folder
@@ -57,6 +60,10 @@ targets:
         product: ApassyVaultKit
       - package: ApassyVaultKit
         product: ApassyVaultCore
+      # The demo ("Try the Demo", -ApassyDemo): synthetic data in memory. The app and the watch
+      # link it; the AutoFill extension must not (ApassyVaultDemoTests checks this file).
+      - package: ApassyVaultKit
+        product: ApassyVaultDemo
       - target: ApassyAutoFill
         embed: true
       # Opens the sealed summary of a push (push-gateway-v1 section 12).
@@ -105,7 +112,7 @@ targets:
             LSHandlerRank: Owner
             LSItemContentTypes:
               - com.wydrox.apassy.vault
-        ITSAppUsesNonExemptEncryption: false
+        ITSAppUsesNonExemptEncryption: true
         ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         UILaunchScreen: {}
         UIApplicationSceneManifest:
@@ -146,6 +153,8 @@ targets:
     platform: iOS
     sources:
       - path: AutoFill
+      - path: Privacy/AutoFill/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: ApassyVaultKit
         product: ApassyVaultKit
@@ -236,6 +245,8 @@ targets:
     sources:
       - path: Watch/Sources
       - path: Watch/Resources
+      - path: Privacy/Watch/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: ApassyVaultKit
         product: ApassyVaultKit
@@ -244,6 +255,9 @@ targets:
       # Opens the sealed summary of the watch's own push (push-gateway-v1 sections 11 and 12).
       - target: ApassyWatchNotifications
         embed: true
+      # "See a Sample" on a watch that is not connected (DemoWatch).
+      - package: ApassyVaultKit
+        product: ApassyVaultDemo
     entitlements:
       path: Watch/ApassyWatch.entitlements
       properties:
@@ -269,7 +283,7 @@ targets:
         ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         WKApplication: true
         WKCompanionAppBundleIdentifier: com.wydrox.apassy.companion
-        ITSAppUsesNonExemptEncryption: false
+        ITSAppUsesNonExemptEncryption: true
         # A node on the tailnet (node-pairing-v1): the watch reaches `https://<Tailscale IPv4>:8444`
         # with the pinned certificate of the node (URLSessionCoreTransport), as the iPhone app.
         NSAppTransportSecurity:

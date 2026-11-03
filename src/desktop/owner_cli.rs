@@ -77,6 +77,8 @@ pub(crate) struct CliHost {
         crate::broker::approvals::OwnerDeliveryFence,
     )>,
     fresh_agent: Option<(AgentRow, SecretText)>,
+    /// A new remote agent, its token, and the MCP address, for its ticket.
+    fresh_remote: Option<(AgentRow, SecretText, String)>,
 }
 
 impl CliHost {
@@ -99,11 +101,18 @@ impl CliHost {
         self.fresh_export = None;
         self.fresh_code = None;
         self.fresh_agent = None;
+        self.fresh_remote = None;
     }
 
     #[cfg(test)]
     pub(crate) fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// The token of a new remote agent went to its ticket: none waits in the window.
+    #[cfg(test)]
+    pub(crate) fn fresh_remote_is_empty(&self) -> bool {
+        self.fresh_remote.is_none()
     }
 }
 
@@ -129,6 +138,8 @@ enum After {
     Code,
     Export,
     RegisterAgent,
+    /// A remote agent of the node: its token and the MCP address.
+    RemoteToken,
     Session,
     Token {
         agent_id: u64,
@@ -389,6 +400,10 @@ impl DesktopApp {
             OwnerRequest::RegisterAgent { .. } | OwnerRequest::RegisterSetupAgent { .. } => {
                 ticket.after = After::RegisterAgent
             }
+            OwnerRequest::AddRemoteAgent { .. } => {
+                self.cli.fresh_remote = None;
+                ticket.after = After::RemoteToken;
+            }
             OwnerRequest::RotateToken { agent_id, .. }
             | OwnerRequest::ConnectAgent { agent_id, .. } => {
                 ticket.after = After::Token {
@@ -398,6 +413,9 @@ impl DesktopApp {
             // A batch binding has its refusals in the ticket already.
             _ => {}
         }
+        // A new remote agent always asks afresh: its token works from the internet,
+        // and a session of the command line proves no owner at the Mac.
+        let eligible = !matches!(request, OwnerRequest::AddRemoteAgent { .. });
         // Attach the reply ticket before the global window can complete the
         // action synchronously. Inherited owner sessions share this policy.
         self.prepare_owner(request, Some(ctx), false);
@@ -406,7 +424,7 @@ impl DesktopApp {
         }
         self.start_local_owner(
             crate::broker::approvals::LocalWindowSource::LocalOwner,
-            true,
+            eligible,
             ctx,
         );
         if self.owner.check.is_some() {
@@ -464,6 +482,17 @@ impl DesktopApp {
             },
             After::RegisterAgent => match self.cli.fresh_agent.take() {
                 Some((agent, token)) => Response::ok(message, Data::Token { agent, token }),
+                None => Response::error("refused", message),
+            },
+            After::RemoteToken => match self.cli.fresh_remote.take() {
+                Some((agent, token, mcp_url)) => Response::ok(
+                    message,
+                    Data::RemoteToken {
+                        agent,
+                        token,
+                        mcp_url,
+                    },
+                ),
                 None => Response::error("refused", message),
             },
             After::Session => match self.cli.issued.take() {
@@ -880,6 +909,7 @@ impl DesktopApp {
                 data(view.agent.name.clone(), Data::Agent(Box::new(view)))
             }
             Command::AgentAdd { name } => Ok(Step::Check(OwnerRequest::RegisterAgent { name })),
+            Command::AgentAddRemote { name, days } => self.cli_add_remote(&name, days),
             Command::AgentConnect { name } => {
                 let name = name.trim().to_owned();
                 let existing = self
@@ -2108,6 +2138,77 @@ impl DesktopApp {
                 self.cli.fresh_agent = Some((row, SecretText::new(token.expose().to_owned())));
             }
             Err(e) => self.set_err(e.message),
+        }
+    }
+
+    /// `agent_add_remote`: checks before the owner check. The node must run (remote
+    /// access on), so the check never waits for a start on the UI thread.
+    fn cli_add_remote(&self, name: &str, days: Option<u32>) -> Run {
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Err(invalid("Name the remote agent."));
+        }
+        let days = days.unwrap_or(crate::vault::DEFAULT_CLOUD_TOKEN_DAYS);
+        if !crate::node::REMOTE_TOKEN_DAYS.contains(&days) {
+            return Err(invalid("The token lifetime is 1 to 365 days."));
+        }
+        if !self.node_running() {
+            return Err(refuse(
+                "remote_access_off",
+                "Remote access is not running. Turn it on in Apassy (Bouncer > Agents), then try again.",
+            ));
+        }
+        Ok(Step::Check(OwnerRequest::AddRemoteAgent { name, days }))
+    }
+
+    /// After the owner check `AddRemoteAgent`: the remote agent and its token, for the
+    /// ticket of the command line. The window does not show the token.
+    pub(crate) fn complete_add_remote_agent(&mut self, name: &str, days: u32, proof: OwnerProof) {
+        let action = OwnerAction::AddRemoteAgent {
+            name: name.to_owned(),
+            days,
+        };
+        let Some(epoch) = self.owner_ui.session.epoch() else {
+            self.set_err("The vault is locked. No agent was made.");
+            return;
+        };
+        if let Err(refusal) = proof.check(&action, &epoch) {
+            self.set_err(refusal.message());
+            return;
+        }
+        drop(proof);
+        let context = match &self.broker {
+            BrokerState::Running(broker) => Some(broker.context()),
+            _ => None,
+        };
+        let (Some(node), Some(context)) =
+            (self.cloud_node().filter(|node| node.is_running()), context)
+        else {
+            self.set_err("Remote access is not running. No agent was made.");
+            return;
+        };
+        match node.add_remote_agent(&self.owner_ui.session.shared_vault(), context, name, days) {
+            Ok(added) => {
+                let row = AgentRow {
+                    id: added.agent_id,
+                    name: added.name.clone(),
+                    created_at: now_unix(),
+                    revoked: false,
+                    token_expires_at: added.expires_at,
+                    token_expired: false,
+                    sees_all: false,
+                };
+                self.set_ok(format!(
+                    "{} is added as a remote agent. The command line got its token.",
+                    added.name
+                ));
+                self.cli.fresh_remote = Some((
+                    row,
+                    SecretText::new(added.token.expose().to_owned()),
+                    added.url,
+                ));
+            }
+            Err(error) => self.set_err(error.message),
         }
     }
 }

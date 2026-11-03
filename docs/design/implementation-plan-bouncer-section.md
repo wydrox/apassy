@@ -39,8 +39,10 @@ remote run still asks the owner.
 
 - **Places.** `Place` gains `Overview` and `Logs`; `Agents` and `Decisions` stay. `Place::is_wide()` is true for
   Overview, Agents, Logs: `shell.rs` skips the list panel and calls `wide_pane(app, ui)`. Decisions keeps list and
-  detail. The agent page is `Place::Agents` with `app.ui.agents.open: Option<AgentRef>`
-  (`AgentRef::{Local(u64), Other{device, id}}`); "‹ Agents" and ⌘[ clear it.
+  detail. The agent page is `Place::Agents` with `app.ui.agent_page.open: Option<AgentRef>`
+  (`AgentRef::{Local(u64), Other{device, id}}`, in `ui/bouncer.rs`; the state is in both builds, so the demo
+  draws it too); "‹ Agents" and ⌘[ clear it. The pages read connect requests as `bouncer::ConnectLine`
+  (from `Node::pending_connects`).
 - **Shortcuts.** ⌘1 credentials, ⌘2 Overview, ⌘3 Decisions, ⌘4 Agents, ⌘5 Logs.
 - **Sidebar.** `agents_section()` becomes `bouncer_section()`: title "Bouncer"; rows Overview, Decisions (badge =
   waiting runs + pending connects), Agents, Logs. The Decisions "Activity" button and its timeline go: that view is
@@ -91,7 +93,7 @@ Window: the last 7 × 24 h; per-day bars by local calendar day, today first. One
 | Median answer | median of `wait_ms` over `asked = 1 AND decided_by = 'owner'`; "—" when none |
 | Ask rate (agent) | asked / runs; orange and an attention item at ≥ 25 % with ≥ 10 runs |
 | Last active | newest `item_use.at`; "Active now" within 10 min; "Waits for you" with an open question |
-| Attention, in order | a Mac silent 24 h after reporting before; a production credential used; an agent that asks often; a remote agent with a denial |
+| Attention, in order | what waits for you (the vault build, with the banner); a Mac silent 24 h after reporting before; a production credential used; an agent that asks often. A remote agent with a denial is not an item (frame 1; owner 2026-11-03): its page shows the denials |
 
 Computation: `Vault::bouncer_stats(since, until, project) -> LocalStats` (new `src/vault/stats.rs`), one SQL pass over
 `decision_log` joined to `item_use`, grouped in Rust. The app keeps `BouncerCache`, recomputed when an activity change
@@ -108,7 +110,7 @@ the same function.
 | `GET /.well-known/oauth-protected-resource` and `…/mcp` (RFC 9728) | `resource = <origin>/mcp`, `authorization_servers = [<origin>]`, `bearer_methods_supported = ["header"]`, `scopes_supported = ["apassy"]` |
 | `GET /.well-known/oauth-authorization-server`, also `/.well-known/openid-configuration` (RFC 8414) | `issuer`, the endpoints below, `response_types_supported = ["code"]`, `grant_types_supported = ["authorization_code","refresh_token"]`, `code_challenge_methods_supported = ["S256"]`, `token_endpoint_auth_methods_supported = ["none"]` |
 | `POST /oauth/register` (RFC 7591) | 201 with a random `client_id`, the echoed fields, `token_endpoint_auth_method = "none"`, no secret |
-| `GET /oauth/authorize` | makes a connect request (id, match code, 300 s), 303 to `/oauth/wait/<id>` |
+| `GET /oauth/authorize` | makes a connect request (id, match code, 300 s), 303 to `/oauth/wait/<id>`; an error is a page for a client that the owner never allowed (no open redirect), a 303 back only for an allowed client |
 | `GET /oauth/wait/<id>` | the page of frame 7 with `Refresh: 3`; allowed → 303 to `redirect_uri?code=…&state=…` once; denied → "You denied the connection."; expired → "The request ended." |
 | `POST /oauth/token` | `authorization_code` with PKCE, or `refresh_token`; `access_token` = the relay agent token (so `/mcp` auth is unchanged), `token_type = "Bearer"`, `expires_in`, `refresh_token`; errors as RFC 6749 §5.2 |
 | `POST /oauth/revoke` (RFC 7009) | 200 always |
@@ -122,13 +124,15 @@ reuse revokes the family. Redirect URIs: `https://…`, or `http://localhost|127
 exact match otherwise; ≤ 512 bytes. `resource`, when sent, must equal `<origin>/mcp`. One live access token per agent.
 
 **Limits on the public listener.** Registrations 10 per 10 min and 100 stored clients (unused clients pruned after
-7 days). Open connect requests ≤ 3 per node and 1 per client. Bad codes and refresh tokens count in the failed-auth
-limiter. Funnel forwards no client identity, so every limit is per node.
+7 days), counting only clients that the owner allowed at least once: a full table drops the oldest client that was never
+allowed, and such a client is pruned 1 h after its registration (an authorize does not renew it). Open connect requests ≤ 3 per node and 1 per client: a new authorize of a client with other parameters ends its
+waiting request and opens one with its own code. Bad codes and refresh tokens count for their client only (20 in
+60 s, then 429 for that client), never in the listener's failed-auth limiter. Funnel forwards no client identity, so every limit is per node.
 
 **The page.** No script, form, cookie, or button: nothing on it can authorize. Headers: `Content-Security-Policy:
 default-src 'none'; style-src 'unsafe-inline'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
 `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`. It shows the client name (cleaned, ≤ 64 bytes, escaped),
-the Mac's name, the match code, and the state text; never an item, an agent list, or the owner's name.
+"your Mac" (never the computer name), the match code, and the state text; never an item, an agent list, or the owner's name.
 
 **Storage** in the directory `relay.db` (1003 → 1004): `oauth_client`, `connect_request`, `oauth_refresh`. Codes and
 refresh tokens are stored hashed. Rollback note in `OPERATIONS.md`.
@@ -142,7 +146,9 @@ The authorize handler wakes `wait_pending`; the host loop polls `pending_connect
 `OwnerRequest::AllowConnect`, "Connect <name> to this Mac"), `Node::deny_connect(id)`. Allow: relay agent with no items
 → vault `add_cloud_agent` (kind `cloud`, `see_all = 0`, `client_id`, `connected_with = oauth`) → `decide_connect(Allow)`;
 if the vault save fails, the relay agent is revoked and the request denied. Name = `client_name`, or "MCP client"; a
-taken name becomes "Grok Bot 2". The same `client_id` with a live agent reconnects to that agent. Activity rows:
+taken name becomes "Grok Bot 2". Every allowed connect makes a new agent with no credential, also for a `client_id`
+that has a live agent: a client id is public, so a reconnect would hand whoever sent it the agent and its credentials
+(security review of 0.5.16, finding 1). The old agent stays until the owner disconnects it. Activity rows:
 `remote agent connected`, `agent disconnected`, `remote access on`, `remote access off`. The host writes `cloud_run` rows.
 
 **CLI fallback.** `apassy agents add-remote <name> [--days 90]` (owner check): creates the agent
@@ -201,7 +207,7 @@ on your Mac". CHANGELOG upgrade notes: vault 26 and 27, relay 7 and directory 10
 | L0 Land the stack | top-level agent | merge `main` into #86 and #89; merge #92 into #85; mark #85, #86, #89 ready; merge in that order | ready runs green (macOS groups) |
 | U1b Relay OAuth and connects | #86 head → `feat/cloud-agents-oauth` | `crates/apassy-relay/src/server/{oauth.rs, connect.rs, http.rs, auth.rs, directory.rs, mcp.rs}`, `src/embedded.rs`, `src/config.rs`, `src/node/backend.rs`, `tests/oauth.rs`, relay `SPEC.md`, `OPERATIONS.md`, `cloud-agents-v1.md` | metadata; register → authorize → wait → allow → 303 → token → `/mcp` 200; wrong verifier and reused code → `invalid_grant` and family revoked; refresh rotates, reuse revokes; deny and expiry pages; limits; headers; `WWW-Authenticate`; hosted config → 404; directory 1003 ↔ 1004 |
 | U3a Stats, schema 27, feed v2 | `main` after #89 → `feat/bouncer-stats` | `src/vault/{schema27.rs, stats.rs}`, `learning.rs`, `cloud.rs`, `src/broker/run.rs` (`wait_ms`, request kind, `answered_on` for relay answers), `src/questions/{feed,feed_reader}.rs`, `ios/ApassyCore/src/core/feed.rs`, `relay-feed-v1.md`, `tests/relay_feed.rs` | 26 ↔ 27; stats of a fixture vault equal hand-computed numbers; v2 within limits, `fit` keeps `days`; both readers accept 1 and 2, refuse 3; a relay answer gives `answered_on` = the iPhone |
-| U2b Node connect | `main` after U1b, U3a → `feat/cloud-agents-connect` | `src/node/{mod,host}.rs`, `src/vault/cloud.rs`, `src/desktop/{node,owner_check,owner_socket}.rs`, `src/cli/**`, `owner-cli-v1.md`, `deploy/plugins/apassy-cloud/**`, store draft, trust model | allow makes a cloud agent with no items and decides on the relay; reconnect; "Grok Bot 2"; deny; expiry; disconnect revokes relay, family, vault; activity and `cloud_run` rows; CLI token once with the owner check |
+| U2b Node connect | `main` after U1b, U3a → `feat/cloud-agents-connect` | `src/node/{mod,host}.rs`, `src/vault/cloud.rs`, `src/desktop/{node,owner_check,owner_socket}.rs`, `src/cli/**`, `owner-cli-v1.md`, `deploy/plugins/apassy-cloud/**`, store draft, trust model | allow makes a cloud agent with no items and decides on the relay; a second connect of a client is a second agent (no reconnect); "Grok Bot 2"; deny; expiry; disconnect revokes relay, family, vault; activity and `cloud_run` rows; CLI token once with the owner check |
 | U3b-1 Navigation, Overview, Logs | `main` after U3a → `feat/bouncer-section` | `src/desktop/mod.rs`, `ui/{shell,sidebar,columns,scope_bar,kit,demo}.rs`, `ui/{overview,logs}.rs`, `remote_feeds.rs`, `keyboard_tests.rs`, `README.md` | ⌘2–⌘5; wide pane; never-reported Mac and one-Mac menu; Overview equals the stats fixture; Logs filters and expansion; empty states 9a, 9d, 10b, 11b, 14; no vault query per frame |
 | U3b-2 Agents, agent page, Decisions | `main` after U2b, U3b-1 → `feat/bouncer-agents` | `ui/agents.rs`, `ui/agents/remote.rs`, `ui/{decisions,decisions_activity}.rs`, `ui/agent_onboarding.rs`, `owner_store/**` | tables per environment; states 8a–8d; agent pages; Choose Credentials… changes relay items; Disconnect… both kinds; connect card through the owner check; cloud run card; history filters; empty states 9b, 9c, 10a, 11a, 12, 13 |
 | U2c Connect on the iPhone | `main` after U2b → `feat/connect-on-iphone` | `relay-questions-v1.md`, `src/questions/{envelope,worker}.rs`, `ios/ApassyCore/src/core/questions*.rs`, the Swift questions view | run cards stay v1; a connect card is posted, answered, settled once; an old reader shows the update text for it only |
@@ -262,6 +268,7 @@ on your Mac". CHANGELOG upgrade notes: vault 26 and 27, relay 7 and directory 10
 | The median across Macs is approximate | said in the Overview ⓘ |
 | Connect requests expire in 5 minutes; the Mac must be unlocked and awake | the page says so; `keep_open_for_node` keeps the window alive |
 | A relay answer is logged as the Mac | fixed and tested in U3a |
+| Any program on the Mac (a coding agent too) reaches the public listener on `127.0.0.1:<port>` and runs the whole connect flow as "Grok Bot"; its card looks real (review 0.5.16, finding 1) | 0.5.16: the Mac prompt, the Touch ID text, and the iPhone card name the redirect host ("Returns to <host>"; a loopback redirect is "Returns to a program on a computer (localhost)" and the Mac adds "A program on this Mac can start this request."). **0.5.17, not built yet:** the public listener accepts only connections from the Tailscale process: on each accepted socket read the peer PID (`getsockopt(SOL_LOCAL, LOCAL_PEERPID)` on macOS; `SO_PEERCRED` on Linux) and its code signature or executable path (`tailscaled` / `io.tailscale.ipn.macsys` network extension), and close any other; fail closed when the PID cannot be read. Check how the App Store / standalone Tailscale variants and the system extension appear as the peer before choosing the rule. This also lets the failed-auth count trust `X-Forwarded-For` only from Tailscale |
 
 ## Not verified in the code
 

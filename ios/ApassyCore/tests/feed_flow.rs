@@ -423,7 +423,11 @@ fn the_feed_of_the_vectors_is_read_and_shown() {
     assert_eq!(mac["generated_at"], 1_790_000_040u64);
     assert_eq!(mac["truncated"], false);
     assert_eq!(mac["problem"], Value::Null);
-    assert_eq!(mac["week"], json!({"by_you": 3, "automatic": 128}));
+    // A feed of v1: `feed_list` adds the fields of v2, empty (ios-core-v1, feed v2).
+    assert_eq!(
+        mac["week"],
+        json!({"by_you": 3, "automatic": 128, "days": [], "answer_p50_secs": null})
+    );
     let agent = &mac["agents"][0];
     assert_eq!(agent["id"], "4");
     assert_eq!(agent["name"], "Claude Code");

@@ -18,6 +18,12 @@
 //! user ([`USER_SOURCES`]). The broker keeps the newest prompt of each session, so a
 //! machine turn would replace the request of the user, and an agent could make its
 //! own scheduled text look like a verified request.
+//!
+//! An Agent SDK turn (`sdk`) stays accepted: T3 Code and other SDK hosts deliver the
+//! owner's real messages this way. But an agent that starts its own SDK session sends
+//! its own text as an `sdk` turn too, so the adapter sends the `source` along, and the
+//! broker names the request "Agent SDK turn" for the bouncer and on the question card
+//! (`docs/operations/host-hooks.md`).
 
 use std::path::Path;
 use std::time::Duration;
@@ -52,6 +58,10 @@ pub struct HookInput {
     pub transcript_path: Option<String>,
     /// The prompt was longer than [`MAX_HOOK_PROMPT_BYTES`] and is cut.
     pub truncated: bool,
+    /// The `source` of the hook input: `user` or `sdk` ([`USER_SOURCES`]). `None` for a
+    /// host that sends none. The broker keeps it with the prompt: an Agent SDK turn
+    /// (`sdk`) is the provenance that the bouncer and the question card name.
+    pub source: Option<String>,
 }
 
 impl std::fmt::Debug for HookInput {
@@ -64,6 +74,7 @@ impl std::fmt::Debug for HookInput {
             .field("prompt_bytes", &self.prompt.len())
             .field("transcript_path", &self.transcript_path)
             .field("truncated", &self.truncated)
+            .field("source", &self.source)
             .finish()
     }
 }
@@ -87,15 +98,21 @@ pub fn parse(bytes: &[u8]) -> Result<Option<HookInput>, &'static str> {
     let Some(prompt) = text("prompt").filter(|prompt| !prompt.trim().is_empty()) else {
         return Ok(None);
     };
-    let from_user = match object.get("source") {
-        None | Some(Value::Null) => !prompt.trim_start().starts_with(TASK_NOTIFICATION_TAG),
-        Some(Value::String(source)) => USER_SOURCES.contains(&source.as_str()),
-        // An unknown form is not a known turn of the user.
-        Some(_) => false,
+    // Only an allow-list is a turn of the user: `user`, `sdk`, or no `source` with a
+    // prompt that is not a task notification. Any other value, or form, is not.
+    let source = match object.get("source") {
+        None | Some(Value::Null) => {
+            if prompt.trim_start().starts_with(TASK_NOTIFICATION_TAG) {
+                return Ok(None);
+            }
+            None
+        }
+        Some(Value::String(source)) if USER_SOURCES.contains(&source.as_str()) => {
+            Some(source.clone())
+        }
+        // An unknown value or form is not a known turn of the user.
+        Some(_) => return Ok(None),
     };
-    if !from_user {
-        return Ok(None);
-    }
     let cwd = text("cwd")
         .filter(|cwd| cwd.starts_with('/'))
         .ok_or("the hook input has no absolute cwd")?;
@@ -117,6 +134,7 @@ pub fn parse(bytes: &[u8]) -> Result<Option<HookInput>, &'static str> {
             .filter(|path| !path.is_empty())
             .map(str::to_owned),
         truncated,
+        source,
     }))
 }
 
@@ -144,6 +162,7 @@ pub fn submit(socket: &Path, token: &str, input: HookInput) -> Result<(), String
         prompt: input.prompt.clone(),
         transcript_path: input.transcript_path.clone(),
         truncated: input.truncated,
+        source: input.source.clone(),
     };
     match client::send_with(socket, token, action, options) {
         Ok(response) if response.ok => Ok(()),
@@ -224,11 +243,17 @@ mod tests {
         assert_eq!(parse(odd.to_string().as_bytes()), Ok(None));
         odd["source"] = serde_json::Value::Null;
         assert!(parse(odd.to_string().as_bytes()).expect("valid").is_some());
-        // Turns of the user are sent as before.
+        // Turns of the user are sent as before, with their `source` (finding 4 of the
+        // 0.5.16 review: the broker names an Agent SDK turn as such).
         for source in [Some("user"), Some("sdk"), None] {
             let parsed = input(source, "Run the checks.").expect("a prompt of the user");
             assert_eq!(parsed.prompt, "Run the checks.");
             assert_eq!(parsed.host, "claude-code");
+            assert_eq!(parsed.source.as_deref(), source);
+        }
+        // Finding 5: an allow-list. A `source` close to a known one is not the user's.
+        for source in ["User", "SDK", "sdk ", "typed", ""] {
+            assert_eq!(input(Some(source), "Run the checks."), None, "{source:?}");
         }
         // The tag only counts at the start: a request that quotes it is the user's.
         assert!(input(None, &format!("Explain this: {notification}")).is_some());
@@ -268,6 +293,7 @@ mod tests {
             prompt: "secret-looking prompt text".to_owned(),
             transcript_path: None,
             truncated: false,
+            source: Some("sdk".to_owned()),
         };
         let err = submit(Path::new("/nonexistent/apassy.sock"), "apassy_agt_x", input)
             .expect_err("no broker");

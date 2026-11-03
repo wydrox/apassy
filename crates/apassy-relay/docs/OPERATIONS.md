@@ -1413,8 +1413,10 @@ immutable audit archives and the master key. No version bump is part of this pat
 An Apassy Mac runs its own node: this relay inside the app, with no edge, listeners on
 the loopback only, and a public listener that Tailscale Funnel reaches (docs/SPEC.md
 section 30). It is configured in code (`RelayConfig::embedded`), not from the
-environment, and it needs no operator. Its operator socket (`<node dir>/admin.sock`)
-serves the usual `admin` commands for diagnostics. The hosted relay does not change:
+environment, and it needs no operator. It serves no operator socket: the node
+directory belongs to the Mac user, whose coding agents run as the same user, so
+`admin` commands (`suspend`, `delete`, `team-code`) are not available there (review
+0.5.16, SPEC 30.1). The hosted relay does not change:
 `APASSY_RELAY_EDGE_SECRET` stays required, there is no public listener, and the
 failed-auth limiter is off.
 
@@ -1509,8 +1511,8 @@ version. Codes and refresh tokens are kept as SHA-256 hashes only.
 - The relay log at the start: no error about `relay.db`.
 - `admin teams`: every team `"open": true`, as before.
 - On a node: relay audit rows of the actor `oauth` (`oauth_client_registered`,
-  `connect_requested`, `connect_allowed`, `connect_denied`, `oauth_code_redeemed`,
-  `oauth_family_revoked`) and team audit rows `agent_token_issued` and
+  `connect_requested`, `connect_replaced`, `connect_allowed`, `connect_denied`,
+  `oauth_code_redeemed`, `oauth_family_revoked`) and team audit rows `agent_token_issued` and
   `agent_token_dropped`. A run of `oauth_family_revoked` with `code_reused` or
   `refresh_reused` means that someone else used a client's code or token.
 

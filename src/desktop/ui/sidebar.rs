@@ -67,6 +67,15 @@ pub(super) fn navigate(app: &mut DesktopApp, place: Place) {
     if let Place::Shared(_) = &place {
         app.selected_item_id = None;
     }
+    // Agents opens on all agents; a caller opens an agent page after this.
+    if place == Place::Agents {
+        app.ui.agent_page.open = None;
+        app.ui.agent_page.note_open = None;
+        #[cfg(feature = "vault")]
+        {
+            app.owner_ui.selected_agent = None;
+        }
+    }
     app.place = place;
     app.ui.sidebar_float = false;
 }

@@ -2,7 +2,7 @@
 //! the sheets. A wide place (Overview, Agents, Logs: `Place::is_wide`) has one pane after
 //! the sidebar instead of the list and the detail ([`wide_pane`]).
 
-use eframe::egui::{self, Align, Frame, Layout, Margin, Pos2, Rect, UiBuilder};
+use eframe::egui::{self, Frame, Margin};
 
 use super::Sheet;
 #[cfg(not(feature = "vault"))]
@@ -78,7 +78,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .frame(Frame::NONE.fill(kit::palette().detail))
         .show(ui, |ui| {
             if wide {
-                wide_pane(app, ui, &pending, columns.list_width);
+                wide_pane(app, ui, &pending);
             } else {
                 detail_column(app, ui, &pending);
             }
@@ -117,10 +117,9 @@ fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     match &app.place {
         Place::Folder(_) | Place::Shared(_) => super::items::list_column(app, ui),
         Place::Decisions => super::decisions::list_column(app, ui, pending),
-        Place::Agents => super::agents::list_column(app, ui),
         Place::Settings => super::settings_view::list_column(app, ui),
         // Wide places have no list column.
-        Place::Overview | Place::Logs => {}
+        Place::Overview | Place::Agents | Place::Logs => {}
     }
     #[cfg(not(feature = "vault"))]
     {
@@ -128,9 +127,8 @@ fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         match &app.place {
             Place::Folder(_) | Place::Shared(_) => super::demo::list_column(app, ui),
             Place::Decisions => super::demo::decisions_list(app, ui),
-            Place::Agents => super::demo::agents_list(app, ui),
             Place::Settings => super::settings_view::list_column(app, ui),
-            Place::Overview | Place::Logs => {}
+            Place::Overview | Place::Agents | Place::Logs => {}
         }
     }
 }
@@ -141,9 +139,8 @@ fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     match &app.place {
         Place::Folder(_) | Place::Shared(_) => super::items::detail_column(app, ui, pending),
         Place::Decisions => super::decisions::detail_column(app, ui, pending),
-        Place::Agents => super::agents::detail_column(app, ui, pending),
         Place::Settings => super::settings_view::detail_column(app, ui),
-        Place::Overview | Place::Logs => {}
+        Place::Overview | Place::Agents | Place::Logs => {}
     }
     #[cfg(not(feature = "vault"))]
     {
@@ -151,58 +148,33 @@ fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         match &app.place {
             Place::Folder(_) | Place::Shared(_) => super::demo::detail_column(app, ui),
             Place::Decisions => super::demo::decisions_detail(app, ui),
-            Place::Agents => super::demo::agents_detail(app, ui),
             Place::Settings => super::settings_view::detail_column(app, ui),
-            Place::Overview | Place::Logs => {}
+            Place::Overview | Place::Agents | Place::Logs => {}
         }
     }
 }
 
-/// The one pane of a wide place. Overview and Logs read the Bouncer cache, which
-/// computes again at most once per 2 seconds (never per frame).
-fn wide_pane(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, list_width: f32) {
+/// The one pane of a wide place. Overview, Agents, and Logs read the Bouncer cache,
+/// which computes again at most once per 2 seconds (never per frame).
+fn wide_pane(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     let ctx = ui.ctx().clone();
+    if !matches!(app.place, Place::Overview | Place::Agents | Place::Logs) {
+        return;
+    }
+    super::focus::page_start(&mut app.ui.focus, &ctx);
+    #[cfg(feature = "vault")]
+    super::bouncer_load::refresh(app, &ctx, pending);
+    #[cfg(not(feature = "vault"))]
+    super::demo::bouncer_refresh(app, &ctx);
     match app.place {
-        Place::Overview | Place::Logs => {
-            super::focus::page_start(&mut app.ui.focus, &ctx);
-            #[cfg(feature = "vault")]
-            super::bouncer_load::refresh(app, &ctx, pending);
-            #[cfg(not(feature = "vault"))]
-            super::demo::bouncer_refresh(app, &ctx);
-            if app.place == Place::Overview {
-                super::overview::wide_pane(app, ui, pending);
-            } else {
-                super::logs::wide_pane(app, ui, pending);
-            }
-        }
-        Place::Agents => agents_in_columns(app, ui, pending, list_width),
+        Place::Overview => super::overview::wide_pane(app, ui, pending),
+        Place::Logs => super::logs::wide_pane(app, ui, pending),
+        #[cfg(feature = "vault")]
+        Place::Agents => super::agents::wide_pane(app, ui, pending),
+        #[cfg(not(feature = "vault"))]
+        Place::Agents => super::demo::agents_wide(app, ui),
         _ => {}
     }
-}
-
-/// Agents keeps its list and its detail inside the wide pane until its own wide page
-/// replaces them (U3b-2, `agents.rs`).
-fn agents_in_columns(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, width: f32) {
-    let full = ui.max_rect();
-    let list = Rect::from_min_max(full.min, Pos2::new(full.left() + width, full.bottom()));
-    let detail = Rect::from_min_max(Pos2::new(list.right(), full.top()), full.max);
-    ui.painter().rect_filled(list, 0, kit::palette().list);
-    let mut list_ui = ui.new_child(
-        UiBuilder::new()
-            .id_salt("agents-list-column")
-            .max_rect(list)
-            .layout(Layout::top_down(Align::Min)),
-    );
-    list_column(app, &mut list_ui, pending);
-    column_edge(ui, list);
-    let mut detail_ui = ui.new_child(
-        UiBuilder::new()
-            .id_salt("agents-detail-column")
-            .max_rect(detail)
-            .layout(Layout::top_down(Align::Min)),
-    );
-    detail_column(app, &mut detail_ui, pending);
-    ui.allocate_rect(full, egui::Sense::hover());
 }
 
 /// The banners on top of a detail: a run that waits (but in Decisions), a ready update,
@@ -295,6 +267,12 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
         #[cfg(feature = "vault")]
         if app.place == Place::Agents && app.owner_ui.selected_agent.is_some() {
             app.owner_ui.selected_agent = None;
+            app.ui.focus.focus_page_start();
+        }
+        // "‹ Agents": back from an agent page to all agents.
+        if app.place == Place::Agents && app.ui.agent_page.open.is_some() {
+            app.ui.agent_page.open = None;
+            app.ui.agent_page.note_open = None;
             app.ui.focus.focus_page_start();
         }
         if app.place == Place::Logs && app.ui.logs.has_selection() {
@@ -442,6 +420,10 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         #[cfg(feature = "vault")]
         Sheet::RevokeAgent { agent_id, name } => {
             super::agents::revoke_sheet(app, ctx, agent_id, &name)
+        }
+        #[cfg(feature = "vault")]
+        Sheet::ChooseCredentials { agent_id, name } => {
+            super::agents::choose_sheet(app, ctx, agent_id, &name)
         }
         #[cfg(feature = "vault")]
         Sheet::ChangePassphrase => super::settings::passphrase_sheet(app, ctx),

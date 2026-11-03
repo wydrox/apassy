@@ -104,6 +104,16 @@ impl OverviewView {
     }
 }
 
+impl OverviewView {
+    /// `count` questions and requests wait for the owner: the first item of "Needs
+    /// attention".
+    pub(super) fn add_waiting(&mut self, count: usize) {
+        if count > 0 {
+            self.attention.insert(0, Attention::Waiting { count });
+        }
+    }
+}
+
 /// What the owner chose on the Overview.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Action {
@@ -112,8 +122,8 @@ pub(super) enum Action {
     ShowAllProjects,
     /// An attention item: Logs for its agent, in its environment; a silent Mac: that Mac.
     Attention(Attention),
-    /// An agent row: Agents, in its environment.
-    Agent(DeviceScope),
+    /// An agent row: its page on Agents, in its environment.
+    Agent(DeviceScope, Option<super::bouncer::AgentRef>),
     /// An environment row: that environment.
     Environment(DeviceScope),
 }
@@ -143,7 +153,12 @@ pub(super) fn wide_pane(app: &mut DesktopApp, ui: &mut Ui, pending: &Pending) {
     }
     #[cfg(not(feature = "vault"))]
     let _ = pending;
-    let view = OverviewView::of(&app.ui.bouncer.data, &app.ui.activity_scope, now, offset);
+    #[allow(unused_mut)]
+    let mut view = OverviewView::of(&app.ui.bouncer.data, &app.ui.activity_scope, now, offset);
+    // What waits for you comes first: the banner above names it, so "Needs attention"
+    // never says "Nothing needs you" under it.
+    #[cfg(feature = "vault")]
+    view.add_waiting(super::decisions::badge_count(app, pending));
     let mut action = None;
     columns::wide_body(ui, "bouncer-overview", |ui| {
         #[cfg(feature = "vault")]
@@ -151,7 +166,8 @@ pub(super) fn wide_pane(app: &mut DesktopApp, ui: &mut Ui, pending: &Pending) {
         action = draw(ui, &view, now, offset);
     });
     if let Some(action) = action {
-        apply(app, action);
+        let ctx = ui.ctx().clone();
+        apply(app, &ctx, action);
     }
 }
 
@@ -162,7 +178,7 @@ fn now() -> u64 {
 }
 
 /// Do what the owner chose.
-fn apply(app: &mut DesktopApp, action: Action) {
+fn apply(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
     match action {
         Action::ConnectAgent => {
             #[cfg(feature = "vault")]
@@ -170,27 +186,37 @@ fn apply(app: &mut DesktopApp, action: Action) {
             #[cfg(not(feature = "vault"))]
             super::sidebar::navigate(app, Place::Agents);
         }
-        // The switch of remote access is on the Agents page (U3b-2, frame 2).
-        Action::TurnOnRemoteAccess => super::sidebar::navigate(app, Place::Agents),
+        // Touch ID, then the route goes on; Agents shows the address (frame 2).
+        Action::TurnOnRemoteAccess => {
+            #[cfg(feature = "vault")]
+            if app.cloud_node().is_some() {
+                app.ask_remote_access_on(Some(ctx));
+                return;
+            }
+            let _ = ctx;
+            super::sidebar::navigate(app, Place::Agents);
+        }
         Action::ShowAllProjects => app.ui.activity_scope.project = None,
         Action::Attention(Attention::Silent { scope, .. }) | Action::Environment(scope) => {
             app.ui.activity_scope.device = scope;
         }
+        Action::Attention(Attention::Waiting { .. }) => {
+            super::sidebar::navigate(app, Place::Decisions);
+        }
         Action::Attention(item) => {
             let agent = match &item {
                 Attention::Production(found) => Some(found.agent.clone()),
-                Attention::AsksOften { agent, .. } | Attention::RemoteDenied { agent, .. } => {
-                    Some(agent.clone())
-                }
-                Attention::Silent { .. } => None,
+                Attention::AsksOften { agent, .. } => Some(agent.clone()),
+                Attention::Silent { .. } | Attention::Waiting { .. } => None,
             };
             app.ui.activity_scope.device = item.scope().clone();
             super::logs::show_agent(app, agent);
             super::sidebar::navigate(app, Place::Logs);
         }
-        Action::Agent(scope) => {
+        Action::Agent(scope, agent) => {
             app.ui.activity_scope.device = scope;
             super::sidebar::navigate(app, Place::Agents);
+            app.ui.agent_page.open = agent;
         }
     }
 }
@@ -447,8 +473,17 @@ fn agents(ui: &mut Ui, view: &OverviewView, now: u64, offset: i64) -> Option<Act
                 Cell::plain(rate)
             };
             let status = agent.status_text(now, offset);
-            let status = if agent.waits || status == "Active now" {
-                Cell::plain(status)
+            // Frame 1: a dot for "Waits for you" (orange) and "Active now" (green).
+            let status = if agent.waits {
+                Cell::Status {
+                    text: status,
+                    tone: Tone::Warning,
+                }
+            } else if status == "Active now" {
+                Cell::Status {
+                    text: status,
+                    tone: Tone::Good,
+                }
             } else {
                 Cell::secondary(status)
             };
@@ -471,7 +506,7 @@ fn agents(ui: &mut Ui, view: &OverviewView, now: u64, offset: i64) -> Option<Act
                 })
                 .inner;
             if response.clicked() {
-                action = Some(Action::Agent(agent.env.clone()));
+                action = Some(Action::Agent(agent.env.clone(), agent.id.clone()));
             }
         }
     });

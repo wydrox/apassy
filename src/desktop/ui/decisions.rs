@@ -41,6 +41,14 @@
 //! leaves the list, and the detail says "Answered on DEVICE" for a few minutes
 //! ([`answered_lines`]). A question that stays on this Mac says why.
 //!
+//! The Bouncer section (implementation-plan-bouncer-section §6, mockup frames 5, 5b, 9c,
+//! 10a): a connect request of a remote agent waits first ("<name> wants to connect", its
+//! code, Deny and Allow with Touch ID); a run of a remote agent has its own card with
+//! "Not verified" on the request and only Deny and Allow Once; History under Waiting has
+//! the runs of this Mac and of the other Macs from the Bouncer cache (never a vault read
+//! per frame), with All / Asked You / Automatic / Denied and one agent
+//! ([`super::decisions_bouncer`]). The scope bar is the bar of the Bouncer pages.
+//!
 //! The questions of the other Macs of the vault (relay-questions-v1 section 13) wait in
 //! the same section, "from MAC", after the questions of this Mac. They have the same
 //! detail and bar. An answer that gives authority passes the owner check on this Mac for
@@ -54,12 +62,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align, Frame, Label, Layout, Margin, Pos2, Rect, RichText, Sense, TextEdit, TextStyle,
-    TextWrapMode, Vec2, WidgetInfo, WidgetText, WidgetType,
+    self, Align, Frame, Label, Layout, Margin, Pos2, Rect, RichText, Sense, TextEdit, Vec2,
+    WidgetInfo, WidgetType,
 };
 use serde_json::Value;
 
+use super::bouncer::ConnectLine;
 use super::columns::{self, Group};
+use super::decisions_bouncer::{
+    self as cards, CardAnswer, DecisionRow, HistoryAction, HistoryView, Mark, decision_row,
+    timer_text,
+};
 use super::folders::FolderTree;
 use super::kit::{self, Font, Icon, Style, Tone};
 use crate::broker::action_kind::ActionKind;
@@ -104,6 +117,13 @@ pub(super) enum Key {
     Suggestion(u64),
     /// A question of another Mac of the vault, by its number in the questions waiter.
     Remote(u64),
+    /// A connect request of a remote agent, by the stamp of its id ([`connect_key`]).
+    Connect(u64),
+}
+
+/// The key of a connect request: a stamp of its id, so that [`Key`] stays `Copy`.
+pub(super) fn connect_key(id: &str) -> u64 {
+    super::bouncer::stamp(("connect", id))
 }
 
 /// The answers of this Mac to questions of other Macs, while the relay takes them: the
@@ -154,8 +174,8 @@ pub(crate) struct State {
     floating_fallback: Option<u64>,
     /// Notification navigation never substitutes a newer request.
     routed: bool,
-    /// The past decision of the recent list that the detail shows, read-only, by its key
-    /// ([`super::decisions_activity::PastDecision::id`]).
+    /// The run of History that the detail shows, read-only, by its key
+    /// ([`super::bouncer::LogEvent::key`]).
     past: Option<u64>,
     /// Its place in the list in the last frame. When it goes (an answer, a time-out), the
     /// decision that takes its place is selected.
@@ -204,6 +224,8 @@ impl EvaluationDraft {
 
 /// What waits for the owner, in the order of the list.
 pub(super) struct Open {
+    /// The connect requests of remote agents, first.
+    pub(super) connects: Vec<ConnectLine>,
     legacy_access: Vec<crate::vault::AccessRequest>,
     pub(super) access: Vec<crate::vault::access_once::AccessRecord>,
     pub(super) waiting: Vec<Waiting>,
@@ -215,9 +237,10 @@ pub(super) struct Open {
 
 impl Open {
     fn keys(&self) -> Vec<Key> {
-        self.waiting
+        self.connects
             .iter()
-            .map(|waiting| Key::Run(waiting.run.id))
+            .map(|connect| Key::Connect(connect_key(&connect.id)))
+            .chain(self.waiting.iter().map(|waiting| Key::Run(waiting.run.id)))
             .chain(
                 self.remote
                     .iter()
@@ -362,7 +385,7 @@ pub(super) fn primary(question: &QuestionInfo) -> Option<Primary> {
             AnswerKind::CorrectEnvironment => Some(Primary::Correct),
             _ => None,
         })
-        .filter(|_| question.items.iter().any(|item| item.unconfirmed))
+        .filter(|_| question.classifiable_item().is_some())
     })
 }
 
@@ -803,6 +826,7 @@ pub(super) fn badge_count(app: &DesktopApp, pending: &[PendingRun]) -> usize {
 pub(super) fn open(app: &DesktopApp, pending: &[PendingRun]) -> Open {
     let session = &app.owner_ui.session;
     Open {
+        connects: super::bouncer_load::pending_connects(app),
         legacy_access: session
             .with_vault(|v| {
                 v.access_requests(true, 1000)
@@ -960,6 +984,10 @@ fn sync_selection(state: &mut State, open: &Open) {
     let keys = open.keys();
     state.selected = if state.routed {
         state.selected.filter(|key| keys.contains(key))
+    } else if state.past.is_some() {
+        // A past decision that the owner chose stays in the detail: what waits comes
+        // first only when nothing is chosen, and a new question does not take its place.
+        None
     } else {
         next_selection(&keys, state.selected, state.index)
     };
@@ -972,7 +1000,6 @@ fn sync_selection(state: &mut State, open: &Open) {
     }
     if let Some(selected) = state.selected {
         state.index = keys.iter().position(|key| *key == selected).unwrap_or(0);
-        // What waits comes first: a past decision leaves the detail.
         state.past = None;
     }
     if state
@@ -1001,45 +1028,59 @@ fn erase_paste(app: &mut DesktopApp, ctx: &egui::Context) {
 
 // ---- The list column. ----
 
-/// The mark at the left of a row or a header: the round avatar of the agent that asks,
-/// or the tile of the credential of a suggestion.
-#[derive(Clone)]
-enum Mark {
-    Agent(String),
-    Tile(kit::Tile),
-}
-
 /// One row of the list, with its key.
 struct ListRow {
     key: Key,
     mark: Mark,
+    /// A remote agent: the cloud badge on its avatar.
+    remote: bool,
     title: String,
     subtitle: String,
     production: bool,
     left: Option<String>,
 }
 
-fn list_rows(open: Open) -> Vec<Group<ListRow>> {
+/// A run of a remote agent (an MCP client on the internet): its own card.
+pub(super) fn is_cloud(run: &PendingRun) -> bool {
+    run.question.reason == crate::broker::route_diagnostics::ReasonKind::CloudAgent
+}
+
+fn list_rows(open: Open, this_mac: &str) -> Vec<Group<ListRow>> {
     let mut groups = Vec::new();
-    let waiting: Vec<ListRow> = open
-        .waiting
-        .into_iter()
-        .map(|waiting| {
+    let now = unix_now();
+    let connects = open.connects.into_iter().map(|connect| ListRow {
+        key: Key::Connect(connect_key(&connect.id)),
+        mark: Mark::Agent(connect.name.clone()),
+        remote: true,
+        title: format!("{} wants to connect", connect.name),
+        subtitle: this_mac.to_owned(),
+        production: false,
+        left: Some(cards::left_text(connect.expires_at, now)),
+    });
+    let waiting: Vec<ListRow> = connects
+        .chain(open.waiting.into_iter().map(|waiting| {
             let run = &waiting.run;
+            let cloud = is_cloud(run);
             ListRow {
                 key: Key::Run(run.id),
                 mark: Mark::Agent(run.agent.clone()),
+                remote: cloud,
                 title: item_names(run),
-                subtitle: format!("{} · {}", run.agent, project_text(run)),
+                subtitle: if cloud {
+                    format!("{} · {this_mac}", run.agent)
+                } else {
+                    format!("{} · {}", run.agent, project_text(run))
+                },
                 production: production(run),
                 left: Some(clock(waiting.left)),
             }
-        })
+        }))
         .chain(open.remote.into_iter().map(|remote| {
             let run = remote.run();
             ListRow {
                 key: Key::Remote(remote.question.id),
                 mark: Mark::Agent(run.agent.clone()),
+                remote: false,
                 title: item_names(run),
                 subtitle: remote_subtitle(&remote.question),
                 production: production(run),
@@ -1053,6 +1094,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
         .map(|r| ListRow {
             key: Key::Access(r.id),
             mark: Mark::Agent(r.card.card.agent.name.clone()),
+            remote: false,
             title: r.card.card.item.name.clone(),
             subtitle: format!(
                 "{} (id {}) · {}",
@@ -1073,6 +1115,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
         .map(|r| ListRow {
             key: Key::LegacyAccess(r.id),
             mark: Mark::Agent(r.agent_name.clone()),
+            remote: false,
             title: r.item_name,
             subtitle: format!("{} · Mac review", r.agent_name),
             production: false,
@@ -1085,6 +1128,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
         .map(|request| ListRow {
             key: Key::Request(request.id),
             mark: Mark::Agent(request.agent_name.clone()),
+            remote: false,
             subtitle: format!("{} · {}", request.agent_name, request_project(&request)),
             title: request.name,
             production: false,
@@ -1097,6 +1141,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
         .map(|(correction, item)| ListRow {
             key: Key::Suggestion(correction.id),
             mark: Mark::Tile(super::credential_tile(item.kind, &item.service, &item.name)),
+            remote: false,
             title: item.name,
             subtitle: suggestion_subtitle(&correction),
             production: false,
@@ -1121,27 +1166,34 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
 }
 
 pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
+    let ctx = ui.ctx().clone();
+    // History reads the Bouncer cache: at most one read of the vault per 2 seconds.
+    super::bouncer_load::refresh(app, &ctx, pending);
     let open = open(app, pending);
     let receive_problem = app
         .owner
         .questions
         .as_ref()
         .and_then(|questions| questions.view().receive_problem);
+    forget_missing_past(app);
     sync_selection(&mut app.ui.decisions, &open);
     // The whole vault: this Mac and the feeds of the other Macs, in the scope.
     let activity = super::decisions_activity::load(app);
-    super::decisions_activity::fit_scope(&mut app.ui.activity_scope, &activity.devices);
     let subtitle = activity
         .week(&app.ui.activity_scope.device)
         .map(|counts| counts.line())
         .unwrap_or_default();
     columns::list_toolbar(ui, "Decisions", &subtitle, |_| {});
+    let now = unix_now();
+    let offset = super::bouncer::local_offset(now);
     let scope_changed = columns::list_inset(ui, |ui| {
-        super::scope_bar::scope_bar(
+        super::scope_bar::bouncer_bar(
             ui,
             &mut app.ui.activity_scope,
-            &activity.devices,
-            &activity.projects,
+            &app.ui.bouncer.data.environments,
+            &app.ui.bouncer.data.projects,
+            now,
+            offset,
         )
     });
     if scope_changed {
@@ -1162,51 +1214,68 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
     let area = ui.available_rect_before_wrap();
     let footer_top = area.bottom() - if notice.is_some() { FOOTER } else { 0.0 };
     let rows_rect = Rect::from_min_max(area.min, Pos2::new(area.right(), footer_top));
-    let groups = list_rows(open);
+    let this_mac = this_mac_name(app);
+    if !open.connects.is_empty() {
+        // The time left of a connect request counts down.
+        ctx.request_repaint_after(Duration::from_secs(1));
+    }
+    let groups = list_rows(open, &this_mac);
     let empty = groups.is_empty();
     let selected = app.ui.decisions.selected;
+    let history_state = cards::State {
+        filter: app.ui.decision_history.filter,
+        agent: app.ui.decision_history.agent.clone(),
+        selected: app.ui.decisions.past,
+    };
+    let history = HistoryView::of(
+        &app.ui.bouncer.data,
+        &app.ui.activity_scope,
+        &history_state,
+        now,
+        offset,
+    );
+    let notes = activity.feed_notes(&app.ui.activity_scope.device);
     let mut chosen = None;
-    let mut chosen_past = None;
+    let mut history_action = None;
     let mut rows_ui = ui.new_child(egui::UiBuilder::new().max_rect(rows_rect));
-    if empty {
-        // Nothing waits: one line says so, then the recent decisions of the vault. The
-        // detail shows the week.
-        chosen_past = super::decisions_activity::empty_list(
-            &mut rows_ui,
-            &activity,
-            &app.ui.activity_scope,
-            app.ui.decisions.past,
-            receive_problem.is_none(),
-        );
-    } else {
-        columns::grouped_rows(
-            &mut rows_ui,
-            "decisions-list",
-            &groups,
-            true,
-            |ui, row| {
-                let response = ui
-                    .push_id(("decision-row", row.key), |ui| {
-                        decision_row(
-                            ui,
-                            &DecisionRow {
-                                mark: &row.mark,
-                                title: &row.title,
-                                subtitle: &row.subtitle,
-                                production: row.production,
-                                left: row.left.as_deref(),
-                                selected: selected == Some(row.key),
-                            },
-                        )
-                    })
-                    .inner;
-                if response.clicked() {
-                    chosen = Some(row.key);
-                }
-            },
-            |_| {},
-        );
-    }
+    // What waits comes first; History under it. With nothing waiting, the detail shows
+    // the week.
+    columns::grouped_rows(
+        &mut rows_ui,
+        "decisions-list",
+        &groups,
+        true,
+        |ui, row| {
+            let response = ui
+                .push_id(("decision-row", row.key), |ui| {
+                    decision_row(
+                        ui,
+                        &DecisionRow {
+                            mark: &row.mark,
+                            remote: row.remote,
+                            title: &row.title,
+                            subtitle: &row.subtitle,
+                            production: row.production,
+                            left: row.left.as_deref(),
+                            selected: selected == Some(row.key),
+                        },
+                    )
+                })
+                .inner;
+            if response.clicked() {
+                chosen = Some(row.key);
+            }
+        },
+        |ui| {
+            history_action = cards::draw_history(
+                ui,
+                &history,
+                &history_state,
+                empty && receive_problem.is_none(),
+                &notes,
+            );
+        },
+    );
     if let Some(summary) = notice {
         let footer = Rect::from_min_max(Pos2::new(area.left(), footer_top), area.max);
         notifications_footer(app, ui, footer, &summary);
@@ -1215,124 +1284,66 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
     if let Some(key) = chosen {
         app.ui.decisions.forget_evaluation();
         app.ui.decisions.routed = false;
+        app.ui.decisions.past = None;
         app.ui.decisions.selected = Some(key);
         app.ui.decisions.disconnect = None;
     }
-    if let Some(id) = chosen_past {
-        choose_past(&mut app.ui.decisions, id);
+    match history_action {
+        Some(HistoryAction::Select(id)) => choose_past(&mut app.ui.decisions, id),
+        Some(HistoryAction::Filter(filter)) => {
+            app.ui.decision_history.filter = filter;
+            app.ui.decisions.past = None;
+        }
+        Some(HistoryAction::Agent(agent)) => {
+            app.ui.decision_history.agent = agent;
+            app.ui.decisions.past = None;
+        }
+        None => {}
     }
 }
 
-/// One row of the list.
-struct DecisionRow<'a> {
-    mark: &'a Mark,
-    title: &'a str,
-    subtitle: &'a str,
-    production: bool,
-    /// The time left of a question, in orange.
-    left: Option<&'a str>,
-    selected: bool,
+/// A past decision that is no longer in History (another scope, a pruned log) leaves the
+/// detail, so what waits comes first again.
+fn forget_missing_past(app: &mut DesktopApp) {
+    if let Some(key) = app.ui.decisions.past
+        && cards::find(&app.ui.bouncer.data, &app.ui.activity_scope, key).is_none()
+    {
+        app.ui.decisions.past = None;
+    }
 }
 
-/// A row of the list as [`kit::list_row`], with the time left in orange at the right
-/// and the red dot of production before it.
-fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 48.0), Sense::click());
-    let name = format!(
-        "{}, {}{}{}",
-        row.title,
-        row.subtitle,
-        if row.production { ", production" } else { "" },
-        row.left
-            .map_or_else(String::new, |left| format!(", {left} left"))
-    );
-    response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::SelectableLabel, true, row.selected, &name)
-    });
-    if response.gained_focus() {
-        response.scroll_to_me(None);
-    }
-    if !ui.is_rect_visible(rect) {
-        return response;
-    }
-    let painter = ui.painter();
-    if row.selected {
-        painter.rect_filled(rect, 8, kit::palette().selection);
-    } else if response.hovered() {
-        painter.rect_filled(rect, 8, kit::palette().list_hover);
-    }
-    if response.has_focus() {
-        kit::inner_focus_ring(painter, rect, 8);
-    }
-    // An agent has a round avatar of 28 points, a credential a tile of 32, as in the
-    // mockup.
-    let side = match row.mark {
-        Mark::Agent(_) => 28.0,
-        Mark::Tile(_) => 32.0,
-    };
-    let tile_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 8.0, rect.center().y - side / 2.0),
-        Vec2::splat(side),
-    );
-    match row.mark {
-        Mark::Agent(name) => kit::paint_avatar(ui, tile_rect, name),
-        Mark::Tile(tile) => kit::paint_tile(ui, tile_rect, tile),
-    }
-    let round = match row.mark {
-        Mark::Agent(_) => true,
-        Mark::Tile(tile) => tile.round,
-    };
-    kit::paint_tile_ring(painter, tile_rect, round, row.selected);
-    let (title_color, sub_color, time_color, dot) = if row.selected {
-        let white = kit::palette().on_accent;
-        (white, kit::palette().on_selection_secondary, white, white)
-    } else {
-        (
-            kit::palette().label,
-            kit::palette().secondary,
-            kit::palette().countdown,
-            kit::palette().production,
-        )
-    };
-    let galley = |value: egui::RichText, max: f32| {
-        WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)
-    };
-    let mut right = rect.right() - 8.0;
-    if let Some(left) = row.left {
-        let time = galley(timer_text(left, Font::Callout).color(time_color), 60.0);
-        right -= time.size().x;
-        painter.galley(
-            Pos2::new(right, rect.center().y - time.size().y / 2.0),
-            time,
-            time_color,
-        );
-        right -= 6.0;
-    }
-    if row.production {
-        painter.circle_filled(Pos2::new(right - 3.5, rect.center().y), 3.5, dot);
-        right -= 13.0;
-    }
-    let left = tile_rect.right() + 10.0;
-    let text_width = (right - left).max(10.0);
-    let title = galley(kit::row_title(row.title).color(title_color), text_width);
-    let subtitle = galley(
-        kit::text(row.subtitle, Font::Callout).color(sub_color),
-        text_width,
-    );
-    let top = rect.center().y - (title.size().y + subtitle.size().y) / 2.0;
-    let title_height = title.size().y;
-    painter.galley(Pos2::new(left, top), title, title_color);
-    painter.galley(Pos2::new(left, top + title_height), subtitle, sub_color);
-    response
+/// The button of a past decision's detail that goes back to what waits: "2 Waiting".
+pub(super) fn waiting_label(count: usize) -> String {
+    format!("{count} Waiting")
+}
+
+/// The name of this Mac, as the Bouncer pages show it.
+fn this_mac_name(app: &DesktopApp) -> String {
+    app.ui
+        .bouncer
+        .data
+        .environment(&super::bouncer::DeviceScope::ThisMac)
+        .map_or_else(|| "This Mac".to_owned(), |env| env.name.clone())
 }
 
 // ---- The detail column. ----
 
 pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
     let mut open = open(app, pending);
+    forget_missing_past(app);
     sync_selection(&mut app.ui.decisions, &open);
+    let waiting = open.keys().len();
     match app.ui.decisions.selected {
+        Some(Key::Connect(key)) => {
+            if let Some(connect) = open
+                .connects
+                .iter()
+                .find(|connect| connect_key(&connect.id) == key)
+                .cloned()
+            {
+                return connect_detail(app, ui, pending, &connect);
+            }
+        }
         Some(Key::LegacyAccess(id)) => {
             if let Some(note) = open.legacy_access.into_iter().find(|r| r.id == id) {
                 columns::detail_toolbar(ui, |ui| {
@@ -1403,21 +1414,32 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         .decisions
         .past
         .filter(|_| !app.ui.decisions.routed)
-        .and_then(|id| activity.find(id, &app.ui.activity_scope).cloned());
-    if let Some(decision) = past {
+        .and_then(|key| cards::find(&app.ui.bouncer.data, &app.ui.activity_scope, key).cloned());
+    if let Some(event) = past {
         // The decision log entry of a decision of this Mac says why it went as it did.
-        let why = decision
-            .decision_log_id
-            .filter(|_| decision.source == super::decisions_activity::Source::ThisMac)
-            .and_then(|id| app.owner_ui.session.decision_record(id).ok().flatten())
-            .map(|record| super::decisions_activity::PastWhy::of(&record.entry));
+        let why = match event.source {
+            super::bouncer::LogSource::Decision(id) => app
+                .owner_ui
+                .session
+                .decision_record(id)
+                .ok()
+                .flatten()
+                .map(|record| why_rows(&super::decisions_activity::PastWhy::of(&record.entry))),
+            _ => None,
+        };
         let mut week = false;
         columns::detail_toolbar(ui, |ui| {
-            week = kit::small_button(ui, "This Week", Style::Bordered).clicked();
+            // With something waiting, the way back goes to it; else to the week.
+            let back = if waiting == 0 {
+                "This Week".to_owned()
+            } else {
+                waiting_label(waiting)
+            };
+            week = kit::small_button(ui, &back, Style::Bordered).clicked();
         });
-        columns::detail_body(ui, ("past-decision", decision.id), |ui| {
+        columns::detail_body(ui, ("past-decision", event.key()), |ui| {
             super::shell::banners(app, ui, pending);
-            super::decisions_activity::past_detail(ui, &decision, why.as_ref());
+            cards::history_detail(ui, &event, why.as_deref(), unix_now());
         });
         if week {
             app.ui.decisions.past = None;
@@ -1458,6 +1480,7 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
             &activity,
             &app.ui.activity_scope.device,
             clear,
+            !app.ui.bouncer.data.has_agents,
         );
     });
 }
@@ -1501,6 +1524,9 @@ fn question_detail(
     pending: &[PendingRun],
     current: Waiting,
 ) {
+    if is_cloud(&current.run) {
+        return cloud_detail(app, ui, pending, current);
+    }
     prepare_evaluation(app, current.run.id);
     let mut answer = None;
     columns::detail_toolbar(ui, |ui| more_menu(ui, &current.run, &mut answer));
@@ -1515,6 +1541,111 @@ fn question_detail(
         apply(app, ui.ctx(), &current.run, answer);
     }
     disconnect_sheet(app, ui.ctx());
+}
+
+/// The lines of "Why" of a past decision of this Mac.
+fn why_rows(why: &super::decisions_activity::PastWhy) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    if !why.note.is_empty() {
+        rows.push((String::new(), why.note.clone()));
+    }
+    rows.push((
+        "Asked you".to_owned(),
+        if why.asked { "Yes" } else { "No" }.to_owned(),
+    ));
+    rows.push(("Task".to_owned(), why.task.clone()));
+    if !why.flags.is_empty() {
+        rows.push(("Rule flags".to_owned(), why.flags.join(", ")));
+    }
+    let brain = why.brain_line();
+    if !brain.is_empty() {
+        rows.push(("Bouncer brain".to_owned(), brain));
+    }
+    rows
+}
+
+/// The card of a connect request (frame 5): Deny needs nothing; Allow opens the owner
+/// check "Connect <name> to this Mac" for exactly this request and code.
+fn connect_detail(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &[PendingRun],
+    connect: &ConnectLine,
+) {
+    let card = cards::ConnectCard {
+        name: connect.name.clone(),
+        mac: this_mac_name(app),
+        left: cards::left_text(connect.expires_at, unix_now()),
+        code: connect.code.clone(),
+        returns_to: connect.returns_to.clone(),
+        local: connect.local,
+    };
+    columns::detail_toolbar(ui, |_| {});
+    let answer = cards::card_bar(ui, ("connect", &connect.id), "Allow", true);
+    decision_body(ui, ("connect", connect_key(&connect.id)), |ui| {
+        super::shell::banners(app, ui, pending);
+        cards::connect_card(ui, &card);
+    });
+    // The time left counts down.
+    ui.ctx().request_repaint_after(Duration::from_secs(1));
+    match answer {
+        Some(CardAnswer::Allow) => {
+            let ctx = ui.ctx().clone();
+            match app
+                .pending_connects()
+                .into_iter()
+                .find(|pending| pending.id == connect.id && pending.code == connect.code)
+            {
+                Some(pending) => app.ask_allow_connect(&pending, Some(&ctx)),
+                None => app
+                    .set_err("This connect request does not wait any more. Nothing was connected."),
+            }
+        }
+        Some(CardAnswer::Deny) => app.deny_connect(&connect.id),
+        None => {}
+    }
+}
+
+/// The card of a run of a remote agent (frame 5b): the request is what the agent says,
+/// not verified; Deny or Allow Once, nothing remembered.
+fn cloud_detail(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun], current: Waiting) {
+    app.ui.decisions.forget_evaluation();
+    let run = &current.run;
+    let item = run.question.items.first();
+    let card = cards::CloudCard {
+        agent: run.agent.clone(),
+        credential: item.map_or_else(|| item_names(run), |item| item.name.clone()),
+        environment: item.and_then(|item| {
+            if item.production {
+                Some(("Production".to_owned(), true))
+            } else if item.unconfirmed {
+                None
+            } else {
+                Some(("Development".to_owned(), false))
+            }
+        }),
+        mac: this_mac_name(app),
+        left: clock(current.left),
+        sends_to: command_hosts(&run.command).join(", "),
+        request: if run.user_request.is_empty() {
+            run.agent_request.clone()
+        } else {
+            run.user_request.clone()
+        },
+        command: shell_words(&run.command),
+    };
+    columns::detail_toolbar(ui, |_| {});
+    let answer = cards::card_bar(ui, ("cloud-run", run.id), "Allow Once", true);
+    decision_body(ui, ("decision", Some(run.id)), |ui| {
+        super::shell::banners(app, ui, pending);
+        cards::cloud_card(ui, &card);
+    });
+    let answer = match answer {
+        Some(CardAnswer::Allow) => Answer::Once,
+        Some(CardAnswer::Deny) => Answer::Deny,
+        None => return,
+    };
+    apply(app, ui.ctx(), &current.run, answer);
 }
 
 /// "AGENT · PROJECT · from MAC": the subtitle of a question of another Mac.
@@ -1603,11 +1734,6 @@ fn notifications_footer(app: &mut DesktopApp, ui: &mut egui::Ui, rect: Rect, sum
     if open {
         super::settings_view::open(app, super::SettingsSection::Devices);
     }
-}
-
-/// The time left in the orange of the mockup, at weight 500.
-fn timer_text(value: impl Into<String>, font: Font) -> RichText {
-    kit::text(value, font).variation(b"wght", 500.0)
 }
 
 /// The header of a detail as in the mockup: the mark at 56 points, the title at 20
@@ -1846,7 +1972,9 @@ fn prepare_evaluation(app: &mut DesktopApp, run_id: u64) {
 
 /// The bar at the bottom: Deny on the left; a caption; Allow Once; the main answer.
 fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) {
-    let unknown = run.question.items.iter().find(|item| item.unconfirmed);
+    // Only a run with exactly one unconfirmed item offers "Allow as dev/prod" (review
+    // of 0.5.16, finding 1): the label names that one item.
+    let unknown = run.question.classifiable_item();
     ui.horizontal_wrapped(|ui| {
         if let Some(item) = unknown {
             if bar_button(ui, "Allow as dev", Bar::Main).clicked() {

@@ -77,7 +77,7 @@ A request can have `host_session`: the session ID of the agent host. `apassy-mcp
 
 The `submit_user_request` action carries the user prompt from a host hook (goal item B6, [host hooks](../operations/host-hooks.md)):
 
-- `host` is a label: `claude-code` or `codex`. `cwd` is the absolute directory of the host session. `transcript_path` is optional. `truncated` is `true` when the hook cut a prompt longer than 32 KiB.
+- `host` is a label: `claude-code` or `codex`. `cwd` is the absolute directory of the host session. `transcript_path` is optional. `truncated` is `true` when the hook cut a prompt longer than 32 KiB. `source` is optional: the `source` of the hook input, `user` (the composer) or `sdk` (an Agent SDK turn); any other value gives `invalid_request`. The broker names an `sdk` prompt "Agent SDK turn" for the bouncer and on the question card.
 - The broker checks the vault and the token, as for other actions. A field that is not valid gives `invalid_request`, and the activity log records it. The response is `{"ok":true,"result":{"stored":true}}`.
 - The broker keeps the newest prompt per agent and host session in memory: a maximum of 256 prompts for 4 hours, in the current vault session only. It does not record the prompt in the activity log at this step.
 - A later `run` uses the hook prompt in place of `user_request` and checks it in the host transcript. See [host hooks](../operations/host-hooks.md) sections 3 and 4.

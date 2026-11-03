@@ -27,6 +27,9 @@ fn agent(name: &str, env: &Environment, runs: u64, asked: u64, ago: u64) -> Agen
         last_active: Some(NOW - ago),
         waits: false,
         projects: vec!["acme-billing".to_owned()],
+        id: None,
+        runs_today: None,
+        connected_at: None,
     }
 }
 
@@ -249,6 +252,7 @@ fn a_mac_without_numbers_shows_a_dash_and_makes_the_totals_partial() {
 
 #[test]
 fn attention_lists_a_silent_mac_then_production_then_an_agent_that_asks_often() {
+    // Frame 1: a remote agent with denials (Grok Bot, 2) is not an attention item.
     let data = fixture(0);
     let items = data.attention(&ActivityScope::default(), NOW);
     let titles: Vec<String> = items.iter().map(Attention::title).collect();
@@ -258,7 +262,6 @@ fn attention_lists_a_silent_mac_then_production_then_an_agent_that_asks_often() 
             "MacBook Pro not reporting",
             "Stripe live used 3 times",
             "Codex asks often",
-            "Grok Bot was denied 2 times",
         ]
     );
     assert_eq!(items[0].detail(0), "Last report 1 Nov, 18:40");
@@ -276,10 +279,7 @@ fn attention_lists_a_silent_mac_then_production_then_an_agent_that_asks_often() 
         NOW,
     );
     let titles: Vec<String> = here.iter().map(Attention::title).collect();
-    assert_eq!(
-        titles,
-        ["Stripe live used 3 times", "Grok Bot was denied 2 times"]
-    );
+    assert_eq!(titles, ["Stripe live used 3 times"]);
 }
 
 #[test]

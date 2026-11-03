@@ -4,6 +4,7 @@
 // It holds no credential, never shows run questions, and has its own relay key and answer key. The
 // iPhone scans the Connect code of the Mac and hands it to the watch; the owner confirms on the Mac.
 
+import ApassyVaultDemo
 import ApassyVaultKit
 import SwiftUI
 import WatchKit
@@ -30,12 +31,17 @@ struct ApassyWatchApp: App {
         WindowGroup {
             WatchRootView(model: model)
                 .environment(notifications)
-                .onAppear { receiver.activate() }
-                .onChange(of: model.connectionReport, initial: true) { _, report in receiver.publish(report) }
+                .environment(\.watchSampleNote, WatchLaunch.isDemo ? DemoWatch.wristNote : nil)
+                // The demo takes no Connect code from the iPhone and reports nothing to it.
+                .onAppear { if !WatchLaunch.isDemo { receiver.activate() } }
+                .onChange(of: model.connectionReport, initial: true) { _, report in
+                    if !WatchLaunch.isDemo { receiver.publish(report) }
+                }
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             // While the setting is on, each activation registers again: the replica is open now.
-            if phase == .active { Task { await notifications.refresh() } }
+            // The demo registers nothing: it talks to no iPhone and no core.
+            if phase == .active, !WatchLaunch.isDemo { Task { await notifications.refresh() } }
         }
     }
 }

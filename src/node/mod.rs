@@ -7,10 +7,11 @@
 //! crate implements them (`apassy_relay::embedded::EmbeddedRelay`); the app crate passes
 //! that implementation in. Tests use a fake backend.
 //!
-//! [`Node`] is the service of the desktop and of Settings > Cloud agents. It owns the
+//! [`Node`] is the service of the desktop and of Bouncer > Agents. It owns the
 //! running node, its host thread (`host`), and the Funnel route (`funnel`):
 //!
-//! - [`Node::start`] (for an unlocked vault with the route on): the key of the node
+//! - [`Node::start`] (for an unlocked vault with the route on, also before any remote
+//!   agent: remote agents connect by themselves): the key of the node
 //!   (`master_key`), the node on the loopback with its public listener on the stable
 //!   port of the vault, the personal team of the vault, the catalog mirror
 //!   (`catalog`), the Funnel route on 8443, and the host thread. It blocks (Touch ID,
@@ -18,9 +19,19 @@
 //! - [`Node::stop`]: the node first (every session ends, every run key goes), then the
 //!   Funnel route off, then the host thread is joined. The desktop calls it on lock, on
 //!   quit, and wherever it ends waiting runs.
-//! - The API of the UI: [`Node::status`], [`Node::set_route`], [`Node::add_agent`] (the
-//!   token is in the answer once), [`Node::agents`], [`Node::revoke_agent`], and
-//!   [`Node::recent_activity`]. Each blocks briefly; the UI calls them off its thread.
+//! - The API of the UI: [`Node::status`], [`Node::set_route`] (the remote access switch),
+//!   [`Node::pending_connects`], [`Node::allow_connect`] (after the owner check
+//!   `AllowConnect`), [`Node::deny_connect`], [`Node::agents`], [`Node::revoke_agent`]
+//!   (Disconnect…), and [`Node::recent_activity`]. Each blocks briefly; the UI calls
+//!   them off its thread, except [`Node::pending_connects`], which reads memory only.
+//! - Remote agents connect by themselves with the MCP authorization flow (plan "Bouncer
+//!   section" decision 4): an allowed connect request makes a relay agent with no item
+//!   and a vault agent of kind `cloud` with its OAuth client (`connected_with = oauth`).
+//!   Every allowed connect makes a new agent, also for a client that has one: a client id
+//!   is public, so a connect never takes over an agent and its credentials; the old agent
+//!   stays until the owner disconnects it. The command-line fallback
+//!   [`Node::add_remote_agent`] (`apassy agents add-remote`) makes one with a token.
+//!   Neither sees a credential until the owner chooses some.
 //!
 //! On the tailnet (ADR 0037 stage 2; plan `docs/design/implementation-plan-s2-s3.md`,
 //! unit N4): with the tailnet route of the vault on (`Vault::set_cloud_tailnet_on`, after
@@ -62,7 +73,8 @@ use std::thread::JoinHandle;
 use zeroize::Zeroizing;
 
 use self::backend::{
-    AuditRow, NodeAgentId, NodeBackend, NodeConfig, NodeError, NodeSecret, NodeTailnet, NodeTeamId,
+    AgentAccess, AuditRow, ConnectDecision, NodeAgentId, NodeBackend, NodeConfig, NodeError,
+    NodeRunId, NodeSecret, NodeTailnet, NodeTeamId, PendingConnect, TokenIssue,
 };
 use self::funnel::{Funnel, FunnelError, SystemTailscale, Tailscale, TailscaleCli};
 use self::master_key::{KeySource, KeyStore, KeychainStore, NoKeychain};
@@ -70,10 +82,12 @@ use self::tailnet::{TailnetHere, TailnetRoute};
 use crate::broker::SharedVault;
 use crate::broker::decide::BrokerContext;
 use crate::net::tls_front::FrontRoute;
-use crate::questions::QuestionsClient;
+use crate::questions::feed::note_remote_access_problem;
+use crate::questions::{ConnectEnd, QuestionsClient};
 use crate::sync::LinkCode;
 use crate::vault::{
-    CLOUD_PORT_MAX, CLOUD_PORT_MIN, CLOUD_TOKEN_DAYS, RelayMembership, TrustedDeviceKind, Vault,
+    ActivityDecision, CLOUD_PORT_MAX, CLOUD_PORT_MIN, ConnectedWith, NewActivity, RelayMembership,
+    TrustedDeviceKind, Vault,
 };
 
 pub use host::LiveSession;
@@ -86,10 +100,107 @@ const LAST_TARGET_FILE: &str = "funnel-target";
 /// The local port of the front in the last Serve fallback (N8-5): a forward to it after a
 /// crash is stale.
 const SERVE_TCP_PORT_FILE: &str = "serve-tcp-port";
+/// The file in the node directory with the Funnel port that the owner chose ("Use Port
+/// 10000"). Without it the route uses 8443.
+const FUNNEL_PORT_FILE: &str = "funnel-port";
+/// The audit rows of one run that Logs reads at most.
+const RUN_AUDIT_ROWS: u32 = 500;
 /// Rows of "Recent cloud activity".
 const RECENT_ROWS: u32 = 20;
 /// Ports tried for the public listener before the start gives up.
 const PORT_TRIES: u16 = 64;
+/// The longest agent name, in bytes (the limit of the vault and of the node).
+const MAX_NAME_BYTES: usize = 64;
+/// The connect ends that wait for the desktop at most.
+const MAX_CONNECT_ENDS: usize = 64;
+
+/// The vault's token end of an agent of the MCP authorization flow: none. The node gives
+/// it short access tokens and refreshes them (9999-12-31T23:59:59Z).
+pub const NO_TOKEN_EXPIRY: u64 = 253_402_300_799;
+/// The token lifetimes of `apassy agents add-remote`, in days.
+pub const REMOTE_TOKEN_DAYS: std::ops::RangeInclusive<u32> = 1..=365;
+/// The name of a remote agent whose client gave none.
+pub const MCP_CLIENT_NAME: &str = "MCP client";
+
+/// The Activity operations of the remote agents and the remote access of this Mac. The
+/// Logs page shows them as connections.
+pub const ACTIVITY_CONNECTED: &str = "remote agent connected";
+pub const ACTIVITY_CONNECT_DENIED: &str = "remote agent denied";
+pub const ACTIVITY_DISCONNECTED: &str = "agent disconnected";
+pub const ACTIVITY_ROUTE_ON: &str = "remote access on";
+pub const ACTIVITY_ROUTE_OFF: &str = "remote access off";
+
+/// The name of the remote agent of a connect request: its client name, or
+/// [`MCP_CLIENT_NAME`]. The text comes from the remote client: it is not verified.
+pub fn connect_name(connect: &PendingConnect) -> String {
+    connect
+        .client_name
+        .as_deref()
+        .map(clean_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| MCP_CLIENT_NAME.to_owned())
+}
+
+/// The line "Returns to <host>" of a connect request for the owner's prompts and cards,
+/// or "Returns to a program on a computer (localhost)" for a loopback host
+/// (`crate::questions::envelope::connect_returns_to`; review 0.5.16).
+pub fn connect_returns_to(connect: &PendingConnect) -> String {
+    crate::questions::envelope::connect_returns_to(&connect.redirect_host)
+}
+
+/// True when the code of a connect request goes back to a program on a computer
+/// (`localhost`, `127.0.0.0/8`, `[::1]`): then a program on this Mac can have started it.
+pub fn connect_is_local(connect: &PendingConnect) -> bool {
+    crate::questions::envelope::is_local_redirect_host(&connect.redirect_host)
+}
+
+/// `text` without control, format, or tag characters (`crate::text::is_hidden_char`, the
+/// rule of the connect page and the connect card), trimmed, at most [`MAX_NAME_BYTES`].
+fn clean_name(text: &str) -> String {
+    let text = crate::text::strip_hidden(text);
+    cut(text.trim(), MAX_NAME_BYTES).trim_end().to_owned()
+}
+
+/// `text` cut to at most `max` bytes at a character boundary.
+fn cut(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// `wanted` (cleaned; [`MCP_CLIENT_NAME`] when empty), or with the first free number
+/// when an agent in `taken` has the name, without regard to case: "Grok Bot 2". The
+/// result is at most 64 bytes.
+pub fn unique_name(taken: &[String], wanted: &str) -> String {
+    let base = Some(clean_name(wanted))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| MCP_CLIENT_NAME.to_owned());
+    let free = |name: &str| {
+        !taken
+            .iter()
+            .any(|other| other.trim().eq_ignore_ascii_case(name))
+    };
+    if free(&base) {
+        return base;
+    }
+    let mut number = 2u32;
+    loop {
+        let suffix = format!(" {number}");
+        let name = format!(
+            "{}{suffix}",
+            cut(&base, MAX_NAME_BYTES - suffix.len()).trim_end()
+        );
+        if free(&name) {
+            return name;
+        }
+        number += 1;
+    }
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -237,7 +348,7 @@ pub struct MoveDone {
     pub hosted_removed: bool,
 }
 
-/// The node as Settings > Cloud agents shows it.
+/// The node as the remote access block of Bouncer > Agents shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeStatus {
     pub tailscale: Tailscale,
@@ -253,32 +364,114 @@ pub struct NodeStatus {
     /// Text for the owner: why the node did not start, items that it does not take, a
     /// lost key, and the limits of the route.
     pub warnings: Vec<String>,
+    /// What keeps remote access from working while the route is on; `None` when nothing
+    /// does (or the route is off). The remote access block shows its button.
+    pub problem: Option<RouteProblem>,
+    /// The Funnel port of the route: 8443, or 10000 after "Use Port 10000".
+    pub funnel_port: u16,
     /// The tailnet route (plan unit N4).
     pub tailnet: TailnetStatus,
 }
 
-/// A cloud agent that was just made. The token is here once.
+/// Why remote access does not work, for the remote access block (plan F6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteProblem {
+    /// Tailscale is not installed: "Get Tailscale…".
+    NoTailscale,
+    /// Tailscale is not connected: "Check Again".
+    NotConnected,
+    /// The tailnet policy does not allow Funnel for this Mac: "Open Admin Console…", to
+    /// the link of Tailscale's message when it gave one.
+    Policy { link: Option<String> },
+    /// Another handler has the Funnel port of the route. `alternative`: the other Funnel
+    /// port, "Use Port 10000" ([`Node::use_funnel_port`]); `None` when the route is on
+    /// 10000 already.
+    PortTaken { alternative: Option<u16> },
+    /// The owner's Serve handler on 443 is public.
+    HttpsPublic,
+    /// Another failure: the message says what.
+    Failed(String),
+}
+
+impl RouteProblem {
+    /// The problem of a failed start, with the Funnel port that it used.
+    fn of(error: &NodeError, funnel_port: u16) -> Option<Self> {
+        Some(match error.code.as_str() {
+            "no_tailscale" => Self::NoTailscale,
+            "tailscale_not_connected" => Self::NotConnected,
+            "funnel_policy" => Self::Policy {
+                link: admin_link(&error.message),
+            },
+            "funnel_port_taken" => Self::PortTaken {
+                alternative: funnel::alternative_port(funnel_port),
+            },
+            "funnel_https_public" => Self::HttpsPublic,
+            // A stop on purpose, or a locked vault, is no problem of the route.
+            "node_stopped" | "vault_locked" | "route_off" => return None,
+            _ => Self::Failed(error.message.clone()),
+        })
+    }
+}
+
+/// The link to the Tailscale admin console in a message of the tailnet policy.
+fn admin_link(message: &str) -> Option<String> {
+    message
+        .split_whitespace()
+        .map(|word| word.trim_end_matches(['.', ',', ')']))
+        .find(|word| {
+            ["https://login.tailscale.com/", "https://tailscale.com/"]
+                .iter()
+                .any(|prefix| word.starts_with(prefix))
+                && word.len() <= 300
+                && word.bytes().all(|b| b.is_ascii_graphic())
+        })
+        .map(str::to_owned)
+}
+
+/// A remote agent that the owner just connected (an allowed connect request): always a
+/// new agent with no credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectedAgent {
+    /// The vault agent.
+    pub agent_id: u64,
+    /// The name it got: the client name, or with a number when it was taken ("Grok Bot 2").
+    pub name: String,
+}
+
+/// A remote agent of the command line that was just made. The token is here once.
 #[derive(Debug)]
 pub struct AddedAgent {
     /// The vault agent.
     pub agent_id: u64,
+    /// The name it got: the name asked for, or with a number when it was taken.
+    pub name: String,
     pub token: NodeSecret,
     pub expires_at: u64,
     /// The MCP URL for the agent.
     pub url: String,
 }
 
-/// One cloud agent for the list of Settings > Cloud agents.
+/// One remote (cloud) agent of this Mac, for the Agents page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudAgentView {
     pub agent_id: u64,
     pub name: String,
-    /// (item id, item name), in id order.
+    /// (item id, item name), in id order: the credentials it may use. Empty until the
+    /// owner chooses some.
     pub items: Vec<(u64, String)>,
-    pub token_expires_at: u64,
+    /// `OAuth`: it connected by itself and the owner allowed it; `Token`: a token of the
+    /// command line (or an agent made before schema 27).
+    pub connected_with: ConnectedWith,
+    /// When the token of a token agent ends; `None` for an agent of the flow, whose
+    /// tokens the node refreshes (see `access`).
+    pub token_expires_at: Option<u64>,
+    pub created_at: u64,
     pub last_used_at: Option<u64>,
     /// A released run of the agent has a session that may still be live.
     pub live_session: bool,
+    /// How it reaches the node now (`RunningNode::agent_access`); `None` while the node
+    /// does not run or cannot say.
+    pub access: Option<AgentAccess>,
 }
 
 struct Running {
@@ -295,9 +488,7 @@ struct Running {
 #[derive(Default)]
 struct Notes {
     /// Why the last start failed.
-    failure: Option<String>,
-    /// The code of that failure.
-    failure_code: Option<String>,
+    failure: Option<NodeError>,
     keychain_fallback: bool,
     /// The node key was new and the older node moved aside, or the node lost the team
     /// of the vault: the cloud agents must be added again.
@@ -347,6 +538,12 @@ pub struct Node {
     stops_waiting: AtomicUsize,
     serial: AtomicU64,
     notes: Mutex<Notes>,
+    /// Connect requests that the owner decided on this Mac or that the node withdrew, for
+    /// the questions lane ([`Node::take_connect_ends`]), oldest first.
+    connect_ends: Mutex<std::collections::VecDeque<(String, ConnectEnd)>>,
+    /// Called on the host thread when the connect requests change; every node of this
+    /// service gets it.
+    on_connects: Arc<Mutex<Option<host::ConnectsHook>>>,
 }
 
 /// The state of the open vault that a start needs.
@@ -367,10 +564,17 @@ struct VaultState {
 
 impl Node {
     pub fn new(options: NodeOptions) -> Self {
+        let funnel = Funnel::new(Arc::clone(&options.cli));
+        if let Some(port) = std::fs::read_to_string(options.data_dir.join(FUNNEL_PORT_FILE))
+            .ok()
+            .and_then(|text| text.trim().parse::<u16>().ok())
+        {
+            funnel.set_port(port);
+        }
         Self {
             backend: options.backend,
             keys: options.keys,
-            funnel: Funnel::new(Arc::clone(&options.cli)),
+            funnel,
             cli: options.cli,
             data_dir: options.data_dir,
             test_loopback: false,
@@ -381,6 +585,8 @@ impl Node {
             stops_waiting: AtomicUsize::new(0),
             serial: AtomicU64::new(0),
             notes: Mutex::new(Notes::default()),
+            connect_ends: Mutex::new(std::collections::VecDeque::new()),
+            on_connects: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -392,6 +598,13 @@ impl Node {
     pub fn with_test_tailnet(mut self) -> Self {
         self.test_loopback = cfg!(debug_assertions);
         self
+    }
+
+    /// Call `hook` (on the host thread, with no lock of the node held) each time the
+    /// connect requests that wait change: the desktop wakes its window, so Decisions and
+    /// the iPhone card see a new request at once, also while the window is idle.
+    pub fn set_on_connects_change(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *lock(&self.on_connects) = Some(Arc::new(hook));
     }
 
     /// True while the node runs.
@@ -418,9 +631,9 @@ impl Node {
     /// a port was taken): the desktop tries again after a while.
     pub fn retry_soon(&self) -> bool {
         lock(&self.notes)
-            .failure_code
-            .as_deref()
-            .is_some_and(|code| RETRY_CODES.contains(&code))
+            .failure
+            .as_ref()
+            .is_some_and(|failure| RETRY_CODES.contains(&failure.code.as_str()))
     }
 
     /// The vault session that the node serves, while it runs.
@@ -430,18 +643,15 @@ impl Node {
             .map(|running| running.shared.epoch())
     }
 
-    /// Whether the open vault wants a node to start: unlocked, and the tailnet route on,
-    /// or the public route on with an active cloud agent. `Some` is the vault session.
+    /// Whether the open vault wants a node to start: unlocked, and the public or the
+    /// tailnet route on. No remote agent is needed: remote agents connect by themselves
+    /// through the running node. `Some` is the vault session.
     pub fn wanted(vault: &Vault) -> Option<[u8; 32]> {
-        let tailnet = vault
-            .cloud_node_setting()
-            .is_ok_and(|setting| setting.tailnet_on);
-        Self::may_run(vault).filter(|_| tailnet || vault.has_cloud_agents().unwrap_or(false))
+        Self::may_run(vault)
     }
 
     /// Whether a running node may go on for the open vault: unlocked, and the public or
-    /// the tailnet route on. Without a cloud agent a node goes on (the first agent is
-    /// being made).
+    /// the tailnet route on.
     pub fn may_run(vault: &Vault) -> Option<[u8; 32]> {
         if vault.is_locked() {
             return None;
@@ -485,7 +695,7 @@ impl Node {
         if !setting.route_on && !setting.tailnet_on {
             return Err(error(
                 "route_off",
-                "The public route is off in Settings > Cloud agents.",
+                "Remote access is off (Bouncer > Agents).",
             ));
         }
         let port = match (setting.route_on, setting.port) {
@@ -567,12 +777,28 @@ impl Node {
     pub fn start(&self, vault: &SharedVault, broker: BrokerContext) -> Result<(), NodeError> {
         let _one = lock(&self.start_lock);
         let result = self.start_inner(vault, broker);
-        {
-            let mut notes = lock(&self.notes);
-            notes.failure = result.as_ref().err().map(|error| error.message.clone());
-            notes.failure_code = result.as_ref().err().map(|error| error.code.clone());
-        }
+        let port = self.funnel.port();
+        let problem = result
+            .as_ref()
+            .err()
+            .and_then(|failure| RouteProblem::of(failure, port));
+        note_remote_access_problem(problem.is_some());
+        lock(&self.notes).failure = result.as_ref().err().cloned();
         result
+    }
+
+    /// At the start of the app, before any vault opens: turn off a Funnel route of this
+    /// node that a crash left on (its handler is still the app's last target). A route
+    /// of another program is left alone. It runs the Tailscale command line, and does
+    /// nothing while a node runs.
+    pub fn clear_stale_route(&self) {
+        let _one = lock(&self.start_lock);
+        if self.is_running() {
+            return;
+        }
+        if let Some(port) = self.last_target() {
+            let _ = self.funnel.disable(port);
+        }
     }
 
     fn start_inner(&self, vault: &SharedVault, broker: BrokerContext) -> Result<(), NodeError> {
@@ -628,13 +854,13 @@ impl Node {
         self.check_not_stopping()?;
         let origin = here.as_ref().map(|here| here.origin(state.tailnet_port));
         let public_url = match (&dns_name, &origin) {
-            (Some(name), _) => funnel::public_origin(name),
+            (Some(name), _) => self.funnel.origin(name),
             // No public route: the node origin is the only origin.
             (None, Some(origin)) => origin.clone(),
             (None, None) => {
                 return Err(error(
                     "route_off",
-                    "The public route is off in Settings > Cloud agents.",
+                    "Remote access is off (Bouncer > Agents).",
                 ));
             }
         };
@@ -647,7 +873,7 @@ impl Node {
         });
         // The certificate key is sealed under the node key, which moves into the config.
         let certificate_key = Zeroizing::new(key.expose().as_bytes().to_vec());
-        let node = self.backend.start_on_tailnet(
+        let node = match self.backend.start_on_tailnet(
             NodeConfig {
                 data_dir: self.data_dir.clone(),
                 master_key: key,
@@ -656,7 +882,17 @@ impl Node {
                     .then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, state.port))),
             },
             tailnet_config,
-        )?;
+        ) {
+            Ok(node) => node,
+            Err(failure) => {
+                // A handler that an earlier process left on for this port (a crash) must
+                // not outlive a start that failed: nothing listens behind it.
+                if funnel_wanted {
+                    let _ = self.funnel.disable(state.port);
+                }
+                return Err(failure);
+            }
+        };
         let tailnet_target = node.tailnet_addr().zip(node.local_route_addr());
         let team = match team_id.map(NodeTeamId) {
             Some(team) if node.has_team(&team) => team,
@@ -691,7 +927,7 @@ impl Node {
                 }
             }
         };
-        let shared = Arc::new(host::Shared::new(
+        let mut shared = host::Shared::new(
             node,
             team,
             Arc::clone(vault),
@@ -699,7 +935,9 @@ impl Node {
             broker,
             state.epoch,
             public_url,
-        ));
+        );
+        shared.on_connects = Arc::clone(&self.on_connects);
+        let shared = Arc::new(shared);
         if let Err(failure) = self
             .check_not_stopping()
             .and_then(|()| shared.refresh(&[]).map(drop))
@@ -943,7 +1181,7 @@ impl Node {
         let mut stop = false;
         if funnel_on {
             let name_changed = match self.funnel.status() {
-                Tailscale::Connected { dns_name } => funnel::public_origin(&dns_name) != public_url,
+                Tailscale::Connected { dns_name } => self.funnel.origin(&dns_name) != public_url,
                 _ => true,
             };
             let route_gone = self
@@ -986,7 +1224,7 @@ impl Node {
             .is_some_and(|running| running.funnel_on)
     }
 
-    /// The node for Settings > Cloud agents. It runs the Tailscale command line.
+    /// The node for the remote access block. It runs the Tailscale command line.
     pub fn status(&self, vault: &SharedVault) -> NodeStatus {
         let tailscale = self.funnel.status();
         let (route_on, port) = {
@@ -1000,15 +1238,28 @@ impl Node {
         let running = self.is_running();
         let url = self.mcp_url().or_else(|| match &tailscale {
             Tailscale::Connected { dns_name } => {
-                Some(format!("{}/mcp", funnel::public_origin(dns_name)))
+                Some(format!("{}/mcp", self.funnel.origin(dns_name)))
             }
             _ => None,
         });
         let mut warnings = Vec::new();
         let notes = lock(&self.notes);
         if let Some(failure) = &notes.failure {
-            warnings.push(failure.clone());
+            warnings.push(failure.message.clone());
         }
+        let problem = notes
+            .failure
+            .as_ref()
+            .filter(|_| route_on && !running)
+            .and_then(|failure| RouteProblem::of(failure, self.funnel.port()))
+            .or(match &tailscale {
+                _ if !route_on => None,
+                Tailscale::Missing => Some(RouteProblem::NoTailscale),
+                Tailscale::NotConnected { .. } => Some(RouteProblem::NotConnected),
+                Tailscale::Connected { .. } => None,
+            });
+        // The feed of this Mac says `problem` while the route is on and this holds.
+        note_remote_access_problem(problem.is_some());
         if notes.lost_key {
             warnings.push("The node lost its key or the team of this vault, so Apassy started it empty. Add your cloud agents again.".to_owned());
         }
@@ -1037,8 +1288,42 @@ impl Node {
             port,
             keychain_fallback,
             warnings,
+            problem,
+            funnel_port: self.funnel.port(),
             tailnet,
         }
+    }
+
+    /// The Funnel port of the route: 8443, or 10000 after [`Node::use_funnel_port`].
+    pub fn funnel_port(&self) -> u16 {
+        self.funnel.port()
+    }
+
+    /// "Use Port 10000": the route uses the Funnel `port` (8443 or 10000) from the next
+    /// start, and the node directory keeps the choice. The MCP address changes, so a
+    /// remote agent connects again with the new address. Only while the node does not
+    /// run (the block offers it for a failed start); a failed start is tried again.
+    pub fn use_funnel_port(&self, port: u16) -> Result<(), NodeError> {
+        if !funnel::is_funnel_port(port) {
+            return Err(error(
+                "invalid_port",
+                "Funnel takes only port 8443 or 10000.",
+            ));
+        }
+        let _one = lock(&self.start_lock);
+        if self.is_running() {
+            return Err(error(
+                "node_running",
+                "Turn remote access off before you change its port.",
+            ));
+        }
+        std::fs::create_dir_all(&self.data_dir)
+            .and_then(|()| std::fs::write(self.data_dir.join(FUNNEL_PORT_FILE), port.to_string()))
+            .map_err(|_| error("node_failed", "The port cannot be saved."))?;
+        self.funnel.set_port(port);
+        lock(&self.notes).failure = None;
+        note_remote_access_problem(false);
+        Ok(())
     }
 
     /// The tailnet route for Settings > Devices. With the route on and the node stopped,
@@ -1562,8 +1847,10 @@ impl Node {
         })
     }
 
-    /// Turn the public route on or off. Off stops the node at once; on lets the desktop
-    /// start it (when the vault has a cloud agent).
+    /// Turn the public route (remote access) on or off. Off stops the node at once; on
+    /// lets the desktop start it. A change writes the Activity row `remote access on` or
+    /// `remote access off`. On gives authority: the caller asks for the owner check
+    /// first (`OwnerRequest::TurnOnRemoteAccess`).
     pub fn set_route(&self, vault: &SharedVault, on: bool) -> Result<(), NodeError> {
         {
             let mut guard = lock(vault);
@@ -1571,9 +1858,31 @@ impl Node {
                 .as_mut()
                 .filter(|vault| !vault.is_locked())
                 .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
+            let was = vault
+                .cloud_node_setting()
+                .is_ok_and(|setting| setting.route_on);
             vault
                 .set_cloud_route_on(on)
                 .map_err(|_| error("vault_error", "The route setting cannot be saved."))?;
+            if was != on {
+                let _ = vault.record_activity(&NewActivity {
+                    agent_id: None,
+                    agent_name: String::new(),
+                    item_id: None,
+                    operation: if on { ACTIVITY_ROUTE_ON } else { ACTIVITY_ROUTE_OFF }.to_owned(),
+                    decision: ActivityDecision::Allow,
+                    reason: if on {
+                        "Remote access is on: remote agents can reach this Mac through Tailscale Funnel while it is awake and the vault is unlocked. Every remote run still asks you."
+                    } else {
+                        "Remote access is off: no remote agent reaches this Mac."
+                    }
+                    .to_owned(),
+                });
+            }
+        }
+        if !on {
+            lock(&self.notes).failure = None;
+            note_remote_access_problem(false);
         }
         // Off stops the node (a tailnet route starts again without Funnel); on stops a
         // node that runs for the tailnet only, so that it starts again with Funnel.
@@ -1583,25 +1892,210 @@ impl Node {
         Ok(())
     }
 
-    /// Make a cloud agent that may use `items` (vault ids), with a token of `days` days
-    /// (30, 90, or 365). Starts the node when it does not run (the route must be on).
-    /// The token is in the answer once.
-    pub fn add_agent(
+    /// The connect requests that wait for the owner, oldest first, as the host thread
+    /// read them from the node last (at most a few seconds old). It reads memory only, so
+    /// the UI may call it each frame. Empty while no node runs.
+    pub fn pending_connects(&self) -> Vec<PendingConnect> {
+        let at = now();
+        self.shared()
+            .map(|shared| {
+                lock(&shared.connects)
+                    .iter()
+                    .filter(|connect| connect.expires_at > at)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Allow the connect request `id` on this Mac, after the owner check
+    /// `OwnerAction::AllowConnect` (Touch ID). See [`Node::allow_connect_on`].
+    pub fn allow_connect(
+        &self,
+        vault: &SharedVault,
+        id: &str,
+    ) -> Result<ConnectedAgent, NodeError> {
+        self.allow_connect_on(vault, id, None)
+    }
+
+    /// Allow the connect request `id`: with `device`, the name of the iPhone whose Face
+    /// ID answer the questions lane verified; `None` for this Mac. Always a new relay
+    /// agent with no item, then a vault agent of kind `cloud` with `see_all = 0`, the
+    /// OAuth client, and `connected_with = oauth`, then the decision on the relay; a save
+    /// that fails revokes the relay agent and denies the request. A client that already
+    /// has a live agent gets a second one ("Grok Bot 2"), with no credential: a client id
+    /// is public, so an allow never connects a request to an agent that exists, and the
+    /// old agent stays until the owner disconnects it. Errors:
+    /// `connect_not_pending` (decided, ended, or unknown), `node_stopped`,
+    /// `vault_locked`, `team_limit` (20 remote agents), `agent_not_saved` (the vault did
+    /// not take the agent: the relay agent is revoked and the request denied).
+    pub fn allow_connect_on(
+        &self,
+        vault: &SharedVault,
+        id: &str,
+        device: Option<&str>,
+    ) -> Result<ConnectedAgent, NodeError> {
+        let shared = self
+            .shared()
+            .ok_or_else(|| error("node_stopped", "Remote access is not running."))?;
+        let serves = lock(vault)
+            .as_ref()
+            .is_some_and(|vault| !vault.is_locked() && vault.epoch() == shared.epoch());
+        if !serves {
+            return Err(error("vault_locked", "The vault is locked."));
+        }
+        shared.poll_connects();
+        let connect = self
+            .pending_connects()
+            .into_iter()
+            .find(|connect| connect.id == id)
+            .ok_or_else(|| {
+                error(
+                    "connect_not_pending",
+                    "This connect request does not wait any more.",
+                )
+            })?;
+        let by = device.map_or_else(
+            || "Allowed with Touch ID on this Mac.".to_owned(),
+            |device| format!("Allowed with Face ID on {}.", cut(device, MAX_NAME_BYTES)),
+        );
+        let made = shared.add_agent(
+            &connect_name(&connect),
+            TokenIssue::Later,
+            Some(&connect.client_id),
+        );
+        let (agent_id, name, created) = match made {
+            Ok(made) => made,
+            Err(failure) if failure.code == host::AGENT_NOT_SAVED => {
+                // Nothing was saved and the relay agent is revoked: the client must not
+                // wait for a connection that cannot come.
+                let _ = self.deny_connect(id);
+                return Err(failure);
+            }
+            Err(failure) => return Err(failure),
+        };
+        let decided = shared
+            .with_node(|node| {
+                node.decide_connect(
+                    id,
+                    ConnectDecision::Allow {
+                        team: shared.team.clone(),
+                        agent: created.agent_id,
+                    },
+                )
+            })
+            .unwrap_or_else(|| Err(error("node_stopped", "Remote access is not running.")));
+        if let Err(failure) = decided {
+            // The request ended in between: the new agent goes again, on both sides.
+            let _ = shared.with_node(|node| node.revoke_agent(&shared.team, created.agent_id));
+            shared.in_vault(|vault| {
+                if vault.revoke_agent(agent_id).is_ok() {
+                    let _ = vault.forget_cloud_agent(agent_id);
+                }
+            });
+            let _ = shared.refresh(&[]);
+            return Err(failure);
+        }
+        // As for a deny: the request waits no more, so the Mac shows it no more before
+        // the next read of the host thread.
+        lock(&shared.connects).retain(|connect| connect.id != id);
+        self.note_connect_end(id, ConnectEnd::Allowed);
+        Self::record(
+            &shared,
+            Some(agent_id),
+            &name,
+            ACTIVITY_CONNECTED,
+            ActivityDecision::Allow,
+            format!(
+                "{by} {name} connected with the MCP authorization flow (code {}). It sees no credential until you choose some, and every run asks you.",
+                cut(&connect.code, 16)
+            ),
+        );
+        Ok(ConnectedAgent { agent_id, name })
+    }
+
+    /// Deny the connect request `id`: the browser page says "You denied the
+    /// connection." Errors: `connect_not_pending`, `node_stopped`.
+    pub fn deny_connect(&self, id: &str) -> Result<(), NodeError> {
+        let shared = self
+            .shared()
+            .ok_or_else(|| error("node_stopped", "Remote access is not running."))?;
+        let name = lock(&shared.connects)
+            .iter()
+            .find(|connect| connect.id == id)
+            .map_or_else(|| MCP_CLIENT_NAME.to_owned(), connect_name);
+        shared
+            .with_node(|node| node.decide_connect(id, ConnectDecision::Deny))
+            .unwrap_or_else(|| Err(error("node_stopped", "Remote access is not running.")))?;
+        lock(&shared.connects).retain(|connect| connect.id != id);
+        self.note_connect_end(id, ConnectEnd::Denied);
+        Self::record(
+            &shared,
+            None,
+            &name,
+            ACTIVITY_CONNECT_DENIED,
+            ActivityDecision::Deny,
+            format!("You denied the connection of {name}. Nothing was made."),
+        );
+        Ok(())
+    }
+
+    /// The connect requests that ended on this Mac since the last call (allowed, denied),
+    /// oldest first. The desktop gives each to the questions lane
+    /// (`QuestionsWorker::end_connect`), so the iPhone cards settle.
+    pub fn take_connect_ends(&self) -> Vec<(String, ConnectEnd)> {
+        lock(&self.connect_ends).drain(..).collect()
+    }
+
+    fn note_connect_end(&self, id: &str, end: ConnectEnd) {
+        let mut ends = lock(&self.connect_ends);
+        if ends.len() >= MAX_CONNECT_ENDS {
+            ends.pop_front();
+        }
+        ends.push_back((id.to_owned(), end));
+    }
+
+    /// One Activity row about a remote agent, in the vault session of the node.
+    fn record(
+        shared: &host::Shared,
+        agent_id: Option<u64>,
+        name: &str,
+        operation: &str,
+        decision: ActivityDecision,
+        reason: String,
+    ) {
+        shared.in_vault(|vault| {
+            let _ = vault.record_activity(&NewActivity {
+                agent_id,
+                agent_name: cut(name, MAX_NAME_BYTES).to_owned(),
+                item_id: None,
+                operation: operation.to_owned(),
+                decision,
+                reason,
+            });
+        });
+    }
+
+    /// The command-line fallback (`apassy agents add-remote NAME [--days N]`): a remote
+    /// agent with no item and a bearer token of `days` days (1 to 365), for a client
+    /// without the MCP authorization flow. Starts the node when it does not run (the
+    /// route must be on). The token is in the answer once, with the MCP address. The
+    /// caller asks for the owner check first (`OwnerAction::AddRemoteAgent`).
+    pub fn add_remote_agent(
         &self,
         vault: &SharedVault,
         broker: BrokerContext,
         name: &str,
-        items: &[u64],
         days: u32,
     ) -> Result<AddedAgent, NodeError> {
-        if !CLOUD_TOKEN_DAYS.contains(&days) {
+        if !REMOTE_TOKEN_DAYS.contains(&days) {
             return Err(error(
                 "invalid_request",
-                "The token lifetime is 30, 90, or 365 days.",
+                "The token lifetime is 1 to 365 days.",
             ));
         }
-        if items.is_empty() {
-            return Err(error("invalid_request", "Pick at least one credential."));
+        if clean_name(name).is_empty() {
+            return Err(error("invalid_request", "Name the remote agent."));
         }
         let route_on = {
             let guard = lock(vault);
@@ -1620,7 +2114,7 @@ impl Node {
         if route_on == Some(false) {
             return Err(error(
                 "route_off",
-                "The public route is off in Settings > Cloud agents.",
+                "Remote access is off (Bouncer > Agents).",
             ));
         }
         if self.is_running() && !self.funnel_running() {
@@ -1633,63 +2127,109 @@ impl Node {
         let shared = self
             .shared()
             .ok_or_else(|| error("node_stopped", "The node is not running."))?;
-        let (agent_id, created) = shared.add_agent(name, items, days)?;
+        let (agent_id, name, created) = shared.add_agent(
+            name,
+            TokenIssue::Now {
+                lifetime_days: days,
+            },
+            None,
+        )?;
         let token = created
             .token
             .ok_or_else(|| error("relay_error", "The node made no token for the agent."))?;
+        Self::record(
+            &shared,
+            Some(agent_id),
+            &name,
+            ACTIVITY_CONNECTED,
+            ActivityDecision::Allow,
+            format!(
+                "Added with apassy agents add-remote: a token for {days} days. {name} sees no credential until you choose some, and every run asks you."
+            ),
+        );
         Ok(AddedAgent {
             agent_id,
+            name,
             token,
             expires_at: created.expires_at,
             url: format!("{}/mcp", shared.public_url),
         })
     }
 
-    /// The cloud agents of the open vault.
+    /// The remote (cloud) agents of the open vault, with how each reaches the node now.
+    /// It reads the vault, then asks the node without the vault held.
     pub fn agents(&self, vault: &SharedVault) -> Result<Vec<CloudAgentView>, NodeError> {
         let shared = self.shared();
         let at = now();
-        let guard = lock(vault);
-        let vault = guard
-            .as_ref()
-            .filter(|vault| !vault.is_locked())
-            .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
-        // Live sessions only of the node of this vault session.
-        let live = shared
-            .filter(|shared| shared.epoch() == vault.epoch())
-            .map(|shared| shared.live_sessions())
-            .unwrap_or_default();
-        let agents = vault
-            .cloud_agents()
-            .map_err(|_| error("vault_error", "The cloud agents cannot be read."))?;
-        Ok(agents
-            .into_iter()
-            .map(|agent| CloudAgentView {
-                items: agent
-                    .items
-                    .iter()
-                    .map(|item| {
-                        let name = vault
-                            .details(*item)
-                            .map_or_else(|_| format!("Item {item}"), |d| d.summary.title);
-                        (*item, name)
-                    })
-                    .collect(),
-                live_session: live.iter().any(|session| {
-                    session.agent_id == agent.agent_id
-                        && session.expires_at.is_none_or(|end| end > at)
-                }),
-                agent_id: agent.agent_id,
-                name: agent.name,
-                token_expires_at: agent.token_expires_at,
-                last_used_at: agent.last_used_at,
-            })
-            .collect())
+        let (mut views, epoch) = {
+            let guard = lock(vault);
+            let vault = guard
+                .as_ref()
+                .filter(|vault| !vault.is_locked())
+                .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
+            // Live sessions only of the node of this vault session.
+            let live = shared
+                .as_ref()
+                .filter(|shared| shared.epoch() == vault.epoch())
+                .map(|shared| shared.live_sessions())
+                .unwrap_or_default();
+            let agents = vault
+                .cloud_agents()
+                .map_err(|_| error("vault_error", "The cloud agents cannot be read."))?;
+            let views: Vec<(u64, CloudAgentView)> = agents
+                .into_iter()
+                .map(|agent| {
+                    let connected_with = vault
+                        .cloud_agent_link(agent.agent_id)
+                        .ok()
+                        .flatten()
+                        .map_or(ConnectedWith::Token, |(_, with)| with);
+                    let view = CloudAgentView {
+                        items: agent
+                            .items
+                            .iter()
+                            .map(|item| {
+                                let name = vault
+                                    .details(*item)
+                                    .map_or_else(|_| format!("Item {item}"), |d| d.summary.title);
+                                (*item, name)
+                            })
+                            .collect(),
+                        live_session: live.iter().any(|session| {
+                            session.agent_id == agent.agent_id
+                                && session.expires_at.is_none_or(|end| end > at)
+                        }),
+                        agent_id: agent.agent_id,
+                        name: agent.name,
+                        connected_with,
+                        // An agent of the flow made before this field has the far end.
+                        token_expires_at: (connected_with == ConnectedWith::Token
+                            && agent.token_expires_at < NO_TOKEN_EXPIRY)
+                            .then_some(agent.token_expires_at),
+                        created_at: agent.created_at,
+                        last_used_at: agent.last_used_at,
+                        access: None,
+                    };
+                    (agent.relay_agent_id, view)
+                })
+                .collect();
+            (views, vault.epoch())
+        };
+        if let Some(shared) = shared.filter(|shared| shared.epoch() == epoch) {
+            for (relay, view) in &mut views {
+                view.access = shared
+                    .with_node(|node| node.agent_access(&shared.team, NodeAgentId(*relay)))
+                    .and_then(Result::ok);
+            }
+        }
+        Ok(views.into_iter().map(|(_, view)| view).collect())
     }
 
-    /// Revoke a cloud agent: the vault at once; the node too, now or at its next start.
-    /// Its token stops at its next request, its pending runs are denied, and its
-    /// sessions end. The caller asks for the owner check first.
+    /// Disconnect (revoke) a remote agent: the vault at once; the node too, now or at its
+    /// next start. Its token stops at its next request, its OAuth refresh family is
+    /// revoked, the open connect requests of its client are denied, its pending runs are
+    /// denied, and its sessions end. It writes the Activity row `agent disconnected`. It
+    /// takes authority away: no owner check is needed (the UI confirms it in a sheet).
     pub fn revoke_agent(&self, vault: &SharedVault, agent_id: u64) -> Result<(), NodeError> {
         let shared = self.shared();
         let (relay_agent, epoch) = {
@@ -1698,15 +2238,25 @@ impl Node {
                 .as_mut()
                 .filter(|vault| !vault.is_locked())
                 .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
-            let relay = vault
+            let (relay, name) = vault
                 .cloud_agents()
                 .ok()
                 .and_then(|agents| agents.into_iter().find(|agent| agent.agent_id == agent_id))
-                .map(|agent| agent.relay_agent_id)
+                .map(|agent| (agent.relay_agent_id, agent.name))
                 .ok_or_else(|| error("not_found", "No such cloud agent."))?;
             vault
                 .revoke_agent(agent_id)
                 .map_err(|_| error("vault_error", "The agent cannot be revoked."))?;
+            let _ = vault.record_activity(&NewActivity {
+                agent_id: Some(agent_id),
+                agent_name: name.clone(),
+                item_id: None,
+                operation: ACTIVITY_DISCONNECTED.to_owned(),
+                decision: ActivityDecision::Allow,
+                reason: format!(
+                    "You disconnected {name}. Its token stops working, and it must connect again and be allowed."
+                ),
+            });
             (relay, vault.epoch())
         };
         // Only the node of this vault session knows the agent; else the revocation waits
@@ -1730,12 +2280,38 @@ impl Node {
         Ok(())
     }
 
+    /// Send the catalog mirror and the item list of each remote agent to the node now:
+    /// after the owner chose the credentials of a remote agent ("Choose Credentials…").
+    /// The host thread does it every few seconds anyway.
+    pub fn sync_catalog(&self) -> Result<(), NodeError> {
+        self.shared()
+            .ok_or_else(|| error("node_stopped", "The node is not running."))?
+            .refresh(&[])
+            .map(drop)
+    }
+
     /// "Recent cloud activity": the newest masked audit rows of the node.
     pub fn recent_activity(&self) -> Vec<AuditRow> {
         self.shared()
             .and_then(|shared| {
                 shared
                     .with_node(|node| node.recent_audit(&shared.team, None, RECENT_ROWS))
+                    .and_then(Result::ok)
+            })
+            .unwrap_or_default()
+    }
+
+    /// The proxied requests and the other audit rows of one run of the node, newest
+    /// first (masked: never a value). Logs reads them when the owner opens a cloud run;
+    /// [`Node::recent_activity`] has only the newest rows of all runs. Empty while the
+    /// node does not run.
+    pub fn run_audit(&self, run_id: u64) -> Vec<AuditRow> {
+        self.shared()
+            .and_then(|shared| {
+                shared
+                    .with_node(|node| {
+                        node.recent_audit(&shared.team, Some(NodeRunId(run_id)), RUN_AUDIT_ROWS)
+                    })
                     .and_then(Result::ok)
             })
             .unwrap_or_default()

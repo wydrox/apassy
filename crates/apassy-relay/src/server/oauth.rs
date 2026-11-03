@@ -6,12 +6,15 @@
 //! `WWW-Authenticate: Bearer resource_metadata=…`; it reads the metadata (RFC 9728, RFC
 //! 8414), registers (RFC 7591), and opens `/oauth/authorize` in a browser. That makes a
 //! connect request with a match code and sends the browser to `/oauth/wait/<id>`, a page
-//! with no script, form, cookie, or button: nothing on it can authorize. The owner allows
-//! the request in the app (`RunningNode::decide_connect`), which names the agent of the
-//! personal team; the next refresh of the page sends the browser back to the client with
-//! a one-time code. `POST /oauth/token` trades the code (with its PKCE verifier) for an
-//! access token, which is the relay agent token of that agent (so `/mcp` auth does not
-//! change), and a refresh token.
+//! with no script, form, cookie, or button: nothing on it can authorize. A second
+//! authorize of the same client with other parameters ends its waiting request and opens a
+//! new one with its own code: a client id is public, so a request that someone else keeps
+//! open never stands in for this browser's. The owner allows the request in the app
+//! (`RunningNode::decide_connect`), which names the agent of the personal team (always a
+//! new one, made for this request); the next refresh of the page sends the browser back
+//! to the client with a one-time code. `POST /oauth/token` trades the code (with its PKCE
+//! verifier) for an access token, which is the relay agent token of that agent (so `/mcp`
+//! auth does not change), and a refresh token.
 //!
 //! Every state is in the directory `relay.db` (version 1004): `oauth_client`,
 //! `connect_request`, `oauth_refresh`. Codes and refresh tokens are stored as SHA-256
@@ -19,9 +22,15 @@
 //! agent has one live access token and one live refresh family at a time. A second use of
 //! a code or of a rotated refresh token revokes the family and drops the access token.
 //!
-//! The limits are per node: Funnel forwards no client identity.
+//! The limits are per node: Funnel forwards no client identity. A client that the owner
+//! never allowed costs a stranger nothing to make, so it never fills a limit that a real
+//! client needs: only clients allowed at least once count toward `MAX_CLIENTS` and the
+//! registration window, a full table drops the oldest client that was never allowed, and
+//! such a client is pruned an hour after its registration. Bad codes and refresh tokens
+//! count for their client only (`ClientFailures`), never for the whole listener.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 
 use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -35,34 +44,6 @@ use crate::secret::{SecretString, TokenKind, new_token, parse_token, same_bytes,
 use crate::server::Core;
 use crate::server::hub::Hub;
 use crate::server::store::{db, to_i, to_u};
-
-/// A `connect_request` row for its wait page: status, redirect_uri, state, match_code,
-/// client_id, expires_at, decided_at, and whether a code was issued.
-type WaitRow = (
-    String,
-    String,
-    Option<String>,
-    String,
-    String,
-    i64,
-    Option<i64>,
-    bool,
-);
-/// A `connect_request` row for a code redemption: id, client_id, redirect_uri,
-/// code_challenge, status, code_expires_at, team_id, agent_id.
-type CodeRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<i64>,
-    Option<String>,
-    Option<i64>,
-);
-/// A refresh token row: family, client_id, team_id, agent_id, expires_at, used_at,
-/// revoked_at.
-type RefreshRow = (String, String, String, i64, i64, Option<i64>, Option<i64>);
 
 /// The lifetime of an access token: 24 hours. The physical test may lower it in a
 /// development build to see the refresh work.
@@ -85,20 +66,61 @@ pub const MAX_REDIRECT_URIS: usize = 8;
 pub const MAX_CLIENT_NAME: usize = 64;
 /// The longest `state`.
 pub const MAX_STATE: usize = 512;
-/// Registrations in `REGISTRATION_WINDOW_SECS`, at most.
+/// Registrations in `REGISTRATION_WINDOW_SECS` of clients that the owner then allowed, at
+/// most. A client that was never allowed does not count.
 pub const REGISTRATIONS_PER_WINDOW: u64 = 10;
 /// The window of `REGISTRATIONS_PER_WINDOW`: 10 minutes.
 pub const REGISTRATION_WINDOW_SECS: u64 = 600;
-/// Stored clients, at most. A client unused for `UNUSED_CLIENT_SECS` is pruned first.
+/// Stored clients, at most. Only clients that the owner allowed at least once can fill it:
+/// at the limit, a registration drops the oldest client that was never allowed (one with
+/// no waiting request first), with its requests.
 pub const MAX_CLIENTS: u64 = 100;
 /// A client with no live connection and no use in 7 days is pruned.
 pub const UNUSED_CLIENT_SECS: u64 = 7 * 86_400;
+/// A client that the owner never allowed is pruned this long after its registration, with
+/// its requests: 1 hour. An authorize does not renew it.
+pub const NEVER_ALLOWED_CLIENT_SECS: u64 = 3_600;
+/// Bad codes and refresh tokens of one client in `CLIENT_FAILURE_WINDOW_SECS`, at most.
+pub const CLIENT_FAILURES_MAX: u32 = 20;
+/// The window of `CLIENT_FAILURES_MAX`, in seconds, and the `Retry-After` of its 429.
+pub const CLIENT_FAILURE_WINDOW_SECS: u64 = 60;
+/// Clients whose failures are kept in memory, at most.
+const MAX_FAILING_CLIENTS: usize = 1_024;
 /// Connect requests that wait for the owner at once, on the whole node.
 pub const OPEN_CONNECTS: u64 = 3;
 /// The `Refresh` of the waiting page, in seconds.
 pub const PAGE_REFRESH_SECS: u64 = 3;
 /// The `NodeError` code of `decide_connect` for a request that does not wait any more.
 pub const CONNECT_NOT_PENDING: &str = "connect_not_pending";
+/// A connect request for its page (`wait`): status, redirect URI, state, match code,
+/// client, end, decision time, and whether its code was sent.
+type WaitRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    i64,
+    Option<i64>,
+    bool,
+);
+
+/// A connect request found by its code (`redeem_code`): id, client, redirect URI,
+/// challenge, status, end of the code, team, and agent.
+type CodeRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+);
+
+/// A refresh token (`redeem_refresh`): family, client, team, agent, end, use, and revocation.
+type RefreshRow = (String, String, String, i64, i64, Option<i64>, Option<i64>);
+
 /// The actor of the audit rows of this module.
 pub const OAUTH_ACTOR: &str = "oauth";
 /// The headers of every page and redirect of this module.
@@ -172,7 +194,8 @@ pub enum Reply {
     Json {
         status: u16,
         body: Value,
-        /// A bad code or refresh token: it counts in the failed-auth limiter.
+        /// A bad code or refresh token: it counts for its client (`ClientFailures`), not
+        /// in the failed-auth limiter of the listener.
         auth_failed: bool,
         retry_after: Option<u64>,
     },
@@ -204,7 +227,7 @@ impl Reply {
         )
     }
 
-    /// `invalid_grant` that counts in the failed-auth limiter.
+    /// `invalid_grant` that counts for its client (`ClientFailures`).
     fn bad_grant(description: &str) -> Self {
         Self::Json {
             status: 400,
@@ -317,6 +340,54 @@ fn params_of(body: &[u8], content_type: Option<&str>) -> Option<HashMap<String, 
     decode_form(std::str::from_utf8(body).ok()?)
 }
 
+// ---- Bad codes and refresh tokens ----
+
+/// The bad codes and refresh tokens of each registered client (`invalid_grant` of `POST
+/// /oauth/token`), in a fixed window of `CLIENT_FAILURE_WINDOW_SECS` that starts at its
+/// first failure. With `CLIENT_FAILURES_MAX` of them, every token request of that client
+/// is 429 `rate_limited` until the window ends; no other client and no other endpoint is
+/// refused. Codes and refresh tokens are 256 random bits: this only slows a client that
+/// sends bad ones in a loop. In memory only, in the hub.
+#[derive(Debug, Default)]
+pub struct ClientFailures {
+    /// For each client: the start of its window and the failures in it.
+    windows: Mutex<HashMap<String, (u64, u32)>>,
+}
+
+impl ClientFailures {
+    /// True while `client_id` is at its limit.
+    pub fn limited(&self, client_id: &str, now: u64) -> bool {
+        let windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        windows.get(client_id).is_some_and(|&(start, count)| {
+            now < start.saturating_add(CLIENT_FAILURE_WINDOW_SECS) && count >= CLIENT_FAILURES_MAX
+        })
+    }
+
+    /// Counts one bad code or refresh token of `client_id`.
+    pub fn record(&self, client_id: &str, now: u64) {
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        if windows.len() >= MAX_FAILING_CLIENTS && !windows.contains_key(client_id) {
+            windows.retain(|_, &mut (start, _)| {
+                now < start.saturating_add(CLIENT_FAILURE_WINDOW_SECS)
+            });
+            if windows.len() >= MAX_FAILING_CLIENTS {
+                let oldest = windows
+                    .iter()
+                    .min_by_key(|(_, window)| window.0)
+                    .map(|(id, _)| id.clone());
+                if let Some(oldest) = oldest {
+                    windows.remove(&oldest);
+                }
+            }
+        }
+        let window = windows.entry(client_id.to_string()).or_insert((now, 0));
+        if window.1 == 0 || now >= window.0.saturating_add(CLIENT_FAILURE_WINDOW_SECS) {
+            *window = (now, 0);
+        }
+        window.1 = window.1.saturating_add(1);
+    }
+}
+
 // ---- The form decoder ----
 
 /// Decodes `application/x-www-form-urlencoded` text (also a query): `+` is a space, `%XX`
@@ -426,6 +497,30 @@ pub fn check_redirect_uri(uri: &str) -> bool {
     loopback_parts(uri).is_some()
 }
 
+/// The host of a redirect URI that passed [`check_redirect_uri`], for the owner's
+/// prompts (review 0.5.16): where the browser goes back with the code. Lowercase, without
+/// the port; an IPv6 address keeps its brackets (`[::1]`). Empty for a text that is not
+/// such a URI.
+pub fn redirect_host(uri: &str) -> String {
+    let Some(rest) = uri
+        .strip_prefix("https://")
+        .or_else(|| uri.strip_prefix("http://"))
+    else {
+        return String::new();
+    };
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let host = if authority.starts_with('[') {
+        match authority.find(']') {
+            Some(close) => &authority[..=close],
+            None => return String::new(),
+        }
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    host.to_ascii_lowercase()
+}
+
 /// True when `given` is the registered URI: the same text, or for a loopback URI the
 /// same host and rest with any port (RFC 8252 section 7.3).
 pub fn redirect_matches(registered: &str, given: &str) -> bool {
@@ -440,16 +535,15 @@ pub fn redirect_matches(registered: &str, given: &str) -> bool {
     }
 }
 
-/// A client name for the page and the app: no control, format, or bidirectional
-/// character, runs of spaces as one, trimmed, at most `MAX_CLIENT_NAME` bytes (cut at a
+/// A client name for the page and the app: no control, format, or tag character (the one
+/// rule of the core, `apassy::text::is_hidden_char`, that the node and the connect card
+/// use too), runs of spaces as one, trimmed, at most `MAX_CLIENT_NAME` bytes (cut at a
 /// character). `None` when nothing is left.
 pub fn clean_name(name: &str) -> Option<String> {
     let mut out = String::new();
     let mut space = false;
     for ch in name.chars() {
-        let hidden = ch.is_control()
-            || matches!(ch, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{00AD}');
-        if hidden {
+        if apassy::text::is_hidden_char(ch) {
             continue;
         }
         if ch.is_whitespace() {
@@ -567,6 +661,11 @@ fn request_id_ok(id: &str) -> bool {
 
 // ---- The page ----
 
+/// The line of the waiting and the busy page: requests that someone else started can wait
+/// on the Mac, and only the owner can end them.
+pub const DENY_OTHERS: &str =
+    "Deny requests on your Mac that you did not start, then connect again.";
+
 /// The text of the connect page. Every field is plain text, escaped when written.
 struct Page {
     title: String,
@@ -586,6 +685,7 @@ impl Page {
                 format!(
                     "Check that the app shows the same code. Apassy must be open and unlocked on the Mac. The request ends in {minutes} {unit}."
                 ),
+                DENY_OTHERS.to_string(),
             ],
         }
     }
@@ -626,15 +726,7 @@ impl Page {
         Self {
             title: "Too many connection requests wait.".to_string(),
             code: None,
-            lines: vec!["Answer them on the Mac, or try again in 5 minutes.".to_string()],
-        }
-    }
-
-    fn client_waits(client: &str) -> Self {
-        Self {
-            title: format!("{client} already waits for an answer."),
-            code: None,
-            lines: vec!["Answer it on the Mac, or try again in 5 minutes.".to_string()],
+            lines: vec![DENY_OTHERS.to_string()],
         }
     }
 
@@ -698,14 +790,51 @@ fn load_client(conn: &Connection, client_id: &str) -> RelayResult<Option<Client>
     }))
 }
 
-/// The name of a client on the page: its cleaned name, or "An MCP client".
+/// The name of a client on the page: its name, cleaned again (a client stored by an older
+/// version kept characters that `clean_name` now removes), or "An MCP client".
 fn shown_name(name: Option<&str>) -> String {
-    name.map_or_else(|| "An MCP client".to_string(), str::to_string)
+    name.and_then(clean_name)
+        .unwrap_or_else(|| "An MCP client".to_string())
+}
+
+/// The SQL test that the `oauth_client` row of the outer query was allowed at least once:
+/// a request of it was allowed (only an allow sets `team_id`), or it has a refresh token.
+const ALLOWED_ONCE: &str = "(EXISTS (SELECT 1 FROM connect_request a \
+     WHERE a.client_id = oauth_client.client_id AND a.team_id IS NOT NULL) \
+     OR EXISTS (SELECT 1 FROM oauth_refresh f WHERE f.client_id = oauth_client.client_id))";
+
+/// True when the owner allowed `client_id` at least once (`ALLOWED_ONCE`).
+fn allowed_once(conn: &Connection, client_id: &str) -> RelayResult<bool> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM oauth_client WHERE client_id = ?1 AND {ALLOWED_ONCE})"
+        ),
+        params![client_id],
+        |row| row.get(0),
+    )
+    .map_err(db)
+}
+
+/// Deletes the client `client_id` and every connect request of it. Only for a client that
+/// was never allowed: it has no team, no agent, and no refresh token.
+fn delete_client(conn: &Connection, client_id: &str) -> RelayResult<()> {
+    conn.execute(
+        "DELETE FROM connect_request WHERE client_id = ?1",
+        params![client_id],
+    )
+    .map_err(db)?;
+    conn.execute(
+        "DELETE FROM oauth_client WHERE client_id = ?1",
+        params![client_id],
+    )
+    .map_err(db)?;
+    Ok(())
 }
 
 /// Removes what no flow needs any more: connect requests older than 7 days, refresh
-/// tokens past their end, and clients that have no live connection, no open request,
-/// and no use in `UNUSED_CLIENT_SECS`.
+/// tokens past their end, clients that the owner never allowed `NEVER_ALLOWED_CLIENT_SECS`
+/// after their registration (with their requests), and clients that have no live
+/// connection, no open request, and no use in `UNUSED_CLIENT_SECS`.
 fn prune(conn: &Connection, now: u64) -> RelayResult<()> {
     let old = to_i(now.saturating_sub(UNUSED_CLIENT_SECS));
     conn.execute(
@@ -716,6 +845,20 @@ fn prune(conn: &Connection, now: u64) -> RelayResult<()> {
     conn.execute(
         "DELETE FROM oauth_refresh WHERE expires_at <= ?1",
         params![to_i(now)],
+    )
+    .map_err(db)?;
+    let never_allowed = to_i(now.saturating_sub(NEVER_ALLOWED_CLIENT_SECS));
+    conn.execute(
+        &format!(
+            "DELETE FROM connect_request WHERE client_id IN (SELECT client_id FROM oauth_client \
+             WHERE created_at < ?1 AND NOT {ALLOWED_ONCE})"
+        ),
+        params![never_allowed],
+    )
+    .map_err(db)?;
+    conn.execute(
+        &format!("DELETE FROM oauth_client WHERE created_at < ?1 AND NOT {ALLOWED_ONCE}"),
+        params![never_allowed],
     )
     .map_err(db)?;
     conn.execute(
@@ -960,20 +1103,67 @@ impl Flow<'_> {
         };
         let client_id = format!("c_{}", random_hex::<16>()?);
         let now = self.now;
-        let limited = self.hub.directory.store.tx(|tx| {
+        // `None`: at a limit. `Some(woke)`: registered; `woke` when a dropped client had
+        // a waiting request, so the host loops look again.
+        let registered = self.hub.directory.store.tx(|tx| {
             prune(tx, now)?;
+            // Only clients that the owner allowed count: a stranger's registrations fill
+            // nothing that a real client needs.
             let recent: i64 = tx
                 .query_row(
-                    "SELECT count(*) FROM oauth_client WHERE created_at > ?1",
+                    &format!(
+                        "SELECT count(*) FROM oauth_client WHERE created_at > ?1 AND {ALLOWED_ONCE}"
+                    ),
                     params![to_i(now.saturating_sub(REGISTRATION_WINDOW_SECS))],
                     |row| row.get(0),
                 )
                 .map_err(db)?;
+            let allowed: i64 = tx
+                .query_row(
+                    &format!("SELECT count(*) FROM oauth_client WHERE {ALLOWED_ONCE}"),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db)?;
+            if to_u(recent) >= REGISTRATIONS_PER_WINDOW || to_u(allowed) >= MAX_CLIENTS {
+                return Ok(None);
+            }
+            // A full table: the oldest clients that were never allowed go, those with no
+            // waiting request first, with their requests.
             let all: i64 = tx
                 .query_row("SELECT count(*) FROM oauth_client", [], |row| row.get(0))
                 .map_err(db)?;
-            if to_u(recent) >= REGISTRATIONS_PER_WINDOW || to_u(all) >= MAX_CLIENTS {
-                return Ok(true);
+            let over = to_u(all).saturating_add(1).saturating_sub(MAX_CLIENTS);
+            let mut woke = false;
+            if over > 0 {
+                let mut statement = tx
+                    .prepare(&format!(
+                        "SELECT client_id, EXISTS(SELECT 1 FROM connect_request p \
+                         WHERE p.client_id = oauth_client.client_id AND p.status = 'pending') AS waits \
+                         FROM oauth_client WHERE NOT {ALLOWED_ONCE} \
+                         ORDER BY waits, created_at, rowid LIMIT ?1"
+                    ))
+                    .map_err(db)?;
+                let evicted = statement
+                    .query_map(params![to_i(over)], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+                    })
+                    .map_err(db)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(db)?;
+                drop(statement);
+                for (old_client, waits) in evicted {
+                    delete_client(tx, &old_client)?;
+                    woke |= waits;
+                    self.hub.directory.audit.write_on(
+                        tx,
+                        now,
+                        OAUTH_ACTOR,
+                        "oauth_client_evicted",
+                        None,
+                        &json!({"client_id": old_client}),
+                    )?;
+                }
             }
             tx.execute(
                 "INSERT INTO oauth_client (client_id, client_name, redirect_uris, created_at) \
@@ -994,13 +1184,17 @@ impl Flow<'_> {
                 None,
                 &json!({"client_id": client_id}),
             )?;
-            Ok(false)
+            Ok(Some(woke))
         })?;
-        if limited {
-            return Ok(Reply::limited(
-                "Too many clients registered on this Mac. Try again later.",
-                REGISTRATION_WINDOW_SECS,
-            ));
+        match registered {
+            None => {
+                return Ok(Reply::limited(
+                    "Too many clients registered on this Mac. Try again later.",
+                    REGISTRATION_WINDOW_SECS,
+                ));
+            }
+            Some(true) => wake_hosts(self.hub),
+            Some(false) => {}
         }
         let mut answer = json!({
             "client_id": client_id,
@@ -1018,8 +1212,10 @@ impl Flow<'_> {
     }
 
     /// `GET /oauth/authorize`: a connect request, then 303 to its page. A bad client or
-    /// redirect URI is a page; any other error goes back to the client (RFC 6749 section
-    /// 4.1.2.1).
+    /// redirect URI is a page. Any other error goes back to a client that the owner allowed
+    /// at least once (RFC 6749 section 4.1.2.1), and is a page for any other client:
+    /// anyone can register a client with any https redirect URI, so a redirect would make
+    /// a link of this Mac an open redirect.
     fn authorize(&self, query: &str) -> RelayResult<Reply> {
         let Some(params) = decode_form(query) else {
             return Ok(Reply::page(400, Page::invalid()));
@@ -1049,7 +1245,15 @@ impl Flow<'_> {
             _ => return Ok(Reply::page(400, Page::invalid())),
         };
         let state = get("state");
+        let allowed = self
+            .hub
+            .directory
+            .store
+            .with(|conn| allowed_once(conn, client_id))?;
         let back = |error: &str, description: &str| {
+            if !allowed {
+                return Reply::page(400, Page::invalid());
+            }
             let mut location = format!(
                 "{redirect_uri}{}error={}&error_description={}",
                 if redirect_uri.contains('?') { '&' } else { '?' },
@@ -1083,7 +1287,6 @@ impl Flow<'_> {
         if state.is_some_and(|state| state.len() > MAX_STATE) {
             return Ok(back("invalid_request", "The state is at most 512 bytes."));
         }
-        let name = shown_name(client.name.as_deref());
         let id = random_hex::<16>()?;
         let match_code = new_match_code()?;
         let now = self.now;
@@ -1091,11 +1294,15 @@ impl Flow<'_> {
         enum Opened {
             New,
             Same(String),
-            ClientWaits,
             Busy,
+            Gone,
         }
         let opened = self.hub.directory.store.tx(|tx| {
             prune(tx, now)?;
+            // A client that was never allowed and is an hour old went just now.
+            if load_client(tx, client_id)?.is_none() {
+                return Ok(Opened::Gone);
+            }
             expire_requests(tx, now)?;
             let waiting: Option<(String, String, String, Option<String>)> = tx
                 .query_row(
@@ -1114,7 +1321,24 @@ impl Flow<'_> {
                 {
                     return Ok(Opened::Same(open));
                 }
-                return Ok(Opened::ClientWaits);
+                // Another request of the same client: the waiting one ends, and this one
+                // gets its own page and code. A client id is public, so a waiting request
+                // that someone else started must never stand in for this browser's: the
+                // owner compares the code that this page shows.
+                tx.execute(
+                    "UPDATE connect_request SET status = 'expired' \
+                     WHERE client_id = ?1 AND status = 'pending'",
+                    params![client_id],
+                )
+                .map_err(db)?;
+                self.hub.directory.audit.write_on(
+                    tx,
+                    now,
+                    OAUTH_ACTOR,
+                    "connect_replaced",
+                    None,
+                    &json!({"client_id": client_id}),
+                )?;
             }
             let open: i64 = tx
                 .query_row(
@@ -1142,11 +1366,8 @@ impl Flow<'_> {
                 ],
             )
             .map_err(db)?;
-            tx.execute(
-                "UPDATE oauth_client SET used_at = ?2 WHERE client_id = ?1",
-                params![client_id, to_i(now)],
-            )
-            .map_err(db)?;
+            // No `used_at`: an authorize renews no client. A client that is never allowed
+            // goes `NEVER_ALLOWED_CLIENT_SECS` after its registration.
             self.hub.directory.audit.write_on(
                 tx,
                 now,
@@ -1167,8 +1388,8 @@ impl Flow<'_> {
             Opened::Same(open) => Reply::Redirect {
                 location: format!("{}{open}", paths::WAIT_PREFIX),
             },
-            Opened::ClientWaits => Reply::page(429, Page::client_waits(&name)),
             Opened::Busy => Reply::page(429, Page::busy()),
+            Opened::Gone => Reply::page(400, Page::invalid()),
         })
     }
 
@@ -1277,6 +1498,35 @@ impl Flow<'_> {
                 "client_id is required.",
             ));
         };
+        let failures = &self.hub.oauth_failures;
+        if failures.limited(client_id, self.now) {
+            return Ok(Reply::limited(
+                "Too many bad codes or refresh tokens from this client. Try again later.",
+                CLIENT_FAILURE_WINDOW_SECS,
+            ));
+        }
+        let reply = self.grant_of(form, client_id)?;
+        if let Reply::Json {
+            auth_failed: true, ..
+        } = reply
+        {
+            // Only a registered client is counted, so the map holds no made-up ids.
+            let known = self
+                .hub
+                .directory
+                .store
+                .with(|conn| load_client(conn, client_id))?
+                .is_some();
+            if known {
+                failures.record(client_id, self.now);
+            }
+        }
+        Ok(reply)
+    }
+
+    /// The grant of a token request of `client_id`.
+    fn grant_of(&self, form: &HashMap<String, String>, client_id: &str) -> RelayResult<Reply> {
+        let get = |name: &str| form.get(name).map(String::as_str);
         match get("grant_type") {
             Some("authorization_code") => {
                 let (Some(code), Some(verifier)) = (get("code"), get("code_verifier")) else {
@@ -1658,6 +1908,9 @@ pub struct ConnectView {
     pub match_code: String,
     pub created_at: u64,
     pub expires_at: u64,
+    /// The host of the request's redirect URI ([`redirect_host`]): the owner's prompts
+    /// say where the code goes back to (review 0.5.16).
+    pub redirect_host: String,
 }
 
 /// The requests that wait for the owner, oldest first. Due ones become `expired` first.
@@ -1666,7 +1919,8 @@ pub fn pending(hub: &Hub, now: u64) -> RelayResult<Vec<ConnectView>> {
         expire_requests(tx, now)?;
         let mut statement = tx
             .prepare(
-                "SELECT r.id, r.client_id, c.client_name, r.match_code, r.created_at, r.expires_at \
+                "SELECT r.id, r.client_id, c.client_name, r.match_code, r.created_at, r.expires_at, \
+                 r.redirect_uri \
                  FROM connect_request r LEFT JOIN oauth_client c ON c.client_id = r.client_id \
                  WHERE r.status = 'pending' ORDER BY r.created_at, r.rowid",
             )
@@ -1680,6 +1934,7 @@ pub fn pending(hub: &Hub, now: u64) -> RelayResult<Vec<ConnectView>> {
                     match_code: row.get(3)?,
                     created_at: to_u(row.get(4)?),
                     expires_at: to_u(row.get(5)?),
+                    redirect_host: redirect_host(&row.get::<_, String>(6)?),
                 })
             })
             .map_err(db)?;
@@ -1908,6 +2163,21 @@ mod tests {
             "https://grok.example/{}",
             "a".repeat(MAX_REDIRECT_URI)
         )));
+        // The host for the owner's prompts: lowercase, no port, brackets kept.
+        for (uri, host) in [
+            ("https://grok.example/oauth/callback", "grok.example"),
+            ("https://Grok.Example:8443/cb?x=1", "grok.example"),
+            ("https://grok.example?x=1", "grok.example"),
+            ("https://grok.example", "grok.example"),
+            ("http://localhost/cb", "localhost"),
+            ("http://127.0.0.1:53682/callback", "127.0.0.1"),
+            ("http://[::1]:8080/cb", "[::1]"),
+            ("https://[2001:db8::7]/cb", "[2001:db8::7]"),
+            ("custom-scheme://cb", ""),
+            ("https://[::1/cb", ""),
+        ] {
+            assert_eq!(redirect_host(uri), host, "{uri}");
+        }
         // Exact, or any port on the loopback.
         assert!(redirect_matches(
             "https://a.example/cb",
@@ -1944,6 +2214,18 @@ mod tests {
             Some("Grok Bot")
         );
         assert_eq!(clean_name(" \u{200B}\n"), None);
+        // The characters that the old list missed: U+061C, U+180E, U+206A–206F,
+        // U+FFF9–FFFB, and the tag block U+E0000–E007F.
+        assert_eq!(
+            clean_name("Gr\u{061C}ok\u{180E} \u{206A}\u{206F}Bot\u{FFF9}\u{FFFB}\u{E0001}\u{E0041}\u{E007F}")
+                .as_deref(),
+            Some("Grok Bot")
+        );
+        assert_eq!(clean_name("\u{E0000}\u{E0020}\u{2066}"), None);
+        // A name stored before the rule is cleaned again on the page.
+        assert_eq!(shown_name(Some("Grok\u{061C} Bot\u{E0041}")), "Grok Bot");
+        assert_eq!(shown_name(Some("\u{E0041}")), "An MCP client");
+        assert_eq!(shown_name(None), "An MCP client");
         let long = clean_name(&"é".repeat(100)).unwrap();
         assert!(long.len() <= MAX_CLIENT_NAME);
         assert_eq!(long.len(), 64);
@@ -1957,7 +2239,7 @@ mod tests {
     fn pkce_and_codes() {
         // RFC 7636 appendix B.
         assert_eq!(
-            s256("dBjftJeZ4CVP-mJ92K9N0lE5n0aahg8JtEsQ1fx8ptg"),
+            s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
         assert!(challenge_ok("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"));
@@ -1977,6 +2259,29 @@ mod tests {
         assert_eq!(distinct.len(), 24);
         assert!(request_id_ok(&random_hex::<16>().unwrap()));
         assert!(!request_id_ok("../../etc"));
+    }
+
+    #[test]
+    fn bad_grants_limit_their_client_only_and_the_window_ends() {
+        let failures = ClientFailures::default();
+        let start = 1_000;
+        for n in 0..CLIENT_FAILURES_MAX {
+            assert!(!failures.limited("c_a", start + u64::from(n)), "{n}");
+            failures.record("c_a", start + u64::from(n));
+        }
+        assert!(failures.limited("c_a", start + 20));
+        assert!(!failures.limited("c_b", start + 20), "another client");
+        assert!(failures.limited("c_a", start + CLIENT_FAILURE_WINDOW_SECS - 1));
+        assert!(!failures.limited("c_a", start + CLIENT_FAILURE_WINDOW_SECS));
+        failures.record("c_a", start + CLIENT_FAILURE_WINDOW_SECS);
+        assert!(!failures.limited("c_a", start + CLIENT_FAILURE_WINDOW_SECS + 1));
+        // The map stays bounded: old windows go first, then the oldest one.
+        let many = ClientFailures::default();
+        for n in 0..MAX_FAILING_CLIENTS + 10 {
+            many.record(&format!("c_{n}"), start);
+        }
+        let held = many.windows.lock().unwrap().len();
+        assert!(held <= MAX_FAILING_CLIENTS, "{held}");
     }
 
     #[test]
@@ -2006,7 +2311,6 @@ mod tests {
             Page::connected(),
             Page::invalid(),
             Page::busy(),
-            Page::client_waits("x"),
             Page::broken(),
         ] {
             let html = page.html().to_ascii_lowercase();
@@ -2021,5 +2325,12 @@ mod tests {
         assert!(html.contains("&lt;b&gt;Grok&lt;/b&gt; wants to connect to Mac"));
         assert!(html.contains("K7Q-4MD"));
         assert!(html.contains("ends in 5 minutes"));
+        // The waiting and the busy page tell the owner to deny what they did not start.
+        let line = "Deny requests on your Mac that you did not start, then connect again.";
+        assert_eq!(DENY_OTHERS, line);
+        assert!(html.contains(line), "{html}");
+        let busy = Page::busy().html();
+        assert!(busy.contains("Too many connection requests wait."));
+        assert!(busy.contains(line), "{busy}");
     }
 }

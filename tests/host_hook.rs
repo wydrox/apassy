@@ -501,10 +501,15 @@ fn a_task_notification_keeps_the_request_of_the_user() {
             "{state}"
         );
         assert!(!state.contains("task-notification"), "{state}");
+        // Finding 4 of the 0.5.16 review: the provenance of an Agent SDK turn goes to the
+        // card and the log, not to the state of the brain (its states never had it).
+        assert!(!state.contains("Task provenance"), "{state}");
     }
     let reason = last_reason(&fx);
     assert!(
-        reason.contains("User request from the Claude Code hook, verified in the host transcript"),
+        reason.contains(
+            "User request from the Claude Code hook (Agent SDK turn), verified in the host transcript"
+        ),
         "{reason}"
     );
 }

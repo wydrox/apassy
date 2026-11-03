@@ -219,8 +219,9 @@ public struct QuestionCard: Codable, Sendable, Equatable {
 }
 
 /// The card of a connect request (contract relay-questions-v1, section 7.4): the client name
-/// that the remote agent registered, the Mac it connects to, and the match code that its browser
-/// page shows. The core opened and checked it; the texts are for display.
+/// that the remote agent registered, the Mac it connects to, the match code that its browser
+/// page shows, and where the code goes back. The core opened and checked it; the texts are for
+/// display.
 public struct ConnectRequestCard: Codable, Sendable, Equatable {
     public var askerDevice: String
     public var createdAt: Int64
@@ -231,10 +232,19 @@ public struct ConnectRequestCard: Codable, Sendable, Equatable {
     public var code: String
     public var expiresAt: Int64
     public var digest: String
+    /// The host of the redirect URI: where the code goes back (review 0.5.16). `nil` for a card
+    /// of a Mac before 0.5.16.
+    public var redirectHost: String?
+    /// The line of the card from the core: "Returns to <host>", or "Returns to a program on a
+    /// computer (localhost)". `nil` without a host.
+    public var returnsTo: String?
+    /// True when the code goes back to a program on a computer (localhost): the line is a warning.
+    public var localRedirect: Bool
 
     public init(
         askerDevice: String, createdAt: Int64, id: String, clientName: String, macName: String, code: String,
-        expiresAt: Int64, digest: String
+        expiresAt: Int64, digest: String, redirectHost: String? = nil, returnsTo: String? = nil,
+        localRedirect: Bool = false
     ) {
         self.askerDevice = askerDevice
         self.createdAt = createdAt
@@ -244,6 +254,24 @@ public struct ConnectRequestCard: Codable, Sendable, Equatable {
         self.code = code
         self.expiresAt = expiresAt
         self.digest = digest
+        self.redirectHost = redirectHost
+        self.returnsTo = returnsTo
+        self.localRedirect = localRedirect
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        askerDevice = try container.decode(String.self, forKey: .askerDevice)
+        createdAt = try container.decode(Int64.self, forKey: .createdAt)
+        id = try container.decode(String.self, forKey: .id)
+        clientName = try container.decode(String.self, forKey: .clientName)
+        macName = try container.decode(String.self, forKey: .macName)
+        code = try container.decode(String.self, forKey: .code)
+        expiresAt = try container.decode(Int64.self, forKey: .expiresAt)
+        digest = try container.decode(String.self, forKey: .digest)
+        redirectHost = try container.decodeIfPresent(String.self, forKey: .redirectHost)
+        returnsTo = try container.decodeIfPresent(String.self, forKey: .returnsTo)
+        localRedirect = try container.decodeIfPresent(Bool.self, forKey: .localRedirect) ?? false
     }
 
     enum CodingKeys: String, CodingKey {
@@ -253,6 +281,9 @@ public struct ConnectRequestCard: Codable, Sendable, Equatable {
         case clientName = "client_name"
         case macName = "mac_name"
         case expiresAt = "expires_at"
+        case redirectHost = "redirect_host"
+        case returnsTo = "returns_to"
+        case localRedirect = "local_redirect"
     }
 }
 

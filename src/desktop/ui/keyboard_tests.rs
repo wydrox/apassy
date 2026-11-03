@@ -893,7 +893,7 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
         window.press(&mut app, key, Modifiers::COMMAND);
         assert_eq!(app.place, place);
         assert!(window.text.contains(text), "{place:?}: {}", window.text);
-        // An empty Decisions ("Nothing waits for you.", "All clear") may have no control
+        // An empty Decisions ("No decisions yet", "This week") may have no control
         // to focus.
         assert!(
             window.focused().is_some() || place == Place::Decisions,

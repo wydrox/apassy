@@ -2272,8 +2272,24 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
     std::thread::sleep(Duration::from_millis(800));
     assert_eq!(reads(&world), 1, "one read, then the pause");
     assert_eq!(world.feed_puts(), 0, "no feed before the read-back worked");
-    // The questions go on meanwhile.
-    assert!(world.relay.count("GET /v1/questions") > 0);
+    // The questions go on meanwhile: the lister polls before the pause ends. With no
+    // session at the start it sleeps 1 s, so its first poll comes about a second after
+    // the start, near the end of the 800 ms above: wait for it, inside the pause.
+    let polled = loop {
+        if world.relay.count("GET /v1/questions") > 0 {
+            break refused.elapsed();
+        }
+        assert!(
+            refused.elapsed() < pause - Duration::from_millis(100),
+            "no questions poll in the pause"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        reads(&world),
+        1,
+        "a questions poll in the pause: {polled:?}"
+    );
     let put = {
         let start = Instant::now();
         loop {

@@ -7,8 +7,11 @@ with `ios/ApassyCompanion/UITests/AppStoreScreenshotsUITests.swift` and
 
 ## Rules
 
-- **Demo data only** (section "Demo data"). No real name, e-mail, host, or secret. A revealed value is
-  a generated demo value.
+- **The demo of the app only** (section "Demo data"): launch with `-ApassyDemo YES`, which opens
+  the in-memory demo vault in every build ([ios/README.md](../../../ios/README.md), "The demo"). No
+  real name, e-mail, host, or secret. A revealed value is a synthetic demo value.
+- The banner "Demo — sample data only" shows at the top of every demo screen. Keep it: it is what
+  the build shows, and it says that the values are samples.
 - **Light appearance**, English (U.S.), the default text size.
 - **Status bar** fixed on every iPhone Simulator before the run:
   `xcrun simctl status_bar <device> override --time 9:41 --dataNetwork wifi --wifiMode active --wifiBars 3 --cellularMode active --cellularBars 4 --batteryState charged --batteryLevel 100`.
@@ -33,53 +36,78 @@ iPhone screenshots show in the search results, so they carry the main message.
 
 ## iPhone 6.9-inch (1320 × 2868)
 
-| # | Screen | Exact state | How to reach it in the Simulator |
+Every launch below starts with `-ApassyDemo YES` (give the flag a value when another flag follows
+it). `-ApassyOpen` works in the demo of every build; the `:reveal`, `:large`, and `:options` forms
+of `item:` only in the Simulator.
+
+| # | Screen | Exact state | Launch arguments |
 | --- | --- | --- | --- |
-| 1 | **Vault list** (tab Vault) | The demo vault "Personal", unlocked; the folders "Work" and "Side project" and the recent items visible; no sheet, no toast | `-ApassyOpen vault` |
-| 2 | **Credential page** of the login "GitHub" (demo) | Username visible, password **masked**, the one-time code tile with its countdown, the website row `github.example.com` with Open | `-ApassyOpen item:<id of GitHub>` |
-| 3 | **AutoFill sheet** in Safari | Safari on a demo login page of `github.example.com`; the Apassy credential list of the AutoFill extension shows the match "GitHub · demo@example.com" | UI test opens Safari to the local demo page and taps the password field, then the key icon; or `xcrun simctl` with the AutoFill extension enabled in Settings |
-| 4 | **Requests** (tab Requests) with a waiting question | One request: agent "coding agent" on the Mac "Studio", credential "Stripe test key", project `~/Dev/shop`, the buttons **Allow Once** and **Deny** | `-ApassyOpen questions` with the preview questions of `PreviewVaultService+Questions.swift` |
-| 5 | **Agent Access** | Two agents with their credentials and states, from the preview feed; no "restricted" or "stale" banner | `-ApassyOpen agents` |
-| 6 | **Watchtower** | The counts of weak, reused and old passwords with the demo items "Router" (weak) and two "Reused" items | `-ApassyOpen watchtower` |
-| 7 | **Settings** | The list grouped as on the Mac (D5 after M7: Vault, Security, Devices, Agent Access, Tools, About), each row with its tile and status line. Without M7 in the build: the current list (General, Security, Devices, Advanced) | `-ApassyOpen settings` |
-| 8 | **Lock** with Face ID over the cover | The Apassy icon on the cover while the Face ID sheet asks (Simulator: Features › Face ID › Enrolled; capture before the match) | Launch with the vault locked and Face ID unlock on |
+| 1 | **Vault list** (tab Vault) | The demo vault "Demo", unlocked; the folders "Acme" and "Personal" and the items visible; no sheet, no toast | `-ApassyDemo YES -ApassyOpen vault` |
+| 2 | **Credential page** of the login "GitHub" (demo, id 100) | Username visible, password **masked**, the one-time code tile with its countdown, the website row with Open | `-ApassyDemo YES -ApassyOpen item:100` |
+| 3 | **AutoFill sheet** in Safari | Not possible with the demo: the AutoFill extension never sees demo items. Capture it with a vault of demo data of your own (a Mac vault with the items of "Demo data"), or leave it out | — |
+| 4 | **Requests** (tab Requests) with the waiting requests | The run question of Claude Code for "Stripe live key" and the access request of Codex for "OpenAI", both from "Mac mini (demo)" | `-ApassyDemo YES -ApassyOpen decisions` |
+| 5 | **Agent Access** | The agents of "Mac mini (demo)" and "MacBook Pro (demo)" with their uses | `-ApassyDemo YES -ApassyOpen agents` |
+| 6 | **Watchtower** | The weak, reused, and old passwords of the demo ("Production Postgres" and "Netflix") | `-ApassyDemo YES -ApassyOpen watchtower` |
+| 7 | **Settings** | The groups of Settings with their tiles | `-ApassyDemo YES -ApassyOpen settings` |
+| 8 | **Lock** with Face ID over the cover | The Apassy icon on the cover while the Face ID sheet asks (Simulator: Features › Face ID › Enrolled; capture before the match) | `-ApassyDemo YES`, then Settings › Security › Lock now (the demo has "Unlock with Face ID" on) |
+
+More demo states, for the video or a replacement screenshot:
+
+| State | Launch arguments, then |
+| --- | --- |
+| The welcome with "Try the Demo" | No argument, on a fresh Simulator |
+| The access request, before the answer | `-ApassyDemo YES -ApassyOpen decisions`, tap the request of Codex |
+| Allow Once with Face ID | The same, tap Allow Once (Simulator: Features › Face ID › Matching Face) |
+| Find duplicates | `-ApassyDemo YES -ApassyOpen settings:general`, tap Find duplicates |
+| A revealed password | `-ApassyDemo YES -ApassyOpen item:109:reveal` (Simulator only) |
+| History | `-ApassyDemo YES -ApassyOpen decisions`, tap History |
+| "Not available in the demo" | Settings › Devices › Pair with a Mac |
 
 Notes:
 
-- Screenshot 3 needs the AutoFill extension turned on in the Simulator's Settings › General ›
-  AutoFill & Passwords. If the UI test cannot capture Safari reliably, M19 captures it by hand with
-  the same demo data.
-- The preview data may name a real agent product (for example "Claude Code"), a third-party name.
-  Recommendation for the owner: use a neutral demo name such as "coding agent" unless the owner accepts the risk of a 2.3.7 or
-  5.2 question; the plan does not decide it. M19 uses the neutral name by default.
+- Screenshot 3 cannot come from the demo: the AutoFill extension never sees a demo item (by
+  design). It needs a vault of demo data of its own on the Simulator (the items of "Demo data",
+  made on a Mac or with "iCloud · Free") and the AutoFill extension turned on in Settings › General
+  › AutoFill & Passwords. If that is too much for v1, leave screenshot 3 out (7 screenshots).
+- The demo names real agent products ("Claude Code", "Codex", "T3 Code") and real services
+  (GitHub, Stripe, OpenAI, Netflix) as sample items, as password managers do in their demos.
+  Recommendation for the owner: keep them in the app; if the owner does not accept the risk of a
+  2.3.7 or 5.2 question for the store screenshots, rename the agents in `DemoVault.feed` and the two
+  waiting requests before M19 captures them.
 
 ## Apple Watch (the size that App Store Connect asks for)
 
 | # | Screen | Exact state | How to reach it |
 | --- | --- | --- | --- |
 | 1 | **Requests** | Two waiting access requests from the Mac "Studio", rows with the agent and the credential | `-ApassyWatchPreview requests` (`WatchPreviewState`, `WatchPreview.swift`; Simulator or Debug only) |
-| 2 | **Request** detail | One request with the agent, the credential, the project, and the buttons **Allow once** and **Deny** | `-ApassyWatchPreview detail` (with `-ApassyWatchScrollToEnd YES` for the buttons) |
+| 2 | **Request** detail | One request with the agent, the credential, the project, and the buttons **Allow once** and **Deny** | `-ApassyDemo YES` (every build: the sample of "See a Sample", from "Mac mini (demo)"), or `-ApassyWatchPreview detail`; add `-ApassyWatchScrollToEnd YES` for the buttons (Simulator or Debug) |
 | 3 | **This watch** | The connected vault "Personal" and the Mac "Studio"; connected state | `-ApassyWatchPreview connected` |
 
 ## Demo data
 
-The same set in the screenshots, the review vault ([review-notes.md](review-notes.md) section 3), and
-the demo video:
+The demo of the app (`DemoVault` in `ios/ApassyVaultKit/Sources/ApassyVaultDemo`) is the one set
+for the screenshots, the reviewer ([review-notes.md](review-notes.md) section 3), and the demo
+video. The ids are those of `-ApassyOpen item:<id>`:
 
-| Item | Kind | Folder | Values |
-| --- | --- | --- | --- |
-| GitHub | Login + one-time code | Work | `demo@example.com`, generated password, random TOTP secret, `github.example.com` |
-| Stripe test key | API key | Side project | `sk_test_` followed by random characters (not a real key format check) |
-| Deploy server | SSH key | Work | a new random Ed25519 key |
-| Router | Login | — | `admin`, password `password1` (weak, for Watchtower) |
-| Mail | Login | — | `demo@example.com`, the same password as "Forum" (reused) |
-| Forum | Login | — | `demo@example.com`, the same password as "Mail" (reused) |
-| GitHub (copy) | Login | Work | the same as GitHub (for Find duplicates) |
-| Wi-Fi at home | Custom (`wifi`) | — | network name `DemoNet`, a generated password |
-| Notes | Custom (`note`) | — | "Demo note" |
+| Id | Item | Kind | Folder | Values |
+| --- | --- | --- | --- | --- |
+| 100 | GitHub | Login + one-time code | Acme | `octocat`, synthetic password, synthetic TOTP secret, `https://github.com`, a note |
+| 101 | Stripe live key | API key (production) | Acme › Billing | a synthetic `sk_synthetic_` token |
+| 102 | OpenAI | API key | — | a synthetic token |
+| 103 | Production Postgres | Database | Acme › Billing | the weak password `short1` (Watchtower) |
+| 104 | Deploy key | SSH key | Acme | a synthetic key |
+| 105 | Netflix | Login | Personal | `family@example.com`, `short1` (reused, Watchtower) |
+| 106 | Wi-Fi at home | Custom | Personal | synthetic words |
+| 107 | GitHub (conflict copy) | Login | Acme | an older synthetic password (a conflict copy) |
+| 108 | Old Heroku | API key | — (archived) | a synthetic token |
+| 109 | Example Shop | Login + one-time code | Personal | `demo@example.com`, `https://shop.example.com` |
+| 110 | Recovery notes | Custom | Personal | a note |
+| 111 | Netflix (old) | Login | Personal | the same website and username as Netflix (Find duplicates) |
+| 112 | Demo passkey | Login + passkey | Personal | `demo@example.com` on `demo.example.com` |
 
-Mac name: "Studio". Agent: "coding agent" (see the note above). Vault name: "Personal" for the
-screenshots, "App Review" for the review vault.
+Vault name: "Demo". Macs: "Mac mini (demo)" (it asks) and "MacBook Pro (demo)" (stale). Agents of
+the sample feed: Claude Code, Codex, T3 Code, and "CI on GitHub" (see the note above about agent
+product names). Passphrase: `demo passphrase`.
 
 ## Demo video (M19)
 

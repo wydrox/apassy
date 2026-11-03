@@ -1360,11 +1360,17 @@ pub fn insert_agent(
             }
         }
 
+        // A node with the MCP authorization flow counts every agent that is not revoked:
+        // an agent of the flow has no live token until its client trades a code, and
+        // between two access tokens (decided 2026-11-03). Elsewhere an expired agent
+        // frees its place.
+        let every_agent = core.config.oauth.is_some();
         let agents: i64 = tx
             .query_row(
                 "SELECT count(*) FROM agent a JOIN member m ON m.id = a.member_id \
-                 WHERE a.revoked_at IS NULL AND a.expires_at > ?1 AND m.revoked_at IS NULL",
-                params![to_i(now)],
+                 WHERE a.revoked_at IS NULL AND (?2 OR a.expires_at > ?1) \
+                 AND m.revoked_at IS NULL",
+                params![to_i(now), every_agent],
                 |row| row.get(0),
             )
             .map_err(db)?;

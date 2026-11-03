@@ -1,9 +1,10 @@
 # Export compliance: Apassy for iPhone and Apple Watch
 
 Unit M18 (Appendix A.3 of [implementation-plan-misc.md](../../design/implementation-plan-misc.md)).
-This is a **fact sheet and a set of draft answers for the owner's legal check**. It is not legal
-advice. Every answer below is a recommendation; the owner decides, and checks the exact questions
-in App Store Connect at upload time, because Apple changes their wording.
+This is a **fact sheet and the answers that follow from the owner's decision of 2026-11-03**
+("describe the app correctly", section 2). It is not legal advice. The U.S. and France sections stay
+recommendations for the owner's legal check. Check the exact questions in App Store Connect when you
+answer them, because Apple changes their wording.
 
 ## 1. Inventory: what encryption the app uses
 
@@ -34,34 +35,78 @@ Its **main function is information security**: a password manager that keeps sec
 So the narrow exemptions for "authentication only", "copy protection", or "encryption only inside
 Apple's operating system" do not describe this app.
 
-## 2. Draft answers to the App Store Connect questions
+## 2. The decision and the answers
 
-App Store Connect asks these questions for the first build when `ITSAppUsesNonExemptEncryption` is not
-set, or at App Review submission (wording of 2025–2026; check it at upload).
+**Owner decision (2026-11-03): "describe the app correctly".** The app implements its own standard
+encryption (SQLCipher with OpenSSL, rustls, ring, the ChaCha20-Poly1305 sealing of section 1), and the
+purpose of that encryption is the confidentiality of data. It is not limited to the encryption of
+Apple's operating system, and it is not one of the narrow exemptions. So:
 
-| Question | Draft answer | Reason |
+- `ITSAppUsesNonExemptEncryption` is **`true`** for the iPhone app and the watch app:
+  `ios/ApassyCompanion/project.yml` (the `info` properties of the targets `ApassyCompanion` and
+  `ApassyWatch`), and the generated `ios/ApassyCompanion/Info.plist` and
+  `ios/ApassyCompanion/Watch/Info.plist`. The AutoFill extension's `Info.plist` has no such key;
+  App Store Connect reads the key of the app bundle, and the extension ships inside it.
+- `ITSEncryptionExportComplianceCode` is **not set yet**. It is set when Apple gives the code
+  (section 2.3).
+
+### 2.1 The App Store Connect answers
+
+App Store Connect asks these questions for a build that says `true` and has no compliance code, in
+the build's "Missing Compliance" dialog, or in App Store Connect › App Information › App Encryption
+Documentation (wording of 2025–2026; check it when you answer, because Apple changes it).
+
+| Question | Answer | Reason |
 | --- | --- | --- |
-| Does your app use encryption? | **Yes** | Rows of section 1 |
-| What type of encryption algorithms does your app implement? | **Standard encryption algorithms instead of, or in addition to, using or accessing the encryption within Apple's operating system** | SQLCipher with OpenSSL, rustls and ring are in the app, beside CryptoKit, CommonCrypto and URLSession |
-| Proprietary or non-standard algorithms? | **No** | Section 1 |
-| Is your app going to be available on the App Store in France? | **The owner's call** (section 4) | |
-| Does your app qualify for an exemption of Category 5, Part 2 (if Apple asks it)? | **The owner's call** (section 3). The draft: the app is a mass-market item (5D992.c), not an exempt item | |
+| Does your app use encryption? | **Yes** | Section 1 |
+| What type of encryption algorithms does your app implement? | **Standard encryption algorithms instead of, or in addition to, using or accessing the encryption within Apple's operating system** | SQLCipher with OpenSSL, rustls and ring are linked into the app, beside CryptoKit, CommonCrypto and URLSession |
+| Proprietary or non-standard algorithms (not accepted by international standard bodies such as IEEE, IETF, ITU)? | **No** | Every algorithm of section 1 is an IETF, NIST or ISO standard |
+| Is your app going to be available on the App Store in France? | **No** (the default, section 4) | France is left out of the first App Store version until the ANSSI declaration is filed |
+| Category 5, Part 2 exemption (if Apple asks it) | **No exemption**: mass market | The main function is information security, so the narrow exemptions do not apply |
+| U.S. classification (if App Store Connect shows or asks it) | **5D992.c, mass market**, License Exception ENC § 740.17(b)(1) | Section 3 |
 
-### `ITSAppUsesNonExemptEncryption`
+With the API (section 2.2) the same answers are the attributes of the declaration:
 
-- Today the iPhone and the watch `Info.plist` say `false` (`ios/ApassyCompanion/project.yml`, keys of
-  the app and of the watch app). ADR 0023 §8 records that the owner chose this for the TestFlight build.
-- With the inventory above, `false` ("only exempt encryption") is **not an accurate description**: the
-  app implements standard encryption beyond Apple's, and its main function is confidentiality.
-- **Recommendation for the owner:** before the App Store submission, either
-  - set `ITSAppUsesNonExemptEncryption` to `true` in `project.yml` for the app and the watch app,
-    answer the questions above in App Store Connect, and upload any document that App Store Connect
-    asks for (for France: the ANSSI declaration, section 4). After Apple approves, App Store Connect
-    gives a code; set `ITSEncryptionExportComplianceCode` to it, so that later builds skip the questions; or
-  - keep `false` only if the owner's legal check concludes that the app is exempt from the document
-    requirement (for example because the U.S. treatment of publicly available open-source encryption
-    applies, section 3) **and** that France needs no declaration. Write the reason down in ADR 0023 D4.
-- The change of `project.yml` is a code change and a new build. It is not part of this unit.
+| Attribute of `appEncryptionDeclarations` | Value |
+| --- | --- |
+| `appDescription` | "A password manager. The app encrypts its vault with SQLCipher (AES-256, OpenSSL), seals requests and answers with ChaCha20-Poly1305, signs with ECDSA P-256, and connects to its relay with TLS (rustls). Only standard algorithms; no proprietary cryptography; no user-adjustable cryptography." |
+| `containsProprietaryCryptography` | `false` |
+| `containsThirdPartyCryptography` | `true` (OpenSSL, rustls, ring are third-party libraries) |
+| `availableOnFrenchStore` | `false` (section 4) |
+
+### 2.2 TestFlight: each build needs the answer until there is a code
+
+- A build that says `true` and has no `ITSEncryptionExportComplianceCode` stops in App Store Connect
+  with **"Missing Compliance"** after processing. Until a declaration is attached, TestFlight does not
+  give the build to testers, internal testers included.
+- Answer it through the **App Store Connect API**, with the same API key that
+  `scripts/ios-testflight.sh` uses, so that uploads stay automatic:
+  1. Once: make the declaration. `POST /v1/appEncryptionDeclarations` with the attributes of the table
+     above and the relationship `app` (the app record of `com.wydrox.apassy.companion`). Keep its id.
+     `GET /v1/apps/{app id}/appEncryptionDeclarations` lists existing ones; reuse an approved one
+     instead of making a new one.
+  2. After each upload: wait until the build is processed. Find it with
+     `GET /v1/builds?filter[app]={app id}&filter[version]={build number}` and wait for
+     `processingState` `VALID`.
+  3. Attach the declaration to the build: `POST /v1/appEncryptionDeclarations/{declaration id}/relationships/builds`
+     with `{"data":[{"type":"builds","id":"{build id}"}]}`. The build then leaves "Missing
+     Compliance", and the TestFlight group assignment continues.
+  4. Read back `GET /v1/builds/{build id}/appEncryptionDeclaration` and the build's TestFlight state
+     before the release report claims a processed build in the intended group (AGENTS.md).
+- Do not answer with `PATCH /v1/builds/{id}` `usesNonExemptEncryption = false`: that would say the
+  opposite of the `Info.plist` and of this file.
+- This is an account action. An agent runs it only when the owner has approved the TestFlight upload
+  of that release.
+
+### 2.3 Later: the compliance code
+
+- When Apple approves the declaration, App Store Connect › App Information › App Encryption
+  Documentation shows the declaration's code and the key to add: `ITSEncryptionExportComplianceCode`.
+- Then add `ITSEncryptionExportComplianceCode: <code>` next to `ITSAppUsesNonExemptEncryption: true`
+  in both `info` blocks of `project.yml` (and so in both generated `Info.plist` files). Later builds
+  with the code skip "Missing Compliance", and step 3 of section 2.2 is no longer needed.
+- Make a new declaration (and a new code) if the encryption of section 1 changes in a way that changes
+  an answer of section 2.1, or when France is added (section 4).
 
 ## 3. United States (EAR): the facts for the owner's check
 
@@ -90,14 +135,15 @@ Recommendations, not legal advice.
   A means that gives confidentiality, such as this app, needs a **declaration to ANSSI** before it is
   supplied in France, unless an exemption of the decree applies.
 - Apple asks the France question and, if the answer is "Yes", may ask for the ANSSI document.
-- **Options for the owner:**
-  1. Make the ANSSI declaration (no fee; the decision takes about one month), then make the app
-     available in France and answer "Yes".
-  2. Remove France from the availability of the first App Store version, answer "No", and add France
-     after the declaration.
-  3. Conclude, with legal advice, that an exemption applies, and record the reason.
-- Recommendation of this unit: option 2 for the first version, then option 1. It does not delay the
-  rest of the world.
+- **Default for the first App Store version (recorded 2026-11-03):** France is **not** in the
+  availability of the app (App Store Connect › Pricing and Availability), and the declaration says
+  `availableOnFrenchStore = false` ("No" to the France question).
+- **When the owner files the ANSSI declaration** (no fee; the decision takes about one month): make a
+  new encryption declaration that says France "Yes", upload the ANSSI document that App Store Connect
+  asks for (`appEncryptionDeclarationDocuments`, or the upload in App Store Connect), add France to the
+  availability, and update `ITSEncryptionExportComplianceCode` to the new declaration's code.
+- An exemption under the decree is possible only with legal advice; if the owner concludes that one
+  applies, record the reason here before adding France without a declaration.
 
 ## 5. Other countries
 

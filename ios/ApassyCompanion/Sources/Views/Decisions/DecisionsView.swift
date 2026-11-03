@@ -53,6 +53,11 @@ struct DecisionsView: View {
         return nil
     }
 
+    /// "Connect this iPhone": the scanner of a Connect code, except in the demo.
+    private func connect() {
+        if root?.isDemo == true { root?.showNotAvailableInDemo() } else { showsConnect = true }
+    }
+
     private var requestsListVisible: Bool {
         scenePhase == .active && destination == .waiting && path.isEmpty && !showsConnect && !showsMac && !localSheetPresented
             && questions?.unlockPrompt == nil && session?.actionError == nil
@@ -139,6 +144,8 @@ struct DecisionsView: View {
             questions?.setRequestsPresented(isPresented)
             questions?.setRequestsVisible(requestsListVisible)
         }
+        // `-ApassyOpen access:<request id>`: in the Simulator, and in the demo of every build (screenshots).
+        .task { if LaunchRoutes.enabled(isDemo: root?.isDemo == true) { await openAccessFromLaunchArgument() } }
         .onDisappear { questions?.setRequestsVisible(false) }
         .onChange(of: isPresented, initial: true) { _, presented in
             questions?.setRequestsPresented(presented)
@@ -175,6 +182,26 @@ struct DecisionsView: View {
         }
     }
 
+    /// `-ApassyOpen access:<request id>`: the detail of that access request, once Requests has read
+    /// it (waiting first, then History).
+    private func openAccessFromLaunchArgument() async {
+        guard let route = UserDefaults.standard.string(forKey: "ApassyOpen"), route.hasPrefix("access:"),
+            let questions
+        else { return }
+        let wanted = String(route.dropFirst("access:".count))
+        for _ in 0..<50 {
+            if let request = questions.access.requests.first(where: { $0.card.request_id == wanted }) {
+                path = [.access(request.id, history: false)]
+                return
+            }
+            if let request = questions.access.history.first(where: { $0.card.request_id == wanted }) {
+                path = [.access(request.id, history: true)]
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
     // MARK: The list
 
     private func list(now: Date) -> some View {
@@ -196,7 +223,9 @@ struct DecisionsView: View {
                         NavigationLink(value: DecisionRoute.access(request.id, history: false)) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(request.card.item.name).font(.headline)
-                                Text("\(request.card.agent.name) (id \(request.card.agent.id)) · \(request.card.asker.name)")
+                                // The agent by its name, with the Mac it runs on: two agents of the same name on
+                                // two Macs stay apart. The numeric id is for Exact identities only.
+                                Text(verbatim: "\(AccessText.escaped(request.card.agent.name)) · \(AccessText.escaped(request.card.asker.name))")
                                     .font(.subheadline).foregroundStyle(.secondary)
                                 if let receipt = request.receipt { Text("Answered on \(receipt.device_name ?? request.card.asker.name)") }
                             }
@@ -340,7 +369,7 @@ struct DecisionsView: View {
             ContentUnavailableView {
                 Label("Connect a Mac", systemImage: "desktopcomputer")
             } description: { Text("Approve requests on this iPhone.") } actions: {
-                Button("Connect this iPhone") { showsConnect = true }.buttonStyle(.bordered).frame(minHeight: 44)
+                Button("Connect this iPhone") { connect() }.buttonStyle(.bordered).frame(minHeight: 44)
             }
         default:
             ContentUnavailableView {
@@ -420,11 +449,12 @@ struct DecisionsView: View {
                 Menu {
                     if let questions {
                         if questions.canConnect {
-                            Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { showsConnect = true }
+                            Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { connect() }
                         }
                     }
                     Button(session.map { "\($0.macName) on Wi-Fi" } ?? "Mac on Wi-Fi", systemImage: "wifi") {
-                        showsMac = true
+                        // The demo pairs with no Mac: the pairing would make keys in the keychain.
+                        if root?.isDemo == true { root?.showNotAvailableInDemo() } else { showsMac = true }
                     }
                 } label: {
                     Label("Devices", systemImage: "ellipsis")

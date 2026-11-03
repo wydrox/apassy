@@ -52,6 +52,13 @@ the shared marketing version. Before upload, read App Store Connect and choose a
 valid higher build number; a build-number increment alone does not replace the
 marketing-version bump. Keep the iOS 26 deployment target and required toolchain.
 
+The iPhone and watch app declare `ITSAppUsesNonExemptEncryption = YES`. Until
+`project.yml` has an `ITSEncryptionExportComplianceCode`, a processed build stays in
+"Missing Compliance" and no tester gets it: attach the app's encryption declaration
+to the build through the App Store Connect API
+([export-compliance.md](../store/app-store/export-compliance.md) section 2.2) before
+you check the TestFlight group. A build in "Missing Compliance" is not delivered.
+
 Read back all six destinations after delivery: the signed macOS download and
 `latest.json` (including hashes/source), processed TestFlight marketing version and
 build in the intended group, public extension listing/package, public Linux node
@@ -82,6 +89,23 @@ The `linux-cli` component of `release-versions.json` is the Linux node from 0.5.
 - Test the workflow on a test tag before the release tag (plan L3): the owner pushes `image-test-<version>-<n>` on the release commit. The tag builds artifacts only; deployment stays a separate step.
 
 To stage `/dl/` for the Worker deploy, download the artifacts of the run (`gh run download RUN_ID -n apassy-node-linux-x86_64 -n apassy-node-linux-aarch64 -n apassy-node-sha256sums -n apassy-team-linux-x86_64 -n apassy-team-darwin-arm64`), copy the four packages and both team CLIs into `crates/apassy-relay/deploy/worker/public/dl/`, write `dl/SHA256SUMS` with all six lines (`SHA256SUMS-node`, `SHA256SUMS-linux`, `SHA256SUMS-darwin`), and `dl/release.json` with `version`, `commit`, `artifacts` (the two team CLIs, as before), and `node` (a map from each package's file name to its `sha256` and `size`). `check-public-assets.py` refuses a staging that misses one of them, and reads every file back from the public origin. `install.sh` picks the single `apassy-<x.y.z>-linux-<arch>.tar.gz` of `SHA256SUMS` on Linux and the team CLI on macOS.
+
+## 0.5.16 coordinated release
+
+0.5.16 collects the work on main since 0.5.15 (Apple Watch, passkey PRF and
+large blob, full Credential Exchange import, Find duplicates, Agents and
+Decisions of every Mac, the decision log) and the release branch: remote agents
+through the Mac's node and the MCP authorization flow, the Bouncer section, the
+fixes for the over-asking bouncer and the idle CPU, the review fixes, and the
+iPhone demo with the App Store package. All six components move to 0.5.16; the
+relay, the Linux CLI and the extension come from 0.5.14. The vault schema goes
+to 27, relay team schema to 7, and the relay directory to 1004. Build the relay
+image with `relay-image.yml` (tag `image-release-0.5.16`) and deploy it only
+after the owner approves the exact image and backup.
+
+State on 2026-11-03: prepared, not published. The version bump and the changelog
+are on `r16/version-bump` (from `release/0.5.16`). No component is live at 0.5.16
+and there is no tag `v0.5.16`.
 
 ## 0.5.15 coordinated release
 

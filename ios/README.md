@@ -155,6 +155,64 @@ What the companion does with what it sees:
 - A key that cannot be used again (a changed Face ID enrollment) ends the pairing and shows the pairing flow with the reason. A failed Face ID match does not: the owner can try again.
 - It offers no way to paste the pairing link, and registers no URL scheme: the code is scanned inside the app.
 
+### The demo (every build)
+
+"Try the Demo" lets App Review and new owners try the app without a Mac. It is a secondary button
+on the first screen, and, when real vaults are on the iPhone, it is only in Settings > Advanced >
+About. `-ApassyDemo` opens it at launch in every build (Simulator, TestFlight, App Store), for
+screenshots: the real vaults stay closed until the owner leaves the demo.
+
+- **What it is.** A vault "Demo" of synthetic data in memory (`ApassyVaultDemo`, `DemoVault` over
+  `PreviewVaultService`): logins with websites and one-time codes (GitHub, Example Shop), a passkey
+  (`demo.example.com`), API keys, an SSH key, a database, notes, folders, an archived item, a
+  planted duplicate ("Netflix" and "Netflix (old)", and a conflict copy of GitHub), the agents of
+  "Mac mini (demo)" and "MacBook Pro (demo)" with their uses, one waiting run question and one
+  waiting access request from "Mac mini (demo)" (both wait 30 minutes from the start of the demo),
+  and past decisions in History. The passphrase of the demo is `demo passphrase`; the lock screen
+  and the passphrase prompt of the demo say so.
+- **What it never touches.** No file, no App Group defaults, no keychain item, no Face ID
+  frequency setting, no AutoFill identity (`ASCredentialIdentityStore`), no push registration, no
+  relay, no iCloud, no network. The settings, the stored passphrase, and the answer key of the demo
+  are in memory (`DemoSession`, `DemoAppSession`). The live root is built from an `AppWorld`; the
+  demo gets it only for the pasteboard. The AutoFill extension does not link `ApassyVaultDemo`.
+- **What works.** Reveal and copy (fake values, the normal owner check and clipboard expiry),
+  ticking one-time codes, search, Watchtower, the generator, Find duplicates (Settings > General),
+  Allow Once on the access request (the real Face ID prompt with the same reason text; the answer is
+  signed with a key in memory and settles locally), Deny, the run question, Agent Access, and
+  Settings. Pairing, the relay, Add Apple Watch, import and export, AutoFill setup, notifications,
+  and the Face ID frequency say "Not available in the demo".
+- **Leaving.** The banner "Demo — sample data only" stays above the screens and sheets of the
+  demo. "Leave Demo" (in the banner, and in Settings > Advanced) drops the demo root with all its
+  models and shows the first screen again, or the real vault where it was.
+- **The watch.** A watch with no vault has "See a Sample": one synthetic access request of
+  "Mac mini (demo)" with Allow once and Deny, answered in memory (`DemoWatch`). Allow once in the
+  sample does not check the wrist: that check needs the key of a connected vault, and the sample
+  says so. `-ApassyDemo` on the watch opens the sample at launch.
+
+`-ApassyOpen <route>` (below) also works in the demo of every build. With `-ApassyDemo`, pass a
+value to the flag when another flag follows it (`-ApassyDemo YES -ApassyOpen decisions`), so the
+argument domain does not read the next flag as its value. The item ids of the demo:
+
+| Id | Item |
+| --- | --- |
+| 100 | GitHub (login, website, one-time code, notes) |
+| 101 | Stripe live key (API key, production) |
+| 102 | OpenAI (API key) |
+| 103 | Production Postgres (database, weak and reused password) |
+| 104 | Deploy key (SSH key) |
+| 105 | Netflix (login; duplicate of 111) |
+| 106 | Wi-Fi at home (custom) |
+| 107 | GitHub (conflict copy) |
+| 108 | Old Heroku (archived) |
+| 109 | Example Shop (login, website, one-time code) |
+| 110 | Recovery notes (notes) |
+| 111 | Netflix (old) (the planted duplicate) |
+| 112 | Demo passkey (passkey) |
+
+```
+xcrun simctl launch booted com.wydrox.apassy.companion -ApassyDemo YES -ApassyOpen decisions
+```
+
 ### Simulator launch arguments
 
 A Simulator build (never a device build) takes these development aids:
@@ -164,7 +222,7 @@ A Simulator build (never a device build) takes these development aids:
 | `-ApassyPreviewVault`, `-ApassyPreviewEmpty`, `-ApassyPreviewUnlocked` | The in-memory vault with synthetic items (passphrase `preview passphrase`), an empty iPhone, or the vault unlocked. |
 | `-ApassyJoinLink <link>`, `-ApassyJoinPassphrase <passphrase>` | A join as if the code had been scanned, and the passphrase step. |
 | `-ApassyUnlockPassphrase <passphrase>` | Unlock once at launch. |
-| `-ApassyOpen <route>` | Open a screen. The routes are below. |
+| `-ApassyOpen <route>` | Open a screen. The routes are below. It works in the demo of every build too. |
 | `-ApassyPasteDemo stripe\|env` | Fill New Credential with synthetic values that the preview vault detects: one Stripe key, or a `.env` with three lines. Use it with `-ApassyOpen newcredential`. |
 | `-ApassyPreviewDecisions list\|detail\|vaults\|locked` | With `-ApassyPreviewVault`, give the preview vault synthetic questions and confirmed/unconfirmed history fixtures. Preview answer keys are ephemeral and never written to Keychain. `detail` explicitly opens the newest fixture question; real generic notification taps open the refreshed list. `vaults` adds the questions of a second vault, "Work". `locked` also adds a third vault, "Family", whose questions are locked; the preview passphrase opens them. |
 | `-ApassyPreviewAgents list\|detail\|confirm\|stale\|restricted\|unverified\|othervault` | With `-ApassyPreviewVault`, give the preview vault the synthetic feeds of two Macs and two vaults. `detail` opens Claude Code on the Mac mini, `confirm` opens Codex and asks to remove its exception, `stale` opens the agent of a Mac that has not reported for three days, `restricted` opens the "only these items" agent of Work, `unverified` removes one of its rows and gets a settle that this iPhone cannot open, and `othervault` opens that agent of Work, a vault that is not selected, whose feed came after its keys were read: "Remove" reads them again first (the preview passphrase stands in for the one stored behind Face ID). Add `-ApassyPreviewAgentsScroll exceptions` (or `sees`) to scroll an agent's page to its exceptions (or to what it sees). |
@@ -180,13 +238,14 @@ The `-ApassyOpen` routes:
 | `folder:<uuid or name>` | A folder, with its parents pushed. |
 | `newcredential` | New Credential. |
 | `decisions`, `questions`, or `approvals` | The Requests tab; all three compatibility route names remain accepted. |
+| `access:<request id>` | The detail of an access request in Requests, waiting or in History (the demo: `access:demo-81`, `access:demo-79`). |
 | `agents` | Settings > Agent Access. |
 | `settings` or `settings:general\|agents\|devices\|security\|advanced` | Settings, or one of its groups. |
 | `generator` | The password generator. |
 | `search:<text>` | The Search tab with the text. |
 | `new:<kind>` | The editor for a new credential. The kinds are `login`, `api_key`, `ssh_key`, `database`, and `custom`. |
 | `edit:<id>` | The editor for the credential with this id. |
-| `item:<id>[:reveal\|:large\|:options]` | A credential; with its first secret revealed, in large type, or scrolled to Options. |
+| `item:<id>[:reveal\|:large\|:options]` | A credential; with its first secret revealed, in large type, or scrolled to Options (these three in the Simulator only). |
 
 For a join with the real core, run a Mac on the fake relay of the tests, then launch the Simulator build with the link it prints:
 
@@ -337,6 +396,9 @@ A Simulator or Debug build takes these development aids:
 | `-ApassyWatchPreview <state>` | Synthetic data for screenshots, with in-memory keys and no core: `unpaired`, `failed` (the words did not match), `removed`, `words`, `connected`, `empty`, `requests`, `detail`, `denyonly`, `sent`, `notconfirmed`, `allowed`, `denied`, `expired`, `settings`. |
 | `-ApassyWatchConnectLink <link>` | Start a connection with the real core as if the iPhone had sent the Connect code (the Simulator cannot scan). The link is a secret for its few minutes; use a code of a Mac that you own and keep it out of shell history. |
 
+Every build also takes `-ApassyDemo`: the sample of "See a Sample" at launch, in memory only, with
+no link to the iPhone.
+
 ```
 xcrun simctl launch booted com.wydrox.apassy.companion.watchkitapp -ApassyWatchPreview detail
 ```
@@ -360,7 +422,7 @@ When the API key has no access to cloud-managed distribution certificates (the e
 
 The build number is the minutes since 1970, so each run is higher than the last; the version is `MARKETING_VERSION` in `project.yml`. App Store Connect needs a few minutes to process a build. Internal testers of the team see it in TestFlight then. `--no-upload` writes the `.ipa` to `target/ios/export` instead.
 
-The app declares `ITSAppUsesNonExemptEncryption = NO` (ADR 0023, section 8), so a build needs no export compliance answer.
+The app and the watch app declare `ITSAppUsesNonExemptEncryption = YES` (owner, 2026-11-03; ADR 0023, section 8): the app has its own standard encryption (SQLCipher with OpenSSL, rustls, ring). Until Apple gives an `ITSEncryptionExportComplianceCode`, each processed build shows "Missing Compliance" and TestFlight holds it back from testers. Attach the app's encryption declaration to the build through the App Store Connect API (`appEncryptionDeclarations`, then its `builds` relationship), as [docs/store/app-store/export-compliance.md](../docs/store/app-store/export-compliance.md) section 2.2 describes. When the code exists, add it next to the flag in `project.yml` and later builds skip the step.
 
 ### Connect without an account
 

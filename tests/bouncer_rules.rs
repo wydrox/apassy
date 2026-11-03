@@ -1028,6 +1028,7 @@ fn live_laya_broker_path() {
         purpose: "warm".to_owned(),
         env_names: Vec::new(),
         instruction: String::new(),
+        task_provenance: String::new(),
     });
 
     let clean = run(&fx, &["echo", "check", "ok"], "Print a check message.");

@@ -6,8 +6,8 @@ and [ADR 0011](../adr/0011-run-proxy-placeholders.md) stage 7. Plan:
 [implementation-plan-0037-cloud-agents.md](../design/implementation-plan-0037-cloud-agents.md), decisions 3
 to 8. The relay side (the public listener, its scope, the failed-auth limiter, the item list of an
 agent, the in-process release) is in `crates/apassy-relay` (its `docs/SPEC.md` sections 11, 12, 14, and
-30). The app side (the node, the host loop, Funnel, Settings → Cloud agents) is in work units U2 and U3
-and is not released yet. A change to this document changes the relay, the app, and the plugin in
+30). The app side (the node, the host loop, Funnel, Bouncer › Agents › Remote Access) is in work units U2 and U3
+and ships in 0.5.16. A change to this document changes the relay, the app, and the plugin in
 [`deploy/plugins/apassy-cloud/`](../../deploy/plugins/apassy-cloud/README.md) together.
 
 ## 1. Purpose and scope
@@ -30,7 +30,7 @@ reach (section 3).
 | Word | Meaning |
 | --- | --- |
 | Node | The relay inside the Apassy app on the owner's Mac, with a personal team for one vault. |
-| Public listener | The node's second listener, on `127.0.0.1:<port>`. Tailscale Funnel is its only way in. |
+| Public listener | The node's second listener, on `127.0.0.1:<port>`. Tailscale Funnel is its only way in from outside the Mac. The loopback bind does not keep the programs of the Mac away: any local program, a coding agent too, can connect to that port and run the whole flow (section 4) as any client name (review 0.5.16). The owner's prompts therefore name where the code goes back ("Returns to <host>"; a loopback redirect is "Returns to a program on a computer (localhost)", and the Mac adds "A program on this Mac can start this request."). |
 | Public URL | `https://<Mac>.<tailnet>.ts.net:8443`: the Funnel origin of the Mac. `<Mac>` is the machine name and `<tailnet>` the tailnet name of `tailscale status`. |
 | Agent token | The bearer token of one cloud agent: `apassy_tagt_<team id>_<64 hex>`. From the authorization flow it is the access token (24 h, refreshed); from the CLI fallback it lives 30 to 365 days. |
 | Connect request | A remote client's request to connect, made by `/oauth/authorize`. It waits 300 s for the owner, with a match code that the browser page and the app both show. |
@@ -43,7 +43,7 @@ reach (section 3).
 ## 3. The route
 
 - The public URL is `https://<Mac>.<tailnet>.ts.net:8443`. Port 8443, never 443. The route is off by
-  default. The owner turns it on in Settings → Cloud agents.
+  default. The owner turns it on in Bouncer › Agents › Remote Access.
 - TLS ends in `tailscaled` on the Mac. `tailscaled` connects to the public listener from the loopback.
 - The public listener serves these routes only:
   - `POST /mcp`: the MCP endpoint (section 5).
@@ -82,11 +82,20 @@ registration (RFC 7591). The relay side is in its `docs/SPEC.md` section 31. The
    client secret.
 4. It opens `GET /oauth/authorize?response_type=code&client_id=…&redirect_uri=…&state=…&code_challenge=…
    &code_challenge_method=S256` in the user's browser (`scope=apassy` and `resource=<public URL>/mcp` are
-   optional). The node makes a connect request and sends the browser to `/oauth/wait/<id>`.
-5. The page says "<client> wants to connect to <Mac>", shows a match code such as `K7Q-4MD`, and reloads
+   optional). The node makes a connect request and sends the browser to `/oauth/wait/<id>`. A client
+   has one waiting request: a new `authorize` of it with other parameters ends the waiting one (its
+   page says "The request ended.") and makes a new one with its own page and code. A client id is
+   public, so a request that someone else keeps open never stands in for this browser's. A bad
+   request (response type, PKCE, `resource`, `state` over 512 bytes) goes back to `redirect_uri` with
+   `error` only for a client that the owner allowed before; for a new client it is the page "This
+   connection link is not valid.", so a link of the node is never an open redirect.
+5. The page says "<client> wants to connect to your Mac" (never the computer name: the page is public),
+   shows a match code such as `K7Q-4MD`, and reloads
    every 3 seconds. It has no button: the owner allows the request in Apassy on the Mac (Decisions, with
-   Touch ID) or on the iPhone, where the same code shows. Apassy must be open and unlocked; the request
-   ends after 300 seconds.
+   Touch ID) or on the iPhone, where the same code shows. Both say where the code goes back: "Returns
+   to <host of redirect_uri>", or for `localhost`, `127.0.0.1`, or `[::1]` "Returns to a program on a
+   computer (localhost)"; the Mac then adds "A program on this Mac can start this request." Apassy
+   must be open and unlocked; the request ends after 300 seconds.
 6. Allowed: the next reload of the page sends the browser to `<redirect_uri>?code=…&state=…&iss=<public
    URL>`, once. Denied: the page says "You denied the connection.". Not answered in time: "The request
    ended.".
@@ -97,21 +106,31 @@ registration (RFC 7591). The relay side is in its `docs/SPEC.md` section 31. The
    `token_expired`, the client sends `grant_type=refresh_token` with `refresh_token` and `client_id`: a
    new access token and a new refresh token. The old refresh token is used up.
 
-A new agent has no credential. It appears in Apassy → Agents; the owner chooses what it may use.
+A new agent has no credential. It appears in Apassy → Agents; the owner chooses what it may use. Every
+allowed connect makes a new agent, also for a client that already has one: a second connect of Grok Bot
+is "Grok Bot 2", with no credential. A connect never takes over an agent that exists; the old agent
+stays until the owner disconnects it.
 
 ### 4.2 Rules
 
-- A code lives 300 seconds and works once. A wrong verifier, client, or redirect URI uses it up. A second
+- A code lives 300 seconds and works once. It goes to whichever browser loads the page first, so a leaked
+  authorize URL can burn it: a denial of service only, since PKCE makes it useless without the client's
+  verifier. A wrong verifier, client, or redirect URI uses it up. A second
   use of a code, or of a refresh token that was already used, is `invalid_grant` and ends the connection:
   its refresh token and its access token stop working, and the client must start at step 4 again.
 - The access token lives 24 hours. The refresh token lives 90 days from its last use. One access token
   is live for each agent: a new one replaces the old one.
-- Each bad code or refresh token counts in the failed-auth limiter (section 10).
+- Bad codes and refresh tokens count for their client only: after 20 `invalid_grant` answers for one
+  client in 60 seconds, its token requests get 429 `rate_limited` with `Retry-After: 60` until the
+  window ends. They never count in the failed-auth limiter of the listener (section 10).
 - `POST /oauth/revoke` (RFC 7009) with the refresh or the access token ends the connection. It answers 200
   always.
 - Limits of the node, not of a caller (Funnel forwards no client identity): 10 registrations in 10
-  minutes and 100 stored clients (429, `Retry-After: 600`); 3 connect requests waiting at once, 1 of each
-  client (429 page).
+  minutes and 100 stored clients (429, `Retry-After: 600`), counting only clients that the owner allowed
+  at least once. A client that was never allowed fills no limit: when 100 clients are stored the oldest
+  of those goes, and each goes 1 hour after its registration (an authorize does not renew it); 3 connect requests waiting at once (429 page
+  "Too many connection requests wait. Deny requests on your Mac that you did not start, then connect
+  again."); 1 of each client, and a new one replaces it (step 4).
 - The node stores only hashes of codes and refresh tokens, and of the access token.
 - A missing, unknown, revoked, or replaced token on `POST /mcp`: HTTP 401 `unauthenticated`. An expired
   token: HTTP 401 `token_expired`. Both have `WWW-Authenticate` as in step 1, with `error="invalid_token"`.
@@ -399,18 +418,22 @@ and the names of the swapped variables. Never a header, a query, a body, a place
 | `wait_secs` of one status call | 0 to 25 s | The call returns. |
 
 **The failed-auth limiter.** The public listener counts its failed authentications: a bearer token that
-names no team or that the node refuses (401 `unauthenticated` or `token_expired`), a proxy path whose
-session key names no live session, and a code or refresh token that `POST /oauth/token` refuses
-(`invalid_grant`). The window is 60 seconds from the first failure. With 20 failures in
-the window, every further request of the public listener in that window gets HTTP 429 `rate_limited`
-with `Retry-After: 60`, also a request with a good token. Then the window ends and the count starts
-again. The check comes after the 404 of section 3 and before the token, the body, or the proxy. The node
-writes at most one audit row in 10 seconds for it (`rate_limited`, scope `public`). The count is in
-memory only.
+names no team or that the node refuses (401 `unauthenticated` or `token_expired`), and a proxy path whose
+session key names no live session. A code or refresh token that `POST /oauth/token` refuses counts for
+its client only (section 4.2), and the routes of the authorization flow are answered before this check:
+the limiter never refuses them. Since 0.5.16 (review 0.5.16) `POST /mcp` and `/p/` count by the source
+address that Funnel forwards (the last address of `X-Forwarded-For`; an IPv6 address by its /64): with
+20 failures of one address in a window of 60 seconds from its first failure, every further request of
+that address in the window gets HTTP 429 `rate_limited` with `Retry-After: 60`, also a request with a
+good token. Requests without an address share one window with a limit of 600. The listener keeps at
+most 4096 address windows; when the table is full, a new address counts in the shared window. Then the
+window ends and the count starts again. The check comes after the 404 of section 3 and before the
+token, the body, or the proxy. The node writes at most one audit row in 10 seconds for it
+(`rate_limited`, scope `public`, bucket `source` or `shared`). The counts are in memory only.
 
-A stranger with bad tokens can hold the public listener at 429 for the rest of each window, and the
-owner's cloud agents with it. A client that gets 429 waits `Retry-After` seconds and does not send bad
-tokens in a loop.
+A stranger with bad tokens holds only their own address at 429; the owner's cloud agents from other
+addresses keep working. A stranger with thousands of addresses can fill the table and then the shared
+window. A client that gets 429 waits `Retry-After` seconds and does not send bad tokens in a loop.
 
 ## 11. Revocation, lock, and quit
 
@@ -470,7 +493,7 @@ A message never holds a value, a placeholder, a token, or a session key.
 | --- | --- | --- |
 | 401 | `unauthenticated`, `token_expired` | `/mcp`: the bearer token, with `WWW-Authenticate` (section 4) |
 | 400 | `invalid_request`, `invalid_grant`, `unsupported_grant_type`, `invalid_target`, `invalid_redirect_uri`, `invalid_client_metadata` | `/oauth/token`, `/oauth/register`: an OAuth error object `{"error", "error_description"}`, not the envelope |
-| 429 | `rate_limited` | `/oauth/register` at its limit, `Retry-After: 600` (OAuth error object) |
+| 429 | `rate_limited` | `/oauth/register` at its limit, `Retry-After: 600`; `/oauth/token` for a client with 20 bad codes or refresh tokens in 60 s, `Retry-After: 60` (OAuth error object) |
 | 403 | `forbidden` | `/mcp`: an `Origin` header that is not the public URL |
 | 403 | `session_invalid`, `host_not_in_session`, `wrong_host`, `misplaced_placeholder`, `placeholder_in_body` | `/p/` |
 | 404 | `not_found` | Any route outside section 3 |
@@ -490,8 +513,9 @@ The per-user steps for Grok Bot and Cursor are in the plugin
 
 - **With the authorization flow (the default).** Add the MCP server by its URL,
   `https://<Mac>.<tailnet>.ts.net:8443/mcp`, with no header. Press Authorize (or the client's word for
-  it). The browser shows a code; allow the request on the Mac or the iPhone when it shows the same code.
-  Then choose the agent's credentials in Apassy → Agents.
+  it). The browser shows a code; allow the request on the Mac or the iPhone only when it shows the same
+  code, and deny any request that you did not start. Then choose the agent's credentials in Apassy →
+  Agents. Each allowed connect is a new agent: disconnect the old one when the client connects again.
 - **With the CLI token (the fallback).** For a client without the flow: `apassy agents add-remote <name>`
   prints the MCP URL and the header `Authorization: Bearer apassy_tagt_…`, once.
 

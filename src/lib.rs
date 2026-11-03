@@ -79,6 +79,9 @@ pub mod node;
 /// The owner command line channel (ADR 0017): wire and client.
 pub mod owner;
 pub mod paths;
+/// The hidden characters of names that the owner reads (control, format, and tag
+/// characters), for the app, the relay, and the iPhone core. It needs no feature.
+pub mod text;
 /// The list of vaults on this computer (ADR 0013). It needs no feature, so the
 /// sandbox launcher reads it.
 pub mod vaults;

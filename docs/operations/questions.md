@@ -44,17 +44,20 @@ v1 fields, including `question.valid_answers`; do not add `owner_prompt` to it.
 
 ### iPhone button derivation from v1
 
-Inspect `question.items[*].unconfirmed`. Any `true` means the environment is
-unknown, including an item with no environment declaration (the Mac represents
-that absence as `unconfirmed: true`; there is no nullable environment field).
-Offer **Allow as dev** (`approve_as_development`), **Allow as prod**
-(`approve_as_production`), **Dismiss** (`deny`), and **Dismiss with comment**
-(`deny_with_comment`). Unknown takes precedence even in a mixed question that
-also contains confirmed production items.
+Inspect `question.items[*].unconfirmed`. A `true` means the environment of that
+item is unknown, including an item with no environment declaration (the Mac
+represents that absence as `unconfirmed: true`; there is no nullable environment
+field). When exactly one item has `unconfirmed: true`, offer **Allow as dev**
+(`approve_as_development`), **Allow as prod** (`approve_as_production`),
+**Dismiss** (`deny`), and **Dismiss with comment** (`deny_with_comment`). Unknown
+takes precedence even in a mixed question that also contains confirmed production
+items. The answer names no item: the Mac labels only that one unconfirmed item.
 
-When every item has `unconfirmed: false`, the environment is known. Offer
-**Allow** (`approve`), **Dismiss** (`deny`), and **Dismiss with comment**
-(`deny_with_comment`). An item's `production: true` with `unconfirmed: false`
+When no item, or two or more items, have `unconfirmed: true`, offer **Allow**
+(`approve`), **Dismiss** (`deny`), and **Dismiss with comment**
+(`deny_with_comment`). With two or more unknown items an answer without an item
+could label a production credential that the owner did not look at, so the run
+asks as any other and labels nothing; the owner labels each item on the Mac. An item's `production: true` with `unconfirmed: false`
 means confirmed production; both flags false mean known non-production.
 `question.production` is the question-level production flag, not the unknown
 environment test. Do not infer unknown status from `why`, `risk`, item names,
@@ -75,8 +78,8 @@ extra fields are allowed for the five current kinds:
 | `kind` | Effect | iPhone signing key |
 | --- | --- | --- |
 | `approve` | Approve known-environment run once | Secure Enclave `answer_key` |
-| `approve_as_development` | Classify unknown items development and approve once | `answer_key` |
-| `approve_as_production` | Classify unknown items production and approve once | `answer_key` |
+| `approve_as_development` | Classify the one unknown item development and approve once | `answer_key` |
+| `approve_as_production` | Classify the one unknown item production and approve once | `answer_key` |
 | `deny` | Dismiss | `sign_key` |
 | `deny_with_comment` | Dismiss and return comment to agent | `sign_key` |
 

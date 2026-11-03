@@ -191,8 +191,11 @@ pub fn node_origin(host: std::net::Ipv4Addr, port: u16) -> String {
 /// The relay configuration of `apassy serve` (plan D8): `RelayConfig::embedded` with the
 /// node origin as the public URL and the only sign-in origin, no public listener, the
 /// tailnet listener with the team routes (`Scope::Tailnet { agents: true }`), push through
-/// the gateway, team vaults on, and no MCP authorization flow (agents of a Linux node use
-/// the tokens of `apassy team`; the OAuth endpoints are never on the tailnet listener).
+/// the gateway, team vaults on, no MCP authorization flow (agents of a Linux node use
+/// the tokens of `apassy team`; the OAuth endpoints are never on the tailnet listener),
+/// and the operator socket on: `apassy pair` and `apassy status` use `admin.sock`
+/// (docs/operations/linux-node.md). The Mac's node has none (`RelayConfig::embedded`),
+/// because the coding agents of the Mac run as the same user as the app.
 pub fn relay_config(
     relay_dir: PathBuf,
     master_key: SecretString,
@@ -209,6 +212,7 @@ pub fn relay_config(
         push_gateway: options.push_gateway.clone(),
     })?;
     config.oauth = None;
+    config.operator_socket = true;
     Ok(config)
 }
 

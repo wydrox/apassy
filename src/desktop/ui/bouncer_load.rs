@@ -1,7 +1,7 @@
 //! The vault build fills [`BouncerData`] here: from this Mac's vault (U3a:
 //! `Vault::bouncer_stats`, `Vault::bouncer_log`), the waiting runs, the activity lines of
-//! the node, the feeds of the other Macs (relay-feed v2), and the connect requests (U2b,
-//! a seam that is empty until `Node::pending_connects` exists).
+//! the node, the feeds of the other Macs (relay-feed v2), and the connect requests of the
+//! node (`DesktopApp::pending_connects`, memory only).
 //!
 //! The pages never call this per frame: [`refresh`] asks [`BouncerCache`] first, so the
 //! vault is read at most once per `REFRESH_MIN` (`bouncer.rs`).
@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use eframe::egui;
 
 use super::bouncer::{
-    self, AgentLine, BouncerData, DayBar, DeviceScope, EnvStats, LOG_PAGE, LogEvent, LogKind,
-    LogOutcome, LogSource, ProductionUse, ProxyRow, WEEK,
+    self, AgentLine, AgentRef, BouncerData, ConnectLine, DayBar, DeviceScope, EnvStats, LOG_PAGE,
+    LogEvent, LogKind, LogOutcome, LogSource, ProductionUse, ProxyRow, RemoteAccessWord, WEEK,
 };
 use super::kit;
 use crate::broker::approvals::PendingRun;
@@ -20,20 +20,24 @@ use crate::desktop::DesktopApp;
 use crate::desktop::remote_feeds::{self, RemoteFeedState, RemoteMac};
 use crate::questions::feed::{Feed, FeedAgent};
 
-/// A connect request that waits for the owner (decision 4, U2b `Node::pending_connects`).
-/// Nothing makes one until U2b lands: [`pending_connects`] is the seam.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingConnect {
-    pub(crate) id: String,
-    pub(crate) client_name: String,
-    pub(crate) at: u64,
-}
-
-/// The connect requests that wait now. Empty until U2b adds `Node::pending_connects()`;
-/// then this reads them from `app.cloud_node()`.
-pub(crate) fn pending_connects(app: &DesktopApp) -> Vec<PendingConnect> {
-    let _ = app;
-    Vec::new()
+/// The connect requests that wait on this Mac now, oldest first (memory of the node only:
+/// it may be called each frame). Empty without a node.
+pub(crate) fn pending_connects(app: &DesktopApp) -> Vec<ConnectLine> {
+    let mut connects: Vec<ConnectLine> = app
+        .pending_connects()
+        .iter()
+        .map(|connect| ConnectLine {
+            id: connect.id.clone(),
+            name: bouncer::clip(&crate::node::connect_name(connect)),
+            code: connect.code.clone(),
+            at: connect.created_at,
+            expires_at: connect.expires_at,
+            returns_to: crate::node::connect_returns_to(connect),
+            local: crate::node::connect_is_local(connect),
+        })
+        .collect();
+    connects.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+    connects
 }
 
 /// Compute the Bouncer data when the cache says so. Call it once per frame of a Bouncer
@@ -108,7 +112,7 @@ pub(super) fn load(
         data.stats.insert(DeviceScope::ThisMac, local_stats(stats));
     }
     let waiting: BTreeSet<&str> = pending.iter().map(|run| run.agent.as_str()).collect();
-    for agent in agents.iter().filter(|agent| !agent.revoked) {
+    for agent in &agents {
         let found = local
             .stats
             .as_ref()
@@ -118,19 +122,29 @@ pub(super) fn load(
             .get(&agent.id)
             .cloned()
             .unwrap_or_default();
-        data.agents.push(AgentLine {
+        let remote = local.cloud.contains(&agent.id);
+        let line = AgentLine {
             name: bouncer::clip(&agent.name),
             env: DeviceScope::ThisMac,
             env_name: this_name.clone(),
-            remote: local.cloud.contains(&agent.id),
+            remote,
             runs: Some(found.map_or(0, |a| a.runs)),
             asked: found.map_or(0, |a| a.asked),
             not_allowed: found.map_or(0, |a| a.not_allowed),
             last_active: found.and_then(|a| a.last_at),
-            waits: waiting.contains(agent.name.as_str()),
+            waits: !agent.revoked && waiting.contains(agent.name.as_str()),
             projects,
-        });
+            id: Some(AgentRef::Local(agent.id)),
+            runs_today: Some(found.and_then(|a| a.days.first()).map_or(0, |day| day.runs)),
+            connected_at: remote.then_some(agent.created_at),
+        };
+        if agent.revoked {
+            data.disconnected.push(line);
+        } else {
+            data.agents.push(line);
+        }
     }
+    data.agent_answer_p50 = agent_medians(&local.rows, since);
     data.production = production_uses(&local.rows, since, &this_name);
     data.more_events = local.more;
     for row in &local.rows {
@@ -175,13 +189,14 @@ pub(super) fn load(
             command: String::new(),
         });
     }
-    for connect in pending_connects(app) {
+    data.connects = pending_connects(app);
+    for connect in &data.connects {
         data.events.push(LogEvent {
             source: LogSource::Connect(connect.id.clone()),
             at: connect.at,
             env: DeviceScope::ThisMac,
             env_name: this_name.clone(),
-            agent: Some(format!("{} (new)", bouncer::clip(&connect.client_name))),
+            agent: Some(format!("{} (new)", connect.name)),
             remote_agent: true,
             kind: LogKind::Connect,
             credential: None,
@@ -243,6 +258,13 @@ pub(super) fn load(
             .environment(&scope)
             .map_or_else(|| bouncer::clip(&mac.name), |env| env.name.clone());
         data.stats.insert(scope.clone(), feed_stats(feed, project));
+        if let Some(word) = feed
+            .remote_access
+            .as_deref()
+            .and_then(RemoteAccessWord::parse)
+        {
+            data.remote_access_of.insert(scope.clone(), word);
+        }
         remote_lines(&mut data, feed, &scope, &name, mac);
     }
 
@@ -275,10 +297,10 @@ fn remote_lines(
     name: &str,
     mac: &RemoteMac,
 ) {
-    for agent in feed.agents.iter().filter(|agent| !agent.revoked) {
+    for agent in &feed.agents {
         let remote = agent.place == "remote";
         let days = agent_days(agent);
-        data.agents.push(AgentLine {
+        let line = AgentLine {
             name: bouncer::clip(&agent.name),
             env: scope.clone(),
             env_name: name.to_owned(),
@@ -289,7 +311,18 @@ fn remote_lines(
             last_active: agent.last_use_at,
             waits: false,
             projects: agent.projects.iter().map(|p| bouncer::clip(p)).collect(),
-        });
+            id: Some(AgentRef::Other {
+                device: mac.device.clone(),
+                id: agent.id.clone(),
+            }),
+            runs_today: agent.days.first().map(|day| day.runs),
+            connected_at: agent.connected_at,
+        };
+        if agent.revoked {
+            data.disconnected.push(line);
+            continue;
+        }
+        data.agents.push(line);
         for item_use in &agent.recent {
             let decided = if item_use.outcome == "timed_out" {
                 "timed_out"
@@ -415,6 +448,28 @@ fn local_stats(stats: &crate::vault::LocalStats) -> EnvStats {
     }
 }
 
+/// The median time to an answer of yours of each agent of this Mac in the window, in
+/// whole seconds (the agent page tile "Median answer").
+fn agent_medians(rows: &[crate::vault::LogRow], since: u64) -> BTreeMap<AgentRef, u64> {
+    let mut waits: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for row in rows
+        .iter()
+        .filter(|row| row.at >= since && row.asked && row.decided_by == "owner")
+    {
+        if let Some(wait) = row.wait_ms {
+            waits.entry(row.agent_id).or_default().push(wait);
+        }
+    }
+    waits
+        .into_iter()
+        .filter_map(|(agent, mut waits)| {
+            waits.sort_unstable();
+            let middle = waits.get(waits.len().checked_sub(1)? / 2)?;
+            Some((AgentRef::Local(agent), (middle + 500) / 1_000))
+        })
+        .collect()
+}
+
 /// The production credentials of this Mac used in the window, by credential and agent.
 fn production_uses(
     rows: &[crate::vault::LogRow],
@@ -443,7 +498,7 @@ fn production_uses(
             times,
         })
         .collect();
-    uses.sort_by_key(|usage| std::cmp::Reverse(usage.times));
+    uses.sort_by_key(|row| std::cmp::Reverse(row.times));
     uses
 }
 
@@ -525,15 +580,15 @@ impl LocalRead {
     }
 }
 
-/// The proxied requests of one cloud run of this Mac, from the relay audit: method, host,
-/// and status only. The node gives its newest audit rows; a run older than those shows
-/// none. (U2b: `Node::run_audit(run)` would read the rows of the run itself.)
+/// The proxied requests of one cloud run of this Mac, from the relay audit of that run
+/// (`Node::run_audit`): method, host, and status only. Read when the owner opens the row,
+/// never per frame. Empty while the node does not run.
 pub(super) fn proxied_requests(app: &DesktopApp, relay_run: u64) -> Vec<ProxyRow> {
     let Some(node) = app.cloud_node() else {
         return Vec::new();
     };
     let mut rows: Vec<ProxyRow> = node
-        .recent_activity()
+        .run_audit(relay_run)
         .into_iter()
         .filter(|row| row.action == "proxy_request")
         .filter(|row| row.run_id.is_some_and(|run| run.0 == relay_run))

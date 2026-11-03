@@ -74,7 +74,7 @@ fn overview_logs_and_agents_are_wide_and_decisions_keeps_its_columns() {
     }
     assert_eq!(Place::Overview.label(), "Overview");
     assert_eq!(Place::Logs.label(), "Logs");
-    // Agents keeps its list and detail inside the wide pane until its own page.
+    // Agents is one wide page: with no agent, frame 9b.
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     app.place = Place::Agents;
@@ -285,6 +285,8 @@ fn logs_filter_the_rows_and_open_a_cloud_run() {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(!text.contains("SECRET-PATH"), "{text}");
+    // The chevrons of the rows are drawn: SF Pro has no "⌄", which showed as a box.
+    assert!(!text.contains('⌄') && !text.contains('›'), "{text}");
 }
 
 /// Frame 14: filters that match nothing; Clear Filters is the way back.

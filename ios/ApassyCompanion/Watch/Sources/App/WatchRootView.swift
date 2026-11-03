@@ -6,6 +6,7 @@ import SwiftUI
 struct WatchRootView: View {
     @Bindable var model: WatchAppModel
     @Environment(\.scenePhase) private var scenePhase
+    @State private var showsSample = false
 
     var body: some View {
         NavigationStack(path: $model.path) {
@@ -22,6 +23,7 @@ struct WatchRootView: View {
         .onChange(of: scenePhase, initial: true) { _, phase in
             model.setScenePhase(WatchScenePhase(phase))
         }
+        .sheet(isPresented: $showsSample) { WatchSampleView() }
     }
 
     @ViewBuilder
@@ -36,9 +38,9 @@ struct WatchRootView: View {
                 Text(verbatim: message)
             }
         case .connect(let problem):
-            ConnectView(problem: problem, removed: false)
+            ConnectView(problem: problem, removed: false, onSample: { showsSample = true })
         case .removed:
-            ConnectView(problem: nil, removed: true)
+            ConnectView(problem: nil, removed: true, onSample: { showsSample = true })
         case .connecting:
             ConnectingView { model.cancelConnect() }
         case .words(let words):

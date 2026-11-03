@@ -310,6 +310,7 @@ fn evaluate(
             purpose: request.purpose.trim().to_owned(),
             env_names: vec![setup.env_name.clone()],
             instruction: setup.instruction.clone(),
+            task_provenance: String::new(),
         })
     };
     let decision = decide_learned(&verdict, &context, &state.learned);

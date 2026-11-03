@@ -48,7 +48,7 @@ Claude Code 2.1.3xx runs `UserPromptSubmit` also for turns that the user did not
 
 The transcript has the same turns as `{"type":"user", ...}` records. A turn that the host injects has `"promptSource":"system"`; a task notification also has `"origin":{"kind":"task-notification"}` and text that starts with `<task-notification>`. A prompt of the user has `"promptSource":"sdk"` (Agent SDK), `"typed"` (desktop), or no `promptSource` (older versions). In a sample of local transcripts, the newest user record before 6 of 72 `apassy_run_with_secrets` calls was a task notification.
 
-`apassy-hook` sends a prompt only when `source` is `user` or `sdk`, or when there is no `source` and the prompt does not start with `<task-notification>` (`USER_SOURCES` in `src/agent/hook.rs`). So the newest prompt of the session stays the request of the user. Before 0.5.16, a finished background task replaced that request: the next run then had the notification as its request (the bouncer brain compared the command with it), or, when the notification was only in the transcript, the check of section 4 failed.
+`apassy-hook` sends a prompt only when `source` is `user` or `sdk`, or when there is no `source` and the prompt does not start with `<task-notification>` (`USER_SOURCES` in `src/agent/hook.rs`). This is an allow-list: any other value, also one that a later host adds, is not sent. The adapter sends the `source` with the prompt, and the broker refuses a `source` other than `user` and `sdk` (`HOOK_SOURCES` in `src/broker/prompts.rs`). So the newest prompt of the session stays the request of the user. Before 0.5.16, a finished background task replaced that request: the next run then had the notification as its request (the bouncer brain compared the command with it), or, when the notification was only in the transcript, the check of section 4 failed.
 
 ## 3. How the broker finds the hook prompt for a run
 
@@ -79,7 +79,7 @@ Code: `PromptStore::check_transcript` in `src/broker/prompts.rs`. The broker doe
 1. The transcript path is in a host transcript directory: `~/.claude/projects`, `~/.codex/sessions`, or the same directories under `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. The broker resolves symlinks first.
 2. The file name ends with `<session_id>.jsonl`.
 3. The file is a regular file. The broker opens it without a wait on a FIFO.
-4. The broker reads a maximum of 16 MiB from the end of the file. The newest user prompt record (section 2) must have the same text as the hook prompt. Tool results, meta records, compact summaries, subagent records, and turns that the host injected (`"promptSource":"system"` or `"origin":{"kind":"task-notification"}`, section 2) are not user prompts. If the text is not there, the broker tries two more times, 200 ms apart.
+4. The broker reads a maximum of 16 MiB from the end of the file. The newest user prompt record (section 2) must have the same text as the hook prompt. Tool results, meta records, compact summaries, subagent records, and turns that the host injected are not user prompts. Only a record with `"promptSource"` `typed`, `user`, or `sdk`, or without `promptSource`, is a user prompt; any other `promptSource` (`system`, a value that a later host adds) and `"origin":{"kind":"task-notification"}` mark an injected turn (section 2, `TRANSCRIPT_USER_SOURCES` in `src/broker/prompts.rs`). If the text is not there, the broker tries two more times, 200 ms apart.
 
 | Result | Card and log | Decision |
 | --- | --- | --- |
@@ -101,6 +101,8 @@ The activity log entry of the run has the same data:
 ```
 Bouncer allowed. Exit code 0. Directory: /…/project/web. User request from the Claude Code hook, verified in the host transcript: "Run the unit tests of the billing module.". The agent sent: "Deploy everything to production.". Model allowed at … Purpose: Run the tests.
 ```
+
+A hook prompt with `source` `sdk` (an Agent SDK turn, for example from T3 Code) is named on the card and in the log: "from the Claude Code hook (Agent SDK turn), verified in the host transcript". The bouncer brain reads it too, at the end of its state: "Task provenance: Agent SDK turn." (section 7).
 
 The activity log entry has a maximum of 700 bytes. It keeps the first 240 bytes of the user request and the first 120 bytes of the agent text. The log is in the encrypted vault. The broker does not write a prompt to any other file or to stderr.
 
@@ -207,6 +209,7 @@ What the hook and the checks stop:
 What they do not stop:
 
 - **A forged transcript entry.** An agent that adds a false user message at the end of its transcript, and then sends the same prompt with `apassy-hook`, passes the check. It can also mark a newer real prompt with `"promptSource":"system"` so that the check skips it. The agent must do this with its normal shell tool or file tool. Apassy does not see these tools. The host permission prompts are the control for them. Keep them on for daily use ([isolation.md](isolation.md) section 3).
+- **An agent that starts its own SDK session with its own text.** T3 Code and other Agent SDK hosts deliver the owner's real messages as `source` `sdk`, so Apassy accepts an `sdk` turn as a request of the user. An agent that can run `claude -p` or the Agent SDK can start a new session with its own text; the hook of that session sends it as an `sdk` turn, and its own transcript verifies it. Apassy cannot tell this from a real SDK host. It names every `sdk` turn ("Agent SDK turn") for the bouncer brain and on the question card, so the owner and the brain can weigh it. The host permission prompts for the shell tool are the control for the start of such a session.
 - **Commands outside Apassy.** The `hook_channel` flag sees only commands that go through `apassy_run_with_secrets`.
 - **A hidden path.** A command that builds the path with variables or an encoding, for example `d=.cl; cat ~/${d}aude/...`, does not get the flag.
 - **A missing hook.** Without a hook prompt, the run uses the text from the agent, as before ADR 0009. Apassy cannot require the hook, because the owner can run a host without it.

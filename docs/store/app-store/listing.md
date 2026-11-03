@@ -16,7 +16,7 @@ The values are chosen by that plan. The owner can change any of them before subm
 | Subtitle | 30 | 25 |
 | Promotional text | 170 | 158 |
 | Keywords | 100 bytes | 83 |
-| Description | 4000 | 2,077 |
+| Description | 4000 | 2,217 |
 | What's New | 4000 | 625 |
 
 Count again with `python3 -c 'print(len(open(0).read().strip()))'` after an edit.
@@ -35,7 +35,7 @@ Count again with `python3 -c 'print(len(open(0).read().strip()))'` after an edit
 | Copyright | `2026 Rafal Wyderka` (the owner confirms the legal name or company) |
 | Support URL | `https://github.com/wydrox/apassy/issues` |
 | Marketing URL | `https://apassy.wyderka.cc` |
-| Privacy policy URL | `https://apassy.wyderka.cc/privacy` (the page needs the iPhone section first: [privacy-policy-ios-draft.md](privacy-policy-ios-draft.md)) |
+| Privacy policy URL | `https://apassy.wyderka.cc/privacy` (the iPhone, watch and relay sections are in `site/src/pages/privacy.astro` since 2026-11-03; check them live after the site deploy) |
 | Age rating | 4+ (answers below) |
 
 The name "Apassy" must be free in the App Store. App Store Connect refuses a name that another app
@@ -65,18 +65,18 @@ Apassy is the iPhone part of Apassy for the Mac: a password manager made for peo
 Your vault on your iPhone
 - Open the same encrypted vault as your Mac, from iCloud Drive or from your Mac through the Apassy relay.
 - The vault is a SQLCipher file on this iPhone. It opens with your passphrase, or with Face ID after you turn it on.
-- Each time you show, copy or fill a secret, Face ID checks that it is you. Plain fields such as a username or a website need no check.
+- Before you show, copy or fill a secret, Face ID checks that it is you: each time, or once for a time that you choose in Settings. Plain fields such as a username or a website need no check.
 - A copied secret stays on this iPhone only and expires after 60 seconds by default.
 - Search, folders, a password generator, and Watchtower, which finds weak and reused passwords.
 - Find duplicates and merge them.
 
 AutoFill
 - Fill passwords and one-time codes in Safari and in apps, after Face ID.
-- Sign in with passkeys, and save new passkeys in Apassy.
-- Move your passwords and passkeys from another app, such as Passwords or 1Password, with Credential Exchange.
+- Sign in with passkeys, and save new passkeys in Apassy. Passkeys with the PRF extension work too.
+- Move your passwords, passkeys, cards, notes and other items from another app, such as Passwords or 1Password, with Credential Exchange.
 
 Your agents ask, you answer
-- When a coding agent on your Mac asks for a credential, your iPhone shows the request: which agent, which credential, which project and command.
+- When a coding agent asks your Mac for a credential, your iPhone shows the request: which agent, which credential, which project and command.
 - Answer with Allow Once or Deny. Allow Once needs Face ID. The agent gets the credential for that one use only.
 - The Mac stays in control: it checks each answer, and its bouncer still checks each run.
 
@@ -87,7 +87,7 @@ Apple Watch
 
 Private by design
 - No Apassy account. No ads. No analytics. No tracking.
-- What the relay carries is encrypted on your devices. The relay cannot read your vault, your requests or your answers.
+- Your vault, your requests and your answers are encrypted on your devices before they go to the Apassy relay. The relay cannot read them.
 - The code is open source under the Apache-2.0 license: github.com/wydrox/apassy
 
 You need Apassy for the Mac to make a vault and to connect agents. Get it at apassy.wyderka.cc.
@@ -96,6 +96,13 @@ The Apple Watch app needs an Apple Watch Series 9 or later, or an Apple Watch Ul
 ```
 
 Rules that this text follows ([plans.md](../../product/plans.md) §5 and §3, App Review 3.1):
+
+- It says the same as the App Privacy answers ([app-privacy.md](app-privacy.md)) and the privacy
+  page: the vault, the requests and the answers go to the relay only encrypted; device ids, names and
+  push tokens are not content, so the text does not call everything on the relay encrypted.
+- "No tracking" matches the App Privacy answer "Data Used to Track You: none". "No Apassy account" is
+  true, although App Privacy declares a pseudonymous User ID (the relay's ids).
+- Face ID: the "Ask for Face ID" setting (every time by default, or a chosen time) is described.
 
 - No price, no plan name, no "Upgrade", "Subscribe", or "Buy", and no word about Apassy Connect. A
   free stand-alone companion (3.1.3(f)) may not have a call to action to buy outside the app, and the
@@ -111,7 +118,7 @@ Rules that this text follows ([plans.md](../../product/plans.md) §5 and §3, Ap
 
 App Store Connect does not show "What's New" for the first version of an app. Use this text from the
 second App Store version. Write it from the dated changelog of that release, only with what the
-iPhone and the watch change. The text for the version after 0.5.15, from the `[Unreleased]` changelog:
+iPhone and the watch change. The text for 0.5.16, from its changelog section:
 
 ```text
 - Apple Watch: answer access requests with Allow once or Deny while the watch is unlocked on your wrist. Connect it in Settings > Devices > Add Apple Watch.
@@ -119,6 +126,8 @@ iPhone and the watch change. The text for the version after 0.5.15, from the `[U
 - More passkeys: ES384, EdDSA and RS256 passkeys from another app, with their PRF and large blob data.
 - Find duplicates: Settings > General > Find duplicates lists the items that hold the same account and merges them.
 - Lock screen: Face ID asks first; the passphrase field shows only when Face ID does not open the vault.
+- Try the Demo: look around the app with sample data only, without a vault.
+- Remote agents: allow a hosted agent's connect request and its runs from Requests.
 ```
 
 ## Age rating
@@ -154,8 +163,9 @@ Expected result: **4+**. The watch app has the same rating as the iPhone app.
 
 ## Availability
 
-- All countries and regions, except where the owner decides otherwise for export compliance:
-  see [export-compliance.md](export-compliance.md), "France".
+- All countries and regions **except France** (default of 2026-11-03,
+  [export-compliance.md](export-compliance.md) §4). Add France after the owner files the ANSSI
+  declaration and a new encryption declaration says France "Yes".
 - Recommendation for the owner: no pre-order. Release manually after approval, so that the website
   privacy page and the Mac app at the same version are live first (AGENTS.md: all six components at one
   version).
