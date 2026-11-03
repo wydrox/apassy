@@ -1,0 +1,22 @@
+[package]
+name = "tailnet-spike-rs"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+license = "Apache-2.0"
+description = "Spike only (plan s8 T0, ADR 0040): pinned rustls over a stream that libtailscale dialed, and crash tests"
+
+# Not a member of the Apassy workspace: scripts/build-spike-libs.sh builds it on its own, with a
+# lockfile that starts as a copy of the repository's.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# The versions and features of the vault core (Cargo.toml of the repository root).
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
+
+# As the vault core: the default panic strategy. A panic that reaches the C boundary aborts.
