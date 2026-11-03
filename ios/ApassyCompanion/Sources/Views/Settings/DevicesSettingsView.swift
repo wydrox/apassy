@@ -166,7 +166,7 @@ private struct SyncSettingsSections: View {
         Section {
             if vault.vault?.syncs == true {
                 LabeledContent("Sync service", value: Self.serviceText(vault.vault))
-                if let detail = vault.vault.flatMap(DeviceRoute.of)?.detail {
+                if let entry = vault.vault, let detail = DeviceRoute.of(entry)?.detail {
                     Text(detail)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
