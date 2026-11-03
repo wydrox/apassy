@@ -1,0 +1,320 @@
+# The T0 spike of the embedded tailnet node (ADR 0037 D9; docs/design/implementation-plan-s4-teams.md,
+# T0; procedure and results in docs/design/spike-tsnet.md). It builds libtailscale with the pinned Go
+# on macOS arm64 and Linux x86_64, runs the T0 tests, measures sizes, link flags, signals, threads,
+# and memory, and joins real tailnets. Manual only; it publishes nothing.
+#
+#   gh workflow run tailnet-spike.yml --ref s4/t0-tailnet-spike
+#   gh workflow run tailnet-spike.yml --ref s4/t0-tailnet-spike -f notarize=true
+#   gh workflow run tailnet-spike.yml --ref s4/t0-tailnet-spike -f go_tags=ts_omit_aws,ts_omit_kube
+#
+# Repository secrets (owner step O1). Each is optional: a missing one skips its part, and the
+# results say so.
+#   TS_A_AUTH  auth key of tailnet A: reusable, ephemeral, pre-approved (tagged tag:apassy-team
+#              for the product path)
+#   TS_B_AUTH  the same for tailnet B, a second Tailscale account
+#   TS_A_API   API access token of tailnet A (creates the device invite, deletes the test devices)
+#   TS_B_API   API access token of a user of tailnet B (accepts the invite, deletes its device)
+# The input notarize uses the release secrets that release.yml provider-check uses.
+
+name: Tailnet spike
+
+on:
+  workflow_dispatch:
+    inputs:
+      online:
+        description: Join real tailnets with the TS_* secrets (time to up, idle with a node, round trips)
+        type: boolean
+        default: true
+      notarize:
+        description: Sign and notarize the macOS spike binary with the release identity (keeps no signed binary)
+        type: boolean
+        default: false
+      go_tags:
+        description: Go build tags for a size experiment, comma-separated (empty is the upstream build)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tailnet-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+  APASSY_TAILNET_GO_TAGS: ${{ inputs.go_tags }}
+  APASSY_TAILNET_REPORT: "1"
+  SPIKE_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      # The app's minimum macOS (packaging/Info.plist); build.rs passes it to cgo too.
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Install the pinned Go (version and SHA-256 from pins.env)
+        run: crates/apassy-tailnet/scripts/install-go.sh "$RUNNER_TEMP/go-toolchain" >> "$GITHUB_PATH"
+      - name: Build the archive
+        run: crates/apassy-tailnet/scripts/build-archive.sh "$RUNNER_TEMP/libtailscale" spike-out/macos-arm64/archive
+      - name: Run the T0 tests (build.rs builds the archive with Go)
+        run: cargo test --locked -p apassy-tailnet --features tailnet
+      # Paths come from shell variables and are relative to the workspace, as in the
+      # container job below, where ${{ runner.temp }} names the host path.
+      - name: Build the spike (prebuilt archive) and the baseline (no archive)
+        run: |
+          export APASSY_LIBTAILSCALE_DIR="$RUNNER_TEMP/libtailscale"
+          cargo build --release --locked -p apassy-tailnet --features spike --bin apassy-tailnet-spike
+          mkdir -p spike-bin
+          cp target/release/apassy-tailnet-spike spike-bin/apassy-tailnet-spike
+          cargo build --release --locked -p apassy-tailnet --bin apassy-tailnet-baseline
+      - name: Measure the build
+        run: |
+          crates/apassy-tailnet/scripts/measure-build.sh spike-bin/apassy-tailnet-spike \
+            target/release/apassy-tailnet-baseline "$RUNNER_TEMP/libtailscale" spike-out/macos-arm64/build \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Measure the running node
+        env:
+          TS_A_AUTH: ${{ secrets.TS_A_AUTH }}
+          TS_A_API: ${{ secrets.TS_A_API }}
+          ONLINE: ${{ inputs.online }}
+        run: |
+          online=()
+          if [ "$ONLINE" = true ]; then online=(--online); fi
+          python3 -I crates/apassy-tailnet/scripts/spike_run.py measure --spike spike-bin/apassy-tailnet-spike \
+            --out spike-out/macos-arm64 --tag "$SPIKE_TAG" ${online[@]+"${online[@]}"} | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: License inventory of the Go modules
+        continue-on-error: true
+        working-directory: crates/apassy-tailnet/go
+        env:
+          CGO_ENABLED: "1"
+          GOTOOLCHAIN: local
+        run: go run github.com/google/go-licenses/v2@v2.0.1 report . > "$GITHUB_WORKSPACE/spike-out/macos-arm64/go-licenses.csv"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: tailnet-spike-macos-arm64
+          path: |
+            spike-out/
+            !spike-out/**/*.stripped
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spike-binary-macos-arm64
+          path: spike-bin/apassy-tailnet-spike
+          if-no-files-found: error
+          retention-days: 1
+
+  linux-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Debian 11 glibc 2.31, the oldest supported Linux runtime, as relay-image.yml linux-cli.
+    container:
+      image: rust:1.97.0-bullseye@sha256:08d3da459cca408754c8071b1f74ed334c40a149e7fa6a150bceb11e2ee924c5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install artifact inspection tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends binutils file python3 curl ca-certificates
+      - name: Install the pinned Go (version and SHA-256 from pins.env)
+        run: crates/apassy-tailnet/scripts/install-go.sh "$RUNNER_TEMP/go-toolchain" >> "$GITHUB_PATH"
+      - name: Build the archive
+        run: crates/apassy-tailnet/scripts/build-archive.sh "$RUNNER_TEMP/libtailscale" spike-out/linux-x86_64/archive
+      - name: Run the T0 tests (build.rs builds the archive with Go)
+        run: cargo test --locked -p apassy-tailnet --features tailnet
+      - name: Build the spike (prebuilt archive) and the baseline (no archive)
+        run: |
+          test "$(uname -m)" = x86_64
+          export APASSY_LIBTAILSCALE_DIR="$RUNNER_TEMP/libtailscale"
+          cargo build --release --locked -p apassy-tailnet --features spike --bin apassy-tailnet-spike
+          mkdir -p spike-bin
+          cp target/release/apassy-tailnet-spike spike-bin/apassy-tailnet-spike
+          cargo build --release --locked -p apassy-tailnet --bin apassy-tailnet-baseline
+      - name: Measure the build (fails above glibc 2.31)
+        run: |
+          crates/apassy-tailnet/scripts/measure-build.sh spike-bin/apassy-tailnet-spike \
+            target/release/apassy-tailnet-baseline "$RUNNER_TEMP/libtailscale" spike-out/linux-x86_64/build \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: tailnet-spike-linux-x86_64-build
+          path: |
+            spike-out/
+            !spike-out/**/*.stripped
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spike-binary-linux-x86_64
+          path: spike-bin/apassy-tailnet-spike
+          if-no-files-found: error
+          retention-days: 1
+
+  # The same binary on the runner itself (glibc 2.39): real network, no container.
+  linux-run:
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: spike-binary-linux-x86_64
+          path: ${{ runner.temp }}/bin
+      - name: Measure the running node
+        env:
+          TS_A_AUTH: ${{ secrets.TS_A_AUTH }}
+          TS_A_API: ${{ secrets.TS_A_API }}
+          ONLINE: ${{ inputs.online }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/apassy-tailnet-spike"
+          online=()
+          if [ "$ONLINE" = true ]; then online=(--online); fi
+          python3 -I crates/apassy-tailnet/scripts/spike_run.py measure --spike "$RUNNER_TEMP/bin/apassy-tailnet-spike" \
+            --out spike-out/linux-x86_64 --tag "$SPIKE_TAG" ${online[@]+"${online[@]}"} | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Round trips in one tailnet and across two tailnets
+        env:
+          TS_A_AUTH: ${{ secrets.TS_A_AUTH }}
+          TS_B_AUTH: ${{ secrets.TS_B_AUTH }}
+          TS_A_API: ${{ secrets.TS_A_API }}
+          TS_B_API: ${{ secrets.TS_B_API }}
+          ONLINE: ${{ inputs.online }}
+        run: |
+          online=()
+          if [ "$ONLINE" = true ]; then online=(--online); fi
+          python3 -I crates/apassy-tailnet/scripts/spike_run.py round-trip --spike "$RUNNER_TEMP/bin/apassy-tailnet-spike" \
+            --out spike-out/linux-x86_64 --tag "$SPIKE_TAG" ${online[@]+"${online[@]}"} | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: tailnet-spike-linux-x86_64-run
+          path: spike-out/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Can a binary with the Go archive be signed with the hardened runtime and notarized?
+  # The signed binary stays on the runner; only the notary answer and log are kept.
+  notarize:
+    needs: macos
+    if: inputs.notarize && github.event.repository.fork == false
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: spike-binary-macos-arm64
+          path: ${{ runner.temp }}/bin
+      - name: Check the secrets
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          missing=""
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing. See docs/operations/release.md."
+            exit 1
+          fi
+      # As release.yml provider-check: a keychain private to this run, deleted at the end.
+      - name: Import the Developer ID certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -base64 32)"
+          security create-keychain -p "$password" "$keychain"
+          echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          umask 077
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode >"$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -f pkcs12 \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain" || true
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          keychains=("$keychain")
+          while IFS= read -r line; do
+            keychains+=("$(sed -E 's/^[[:space:]]*"(.*)"$/\1/' <<<"$line")")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${keychains[@]}"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/"Developer ID Application: / {print $2; exit}')"
+          if [ -z "$identity" ]; then
+            echo "::error::MACOS_CERTIFICATE_P12 has no Developer ID Application identity."
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
+      - name: Sign with the hardened runtime and notarize
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          mkdir -p spike-out/notarize
+          binary="$RUNNER_TEMP/bin/apassy-tailnet-spike"
+          chmod +x "$binary"
+          codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp \
+            --identifier cc.wyderka.apassy.tailnet-spike "$binary"
+          codesign --verify --strict --verbose=2 "$binary" 2>&1 | tee spike-out/notarize/codesign-verify.txt
+          codesign --display --verbose=4 "$binary" 2>&1 | grep -E '^(Identifier|Format|CodeDirectory|Runtime|Timestamp|TeamIdentifier)' \
+            | tee spike-out/notarize/codesign-display.txt
+          ditto -c -k --keepParent "$binary" "$RUNNER_TEMP/apassy-tailnet-spike.zip"
+          umask 077
+          printf '%s\n' "$APPLE_API_KEY_P8" >"$RUNNER_TEMP/AuthKey.p8"
+          notary=(--key "$RUNNER_TEMP/AuthKey.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID")
+          xcrun notarytool submit "$RUNNER_TEMP/apassy-tailnet-spike.zip" "${notary[@]}" --wait --timeout 45m \
+            --output-format json | tee spike-out/notarize/submit.json
+          id="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' spike-out/notarize/submit.json)"
+          [ -z "$id" ] || xcrun notarytool log "$id" "${notary[@]}" spike-out/notarize/log.json || true
+          status="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' spike-out/notarize/submit.json)"
+          echo "### Notarization: $status" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$status" = Accepted
+      - name: Run the signed binary
+        run: |
+          binary="$RUNNER_TEMP/bin/apassy-tailnet-spike"
+          "$binary" info | tee spike-out/notarize/info.json
+          "$binary" signals | tee spike-out/notarize/signals.jsonl
+          mkdir -m 700 "$RUNNER_TEMP/notarized-node"
+          "$binary" serve --dir "$RUNNER_TEMP/notarized-node/state" --hostname apassy-spike-notarized --no-auth-key \
+            --no-wait --control-url http://127.0.0.1:1 > spike-out/notarize/serve.jsonl &
+          pid=$!
+          sleep 10
+          kill -TERM "$pid"
+          set +e
+          wait "$pid"
+          echo "{\"signed_offline_node_exit\": $?}" | tee spike-out/notarize/serve-exit.json
+      - name: Remove the keychain and the key
+        if: always()
+        run: |
+          [ -z "${KEYCHAIN:-}" ] || security delete-keychain "$KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/apassy-tailnet-spike.zip"
+          rm -f "$RUNNER_TEMP/bin/apassy-tailnet-spike"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: tailnet-spike-notarize
+          path: spike-out/notarize/
+          if-no-files-found: warn
+          retention-days: 14
