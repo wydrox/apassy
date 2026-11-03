@@ -152,3 +152,20 @@ The vault core of the iPhone app (`ios/ApassyCore`) links the storage and TLS st
 ## Browser domain matching
 
 IDNA and public suffix dependency notices and license texts are in [browser-domains](browser-domains/README.md).
+
+## Embedded tailnet node (T0 spike, not shipped)
+
+Date: 2026-11-03. The crate `crates/apassy-tailnet` (ADR 0037 D9) builds a Go archive from the vendored libtailscale (`crates/apassy-tailnet/go/`, [VENDORED.md](../crates/apassy-tailnet/go/VENDORED.md)) and links it into the spike binary `apassy-tailnet-spike`. No shipped binary links it yet: the feature `tailnet` is off, and the crate is not a default member of the workspace. Before the app or the Linux node links it (unit TH-T), generate the full list of the Go modules in the archive with `go-licenses report` (the spike workflow uploads one) and add each notice here.
+
+| Component | Version | License | Text | In the archive |
+| --- | --- | --- | --- | --- |
+| libtailscale (Tailscale Inc and authors) | commit `ac7ed43a` (2026-10-30) | BSD-3-Clause | `libtailscale/LICENSE` | Yes, the C API and its Go code |
+| tailscale.com (Tailscale Inc and contributors): tsnet, the control client, magicsock, DERP | 1.104.1 | BSD-3-Clause | `tailscale/LICENSE` | Yes |
+| Go runtime and standard library (The Go Authors) | 1.27.3 | BSD-3-Clause | `go/LICENSE` | Yes, statically |
+| golang.org/x/crypto, net, sys, sync, term, text, time and other x/ modules (The Go Authors) | `go.sum` of the commit | BSD-3-Clause | `go/LICENSE` (same text) | Yes, the packages that tsnet imports |
+| wireguard-go, Tailscale fork (WireGuard LLC) | `v0.0.0-20260928213032-417aef361226` | MIT | `wireguard-go/LICENSE` | Yes |
+| gVisor netstack (The gVisor Authors) | `v0.0.0-20260915211658-a6f909f08a72` | Apache-2.0 | `gvisor/LICENSE` | Yes, the userspace TCP/IP stack |
+
+The wireguard-go license file has no copyright line. Its source files carry "Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved." Keep that line with the MIT text in a shipped notice.
+
+The Apassy file `crates/apassy-tailnet/go/apassy.go` is Apache-2.0, like the rest of Apassy. BSD-3-Clause and MIT need the copyright notice and the license text in a binary distribution. They permit linking into the Apache-2.0 app. Apache-2.0 (gVisor) needs a copy of the license and has a patent grant (section 3).
