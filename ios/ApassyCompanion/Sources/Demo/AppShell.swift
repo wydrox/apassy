@@ -147,10 +147,19 @@ struct DemoBanner: View {
 
 extension View {
     /// The banner of the demo at the top, when `root` is the demo.
+    ///
+    /// A stack, not `safeAreaInset`: the navigation bars of a `NavigationStack` (also inside a
+    /// `TabView` and in a sheet) take their place from the safe area of the window, so an inset
+    /// put the banner over their titles and Back, Close, and toolbar buttons. Below the banner the
+    /// screens get a frame of their own, and their bars start under it. The banner's material
+    /// still reaches up under the status bar.
     @ViewBuilder
     func demoBanner(_ root: RootModel?) -> some View {
         if let root, root.isDemo {
-            safeAreaInset(edge: .top, spacing: 0) { DemoBanner(root: root) }
+            VStack(spacing: 0) {
+                DemoBanner(root: root)
+                self.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         } else {
             self
         }

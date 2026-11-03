@@ -129,7 +129,7 @@ public enum DemoVault {
     public static func accessRequest(answerKey: Data, now: Date = Date()) -> RelayAccessRequest {
         let created = UInt64(now.timeIntervalSince1970) - 20
         return access(
-            id: accessRequestID, agent: "Codex", host: "codex", item: "OpenAI", binding: "OPENAI_API_KEY",
+            id: accessRequestID, agentID: "7", agent: "Codex", host: "codex", item: "OpenAI", binding: "OPENAI_API_KEY",
             hosts: ["api.openai.com"], reason: "Summarize the newsletter draft with the OpenAI API.",
             project: "newsletter", created: created, expires: created + UInt64(waitLifetime), state: "open",
             answerKey: answerKey)
@@ -139,7 +139,7 @@ public enum DemoVault {
     static func pastAccessRequest(answerKey: Data, now: Date = Date()) -> RelayAccessRequest {
         let created = UInt64(now.timeIntervalSince1970) - 86_400
         let open = access(
-            id: "demo-79", agent: "Claude Code", host: "claude-code", item: "GitHub", binding: "GITHUB_TOKEN",
+            id: "demo-79", agentID: "4", agent: "Claude Code", host: "claude-code", item: "GitHub", binding: "GITHUB_TOKEN",
             hosts: ["api.github.com"], reason: "Open the pull request of the release.", project: "acme-billing",
             created: created, expires: created + 300, state: "open", answerKey: answerKey)
         let card = open.card
@@ -154,7 +154,7 @@ public enum DemoVault {
     }
 
     static func access(
-        id: String, agent: String, host: String, item: String, binding: String, hosts: [String], reason: String,
+        id: String, agentID: String, agent: String, host: String, item: String, binding: String, hosts: [String], reason: String,
         project: String, created: UInt64, expires: UInt64, state: String, answerKey: Data,
         rowVaultID: String = DemoVault.vaultID
     ) -> RelayAccessRequest {
@@ -165,7 +165,7 @@ public enum DemoVault {
             request_id: id,
             asker: .init(device: PreviewVaultService.PreviewMacs.macMini, relay_device_id: 2, name: macName),
             vault_name: name,
-            agent: .init(id: "7", name: agent, host: host, host_source: "agent_claimed"),
+            agent: .init(id: agentID, name: agent, host: host, host_source: "agent_claimed"),
             item: .init(
                 local_id: "102", uuid: "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a03", revision: "3", name: item,
                 environment: "development", delivery: "placeholder", binding_name: binding),

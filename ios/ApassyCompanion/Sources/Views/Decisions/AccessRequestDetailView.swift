@@ -28,7 +28,7 @@ struct AccessRequestDetailView: View {
     let c = r.card
     return List {
       Section {
-        Text("\(escaped(c.agent.name)) (id \(c.agent.id)) asks for \(escaped(c.item.name))")
+        Text(verbatim: "\(escaped(c.agent.name)) asks for \(escaped(c.item.name))")
           .font(.headline)
         Text("\(escaped(c.vault_name)) · Asked on \(escaped(c.asker.name))")
         if c.agent.host == nil { Text("Agent host: unknown") }

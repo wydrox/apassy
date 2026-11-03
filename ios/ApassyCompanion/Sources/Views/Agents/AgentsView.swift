@@ -212,10 +212,11 @@ private struct AgentRow: View {
                             .accessibilityLabel("Last use \(AgentsText.ago(last, now: now))")
                     }
                 }
+                // Two lines: a long Mac name must not cut off the uses ("6 uses this w…").
                 Text(AgentsText.subtitle(entry))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
             }
         }
         .accessibilityElement(children: .combine)

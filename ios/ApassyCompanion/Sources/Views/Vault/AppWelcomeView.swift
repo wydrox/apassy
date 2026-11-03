@@ -76,6 +76,8 @@ struct AppWelcomeView: View {
 private struct WelcomePoint: View {
     let symbol: String
     let text: String
+    /// One width for every symbol, so the three texts start at the same x.
+    @ScaledMetric(relativeTo: .callout) private var iconWidth: CGFloat = 28
 
     var body: some View {
         Label {
@@ -84,6 +86,7 @@ private struct WelcomePoint: View {
         } icon: {
             Image(systemName: symbol)
                 .foregroundStyle(.tint)
+                .frame(width: iconWidth)
         }
     }
 }
