@@ -47,6 +47,9 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+      # The privacy manifest (required reason APIs, collected data): docs/store/app-store/app-privacy.md.
+      - path: Privacy/App/PrivacyInfo.xcprivacy
+        buildPhase: resources
       # The notices and license texts of the code and data in the app (Settings > Licenses).
       - path: ../../licenses
         type: folder
@@ -141,6 +144,8 @@ targets:
     platform: iOS
     sources:
       - path: AutoFill
+      - path: Privacy/AutoFill/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: ApassyVaultKit
         product: ApassyVaultKit
@@ -196,6 +201,8 @@ targets:
     sources:
       - path: Watch/Sources
       - path: Watch/Resources
+      - path: Privacy/Watch/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: ApassyVaultKit
         product: ApassyVaultKit
