@@ -69,6 +69,12 @@ pub(crate) struct CreatedTeam {
 /// `POST /v1/teams` with the operator team code: a new team named `team` with the key
 /// `key` as its first device, named `device` (relay-sync-v1 section 6). The team code
 /// must have its form; the caller checks it.
+///
+/// `url` brings its trust: a pinned node (the team code of kind `node` of a node pairing
+/// link, node-pairing-v1 section 6; plan S2–S3 unit L4) gets the request only after its
+/// leaf certificate matches the pin, at its origin or an alternative; another
+/// certificate is `PinMismatch` before any request byte. A hosted address keeps system
+/// trust.
 pub(crate) fn create_team_on_relay(
     url: &RelayUrl,
     team_code: &str,
@@ -611,6 +617,138 @@ pub fn valid_device_uuid(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relay of one canned answer to `POST /v1/teams` behind the real TLS front of a
+    /// node on the loopback (with the front's test hooks), and a new self-signed node
+    /// certificate. Returns the front, the node origin, the pin, and the number of
+    /// connections that reached the relay behind the front.
+    fn pinned_team_relay() -> (
+        crate::net::tls_front::FrontHandle,
+        String,
+        crate::net::pin::Pin,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use crate::net::certificate::NodeCertificate;
+        use crate::net::tls_front::{Front, FrontLimits, FrontOptions};
+        use std::io::{Read, Write};
+        use std::net::{IpAddr, Ipv4Addr, TcpListener};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let target = listener.local_addr().unwrap();
+        let reached = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&reached);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                count.fetch_add(1, Ordering::SeqCst);
+                // The head, then the JSON body of its Content-Length.
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(read) = stream.read(&mut buf) {
+                    if read == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..read]);
+                    let text = String::from_utf8_lossy(&seen).to_string();
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                }
+                // The envelope of relay-sync-v1 section 4.
+                let body = r#"{"ok":true,"result":{"team_id":"t_7k2m5q4x3c","device_id":1}}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let certificate = NodeCertificate::generate("Synthetic build box").unwrap();
+        let pin = certificate.pin;
+        let mut options = FrontOptions::new(
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            0,
+            certificate,
+            target,
+        );
+        options.allow_loopback_bind = true;
+        options.allow_test_peers = true;
+        // The refused attempts count too: more than a real peer's minute allows.
+        options.limits = FrontLimits {
+            max_connections: 64,
+            max_per_peer: 64,
+            new_per_peer_per_minute: 10_000,
+            ..FrontLimits::default()
+        };
+        let front = Front::start(options).unwrap();
+        let origin = format!("https://127.0.0.1:{}", front.bound()[0].port());
+        (front, origin, pin, reached)
+    }
+
+    /// The team of a node pairing link (plan S2–S3 unit L4) is made through the pin: a
+    /// wrong pin and system trust are refused before any byte reaches the relay; the
+    /// right pin makes the team, and a questions membership keeps the pin and the
+    /// alternatives of the address.
+    #[test]
+    fn a_team_on_a_pinned_node_is_made_only_through_its_pin() {
+        use crate::net::pin::Pin;
+        use crate::sync::TlsTrust;
+        use std::sync::atomic::Ordering;
+        let (_front, origin, pin, reached) = pinned_team_relay();
+        let code = format!("apassy_tcd_{}", "cd".repeat(32));
+        let key = DeviceKey::generate().unwrap();
+        let other = Pin::of_certificate(b"synthetic other certificate");
+        let wrong = RelayUrl::parse_with_trust(&origin, TlsTrust::Pinned(other)).unwrap();
+        assert_eq!(
+            create_team_on_relay(&wrong, &code, "Personal", "Synthetic Mac", &key).unwrap_err(),
+            SyncError::PinMismatch
+        );
+        let system = RelayUrl::parse(&origin).unwrap();
+        assert_eq!(
+            create_team_on_relay(&system, &code, "Personal", "Synthetic Mac", &key).unwrap_err(),
+            SyncError::RelayUnreachable
+        );
+        assert_eq!(reached.load(Ordering::SeqCst), 0, "no request reached it");
+
+        let node = RelayUrl::parse_with_trust(&origin, TlsTrust::Pinned(pin)).unwrap();
+        let created = create_team_on_relay(&node, &code, "Personal", "Synthetic Mac", &key)
+            .expect("the team");
+        assert_eq!(
+            created,
+            CreatedTeam {
+                team_id: "t_7k2m5q4x3c".to_owned(),
+                device_id: 1
+            }
+        );
+        assert_eq!(reached.load(Ordering::SeqCst), 1);
+
+        // A questions team at the address with an alternative: the membership keeps the
+        // pin and the alternative (vault schema 28).
+        let node = node
+            .alternatives(&["apassy-node.tail0123.ts.net".to_owned()])
+            .unwrap();
+        let membership =
+            new_questions_team_at(&node, &code, "Personal", "Synthetic Mac").expect("team");
+        assert_eq!(membership.relay_url, origin);
+        assert_eq!(membership.pin, Some(pin.text()));
+        let port = origin.rsplit(':').next().unwrap();
+        assert_eq!(
+            membership.alt,
+            [format!("apassy-node.tail0123.ts.net:{port}")]
+        );
+        assert_eq!(reached.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn a_new_device_uuid_has_the_contract_form() {

@@ -1147,14 +1147,27 @@ fn the_relay_setup_sheet_asks_for_the_address_the_team_code_and_the_name() {
         "Sync “Personal” through the Apassy relay",
         "New relay copy",
         "Join from another Mac",
+        "Your own node",
         "Relay address",
-        "Team code",
+        "Relay with a team code",
         "Name of this Mac",
         "https://apassy-relay.wyderka.cc",
         "Turn on",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    // The hosted relay needs no team code (plan s7 unit S0): the field is there only
+    // with "Relay with a team code", and always for a relay that the owner runs.
+    assert!(!text.contains("Team code"), "{text}");
+    a.sync.relay.with_code = true;
+    let text = frames_in(&ctx, &mut a, Vec::new());
+    assert!(text.contains("Team code"), "{text}");
+    a.sync.relay.with_code = false;
+    a.sync.relay.url_input = "https://relay.example".to_owned();
+    let text = frames_in(&ctx, &mut a, Vec::new());
+    assert!(text.contains("Team code"), "{text}");
+    assert!(!text.contains("Relay with a team code"), "{text}");
+    a.sync.relay.url_input = crate::sync::DEFAULT_RELAY_URL.to_owned();
     // The first field of the new sheet has the focus: typing goes into the address.
     a.sync.relay.url_input.clear();
     let _ = frames_in(&ctx, &mut a, vec![egui::Event::Text("h".to_owned())]);
@@ -3221,14 +3234,19 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         Some(&joined.device_id())
     );
     a.ui.sheet = None;
+    // Settings > Devices of N7 (Devices mockup, frame 1): the row of the iPhone with its
+    // kind and role, its route, and "Revoke…" for a device on the relay.
+    super::open_settings(&mut a, super::SettingsSection::Devices);
     let text = frames(&mut a);
     a.questions_settle_for_test();
+    // This Mac's row has the name of the machine, not its device name on the relay.
     for expected in [
-        "Synthetic MacBook",
         "This Mac",
+        "Mac · Asks for approvals",
         "Test iPhone",
-        "iPhone · answers with Face ID",
-        "Remove…",
+        "iPhone · Approves runs",
+        "via Apassy relay",
+        "Revoke…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -4010,4 +4028,385 @@ fn the_new_relay_copy_step_has_no_code_field_for_the_hosted_relay() {
     for banned in ["paid", "€", "EUR", "a month", "for teams", "team code from"] {
         assert!(!words.contains(banned), "{banned}: {words}");
     }
+}
+
+/// The fake relay behind the real TLS front of a node on the loopback, as in
+/// `tests/relay_pinned.rs`: a new self-signed node certificate, and the front's test
+/// hooks that let it bind `127.0.0.1` and admit a loopback peer. Returns the front, the
+/// node origin `https://127.0.0.1:<port>` (an explicit port, never 443), and the pin. The
+/// relay reports the node origin in its sign-in challenge. The Linux node of unit L1
+/// serves the same relay behind the same front.
+fn pinned_node(
+    relay: &fake_relay::FakeRelay,
+) -> (
+    crate::net::tls_front::FrontHandle,
+    String,
+    crate::net::pin::Pin,
+) {
+    use crate::net::certificate::NodeCertificate;
+    use crate::net::tls_front::{Front, FrontLimits, FrontOptions};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let target: SocketAddr = relay
+        .url
+        .strip_prefix("http://")
+        .expect("plain fake relay")
+        .parse()
+        .expect("loopback address");
+    let certificate = NodeCertificate::generate("Synthetic build box").expect("certificate");
+    let pin = certificate.pin;
+    let mut options = FrontOptions::new(
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        0,
+        certificate,
+        target,
+    );
+    options.allow_loopback_bind = true;
+    options.allow_test_peers = true;
+    // One connection per request: the test makes more than a real peer's minute allows.
+    options.limits = FrontLimits {
+        max_connections: 256,
+        max_per_peer: 256,
+        new_per_peer_per_minute: 100_000,
+        ..FrontLimits::default()
+    };
+    let front = Front::start(options).expect("front");
+    let origin = format!("https://127.0.0.1:{}", front.bound()[0].port());
+    relay.set_origin(&origin);
+    (front, origin, pin)
+}
+
+/// The node pairing link of `apassy pair` (node-pairing-v1, `/pair#`) for the node at
+/// `origin` with the pin `pin`: a new one-use team code of the fake relay.
+fn node_pairing_link(
+    relay: &fake_relay::FakeRelay,
+    origin: &str,
+    pin: crate::net::pin::Pin,
+) -> String {
+    use crate::sync::{LinkKind, PairedLink, RelayUrl, TlsTrust};
+    let node = RelayUrl::parse_with_trust(origin, TlsTrust::Pinned(pin)).expect("node");
+    PairedLink::format(
+        LinkKind::Pair,
+        &node,
+        &relay.team_code(),
+        Some("Synthetic build box"),
+    )
+    .expect("a pairing link")
+    .to_string()
+}
+
+/// "Your own node" (plan S2–S3 unit L4): the pairing link of a Linux node makes the
+/// team on the node through its pin, and the sync link of the vault list and the
+/// membership keep the pin. "Add a device…" then gives the iPhone (and a Mac) a device
+/// link with the node's origin and pin, and a Mac that joins with it adopts the vault
+/// with the pin and syncs through the node.
+#[test]
+fn your_own_node_takes_a_pairing_link_and_the_iphone_link_names_the_node_and_its_pin() {
+    use crate::sync::{LinkKind, PairedLink, TlsTrust};
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let (_front, origin, pin) = pinned_node(&relay);
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Personal", PASS, None);
+    add_item(&mut a, "Alpha", "SYNTH-alpha");
+    let id = current_id(&a);
+    super::open_settings(&mut a, super::SettingsSection::Vault);
+    a.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
+    a.sync.relay.mode = super::sync::relay::SetupMode::Node;
+    let ctx = egui::Context::default();
+    let text = frames_in(&ctx, &mut a, Vec::new());
+    for expected in [
+        "New relay copy",
+        "Join from another Mac",
+        "Your own node",
+        "Pairing link",
+        "apassy pair",
+        "Name of this Mac",
+        "Turn on",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    // The pairing link has the focus: typing goes into it.
+    let _ = frames_in(&ctx, &mut a, vec![egui::Event::Text("h".to_owned())]);
+    assert_eq!(a.sync.relay.pair_input, "h");
+
+    // A pasted link and Return: the team is on the node, with the pin.
+    a.sync.relay.pair_input = node_pairing_link(&relay, &origin, pin);
+    a.sync.relay.device_input = "Synthetic MacBook".to_owned();
+    let enter = egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let _ = frames_in(&ctx, &mut a, vec![enter]);
+    a.relay_settle_for_test();
+    assert!(a.ui.sheet.is_none(), "{}", a.status_text);
+    assert_eq!(
+        a.status_text,
+        "“Personal” syncs through your own node. To add another Mac or an iPhone, select “Add a device…”."
+    );
+    assert!(a.sync.relay.pair_input.is_empty(), "the code is erased");
+    assert_eq!(relay.version(), 1);
+    assert_eq!(relay.count("POST /v1/teams"), 1);
+    // No request carried the pin or the node name: they stay on this Mac.
+    assert!(
+        !relay
+            .log()
+            .iter()
+            .any(|line| line.contains("pin=") || line.contains("name=")),
+        "{:?}",
+        relay.log()
+    );
+    let entry = a.vault_list.registry.get(&id).expect("entry").clone();
+    let link = entry.sync_relay().expect("relay link").clone();
+    assert_eq!(link.url, origin, "the node origin is the stored value");
+    assert_eq!(link.pin.as_deref(), Some(pin.text().as_str()));
+    let listed = crate::vaults::Registry::read(&a.vault_list.data_dir)
+        .expect("read")
+        .expect("list");
+    assert_eq!(
+        listed
+            .get(&id)
+            .and_then(|entry| entry.sync_relay())
+            .and_then(|link| link.pin.clone()),
+        Some(pin.text())
+    );
+    let membership = a
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.relay_membership(&link.team_id))
+        .expect("vault")
+        .expect("read")
+        .expect("membership");
+    assert_eq!(membership.relay_url, origin);
+    assert_eq!(membership.pin.as_deref(), Some(pin.text().as_str()));
+    // The relay sync of the list (the worker's) is pinned, and syncs through the front.
+    assert_eq!(
+        a.relay_of(&id).expect("relay").config().trust,
+        TlsTrust::Pinned(pin)
+    );
+    add_item(&mut a, "Beta", "SYNTH-beta");
+    a.sync_now();
+    a.relay_settle_for_test();
+    assert_eq!(a.status_text, "Saved to the relay.");
+    assert_eq!(relay.version(), 2);
+
+    // "Add a device…": the link for the iPhone names the node origin and the pin.
+    a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
+    let text = settled_frames(&mut a);
+    let device_link = a.relay_add_mac_link_for_test().expect("a link");
+    assert!(
+        device_link.starts_with(&format!("{origin}/link#apassy_lnk_")),
+        "{device_link}"
+    );
+    assert!(
+        device_link.contains(&format!("&pin={}", pin.text())),
+        "{device_link}"
+    );
+    assert!(text.contains(&device_link), "the link as text: {text}");
+    assert_qr_encodes(
+        a.relay_add_mac_qr_for_test().expect("a QR code"),
+        &device_link,
+    );
+    let parsed = PairedLink::parse(&device_link).expect("a node-pairing-v1 link");
+    assert_eq!(
+        (parsed.kind, parsed.origin.as_str(), parsed.pin),
+        (LinkKind::Device, origin.as_str(), Some(pin))
+    );
+
+    // A Mac that joins with that link adopts the vault with the pin, and syncs.
+    let mut b = folders.mac("mac-b");
+    super::sync::begin_open(&mut b);
+    b.sync.relay.source = super::sync::OpenSource::Relay;
+    let _ = frames(&mut b);
+    let words = send_link(&mut b, &device_link);
+    a.relay_add_mac_poll_for_test();
+    let links = a.relay_add_mac_links_for_test();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].safety.as_deref(), Some(words.as_str()));
+    a.relay_ask_confirm_for_test(links[0].id);
+    a.confirm_owner_now(crate::broker::approvals::OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.relay_settle_for_test();
+    a.ui.sheet = None;
+    b.relay_join_poll_now_for_test();
+    assert_eq!(
+        b.sync.relay.join_view(None),
+        Some(super::sync::relay::JoinView::Ready {
+            team: "Personal".to_owned()
+        }),
+        "{:?}",
+        b.sync.relay.join_error
+    );
+    b.owner_ui.passphrase.push_str(PASS);
+    b.relay_open_vault(None);
+    b.relay_settle_for_test();
+    assert!(!b.owner_ui.session.is_locked(), "{}", b.status_text);
+    assert_eq!(names(&b), vec!["Alpha", "Beta"]);
+    let id_b = current_id(&b);
+    let link_b = b
+        .vault_list
+        .registry
+        .get(&id_b)
+        .and_then(|entry| entry.sync_relay().cloned())
+        .expect("relay link");
+    assert_eq!(link_b.url, origin);
+    assert_eq!(link_b.pin.as_deref(), Some(pin.text().as_str()));
+    assert_eq!(
+        b.relay_of(&id_b).expect("relay").config().trust,
+        TlsTrust::Pinned(pin)
+    );
+    add_item(&mut b, "From B", "SYNTH-from-b");
+    b.sync_now();
+    b.relay_settle_for_test();
+    assert_eq!(b.status_text, "Saved to the relay.");
+    a.sync_now();
+    a.relay_settle_for_test();
+    assert_eq!(names(&a), vec!["Alpha", "Beta", "From B"]);
+}
+
+/// A node whose certificate does not match the pin is refused before any request: the
+/// pairing link of "Your own node" with another pin, a node origin typed as a relay
+/// address (system trust: no store has the node's certificate), a device link with
+/// another pin, and a vault list whose pin differs from the membership's. The team code
+/// of the refused pairing works afterwards: no request used it. A link that the grammar
+/// refuses, and a device link in "Your own node", come back at once.
+#[test]
+fn a_wrong_pin_refuses_the_node_before_any_request() {
+    use crate::net::pin::Pin;
+    use crate::sync::{LINK_INVALID_TEXT, PIN_CHANGED_TEXT, RelayConfig, RelaySync, SyncError};
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let (_front, origin, pin) = pinned_node(&relay);
+    let other = Pin::of_certificate(b"synthetic other certificate");
+    assert_ne!(other, pin);
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Personal", PASS, None);
+    add_item(&mut a, "Alpha", "SYNTH-alpha");
+    let id = current_id(&a);
+    let off = |a: &DesktopApp| {
+        a.vault_list
+            .registry
+            .get(&id)
+            .expect("entry")
+            .sync
+            .is_none()
+    };
+
+    // The pairing link with another pin.
+    let good = node_pairing_link(&relay, &origin, pin);
+    let wrong = good.replace(&pin.text(), &other.text());
+    a.relay_enable_node(&id, &wrong, "Synthetic MacBook")
+        .expect("sent");
+    a.relay_settle_for_test();
+    assert_eq!(
+        a.status_text,
+        format!("{PIN_CHANGED_TEXT} Sync stays off."),
+        "{}",
+        a.status_text
+    );
+    assert!(off(&a));
+    assert!(relay.log().is_empty(), "{:?}", relay.log());
+
+    // The node origin as a typed relay address: system trust refuses its certificate.
+    a.relay_enable_new(&id, &origin, &relay.team_code(), "Synthetic MacBook")
+        .expect("sent");
+    a.relay_settle_for_test();
+    assert!(
+        a.status_text.contains("Relay not reachable"),
+        "{}",
+        a.status_text
+    );
+    assert!(off(&a));
+    assert!(relay.log().is_empty(), "{:?}", relay.log());
+
+    // Texts that are no pairing link make no request: a pair link without a pin, and
+    // one with a key of a later contract version (node-pairing-v1 section 5 rule 5).
+    let no_pin = format!("{origin}/pair#apassy_tcd_{}", "cd".repeat(32));
+    assert_eq!(
+        a.relay_enable_node(&id, &no_pin, "Mac").unwrap_err(),
+        LINK_INVALID_TEXT
+    );
+    assert_eq!(
+        a.relay_enable_node(&id, &format!("{good}&foo=1"), "Mac")
+            .unwrap_err(),
+        crate::sync::LINK_UPDATE_TEXT
+    );
+    let device_link = format!(
+        "{origin}/link#apassy_lnk_t_7k2m5q4x3c_{}&pin={}",
+        "ab".repeat(32),
+        pin.text()
+    );
+    assert_eq!(
+        a.relay_enable_node(&id, &device_link, "Mac").unwrap_err(),
+        super::sync::relay::NOT_A_PAIRING_LINK
+    );
+    // ... and "Join from another Mac" points a pairing link to "Your own node".
+    a.sync.relay.link_input = good.clone();
+    a.relay_join_request(Some(id.clone()), None);
+    assert_eq!(
+        a.sync.relay.join_error.as_deref(),
+        Some(super::sync::relay::A_PAIRING_LINK)
+    );
+    assert!(relay.log().is_empty(), "{:?}", relay.log());
+
+    // The refused pairing used no code: the same link with the right pin works.
+    a.relay_enable_node(&id, &good, "Synthetic MacBook")
+        .expect("sent");
+    a.relay_settle_for_test();
+    assert!(
+        a.status_text.contains("syncs through your own node"),
+        "{}",
+        a.status_text
+    );
+    let entry = a.vault_list.registry.get(&id).expect("entry").clone();
+    let link = entry.sync_relay().expect("relay link").clone();
+
+    // A Mac that pastes the device link with another pin asks nothing of the node.
+    a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
+    let _ = settled_frames(&mut a);
+    let device_link = a.relay_add_mac_link_for_test().expect("a link");
+    let seen = relay.log().len();
+    let mut b = folders.mac("mac-b");
+    b.sync.relay.link_input = device_link.replace(&pin.text(), &other.text());
+    b.relay_join_request(None, None);
+    b.relay_join_settle_for_test();
+    assert!(
+        b.sync
+            .relay
+            .join_error
+            .as_deref()
+            .is_some_and(|error| error.contains(PIN_CHANGED_TEXT)),
+        "{:?}",
+        b.sync.relay.join_error
+    );
+    assert_eq!(relay.log().len(), seen, "{:?}", relay.log());
+
+    // The relay sync of a vault list whose pin is another than the membership's (the
+    // worker's `RelayConfig::for_link`): refused before the sign-in.
+    let mut tampered = link.clone();
+    tampered.pin = Some(other.text());
+    let state = entry.sync.as_ref().expect("sync").state.clone();
+    let probe = RelaySync::new(
+        RelayConfig::for_link(&a.vault_list.data_dir, &entry.path, &tampered, &state)
+            .expect("config"),
+    );
+    let seen = relay.log().len();
+    let refused = a
+        .owner_ui
+        .session
+        .with_vault(|vault| probe.sync(vault))
+        .expect("vault");
+    assert!(
+        matches!(refused, Err(SyncError::WrongVault | SyncError::PinMismatch)),
+        "{refused:?}"
+    );
+    assert_eq!(relay.log().len(), seen, "{:?}", relay.log());
+    // A stored pin that is not a pin never falls back to system trust.
+    tampered.pin = Some("not-a-pin".to_owned());
+    assert_eq!(
+        RelayConfig::for_link(&a.vault_list.data_dir, &entry.path, &tampered, &state).unwrap_err(),
+        SyncError::InvalidRelayAddress
+    );
 }
