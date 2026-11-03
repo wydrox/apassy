@@ -490,6 +490,7 @@ impl RunningNode for EmbeddedNode {
                 code: request.match_code,
                 created_at: request.created_at,
                 expires_at: request.expires_at,
+                redirect_host: request.redirect_host,
             })
             .collect())
     }

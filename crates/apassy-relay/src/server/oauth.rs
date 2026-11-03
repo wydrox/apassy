@@ -468,6 +468,30 @@ pub fn check_redirect_uri(uri: &str) -> bool {
     loopback_parts(uri).is_some()
 }
 
+/// The host of a redirect URI that passed [`check_redirect_uri`], for the owner's
+/// prompts (review 0.5.16): where the browser goes back with the code. Lowercase, without
+/// the port; an IPv6 address keeps its brackets (`[::1]`). Empty for a text that is not
+/// such a URI.
+pub fn redirect_host(uri: &str) -> String {
+    let Some(rest) = uri
+        .strip_prefix("https://")
+        .or_else(|| uri.strip_prefix("http://"))
+    else {
+        return String::new();
+    };
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let host = if authority.starts_with('[') {
+        match authority.find(']') {
+            Some(close) => &authority[..=close],
+            None => return String::new(),
+        }
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    host.to_ascii_lowercase()
+}
+
 /// True when `given` is the registered URI: the same text, or for a loopback URI the
 /// same host and rest with any port (RFC 8252 section 7.3).
 pub fn redirect_matches(registered: &str, given: &str) -> bool {
@@ -1864,6 +1888,9 @@ pub struct ConnectView {
     pub match_code: String,
     pub created_at: u64,
     pub expires_at: u64,
+    /// The host of the request's redirect URI ([`redirect_host`]): the owner's prompts
+    /// say where the code goes back to (review 0.5.16).
+    pub redirect_host: String,
 }
 
 /// The requests that wait for the owner, oldest first. Due ones become `expired` first.
@@ -1872,7 +1899,8 @@ pub fn pending(hub: &Hub, now: u64) -> RelayResult<Vec<ConnectView>> {
         expire_requests(tx, now)?;
         let mut statement = tx
             .prepare(
-                "SELECT r.id, r.client_id, c.client_name, r.match_code, r.created_at, r.expires_at \
+                "SELECT r.id, r.client_id, c.client_name, r.match_code, r.created_at, r.expires_at, \
+                 r.redirect_uri \
                  FROM connect_request r LEFT JOIN oauth_client c ON c.client_id = r.client_id \
                  WHERE r.status = 'pending' ORDER BY r.created_at, r.rowid",
             )
@@ -1886,6 +1914,7 @@ pub fn pending(hub: &Hub, now: u64) -> RelayResult<Vec<ConnectView>> {
                     match_code: row.get(3)?,
                     created_at: to_u(row.get(4)?),
                     expires_at: to_u(row.get(5)?),
+                    redirect_host: redirect_host(&row.get::<_, String>(6)?),
                 })
             })
             .map_err(db)?;
@@ -2114,6 +2143,21 @@ mod tests {
             "https://grok.example/{}",
             "a".repeat(MAX_REDIRECT_URI)
         )));
+        // The host for the owner's prompts: lowercase, no port, brackets kept.
+        for (uri, host) in [
+            ("https://grok.example/oauth/callback", "grok.example"),
+            ("https://Grok.Example:8443/cb?x=1", "grok.example"),
+            ("https://grok.example?x=1", "grok.example"),
+            ("https://grok.example", "grok.example"),
+            ("http://localhost/cb", "localhost"),
+            ("http://127.0.0.1:53682/callback", "127.0.0.1"),
+            ("http://[::1]:8080/cb", "[::1]"),
+            ("https://[2001:db8::7]/cb", "[2001:db8::7]"),
+            ("custom-scheme://cb", ""),
+            ("https://[::1/cb", ""),
+        ] {
+            assert_eq!(redirect_host(uri), host, "{uri}");
+        }
         // Exact, or any port on the loopback.
         assert!(redirect_matches(
             "https://a.example/cb",

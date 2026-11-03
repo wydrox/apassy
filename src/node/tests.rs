@@ -592,6 +592,7 @@ impl Fixture {
             code: "K7Q-4MD".to_owned(),
             created_at: fake_now(),
             expires_at: fake_now() + 300,
+            redirect_host: "grok.example".to_owned(),
         };
         self.state().connects.push(connect.clone());
         until("the host reads the connect request", || {
@@ -1181,6 +1182,7 @@ fn a_connect_name_has_no_format_or_tag_character() {
         code: "K7Q-4MD".to_owned(),
         created_at: fake_now(),
         expires_at: fake_now() + 300,
+        redirect_host: "grok.example".to_owned(),
     };
     // The characters of the security review: U+061C, U+180E, U+206A–206F, U+FFF9–FFFB,
     // and the tag block, beside the bidirectional controls.

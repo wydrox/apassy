@@ -572,6 +572,51 @@ pub const MAX_CONNECT_ID_BYTES: usize = 64;
 pub const MAX_CLIENT_NAME_BYTES: usize = 64;
 pub const MAX_MAC_NAME_BYTES: usize = 64;
 pub const MAX_CODE_BYTES: usize = 16;
+/// The longest `redirect_host` of a connect card: a DNS name has at most 253 bytes.
+pub const MAX_REDIRECT_HOST_BYTES: usize = 255;
+/// The line of the Mac's owner check for a connect request whose code goes back to a
+/// program on a computer (review 0.5.16).
+pub const LOCAL_CONNECT_WARNING: &str = "A program on this Mac can start this request.";
+
+/// True for the host of a redirect URI that names a computer itself, not a site:
+/// `localhost` and names under it, an address of `127.0.0.0/8`, `[::1]`, or the
+/// unspecified address. The code then goes to a program on the computer of the browser,
+/// and on the Mac any program can make such a request: the node's listener is on the
+/// loopback (review 0.5.16).
+pub fn is_local_redirect_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback() || v4.is_unspecified();
+    }
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(&host);
+    bare.parse::<std::net::Ipv6Addr>().is_ok_and(|v6| {
+        v6.is_loopback()
+            || v6.is_unspecified()
+            || v6
+                .to_ipv4_mapped()
+                .is_some_and(|v4| v4.is_loopback() || v4.is_unspecified())
+    })
+}
+
+/// The line of the owner's prompts and cards about where the code of a connect request
+/// goes back: "Returns to <host>", "Returns to a program on a computer (localhost)" for
+/// a local host ([`is_local_redirect_host`]), or "Returns to an address that was not
+/// given" for an empty one.
+pub fn connect_returns_to(host: &str) -> String {
+    if host.is_empty() {
+        "Returns to an address that was not given".to_owned()
+    } else if is_local_redirect_host(host) {
+        "Returns to a program on a computer (localhost)".to_owned()
+    } else {
+        format!("Returns to {host}")
+    }
+}
 
 /// The connect request of a connect card: a remote agent asks to connect to a Mac (the
 /// MCP authorization flow of ADR 0037). No token, no item, and no agent list.
@@ -588,12 +633,20 @@ pub struct CardConnect {
     pub code: String,
     /// When the connect request ends on the node (Unix seconds).
     pub expires_at: u64,
+    /// The host of the redirect URI of the request (`PendingConnect.redirect_host`):
+    /// where the code goes back. Since 0.5.16 (review 0.5.16) a Mac always sends it; a
+    /// card of an older Mac has none. The digest covers it when it is there. A reader
+    /// before 0.5.16 refuses a card with it ("Update Apassy"): its answer would not say
+    /// where the code goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_host: Option<String>,
 }
 
 impl CardConnect {
     /// The forms of section 7.4: an ID of `A-Za-z0-9-_`, names and a code without a
     /// control, format, or tag character (`crate::text::is_hidden_char`), within their
-    /// limits.
+    /// limits, and a `redirect_host`, when there is one, of printable ASCII without a
+    /// space, at most [`MAX_REDIRECT_HOST_BYTES`].
     pub fn valid(&self) -> bool {
         let text = |value: &str, max: usize| {
             !value.is_empty()
@@ -609,7 +662,25 @@ impl CardConnect {
             && text(&self.client_name, MAX_CLIENT_NAME_BYTES)
             && text(&self.mac_name, MAX_MAC_NAME_BYTES)
             && text(&self.code, MAX_CODE_BYTES)
+            && self
+                .redirect_host
+                .as_deref()
+                .is_none_or(valid_redirect_host)
     }
+
+    /// The line "Returns to …" of the card ([`connect_returns_to`]). `None` for a card of
+    /// a Mac before 0.5.16, which has no host.
+    pub fn returns_to(&self) -> Option<String> {
+        self.redirect_host.as_deref().map(connect_returns_to)
+    }
+}
+
+/// A `redirect_host` of a connect card: not empty, at most [`MAX_REDIRECT_HOST_BYTES`],
+/// printable ASCII without a space.
+pub fn valid_redirect_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= MAX_REDIRECT_HOST_BYTES
+        && host.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// The plaintext of a connect card (card v2, `kind = connect`), with exactly the fields of
@@ -627,7 +698,9 @@ pub struct ConnectCard {
 }
 
 /// The connect digest (section 8.1) as 64 lowercase hex characters: it covers the asker
-/// and every field of the connect request, so the device signs what it showed.
+/// and every field of the connect request, so the device signs what it showed. A card
+/// with a `redirect_host` adds the text `redirect_host` and the host after `expires_at`;
+/// a card without one has the digest of 0.5.15.
 pub fn connect_digest_hex(asker_device: &str, connect: &CardConnect) -> String {
     use ring::digest::{Context, SHA256};
     let mut hash = Context::new(&SHA256);
@@ -642,6 +715,10 @@ pub fn connect_digest_hex(asker_device: &str, connect: &CardConnect) -> String {
     text(&mut hash, &connect.mac_name);
     text(&mut hash, &connect.code);
     hash.update(&connect.expires_at.to_be_bytes());
+    if let Some(host) = &connect.redirect_host {
+        text(&mut hash, "redirect_host");
+        text(&mut hash, host);
+    }
     hash.finish()
         .as_ref()
         .iter()
@@ -1451,6 +1528,7 @@ mod tests {
             mac_name: "Synthetic Mac mini".to_owned(),
             code: "482 913".to_owned(),
             expires_at: 1_790_000_300,
+            redirect_host: None,
         }
     }
 
@@ -1531,6 +1609,106 @@ mod tests {
             text.replace(r#""kind":"connect""#, r#""kind":"run""#)
                 .as_bytes()
         ));
+    }
+
+    /// Review 0.5.16: a card says where the code goes back. The digest covers the host,
+    /// a card without one keeps the digest of 0.5.15, and a bad host is never posted.
+    #[test]
+    fn a_connect_card_names_where_the_code_goes_back() {
+        let mut connect = synthetic_connect();
+        connect.redirect_host = Some("grok.example".to_owned());
+        assert!(connect.valid());
+        let card = ConnectCard::new(
+            "oKGio6SlpqeoqaqrrK2urw",
+            "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+            "Synthetic Mac mini",
+            1_790_000_000,
+            &connect,
+        );
+        assert_eq!(
+            card.digest,
+            "920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12"
+        );
+        assert_ne!(
+            card.digest,
+            "414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc"
+        );
+        let bytes = card.to_plaintext().unwrap();
+        assert_eq!(bytes.len(), 399);
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            text.contains(r#""expires_at":1790000300,"redirect_host":"grok.example"}"#),
+            "{text}"
+        );
+        assert_eq!(ConnectCard::parse(&bytes).unwrap(), card);
+        assert_eq!(
+            card.connect.returns_to().as_deref(),
+            Some("Returns to grok.example")
+        );
+        // Another host, or a card without the host, fails its digest.
+        for changed in [
+            text.replacen("grok.example", "other.example", 1),
+            text.replacen(r#","redirect_host":"grok.example""#, "", 1),
+        ] {
+            assert_ne!(changed, text);
+            assert_eq!(
+                ConnectCard::parse(changed.as_bytes()),
+                Err(CardError::Unreadable)
+            );
+        }
+        // A card of a Mac before 0.5.16 has no host and no "Returns to" line.
+        assert_eq!(synthetic_connect().returns_to(), None);
+        for bad in ["", "grok example", "grok\u{0}.example", "gr\u{f6}k.example"] {
+            let mut connect = synthetic_connect();
+            connect.redirect_host = Some(bad.to_owned());
+            assert!(!connect.valid(), "{bad:?}");
+            let card = ConnectCard::new("oKGio6SlpqeoqaqrrK2urw", "d", "Mac", 1, &connect);
+            assert_eq!(card.to_plaintext().err(), Some(CardError::TooLong));
+        }
+        let mut long = synthetic_connect();
+        long.redirect_host = Some("a".repeat(MAX_REDIRECT_HOST_BYTES + 1));
+        assert!(!long.valid());
+    }
+
+    #[test]
+    fn a_loopback_redirect_host_returns_to_a_program_on_a_computer() {
+        for local in [
+            "localhost",
+            "LOCALHOST",
+            "localhost.",
+            "app.localhost",
+            "127.0.0.1",
+            "127.8.9.10",
+            "0.0.0.0",
+            "[::1]",
+            "::1",
+            "[::]",
+            "[::ffff:127.0.0.1]",
+        ] {
+            assert!(is_local_redirect_host(local), "{local}");
+            assert_eq!(
+                connect_returns_to(local),
+                "Returns to a program on a computer (localhost)"
+            );
+        }
+        for remote in [
+            "grok.example",
+            "localhost.evil.example",
+            "128.0.0.1",
+            "[2001:db8::1]",
+            "[::ffff:203.0.113.9]",
+        ] {
+            assert!(!is_local_redirect_host(remote), "{remote}");
+            assert_eq!(connect_returns_to(remote), format!("Returns to {remote}"));
+        }
+        assert_eq!(
+            connect_returns_to(""),
+            "Returns to an address that was not given"
+        );
+        assert_eq!(
+            LOCAL_CONNECT_WARNING,
+            "A program on this Mac can start this request."
+        );
     }
 
     #[test]

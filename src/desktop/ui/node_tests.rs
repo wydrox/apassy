@@ -235,6 +235,7 @@ fn offered(fx: &Fixture, id: &str, client: &str) -> PendingConnect {
             code: "K7Q-4MD".to_owned(),
             created_at: unix_now(),
             expires_at: unix_now() + 300,
+            redirect_host: "grok.example".to_owned(),
         });
     let end = Instant::now() + Duration::from_secs(20);
     loop {

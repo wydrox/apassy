@@ -226,6 +226,17 @@ struct ConnectRequestDetail: View {
                 Label(QuestionsModel.connectCodeWarning(code: connect.code), systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
             }
+            // Where the code goes back (review 0.5.16); a program on a computer is a warning.
+            if let returnsTo = connect.returnsTo {
+                Section {
+                    Label(
+                        returnsTo,
+                        systemImage: connect.localRedirect ? "exclamationmark.triangle" : "arrow.uturn.backward"
+                    )
+                    .foregroundStyle(connect.localRedirect ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .accessibilityIdentifier("connect.returnsTo")
+                }
+            }
             Section {
                 LabeledContent("Asked on", value: question.askerName)
                 if model.namesVaults, let vault = question.vaultName {

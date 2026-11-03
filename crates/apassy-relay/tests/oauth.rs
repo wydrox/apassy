@@ -575,6 +575,8 @@ fn register_authorize_wait_allow_token_and_mcp() {
     assert_eq!(request.client_name.as_deref(), Some("Grok Bot"));
     assert_eq!(request.code.len(), 7);
     assert!(request.expires_at >= request.created_at + 299);
+    // Where the code goes back, for the owner's prompts (review 0.5.16).
+    assert_eq!(request.redirect_host, "client.example");
     let page = get(&node.public(), &wait);
     assert_eq!(page.status, 200, "{}", page.text);
     assert_page_headers(&page);
@@ -924,6 +926,8 @@ fn authorize_checks_the_client_the_redirect_pkce_and_the_resource() {
             .unwrap()
             .starts_with("/oauth/wait/")
     );
+    // The owner's prompts say where the code goes back: the loopback here (review 0.5.16).
+    assert_eq!(node.pending_one().redirect_host, "127.0.0.1");
     // The token endpoint refuses another resource.
     let answer = post_form(
         &node.public(),

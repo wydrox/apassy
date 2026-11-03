@@ -394,6 +394,8 @@ impl DesktopApp {
                 mac_name: mac_name.clone(),
                 code: connect.code.clone(),
                 expires_at: connect.expires_at,
+                redirect_host: (!connect.redirect_host.is_empty())
+                    .then(|| connect.redirect_host.clone()),
             });
             self.node
                 .posted
@@ -435,7 +437,8 @@ impl DesktopApp {
     }
 
     /// "Allow" on a connect card: the owner check "Connect <name> to this Mac" (Touch
-    /// ID), then [`Node::allow_connect`] for exactly this request and code.
+    /// ID), which says where the code goes back, then [`Node::allow_connect`] for exactly
+    /// this request, code, and redirect host.
     pub(crate) fn ask_allow_connect(
         &mut self,
         connect: &PendingConnect,
@@ -446,6 +449,7 @@ impl DesktopApp {
                 id: connect.id.clone(),
                 client_name: connect_name(connect),
                 code: connect.code.clone(),
+                redirect_host: connect.redirect_host.clone(),
             },
             ctx,
         );
@@ -468,12 +472,14 @@ impl DesktopApp {
         id: &str,
         client_name: &str,
         code: &str,
+        redirect_host: &str,
         proof: OwnerProof,
     ) {
         let action = OwnerAction::AllowConnect {
             id: id.to_owned(),
             client_name: client_name.to_owned(),
             code: code.to_owned(),
+            redirect_host: redirect_host.to_owned(),
         };
         let Some(epoch) = self.owner_ui.session.epoch() else {
             self.set_err("The vault is locked. Nothing was connected.");
@@ -488,12 +494,10 @@ impl DesktopApp {
             self.set_err("This build of Apassy has no remote access.");
             return;
         };
-        // Only the request that the owner saw, with its code.
-        if !node
-            .pending_connects()
-            .iter()
-            .any(|connect| connect.id == id && connect.code == code)
-        {
+        // Only the request that the owner saw, with its code and redirect host.
+        if !node.pending_connects().iter().any(|connect| {
+            connect.id == id && connect.code == code && connect.redirect_host == redirect_host
+        }) {
             self.set_err("This connect request does not wait any more. Nothing was connected.");
             return;
         }

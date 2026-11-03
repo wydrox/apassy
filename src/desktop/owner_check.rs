@@ -637,6 +637,8 @@ pub enum OwnerRequest {
         id: String,
         client_name: String,
         code: String,
+        /// Where the code goes back (`PendingConnect.redirect_host`, review 0.5.16).
+        redirect_host: String,
     },
     /// `apassy agents add-remote NAME [--days N]`: a remote agent with no item and a
     /// bearer token for the command line. Only the command line asks for it.
@@ -1044,10 +1046,12 @@ impl OwnerRequest {
                 id,
                 client_name,
                 code,
+                redirect_host,
             } => OwnerAction::AllowConnect {
                 id: id.clone(),
                 client_name: client_name.clone(),
                 code: code.clone(),
+                redirect_host: redirect_host.clone(),
             },
             Self::AddRemoteAgent { name, days } => OwnerAction::AddRemoteAgent {
                 name: name.clone(),
@@ -1445,12 +1449,27 @@ impl OwnerRequest {
                 )
             }
             Self::AllowConnect {
-                client_name, code, ..
-            } => format!(
-                "Connect {} to this Mac as a new agent? Allow only if the page in your browser shows this code: {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you.",
-                page_text(client_name),
-                page_text(code)
-            ),
+                client_name,
+                code,
+                redirect_host,
+                ..
+            } => {
+                // Where the code goes back; a loopback address can be any program of this
+                // Mac, as the node's listener is on the loopback (review 0.5.16).
+                let local = redirect_host.is_empty()
+                    || crate::questions::envelope::is_local_redirect_host(redirect_host);
+                format!(
+                    "Connect {} to this Mac as a new agent? {}.{} Allow only if the page in your browser shows this code: {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you.",
+                    page_text(client_name),
+                    page_text(&crate::questions::envelope::connect_returns_to(redirect_host)),
+                    if local {
+                        format!(" {}", crate::questions::envelope::LOCAL_CONNECT_WARNING)
+                    } else {
+                        String::new()
+                    },
+                    page_text(code)
+                )
+            }
             Self::AddRemoteAgent { name, days } => format!(
                 "Add the remote agent {} and issue its token to the command line? The token works for {days} days. The agent sees no credential until you choose some, and every run asks you.",
                 page_text(name)
@@ -2388,7 +2407,8 @@ impl DesktopApp {
                 id,
                 client_name,
                 code,
-            } => self.complete_allow_connect(&id, &client_name, &code, proof),
+                redirect_host,
+            } => self.complete_allow_connect(&id, &client_name, &code, &redirect_host, proof),
             OwnerRequest::AddRemoteAgent { name, days } => {
                 self.complete_add_remote_agent(&name, days, proof);
             }
@@ -3073,6 +3093,7 @@ mod connect_prompt_tests {
             id: "cr_1".to_owned(),
             client_name: "Grok Bot".to_owned(),
             code: "K7Q-4MD".to_owned(),
+            redirect_host: "grok.example".to_owned(),
         };
         let text = request.describe();
         assert!(
@@ -3080,9 +3101,49 @@ mod connect_prompt_tests {
             "{text}"
         );
         assert!(
-            text.starts_with("Connect Grok Bot to this Mac as a new agent?"),
+            text.starts_with(
+                "Connect Grok Bot to this Mac as a new agent? Returns to grok.example. Allow only"
+            ),
             "{text}"
         );
         assert!(!text.contains("page of the agent"), "{text}");
+        assert!(!text.contains("A program on this Mac"), "{text}");
+    }
+
+    /// Review 0.5.16: the node's listener is on the loopback, so any program of this Mac
+    /// can start a connect request whose code goes back to localhost. The prompt says so.
+    #[test]
+    fn the_allow_connect_prompt_says_a_program_on_this_mac_can_start_a_localhost_request() {
+        for host in ["127.0.0.1", "localhost", "[::1]", ""] {
+            let request = OwnerRequest::AllowConnect {
+                id: "cr_1".to_owned(),
+                client_name: "Grok Bot".to_owned(),
+                code: "K7Q-4MD".to_owned(),
+                redirect_host: host.to_owned(),
+            };
+            let text = request.describe();
+            assert!(
+                text.contains("A program on this Mac can start this request."),
+                "{host}: {text}"
+            );
+            assert!(text.contains("K7Q-4MD"), "{text}");
+            if !host.is_empty() {
+                assert!(
+                    text.contains("Returns to a program on a computer (localhost)."),
+                    "{text}"
+                );
+            }
+        }
+        // The proof binds the host: another host is another action.
+        let action = |host: &str| {
+            OwnerRequest::AllowConnect {
+                id: "cr_1".to_owned(),
+                client_name: "Grok Bot".to_owned(),
+                code: "K7Q-4MD".to_owned(),
+                redirect_host: host.to_owned(),
+            }
+            .action()
+        };
+        assert_ne!(action("grok.example"), action("127.0.0.1"));
     }
 }

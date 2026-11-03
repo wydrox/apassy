@@ -419,6 +419,8 @@ pub enum OwnerAction {
         id: String,
         client_name: String,
         code: String,
+        /// Where the code goes back, as the dialog showed it (review 0.5.16).
+        redirect_host: String,
     },
     /// Make a remote agent with a bearer token for the command line (`apassy agents
     /// add-remote`). The proof names the name and the token lifetime in days.
@@ -737,8 +739,23 @@ impl OwnerAction {
             Self::EnableRelayQuestions { .. } => {
                 "send the questions of this vault through the relay".to_owned()
             }
-            Self::AllowConnect { client_name, .. } => {
-                format!("connect \"{}\" to this Mac", short_device_name(client_name))
+            Self::AllowConnect {
+                client_name,
+                redirect_host,
+                ..
+            } => {
+                // Where the code goes back (review 0.5.16); a loopback host is "localhost".
+                let back = if redirect_host.is_empty()
+                    || crate::questions::envelope::is_local_redirect_host(redirect_host)
+                {
+                    "localhost".to_owned()
+                } else {
+                    short_device_name(redirect_host)
+                };
+                format!(
+                    "connect \"{}\", which returns to {back}, to this Mac",
+                    short_device_name(client_name)
+                )
             }
             Self::AddRemoteAgent { name, .. } => format!(
                 "add the remote agent \"{}\" and issue its token",
@@ -1948,6 +1965,7 @@ mod evaluation_tests {
                 id: "cr_synthetic".into(),
                 client_name: "Grok Bot".into(),
                 code: "K7Q-4MD".into(),
+                redirect_host: "grok.example".into(),
             },
             OwnerAction::AddRemoteAgent {
                 name: "Grok Bot".into(),
@@ -2208,6 +2226,32 @@ impl OwnerDeliveryFence {
 #[cfg(test)]
 mod touch_id_title_tests {
     use super::OwnerAction;
+
+    /// Review 0.5.16: the Touch ID text of a connect says where the code goes back.
+    #[test]
+    fn the_touch_id_text_of_a_connect_names_where_the_code_goes_back() {
+        let connect = |host: &str| OwnerAction::AllowConnect {
+            id: "cr_1".into(),
+            client_name: "Grok Bot".into(),
+            code: "K7Q-4MD".into(),
+            redirect_host: host.into(),
+        };
+        assert_eq!(
+            connect("grok.example").reason(),
+            "connect \"Grok Bot\", which returns to grok.example, to this Mac"
+        );
+        for host in ["127.0.0.1", "localhost", "[::1]", ""] {
+            assert_eq!(
+                connect(host).reason(),
+                "connect \"Grok Bot\", which returns to localhost, to this Mac",
+                "{host}"
+            );
+        }
+        assert_eq!(
+            connect("grok.example").touch_id_title(),
+            "Connect a remote agent"
+        );
+    }
 
     #[test]
     fn untrusted_login_text_cannot_become_the_authentication_title() {

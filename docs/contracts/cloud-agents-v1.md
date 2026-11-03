@@ -30,7 +30,7 @@ reach (section 3).
 | Word | Meaning |
 | --- | --- |
 | Node | The relay inside the Apassy app on the owner's Mac, with a personal team for one vault. |
-| Public listener | The node's second listener, on `127.0.0.1:<port>`. Tailscale Funnel is its only way in. |
+| Public listener | The node's second listener, on `127.0.0.1:<port>`. Tailscale Funnel is its only way in from outside the Mac. The loopback bind does not keep the programs of the Mac away: any local program, a coding agent too, can connect to that port and run the whole flow (section 4) as any client name (review 0.5.16). The owner's prompts therefore name where the code goes back ("Returns to <host>"; a loopback redirect is "Returns to a program on a computer (localhost)", and the Mac adds "A program on this Mac can start this request."). |
 | Public URL | `https://<Mac>.<tailnet>.ts.net:8443`: the Funnel origin of the Mac. `<Mac>` is the machine name and `<tailnet>` the tailnet name of `tailscale status`. |
 | Agent token | The bearer token of one cloud agent: `apassy_tagt_<team id>_<64 hex>`. From the authorization flow it is the access token (24 h, refreshed); from the CLI fallback it lives 30 to 365 days. |
 | Connect request | A remote client's request to connect, made by `/oauth/authorize`. It waits 300 s for the owner, with a match code that the browser page and the app both show. |
@@ -92,8 +92,10 @@ registration (RFC 7591). The relay side is in its `docs/SPEC.md` section 31. The
 5. The page says "<client> wants to connect to your Mac" (never the computer name: the page is public),
    shows a match code such as `K7Q-4MD`, and reloads
    every 3 seconds. It has no button: the owner allows the request in Apassy on the Mac (Decisions, with
-   Touch ID) or on the iPhone, where the same code shows. Apassy must be open and unlocked; the request
-   ends after 300 seconds.
+   Touch ID) or on the iPhone, where the same code shows. Both say where the code goes back: "Returns
+   to <host of redirect_uri>", or for `localhost`, `127.0.0.1`, or `[::1]` "Returns to a program on a
+   computer (localhost)"; the Mac then adds "A program on this Mac can start this request." Apassy
+   must be open and unlocked; the request ends after 300 seconds.
 6. Allowed: the next reload of the page sends the browser to `<redirect_uri>?code=…&state=…&iss=<public
    URL>`, once. Denied: the page says "You denied the connection.". Not answered in time: "The request
    ended.".

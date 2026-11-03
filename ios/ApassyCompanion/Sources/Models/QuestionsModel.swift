@@ -588,15 +588,20 @@ final class QuestionsModel {
         "Allow only if the page in your browser shows this code: \(code)."
     }
 
-    /// The text of the Face ID prompt of a connect request: the client and the Mac, with control
-    /// characters and `"` removed, at most 40 characters each.
-    static func connectFaceIDReason(client: String, mac: String) -> String {
+    /// The text of the Face ID prompt of a connect request: the client, where the code goes back
+    /// ("localhost" for a program on a computer), and the Mac, with control characters and `"`
+    /// removed, at most 40 characters each. A card of a Mac before 0.5.16 has no host.
+    static func connectFaceIDReason(client: String, mac: String, host: String? = nil, local: Bool = false)
+        -> String
+    {
         let clean = { (text: String) -> String in
             String(String(String.UnicodeScalarView(
                 text.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && $0 != "\"" }))
                 .prefix(40))
         }
-        return "allow \"\(clean(client))\" to connect to \(clean(mac))"
+        guard let host else { return "allow \"\(clean(client))\" to connect to \(clean(mac))" }
+        let back = local ? "localhost" : clean(host)
+        return "allow \"\(clean(client))\", which returns to \(back), to connect to \(clean(mac))"
     }
 
     /// Answer a connect request (card v2 `kind = connect`): Allow asks for Face ID for this answer,
@@ -609,7 +614,9 @@ final class QuestionsModel {
         guard isCurrentUnanswered(question), scopedDeliveries[question.requestIdentity] != .sending,
             let connect = question.connect else { return }
         await deliver(RemoteAnswer(kind: allow ? .allowConnect : .deny), for: question,
-            reason: Self.connectFaceIDReason(client: connect.clientName, mac: connect.macName))
+            reason: Self.connectFaceIDReason(
+                client: connect.clientName, mac: connect.macName, host: connect.redirectHost,
+                local: connect.localRedirect))
     }
 
     /// Whether Deny and Allow of the connect request `question` can be used at `now`.

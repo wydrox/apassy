@@ -266,6 +266,7 @@ on your Mac". CHANGELOG upgrade notes: vault 26 and 27, relay 7 and directory 10
 | The median across Macs is approximate | said in the Overview ⓘ |
 | Connect requests expire in 5 minutes; the Mac must be unlocked and awake | the page says so; `keep_open_for_node` keeps the window alive |
 | A relay answer is logged as the Mac | fixed and tested in U3a |
+| Any program on the Mac (a coding agent too) reaches the public listener on `127.0.0.1:<port>` and runs the whole connect flow as "Grok Bot"; its card looks real (review 0.5.16, finding 1) | 0.5.16: the Mac prompt, the Touch ID text, and the iPhone card name the redirect host ("Returns to <host>"; a loopback redirect is "Returns to a program on a computer (localhost)" and the Mac adds "A program on this Mac can start this request."). **0.5.17, not built yet:** the public listener accepts only connections from the Tailscale process: on each accepted socket read the peer PID (`getsockopt(SOL_LOCAL, LOCAL_PEERPID)` on macOS; `SO_PEERCRED` on Linux) and its code signature or executable path (`tailscaled` / `io.tailscale.ipn.macsys` network extension), and close any other; fail closed when the PID cannot be read. Check how the App Store / standalone Tailscale variants and the system extension appear as the peer before choosing the rule. This also lets the failed-auth count trust `X-Forwarded-For` only from Tailscale |
 
 ## Not verified in the code
 

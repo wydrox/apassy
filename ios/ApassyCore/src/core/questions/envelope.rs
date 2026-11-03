@@ -491,6 +491,10 @@ pub struct Connect {
     pub mac_name: String,
     pub code: String,
     pub expires_at: u64,
+    /// Where the code goes back: the host of the redirect URI (review 0.5.16). A Mac of
+    /// 0.5.16 or later always sends it; a card of an older Mac has none. The digest covers
+    /// it when it is there.
+    pub redirect_host: Option<String>,
 }
 
 /// A connect card that passed the checks 2 and 3 of section 7.4.
@@ -527,6 +531,10 @@ pub fn connect_digest(asker_device: &str, connect: &Connect) -> String {
     put_text(&mut hash, &connect.mac_name);
     put_text(&mut hash, &connect.code);
     hash.update(&connect.expires_at.to_be_bytes());
+    if let Some(host) = &connect.redirect_host {
+        put_text(&mut hash, "redirect_host");
+        put_text(&mut hash, host);
+    }
     hex(hash.finish().as_ref())
 }
 
@@ -556,10 +564,21 @@ pub fn parse_connect_card(plaintext: &[u8], relay_qid: &str) -> Result<ConnectCa
         ],
     )?;
     let asker = exact(&card["asker"], &["device", "name"])?;
-    let connect = exact(
-        &card["connect"],
-        &["id", "client_name", "mac_name", "code", "expires_at"],
-    )?;
+    // A card of a Mac before 0.5.16 has no `redirect_host`.
+    let with_host = card["connect"].get("redirect_host").is_some();
+    let fields: &[&str] = if with_host {
+        &[
+            "id",
+            "client_name",
+            "mac_name",
+            "code",
+            "expires_at",
+            "redirect_host",
+        ]
+    } else {
+        &["id", "client_name", "mac_name", "code", "expires_at"]
+    };
+    let connect = exact(&card["connect"], fields)?;
     let parsed = ConnectCard {
         qid: text(card, "qid")?,
         asker: Asker {
@@ -573,6 +592,11 @@ pub fn parse_connect_card(plaintext: &[u8], relay_qid: &str) -> Result<ConnectCa
             mac_name: text(connect, "mac_name")?,
             code: text(connect, "code")?,
             expires_at: number(connect, "expires_at")?,
+            redirect_host: if with_host {
+                Some(text(connect, "redirect_host")?)
+            } else {
+                None
+            },
         },
         digest: text(card, "digest")?,
     };
@@ -592,6 +616,11 @@ pub fn parse_connect_card(plaintext: &[u8], relay_qid: &str) -> Result<ConnectCa
         && connect_text(&parsed.connect.client_name, MAX_CLIENT_NAME_BYTES)
         && connect_text(&parsed.connect.mac_name, MAX_MAC_NAME_BYTES)
         && connect_text(&parsed.connect.code, MAX_CODE_BYTES)
+        && parsed
+            .connect
+            .redirect_host
+            .as_deref()
+            .is_none_or(apassy::questions::envelope::valid_redirect_host)
         && valid_digest(&parsed.digest)
         && connect_digest(&parsed.asker.device, &parsed.connect) == parsed.digest;
     if !checks {
@@ -1767,6 +1796,7 @@ pub(crate) mod tests {
             mac_name: "Synthetic Mac mini".into(),
             code: "482 913".into(),
             expires_at: 1_790_000_300,
+            redirect_host: None,
         };
         let sealed_digest = connect_digest("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect);
         let bidi = CONNECT_CARD
@@ -1811,6 +1841,7 @@ pub(crate) mod tests {
             mac_name: "Synthetic Mac mini".into(),
             code: "482 913".into(),
             expires_at: 1_790_000_300,
+            redirect_host: None,
         };
         let mac = MacCard::new(
             QID,
@@ -1842,6 +1873,64 @@ pub(crate) mod tests {
                 1_790_000_030
             )
         );
+    }
+
+    /// Review 0.5.16: a card of a Mac of 0.5.16 says where the code goes back. The
+    /// iPhone reads it, the digest covers it, and the Mac and the iPhone agree.
+    const CONNECT_CARD_HOST: &str = r#"{"v":2,"kind":"connect","qid":"oKGio6SlpqeoqaqrrK2urw","asker":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"Synthetic Mac mini"},"created_at":1790000000,"connect":{"id":"cr_7Hq2xN","client_name":"Grok Bot","mac_name":"Synthetic Mac mini","code":"482 913","expires_at":1790000300,"redirect_host":"grok.example"},"digest":"920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12"}"#;
+
+    #[test]
+    fn a_connect_card_with_a_redirect_host_reads_and_its_digest_covers_it() {
+        assert_eq!(CONNECT_CARD_HOST.len(), 399);
+        let card = parse_connect_card(CONNECT_CARD_HOST.as_bytes(), QID).unwrap();
+        assert_eq!(card.connect.redirect_host.as_deref(), Some("grok.example"));
+        assert_eq!(
+            card.digest,
+            "920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12"
+        );
+        // The old card still reads, without a host.
+        let old = parse_connect_card(CONNECT_CARD.as_bytes(), QID).unwrap();
+        assert_eq!(old.connect.redirect_host, None);
+        // Another host, or the host taken away, fails the digest.
+        for changed in [
+            CONNECT_CARD_HOST.replacen("grok.example", "localhost", 1),
+            CONNECT_CARD_HOST.replacen(r#","redirect_host":"grok.example""#, "", 1),
+        ] {
+            assert_eq!(
+                parse_connect_card(changed.as_bytes(), QID),
+                Err(CardRefusal::Unreadable),
+                "{changed}"
+            );
+        }
+        // A host of a bad form never shows, also with its own digest.
+        let mut connect = card.connect.clone();
+        connect.redirect_host = Some("grok example".into());
+        let digest = connect_digest("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect);
+        let bad = CONNECT_CARD_HOST
+            .replace("grok.example", "grok example")
+            .replace(&card.digest, &digest);
+        assert_eq!(
+            parse_connect_card(bad.as_bytes(), QID),
+            Err(CardRefusal::Unreadable)
+        );
+        // The Mac makes the same card.
+        use apassy::questions::envelope::{CardConnect, ConnectCard as MacCard};
+        let mac = MacCard::new(
+            QID,
+            "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+            "Synthetic Mac mini",
+            1_790_000_000,
+            &CardConnect {
+                id: "cr_7Hq2xN".into(),
+                client_name: "Grok Bot".into(),
+                mac_name: "Synthetic Mac mini".into(),
+                code: "482 913".into(),
+                expires_at: 1_790_000_300,
+                redirect_host: Some("grok.example".into()),
+            },
+        );
+        let bytes = mac.to_plaintext().unwrap();
+        assert_eq!(std::str::from_utf8(&bytes).unwrap(), CONNECT_CARD_HOST);
     }
 
     #[test]
