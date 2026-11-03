@@ -113,6 +113,9 @@ jobs:
           path: spike-bin/apassy-tailnet-spike
           if-no-files-found: error
           retention-days: 1
+      # Last, after the uploads: a lint failure does not hide the numbers.
+      - name: Clippy with the archive linked (the FFI module and the spike)
+        run: APASSY_LIBTAILSCALE_DIR="$RUNNER_TEMP/libtailscale" cargo clippy --locked -p apassy-tailnet --features spike --all-targets -- -D warnings
 
   linux-build:
     runs-on: ubuntu-24.04
@@ -162,6 +165,9 @@ jobs:
           path: spike-bin/apassy-tailnet-spike
           if-no-files-found: error
           retention-days: 1
+      # Last, after the uploads: a lint failure does not hide the numbers.
+      - name: Clippy with the archive linked (the FFI module and the spike)
+        run: APASSY_LIBTAILSCALE_DIR="$RUNNER_TEMP/libtailscale" cargo clippy --locked -p apassy-tailnet --features spike --all-targets -- -D warnings
 
   # The same binary on the runner itself (glibc 2.39): real network, no container.
   linux-run:
