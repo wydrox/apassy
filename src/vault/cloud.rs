@@ -613,6 +613,22 @@ impl Vault {
         .transpose()
     }
 
+    /// Every agent of kind `cloud`, revoked ones too: the feed names them `remote`.
+    pub fn cloud_agent_ids(&self) -> VaultResult<BTreeSet<u64>> {
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM agent WHERE kind = 'cloud'")
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(storage)?;
+        let mut out = BTreeSet::new();
+        for row in rows {
+            out.insert(to_public_id(row.map_err(storage)?)?);
+        }
+        Ok(out)
+    }
+
     /// The active cloud agent that connected with the OAuth client `client_id`, if any:
     /// the same client connects again to that agent.
     pub fn cloud_agent_for_client(&self, client_id: &str) -> VaultResult<Option<u64>> {

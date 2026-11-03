@@ -67,8 +67,19 @@ pub const ACTION_TAG: &str = "apassy-feed-action-v1";
 /// The first line of the action string of v2 (section 9.3), which signs the names that
 /// the owner saw.
 pub const ACTION_TAG_V2: &str = "apassy-feed-action-v2";
-/// The version of every feed, action, settle, and request body.
+/// The version of every action, settle, and request body, and of a feed of v1.
 pub const VERSION: u32 = 1;
+/// The version of the feeds that this Mac publishes (section 7.5): v1 with the figures of
+/// the Bouncer section. Both readers take a feed of [`VERSION`] or of this.
+pub const FEED_VERSION: u32 = 2;
+/// The days of `week.days` and `agents[].days` of a feed of v2, today first.
+pub const FEED_DAYS: usize = 7;
+/// The values of `remote_access` of a feed of v2.
+pub const REMOTE_ACCESS_VALUES: [&str; 3] = ["off", "on", "problem"];
+/// What a feed of v2 may add to the same feed of v1, at most: `remote_access`,
+/// `week.days`, `week.answer_p50_secs`, `where = remote`, `connected_at`, and the `days`
+/// of [`MAX_AGENTS`] agents with every number at 2^32 − 1 (section 7.5).
+pub const MAX_V2_EXTRA_BYTES: usize = 20 * 1024;
 /// The version of an action body that carries `names` (section 9.2).
 pub const ACTION_VERSION_NAMES: u32 = 2;
 /// The last byte of the plaintext of a feed whose Mac checks the names of an action
@@ -210,7 +221,9 @@ where
 
 // ---- The feed (section 7). ----
 
-/// The plaintext of a feed, with exactly the fields of section 7.1.
+/// The plaintext of a feed, with exactly the fields of section 7.1, and of a feed of v2
+/// those of section 7.5 too. A field of v2 is absent in a feed of v1 (the readers then
+/// leave it empty), so the bytes of a feed of v1 do not change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Feed {
@@ -219,6 +232,10 @@ pub struct Feed {
     pub seq: u64,
     pub generated_at: u64,
     pub truncated: bool,
+    /// v2: `off`, `on`, or `problem` (the public route of this Mac's node, never its
+    /// address). `None` in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_access: Option<String>,
     pub week: FeedWeek,
     pub agents: Vec<FeedAgent>,
 }
@@ -230,11 +247,65 @@ pub struct FeedMac {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedWeek {
     pub by_you: u64,
     pub automatic: u64,
+    /// v2: [`FEED_DAYS`] local days, today first. Empty in v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub days: Vec<FeedDay>,
+    /// v2: the median time of the owner's answers of the last 7 days, in seconds; absent
+    /// (or `null`) when there is none, and in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_p50_secs: Option<u64>,
+}
+
+/// One day of `week.days` (v2): the runs and those that asked the owner. On the wire a
+/// pair `[runs, asked]`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "(u64, u64)", into = "(u64, u64)")]
+pub struct FeedDay {
+    pub runs: u64,
+    pub asked: u64,
+}
+
+impl From<(u64, u64)> for FeedDay {
+    fn from((runs, asked): (u64, u64)) -> Self {
+        Self { runs, asked }
+    }
+}
+
+impl From<FeedDay> for (u64, u64) {
+    fn from(day: FeedDay) -> Self {
+        (day.runs, day.asked)
+    }
+}
+
+/// One day of `agents[].days` (v2): the runs of the agent, those that asked the owner,
+/// and those that were denied. On the wire a triple `[runs, asked, not_allowed]`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "(u64, u64, u64)", into = "(u64, u64, u64)")]
+pub struct FeedAgentDay {
+    pub runs: u64,
+    pub asked: u64,
+    pub not_allowed: u64,
+}
+
+impl From<(u64, u64, u64)> for FeedAgentDay {
+    fn from((runs, asked, not_allowed): (u64, u64, u64)) -> Self {
+        Self {
+            runs,
+            asked,
+            not_allowed,
+        }
+    }
+}
+
+impl From<FeedAgentDay> for (u64, u64, u64) {
+    fn from(day: FeedAgentDay) -> Self {
+        (day.runs, day.asked, day.not_allowed)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,13 +314,20 @@ pub struct FeedAgent {
     pub id: String,
     pub name: String,
     pub host: String,
+    /// `mac`; in v2 also `remote` (a cloud agent of the node of this Mac).
     #[serde(rename = "where")]
     pub place: String,
+    /// v2: when a remote agent connected; absent for an agent on the Mac, and in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_at: Option<u64>,
     pub revoked: bool,
     pub token_expires_at: u64,
     #[serde(deserialize_with = "required")]
     pub last_use_at: Option<u64>,
     pub uses_this_week: u64,
+    /// v2: [`FEED_DAYS`] local days of its runs, today first. Empty in v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub days: Vec<FeedAgentDay>,
     pub projects: Vec<String>,
     pub note: String,
     pub restricted: bool,
@@ -328,16 +406,52 @@ impl Feed {
         plaintext.last() == Some(&NAMES_MARK)
     }
 
-    /// Parse a feed plaintext with the reader's checks of section 7.4 step 2 and `v`.
+    /// Parse a feed plaintext with the reader's checks of section 7.4 step 2 and `v`: a
+    /// feed of v1 or of v2 ([`FEED_VERSION`]); any other `v` is refused.
     pub fn parse(plaintext: &[u8]) -> Option<Self> {
         if plaintext.len() > MAX_FEED_BYTES {
             return None;
         }
         let feed: Self = serde_json::from_slice(plaintext).ok()?;
-        (feed.v == VERSION && feed.within_limits()).then_some(feed)
+        (matches!(feed.v, VERSION | FEED_VERSION) && feed.within_limits()).then_some(feed)
     }
 
-    /// Every field within its form and limit (section 7.1).
+    /// The fields of v2 have their form (section 7.5), or a feed of v1 has none of them.
+    fn v2_fields_ok(&self) -> bool {
+        let day_ok = |day: &FeedDay| day.runs <= U32_MAX && day.asked <= day.runs;
+        let agent_day_ok = |day: &FeedAgentDay| {
+            day.runs <= U32_MAX && day.asked <= day.runs && day.not_allowed <= day.runs
+        };
+        match self.v {
+            VERSION => {
+                self.remote_access.is_none()
+                    && self.week.days.is_empty()
+                    && self.week.answer_p50_secs.is_none()
+                    && self.agents.iter().all(|agent| {
+                        agent.place == "mac"
+                            && agent.connected_at.is_none()
+                            && agent.days.is_empty()
+                    })
+            }
+            FEED_VERSION => {
+                self.remote_access
+                    .as_deref()
+                    .is_some_and(|value| REMOTE_ACCESS_VALUES.contains(&value))
+                    && self.week.days.len() == FEED_DAYS
+                    && self.week.days.iter().all(day_ok)
+                    && self.week.answer_p50_secs.is_none_or(|secs| secs <= U32_MAX)
+                    && self.agents.iter().all(|agent| {
+                        matches!(agent.place.as_str(), "mac" | "remote")
+                            && (agent.place == "remote" || agent.connected_at.is_none())
+                            && agent.days.len() == FEED_DAYS
+                            && agent.days.iter().all(agent_day_ok)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Every field within its form and limit (section 7.1, and 7.5 for v2).
     pub fn within_limits(&self) -> bool {
         let agents_ok = self.agents.len() <= MAX_AGENTS
             && self.agents.iter().all(|agent| {
@@ -351,7 +465,6 @@ impl Feed {
                 parse_decimal(&agent.id).is_some()
                     && text_ok(&agent.name, 1, MAX_NAME_BYTES)
                     && ["claude", "codex", "t3", "other"].contains(&agent.host.as_str())
-                    && agent.place == "mac"
                     && agent.uses_this_week <= U32_MAX
                     && projects_ok(&agent.projects)
                     && agent.note.len() <= MAX_AGENT_NOTE_BYTES
@@ -388,6 +501,7 @@ impl Feed {
             && self.week.by_you <= U32_MAX
             && self.week.automatic <= U32_MAX
             && agents_ok
+            && self.v2_fields_ok()
     }
 
     /// The digest of what the feed says, without `seq`, `generated_at`, and `truncated`,
@@ -529,12 +643,59 @@ fn projects_of(projects: &[String]) -> Vec<String> {
     out
 }
 
-/// The feed of the agents of this vault on this Mac (section 7.1), every field at its
-/// limit, before [`fit`]. `me` is the trusted device of this Mac; `seq` and `now` go in
-/// the feed as they are. It reads the vault only: no value, no item notes, no project
-/// key, no host list, no token.
+/// The node of this Mac has a problem with its public route (`Node::status`: Tailscale
+/// missing or not connected, a policy, a port taken). The desktop app sets it
+/// ([`note_remote_access_problem`]); the feed says `problem` while the route is on.
+static REMOTE_ACCESS_PROBLEM: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Say whether the public route of this Mac's node has a problem now. The next feed
+/// carries it (`remote_access`, section 7.5).
+pub fn note_remote_access_problem(problem: bool) {
+    REMOTE_ACCESS_PROBLEM.store(problem, Ordering::Relaxed);
+}
+
+/// `remote_access` of a feed of v2: `off` while the public route is off, else `problem`
+/// or `on`.
+pub fn remote_access_value(route_on: bool, problem: bool) -> &'static str {
+    match (route_on, problem) {
+        (false, _) => "off",
+        (true, true) => "problem",
+        (true, false) => "on",
+    }
+}
+
+/// The feed of the agents of this vault on this Mac (section 7.1, v2 of section 7.5),
+/// every field at its limit, before [`fit`]. `me` is the trusted device of this Mac;
+/// `seq` and `now` go in the feed as they are. It reads the vault only: no value, no item
+/// notes, no project key, no host list, no token, no address of the node. The days and
+/// the median come from [`Vault::bouncer_stats`] over the 7 × 24 h before `now`, as the
+/// Overview of this Mac shows them.
 pub fn build_feed(vault: &Vault, me: &TrustedDevice, seq: u64, now: u64) -> VaultResult<Feed> {
     let week = vault.week_counts(now)?;
+    let stats = vault.bouncer_stats(
+        now.saturating_sub(crate::vault::STATS_WINDOW_SECS),
+        now.saturating_add(1),
+        None,
+    )?;
+    let agent_days: HashMap<u64, Vec<FeedAgentDay>> = stats
+        .agents
+        .iter()
+        .map(|agent| {
+            let days = agent
+                .days
+                .iter()
+                .map(|day| FeedAgentDay {
+                    runs: short_u32(day.runs),
+                    asked: short_u32(day.asked),
+                    not_allowed: short_u32(day.not_allowed),
+                })
+                .collect();
+            (agent.agent_id, days)
+        })
+        .collect();
+    let remote = vault.cloud_agent_ids()?;
+    let route_on = vault.cloud_node_setting()?.route_on;
     let refs = vault.item_refs()?;
     let mask = vault.vault_command_mask()?;
     let mut agents = Vec::new();
@@ -579,15 +740,21 @@ pub fn build_feed(vault: &Vault, me: &TrustedDevice, seq: u64, now: u64) -> Vaul
                 answered_on: cut_clean(&item_use.answered_on, MAX_NAME_BYTES),
             });
         }
+        let is_remote = remote.contains(&agent.id);
         agents.push(FeedAgent {
             id: agent.id.to_string(),
             host: host_of(&agent.name).to_owned(),
             name: feed_agent_name(&agent.name),
-            place: "mac".to_owned(),
+            place: if is_remote { "remote" } else { "mac" }.to_owned(),
+            connected_at: is_remote.then_some(agent.created_at),
             revoked: agent.revoked,
             token_expires_at: agent.token_expires_at,
             last_use_at: facts.last_use_at(),
             uses_this_week: short_u32(facts.uses_this_week as u64),
+            days: agent_days
+                .get(&agent.id)
+                .cloned()
+                .unwrap_or_else(|| vec![FeedAgentDay::default(); FEED_DAYS]),
             projects: projects_of(&facts.projects),
             note: cut_clean(&facts.note, MAX_AGENT_NOTE_BYTES),
             restricted: facts.restricted,
@@ -623,7 +790,7 @@ pub fn build_feed(vault: &Vault, me: &TrustedDevice, seq: u64, now: u64) -> Vaul
         name => name,
     };
     Ok(Feed {
-        v: VERSION,
+        v: FEED_VERSION,
         mac: FeedMac {
             device: me.uuid.clone(),
             name,
@@ -631,9 +798,21 @@ pub fn build_feed(vault: &Vault, me: &TrustedDevice, seq: u64, now: u64) -> Vaul
         seq,
         generated_at: now,
         truncated: false,
+        remote_access: Some(
+            remote_access_value(route_on, REMOTE_ACCESS_PROBLEM.load(Ordering::Relaxed)).to_owned(),
+        ),
         week: FeedWeek {
             by_you: short_u32(week.by_you),
             automatic: short_u32(week.automatic),
+            days: stats
+                .days
+                .iter()
+                .map(|day| FeedDay {
+                    runs: short_u32(day.runs),
+                    asked: short_u32(day.asked),
+                })
+                .collect(),
+            answer_p50_secs: stats.answer_p50_secs.map(short_u32),
         },
         agents,
     })
@@ -654,8 +833,9 @@ fn size(feed: &Feed) -> usize {
 /// leaves out, in this order, and sets `truncated`: an agent with no exception and no
 /// use for 90 days; `recent` cut to 10, 5, then 0 per agent; the revoked agents, the
 /// oldest first; the other agents, the oldest first. An exception list is never cut:
-/// an agent with more than [`MAX_EXCEPTIONS`] is left out whole. `None` when nothing
-/// fits.
+/// an agent with more than [`MAX_EXCEPTIONS`] is left out whole. The `days` of v2
+/// (`week.days`, `agents[].days`) are never cut either: an agent goes with its days.
+/// `None` when nothing fits.
 pub fn fit(feed: &mut Feed, max_bytes: usize, now: u64) -> Option<Zeroizing<Vec<u8>>> {
     let before = feed.agents.len();
     feed.agents
@@ -2172,10 +2352,12 @@ mod tests {
             name: format!("agent {id}"),
             host: "other".to_owned(),
             place: "mac".to_owned(),
+            connected_at: None,
             revoked,
             token_expires_at: 1,
             last_use_at,
             uses_this_week: 0,
+            days: Vec::new(),
             projects: Vec::new(),
             note: String::new(),
             restricted: false,
@@ -2212,9 +2394,12 @@ mod tests {
             seq: 5,
             generated_at: 5,
             truncated: false,
+            remote_access: None,
             week: FeedWeek {
                 by_you: 0,
                 automatic: 0,
+                days: Vec::new(),
+                answer_p50_secs: None,
             },
             agents,
         }
@@ -2319,6 +2504,190 @@ mod tests {
         }
     }
 
+    /// `feed` as a feed of v2: the route on, 7 days, a median, and every agent with its
+    /// days; agent 1 is a remote agent.
+    fn v2(mut feed: Feed) -> Feed {
+        feed.v = FEED_VERSION;
+        feed.remote_access = Some("on".to_owned());
+        feed.week.days = (0..FEED_DAYS as u64)
+            .map(|n| FeedDay {
+                runs: n + 2,
+                asked: n,
+            })
+            .collect();
+        feed.week.answer_p50_secs = Some(42);
+        for agent in &mut feed.agents {
+            agent.days = vec![
+                FeedAgentDay {
+                    runs: 3,
+                    asked: 2,
+                    not_allowed: 1
+                };
+                FEED_DAYS
+            ];
+            if agent.id == "1" {
+                agent.place = "remote".to_owned();
+                agent.connected_at = Some(1_790_000_000);
+            }
+        }
+        feed
+    }
+
+    #[test]
+    fn a_feed_of_v1_and_of_v2_read_and_v3_is_refused() {
+        // v1: the fields of v2 are absent, and the reader leaves them empty.
+        let one = feed(vec![agent(1, false, None, 1)]);
+        let text = String::from_utf8(one.to_plaintext().to_vec()).unwrap();
+        assert!(!text.contains("days") && !text.contains("remote_access"));
+        let read = Feed::parse(text.as_bytes()).unwrap();
+        assert!(read.week.days.is_empty() && read.week.answer_p50_secs.is_none());
+        assert!(read.agents[0].days.is_empty() && read.agents[0].connected_at.is_none());
+        assert_eq!(read.remote_access, None);
+
+        // v2: the fields of section 7.5, the days as compact arrays.
+        let two = v2(feed(vec![
+            agent(1, false, None, 1),
+            agent(2, true, Some(9), 0),
+        ]));
+        let text = String::from_utf8(two.to_plaintext().to_vec()).unwrap();
+        assert!(text.starts_with(r#"{"v":2,"#), "{text}");
+        assert!(text.contains(
+            r#""remote_access":"on","week":{"by_you":0,"automatic":0,"days":[[2,0],[3,1],"#
+        ));
+        assert!(text.contains(r#""answer_p50_secs":42}"#));
+        assert!(text.contains(r#""where":"remote","connected_at":1790000000,"#));
+        assert!(text.contains(r#""days":[[3,2,1],"#));
+        assert_eq!(Feed::parse(text.as_bytes()), Some(two.clone()));
+        // A median of null reads as none.
+        let null = text.replace(r#""answer_p50_secs":42"#, r#""answer_p50_secs":null"#);
+        assert_eq!(
+            Feed::parse(null.as_bytes()).unwrap().week.answer_p50_secs,
+            None
+        );
+
+        // v3 is refused, whatever it holds.
+        assert!(Feed::parse(text.replace(r#""v":2"#, r#""v":3"#).as_bytes()).is_none());
+        // A v2 feed called v1 has fields that v1 does not have.
+        assert!(Feed::parse(text.replace(r#""v":2"#, r#""v":1"#).as_bytes()).is_none());
+        // Each field of v2 is checked.
+        let mut bad = Vec::new();
+        let mut no_route = two.clone();
+        no_route.remote_access = None;
+        bad.push(no_route);
+        let mut odd_route = two.clone();
+        odd_route.remote_access = Some("maybe".to_owned());
+        bad.push(odd_route);
+        let mut six = two.clone();
+        six.week.days.pop();
+        bad.push(six);
+        let mut agent_six = two.clone();
+        agent_six.agents[1].days.pop();
+        bad.push(agent_six);
+        let mut more_asked = two.clone();
+        more_asked.week.days[0].asked = 99;
+        bad.push(more_asked);
+        let mut big = two.clone();
+        big.agents[0].days[0] = FeedAgentDay {
+            runs: U32_MAX + 1,
+            asked: 0,
+            not_allowed: 0,
+        };
+        bad.push(big);
+        let mut mac_connected = two.clone();
+        mac_connected.agents[1].connected_at = Some(1);
+        bad.push(mac_connected);
+        let mut phone = two.clone();
+        phone.agents[1].place = "phone".to_owned();
+        bad.push(phone);
+        for feed in bad {
+            assert!(!feed.within_limits(), "{feed:?}");
+            assert!(Feed::parse(&feed.to_plaintext()).is_none());
+        }
+        // v1 knows no remote agent.
+        let mut remote_v1 = one.clone();
+        remote_v1.agents[0].place = "remote".to_owned();
+        assert!(Feed::parse(&remote_v1.to_plaintext()).is_none());
+    }
+
+    #[test]
+    fn the_fields_of_v2_add_at_most_20_kib_at_their_limits() {
+        // 64 remote agents, every number of every day at 2^32 − 1.
+        let agents: Vec<FeedAgent> = (1..=MAX_AGENTS as u64)
+            .map(|id| agent(id, false, Some(id), 0))
+            .collect();
+        let one = feed(agents);
+        let mut two = v2(one.clone());
+        let max = FeedAgentDay {
+            runs: U32_MAX,
+            asked: U32_MAX,
+            not_allowed: U32_MAX,
+        };
+        for agent in &mut two.agents {
+            agent.place = "remote".to_owned();
+            agent.connected_at = Some(MAX_SEQ);
+            agent.days = vec![max; FEED_DAYS];
+        }
+        two.remote_access = Some("problem".to_owned());
+        two.week.days = vec![
+            FeedDay {
+                runs: U32_MAX,
+                asked: U32_MAX
+            };
+            FEED_DAYS
+        ];
+        two.week.answer_p50_secs = Some(U32_MAX);
+        assert!(two.within_limits());
+        let extra = size(&two) - size(&one);
+        assert!(extra <= MAX_V2_EXTRA_BYTES, "{extra} bytes");
+    }
+
+    #[test]
+    fn fitting_a_v2_feed_never_cuts_the_days() {
+        let full = v2(feed(vec![
+            agent(1, false, Some(300), 20),
+            agent(2, true, Some(200), 20),
+            agent(3, false, Some(100), 20),
+        ]));
+        let mut probe = full.clone();
+        probe.truncated = true;
+        for agent in &mut probe.agents {
+            agent.recent.clear();
+        }
+        // Room for the agents without their uses only.
+        let mut cut = full.clone();
+        let plaintext = fit(&mut cut, size(&probe), 400).expect("it fits");
+        assert!(cut.truncated);
+        assert_eq!(cut.agents.len(), 3);
+        assert_eq!(cut.week.days, full.week.days);
+        for (agent, before) in cut.agents.iter().zip(&full.agents) {
+            assert!(agent.recent.is_empty());
+            assert_eq!(agent.days, before.days, "agent {}", agent.id);
+        }
+        assert!(Feed::parse(&plaintext).is_some());
+        // Less room: an agent goes whole, with its days; the others keep theirs.
+        let mut fewer = full.clone();
+        // The revoked agent goes first (section 7.3).
+        let mut two_agents = probe.clone();
+        two_agents.agents.remove(1);
+        fit(&mut fewer, size(&two_agents), 400).expect("it fits");
+        let ids: Vec<&str> = fewer.agents.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, ["1", "3"]);
+        assert!(
+            fewer
+                .agents
+                .iter()
+                .all(|agent| agent.days.len() == FEED_DAYS)
+        );
+        assert_eq!(fewer.week.days.len(), FEED_DAYS);
+    }
+
+    #[test]
+    fn remote_access_says_off_on_or_problem() {
+        assert_eq!(remote_access_value(false, true), "off");
+        assert_eq!(remote_access_value(true, false), "on");
+        assert_eq!(remote_access_value(true, true), "problem");
+    }
+
     #[test]
     fn a_feed_with_an_unknown_or_missing_field_is_refused() {
         let good = feed(vec![agent(1, false, None, 1)]);
@@ -2336,6 +2705,7 @@ mod tests {
             )
             .is_none()
         );
+        // A feed of v1 called v2 has none of the fields of v2.
         assert!(Feed::parse(text.replace(r#""v":1"#, r#""v":2"#).as_bytes()).is_none());
         assert!(
             Feed::parse(

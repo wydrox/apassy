@@ -127,19 +127,24 @@ fn vector_feed() -> Feed {
         seq: 1_790_000_040,
         generated_at: 1_790_000_040,
         truncated: false,
+        remote_access: None,
         week: FeedWeek {
             by_you: 3,
             automatic: 128,
+            days: Vec::new(),
+            answer_p50_secs: None,
         },
         agents: vec![FeedAgent {
             id: "4".to_owned(),
             name: "Claude Code".to_owned(),
             host: "claude".to_owned(),
             place: "mac".to_owned(),
+            connected_at: None,
             revoked: false,
             token_expires_at: 1_797_776_000,
             last_use_at: Some(1_790_000_010),
             uses_this_week: 12,
+            days: Vec::new(),
             projects: vec!["synthetic-shop".to_owned()],
             note: "Deploys only from the main branch.".to_owned(),
             restricted: false,
@@ -2835,4 +2840,141 @@ fn the_feed_goes_out_for_another_mac_and_leaves_with_the_last_other_device() {
         world.relay.feed_of(world.mac_id()).is_none().then_some(())
     });
     assert_eq!(world.relay.count("DELETE /v1/feed"), 1);
+}
+
+/// Feed v2 (section 7.5): the Mac publishes `v: 2` with the days and the median of the
+/// Overview of this Mac (`Vault::bouncer_stats` over the same window), the route of its
+/// node, and a cloud agent as `remote` with its connect time. The feed is within the
+/// limits, and both forms read.
+#[test]
+fn the_feed_of_v2_carries_the_figures_of_the_overview() {
+    use apassy::questions::feed::{FEED_DAYS, FEED_VERSION, MAX_V2_EXTRA_BYTES};
+    use apassy::vault::{
+        DecidedBy, DecisionEntry, DecisionMeta, LoggedDecision, RequestKind, RequestSource,
+        STATS_WINDOW_SECS,
+    };
+    let world = world();
+    let [shop, _] = world.items;
+    let at = now();
+    let (cloud, created_at) = world.with(|vault| {
+        for (ago, asked, wait_ms) in [
+            (60, true, Some(8_000)),
+            (120, false, None),
+            (180, true, Some(2_000)),
+        ] {
+            vault
+                .record_decision_with(
+                    &DecisionEntry {
+                        at: at - ago,
+                        agent_id: world.agent,
+                        agent_name: "Claude Code".to_owned(),
+                        project_dir: String::new(),
+                        cwd_rel: String::new(),
+                        items: vec![shop],
+                        user_request: String::new(),
+                        user_request_source: RequestSource::None,
+                        command: vec!["true".to_owned()],
+                        purpose: "synthetic".to_owned(),
+                        env_names: Vec::new(),
+                        declarations: Vec::new(),
+                        rule_flags: Vec::new(),
+                        known_safe: false,
+                        model_facts: Vec::new(),
+                        pattern: String::new(),
+                        grant_asks: false,
+                        asked,
+                        decision: LoggedDecision::Allow,
+                        decided_by: if asked {
+                            DecidedBy::Owner
+                        } else {
+                            DecidedBy::Model
+                        },
+                        remembered: false,
+                        policy: String::new(),
+                        note: String::new(),
+                        instruction: String::new(),
+                    },
+                    &DecisionMeta {
+                        request: RequestKind::Run,
+                        wait_ms,
+                    },
+                )
+                .unwrap();
+        }
+        let cloud = vault
+            .add_cloud_agent("Grok Bot", &[shop], 7, 4_000_000_000)
+            .unwrap();
+        vault.set_cloud_route_on(true).unwrap();
+        let created_at = vault
+            .cloud_agents()
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.agent_id == cloud)
+            .unwrap()
+            .created_at;
+        (cloud, created_at)
+    });
+    let me = world.me();
+    let (feed, stats) = world.with(|vault| {
+        let feed = build_feed(vault, &me, 1, at).unwrap();
+        let stats = vault
+            .bouncer_stats(at - STATS_WINDOW_SECS, at + 1, None)
+            .unwrap();
+        (feed, stats)
+    });
+    assert_eq!(feed.v, FEED_VERSION);
+    assert_eq!(feed.remote_access.as_deref(), Some("on"));
+    // The median of 8 s and 2 s is 5 s; the model run has no answer time.
+    assert_eq!(feed.week.answer_p50_secs, Some(5));
+    assert_eq!(feed.week.answer_p50_secs, stats.answer_p50_secs);
+    assert_eq!(feed.week.days.len(), FEED_DAYS);
+    let days: Vec<(u64, u64)> = feed.week.days.iter().map(|d| (d.runs, d.asked)).collect();
+    let expected: Vec<(u64, u64)> = stats.days.iter().map(|d| (d.runs, d.asked)).collect();
+    assert_eq!(days, expected);
+    assert_eq!(days.iter().map(|d| d.0).sum::<u64>(), 3, "{days:?}");
+    let local = feed
+        .agents
+        .iter()
+        .find(|agent| agent.id == world.agent.to_string())
+        .unwrap();
+    assert_eq!(local.place, "mac");
+    assert_eq!(local.connected_at, None);
+    assert_eq!(local.days.len(), FEED_DAYS);
+    assert_eq!(local.days.iter().map(|d| d.runs).sum::<u64>(), 3);
+    assert_eq!(local.days.iter().map(|d| d.asked).sum::<u64>(), 2);
+    let remote = feed
+        .agents
+        .iter()
+        .find(|agent| agent.id == cloud.to_string())
+        .unwrap();
+    assert_eq!(remote.place, "remote");
+    assert_eq!(remote.connected_at, Some(created_at));
+    assert!(remote.days.iter().all(|day| day.runs == 0));
+
+    // Within its limits; the v2 fields stay under 20 KiB; the reader of section 7.4 reads it.
+    assert!(feed.within_limits());
+    let plaintext = feed.to_plaintext();
+    assert_eq!(Feed::parse(&plaintext).as_ref(), Some(&feed));
+    let mut as_v1 = feed.clone();
+    as_v1.v = 1;
+    as_v1.remote_access = None;
+    as_v1.week.days.clear();
+    as_v1.week.answer_p50_secs = None;
+    for agent in &mut as_v1.agents {
+        agent.place = "mac".to_owned();
+        agent.connected_at = None;
+        agent.days.clear();
+    }
+    assert!(
+        Feed::parse(&as_v1.to_plaintext()).is_some(),
+        "v1 still reads"
+    );
+    assert!(plaintext.len() - as_v1.to_plaintext().len() <= MAX_V2_EXTRA_BYTES);
+    // The address of the node never goes in the feed.
+    let text = String::from_utf8(plaintext.to_vec()).unwrap();
+    assert!(!text.contains("ts.net") && !text.contains("127.0.0.1"));
+    // The route off says off.
+    world.with(|vault| vault.set_cloud_route_on(false).unwrap());
+    let off = world.with(|vault| build_feed(vault, &me, 2, at).unwrap());
+    assert_eq!(off.remote_access.as_deref(), Some("off"));
 }

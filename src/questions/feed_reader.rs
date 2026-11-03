@@ -16,7 +16,7 @@
 //! - For each feed of another relay device it runs the checks of section 7.4 in order
 //!   ([`read_feed`], [`Reader::take`]): the envelope opens with the question key and the
 //!   AAD of the relay's device id and `seq`; the plaintext has exactly the fields of
-//!   section 7.1 ([`Feed::parse`]); `seq` equals the relay's; `mac.device` is a live
+//!   section 7.1, of v1 or of v2 (section 7.5) ([`Feed::parse`]); `seq` equals the relay's; `mac.device` is a live
 //!   `trusted_device` of kind `mac`, not this Mac, whose `relay_devices[team]` is the
 //!   relay's `device_id`; `seq` is above the highest one accepted of that device.
 //! - It keeps the last good feed of each Mac, and the text of a failed step 1 or 2 for a
@@ -123,8 +123,8 @@ pub fn read_feed(record: &FeedRecord, team_id: &str, key: Option<&QuestionKey>) 
     let Some(plaintext) = record.sealed().open(key, &aad) else {
         return Read::Problem(Problem::Sync);
     };
-    // 2. and 3. Exactly the fields of section 7.1 within their limits, `v` 1, and the
-    // relay's `seq`.
+    // 2. and 3. Exactly the fields of section 7.1 (and 7.5 for v2) within their limits,
+    // `v` 1 or 2, and the relay's `seq`.
     match Feed::parse(&plaintext) {
         Some(feed) if feed.seq == record.seq => Read::Good(feed),
         _ => Read::Problem(Problem::Update),
@@ -631,9 +631,12 @@ mod tests {
             seq,
             generated_at: seq,
             truncated: false,
+            remote_access: None,
             week: FeedWeek {
                 by_you: 1,
                 automatic: 2,
+                days: Vec::new(),
+                answer_p50_secs: None,
             },
             agents: Vec::new(),
         }
@@ -741,6 +744,57 @@ mod tests {
         let mut bad_key_id = record;
         bad_key_id.key_id = "not-a-key-id".to_owned();
         assert_eq!(read_feed(&bad_key_id, TEAM, Some(&key())), Read::Ignore);
+    }
+
+    /// `feed` as a feed of v2 with one remote agent.
+    fn feed_v2(uuid: &str, seq: u64) -> Feed {
+        use crate::questions::feed::{FEED_DAYS, FEED_VERSION, FeedAgentDay, FeedDay};
+        let mut two = feed(uuid, seq);
+        two.v = FEED_VERSION;
+        two.remote_access = Some("off".to_owned());
+        two.week.days = vec![FeedDay { runs: 4, asked: 1 }; FEED_DAYS];
+        two.week.answer_p50_secs = Some(12);
+        let text = r#"{"id":"9","name":"Grok Bot","host":"other","where":"remote","connected_at":1790000000,"revoked":false,"token_expires_at":1797776000,"last_use_at":null,"uses_this_week":0,"projects":[],"note":"","restricted":true,"actions":[],"exceptions":[],"recent":[]}"#;
+        let mut agent: crate::questions::feed::FeedAgent = serde_json::from_str(text).unwrap();
+        agent.days = vec![
+            FeedAgentDay {
+                runs: 2,
+                asked: 2,
+                not_allowed: 1
+            };
+            FEED_DAYS
+        ];
+        two.agents.push(agent);
+        two
+    }
+
+    #[test]
+    fn the_reader_takes_a_feed_of_v1_or_v2_and_refuses_v3() {
+        let one = feed(OTHER, 1_790_000_040);
+        assert_eq!(
+            read_feed(&record(OTHER_ID, &one, 1), TEAM, Some(&key())),
+            Read::Good(one.clone())
+        );
+        let two = feed_v2(OTHER, 1_790_000_041);
+        let Read::Good(read) = read_feed(&record(OTHER_ID, &two, 2), TEAM, Some(&key())) else {
+            panic!("a feed of v2 reads");
+        };
+        assert_eq!(read, two);
+        assert_eq!(read.remote_access.as_deref(), Some("off"));
+        assert_eq!(read.week.answer_p50_secs, Some(12));
+        assert_eq!(read.agents[0].place, "remote");
+        assert_eq!(read.agents[0].days.len(), 7);
+        // v3: "Update Apassy to see the agents of <Mac>".
+        let text = String::from_utf8(two.to_plaintext().to_vec()).unwrap();
+        let three = text.replacen(r#""v":2"#, r#""v":3"#, 1);
+        assert_eq!(
+            read_feed(
+                &record_of(OTHER_ID, two.seq, 3, &key(), three.as_bytes()),
+                TEAM,
+                Some(&key())
+            ),
+            Read::Problem(Problem::Update)
+        );
     }
 
     #[test]
