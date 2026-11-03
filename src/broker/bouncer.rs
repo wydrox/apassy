@@ -1,16 +1,22 @@
-//! Bouncer on a local Jev-compatible decision model (ADR 0007).
+//! Bouncer on a Jev-compatible decision model (ADR 0007, ADR 0035).
 //!
 //! The bouncer sends one `POST /v1/systemone` request with `noul` questions
-//! and reads the probabilities. Laya (`laya-serve`) and Jev use this protocol.
+//! and reads the probabilities. Laya (`laya-serve`) and Jev use this protocol;
+//! contract `bouncer-brain-v1` adds pinned head sets and the shadow head set in
+//! the same request. The bouncer brain is on this Mac (loopback `http://`) or on a
+//! remote server ([`BouncerClient::remote`], `https://` with a credential only).
 //! Any failure gives [`BouncerVerdict::Unavailable`]. Unavailable is never an
 //! allowance.
 
 use super::route_diagnostics::ReasonKind;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+use zeroize::Zeroizing;
 
-use super::http::{self, DestinationUrl, parse_destination};
+use super::http::{self, DestinationUrl, TlsClient, parse_destination};
 use super::shell_risk::Analysis;
 use crate::vault::{
     CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED, Scope, valid_model_version,
@@ -45,6 +51,11 @@ const PATH: &str = "/v1/systemone";
 /// decision can take over five seconds. One timeout retry gives at most 20 seconds
 /// by default. `with_timeout` overrides each attempt's whole-exchange budget.
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// The time limit of each attempt to a remote bouncer brain (ADR 0035 decision 3,
+/// contract bouncer-brain-v1 section 8): name lookup, connect, TLS handshake, the
+/// credential, request, and answer. With the one retry after a transport timeout,
+/// a request waits at most twice this long.
+pub const REMOTE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Facts that the model answers. A decision model classifies facts well. A direct
 /// "allow or ask" question gave probabilities near 0.5 in a probe on 2026-09-26.
@@ -168,7 +179,110 @@ pub fn env_url() -> Option<String> {
         .filter(|url| !url.trim().is_empty())
 }
 
-/// Client for one local decision service.
+/// A head set hash of the wire: 64 lowercase hexadecimal characters (contract
+/// bouncer-brain-v1 section 3.1). The client checks every hash before it sends it.
+pub fn is_heads_hash(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The bearer of a remote bouncer brain (ADR 0035). It is not a vault credential:
+/// a bouncer brain never receives a secret value. The owner's server has a static
+/// token ([`StaticBearer`]); Apassy Connect signs in with the device key (unit C3).
+pub trait BrainCredential: Send + Sync {
+    /// The bearer for the next request, or `None` when there is none before
+    /// `deadline`. Without a bearer the client sends nothing.
+    fn bearer(&self, deadline: Instant) -> Option<Zeroizing<String>>;
+
+    /// The server answered 401 to the last bearer. The request that got the 401 is
+    /// unavailable; it is never sent again with another bearer.
+    fn invalidate(&self);
+}
+
+/// The token of the owner's server (`LAYA_API_KEY` there). After a 401 it gives no
+/// bearer any more: the owner enters the right token, which makes a new client.
+pub struct StaticBearer {
+    bearer: Zeroizing<String>,
+    refused: AtomicBool,
+}
+
+impl StaticBearer {
+    /// `None` when the token is empty or has a character that a header cannot carry.
+    pub fn new(token: Zeroizing<String>) -> Option<Self> {
+        let valid = !token.is_empty() && token.bytes().all(|b| (0x21..0x7f).contains(&b));
+        valid.then(|| Self {
+            bearer: token,
+            refused: AtomicBool::new(false),
+        })
+    }
+
+    /// The server refused this token (401).
+    pub fn is_refused(&self) -> bool {
+        self.refused.load(Ordering::SeqCst)
+    }
+}
+
+impl std::fmt::Debug for StaticBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StaticBearer")
+            .field("refused", &self.is_refused())
+            .finish_non_exhaustive()
+    }
+}
+
+impl BrainCredential for StaticBearer {
+    fn bearer(&self, _deadline: Instant) -> Option<Zeroizing<String>> {
+        (!self.is_refused()).then(|| self.bearer.clone())
+    }
+
+    fn invalidate(&self) {
+        self.refused.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The shadow head set of a request (contract bouncer-brain-v1 section 3): its hash
+/// goes as `shadow_heads`, and its answer must name `model`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowPin {
+    /// The SHA-256 of the shadow head file, 64 lowercase hex characters.
+    pub heads: String,
+    /// The version of the shadow head set: `<name>+<first 8 hex of heads>`.
+    pub model: String,
+}
+
+impl ShadowPin {
+    pub fn new(heads: &str, model: &str) -> Self {
+        Self {
+            heads: heads.to_owned(),
+            model: model.to_owned(),
+        }
+    }
+}
+
+/// The transport of a remote bouncer brain.
+#[derive(Clone)]
+struct Remote {
+    credential: Arc<dyn BrainCredential>,
+    tls: Arc<TlsClient>,
+}
+
+impl std::fmt::Debug for Remote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Remote")
+    }
+}
+
+/// Why one attempt sent no request or got no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendFailure {
+    Http(http::HttpFailure),
+    /// A remote bouncer brain without a bearer: nothing was sent.
+    NoCredential,
+}
+
+/// Client for one decision service: on this Mac, or remote over `https://`.
 #[derive(Debug, Clone)]
 pub struct BouncerClient {
     destination: DestinationUrl,
@@ -178,10 +292,16 @@ pub struct BouncerClient {
     /// The model version that the answers must name (goal item B9). A promoted model is
     /// pinned, so another model at the same address cannot change the policy silently.
     expected_model: Option<String>,
+    /// The SHA-256 of the active head file. It goes as `heads`, and the answer must
+    /// name it (contract bouncer-brain-v1 section 3.4).
+    expected_heads: Option<String>,
+    /// `Some` for a remote bouncer brain ([`BouncerClient::remote`]).
+    remote: Option<Remote>,
 }
 
 impl BouncerClient {
-    /// Only a loopback `http://` address is permitted in this phase.
+    /// A bouncer brain on this Mac: only a loopback `http://` address. A remote
+    /// bouncer brain needs [`BouncerClient::remote`].
     pub fn new(url: &str) -> Result<Self, &'static str> {
         let destination = parse_destination(url)?;
         if !matches!(destination, DestinationUrl::Loopback { .. }) {
@@ -193,7 +313,38 @@ impl BouncerClient {
             api_key: None,
             timeout: TIMEOUT,
             expected_model: None,
+            expected_heads: None,
+            remote: None,
         })
+    }
+
+    /// A remote bouncer brain (ADR 0035): an `https://` address only, with a
+    /// credential, and [`REMOTE_TIMEOUT`] for each attempt. Only the owner's hosting
+    /// choice in the vault makes one; `APASSY_BOUNCER_URL` and `bouncer.json` never
+    /// name a remote host ([`BouncerClient::from_env_or`] stays loopback-only).
+    pub fn remote(
+        url: &str,
+        credential: Arc<dyn BrainCredential>,
+        tls: Arc<TlsClient>,
+    ) -> Result<Self, &'static str> {
+        let destination = parse_destination(url)?;
+        if !matches!(destination, DestinationUrl::Https { .. }) {
+            return Err("A remote bouncer brain must use https://.");
+        }
+        Ok(Self {
+            destination,
+            url: url.trim().trim_end_matches('/').to_owned(),
+            api_key: None,
+            timeout: REMOTE_TIMEOUT,
+            expected_model: None,
+            expected_heads: None,
+            remote: Some(Remote { credential, tls }),
+        })
+    }
+
+    /// True for a remote bouncer brain.
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
     }
 
     /// A client for another loopback address, with the same key and time limit. It does
@@ -217,19 +368,52 @@ impl BouncerClient {
         self.expected_model.as_deref()
     }
 
+    /// Pin the active head set: each request sends `heads`, and an answer from
+    /// another head set is [`BouncerVerdict::Unavailable`] (contract
+    /// bouncer-brain-v1 section 3.4). A pin that is not 64 lowercase hex characters
+    /// makes every request unavailable, with nothing sent.
+    pub fn expect_heads(mut self, sha256: &str) -> Self {
+        self.expected_heads = Some(sha256.to_owned());
+        self
+    }
+
+    /// The pinned head hash, if there is one.
+    pub fn expected_heads(&self) -> Option<&str> {
+        self.expected_heads.as_deref()
+    }
+
+    /// The time limit of one attempt.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// The longest wait of one request: two attempts.
+    pub fn max_wait(&self) -> Duration {
+        self.timeout.saturating_mul(2)
+    }
+
     /// `APASSY_BOUNCER_URL`, or the default address.
     pub fn from_env() -> Result<Self, &'static str> {
         Self::from_env_or(DEFAULT_URL)
     }
 
     /// `APASSY_BOUNCER_URL`, or `url` (the address in `bouncer.json`). The environment
-    /// wins, as in [`BouncerClient::from_env`].
+    /// wins, as in [`BouncerClient::from_env`]. Loopback only: any process of the user
+    /// can set these, so a remote address here would bypass the owner check of the
+    /// hosting choice (ADR 0035).
     pub fn from_env_or(url: &str) -> Result<Self, &'static str> {
-        let url = env_url().unwrap_or_else(|| url.to_owned());
+        Self::from_sources(env_url(), url, std::env::var("APASSY_BOUNCER_KEY").ok())
+    }
+
+    /// [`BouncerClient::from_env_or`] with the environment values as arguments.
+    fn from_sources(
+        env_url: Option<String>,
+        url: &str,
+        key: Option<String>,
+    ) -> Result<Self, &'static str> {
+        let url = env_url.unwrap_or_else(|| url.to_owned());
         let mut client = Self::new(&url)?;
-        client.api_key = std::env::var("APASSY_BOUNCER_KEY")
-            .ok()
-            .filter(|key| !key.is_empty());
+        client.api_key = key.filter(|key| !key.is_empty());
         Ok(client)
     }
 
@@ -237,7 +421,8 @@ impl BouncerClient {
         &self.url
     }
 
-    /// The bearer key from `APASSY_BOUNCER_KEY`, if set.
+    /// The bearer key from `APASSY_BOUNCER_KEY`, if set. A remote bouncer brain has
+    /// its credential instead, so this is `None` for it.
     pub fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref()
     }
@@ -251,12 +436,13 @@ impl BouncerClient {
     }
 
     /// A short `GET /health` check (the health route of `laya-serve` and `serve.py`).
-    /// It sends no request data and no key.
+    /// It sends no request data and no key. A remote bouncer brain is checked over
+    /// TLS with the same time limit.
     pub fn probe_health(&self, timeout: Duration) -> Health {
         use std::io::{Read, Write};
 
         let DestinationUrl::Loopback { addr, host_header } = &self.destination else {
-            return Health::NoServer;
+            return self.probe_remote_health(timeout);
         };
         let Ok(mut stream) = std::net::TcpStream::connect_timeout(addr, timeout) else {
             return Health::NoServer;
@@ -287,27 +473,114 @@ impl BouncerClient {
         }
     }
 
+    fn probe_remote_health(&self, timeout: Duration) -> Health {
+        let Some(remote) = &self.remote else {
+            return Health::NoServer;
+        };
+        match http::get_health(
+            &self.destination,
+            "/health",
+            timeout,
+            Some(remote.tls.as_ref()),
+        ) {
+            Ok(response) => {
+                let ok = response.status == 200
+                    && serde_json::from_slice::<Value>(&response.body)
+                        .is_ok_and(|body| body["status"] == "ok");
+                if ok {
+                    Health::Healthy
+                } else {
+                    Health::NotBouncer
+                }
+            }
+            Err(http::HttpFailure::Connect | http::HttpFailure::Timeout) => Health::NoServer,
+            Err(_) => Health::NotBouncer,
+        }
+    }
+
+    /// One attempt: the credential of a remote bouncer brain and one POST, all
+    /// within `timeout`.
+    fn send_once(&self, body: &[u8], timeout: Duration) -> Result<http::HttpResponse, SendFailure> {
+        let Some(remote) = &self.remote else {
+            return http::post_json_loopback(
+                &self.destination,
+                PATH,
+                body,
+                self.api_key.as_deref(),
+                timeout,
+            )
+            .map_err(SendFailure::Http);
+        };
+        let deadline = Instant::now() + timeout;
+        let bearer = remote
+            .credential
+            .bearer(deadline)
+            .ok_or(SendFailure::NoCredential)?;
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(SendFailure::Http(http::HttpFailure::Timeout))?;
+        http::post_json(
+            &self.destination,
+            PATH,
+            body,
+            Some(bearer.as_str()),
+            left,
+            Some(remote.tls.as_ref()),
+        )
+        .map_err(SendFailure::Http)
+    }
+
+    /// A 401 of a remote bouncer brain ends its credential.
+    fn note_status(&self, status: u16) {
+        if status == 401
+            && let Some(remote) = &self.remote
+        {
+            remote.credential.invalidate();
+        }
+    }
+
+    /// The pinned head hash for the wire, or a reason when the pin is malformed.
+    fn heads_for_wire(&self) -> Result<Option<&str>, String> {
+        match self.expected_heads.as_deref() {
+            Some(heads) if !is_heads_hash(heads) => {
+                Err("the pinned head hash is not valid; nothing was sent".to_owned())
+            }
+            heads => Ok(heads),
+        }
+    }
+
     /// Ask one neutral question, so the server loads the model, and read the model
     /// version from the answer. The question has no request data.
     pub fn warm_up(&self, timeout: Duration) -> Result<Option<String>, String> {
         const READY: (&str, &str) = ("ready", "Is this a readiness check?");
-        let body = json!({
+        let heads = self.heads_for_wire()?;
+        let mut body = json!({
             "state": "Apassy checks that the decision model answers.",
             "questions": { READY.0: { "type": "noul", "instructions": READY.1 } },
         });
+        if let Some(heads) = heads {
+            body["heads"] = json!(heads);
+        }
         let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
-        let response = http::post_json_loopback(
-            &self.destination,
-            PATH,
-            &bytes,
-            self.api_key.as_deref(),
-            timeout,
-        )
-        .map_err(|failure| format!("readiness request to {} failed ({failure:?})", self.url))?;
-        if !(200..300).contains(&response.status) {
+        let response = self
+            .send_once(&bytes, timeout)
+            .map_err(|failure| match failure {
+                SendFailure::Http(failure) => {
+                    format!("readiness request to {} failed ({failure:?})", self.url)
+                }
+                SendFailure::NoCredential => {
+                    format!("readiness request to {} has no credential", self.url)
+                }
+            })?;
+        self.note_status(response.status);
+        if response.status != 200 {
             return Err(format!("status {}", response.status));
         }
-        match self.check_model(parse_answers(&response.body, &[READY])) {
+        let Ok(value) = serde_json::from_slice::<Value>(&response.body) else {
+            return Err("the answer is not JSON".to_owned());
+        };
+        match self.check_pins(answers_in(&value, &[READY]), &value) {
             BouncerVerdict::Scored { model, .. } => Ok(model),
             BouncerVerdict::Unavailable(reason) => Err(reason),
         }
@@ -319,54 +592,124 @@ impl BouncerClient {
     }
 
     pub fn evaluate(&self, request: &BouncerRequest) -> BouncerVerdict {
-        let body = request_body(request);
+        self.evaluate_with_shadow(request, None).0
+    }
+
+    /// The active verdict and, with `shadow`, the verdict of the shadow head set from
+    /// the same request (contract bouncer-brain-v1 section 3). The shadow part never
+    /// changes the active verdict: a missing shadow, a `shadow.error`, or a failed
+    /// check of `shadow.heads` or `shadow.model` makes only the shadow verdict
+    /// unavailable. With `shadow`, the second value is always `Some`.
+    pub fn evaluate_with_shadow(
+        &self,
+        request: &BouncerRequest,
+        shadow: Option<&ShadowPin>,
+    ) -> (BouncerVerdict, Option<BouncerVerdict>) {
+        let both = |reason: String| {
+            (
+                BouncerVerdict::Unavailable(reason.clone()),
+                shadow.map(|_| BouncerVerdict::Unavailable(reason)),
+            )
+        };
+        let heads = match self.heads_for_wire() {
+            Ok(heads) => heads,
+            Err(reason) => return both(reason),
+        };
+        // A malformed shadow hash is a client defect: it is not sent, and only the
+        // shadow verdict is unavailable.
+        let shadow_heads = shadow
+            .map(|pin| pin.heads.as_str())
+            .filter(|heads| is_heads_hash(heads));
+        let mut body = request_body(request);
+        if let Some(heads) = heads {
+            body["heads"] = json!(heads);
+        }
+        if let Some(shadow_heads) = shadow_heads {
+            body["shadow_heads"] = json!(shadow_heads);
+        }
         let Ok(bytes) = serde_json::to_vec(&body) else {
-            return BouncerVerdict::Unavailable("the request did not encode".to_owned());
+            return both("the request did not encode".to_owned());
         };
         // Inference is read-only: retry at most once, and only when its transport
         // timed out. This never retries a command, HTTP error, or invalid answer.
-        let send = || {
-            http::post_json_loopback(
-                &self.destination,
-                PATH,
-                &bytes,
-                self.api_key.as_deref(),
-                self.timeout,
-            )
-        };
+        let send = || self.send_once(&bytes, self.timeout);
         let response = match send().or_else(|failure| {
-            if failure == http::HttpFailure::Timeout {
+            if failure == SendFailure::Http(http::HttpFailure::Timeout) {
                 send()
             } else {
                 Err(failure)
             }
         }) {
             Ok(response) => response,
-            Err(http::HttpFailure::Timeout) => {
-                return BouncerVerdict::Unavailable(format!(
+            Err(SendFailure::Http(http::HttpFailure::Timeout)) => {
+                return both(format!(
                     "the model at {} timed out after two inference attempts (up to {} ms total)",
                     self.url,
-                    self.timeout.saturating_mul(2).as_millis()
+                    self.max_wait().as_millis()
                 ));
             }
-            Err(_) => {
-                return BouncerVerdict::Unavailable(format!("no answer from {}", self.url));
+            Err(SendFailure::NoCredential) => {
+                return both(format!(
+                    "no credential for the bouncer brain at {}; nothing was sent",
+                    self.url
+                ));
+            }
+            Err(SendFailure::Http(_)) => {
+                return both(format!("no answer from {}", self.url));
             }
         };
-        if !(200..300).contains(&response.status) {
-            if response.status == 422
-                && serde_json::from_slice::<Value>(&response.body)
-                    .ok()
-                    .is_some_and(|body| body["detail"]["code"] == "input_too_long")
-            {
-                return BouncerVerdict::Unavailable(
+        self.note_status(response.status);
+        if response.status != 200 {
+            let code = serde_json::from_slice::<Value>(&response.body)
+                .ok()
+                .and_then(|body| body["detail"]["code"].as_str().map(str::to_owned));
+            return both(match (response.status, code.as_deref()) {
+                (422, Some("input_too_long")) => {
                     "the complete request does not fit the model context; the model did not decide"
-                        .to_owned(),
-                );
-            }
-            return BouncerVerdict::Unavailable(format!("status {}", response.status));
+                        .to_owned()
+                }
+                (401, _) => format!(
+                    "the bouncer brain at {} refused the credential (status 401)",
+                    self.url
+                ),
+                (409, _) => format!(
+                    "the bouncer brain at {} does not have the pinned head set (status 409)",
+                    self.url
+                ),
+                (status, _) => format!("status {status}"),
+            });
         }
-        self.check_model(parse_answers(&response.body, &facts_for(request)))
+        let Ok(value) = serde_json::from_slice::<Value>(&response.body) else {
+            return both("the answer is not JSON".to_owned());
+        };
+        let asked = facts_for(request);
+        let active = self.check_pins(answers_in(&value, &asked), &value);
+        let shadow = shadow.map(|pin| {
+            if shadow_heads.is_none() {
+                BouncerVerdict::Unavailable(
+                    "the shadow head hash is not valid; it was not sent".to_owned(),
+                )
+            } else {
+                shadow_verdict(&value, pin, &asked)
+            }
+        });
+        (active, shadow)
+    }
+
+    /// The pins of the active head set: the model version and the head hash.
+    fn check_pins(&self, verdict: BouncerVerdict, answer: &Value) -> BouncerVerdict {
+        let verdict = self.check_model(verdict);
+        match (&self.expected_heads, &verdict) {
+            (Some(expected), BouncerVerdict::Scored { .. })
+                if answer.get("heads").and_then(Value::as_str) != Some(expected.as_str()) =>
+            {
+                BouncerVerdict::Unavailable(format!(
+                    "the answer of the model at {} is not from the pinned head set",
+                    self.url
+                ))
+            }
+            _ => verdict,
+        }
     }
 
     fn check_model(&self, verdict: BouncerVerdict) -> BouncerVerdict {
@@ -382,6 +725,37 @@ impl BouncerClient {
             }
             _ => verdict,
         }
+    }
+}
+
+/// The shadow part of an answer, checked against its pin (contract bouncer-brain-v1
+/// sections 3.2 and 3.4). Any failure is "no answer" for the shadow head set.
+fn shadow_verdict(answer: &Value, pin: &ShadowPin, asked: &[(&str, &str)]) -> BouncerVerdict {
+    let Some(shadow) = answer.get("shadow").filter(|shadow| shadow.is_object()) else {
+        return BouncerVerdict::Unavailable("the answer has no shadow part".to_owned());
+    };
+    if shadow.get("heads").and_then(Value::as_str) != Some(pin.heads.as_str()) {
+        return BouncerVerdict::Unavailable(
+            "the shadow part is not from the shadow head set".to_owned(),
+        );
+    }
+    if let Some(error) = shadow.get("error") {
+        // Only the codes of the contract are named; other server text is not logged.
+        let code = match error.as_str() {
+            Some(code @ ("unknown_heads" | "shadow_failed")) => code,
+            _ => "another error",
+        };
+        return BouncerVerdict::Unavailable(format!("the shadow head set failed ({code})"));
+    }
+    match answers_in(shadow, asked) {
+        BouncerVerdict::Scored { model, .. } if model.as_deref() != Some(pin.model.as_str()) => {
+            BouncerVerdict::Unavailable(format!(
+                "the shadow model is {}, not the shadow version {}",
+                model.as_deref().unwrap_or("unnamed"),
+                pin.model
+            ))
+        }
+        verdict => verdict,
     }
 }
 
@@ -441,6 +815,11 @@ pub fn parse_answers(body: &[u8], asked: &[(&str, &str)]) -> BouncerVerdict {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return BouncerVerdict::Unavailable("the answer is not JSON".to_owned());
     };
+    answers_in(&value, asked)
+}
+
+/// [`parse_answers`] of a parsed answer, or of its `shadow` part.
+fn answers_in(value: &Value, asked: &[(&str, &str)]) -> BouncerVerdict {
     let mut facts = Vec::new();
     for (name, _) in asked {
         let probability = value
@@ -459,7 +838,7 @@ pub fn parse_answers(body: &[u8], asked: &[(&str, &str)]) -> BouncerVerdict {
     }
     BouncerVerdict::Scored {
         facts,
-        model: model_version(&value),
+        model: model_version(value),
     }
 }
 
