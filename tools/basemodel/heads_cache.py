@@ -313,6 +313,11 @@ class HeadSetCache:
         if self._stored_count() >= self.max_stored:
             raise HeadsError(409, "heads_full", "this server stores no more head sets; delete one first")
 
+    def stored_count(self):
+        """How many uploaded head sets the heads folder stores."""
+        with self._lock:
+            return self._stored_count()
+
     def check_room(self, sha):
         """Raise 409 `heads_full` when `sha` is new and the heads folder is full."""
         with self._lock:
