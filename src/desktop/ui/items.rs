@@ -1730,7 +1730,7 @@ pub(super) fn website_link(value: &str) -> Option<(String, String)> {
     Some((host, format!("{scheme}://{rest}")))
 }
 
-/// The addresses that "Open" gave in a test. The tests never start a browser.
+// The addresses that "Open" gave in a test. The tests never start a browser.
 #[cfg(test)]
 thread_local! {
     pub(super) static OPENED: std::cell::RefCell<Vec<String>> =
