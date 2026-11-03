@@ -137,6 +137,16 @@ relay-access-request-v1 §4 to §6, unchanged.
   - It receives the handoff after the owner confirms on the Mac with Touch ID.
 - **The iPhone learns the handoff secret.** It is the owner's trusted vault holder: the same trust
   class (relay-questions-v1 §18). A link scanned on the iPhone is visible to the iPhone in any case.
+- **The iPhone shows the state of the watch** (added 2026-11-03, after the first test on a device
+  found no place that said why nothing happened).
+  - Settings › Devices has an Apple Watch row: Not paired, Apassy not installed, Not connected,
+    Connected to "<vault>", or Removed by a Mac.
+  - When Apassy is not installed, the row says what the watch app needs: watchOS 27 on Apple Watch
+    Series 9 or later, Ultra 2 or later, or SE 3.
+  - The watch publishes its connection with `updateApplicationContext`
+    (`WatchConnectionReport`: `apassy.watch-state`, and `apassy.watch-vault` for the vault name). It
+    sends only the state and the vault name, never a key, a link or a request.
+  - The watch's Requests screen says "Connected to "<vault>"".
 
 ## 7. Notifications
 

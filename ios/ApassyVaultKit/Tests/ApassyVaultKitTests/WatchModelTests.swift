@@ -36,20 +36,34 @@ import Testing
         let keys = MemoryWatchAnswerKeys()
         let replica = MemoryWatchReplicaStore()
         let model = model(service, keys: keys, replica: replica)
+        #expect(model.connectionReport == nil)
         await model.scenePhaseChanged(.active)
         #expect(model.screen == .connect(nil))
+        #expect(model.connectionReport == .notConnected)
         #expect(model.receiveLink("not a code") != nil)
         #expect(model.screen == .connect(nil))
         #expect(model.receiveLink(WatchPreview.link) == nil)
         #expect(model.screen == .connecting)
         await model.connectFinished()
         #expect(model.screen == .connected(vault: "Personal", macs: ["Studio Mac"]))
+        #expect(model.connectionReport == .connected(vault: "Personal"))
         #expect(keys.publicKey(team: team) != nil)
         #expect(try replica.load()?.team == team)
         // A connected watch takes no other code.
         model.finishConnecting()
         #expect(model.screen == .requests)
+        #expect(model.connectionReport == .connected(vault: "Personal"))
         #expect(model.receiveLink(WatchPreview.link) != nil)
+    }
+
+    /// The application context that the iPhone reads for Settings › Devices › Apple Watch.
+    @Test func theConnectionReportSurvivesTheApplicationContext() {
+        for report in [WatchConnectionReport.notConnected, .removed, .connected(vault: "Personal")] {
+            #expect(WatchConnectionReport(context: report.context) == report)
+        }
+        #expect(WatchConnectionReport(context: [:]) == nil)
+        #expect(WatchConnectionReport(context: [WatchConnectionReport.stateKey: "paired-later"]) == nil)
+        #expect(WatchConnectionReport(context: [WatchConnectionReport.stateKey: "connected"]) == .connected(vault: ""))
     }
 
     @Test func aRefusedConnectionShowsTheReasonAndForgetsTheNewKeys() async throws {
@@ -190,6 +204,7 @@ import Testing
         await service.setState(.removed)
         await model.refreshRequests()
         #expect(model.screen == .removed)
+        #expect(model.connectionReport == .removed)
         #expect(model.requests.rows.isEmpty)
     }
 

@@ -126,6 +126,18 @@ public final class WatchAppModel {
     /// The connected vault, escaped.
     public var vaultName: String? { status?.vault.map { WatchRequestText.escaped($0.name) } }
 
+    /// What the watch tells the paired iPhone about its connection, or nil while it does not
+    /// know yet (starting) or its core did not start. The vault name is escaped, as on screen.
+    public var connectionReport: WatchConnectionReport? {
+        switch screen {
+        case .starting, .unavailable: nil
+        case .connect, .connecting, .words: .notConnected
+        case .removed: .removed
+        case .connected(let vault, _): .connected(vault: vault)
+        case .requests: .connected(vault: vaultName ?? "")
+        }
+    }
+
     // MARK: - The scene
 
     /// The scene phase changed (`onChange`, synchronous). The background drops the requests and

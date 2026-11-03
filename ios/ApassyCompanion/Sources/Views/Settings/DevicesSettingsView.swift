@@ -23,10 +23,8 @@ struct DevicesSettingsView: View {
                     // The demo pairs nothing: no Mac, no watch, no relay.
                     Button("Pair with a Mac", systemImage: "qrcode.viewfinder") { root.showNotAvailableInDemo() }
                     Button("Add Apple Watch", systemImage: "applewatch") { root.showNotAvailableInDemo() }
-                } else if AppleWatchLink.shared.canAddWatch {
-                    NavigationLink(value: SettingsView.Page.addAppleWatch) {
-                        Label("Add Apple Watch", systemImage: "applewatch")
-                    }
+                } else {
+                    AppleWatchRow()
                 }
                 if let ui {
                     Button("Open Requests", systemImage: "checkmark.circle") {
@@ -66,6 +64,43 @@ struct QuestionsStateRow: View {
         case .off?: "Not connected"
         case .failed?: "Not available"
         case .loading?, nil: "Checking"
+        }
+    }
+}
+
+/// The paired Apple Watch (ADR 0039): whether Apassy is on it and connected, what it needs when
+/// it is not, and Add Apple Watch while it is not connected.
+struct AppleWatchRow: View {
+    private var watch: AppleWatchLink { .shared }
+
+    var body: some View {
+        if watch.isSupported {
+            LabeledContent("Apple Watch", value: state)
+            if watch.isPaired, !watch.isWatchAppInstalled {
+                Text(verbatim: AppleWatchLink.installHint)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if watch.canAddWatch, !isConnected {
+                NavigationLink(value: SettingsView.Page.addAppleWatch) {
+                    Label("Add Apple Watch", systemImage: "applewatch")
+                }
+            }
+        }
+    }
+
+    private var isConnected: Bool {
+        if case .connected = watch.report { true } else { false }
+    }
+
+    private var state: String {
+        guard watch.isActivated else { return "Checking" }
+        guard watch.isPaired else { return "Not paired" }
+        guard watch.isWatchAppInstalled else { return "Apassy not installed" }
+        switch watch.report {
+        case .connected(let vault)?: return vault.isEmpty ? "Connected" : "Connected to “\(vault)”"
+        case .removed?: return "Removed by a Mac"
+        case .notConnected?, nil: return "Not connected"
         }
     }
 }
