@@ -828,6 +828,7 @@ def main(argv=None):
     p.add_argument("--heads-dir", default="", help="head sets of make-heads")
     p.add_argument("--candidate", action="append", default=[],
                    help="a candidate folder of local_train.py (repeatable)")
+    p.add_argument("--first", type=int, default=0, help="only the first N head sets of --heads-dir")
 
     p = sub.add_parser("latency")
     server(p)
@@ -900,7 +901,8 @@ def main(argv=None):
             raise SystemExit("bench: upload needs --heads-dir or --candidate")
         uploads = []
         if args.heads_dir:
-            for entry in head_sets(args.heads_dir):
+            entries = head_sets(args.heads_dir)
+            for entry in entries[:args.first] if args.first else entries:
                 uploads.append((entry["heads"], client.upload(args.heads_dir, entry["heads"])))
         for folder in args.candidate:
             uploads.append(client.upload_candidate(folder))
