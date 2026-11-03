@@ -25,6 +25,7 @@ const USAGE: &str = "Usage:
   apassy-relay init [--team <name> --owner <name>]
   apassy-relay migrate
   apassy-relay rollback-check
+  apassy-relay downgrade-schema-6
   apassy-relay snapshot-check
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin teams
@@ -53,7 +54,10 @@ The configuration is read from the environment:
 `admin` reads only APASSY_RELAY_DATA and talks to the running relay.
 `rollback-check` reads relay.db and the team files read-only, with or without a running
 relay, and prints what a rollback to schema 5 would undo (docs/OPERATIONS.md 21.3). It
-exits 1 when any team is not clean.";
+exits 1 when any team is not clean.
+`downgrade-schema-6` runs with the relay stopped: every team file of schema 7 goes back
+to 6 in place, and each agent with an item list is revoked (docs/OPERATIONS.md 23.3). It
+exits 1 when any team failed.";
 
 /// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
 /// before a deletion.
@@ -66,6 +70,7 @@ enum Command {
     Init { team: Option<(String, String)> },
     Migrate,
     RollbackCheck,
+    DowngradeSchema6,
     SnapshotCheck,
     Admin(Operator),
     Help,
@@ -247,6 +252,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "serve" if args.len() == 1 => Ok(Command::Serve),
         "migrate" if args.len() == 1 => Ok(Command::Migrate),
         "rollback-check" if args.len() == 1 => Ok(Command::RollbackCheck),
+        "downgrade-schema-6" if args.len() == 1 => Ok(Command::DowngradeSchema6),
         "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
@@ -381,6 +387,29 @@ fn main() -> ExitCode {
                 } else {
                     eprintln!(
                         "apassy-relay: {unclean} of {} teams need a decision before a rollback (docs/OPERATIONS.md 21.3).",
+                        teams.len()
+                    );
+                    ExitCode::from(1)
+                }
+            }
+            Err(error) => fail(&error.message),
+        },
+        Command::DowngradeSchema6 => match apassy_relay::server::rollback::downgrade_to_6(&config) {
+            Ok(teams) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&teams).unwrap_or_default()
+                );
+                let failed = teams.iter().filter(|team| team.error.is_some()).count();
+                if failed == 0 {
+                    eprintln!(
+                        "apassy-relay: {} teams are at schema 6 or below; the image of schema 6 can open them.",
+                        teams.len()
+                    );
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!(
+                        "apassy-relay: {failed} of {} teams could not go back to schema 6 (docs/OPERATIONS.md 23.3).",
                         teams.len()
                     );
                     ExitCode::from(1)
@@ -577,6 +606,11 @@ mod tests {
             Command::RollbackCheck
         ));
         assert!(parse(&args(&["rollback-check", "t_abcdefgh23"])).is_err());
+        assert!(matches!(
+            parse(&args(&["downgrade-schema-6"])).unwrap(),
+            Command::DowngradeSchema6
+        ));
+        assert!(parse(&args(&["downgrade-schema-6", "--now"])).is_err());
         assert!(parse_admin(&args(&["rollback-check"])).is_err());
         for values in [
             vec!["delete"],

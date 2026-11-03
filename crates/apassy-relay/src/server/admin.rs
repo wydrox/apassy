@@ -25,7 +25,8 @@ use crate::server::audit::{self, member_actor};
 use crate::server::auth::{AgentAuth, MemberAuth, parse_role, role_text};
 use crate::server::env::{RESERVED_NAMES, base_var, provider_vars};
 use crate::server::store::{
-    ItemRow, db, has_grant, is_unique_violation, load_live_items, team_name, to_i, to_u,
+    ItemRow, agent_items, db, has_grant, is_unique_violation, load_live_items, team_name, to_i,
+    to_u,
 };
 
 const DEFAULT_INVITE_HOURS: u32 = 72;
@@ -1268,9 +1269,14 @@ fn approval_text(item: &ItemRow) -> String {
 
 pub fn access(core: &Core, agent: &AgentAuth) -> RelayResult<Value> {
     core.store.with(|conn| {
+        // The agent's own list, when it has one, narrows the grants of its member.
+        let listed = agent_items(conn, agent.id)?;
         let mut items = Vec::new();
         for item in load_live_items(conn, None)? {
             if !has_grant(conn, agent.member.id, item.collection_id)? {
+                continue;
+            }
+            if listed.as_ref().is_some_and(|list| !list.contains(&item.id)) {
                 continue;
             }
             let hosts: Vec<HostRule> = item

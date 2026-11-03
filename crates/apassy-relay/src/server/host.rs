@@ -190,7 +190,7 @@ pub fn release(
         let actor = member_actor(owner.id.0);
         // Step 1 and step 3 of the decision, again.
         let items = if auth::agent_by_id(tx, run.agent_id, now).is_ok() {
-            decide::check_access(tx, run.member_id, &run.items).ok()
+            decide::check_access(tx, run.agent_id, run.member_id, &run.items).ok()
         } else {
             None
         };

@@ -1922,10 +1922,11 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     let mut backup = path.clone().into_os_string();
     backup.push(".pre-v6");
     let backup = std::path::PathBuf::from(backup);
-    // The start above moved it to 6 and kept the copy (mode 0600, encrypted, version 5).
+    // The start above moved it to 6 and kept the copy (mode 0600, encrypted, version 5),
+    // and then to 7.
     assert_eq!(
         relay.vault_rows("SELECT user_version, '' FROM pragma_user_version")[0].0,
-        b"6"
+        b"7"
     );
     assert_eq!(
         std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
@@ -1981,7 +1982,7 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
             &before["revocations"],
             &before["changes"]
         ),
-        (&json!(true), &json!(6), &json!([]), &json!([]))
+        (&json!(true), &json!(7), &json!([]), &json!([]))
     );
     let lost = before["audit_rows_lost"].as_u64().unwrap();
     assert!(lost > 0, "{before}");
@@ -2084,7 +2085,7 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
             &later["revocations"],
             &later["clean"]
         ),
-        (&json!(false), &json!(6), &json!([]), &json!(false))
+        (&json!(false), &json!(7), &json!([]), &json!(false))
     );
     // The rollback of OPERATIONS 21.3: the copy goes back over the file, which is then
     // version 5 again with its question, and the image of schema 6 moves it once more.
@@ -2104,7 +2105,7 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     });
     assert_eq!(
         relay.vault_rows("SELECT user_version, '' FROM pragma_user_version")[0].0,
-        b"6"
+        b"7"
     );
     assert_eq!(
         relay.vault_rows("SELECT count(*), '' FROM question")[0].0,

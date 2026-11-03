@@ -176,6 +176,8 @@ pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
         with(".pre-v5.tmp"),
         with(".pre-v6"),
         with(".pre-v6.tmp"),
+        with(".pre-v7"),
+        with(".pre-v7.tmp"),
     ];
     for file in std::iter::once(path.clone().into_os_string()).chain(extra) {
         match std::fs::remove_file(&file) {

@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 
 use crate::api::Policy;
 use crate::error::{RelayError, RelayResult, codes};
-use crate::ids::{CollectionId, ItemId, MemberId};
+use crate::ids::{AgentId, CollectionId, ItemId, MemberId};
 use crate::secret::SecretString;
 
 /// The schema version in `PRAGMA user_version`. Version 1 was the first alpha: it kept
@@ -26,8 +26,9 @@ use crate::secret::SecretString;
 /// Version 3 adds devices and permits members without member tokens. Version 4 adds
 /// the heads and receipts of vault sync (docs/SPEC.md section 24). Version 5 adds the
 /// questions, their answers, and the push tokens (docs/SPEC.md section 25). Version 6
-/// adds the feeds of the Macs and their actions (docs/SPEC.md section 27).
-pub const SCHEMA_VERSION: i64 = 6;
+/// adds the feeds of the Macs and their actions (docs/SPEC.md section 27). Version 7
+/// adds the item list of an agent, `agent.items` (docs/SPEC.md section 28.4).
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// `max_page_count` without a cap: SQLite clamps it to its own largest value.
 const NO_PAGE_CAP: u64 = 4_294_967_294;
@@ -175,6 +176,12 @@ CREATE TABLE feed_action (
   settled_at INTEGER, settle_key_id TEXT, settle_nonce BLOB, settle_ciphertext BLOB);
 CREATE INDEX feed_action_to ON feed_action(to_device, seq);
 CREATE INDEX feed_action_created ON feed_action(created_at);
+";
+
+/// Version 7: the JSON array of the item ids an agent may use; `NULL` is every item that
+/// its member's grants give (`agent_items`).
+const AGENT_ITEMS_SCHEMA: &str = "
+ALTER TABLE agent ADD COLUMN items TEXT;
 ";
 
 const REBUILD_V3: &str = "
@@ -372,7 +379,7 @@ impl Store {
             path,
             key,
             &format!(
-                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}PRAGMA user_version = 6;"
+                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}{AGENT_ITEMS_SCHEMA}PRAGMA user_version = 7;"
             ),
         )
     }
@@ -418,6 +425,14 @@ impl Store {
             store.migrate_v6(path).map_err(|error| {
                 RelayError::internal(format!(
                     "The team file cannot be moved to schema version 6: {} It is still version 5 and unchanged; free disk space or read the log, then start the relay again.",
+                    error.message
+                ))
+            })?;
+        }
+        if store.user_version()? == 6 {
+            store.migrate_v7(path).map_err(|error| {
+                RelayError::internal(format!(
+                    "The team file cannot be moved to schema version 7: {} It is still version 6 and unchanged; free disk space or read the log, then start the relay again.",
                     error.message
                 ))
             })?;
@@ -495,6 +510,77 @@ impl Store {
         tx.execute_batch(FEED_SCHEMA).map_err(db)?;
         tx.pragma_update(None, "user_version", 6).map_err(db)?;
         tx.commit().map_err(db)
+    }
+
+    /// Keeps an encrypted version 6 backup and adds `agent.items` in one transaction.
+    /// Additive, as version 6: every agent keeps `NULL`, every item its grants give. A file
+    /// that `downgrade_to_v6` took back has the column already: it stays.
+    fn migrate_v7(&self, path: &Path) -> RelayResult<()> {
+        let mut conn = self.lock();
+        write_pre(path, ".pre-v7")?;
+        let tx = Transaction::new(&mut conn, TransactionBehavior::Immediate).map_err(db)?;
+        if !has_column(&tx, "agent", "items")? {
+            tx.execute_batch(AGENT_ITEMS_SCHEMA).map_err(db)?;
+        }
+        tx.pragma_update(None, "user_version", 7).map_err(db)?;
+        tx.commit().map_err(db)
+    }
+
+    /// The way back of version 7 in place, for the image of schema 6 (docs/OPERATIONS.md
+    /// section 23.3), with the relay stopped. That image does not know `agent.items` and
+    /// would give such an agent every item of its member's grants: so each live agent with
+    /// a list is revoked (with an `agent_revoked` row of the operator) and its pending runs
+    /// are denied, and then every list is cleared. The column stays, empty: the image of
+    /// schema 6 never reads it, and `migrate_v7` keeps it. Returns the agents revoked.
+    pub fn downgrade_to_v6(&self, now: u64) -> RelayResult<u64> {
+        if self.user_version()? != 7 {
+            return Err(RelayError::internal(
+                "Only a team file of schema version 7 goes back to version 6.",
+            ));
+        }
+        let audit = crate::server::audit::Audit::new();
+        self.tx(|tx| {
+            let agents: Vec<i64> = {
+                let mut statement = tx
+                    .prepare("SELECT id FROM agent WHERE items IS NOT NULL AND revoked_at IS NULL ORDER BY id")
+                    .map_err(db)?;
+                statement
+                    .query_map([], |row| row.get(0))
+                    .map_err(db)?
+                    .collect::<Result<_, _>>()
+                    .map_err(db)?
+            };
+            for id in &agents {
+                tx.execute(
+                    "UPDATE agent SET revoked_at = ?2 WHERE id = ?1",
+                    params![id, to_i(now)],
+                )
+                .map_err(db)?;
+                tx.execute(
+                    "UPDATE run SET status = 'denied', code = ?2, decided_by = 'revocation', \
+                     decided_at = ?3, note = ?4 WHERE agent_id = ?1 AND status = 'pending'",
+                    params![
+                        id,
+                        codes::APPROVAL_INVALIDATED,
+                        to_i(now),
+                        crate::server::approvals::INVALIDATED_NOTE
+                    ],
+                )
+                .map_err(db)?;
+                audit.write_on(
+                    tx,
+                    now,
+                    crate::server::directory::OPERATOR_ACTOR,
+                    "agent_revoked",
+                    None,
+                    &serde_json::json!({"agent_id": to_u(*id), "reason": "schema_rollback"}),
+                )?;
+            }
+            tx.execute("UPDATE agent SET items = NULL WHERE items IS NOT NULL", [])
+                .map_err(db)?;
+            tx.pragma_update(None, "user_version", 6).map_err(db)?;
+            Ok(agents.len() as u64)
+        })
     }
 
     /// Copies the file to `dest` (mode 0600) while no other statement can run: the
@@ -664,6 +750,17 @@ fn write_pre(path: &Path, suffix: &str) -> RelayResult<()> {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+/// True when `table` has `column`.
+fn has_column(conn: &Connection, table: &str, column: &str) -> RelayResult<bool> {
+    conn.query_row(
+        "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table, column],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(db)
 }
 
 /// The data directory gets mode 0700.
@@ -899,6 +996,35 @@ pub fn has_grant(
     .map_err(db)
 }
 
+/// The item list of an agent (`agent.items`, schema 7): `None` for every item that its
+/// member's grants give, `Some(ids)` for those ids only. It never widens a grant. An
+/// unknown agent, or a list that does not parse, gives no item.
+pub fn agent_items(conn: &Connection, agent: AgentId) -> RelayResult<Option<Vec<ItemId>>> {
+    let row: Option<Option<String>> = conn
+        .query_row(
+            "SELECT items FROM agent WHERE id = ?1",
+            params![to_i(agent.0)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db)?;
+    Ok(match row {
+        None => Some(Vec::new()),
+        Some(None) => None,
+        Some(Some(text)) => Some(
+            serde_json::from_str::<Vec<u64>>(&text)
+                .map(|ids| ids.into_iter().map(ItemId).collect())
+                .unwrap_or_default(),
+        ),
+    })
+}
+
+/// The text of `agent.items` for a list of ids: a JSON array of numbers.
+pub fn items_text(items: &[ItemId]) -> String {
+    let ids: Vec<u64> = items.iter().map(|item| item.0).collect();
+    serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
+}
+
 /// The name of the team.
 pub fn team_name(conn: &Connection) -> RelayResult<String> {
     conn.query_row("SELECT name FROM team WHERE id = 1", [], |row| row.get(0))
@@ -983,7 +1109,7 @@ mod tests {
         let before = crate::now_unix();
         let store = Store::open_team(&path, &key).unwrap();
         let after = crate::now_unix();
-        assert_eq!(store.user_version().unwrap(), 6);
+        assert_eq!(store.user_version().unwrap(), 7);
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
             fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
@@ -1059,11 +1185,18 @@ mod tests {
             5
         );
         assert_eq!(
-            Store::open_team(&path, &key)
+            Store::open_at(&dir.path().join("team.db.pre-v7"), &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
             6
+        );
+        assert_eq!(
+            Store::open_team(&path, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            7
         );
     }
 
@@ -1078,20 +1211,20 @@ mod tests {
         fs::write(dir.path().join("team.db.pre-v3.tmp"), b"a half temp copy").unwrap();
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 6);
+        assert_eq!(store.user_version().unwrap(), 7);
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
             original
         );
         assert!(!dir.path().join("team.db.pre-v3.tmp").exists());
         drop(store);
-        // A version 6 file opens again and keeps its backup.
+        // A version 7 file opens again and keeps its backup.
         assert_eq!(
             Store::open_team(&path, &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            6
+            7
         );
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
@@ -1157,8 +1290,8 @@ mod tests {
         v3_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        // Version 3 goes through 4 and 5 to 6 in one start.
-        assert_eq!(store.user_version().unwrap(), 6);
+        // Version 3 goes through 4, 5, and 6 to 7 in one start.
+        assert_eq!(store.user_version().unwrap(), 7);
         let backup = dir.path().join("team.db.pre-v4");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1193,7 +1326,7 @@ mod tests {
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            6
+            7
         );
         assert_eq!(fs::read(&backup).unwrap(), original);
     }
@@ -1231,7 +1364,7 @@ mod tests {
         v4_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 6);
+        assert_eq!(store.user_version().unwrap(), 7);
         let backup = dir.path().join("team.db.pre-v5");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1296,7 +1429,7 @@ mod tests {
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            6
+            7
         );
         assert_eq!(fs::read(&backup).unwrap(), original);
     }
@@ -1366,7 +1499,7 @@ mod tests {
         v5_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 6);
+        assert_eq!(store.user_version().unwrap(), 7);
         let backup = dir.path().join("team.db.pre-v6");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1427,13 +1560,13 @@ mod tests {
                 .unwrap(),
             5
         );
-        // A version 6 file opens again and keeps its backup.
+        // A version 7 file opens again and keeps its backup.
         assert_eq!(
             Store::open_team(&path, &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            6
+            7
         );
         assert_eq!(fs::read(&backup).unwrap(), original);
     }
@@ -1475,15 +1608,163 @@ mod tests {
         .unwrap();
     }
 
+    /// A version 6 file as `create_team` made it before agent item lists: an agent that
+    /// will get a list, one that will not, and a pending run of the first.
+    fn v6_vault(path: &Path, key: &SecretString) {
+        let store = Store::create_at(
+            path,
+            key,
+            &format!(
+                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}PRAGMA user_version = 6;"
+            ),
+        )
+        .unwrap();
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO team (id, name, created_at) VALUES (1, 'Team', 100);
+                     INSERT INTO member (name, role, created_at) VALUES ('owner', 'owner', 100);
+                     INSERT INTO agent (member_id, name, token_hash, created_at, expires_at)
+                        VALUES (1, 'listed', X'01', 100, 4000000000);
+                     INSERT INTO agent (member_id, name, token_hash, created_at, expires_at)
+                        VALUES (1, 'every', X'02', 100, 4000000000);
+                     INSERT INTO run (agent_id, member_id, items, command, purpose, ttl_secs,
+                        flags, note, status, created_at, expires_at)
+                        VALUES (1, 1, '[3]', '[\"curl\"]', 'look', 60, '[]', '', 'pending', 100, 4000000000);",
+                )
+                .map_err(db)
+            })
+            .unwrap();
+    }
+
     #[test]
-    fn a_version_7_file_is_refused() {
+    fn v7_migration_adds_agent_items_and_the_downgrade_takes_them_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        v6_vault(&path, &key);
+        let original = fs::read(&path).unwrap();
+        let store = Store::open_team(&path, &key).unwrap();
+        assert_eq!(store.user_version().unwrap(), 7);
+        let backup = dir.path().join("team.db.pre-v7");
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!dir.path().join("team.db.pre-v7.tmp").exists());
+        store
+            .with(|conn| {
+                // Every agent keeps every item of its grants; an unknown agent gets none.
+                assert_eq!(agent_items(conn, AgentId(1))?, None);
+                assert_eq!(agent_items(conn, AgentId(2))?, None);
+                assert_eq!(agent_items(conn, AgentId(99))?, Some(Vec::new()));
+                conn.execute(
+                    "UPDATE agent SET items = ?1 WHERE id = 1",
+                    params![items_text(&[ItemId(3), ItemId(5)])],
+                )
+                .map_err(db)?;
+                assert_eq!(
+                    agent_items(conn, AgentId(1))?,
+                    Some(vec![ItemId(3), ItemId(5)])
+                );
+                // A list that does not parse gives no item.
+                conn.execute("UPDATE agent SET items = 'not a list' WHERE id = 2", [])
+                    .map_err(db)?;
+                assert_eq!(agent_items(conn, AgentId(2))?, Some(Vec::new()));
+                conn.execute("UPDATE agent SET items = NULL WHERE id = 2", [])
+                    .map_err(db)?;
+                Ok(())
+            })
+            .unwrap();
+        // The way back: the agent with a list is revoked and its pending run denied,
+        // so the image of schema 6 cannot give it more; the other agent stays.
+        assert_eq!(store.downgrade_to_v6(500).unwrap(), 1);
+        assert_eq!(store.user_version().unwrap(), 6);
+        assert!(store.downgrade_to_v6(501).is_err());
+        store
+            .with(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT revoked_at, items FROM agent ORDER BY id")
+                    .map_err(db)?;
+                let agents: Vec<(Option<i64>, Option<String>)> = statement
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .map_err(db)?
+                    .collect::<Result<_, _>>()
+                    .map_err(db)?;
+                assert_eq!(agents, vec![(Some(500), None), (None, None)]);
+                let run: (String, String) = conn
+                    .query_row("SELECT status, code FROM run WHERE id = 1", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .map_err(db)?;
+                assert_eq!(
+                    run,
+                    ("denied".to_string(), codes::APPROVAL_INVALIDATED.to_string())
+                );
+                let rows: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM audit WHERE action = 'agent_revoked' AND actor = 'operator'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(db)?;
+                assert_eq!(rows, 1);
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        // The image of schema 7 moves it up again and keeps the empty column.
+        let store = Store::open_team(&path, &key).unwrap();
+        assert_eq!(store.user_version().unwrap(), 7);
+        store
+            .with(|conn| {
+                assert_eq!(agent_items(conn, AgentId(2))?, None);
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            Store::open_at(&backup, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            6
+        );
+    }
+
+    #[test]
+    fn a_failed_v7_backup_leaves_version_6() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        v6_vault(&path, &key);
+        let original = fs::read(&path).unwrap();
+        fs::create_dir(dir.path().join("team.db.pre-v7.tmp")).unwrap();
+        fs::write(dir.path().join("team.db.pre-v7.tmp/x"), b"x").unwrap();
+        let error = Store::open_team(&path, &key).err().unwrap();
+        assert!(error.message.contains("version 7"), "{error}");
+        assert!(error.message.contains("still version 6"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!dir.path().join("team.db.pre-v7").exists());
+        let old = Store::open_at(&path, &key).unwrap();
+        assert_eq!(old.user_version().unwrap(), 6);
+        old.with(|conn| {
+            assert!(!has_column(conn, "agent", "items")?);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_version_8_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("team.db");
         let key = SecretString::new("schema migration test passphrase".into());
         drop(Store::create_team(&path, &key).unwrap());
         Store::open_at(&path, &key)
             .unwrap()
-            .with(|conn| conn.pragma_update(None, "user_version", 7).map_err(db))
+            .with(|conn| conn.pragma_update(None, "user_version", 8).map_err(db))
             .unwrap();
         let error = Store::open_team(&path, &key).err().unwrap();
         assert!(error.message.contains("unknown schema version"), "{error}");
@@ -1511,11 +1792,11 @@ mod tests {
     }
 
     #[test]
-    fn fresh_team_uses_v6_and_has_a_member_token_deadline() {
+    fn fresh_team_uses_v7_and_has_a_member_token_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let key = SecretString::new("new schema test passphrase".into());
         let store = Store::create_team(&dir.path().join("team.db"), &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 6);
+        assert_eq!(store.user_version().unwrap(), 7);
         store
             .with(|conn| {
                 conn.execute(
