@@ -8,6 +8,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - **Apple Watch:** a watch app that answers access requests only (ADR 0039). It can **Allow once** while the watch is unlocked on your wrist, or **Deny**. Connect it in Settings › Devices › Add Apple Watch on the iPhone, with the code from the Mac's Add an iPhone or a Mac…, and confirm the safety words with Touch ID on the Mac. The watch never shows run questions or vault items. Macs refuse every run answer from a watch. Apple Watch Series 9 or later, or Ultra 2 or later (arm64), with watchOS 27 or later.
 
+### Changed
+
+- **iPhone and site:** The text describes the Apassy relay as sync with your Mac, not as the way for teams: the welcome and Add a vault screens offer **From your Mac · Apassy relay**, and the hosted relay no longer serves team vaults. Plans: everything self-hosted is free; only the hosted Apassy Connect is paid (`docs/product/plans.md`).
+
 ### Upgrade notes
 
 - Vault schema 24: `trusted_device` accepts the device kind `watch`. Apps at schema 23 or older refuse schema-24 copies until they update.
