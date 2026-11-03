@@ -1,0 +1,92 @@
+# XcodeGen spec of the iPhone tailnet spike (plan s8 unit T0, ADR 0040). Spike only: a project of
+# its own, not a target, scheme, App ID, or release of the Apassy app. The steps and the owner's
+# device test are in docs/design/spike-tsnet-ios.md.
+#
+#   scripts/build-spike-libs.sh            # first: out/LibTailscale.xcframework, out/SpikeRust.xcframework
+#   xcodegen generate --spec project.yml   # then TailnetSpike.xcodeproj and Info.plist (not committed)
+#
+# It sets no DEVELOPMENT_TEAM: pass DEVELOPMENT_TEAM=<id> to xcodebuild. The bundle ID is a
+# build setting (SPIKE_BUNDLE_ID) so that a run can use another App ID.
+name: TailnetSpike
+options:
+  bundleIdPrefix: com.wydrox.apassy
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    # Swift 5 mode with minimal concurrency checks: this is throwaway code around blocking C calls.
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    SUPPORTS_MACCATALYST: NO
+    SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+    LM_SKIP_METADATA_EXTRACTION: YES
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    # The archives have arm64 slices only (Apple silicon Simulator).
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+targets:
+  TailnetSpike:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: out/build-info.json
+        optional: true
+        buildPhase: resources
+    dependencies:
+      # Static libraries: linked, not embedded.
+      - framework: out/LibTailscale.xcframework
+        embed: false
+      - framework: out/SpikeRust.xcframework
+        embed: false
+      # What the Go runtime and the Tailscale client call in the system (cgo dynamic imports).
+      - sdk: CoreFoundation.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: libresolv.tbd
+      - sdk: Network.framework
+      - sdk: AuthenticationServices.framework
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Tailnet spike
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # The same purpose as the app's: a direct WireGuard path to the Mac on this Wi-Fi. The
+        # spike records whether iOS asks, and what the path is without the permission.
+        NSLocalNetworkUsageDescription: The tailnet spike connects to your Mac on this Wi-Fi network directly. Without it, the connection goes through a Tailscale relay.
+        # Plain HTTP to tsnet's LocalAPI on 127.0.0.1 (the loopback check).
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        ITSAppUsesNonExemptEncryption: false
+        # No UIBackgroundModes: the node runs only while the app is on the screen (ADR 0040 §3).
+    settings:
+      base:
+        PRODUCT_NAME: TailnetSpike
+        SPIKE_BUNDLE_ID: com.wydrox.apassy.tailnetspike
+        PRODUCT_BUNDLE_IDENTIFIER: $(SPIKE_BUNDLE_ID)
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/TailnetSpike-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(PROJECT_DIR)/out/include
+          - $(PROJECT_DIR)/Native/include
+        OTHER_LDFLAGS:
+          - -lresolv
+        DEAD_CODE_STRIPPING: YES
+        # The link map tells how many bytes each archive adds (scripts/linkmap-sizes.py).
+        LD_GENERATE_MAP_FILE: YES
+        LD_MAP_FILE_PATH: $(PROJECT_DIR)/out/linkmap-$(CONFIGURATION)-$(PLATFORM_NAME).txt
+    scheme: {}
