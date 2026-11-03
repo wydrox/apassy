@@ -45,7 +45,7 @@ struct DeviceRouteTests {
     @Test("the node words line shows the words of the core, and nothing for a hosted team")
     func nodeWordsLine() {
         let words = "noodle monkey dinner sled guitar garden"
-        #expect(DeviceRoute.nodeWordsLine(NodeInfo(origin: Self.origin, nodeWords: words)) == "Node words: \(words)")
+        #expect(DeviceRoute.nodeWordsLine(NodeInfo(origin: Self.origin, nodeWords: words)) == "Node words to compare: \(words)")
         #expect(DeviceRoute.nodeWordsLine(NodeInfo(origin: Self.origin)) == nil)
         #expect(DeviceRoute.nodeWordsLine(nil) == nil)
     }

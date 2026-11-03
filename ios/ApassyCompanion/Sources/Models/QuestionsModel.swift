@@ -106,7 +106,7 @@ struct QuestionRoute: Equatable, Identifiable {
 
     var id: String { vault.vaultID }
 
-    /// "Node words: …" for a team on a node, to compare with the Mac. Nil for a hosted team.
+    /// "Node words to compare: …" for a team on a node, to compare with the Mac. Nil for a hosted team.
     var nodeWordsLine: String? { DeviceRoute.nodeWordsLine(vault.status.node) }
 }
 
