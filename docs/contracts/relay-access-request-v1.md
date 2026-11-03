@@ -19,6 +19,8 @@ Reuse questions sections 4–6 and 10–16 for sign-in, team membership, questio
 
 The question key remains in the vault; it is not sent to the relay or APNs. The asking Mac caches the key of a live request only for its bounded lifetime. Current trusted-device revocation checks are still required even if an old envelope decrypts.
 
+**Origins** ([node-pairing-v1](node-pairing-v1.md)). Access requests use the questions team's relay, wherever it is: the hosted relay, a self-hosted relay, or a node (`https://<Tailscale IPv4>:8444`). The card, answer, and settle bytes, their AAD, and their signatures do not name the origin and do not change with it. A node origin is pinned (node-pairing-v1 §4), also for the watch (its URLSession transport carries the pin).
+
 ## 2. Identifiers and local source
 
 | Value | Form and meaning |

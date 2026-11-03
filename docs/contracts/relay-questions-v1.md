@@ -426,6 +426,7 @@ The other devices show "Answered on Test iPhone", "Expired", or the new question
 - Auth: `Authorization: Bearer apassy_acc_…`, the access token of a **live device** of the questions team (relay-sync-v1 section 5). The relay checks `Need::Member` and then requires `MemberAuth.device`; a member token gets `401 unauthenticated`.
 - The team comes from the token. No endpoint takes a team id.
 - Bodies: JSON, at most 64 KiB, `deny_unknown_fields`. `v` must be `1`.
+- **Origins** ([node-pairing-v1](node-pairing-v1.md)). The relay's origin is a value of the membership, not a constant: the hosted relay, a self-hosted relay, or a node (`https://<Tailscale IPv4>:8444`, the relay inside the Mac app or `apassy serve`). Every endpoint, body, AAD, and digest of this contract is the same at each origin. A node origin is pinned: the device stores the pin with the membership and accepts only that certificate (node-pairing-v1 §4); it signs in with the node origin. On a node, push uses handles ([push-gateway-v1](push-gateway-v1.md) §10) instead of section 10.8.
 
 ### 10.2 Errors
 
