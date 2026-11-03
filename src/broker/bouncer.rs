@@ -1834,18 +1834,6 @@ mod tests {
         assert!(other.at_url("https://example.com").is_err());
     }
 
-    #[test]
-    fn only_loopback_and_unreachable_is_unavailable() {
-        assert!(BouncerClient::new("https://example.com").is_err());
-        let client = BouncerClient::new("http://127.0.0.1:9")
-            .expect("loopback")
-            .with_timeout(Duration::from_millis(300));
-        assert!(matches!(
-            client.evaluate(&request("")),
-            BouncerVerdict::Unavailable(_)
-        ));
-    }
-
     /// Synthetic inference responses, with no vault, provider, or command execution.
     /// `None` holds a request open without replying, while accepting the next one.
     /// This forces a real client timeout without delaying the retry's response.
@@ -2042,5 +2030,680 @@ mod tests {
                 .expect_err("wrong version")
                 .contains("not the active version active-model")
         );
+    }
+
+    /// A synthetic vault value and vault path. Neither may reach a bouncer brain.
+    const SYNTHETIC_SECRET: &str = "FAKE-brain-secret-5521-canary";
+    const SYNTHETIC_VAULT_PATH: &str =
+        "/Users/synthetic/Library/Application Support/Apassy/vault.db";
+    /// The bearer of the fake remote bouncer brain. It is not a vault credential.
+    const BRAIN_TOKEN: &str = "synthetic-brain-token-not-a-secret";
+    const ACTIVE_HEADS: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const ACTIVE_MODEL: &str = "apassy-local-v1+a1b2c3d4";
+    const SHADOW_HEADS: &str = "0badc0de135724680badc0de135724680badc0de135724680badc0de13572468";
+    const SHADOW_MODEL: &str = "apassy-local-v1+0badc0de";
+
+    /// A remote bouncer brain over TLS on this computer (`https://localhost:PORT`).
+    /// It answers each request with the current `answer` and keeps every request,
+    /// head and body, after TLS decryption.
+    struct FakeBrain {
+        url: String,
+        tls: Arc<TlsClient>,
+        requests: Arc<std::sync::Mutex<Vec<String>>>,
+        answer: Arc<std::sync::Mutex<(u16, String)>>,
+    }
+
+    impl FakeBrain {
+        fn set_answer(&self, status: u16, body: &str) {
+            *self.answer.lock().expect("answer") = (status, body.to_owned());
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().expect("requests").clone()
+        }
+
+        /// The JSON body of request `index`.
+        fn body(&self, index: usize) -> Value {
+            let request = &self.requests()[index];
+            let at = request.find("\r\n\r\n").expect("head end");
+            serde_json::from_str(&request[at + 4..]).expect("JSON body")
+        }
+
+        /// Every request has the brain bearer in its head, and no request has the
+        /// synthetic vault value or the vault path. The body has only contract
+        /// fields and never the bearer.
+        fn assert_clean(&self) {
+            for request in self.requests() {
+                let at = request.find("\r\n\r\n").expect("head end");
+                let (head, body) = (&request[..at], &request[at + 4..]);
+                assert!(
+                    head.contains(&format!("\r\nAuthorization: Bearer {BRAIN_TOKEN}\r\n")),
+                    "{head}"
+                );
+                for hidden in [SYNTHETIC_SECRET, SYNTHETIC_VAULT_PATH] {
+                    assert!(!request.contains(hidden), "{hidden} reached the brain");
+                }
+                assert!(!body.contains(BRAIN_TOKEN));
+                let value: Value = serde_json::from_str(body).expect("JSON body");
+                for key in value.as_object().expect("object").keys() {
+                    assert!(
+                        ["state", "questions", "heads", "shadow_heads"].contains(&key.as_str()),
+                        "a field outside the contract: {key}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn fake_brain(delay: Duration) -> FakeBrain {
+        use std::io::{Read, Write};
+        let pki = crate::broker::http::test_support::test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!(
+            "https://localhost:{}",
+            listener.local_addr().expect("addr").port()
+        );
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let answer = Arc::new(std::sync::Mutex::new((200, String::new())));
+        let (seen, current, config) = (
+            Arc::clone(&requests),
+            Arc::clone(&answer),
+            Arc::clone(&pki.config),
+        );
+        std::thread::spawn(move || {
+            for tcp in listener.incoming().flatten() {
+                let _ = tcp.set_read_timeout(Some(Duration::from_secs(5)));
+                let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+                    continue;
+                };
+                let mut tls = rustls::StreamOwned::new(conn, tcp);
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                let complete = loop {
+                    if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+                        let length = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |value| value.trim().parse::<usize>().unwrap_or(0));
+                        if raw.len() >= end + 4 + length {
+                            break true;
+                        }
+                    }
+                    match tls.read(&mut buf) {
+                        Ok(0) | Err(_) => break false,
+                        Ok(read) => raw.extend_from_slice(&buf[..read]),
+                    }
+                };
+                if !complete {
+                    continue;
+                }
+                seen.lock()
+                    .expect("requests")
+                    .push(String::from_utf8_lossy(&raw).into_owned());
+                std::thread::sleep(delay);
+                let (status, body) = current.lock().expect("answer").clone();
+                let _ = write!(
+                    tls,
+                    "HTTP/1.1 {status} Synthetic\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tls.flush();
+                tls.conn.send_close_notify();
+                let _ = tls.conn.complete_io(&mut tls.sock);
+            }
+        });
+        FakeBrain {
+            url,
+            tls: Arc::new(pki.client),
+            requests,
+            answer,
+        }
+    }
+
+    /// A bearer that keeps the deadline of each call.
+    #[derive(Default)]
+    struct RecordingBearer {
+        calls: std::sync::Mutex<Vec<(Instant, Instant)>>,
+        invalidated: AtomicBool,
+    }
+
+    impl BrainCredential for RecordingBearer {
+        fn bearer(&self, deadline: Instant) -> Option<Zeroizing<String>> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push((Instant::now(), deadline));
+            Some(Zeroizing::new(BRAIN_TOKEN.to_owned()))
+        }
+
+        fn invalidate(&self) {
+            self.invalidated.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn static_bearer() -> Arc<StaticBearer> {
+        Arc::new(StaticBearer::new(Zeroizing::new(BRAIN_TOKEN.to_owned())).expect("token"))
+    }
+
+    /// A request whose context names the synthetic vault value and path nowhere:
+    /// the state of ADR 0007 only.
+    fn remote_request() -> BouncerRequest {
+        BouncerRequest {
+            user_request: "Run the staging checks".to_owned(),
+            command: "npm test".to_owned(),
+            relative_dir: ".".to_owned(),
+            purpose: "Run the tests".to_owned(),
+            env_names: vec!["DB_URL".to_owned()],
+            instruction: String::new(),
+        }
+    }
+
+    /// Active answers for the five facts, with `heads` and `model`, and an optional
+    /// `shadow` part.
+    fn brain_answer(heads: &str, model: &str, shadow: Option<Value>) -> String {
+        let answers = json!({
+            "task_match": {"type": "noul", "noul": 0.9},
+            "writes": {"type": "noul", "noul": 0.1},
+            "remote": {"type": "noul", "noul": 0.1},
+            "leak": {"type": "noul", "noul": 0.1},
+            "destroy": {"type": "noul", "noul": 0.1},
+        });
+        let mut body = json!({"model": model, "heads": heads, "answers": answers});
+        if let Some(shadow) = shadow {
+            body["shadow"] = shadow;
+        }
+        body.to_string()
+    }
+
+    fn shadow_answers(heads: &str, model: &str, noul: f64) -> Value {
+        json!({
+            "heads": heads,
+            "model": model,
+            "answers": {
+                "task_match": {"type": "noul", "noul": noul},
+                "writes": {"type": "noul", "noul": 0.2},
+                "remote": {"type": "noul", "noul": 0.2},
+                "leak": {"type": "noul", "noul": 0.2},
+                "destroy": {"type": "noul", "noul": 0.2},
+            },
+        })
+    }
+
+    fn reason(verdict: &BouncerVerdict) -> &str {
+        match verdict {
+            BouncerVerdict::Unavailable(reason) => reason,
+            BouncerVerdict::Scored { .. } => panic!("expected unavailable: {verdict:?}"),
+        }
+    }
+
+    #[test]
+    fn loopback_over_http_and_remote_only_over_https_with_a_credential() {
+        // This Mac: loopback http:// only.
+        assert!(BouncerClient::new("https://example.com").is_err());
+        assert!(BouncerClient::new("http://10.0.0.1:8770").is_err());
+        let client = BouncerClient::new("http://127.0.0.1:9")
+            .expect("loopback")
+            .with_timeout(Duration::from_millis(300));
+        assert!(!client.is_remote());
+        assert!(matches!(
+            client.evaluate(&request("")),
+            BouncerVerdict::Unavailable(_)
+        ));
+        // A remote bouncer brain: https:// only.
+        let tls = Arc::new(TlsClient::platform().expect("platform TLS"));
+        for url in [
+            "http://127.0.0.1:8770",
+            "http://10.0.0.1:8770",
+            "http://brain.example.invalid:80",
+            "ftp://brain.example.invalid",
+        ] {
+            assert!(
+                BouncerClient::remote(url, static_bearer(), Arc::clone(&tls)).is_err(),
+                "{url}"
+            );
+        }
+        let remote = BouncerClient::remote(
+            "https://brain.example.invalid/",
+            static_bearer(),
+            Arc::clone(&tls),
+        )
+        .expect("https");
+        assert!(remote.is_remote());
+        assert_eq!(remote.url(), "https://brain.example.invalid");
+        assert_eq!(remote.api_key(), None);
+        assert_eq!(remote.port(), None);
+        // `at_url` gives a client on this Mac only.
+        assert!(remote.at_url("https://brain.example.invalid").is_err());
+
+        // Without a bearer, nothing goes to the server: no connection arrives.
+        let brain = fake_brain(Duration::ZERO);
+        brain.set_answer(200, &brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, None));
+        let refused = static_bearer();
+        refused.invalidate();
+        assert!(refused.is_refused());
+        assert!(refused.bearer(Instant::now()).is_none());
+        let client = BouncerClient::remote(&brain.url, refused, Arc::clone(&brain.tls))
+            .expect("https")
+            .with_timeout(Duration::from_secs(2));
+        let verdict = client.evaluate(&remote_request());
+        assert!(reason(&verdict).contains("no credential"), "{verdict:?}");
+        assert!(
+            client.warm_up(Duration::from_secs(2)).is_err(),
+            "no readiness request without a bearer"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(brain.requests().is_empty(), "nothing was sent");
+        // With a bearer the same server answers, over TLS.
+        let client = BouncerClient::remote(&brain.url, static_bearer(), Arc::clone(&brain.tls))
+            .expect("https")
+            .with_timeout(Duration::from_secs(2));
+        assert!(matches!(
+            client.evaluate(&remote_request()),
+            BouncerVerdict::Scored { .. }
+        ));
+        brain.assert_clean();
+        assert_eq!(brain.requests().len(), 1);
+        // An empty token or one that a header cannot carry is not a credential.
+        for token in ["", "two words", "line\r\nbreak"] {
+            assert!(StaticBearer::new(Zeroizing::new(token.to_owned())).is_none());
+        }
+    }
+
+    #[test]
+    fn a_remote_brain_is_checked_over_tls() {
+        let brain = fake_brain(Duration::ZERO);
+        let client = BouncerClient::remote(&brain.url, static_bearer(), Arc::clone(&brain.tls))
+            .expect("https");
+        brain.set_answer(
+            200,
+            r#"{"status":"ok","loaded":["english"],"device":"cpu"}"#,
+        );
+        assert_eq!(client.probe_health(Duration::from_secs(2)), Health::Healthy);
+        brain.set_answer(200, r#"{"status":"loading"}"#);
+        assert_eq!(
+            client.probe_health(Duration::from_secs(2)),
+            Health::NotBouncer
+        );
+        brain.set_answer(503, r#"{"status":"ok"}"#);
+        assert_eq!(
+            client.probe_health(Duration::from_secs(2)),
+            Health::NotBouncer
+        );
+        // The health check sends no bearer.
+        for request in brain.requests() {
+            assert!(request.starts_with("GET /health HTTP/1.1\r\n"), "{request}");
+            assert!(!request.contains(BRAIN_TOKEN));
+        }
+        // A certificate that the client does not trust is not a bouncer brain.
+        let untrusted = BouncerClient::remote(
+            &brain.url,
+            static_bearer(),
+            Arc::new(TlsClient::platform().expect("platform TLS")),
+        )
+        .expect("https");
+        assert_eq!(
+            untrusted.probe_health(Duration::from_secs(2)),
+            Health::NotBouncer
+        );
+        // A closed port is no server.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = closed.local_addr().expect("addr").port();
+        drop(closed);
+        let nowhere = BouncerClient::remote(
+            &format!("https://localhost:{port}"),
+            static_bearer(),
+            Arc::clone(&brain.tls),
+        )
+        .expect("https");
+        assert_eq!(
+            nowhere.probe_health(Duration::from_secs(2)),
+            Health::NoServer
+        );
+
+        // The readiness question goes with the bearer and the head pin, and checks
+        // both pins.
+        let before = brain.requests().len();
+        let pinned = client
+            .clone()
+            .expect_model(ACTIVE_MODEL)
+            .expect_heads(ACTIVE_HEADS);
+        brain.set_answer(
+            200,
+            &json!({"model": ACTIVE_MODEL, "heads": ACTIVE_HEADS, "answers": {"ready": {"type": "noul", "noul": 0.5}}})
+                .to_string(),
+        );
+        assert_eq!(
+            pinned.warm_up(Duration::from_secs(2)),
+            Ok(Some(ACTIVE_MODEL.to_owned()))
+        );
+        assert_eq!(brain.body(before)["heads"], ACTIVE_HEADS);
+        brain.set_answer(
+            200,
+            &json!({"model": ACTIVE_MODEL, "heads": SHADOW_HEADS, "answers": {"ready": {"type": "noul", "noul": 0.5}}})
+                .to_string(),
+        );
+        assert!(
+            pinned
+                .warm_up(Duration::from_secs(2))
+                .expect_err("another head set")
+                .contains("not from the pinned head set")
+        );
+        brain.assert_clean_bodies_after(before);
+    }
+
+    impl FakeBrain {
+        /// [`FakeBrain::assert_clean`] for the requests from `index` on (the health
+        /// checks before have no bearer and no body).
+        fn assert_clean_bodies_after(&self, index: usize) {
+            let all = self.requests();
+            let checked = FakeBrain {
+                url: self.url.clone(),
+                tls: Arc::clone(&self.tls),
+                requests: Arc::new(std::sync::Mutex::new(all[index..].to_vec())),
+                answer: Arc::clone(&self.answer),
+            };
+            checked.assert_clean();
+        }
+    }
+
+    #[test]
+    fn a_409_a_401_or_a_wrong_head_hash_is_unavailable() {
+        let brain = fake_brain(Duration::ZERO);
+        let bearer = static_bearer();
+        let client = BouncerClient::remote(&brain.url, bearer.clone(), Arc::clone(&brain.tls))
+            .expect("https")
+            .with_timeout(Duration::from_secs(2))
+            .expect_model(ACTIVE_MODEL)
+            .expect_heads(ACTIVE_HEADS);
+        assert_eq!(client.expected_heads(), Some(ACTIVE_HEADS));
+
+        // The pinned answer is a verdict, and the request carries the pin.
+        brain.set_answer(200, &brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, None));
+        let verdict = client.evaluate(&remote_request());
+        assert!(
+            matches!(verdict, BouncerVerdict::Scored { .. }),
+            "{verdict:?}"
+        );
+        assert_eq!(verdict.model(), Some(ACTIVE_MODEL));
+        assert_eq!(brain.body(0)["heads"], ACTIVE_HEADS);
+        assert!(brain.body(0).get("shadow_heads").is_none());
+
+        // 409 unknown_heads: the server has no such head set.
+        brain.set_answer(
+            409,
+            r#"{"detail":{"code":"unknown_heads","message":"the head set is not on this server"}}"#,
+        );
+        let verdict = client.evaluate(&remote_request());
+        assert!(reason(&verdict).contains("status 409"), "{verdict:?}");
+        // Another head set, no head set named, or another model: unavailable.
+        for (heads, model) in [
+            (SHADOW_HEADS, ACTIVE_MODEL),
+            ("", ACTIVE_MODEL),
+            (ACTIVE_HEADS, SHADOW_MODEL),
+        ] {
+            let mut answer: Value =
+                serde_json::from_str(&brain_answer(heads, model, None)).expect("JSON");
+            if heads.is_empty() {
+                answer.as_object_mut().expect("object").remove("heads");
+            }
+            brain.set_answer(200, &answer.to_string());
+            assert!(
+                matches!(
+                    client.evaluate(&remote_request()),
+                    BouncerVerdict::Unavailable(_)
+                ),
+                "{heads} {model}"
+            );
+        }
+        // Other statuses, a 2xx other than 200 included, and a body that is not JSON.
+        for (status, body) in [
+            (201, brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, None)),
+            (
+                422,
+                r#"{"detail":{"code":"bad_heads","message":"x"}}"#.to_owned(),
+            ),
+            (500, "{}".to_owned()),
+            (200, "not-json".to_owned()),
+        ] {
+            brain.set_answer(status, &body);
+            assert!(
+                matches!(
+                    client.evaluate(&remote_request()),
+                    BouncerVerdict::Unavailable(_)
+                ),
+                "{status}"
+            );
+        }
+        // A malformed pin sends nothing.
+        let sent = brain.requests().len();
+        let malformed = client.clone().expect_heads("A1B2");
+        let verdict = malformed.evaluate(&remote_request());
+        assert!(reason(&verdict).contains("not valid"), "{verdict:?}");
+        assert_eq!(brain.requests().len(), sent, "nothing was sent");
+
+        // 401: unavailable, and the credential ends. The next request sends nothing.
+        brain.set_answer(401, r#"{"detail":"Unauthorized"}"#);
+        let verdict = client.evaluate(&remote_request());
+        assert!(reason(&verdict).contains("status 401"), "{verdict:?}");
+        assert!(bearer.is_refused());
+        let sent = brain.requests().len();
+        brain.set_answer(200, &brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, None));
+        let verdict = client.evaluate(&remote_request());
+        assert!(reason(&verdict).contains("no credential"), "{verdict:?}");
+        assert_eq!(
+            brain.requests().len(),
+            sent,
+            "nothing was sent after the 401"
+        );
+        // A 401 is not retried with the same request.
+        let recording = Arc::new(RecordingBearer::default());
+        let client = BouncerClient::remote(&brain.url, recording.clone(), Arc::clone(&brain.tls))
+            .expect("https")
+            .with_timeout(Duration::from_secs(2));
+        brain.set_answer(401, r#"{"detail":"Unauthorized"}"#);
+        assert!(matches!(
+            client.evaluate(&remote_request()),
+            BouncerVerdict::Unavailable(_)
+        ));
+        assert!(recording.invalidated.load(Ordering::SeqCst));
+        assert_eq!(recording.calls.lock().expect("calls").len(), 1);
+        brain.assert_clean();
+    }
+
+    #[test]
+    fn a_shadow_error_never_changes_the_active_verdict() {
+        let brain = fake_brain(Duration::ZERO);
+        let client = BouncerClient::remote(&brain.url, static_bearer(), Arc::clone(&brain.tls))
+            .expect("https")
+            .with_timeout(Duration::from_secs(2))
+            .expect_model(ACTIVE_MODEL)
+            .expect_heads(ACTIVE_HEADS);
+        let pin = ShadowPin::new(SHADOW_HEADS, SHADOW_MODEL);
+        // The active verdict of an answer without a shadow part.
+        brain.set_answer(200, &brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, None));
+        let alone = client.evaluate(&remote_request());
+        assert!(matches!(alone, BouncerVerdict::Scored { .. }), "{alone:?}");
+
+        // A good shadow part: both verdicts, from one request.
+        let sent = brain.requests().len();
+        brain.set_answer(
+            200,
+            &brain_answer(
+                ACTIVE_HEADS,
+                ACTIVE_MODEL,
+                Some(shadow_answers(SHADOW_HEADS, SHADOW_MODEL, 0.7)),
+            ),
+        );
+        let (active, shadow) = client.evaluate_with_shadow(&remote_request(), Some(&pin));
+        assert_eq!(active, alone);
+        let shadow = shadow.expect("a shadow verdict");
+        assert_eq!(shadow.model(), Some(SHADOW_MODEL));
+        assert_eq!(shadow.fact("task_match"), Some(0.7));
+        assert_eq!(brain.requests().len(), sent + 1, "one request");
+        let body = brain.body(sent);
+        assert_eq!(body["heads"], ACTIVE_HEADS);
+        assert_eq!(body["shadow_heads"], SHADOW_HEADS);
+
+        // Each shadow failure leaves the active verdict as it is.
+        let mut out_of_range = shadow_answers(SHADOW_HEADS, SHADOW_MODEL, 0.7);
+        out_of_range["answers"]["task_match"]["noul"] = json!(1.5);
+        let mut missing = shadow_answers(SHADOW_HEADS, SHADOW_MODEL, 0.7);
+        missing["answers"]
+            .as_object_mut()
+            .expect("answers")
+            .remove("destroy");
+        for (name, part) in [
+            (
+                "unknown",
+                Some(json!({"heads": SHADOW_HEADS, "error": "unknown_heads"})),
+            ),
+            (
+                "failed",
+                Some(json!({"heads": SHADOW_HEADS, "error": "shadow_failed"})),
+            ),
+            (
+                "other error",
+                Some(json!({"heads": SHADOW_HEADS, "error": "out of memory at /srv/x"})),
+            ),
+            ("no shadow part", None),
+            ("not an object", Some(json!("broken"))),
+            (
+                "other heads",
+                Some(shadow_answers(ACTIVE_HEADS, SHADOW_MODEL, 0.7)),
+            ),
+            (
+                "other model",
+                Some(shadow_answers(SHADOW_HEADS, ACTIVE_MODEL, 0.7)),
+            ),
+            ("out of range", Some(out_of_range)),
+            ("missing answer", Some(missing)),
+        ] {
+            brain.set_answer(200, &brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, part));
+            let (active, shadow) = client.evaluate_with_shadow(&remote_request(), Some(&pin));
+            assert_eq!(active, alone, "{name}");
+            let shadow = shadow.expect("a shadow verdict");
+            assert!(
+                matches!(shadow, BouncerVerdict::Unavailable(_)),
+                "{name}: {shadow:?}"
+            );
+            assert!(
+                !reason(&shadow).contains("/srv/x"),
+                "server text is not kept"
+            );
+        }
+        // A malformed shadow pin is not sent, and the active verdict stands.
+        let sent = brain.requests().len();
+        brain.set_answer(200, &brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, None));
+        let bad_pin = ShadowPin::new("0BADC0DE", SHADOW_MODEL);
+        let (active, shadow) = client.evaluate_with_shadow(&remote_request(), Some(&bad_pin));
+        assert_eq!(active, alone);
+        assert!(reason(&shadow.expect("a shadow verdict")).contains("not valid"));
+        assert!(brain.body(sent).get("shadow_heads").is_none());
+        // An unavailable active answer is never replaced by a good shadow part.
+        brain.set_answer(
+            200,
+            &brain_answer(
+                SHADOW_HEADS,
+                ACTIVE_MODEL,
+                Some(shadow_answers(SHADOW_HEADS, SHADOW_MODEL, 0.99)),
+            ),
+        );
+        let (active, _) = client.evaluate_with_shadow(&remote_request(), Some(&pin));
+        assert!(
+            matches!(active, BouncerVerdict::Unavailable(_)),
+            "{active:?}"
+        );
+        // A failed request gives no shadow answer either.
+        brain.set_answer(409, r#"{"detail":{"code":"unknown_heads","message":"x"}}"#);
+        let (active, shadow) = client.evaluate_with_shadow(&remote_request(), Some(&pin));
+        assert!(matches!(active, BouncerVerdict::Unavailable(_)));
+        assert!(matches!(shadow, Some(BouncerVerdict::Unavailable(_))));
+        // Without a shadow pin there is no shadow verdict.
+        brain.set_answer(200, &brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, None));
+        assert_eq!(client.evaluate_with_shadow(&remote_request(), None).1, None);
+        brain.assert_clean();
+    }
+
+    #[test]
+    fn a_remote_url_from_the_environment_is_refused() {
+        // `APASSY_BOUNCER_URL` and the address of `bouncer.json` name only this Mac.
+        // `from_sources` is `from_env_or` with the environment values as arguments.
+        for (env, file) in [
+            (Some("https://brain.example.invalid"), DEFAULT_URL),
+            (None, "https://brain.example.invalid"),
+            (Some("http://10.0.0.1:8770"), DEFAULT_URL),
+            (None, "http://brain.example.invalid:8770"),
+            (Some("https://localhost:8443"), DEFAULT_URL),
+        ] {
+            assert!(
+                BouncerClient::from_sources(
+                    env.map(str::to_owned),
+                    file,
+                    Some("synthetic-key".to_owned())
+                )
+                .is_err(),
+                "{env:?} {file}"
+            );
+        }
+        let local = BouncerClient::from_sources(
+            Some("http://127.0.0.1:8771".to_owned()),
+            DEFAULT_URL,
+            Some("synthetic-key".to_owned()),
+        )
+        .expect("loopback");
+        assert!(!local.is_remote());
+        assert_eq!(local.url(), "http://127.0.0.1:8771");
+        assert_eq!(local.api_key(), Some("synthetic-key"));
+        let file =
+            BouncerClient::from_sources(None, DEFAULT_URL, Some(String::new())).expect("loopback");
+        assert_eq!(file.url(), DEFAULT_URL);
+        assert_eq!(file.api_key(), None);
+    }
+
+    #[test]
+    fn the_remote_deadline_is_20_s_per_attempt_and_40_s_at_most() {
+        assert_eq!(REMOTE_TIMEOUT, Duration::from_secs(20));
+        let tls = Arc::new(TlsClient::platform().expect("platform TLS"));
+        let remote = BouncerClient::remote("https://brain.example.invalid", static_bearer(), tls)
+            .expect("https");
+        assert_eq!(remote.timeout(), Duration::from_secs(20));
+        assert_eq!(remote.max_wait(), Duration::from_secs(40));
+        // This Mac keeps 10 s per attempt.
+        let local = BouncerClient::new(DEFAULT_URL).expect("loopback");
+        assert_eq!(local.timeout(), Duration::from_secs(10));
+        assert_eq!(local.max_wait(), Duration::from_secs(20));
+
+        // The same rule with a short attempt: a server that answers after two
+        // attempts gives up after two attempts, and the bearer of each attempt has
+        // the deadline of that attempt.
+        let attempt = Duration::from_millis(400);
+        let brain = fake_brain(Duration::from_millis(1500));
+        brain.set_answer(200, &brain_answer(ACTIVE_HEADS, ACTIVE_MODEL, None));
+        let recording = Arc::new(RecordingBearer::default());
+        let client = BouncerClient::remote(&brain.url, recording.clone(), Arc::clone(&brain.tls))
+            .expect("https")
+            .with_timeout(attempt);
+        let began = Instant::now();
+        let verdict = client.evaluate(&remote_request());
+        let elapsed = began.elapsed();
+        assert!(
+            reason(&verdict)
+                .contains("timed out after two inference attempts (up to 800 ms total)"),
+            "{verdict:?}"
+        );
+        assert!(elapsed >= attempt, "the first attempt waited: {elapsed:?}");
+        assert!(
+            elapsed < attempt * 2 + Duration::from_secs(1),
+            "two attempts at most: {elapsed:?}"
+        );
+        let calls = recording.calls.lock().expect("calls").clone();
+        assert_eq!(calls.len(), 2, "one retry after a transport timeout");
+        for (asked, deadline) in calls {
+            let budget = deadline.duration_since(asked);
+            assert!(budget <= attempt, "{budget:?}");
+            assert!(budget + Duration::from_millis(100) >= attempt, "{budget:?}");
+        }
+        assert!(!recording.invalidated.load(Ordering::SeqCst));
     }
 }

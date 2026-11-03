@@ -1347,8 +1347,74 @@ fn decode_chunked(mut data: &[u8]) -> Result<Option<Vec<u8>>, HttpFailure> {
     }
 }
 
+/// The test PKI of the TLS tests of this module and of the bouncer client.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::TlsClient;
+    use std::sync::Arc;
+
+    /// A local HTTPS service for `localhost` with its own test root. The client
+    /// trusts that root in addition to the platform roots.
+    pub(crate) struct TestTls {
+        pub(crate) config: Arc<rustls::ServerConfig>,
+        pub(crate) client: TlsClient,
+    }
+
+    pub(crate) fn test_tls() -> TestTls {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DistinguishedName, DnType,
+            ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+        };
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        fn validity(params: &mut CertificateParams) {
+            let now = time::OffsetDateTime::now_utc();
+            params.not_before = now - time::Duration::hours(1);
+            params.not_after = now + time::Duration::days(1);
+        }
+
+        let mut root = CertificateParams::default();
+        let mut name = DistinguishedName::new();
+        name.push(DnType::CommonName, "Apassy http test root");
+        root.distinguished_name = name;
+        root.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        validity(&mut root);
+        let root_key = KeyPair::generate().expect("root key");
+        let root_cert = root.self_signed(&root_key).expect("root");
+        let issuer = Issuer::new(root, root_key);
+        let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).expect("leaf");
+        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf.use_authority_key_identifier_extension = true;
+        validity(&mut leaf);
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let leaf_cert = leaf.signed_by(&leaf_key, &issuer).expect("leaf cert");
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf_cert.der().clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+        )
+        .expect("server config");
+        TestTls {
+            config: Arc::new(config),
+            client: TlsClient::with_extra_roots(vec![root_cert.der().clone()])
+                .expect("TLS client with test root"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::test_tls;
     use super::*;
 
     #[test]
@@ -1579,64 +1645,6 @@ mod tests {
             classify(&io::Error::from(io::ErrorKind::InvalidData)),
             HttpFailure::Tls
         );
-    }
-
-    /// A local HTTPS service for `localhost` with its own test root. The client
-    /// trusts that root in addition to the platform roots.
-    struct TestTls {
-        config: Arc<rustls::ServerConfig>,
-        client: TlsClient,
-    }
-
-    fn test_tls() -> TestTls {
-        use rcgen::{
-            BasicConstraints, CertificateParams, DistinguishedName, DnType,
-            ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
-        };
-        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-
-        fn validity(params: &mut CertificateParams) {
-            let now = time::OffsetDateTime::now_utc();
-            params.not_before = now - time::Duration::hours(1);
-            params.not_after = now + time::Duration::days(1);
-        }
-
-        let mut root = CertificateParams::default();
-        let mut name = DistinguishedName::new();
-        name.push(DnType::CommonName, "Apassy http test root");
-        root.distinguished_name = name;
-        root.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        root.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::DigitalSignature,
-        ];
-        validity(&mut root);
-        let root_key = KeyPair::generate().expect("root key");
-        let root_cert = root.self_signed(&root_key).expect("root");
-        let issuer = Issuer::new(root, root_key);
-        let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).expect("leaf");
-        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        leaf.use_authority_key_identifier_extension = true;
-        validity(&mut leaf);
-        let leaf_key = KeyPair::generate().expect("leaf key");
-        let leaf_cert = leaf.signed_by(&leaf_key, &issuer).expect("leaf cert");
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("versions")
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![leaf_cert.der().clone()],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
-        )
-        .expect("server config");
-        TestTls {
-            config: Arc::new(config),
-            client: TlsClient::with_extra_roots(vec![root_cert.der().clone()])
-                .expect("TLS client with test root"),
-        }
     }
 
     /// Every name is this computer, on the port of the destination. No network.
