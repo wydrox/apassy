@@ -14,6 +14,7 @@ use eframe::egui::{
 };
 
 use super::kit::{self, Font, Icon};
+use crate::desktop::model::MASKED_VALUE;
 
 /// The width of the content of the page: 640 points less the 28-point margins.
 pub(super) const READING_WIDTH: f32 = 584.0;
@@ -324,6 +325,17 @@ pub(super) fn pill_button(ui: &mut Ui, label: &str, name: &str) -> Response {
         painter.galley(rect.center() - galley.size() / 2.0, galley, color);
     }
     response
+}
+
+/// The mask of a hidden value on its row: the dots of the Password row. A masked
+/// one-time password uses the same mask.
+pub(super) fn mask(ui: &mut Ui) -> Response {
+    ui.label(
+        kit::text(MASKED_VALUE, Font::Body)
+            .size(15.0)
+            .extra_letter_spacing(2.0)
+            .color(kit::LABEL),
+    )
 }
 
 /// A menu value, as `.pop` of the mockup: the value on a light gray capsule with a
