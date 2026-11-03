@@ -750,6 +750,18 @@ const ALLOWED_ONCE: &str = "(EXISTS (SELECT 1 FROM connect_request a \
      WHERE a.client_id = oauth_client.client_id AND a.team_id IS NOT NULL) \
      OR EXISTS (SELECT 1 FROM oauth_refresh f WHERE f.client_id = oauth_client.client_id))";
 
+/// True when the owner allowed `client_id` at least once (`ALLOWED_ONCE`).
+fn allowed_once(conn: &Connection, client_id: &str) -> RelayResult<bool> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM oauth_client WHERE client_id = ?1 AND {ALLOWED_ONCE})"
+        ),
+        params![client_id],
+        |row| row.get(0),
+    )
+    .map_err(db)
+}
+
 /// Deletes the client `client_id` and every connect request of it. Only for a client that
 /// was never allowed: it has no team, no agent, and no refresh token.
 fn delete_client(conn: &Connection, client_id: &str) -> RelayResult<()> {
@@ -1147,8 +1159,10 @@ impl Flow<'_> {
     }
 
     /// `GET /oauth/authorize`: a connect request, then 303 to its page. A bad client or
-    /// redirect URI is a page; any other error goes back to the client (RFC 6749 section
-    /// 4.1.2.1).
+    /// redirect URI is a page. Any other error goes back to a client that the owner allowed
+    /// at least once (RFC 6749 section 4.1.2.1), and is a page for any other client:
+    /// anyone can register a client with any https redirect URI, so a redirect would make
+    /// a link of this Mac an open redirect.
     fn authorize(&self, query: &str) -> RelayResult<Reply> {
         let Some(params) = decode_form(query) else {
             return Ok(Reply::page(400, Page::invalid()));
@@ -1178,7 +1192,15 @@ impl Flow<'_> {
             _ => return Ok(Reply::page(400, Page::invalid())),
         };
         let state = get("state");
+        let allowed = self
+            .hub
+            .directory
+            .store
+            .with(|conn| allowed_once(conn, client_id))?;
         let back = |error: &str, description: &str| {
+            if !allowed {
+                return Reply::page(400, Page::invalid());
+            }
             let mut location = format!(
                 "{redirect_uri}{}error={}&error_description={}",
                 if redirect_uri.contains('?') { '&' } else { '?' },

@@ -867,8 +867,8 @@ fn authorize_checks_the_client_the_redirect_pkce_and_the_resource() {
         assert!(answer.text.contains("This connection link is not valid."));
         assert_page_headers(&answer);
     }
-    // Any other error goes back to the client.
-    for (extra, error) in [
+    let long_state = "s".repeat(600);
+    let errors = [
         (
             vec![("response_type", "token")],
             "unsupported_response_type",
@@ -879,12 +879,36 @@ fn authorize_checks_the_client_the_redirect_pkce_and_the_resource() {
             vec![("resource", "https://other.example/mcp")],
             "invalid_target",
         ),
-    ] {
-        let answer = node.authorize_raw(&client_id, &extra);
+        (vec![("state", long_state.as_str())], "invalid_request"),
+    ];
+    // Any other error of a client that the owner never allowed: a page, never a
+    // redirect. Anyone can register a client with any https redirect URI, so a redirect
+    // would make a link of this Mac an open redirect (security review finding 3).
+    let stranger = node.register(Some("Stranger"), "https://evil.example/cb");
+    for (extra, _) in &errors {
+        for client in [&client_id, &stranger] {
+            let mut extra = extra.clone();
+            if *client == stranger {
+                extra.push(("redirect_uri", "https://evil.example/cb"));
+            }
+            let answer = node.authorize_raw(client, &extra);
+            assert_eq!(answer.status, 400, "{extra:?}");
+            assert!(answer.header("location").is_none(), "{extra:?}");
+            assert!(answer.text.contains("This connection link is not valid."));
+            assert!(!answer.text.contains("evil.example"));
+            assert_page_headers(&answer);
+        }
+    }
+    assert!(node.node().pending_connects().unwrap().is_empty());
+    // A client that the owner allowed gets its errors back at its redirect URI.
+    let allowed = node.connect("Allowed");
+    for (extra, error) in &errors {
+        let answer = node.authorize_raw(&allowed.client_id, extra);
         assert_eq!(answer.status, 303, "{extra:?}");
-        let query = query_of(answer.header("location").unwrap());
-        assert_eq!(query["error"], error, "{extra:?}");
-        assert_eq!(query["state"], "state-123");
+        let location = answer.header("location").unwrap();
+        assert!(location.starts_with(&format!("{REDIRECT}?")), "{location}");
+        let query = query_of(location);
+        assert_eq!(query["error"], *error, "{extra:?}");
     }
     assert!(node.node().pending_connects().unwrap().is_empty());
     // A loopback redirect URI matches with any port (RFC 8252).

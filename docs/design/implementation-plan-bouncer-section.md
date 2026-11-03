@@ -108,7 +108,7 @@ the same function.
 | `GET /.well-known/oauth-protected-resource` and `…/mcp` (RFC 9728) | `resource = <origin>/mcp`, `authorization_servers = [<origin>]`, `bearer_methods_supported = ["header"]`, `scopes_supported = ["apassy"]` |
 | `GET /.well-known/oauth-authorization-server`, also `/.well-known/openid-configuration` (RFC 8414) | `issuer`, the endpoints below, `response_types_supported = ["code"]`, `grant_types_supported = ["authorization_code","refresh_token"]`, `code_challenge_methods_supported = ["S256"]`, `token_endpoint_auth_methods_supported = ["none"]` |
 | `POST /oauth/register` (RFC 7591) | 201 with a random `client_id`, the echoed fields, `token_endpoint_auth_method = "none"`, no secret |
-| `GET /oauth/authorize` | makes a connect request (id, match code, 300 s), 303 to `/oauth/wait/<id>` |
+| `GET /oauth/authorize` | makes a connect request (id, match code, 300 s), 303 to `/oauth/wait/<id>`; an error is a page for a client that the owner never allowed (no open redirect), a 303 back only for an allowed client |
 | `GET /oauth/wait/<id>` | the page of frame 7 with `Refresh: 3`; allowed → 303 to `redirect_uri?code=…&state=…` once; denied → "You denied the connection."; expired → "The request ended." |
 | `POST /oauth/token` | `authorization_code` with PKCE, or `refresh_token`; `access_token` = the relay agent token (so `/mcp` auth is unchanged), `token_type = "Bearer"`, `expires_in`, `refresh_token`; errors as RFC 6749 §5.2 |
 | `POST /oauth/revoke` (RFC 7009) | 200 always |

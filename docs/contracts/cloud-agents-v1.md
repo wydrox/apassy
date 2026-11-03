@@ -85,7 +85,10 @@ registration (RFC 7591). The relay side is in its `docs/SPEC.md` section 31. The
    optional). The node makes a connect request and sends the browser to `/oauth/wait/<id>`. A client
    has one waiting request: a new `authorize` of it with other parameters ends the waiting one (its
    page says "The request ended.") and makes a new one with its own page and code. A client id is
-   public, so a request that someone else keeps open never stands in for this browser's.
+   public, so a request that someone else keeps open never stands in for this browser's. A bad
+   request (response type, PKCE, `resource`, `state` over 512 bytes) goes back to `redirect_uri` with
+   `error` only for a client that the owner allowed before; for a new client it is the page "This
+   connection link is not valid.", so a link of the node is never an open redirect.
 5. The page says "<client> wants to connect to <Mac>", shows a match code such as `K7Q-4MD`, and reloads
    every 3 seconds. It has no button: the owner allows the request in Apassy on the Mac (Decisions, with
    Touch ID) or on the iPhone, where the same code shows. Apassy must be open and unlocked; the request
