@@ -26,6 +26,9 @@ pub(crate) struct UiPrefs {
     /// The owner turned "Show agents on my other devices" off (relay-feed-v1 section 8;
     /// "Show agents on the iPhone" before). On by default. The key stays `feed_off`.
     pub(crate) feed_off: bool,
+    /// The owner closed the once-only notice of the end of Wi-Fi pairing (ADR 0028
+    /// stage 3, plan S2–S3 unit W1). A flag of this Mac, not of a vault.
+    pub(crate) wifi_notice_seen: bool,
 }
 
 impl UiPrefs {
@@ -115,6 +118,7 @@ mod tests {
                 sidebar_hidden: true,
                 open_folders: ["folder-1".to_owned()].into(),
                 feed_off: false,
+                wifi_notice_seen: false,
             }
         );
         prefs.save(&path).expect("save");
@@ -131,6 +135,7 @@ mod tests {
             sidebar_hidden: true,
             open_folders: ["folder-1".to_owned()].into(),
             feed_off: true,
+            wifi_notice_seen: true,
         };
         prefs.save(&path).expect("save");
         assert_eq!(UiPrefs::load(&path), prefs);

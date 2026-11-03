@@ -48,6 +48,8 @@ mod decisions_tests;
 mod demo;
 #[cfg(feature = "vault")]
 mod detail_rows;
+/// Settings > Devices: the node of this Mac, every device, and the Wi-Fi notice.
+pub(crate) mod devices;
 /// Find duplicates and merge them (`src/vault/dedup.rs`).
 #[cfg(feature = "vault")]
 mod duplicates;
@@ -311,6 +313,12 @@ pub(crate) struct UiState {
     pub(crate) open_folders: BTreeSet<String>,
     /// "Show agents on the iPhone" is off (relay-feed-v1 section 8). `ui.json` keeps it.
     pub(crate) feed_off: bool,
+    /// The owner closed the once-only notice of the end of Wi-Fi pairing (ADR 0028 stage
+    /// 3). `ui.json` keeps it: it is for this Mac, not for a vault.
+    #[cfg(feature = "vault")]
+    pub(crate) wifi_notice_seen: bool,
+    /// Settings > Devices: its sheets, the node cache, and the demo frame.
+    pub(crate) devices: devices::State,
     /// The shared vaults in the sidebar (ADR 0026 §6). Nothing fills it until the vault
     /// keeps shared vaults; the tests draw synthetic ones.
     pub(crate) shared_vaults: Vec<sidebar::SharedVaultRow>,
@@ -414,6 +422,7 @@ impl UiState {
         self.sidebar_hidden = prefs.sidebar_hidden;
         self.open_folders = prefs.open_folders;
         self.feed_off = prefs.feed_off;
+        self.wifi_notice_seen = prefs.wifi_notice_seen;
         self.prefs_path = Some(path);
     }
 
@@ -426,6 +435,7 @@ impl UiState {
                 sidebar_hidden: self.sidebar_hidden,
                 open_folders: self.open_folders.clone(),
                 feed_off: self.feed_off,
+                wifi_notice_seen: self.wifi_notice_seen,
             };
             let _ = prefs.save(path);
         }
@@ -448,7 +458,16 @@ impl UiState {
         }
     }
 
+    /// The owner closed the Wi-Fi notice: it never shows again on this Mac.
+    #[cfg(feature = "vault")]
+    pub(crate) fn set_wifi_notice_seen(&mut self) {
+        self.wifi_notice_seen = true;
+        self.save_prefs();
+    }
+
     /// Turn "Show agents on the iPhone" off or on, and keep the choice.
+    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+    #[allow(dead_code)]
     pub(crate) fn set_feed_off(&mut self, off: bool) {
         self.feed_off = off;
         self.save_prefs();

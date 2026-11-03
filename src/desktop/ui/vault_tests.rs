@@ -236,8 +236,17 @@ fn settings_show_the_groups_of_the_selected_section_only() {
         ),
         (
             SettingsSection::Devices,
-            &["This Mac", "Allow the iPhone app on this network", "Relay"][..],
-            &["Back up now…", "Change passphrase…", "Other Macs"][..],
+            &[
+                "This Mac",
+                "Reachable on Your Tailnet",
+                "Add an iPhone or a Mac…",
+            ][..],
+            &[
+                "Back up now…",
+                "Change passphrase…",
+                "Other Macs",
+                "Pair an iPhone",
+            ][..],
         ),
         (
             SettingsSection::Bouncer,

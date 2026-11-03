@@ -417,6 +417,8 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
     if app.pending_delete && app.selected_item_id.is_some() {
         super::demo::draw_delete_alert(app, ctx);
     }
+    // Settings > Devices: its sheets and the once-only Wi-Fi notice (plan S2–S3, N7).
+    super::devices::overlays(app, ctx);
     let Some(sheet) = app.ui.sheet.clone() else {
         return;
     };

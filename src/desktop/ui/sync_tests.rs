@@ -3630,12 +3630,8 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
         }
     );
     super::open_settings(&mut b, super::SettingsSection::Devices);
-    let text = frames(&mut b);
-    assert!(
-        text.contains(super::settings::RELAY_QUESTIONS_JOIN),
-        "{text}"
-    );
-    super::settings::set_relay_questions(&mut b, true, None);
+    // "Add an iPhone or a Mac…" of Devices (plan S2–S3, unit N7) joins the team.
+    b.questions_add_iphone(None);
     let text = frames(&mut b);
     for expected in ["Join the questions of “Personal”", "Join…"] {
         assert!(text.contains(expected), "{expected}: {text}");

@@ -1411,3 +1411,418 @@ fn bouncer_events(now: u64, waiting: bool) -> Vec<super::bouncer::LogEvent> {
     ));
     events
 }
+
+// ---- Settings > Devices (mockup docs/design/devices-settings-mockup.html). ----
+
+/// The frame of the Devices mockup that Settings > Devices shows in the demo build. The
+/// menu at the top of the section picks it, and `APASSY_DEMO_DEVICES` (1, 3a, 3b, 3c, 3d,
+/// 3f, 3g, 3h, 4, 5a, 5b, 5c, 6a, 6b, 6d, 7) sets it at start and opens the section, for
+/// screenshots. 3e and 6c are frame 1 with the ⓘ of the switch or of Wi-Fi Pairing open.
+/// Frames 2 and 4b–4d are the pairing and move sheets of the vault build.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum DevicesFrame {
+    /// 1: the route on, every kind of device, the Wi-Fi group.
+    #[default]
+    TailnetOn,
+    /// 3a.
+    NoTailscale,
+    /// 3b.
+    NotConnected,
+    /// 3c.
+    RouteOff,
+    /// 3d.
+    Starting,
+    /// 3f.
+    Locked,
+    /// 3g.
+    PortTaken,
+    /// 3h.
+    AddressChanged,
+    /// 4: the approvals go through Apassy relay.
+    Move,
+    /// 5a: Revoke an iPhone with a watch.
+    RevokeIphone,
+    /// 5b: Revoke another Mac.
+    RevokeMac,
+    /// 5c: after the revoke.
+    AfterRevoke,
+    /// 6a: the Wi-Fi notice with the route on.
+    NoticeTailnet,
+    /// 6b: the Wi-Fi notice without the route.
+    NoticeRelay,
+    /// 6d: the Wi-Fi group of the next release.
+    NextVersion,
+    /// 7: first run, no Tailscale.
+    FirstRun,
+}
+
+impl DevicesFrame {
+    const ALL: [Self; 16] = [
+        Self::TailnetOn,
+        Self::NoTailscale,
+        Self::NotConnected,
+        Self::RouteOff,
+        Self::Starting,
+        Self::Locked,
+        Self::PortTaken,
+        Self::AddressChanged,
+        Self::Move,
+        Self::RevokeIphone,
+        Self::RevokeMac,
+        Self::AfterRevoke,
+        Self::NoticeTailnet,
+        Self::NoticeRelay,
+        Self::NextVersion,
+        Self::FirstRun,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::TailnetOn => "Frame 1: Tailnet On",
+            Self::NoTailscale => "Frame 3a: No Tailscale",
+            Self::NotConnected => "Frame 3b: Not Connected",
+            Self::RouteOff => "Frame 3c: Route Off",
+            Self::Starting => "Frame 3d: Starting",
+            Self::Locked => "Frame 3f: Vault Locked",
+            Self::PortTaken => "Frame 3g: Port in Use",
+            Self::AddressChanged => "Frame 3h: Address Changed",
+            Self::Move => "Frame 4: Move Approvals",
+            Self::RevokeIphone => "Frame 5a: Revoke iPhone",
+            Self::RevokeMac => "Frame 5b: Revoke Mac",
+            Self::AfterRevoke => "Frame 5c: After Revoke",
+            Self::NoticeTailnet => "Frame 6a: Notice, Tailnet",
+            Self::NoticeRelay => "Frame 6b: Notice, Relay",
+            Self::NextVersion => "Frame 6d: Next Version",
+            Self::FirstRun => "Frame 7: First Run",
+        }
+    }
+
+    /// The frame of `APASSY_DEMO_DEVICES`.
+    fn from_env() -> Option<Self> {
+        let value = std::env::var("APASSY_DEMO_DEVICES").ok()?;
+        let value = value.trim();
+        Self::ALL.into_iter().find(|frame| {
+            let number = frame.label().trim_start_matches("Frame ");
+            number.split(':').next() == Some(value)
+        })
+    }
+}
+
+/// "Now" of the Devices fixtures: Tue 3 Nov 2026, 14:20 UTC, as the mockup.
+const DEVICES_NOW: u64 = 1_793_715_600;
+/// 12 Sep 2026: the Wi-Fi iPhone paired.
+const WIFI_PAIRED: u64 = 1_789_203_600;
+
+fn demo_device(
+    name: &str,
+    kind: super::devices::Kind,
+    role: &str,
+    route: Option<super::devices::Route>,
+    ago: Option<u64>,
+    target: super::devices::Target,
+) -> super::devices::DeviceEntry {
+    super::devices::DeviceEntry {
+        name: name.to_owned(),
+        kind,
+        roles: vec![role.to_owned()],
+        route,
+        last_contact: ago.map(|ago| DEVICES_NOW - ago),
+        target,
+        failed: false,
+    }
+}
+
+fn node_target(id: u64) -> super::devices::Target {
+    super::devices::Target::Node {
+        team_id: "t_demo".to_owned(),
+        id,
+        uuid: None,
+    }
+}
+
+fn hosted_target(uuid: &str) -> super::devices::Target {
+    super::devices::Target::Hosted {
+        team_id: "t_demo".to_owned(),
+        id: None,
+        uuid: uuid.to_owned(),
+    }
+}
+
+/// The view of a frame of the Devices mockup. Synthetic data only.
+pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
+    use super::devices::{
+        Address, DevicesView, Kind, NodeProblem, NodeState, Route, Target, WifiDevice, WifiEnd,
+        WifiView,
+    };
+    let address = |ipv4: &str| Address {
+        ipv4: ipv4.to_owned(),
+        origin: format!("https://{ipv4}:8444"),
+        port: 8444,
+        words: Some("harbor lemon quartz otter cedar mango".to_owned()),
+    };
+    let moving = frame == DevicesFrame::Move;
+    let first_run = frame == DevicesFrame::FirstRun;
+    let (approvals, phone_route) = if moving {
+        ("Asks for approvals", Route::Relay)
+    } else {
+        ("Hosts approvals", Route::Mac)
+    };
+    let this_mac = demo_device(
+        "Mac mini (office)",
+        Kind::Mac,
+        if first_run {
+            "Asks for approvals"
+        } else {
+            approvals
+        },
+        None,
+        Some(0),
+        Target::ThisMac,
+    );
+    let phone_target = |id, uuid| {
+        if moving {
+            hosted_target(uuid)
+        } else {
+            node_target(id)
+        }
+    };
+    let mut devices = vec![this_mac];
+    if !first_run {
+        devices.extend([
+            demo_device(
+                "Rafal's iPhone",
+                Kind::Iphone,
+                "Approves runs",
+                Some(phone_route),
+                Some(10),
+                phone_target(2, "iphone"),
+            ),
+            demo_device(
+                "Rafal's Apple Watch",
+                Kind::Watch,
+                "Sees requests",
+                Some(phone_route),
+                Some(if moving { 9 * 60 } else { 4 * 60 }),
+                phone_target(3, "watch"),
+            ),
+            demo_device(
+                "MacBook Pro",
+                Kind::Mac,
+                "Syncs Personal",
+                Some(Route::Relay),
+                Some(2 * 60),
+                hosted_target("macbook"),
+            ),
+            demo_device(
+                "Mac mini (studio)",
+                Kind::Mac,
+                "Syncs Personal",
+                Some(Route::Relay),
+                Some(3_600),
+                hosted_target("studio"),
+            ),
+        ]);
+        if !moving {
+            devices.push(demo_device(
+                "build-box",
+                Kind::LinuxNode,
+                "Syncs Acme team",
+                Some(Route::Tailnet),
+                Some(5 * 60),
+                Target::Linux {
+                    vault: "acme".to_owned(),
+                    team_id: "t_acme".to_owned(),
+                    device_id: 7,
+                    origin: "https://100.88.4.20:8444".to_owned(),
+                },
+            ));
+        }
+    }
+    if frame == DevicesFrame::AfterRevoke {
+        devices.retain(|device| device.kind != Kind::Iphone && device.kind != Kind::Watch);
+        devices.retain(|device| device.name != "Mac mini (studio)");
+        for device in &mut devices {
+            device.last_contact = None;
+        }
+        if let Some(this_mac) = devices.first_mut() {
+            this_mac.last_contact = Some(DEVICES_NOW);
+        }
+    }
+    let (node, problem) = match frame {
+        DevicesFrame::NoTailscale | DevicesFrame::FirstRun => (NodeState::Missing, None),
+        DevicesFrame::NotConnected => (NodeState::NotConnected, None),
+        DevicesFrame::RouteOff | DevicesFrame::NoticeRelay => (NodeState::Off, None),
+        DevicesFrame::Starting => (NodeState::On { address: None }, None),
+        DevicesFrame::Locked => (NodeState::Locked, None),
+        DevicesFrame::PortTaken => (
+            NodeState::On { address: None },
+            Some(NodeProblem::PortTaken {
+                port: 8444,
+                before_pairing: true,
+            }),
+        ),
+        DevicesFrame::AddressChanged => (
+            NodeState::On {
+                address: Some(address("100.77.20.5")),
+            },
+            Some(NodeProblem::AddressChanged),
+        ),
+        _ => (
+            NodeState::On {
+                address: Some(address("100.101.7.12")),
+            },
+            None,
+        ),
+    };
+    let wifi = (!moving && !first_run).then(|| WifiView {
+        listening: true,
+        starting: false,
+        failed: None,
+        devices: vec![WifiDevice {
+            id: "wifi-phone".to_owned(),
+            name: "Rafal's iPhone".to_owned(),
+            paired_at: WIFI_PAIRED,
+            last_seen_at: Some(DEVICES_NOW - 3 * 3_600),
+        }],
+        end: if frame == DevicesFrame::NextVersion {
+            WifiEnd::NextVersion
+        } else {
+            WifiEnd::TwoVersions
+        },
+    });
+    DevicesView {
+        node,
+        problem,
+        locked: frame == DevicesFrame::Locked,
+        can_move: moving,
+        devices,
+        notes: Vec::new(),
+        wifi,
+        now: DEVICES_NOW,
+    }
+}
+
+/// The status line of Settings > Devices in the demo build.
+pub(super) fn devices_status(app: &DesktopApp) -> String {
+    devices_view(app.ui.devices.demo).status_line()
+}
+
+/// Pick a frame of the Devices mockup, with its sheet.
+fn select_devices_frame(app: &mut DesktopApp, frame: DevicesFrame) {
+    use super::devices::{DevicesSheet, Kind, WatchChoice};
+    app.ui.devices.demo = frame;
+    let view = devices_view(frame);
+    let find = |kind: Kind| view.devices.iter().position(|device| device.kind == kind);
+    app.ui.devices.sheet = match frame {
+        DevicesFrame::RevokeIphone => find(Kind::Iphone).map(|index| DevicesSheet::Revoke {
+            device: view.devices[index].clone(),
+            vault: None,
+            watches: find(Kind::Watch)
+                .map(|index| WatchChoice {
+                    index,
+                    name: view.devices[index].name.clone(),
+                    revoke: true,
+                })
+                .into_iter()
+                .collect(),
+        }),
+        DevicesFrame::RevokeMac => view
+            .devices
+            .iter()
+            .find(|device| device.name == "MacBook Pro")
+            .map(|device| DevicesSheet::Revoke {
+                device: device.clone(),
+                vault: Some("Personal".to_owned()),
+                watches: Vec::new(),
+            }),
+        DevicesFrame::NoticeTailnet => Some(DevicesSheet::WifiNotice { tailnet: true }),
+        DevicesFrame::NoticeRelay => Some(DevicesSheet::WifiNotice { tailnet: false }),
+        _ => None,
+    };
+    if frame == DevicesFrame::AfterRevoke {
+        app.set_ok("Rafal's iPhone revoked");
+    }
+}
+
+/// Settings > Devices in the demo build: the frame menu and the frame.
+pub(super) fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::devices::{self, Action, Kind, rows};
+    ui.add_space(8.0);
+    let mut frame = app.ui.devices.demo;
+    let options: Vec<(DevicesFrame, String)> = DevicesFrame::ALL
+        .iter()
+        .map(|frame| (*frame, frame.label().to_owned()))
+        .collect();
+    let shown = frame.label();
+    kit::picker(ui, "demo-devices-frame", &mut frame, &options, shown, 240.0);
+    if frame != app.ui.devices.demo {
+        select_devices_frame(app, frame);
+    }
+    let view = devices_view(app.ui.devices.demo);
+    let action = devices::draw(ui, &view, |g| {
+        g.labeled("Notifications", rows::value("On"));
+    });
+    let next = match action {
+        Some(Action::SetRoute(true)) => Some(DevicesFrame::TailnetOn),
+        Some(Action::SetRoute(false)) => Some(DevicesFrame::RouteOff),
+        Some(Action::CheckAgain) => Some(DevicesFrame::TailnetOn),
+        Some(Action::Revoke(index)) => match view.devices.get(index).map(|device| device.kind) {
+            Some(Kind::Iphone) => Some(DevicesFrame::RevokeIphone),
+            Some(Kind::Mac) => Some(DevicesFrame::RevokeMac),
+            _ => None,
+        },
+        Some(Action::Copy(origin)) => {
+            ui.ctx().copy_text(origin);
+            None
+        }
+        _ => None,
+    };
+    if let Some(next) = next {
+        select_devices_frame(app, next);
+    }
+}
+
+/// The sheets of the Devices frames 5a, 5b, 6a, and 6b, and `APASSY_DEMO_DEVICES`.
+pub(super) fn devices_overlays(app: &mut DesktopApp, ctx: &egui::Context) {
+    use super::devices::{Choice, DevicesSheet};
+    use std::sync::Once;
+    static FROM_ENV: Once = Once::new();
+    FROM_ENV.call_once(|| {
+        if let Some(frame) = DevicesFrame::from_env() {
+            super::settings_view::open(app, super::settings_view::SettingsSection::Devices);
+            select_devices_frame(app, frame);
+        }
+    });
+    let Some(sheet) = app.ui.devices.sheet.clone() else {
+        return;
+    };
+    let (choice, escape, sheet) = match sheet {
+        DevicesSheet::Revoke {
+            device,
+            vault,
+            mut watches,
+        } => {
+            let (choice, escape) =
+                super::devices::revoke_sheet(ctx, &device, vault.as_deref(), &mut watches);
+            (
+                choice,
+                escape,
+                DevicesSheet::Revoke {
+                    device,
+                    vault,
+                    watches,
+                },
+            )
+        }
+        DevicesSheet::WifiNotice { tailnet } => {
+            let (choice, escape) = super::devices::wifi_notice(ctx, tailnet);
+            (choice, escape, DevicesSheet::WifiNotice { tailnet })
+        }
+        DevicesSheet::Linux { .. } => (Some(Choice::Cancel), false, sheet),
+    };
+    match choice.or(escape.then_some(Choice::Cancel)) {
+        Some(Choice::Confirm) => select_devices_frame(app, DevicesFrame::AfterRevoke),
+        Some(_) => select_devices_frame(app, DevicesFrame::TailnetOn),
+        None => app.ui.devices.sheet = Some(sheet),
+    }
+}

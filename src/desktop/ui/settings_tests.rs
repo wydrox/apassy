@@ -1,18 +1,21 @@
 //! Headless tests of Settings as a view of the window (ADR 0026 §3): the gear and ⌘,
 //! open it, the list column names each section, a click selects one, a sidebar click
-//! leaves; each section shows its groups at a tall and at the minimum window size; the
-//! relay row of Devices with its owner check; and a sheet of Settings over the window.
-//! Synthetic values only; the relay is the in-process fake relay on 127.0.0.1.
+//! leaves; each section shows its groups at a tall and at the minimum window size;
+//! Devices (plan S2–S3, unit N7): each frame of its mockup, the device list with Revoke…
+//! and its owner check, and the route switch behind the owner check; and a sheet of
+//! Settings over the window. Synthetic values only; the relay is the in-process fake
+//! relay on 127.0.0.1.
 
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
+use super::super::devices::{
+    self, ADD_DEVICE, Address, DeviceEntry, DevicesSheet, DevicesView, Kind, NodeProblem,
+    NodeState, ONLY_THIS_MAC, ROUTE_LOCKED, ROUTE_OFF, ROUTE_ON, ROUTE_SWITCH, Route, Target,
+    WIFI_GROUP, WIFI_LISTEN, WIFI_NOTICE_TITLE, WifiDevice, WifiEnd, WifiView,
+};
 use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
 use super::super::settings_view::SettingsSection;
-use super::{
-    ADD_IPHONE, RELAY_QUESTIONS, RELAY_QUESTIONS_NEW_TEAM, RELAY_QUESTIONS_OFF, RELAY_QUESTIONS_ON,
-    RELAY_ROW, SHOW_AGENTS,
-};
 use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{DesktopApp, Place};
@@ -154,19 +157,20 @@ fn cases() -> [(
             SettingsSection::Devices,
             &[
                 "This Mac",
+                ROUTE_SWITCH,
                 "Notifications",
-                "iPhone",
-                "Allow the iPhone app on this network",
-                "Pair an iPhone",
-                RELAY_ROW,
-                "Questions reach every device.",
+                ADD_DEVICE,
+                ONLY_THIS_MAC,
             ],
             &[
                 "Back up now…",
-                "Questions go to every device",
-                "Add device…",
+                "Pair an iPhone",
+                "Allow the iPhone app on this network",
+                WIFI_GROUP,
+                "Other Macs",
+                "Questions reach every device.",
+                "Get approvals on your iPhone",
                 "None paired",
-                "Not synced",
             ],
         ),
         (
@@ -331,9 +335,622 @@ fn a_sheet_of_settings_shows_over_the_window() {
     assert_eq!(app.place, Place::Settings, "Esc does not leave a view");
 }
 
-/// The state of the relay switch in the AccessKit tree of three frames: disabled, and
-/// toggled.
-fn relay_switch(app: &mut DesktopApp) -> (bool, Option<egui::accesskit::Toggled>) {
+/// The painted texts of the Devices section for `view`, in a tall window, after three
+/// frames.
+fn view_texts(view: &DevicesView) -> String {
+    let ctx = egui::Context::default();
+    let mut texts = Vec::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(720.0, 2400.0))),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                devices::draw(ui, view, |g| {
+                    g.labeled("Notifications", super::rows::value("On"));
+                });
+            });
+        });
+        texts.clear();
+        for clipped in &output.shapes {
+            texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        output.drop_without_applying_deltas();
+    }
+    joined(&texts)
+}
+
+fn joined(texts: &[(String, Rect)]) -> String {
+    texts
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Tue 3 Nov 2026, 14:20 UTC, as the mockup.
+const NOW: u64 = 1_793_715_600;
+const MOVE: &str = devices::MOVE_APPROVALS;
+
+fn entry(
+    name: &str,
+    kind: Kind,
+    role: &str,
+    route: Option<Route>,
+    ago: u64,
+    target: Target,
+) -> DeviceEntry {
+    DeviceEntry {
+        name: name.to_owned(),
+        kind,
+        roles: vec![role.to_owned()],
+        route,
+        last_contact: Some(NOW - ago),
+        target,
+        failed: false,
+    }
+}
+
+/// The view of frame 1 of the mockup: the route on, every kind of device, Wi-Fi Pairing.
+fn frame_one() -> DevicesView {
+    let node = |id| Target::Node {
+        team_id: "t_node".to_owned(),
+        id,
+        uuid: None,
+    };
+    let hosted = |uuid: &str| Target::Hosted {
+        team_id: "t_sync".to_owned(),
+        id: None,
+        uuid: uuid.to_owned(),
+    };
+    DevicesView {
+        node: NodeState::On {
+            address: Some(Address {
+                ipv4: "100.101.7.12".to_owned(),
+                origin: "https://100.101.7.12:8444".to_owned(),
+                port: 8444,
+                words: Some("harbor lemon quartz otter cedar mango".to_owned()),
+            }),
+        },
+        problem: None,
+        locked: false,
+        can_move: false,
+        devices: vec![
+            entry(
+                "Mac mini (office)",
+                Kind::Mac,
+                "Hosts approvals",
+                None,
+                0,
+                Target::ThisMac,
+            ),
+            entry(
+                "Rafal's iPhone",
+                Kind::Iphone,
+                "Approves runs",
+                Some(Route::Mac),
+                10,
+                node(2),
+            ),
+            entry(
+                "Rafal's Apple Watch",
+                Kind::Watch,
+                "Sees requests",
+                Some(Route::Mac),
+                240,
+                node(3),
+            ),
+            entry(
+                "MacBook Pro",
+                Kind::Mac,
+                "Syncs Personal",
+                Some(Route::Relay),
+                120,
+                hosted("mbp"),
+            ),
+            entry(
+                "Mac mini (studio)",
+                Kind::Mac,
+                "Syncs Personal",
+                Some(Route::Relay),
+                3_600,
+                hosted("studio"),
+            ),
+            entry(
+                "build-box",
+                Kind::LinuxNode,
+                "Syncs Acme team",
+                Some(Route::Tailnet),
+                300,
+                Target::Linux {
+                    vault: "acme".to_owned(),
+                    team_id: "t_acme".to_owned(),
+                    device_id: 7,
+                    origin: "https://100.88.4.20:8444".to_owned(),
+                },
+            ),
+        ],
+        notes: Vec::new(),
+        wifi: Some(WifiView {
+            listening: true,
+            starting: false,
+            failed: None,
+            devices: vec![WifiDevice {
+                id: "wifi".to_owned(),
+                name: "Rafal's iPhone".to_owned(),
+                // 12 Sep 2026, 09:00 UTC.
+                paired_at: 1_789_203_600,
+                last_seen_at: Some(NOW - 3 * 3_600),
+            }],
+            end: WifiEnd::TwoVersions,
+        }),
+        now: NOW,
+    }
+}
+
+/// Frame 1 of the mockup: the texts of the node group, the device list with its route
+/// words, last contacts, and buttons, the one add button, and the Wi-Fi group in its
+/// notice state with no "Pair an iPhone".
+#[test]
+fn devices_frame_one_draws_the_mockup() {
+    let view = frame_one();
+    assert_eq!(view.status_line(), "Tailnet on · 6 devices");
+    let text = view_texts(&view);
+    for expected in [
+        "This Mac",
+        ROUTE_SWITCH,
+        ROUTE_ON,
+        "Address",
+        "100.101.7.12",
+        "Copy",
+        "Port",
+        "8444",
+        "Node Words",
+        "harbor lemon quartz otter cedar mango",
+        "Notifications",
+        "Devices",
+        "6",
+        "Mac mini (office)",
+        "Mac · Hosts approvals",
+        "iPhone · Approves runs",
+        "Apple Watch · Sees requests",
+        "Mac · Syncs Personal",
+        "Linux node · Syncs Acme team",
+        "via your Mac",
+        "via Apassy relay",
+        "Tailnet",
+        "Now",
+        "4 min ago",
+        "2 min ago",
+        "1 h ago",
+        "5 min ago",
+        "Revoke…",
+        "Details…",
+        ADD_DEVICE,
+        WIFI_GROUP,
+        "Wi-Fi pairing ends in two versions.",
+        WIFI_LISTEN,
+        "Paired 12 Sep",
+        "Wi-Fi",
+        "3 h ago",
+        "Remove…",
+        "Reset Pairing…",
+    ] {
+        assert!(text.contains(expected), "frame 1 shows {expected}: {text}");
+    }
+    for gone in [
+        "Pair an iPhone",
+        "Pair…",
+        "Allow the iPhone app on this network",
+        MOVE,
+        ONLY_THIS_MAC,
+        "Get approvals on your iPhone",
+    ] {
+        assert!(!text.contains(gone), "frame 1 has no {gone}: {text}");
+    }
+    // This Mac has no button; four node and relay devices have Revoke…, the Linux node
+    // has Details….
+    assert_eq!(text.matches("Revoke…").count(), 4, "{text}");
+    assert_eq!(text.matches("Details…").count(), 1, "{text}");
+}
+
+/// Frame 3: the This Mac group in each state, one line and at most one button for each
+/// problem; frame 4: the move row; frame 6d; and frame 7: only this Mac.
+#[test]
+fn devices_node_states_draw_the_mockup() {
+    let with = |node: NodeState, problem: Option<NodeProblem>| DevicesView {
+        node,
+        problem,
+        ..frame_one()
+    };
+    let address = |ipv4: &str| Address {
+        ipv4: ipv4.to_owned(),
+        origin: format!("https://{ipv4}:8444"),
+        port: 8444,
+        words: Some("harbor lemon quartz otter cedar mango".to_owned()),
+    };
+    let only_this_mac = || frame_one().devices.into_iter().take(1).collect::<Vec<_>>();
+    let cases: Vec<(&str, DevicesView, Vec<&str>, Vec<&str>)> = vec![
+        (
+            "3a",
+            with(NodeState::Missing, None),
+            vec![ROUTE_OFF, "Tailscale is not installed.", "Get Tailscale…"],
+            vec!["Address", "Node Words", ROUTE_ON],
+        ),
+        (
+            "3b",
+            with(NodeState::NotConnected, None),
+            vec![ROUTE_OFF, "Tailscale is not connected.", "Check Again"],
+            vec!["Address", "Get Tailscale…"],
+        ),
+        (
+            "3c",
+            with(NodeState::Off, None),
+            vec![ROUTE_OFF, "Notifications", "via your Mac"],
+            vec!["Address", "Port", "Node Words"],
+        ),
+        (
+            "3d",
+            with(NodeState::On { address: None }, None),
+            vec![ROUTE_ON, "Address", "Starting…"],
+            vec!["Node Words", "Copy"],
+        ),
+        (
+            "3f",
+            DevicesView {
+                locked: true,
+                ..with(NodeState::Locked, None)
+            },
+            vec![ROUTE_LOCKED, "Address", "Off"],
+            vec!["Node Words", "Copy"],
+        ),
+        (
+            "3g",
+            with(
+                NodeState::On { address: None },
+                Some(NodeProblem::PortTaken {
+                    port: 8444,
+                    before_pairing: true,
+                }),
+            ),
+            vec![ROUTE_ON, "Another app uses port 8444.", "Use Port 8445"],
+            vec!["Starting…", "Address"],
+        ),
+        (
+            "3g after the first pairing",
+            with(
+                NodeState::On { address: None },
+                Some(NodeProblem::PortTaken {
+                    port: 8444,
+                    before_pairing: false,
+                }),
+            ),
+            vec!["Another app uses port 8444. Quit it."],
+            vec!["Use Port 8445"],
+        ),
+        (
+            "3h",
+            with(
+                NodeState::On {
+                    address: Some(address("100.77.20.5")),
+                },
+                Some(NodeProblem::AddressChanged),
+            ),
+            vec![
+                "100.77.20.5",
+                "The address changed. Paired devices must pair again.",
+                "Pair Again…",
+            ],
+            vec!["Node Words", "Port"],
+        ),
+        (
+            "4",
+            DevicesView {
+                can_move: true,
+                ..frame_one()
+            },
+            vec![
+                "Approvals go through Apassy relay",
+                "Move them here to keep them on your tailnet.",
+                MOVE,
+                ADD_DEVICE,
+            ],
+            vec![],
+        ),
+        (
+            "6d",
+            DevicesView {
+                wifi: frame_one().wifi.map(|wifi| WifiView {
+                    end: WifiEnd::NextVersion,
+                    ..wifi
+                }),
+                ..frame_one()
+            },
+            vec!["Wi-Fi pairing ends in the next version."],
+            vec!["Wi-Fi pairing ends in two versions."],
+        ),
+        (
+            "7",
+            DevicesView {
+                devices: only_this_mac(),
+                wifi: None,
+                ..with(NodeState::Missing, None)
+            },
+            vec![
+                "Tailscale is not installed.",
+                "Get Tailscale…",
+                "Mac mini (office)",
+                ONLY_THIS_MAC,
+                ADD_DEVICE,
+            ],
+            vec![WIFI_GROUP, "Revoke…", "Details…"],
+        ),
+    ];
+    for (frame, view, shown, hidden) in cases {
+        let text = view_texts(&view);
+        for expected in shown {
+            assert!(text.contains(expected), "{frame} shows {expected}: {text}");
+        }
+        for unexpected in hidden {
+            assert!(
+                !text.contains(unexpected),
+                "{frame} hides {unexpected}: {text}"
+            );
+        }
+    }
+    let first_run = DevicesView {
+        devices: only_this_mac(),
+        node: NodeState::Missing,
+        ..frame_one()
+    };
+    assert_eq!(first_run.status_line(), "This Mac only");
+    let off = DevicesView {
+        node: NodeState::Off,
+        ..frame_one()
+    };
+    assert_eq!(off.status_line(), "6 devices");
+}
+
+/// The last contact reads "Now" under a minute, then "4 min ago", "3 h ago",
+/// "Yesterday", "12 Sep"; a device row says `<Kind> · <Role>[ · <Role>]`; the host of an
+/// origin is its address.
+#[test]
+fn devices_words_follow_the_mockup() {
+    use devices::{day_month, last_contact, origin_host};
+    assert_eq!(last_contact(NOW - 59, NOW), "Now");
+    assert_eq!(last_contact(NOW - 240, NOW), "4 min ago");
+    assert_eq!(last_contact(NOW - 3 * 3_600, NOW), "3 h ago");
+    assert_eq!(last_contact(NOW - 90_000, NOW), "Yesterday");
+    assert_eq!(last_contact(1_789_203_600, NOW), "12 Sep");
+    assert_eq!(day_month(0), "1 Jan");
+    assert_eq!(day_month(1_767_225_599), "31 Dec");
+    // 29 Feb 2028, 12:00 UTC.
+    assert_eq!(day_month(1_835_438_400), "29 Feb");
+    let mut device = entry(
+        "MacBook Pro",
+        Kind::Mac,
+        "Syncs Personal",
+        Some(Route::Relay),
+        0,
+        Target::ThisMac,
+    );
+    device.roles.push("Asks for approvals".to_owned());
+    assert_eq!(
+        device.subline(),
+        "Mac · Syncs Personal · Asks for approvals"
+    );
+    assert_eq!(device.button(), None);
+    assert_eq!(origin_host("https://100.101.7.12:8444"), "100.101.7.12");
+    assert_eq!(
+        origin_host("https://build-box.tail0.ts.net"),
+        "build-box.tail0.ts.net"
+    );
+    assert_eq!(
+        [Route::Mac, Route::Relay, Route::Tailnet, Route::Wifi].map(Route::words),
+        ["via your Mac", "via Apassy relay", "Tailnet", "Wi-Fi"]
+    );
+}
+
+/// The sheets of frame 5 and frame 6: Revoke of an iPhone with its watch and of another
+/// Mac, Details… of a Linux node, and the once-only Wi-Fi notice with and without the
+/// route.
+#[test]
+fn devices_sheets_draw_the_mockup() {
+    let sheet_texts = |sheet: DevicesSheet| {
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, DEFAULT)),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| match &sheet {
+                DevicesSheet::Revoke {
+                    device,
+                    vault,
+                    watches,
+                } => {
+                    let mut watches = watches.clone();
+                    devices::revoke_sheet(ui.ctx(), device, vault.as_deref(), &mut watches);
+                }
+                DevicesSheet::Linux { device, vault } => {
+                    devices::linux_sheet(ui.ctx(), device, vault, "https://100.88.4.20:8444");
+                }
+                DevicesSheet::WifiNotice { tailnet } => {
+                    devices::wifi_notice(ui.ctx(), *tailnet);
+                }
+            });
+            texts.clear();
+            for clipped in &output.shapes {
+                texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+            }
+            output.drop_without_applying_deltas();
+        }
+        joined(&texts)
+    };
+    let view = frame_one();
+    let text = sheet_texts(DevicesSheet::Revoke {
+        device: view.devices[1].clone(),
+        vault: None,
+        watches: vec![devices::WatchChoice {
+            index: 2,
+            name: "Rafal's Apple Watch".to_owned(),
+            revoke: true,
+        }],
+    });
+    for expected in [
+        "Revoke Rafal's iPhone?",
+        "It can no longer see or answer questions.",
+        "Also revoke Rafal's Apple Watch",
+        "To use it again, pair it again.",
+        "Cancel",
+        "Revoke",
+    ] {
+        assert!(text.contains(expected), "5a shows {expected}: {text}");
+    }
+    let text = sheet_texts(DevicesSheet::Revoke {
+        device: view.devices[3].clone(),
+        vault: Some("Personal".to_owned()),
+        watches: Vec::new(),
+    });
+    for expected in [
+        "Revoke MacBook Pro?",
+        "It stops syncing Personal and seeing approvals.",
+        "Its copy of the vault stays on that Mac.",
+    ] {
+        assert!(text.contains(expected), "5b shows {expected}: {text}");
+    }
+    assert!(!text.contains("Also revoke"), "{text}");
+    let text = sheet_texts(DevicesSheet::Linux {
+        device: view.devices[5].clone(),
+        vault: "Acme team".to_owned(),
+    });
+    for expected in [
+        "build-box",
+        "Linux node",
+        "Tailnet",
+        "100.88.4.20",
+        "Revoke…",
+        "Done",
+    ] {
+        assert!(text.contains(expected), "Details… shows {expected}: {text}");
+    }
+    for (tailnet, way) in [
+        (
+            true,
+            "The iPhone app now reaches this Mac through your tailnet.",
+        ),
+        (
+            false,
+            "The iPhone app now reaches this Mac through Apassy relay.",
+        ),
+    ] {
+        let text = sheet_texts(DevicesSheet::WifiNotice { tailnet });
+        for expected in [
+            WIFI_NOTICE_TITLE,
+            way,
+            "Wi-Fi pairing ends in two versions.",
+            "OK",
+            "Open Devices",
+        ] {
+            assert!(text.contains(expected), "6a/6b shows {expected}: {text}");
+        }
+    }
+}
+
+/// The route switch and every revoke go through the owner check: the requests name
+/// exactly what changes, and a proof of another action changes nothing.
+#[test]
+fn the_route_switch_and_revoke_name_their_owner_check() {
+    let on = OwnerRequest::SetTailnetRoute { on: true };
+    assert_eq!(on.action(), OwnerAction::SetTailnetRoute { on: true });
+    assert!(
+        on.describe()
+            .starts_with("Make this Mac reachable on your tailnet."),
+        "{}",
+        on.describe()
+    );
+    assert_eq!(
+        OwnerRequest::SetTailnetRoute { on: false }.action(),
+        OwnerAction::SetTailnetRoute { on: false }
+    );
+    let revoke = OwnerRequest::RevokeNodeDevice(devices::RevokeRequest {
+        team_id: "t_node".to_owned(),
+        devices: vec![(2, String::new()), (3, String::new())],
+        device_name: "Rafal's iPhone".to_owned(),
+        node: true,
+        linux_vault: None,
+    });
+    assert_eq!(
+        revoke.action(),
+        OwnerAction::RevokeNodeDevice {
+            team_id: "t_node".to_owned(),
+            device_ids: vec![2, 3],
+            device_name: "Rafal's iPhone".to_owned(),
+        }
+    );
+    assert!(
+        revoke.describe().starts_with("Revoke \"Rafal's iPhone\"."),
+        "{}",
+        revoke.describe()
+    );
+    assert_eq!(
+        OwnerAction::SetTailnetRoute { on: true }.touch_id_title(),
+        "Reach this Mac on your tailnet"
+    );
+    assert!(
+        !OwnerAction::SetTailnetRoute { on: true }
+            .reason()
+            .is_empty()
+    );
+
+    // The completion checks the proof: a proof of another action changes nothing.
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let other = app
+        .owner_gate()
+        .authorize(
+            OwnerAction::SetTailnetRoute { on: false },
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("proof");
+    app.devices_set_route(true, other);
+    assert!(
+        app.status_text.contains("did not match"),
+        "{}",
+        app.status_text
+    );
+    let setting = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.cloud_node_setting().map(|s| s.tailnet_on).ok())
+        .flatten();
+    assert_ne!(setting, Some(true), "the route stays off");
+}
+
+/// Devices of a vault without a team: only this Mac, the hint row, and the one add
+/// button. Without Tailscale the switch cannot move. A lock leaves Settings.
+#[test]
+fn devices_of_a_vault_without_a_team_show_this_mac_and_the_add_button() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    super::super::open_settings(&mut app, SettingsSection::Devices);
+    let (text, _) = frames(&mut app, TALL);
+    for expected in [
+        ROUTE_SWITCH,
+        ROUTE_OFF,
+        "Tailscale is not installed.",
+        ONLY_THIS_MAC,
+        ADD_DEVICE,
+    ] {
+        assert!(text.contains(expected), "shows {expected}: {text}");
+    }
+    assert_eq!(
+        super::status_line(&app, SettingsSection::Devices),
+        "This Mac only"
+    );
+    // The switch is disabled: no Tailscale, no route.
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut switch = None;
@@ -342,49 +959,33 @@ fn relay_switch(app: &mut DesktopApp) -> (bool, Option<egui::accesskit::Toggled>
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, TALL)),
             ..Default::default()
         };
-        let output = ctx.run_ui(input, |ui| super::super::draw(app, ui));
+        let output = ctx.run_ui(input, |ui| super::super::draw(&mut app, ui));
         if let Some(update) = &output.platform_output.accesskit_update {
             for (_, node) in &update.nodes {
-                if node.label() == Some(RELAY_QUESTIONS) {
+                if node.label() == Some(ROUTE_SWITCH) && node.toggled().is_some() {
                     switch = Some((node.is_disabled(), node.toggled()));
                 }
             }
         }
         output.drop_without_applying_deltas();
     }
-    switch.expect("the relay switch is in the AccessKit tree")
-}
+    let (disabled, toggled) = switch.expect("the route switch is in the AccessKit tree");
+    assert!(disabled, "no Tailscale: the switch does not move");
+    assert_eq!(toggled, Some(egui::accesskit::Toggled::False));
 
-/// "Send questions through the relay" is in Settings > Devices and off by default. A vault
-/// that is not on the relay can turn it on too: through a notifications-only team, so
-/// the switch says so. A locked vault cannot change it.
-#[test]
-fn the_relay_questions_switch_offers_a_team_without_relay_sync() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, _) = unlocked_app_with_item(&dir);
-    super::super::open_settings(&mut app, SettingsSection::Devices);
-    let (disabled, toggled) = relay_switch(&mut app);
-    assert!(!disabled, "the relay switch is enabled");
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
-    let (text, _) = frames(&mut app, TALL);
-    assert!(text.contains(RELAY_QUESTIONS_NEW_TEAM), "{text}");
-    assert!(text.contains("Get approvals on your iPhone"), "{text}");
-    assert!(!text.contains("code from the operator"), "{text}");
-
-    // A lock leaves Settings, and a locked vault has no relay state to change.
+    // A lock leaves Settings.
     app.owner_ui.session.lock().expect("lock");
-    assert_eq!(super::relay_questions_state(&app), None);
     frames(&mut app, TALL);
     assert!(app.place.is_credentials(), "a lock leaves Settings");
 }
 
-/// With relay sync, the switch is enabled and still off by default. On is a new channel
-/// that can approve runs: it opens the owner check for exactly the sync team, and nothing
-/// changes before it passes. Then the sync membership has the purpose `questions`, the
-/// vault has its question key, and this Mac is a trusted device. Off needs no check,
-/// takes the purpose away, and keeps relay sync.
+/// With relay sync, turning the approvals on is a new channel that can approve runs: it
+/// opens the owner check for exactly the sync team, and nothing changes before it passes.
+/// Then the devices of the vault show with their route, and Revoke… of an iPhone opens
+/// its sheet; Revoke there asks the owner check, and only the right proof removes the
+/// iPhone. Off needs no check and keeps relay sync.
 #[test]
-fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
+fn devices_list_the_team_and_revoke_needs_the_owner_check() {
     use crate::relay::membership::{QuestionsAvailability, questions_availability};
     // The device list of Devices goes to this relay on 127.0.0.1, never to the network.
     let relay = fake_relay::FakeRelay::start();
@@ -407,11 +1008,6 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
             created_at: 0,
         })
         .expect("relay row");
-    let (disabled, toggled) = relay_switch(&mut app);
-    assert!(!disabled, "the relay switch is enabled");
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
-    let (text, _) = frames(&mut app, TALL);
-    assert!(text.contains(RELAY_QUESTIONS_OFF), "{text}");
 
     let unchanged = |app: &DesktopApp| {
         let shared = app.owner_ui.session.shared_vault();
@@ -426,7 +1022,7 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
         assert!(open.question_key().unwrap().is_none());
         assert!(open.trusted_devices().unwrap().is_empty());
     };
-    super::set_relay_questions(&mut app, true, None);
+    app.questions_turn_on(None);
     let request = app
         .owner
         .check
@@ -439,44 +1035,15 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
         team_id: Some("t_7k2m5q4x3c".to_owned()),
     };
     assert_eq!(request.action(), expected);
-    assert!(matches!(request, OwnerRequest::EnableRelayQuestions { .. }));
-    assert_eq!(
-        expected.reason(),
-        "send the questions of this vault through the relay"
-    );
-    assert!(
-        request
-            .describe()
-            .starts_with("Send the questions of this vault through the Apassy relay"),
-        "{}",
-        request.describe()
-    );
     unchanged(&app);
     assert_eq!(
         app.confirm_owner_now(OwnerCheck::passphrase(WRONG)),
         Err(OwnerAuthError::WrongPassphrase)
     );
     unchanged(&app);
-    // A proof for another action changes nothing.
-    let other = app
-        .owner_gate()
-        .authorize(
-            OwnerAction::EnableRelayQuestions {
-                relay_url: relay.url.clone(),
-                team_id: None,
-            },
-            OwnerCheck::passphrase(PASS),
-        )
-        .expect("proof");
-    super::set_relay_questions(&mut app, true, None);
-    app.finish_owner_check_with(other);
-    unchanged(&app);
-
-    super::set_relay_questions(&mut app, true, None);
+    app.questions_turn_on(None);
     app.confirm_owner_now(OwnerCheck::passphrase(PASS))
         .expect("owner check");
-    let (_, toggled) = relay_switch(&mut app);
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::True));
     {
         let guard = vault.lock().unwrap();
         let open = guard.as_ref().expect("open vault");
@@ -486,80 +1053,110 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
                 team_id: "t_7k2m5q4x3c".to_owned()
             }
         );
-        assert!(open.question_key().unwrap().is_some());
-        let devices = open.trusted_devices().unwrap();
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].sign_key, key.public_key());
     }
     let (text, _) = frames(&mut app, TALL);
-    assert!(text.contains(RELAY_QUESTIONS_ON), "{text}");
     assert!(
-        text.contains("This Mac") && text.contains(ADD_IPHONE),
+        text.contains("This Mac") && text.contains(ADD_DEVICE),
         "{text}"
     );
-    // "Show agents on the iPhone" shows with the questions on, and is on by default.
-    assert!(text.contains(SHOW_AGENTS), "{text}");
-    assert!(!app.ui.feed_off);
-    super::set_feed_shown(&mut app, false);
-    assert!(app.ui.feed_off);
-    let (text, _) = frames(&mut app, TALL);
-    assert!(
-        text.contains(SHOW_AGENTS),
-        "the switch stays to turn it on: {text}"
-    );
-    super::set_feed_shown(&mut app, true);
-    assert!(!app.ui.feed_off);
 
-    // An iPhone linked through the relay counts in the line of Devices, and its
-    // "Remove…" ends where the switches above end.
-    let devices = |app: &DesktopApp| super::status_line(app, SettingsSection::Devices);
-    assert!(
-        devices(&app).ends_with("No iPhone · Relay on"),
-        "{}",
-        devices(&app)
-    );
+    // An iPhone linked through the relay: a row with its route and Revoke….
     let sign = crate::sync::DeviceKey::generate().expect("key");
     let answer = crate::sync::DeviceKey::generate().expect("key");
+    let uuid = "5d2c9e1a-7b3f-4c8d-9e0a-1b2c3d4e5f60";
     vault
         .lock()
         .unwrap()
         .as_mut()
         .expect("open vault")
         .register_trusted_device(
-            "5d2c9e1a-7b3f-4c8d-9e0a-1b2c3d4e5f60",
+            uuid,
             "Synthetic iPhone",
             crate::vault::TrustedDeviceKind::Iphone,
             sign.public_key(),
             Some(answer.public_key()),
         )
         .expect("iPhone row");
-    assert!(
-        devices(&app).ends_with("1 iPhone · Relay on"),
-        "{}",
-        devices(&app)
+    assert_eq!(
+        super::status_line(&app, SettingsSection::Devices),
+        "2 devices"
     );
-    let (text, texts) = frames(&mut app, TALL);
-    assert!(text.contains("Synthetic iPhone"), "{text}");
-    let right_of = |label: &str| {
+    let ctx = egui::Context::default();
+    let mut texts = Vec::new();
+    for _ in 0..3 {
+        texts = frame(&ctx, &mut app, TALL, Vec::new());
+    }
+    let text = joined(&texts);
+    for expected in [
+        "Synthetic iPhone",
+        "iPhone · Approves runs",
+        "via Apassy relay",
+        "Revoke…",
+    ] {
+        assert!(text.contains(expected), "shows {expected}: {text}");
+    }
+    let at = center_of(&texts, "Revoke…", TALL.x).expect("Revoke… is painted");
+    click(&ctx, &mut app, TALL, at);
+    assert!(
+        matches!(&app.ui.devices.sheet, Some(DevicesSheet::Revoke { device, .. }) if device.name == "Synthetic iPhone"),
+        "Revoke… opens its sheet"
+    );
+    assert!(app.owner.check.is_none(), "no owner check before Revoke");
+    let texts = frame(&ctx, &mut app, TALL, Vec::new());
+    assert!(
         texts
             .iter()
-            .find(|(painted, _)| painted == label)
-            .map(|(_, rect)| rect.right())
-            .unwrap_or_else(|| panic!("{label} is painted: {text}"))
-    };
-    // The relay switch, 32 points wide, is 8 points right of its value.
-    let switches = right_of("End-to-end encrypted") + 8.0 + 32.0;
-    let remove = right_of(super::REMOVE_DEVICE);
+            .any(|(text, _)| text == "Revoke Synthetic iPhone?"),
+        "the sheet shows: {}",
+        joined(&texts)
+    );
+    let revoke = texts
+        .iter()
+        .find(|(text, _)| text == "Revoke")
+        .map(|(_, rect)| rect.center())
+        .expect("the Revoke button is painted");
+    click(&ctx, &mut app, TALL, revoke);
+    assert!(app.ui.devices.sheet.is_none(), "the sheet closes");
+    let request = app
+        .owner
+        .check
+        .as_ref()
+        .expect("the owner check opens")
+        .request
+        .clone();
     assert!(
-        (remove - switches).abs() <= 1.0,
-        "Remove… ends at {remove}, the switches at {switches}"
+        matches!(&request, OwnerRequest::RevokeNodeDevice(r) if r.device_name == "Synthetic iPhone" && !r.node),
+        "{request:?}"
+    );
+    let present = |app: &DesktopApp| {
+        let shared = app.owner_ui.session.shared_vault();
+        let guard = shared.lock().unwrap();
+        guard
+            .as_ref()
+            .expect("open vault")
+            .trusted_devices()
+            .unwrap()
+            .iter()
+            .any(|device| device.uuid == uuid)
+    };
+    assert_eq!(
+        app.confirm_owner_now(OwnerCheck::passphrase(WRONG)),
+        Err(OwnerAuthError::WrongPassphrase)
+    );
+    assert!(present(&app), "a wrong passphrase revokes nothing");
+    app.ask_owner(request.clone(), None);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert!(!present(&app), "the right proof revokes the iPhone");
+    assert!(
+        app.status_text.contains("Synthetic iPhone revoked"),
+        "{}",
+        app.status_text
     );
 
-    // Off: stricter, no check.
-    super::set_relay_questions(&mut app, false, None);
+    // Off: stricter, no check; relay sync stays.
+    app.questions_turn_off();
     assert!(app.owner.check.is_none(), "off needs no owner check");
-    let (_, toggled) = relay_switch(&mut app);
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::False));
     let guard = vault.lock().unwrap();
     let open = guard.as_ref().expect("open vault");
     assert_eq!(
@@ -569,63 +1166,6 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
             .team_id,
         "t_7k2m5q4x3c"
     );
-    assert_eq!(
-        questions_availability(open).unwrap(),
-        QuestionsAvailability::CanTurnOn {
-            team_id: "t_7k2m5q4x3c".to_owned()
-        }
-    );
-    drop(guard);
-    // The iPhone answers no question without the relay.
-    assert!(devices(&app).ends_with("No iPhone"), "{}", devices(&app));
-}
-
-/// The iPhones of Devices: the paired iPhones of this network and the iPhones of the
-/// relay, an iPhone in both once.
-#[test]
-fn devices_counts_each_iphone_once() {
-    use super::{iphone_count, iphones_words};
-    use crate::vault::{CompanionDevice, TrustedDevice, TrustedDeviceKind};
-    let paired = |name: &str| CompanionDevice {
-        device_id: "0123456789abcdef0123456789abcdef".to_owned(),
-        name: name.to_owned(),
-        paired_at: 0,
-        last_seen_at: None,
-    };
-    let relay = |name: &str| TrustedDevice {
-        uuid: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
-        name: name.to_owned(),
-        kind: TrustedDeviceKind::Iphone,
-        relay_devices: Default::default(),
-        sign_key: vec![4; 65],
-        answer_key: None,
-        created_at: 0,
-        updated_at: 0,
-        updated_by: String::new(),
-    };
-    assert_eq!(iphone_count(&[], &[]), 0);
-    assert_eq!(iphone_count(&[paired("Synthetic iPhone")], &[]), 1);
-    assert_eq!(iphone_count(&[], &[relay("Synthetic iPhone")]), 1);
-    // The same iPhone, paired here and linked through the relay.
-    assert_eq!(
-        iphone_count(&[paired("Synthetic iPhone")], &[relay("Synthetic iPhone ")]),
-        1
-    );
-    assert_eq!(
-        iphone_count(&[paired("Synthetic iPhone")], &[relay("Work iPhone")]),
-        2
-    );
-    // Two iPhones of the relay with one name, and one of them paired here.
-    assert_eq!(
-        iphone_count(
-            &[paired("Synthetic iPhone")],
-            &[relay("Synthetic iPhone"), relay("Synthetic iPhone")]
-        ),
-        2
-    );
-    assert_eq!(iphones_words(0), "No iPhone");
-    assert_eq!(iphones_words(1), "1 iPhone");
-    assert_eq!(iphones_words(2), "2 iPhones");
 }
 
 /// What Devices says of each device of the questions: its kind, how it answers, and the
