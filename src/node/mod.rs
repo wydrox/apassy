@@ -1227,6 +1227,45 @@ impl Node {
         ))
     }
 
+    /// The pin and the alternatives of the running route: the certificate that the front
+    /// serves now.
+    fn route_trust(&self) -> Result<(String, Vec<String>), NodeError> {
+        let running = lock(&self.running);
+        running
+            .as_ref()
+            .and_then(|running| running.tailnet.as_ref())
+            .map(|route| (route.pin.text(), route.alt.clone()))
+            .ok_or_else(|| error("node_stopped", "The node is not running."))
+    }
+
+    /// Give `membership`, a team of this node, the pin and the alternatives of the running
+    /// route, in the vault too, when they differ: the node certificate was replaced (its
+    /// key did not open) or the alternatives changed. This Mac is that node and reaches it
+    /// through the local route, so the stored pin only feeds the pairing links. Without
+    /// this, every new pairing link would carry the old pin and every iPhone would refuse
+    /// it (N8-2).
+    fn take_route_trust(
+        &self,
+        vault: &SharedVault,
+        epoch: [u8; 32],
+        membership: &mut RelayMembership,
+    ) -> Result<(), NodeError> {
+        let (pin, alt) = self.route_trust()?;
+        if membership.pin.as_deref() == Some(pin.as_str()) && membership.alt == alt {
+            return Ok(());
+        }
+        let mut guard = lock(vault);
+        let open = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.epoch() == epoch)
+            .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
+        open.set_membership_trust(&membership.team_id, Some(&pin), &alt)
+            .map_err(|_| error("vault_error", "The relay membership cannot be saved."))?;
+        membership.pin = Some(pin);
+        membership.alt = alt;
+        Ok(())
+    }
+
     /// The questions team of the open vault on this node (plan D6): the membership of an
     /// earlier call, or a new team of devices with this Mac, named `device_name`, as its
     /// first device; the vault keeps it (`adopt_node_team`) and the questions worker uses
@@ -1256,9 +1295,10 @@ impl Node {
             .shared()
             .ok_or_else(|| error("node_stopped", "The node is not running."))?;
         match found {
-            (Some(membership), _) if questions_team::on_node(&membership, &origin) => {
+            (Some(mut membership), _) if questions_team::on_node(&membership, &origin) => {
                 let team = NodeTeamId(membership.team_id.clone());
                 if shared.with_node(|node| node.has_team(&team)) == Some(true) {
+                    self.take_route_trust(vault, epoch, &mut membership)?;
                     return Ok(membership);
                 }
                 // The node lost the team (its directory is new): the membership names
@@ -1316,7 +1356,7 @@ impl Node {
         vault: &SharedVault,
     ) -> Result<(QuestionsClient, LinkCode), NodeError> {
         let (origin, name, epoch) = self.route_info()?;
-        let membership = {
+        let mut membership = {
             let guard = lock(vault);
             let open = guard
                 .as_ref()
@@ -1330,6 +1370,9 @@ impl Node {
                 "This vault has no approvals on this Mac yet. Turn them on first.",
             )
         })?;
+        // The link names the certificate that the front serves now, never a stored pin
+        // of a replaced one (N8-2).
+        self.take_route_trust(vault, epoch, &mut membership)?;
         let client =
             QuestionsClient::from_membership(&membership).map_err(questions_team::sync_error)?;
         let link = questions_team::device_link(&client, &membership, Some(&name))

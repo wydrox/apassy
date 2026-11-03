@@ -240,6 +240,40 @@ fn the_questions_team_is_made_once_and_reused_after_a_restart() {
 }
 
 #[test]
+fn after_a_certificate_replacement_the_team_and_its_links_take_the_new_pin() {
+    let fx = fixture();
+    fx.start();
+    let old_pin = fx.node.status(&fx.vault).tailnet.pin.unwrap();
+    let first = fx
+        .node
+        .ensure_questions_team(&fx.vault, "Synthetic Mac")
+        .unwrap();
+    assert_eq!(first.pin.as_deref(), Some(old_pin.as_str()));
+    fx.node.stop();
+    // The certificate is lost while the relay directory and the team stay: the next
+    // start makes a new one, and the pin changes.
+    let front = fx._dir.path().join("node").join(tailnet::FRONT_DIR);
+    std::fs::remove_file(front.join(crate::net::certificate::CERT_FILE)).unwrap();
+    fx.start();
+    let new_pin = fx.node.status(&fx.vault).tailnet.pin.unwrap();
+    assert_ne!(new_pin, old_pin);
+    // The same team, with the pin that the front serves now, in the vault too.
+    let again = fx
+        .node
+        .ensure_questions_team(&fx.vault, "Synthetic Mac")
+        .unwrap();
+    assert_eq!(again.team_id, first.team_id);
+    assert_eq!(again.pin.as_deref(), Some(new_pin.as_str()));
+    let kept = fx.with_vault(|vault| questions_membership(vault).unwrap().unwrap());
+    assert_eq!(kept.pin.as_deref(), Some(new_pin.as_str()));
+    // A pairing link is built from that membership (`questions_team::device_link`): it
+    // carries the new pin.
+    let url = crate::sync::membership_relay_url(&kept).unwrap();
+    assert_eq!(url.pin().map(|pin| pin.text()), Some(new_pin));
+    fx.node.stop();
+}
+
+#[test]
 fn revoke_removes_the_device_on_the_node_and_its_row_and_refuses_this_mac() {
     let fx = fixture();
     fx.start();
