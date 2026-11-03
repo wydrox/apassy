@@ -21,10 +21,13 @@
 //!   one from this Mac ([`RemoteAnswering::send`], signed with the relay key of this Mac,
 //!   an approving answer only with a fresh owner check).
 //!
-//! Two more threads carry the feed of the agents of this Mac for the iPhone (contract
-//! relay-feed-v1, `super::feed`): the publisher, which puts the sealed feed on the relay
-//! after a change and at the beat, and the action handler, which long-polls the
-//! removals of exceptions that an iPhone sends and applies the ones that pass.
+//! Three more threads carry the feeds of the agents (contract relay-feed-v1): the
+//! publisher (`super::feed`), which puts the sealed feed of this Mac on the relay after a
+//! change and at the beat; the action handler, which long-polls the removals of
+//! exceptions that an iPhone sends and applies the ones that pass; and the reader
+//! (`super::feed_reader`), which long-polls the feeds of the other Macs of the vault and
+//! keeps the good ones for the window ([`QuestionsWorker::with_other_macs`]). A Mac sends
+//! no action of the feed.
 //!
 //! The local card and the local-network companion are unchanged: the card shows at once,
 //! and whichever answer the queue takes first counts. A lock drops the relay token and
@@ -53,6 +56,7 @@ use super::envelope::{
     valid_key_id, valid_qid,
 };
 use super::feed::FeedState;
+use super::feed_reader::{OtherMac, OtherMacs, Reader as FeedReader};
 use crate::broker::SharedVault;
 use crate::broker::approvals::{
     ApprovalOutcome, ApprovalQueue, ApprovalRefusal, CheckMethod, OwnerAction, OwnerAuthError,
@@ -126,8 +130,10 @@ pub struct QuestionsConfig {
     pub tick: Duration,
     /// The name of this Mac for its trusted device row.
     pub device_name: String,
-    /// Publish the feed of the agents for the iPhone and take its actions
-    /// (relay-feed-v1, "Show agents on the iPhone"). On by default.
+    /// The feeds of the agents (relay-feed-v1): publish the feed of this Mac for the other
+    /// devices of the vault and take the actions of an iPhone ("Show agents on my other
+    /// devices" turns the publishing off at run time), and read the feeds of the other
+    /// Macs. On by default.
     pub feed: bool,
     /// The shortest time between two feeds (relay-feed-v1 section 8): 10 s.
     pub feed_every: Duration,
@@ -569,8 +575,13 @@ pub(super) struct Shared {
     pub(super) feed_poll: Mutex<Option<Arc<Cancel>>>,
     /// One feed goes to the relay at a time.
     pub(super) publishing: Mutex<()>,
-    /// "Show agents on the iPhone" at run time ([`QuestionsWorker::set_feed`]).
+    /// "Show agents on my other devices" at run time ([`QuestionsWorker::set_feed`]).
     pub(super) feed_on: AtomicBool,
+    /// The feeds of the other Macs of the vault (`super::feed_reader`).
+    pub(super) feed_reader: Mutex<FeedReader>,
+    /// What the reader shows of them, apart from the view: the window reads it each frame
+    /// without a copy of every feed.
+    pub(super) other_macs: Mutex<OtherMacs>,
 }
 
 /// The questions waiter of the app. It stops when dropped.
@@ -611,6 +622,8 @@ impl QuestionsWorker {
             feed_poll: Mutex::new(None),
             publishing: Mutex::new(()),
             feed_on: AtomicBool::new(true),
+            feed_reader: Mutex::new(FeedReader::default()),
+            other_macs: Mutex::new(OtherMacs::default()),
         });
         let mut threads = Vec::new();
         for (name, body) in [
@@ -623,6 +636,7 @@ impl QuestionsWorker {
             ),
             ("apassy-feed-publish", feed_publisher as fn(&Shared)),
             ("apassy-feed-actions", feed_actions as fn(&Shared)),
+            ("apassy-feed-read", feed_reading as fn(&Shared)),
         ] {
             let worker = Arc::clone(&shared);
             if let Ok(handle) = std::thread::Builder::new()
@@ -666,9 +680,10 @@ impl QuestionsWorker {
         self.shared.forget();
     }
 
-    /// "Show agents on the iPhone" (relay-feed-v1 section 8): off removes the feed of
-    /// this Mac from the relay (`DELETE /v1/feed`) and stops the actions; on publishes
-    /// again. The publisher thread calls the relay, so the caller never waits.
+    /// "Show agents on my other devices" (relay-feed-v1 section 8): off removes the feed
+    /// of this Mac from the relay (`DELETE /v1/feed`) and stops the actions; on publishes
+    /// again. The publisher thread calls the relay, so the caller never waits. The feeds
+    /// of the other Macs are read either way.
     pub fn set_feed(&self, on: bool) {
         let was = self.shared.feed_on.swap(on, Ordering::SeqCst);
         if was != on {
@@ -680,9 +695,18 @@ impl QuestionsWorker {
         self.shared.wake();
     }
 
-    /// Whether "Show agents on the iPhone" is on.
+    /// Whether "Show agents on my other devices" is on.
     pub fn feed_on(&self) -> bool {
         self.shared.feed_on.load(Ordering::SeqCst)
+    }
+
+    /// Run `f` with the vault session that read the feeds of the other Macs (`None`: no
+    /// session) and the other Macs with their last feeds (relay-feed-v1 section 7.4, a Mac
+    /// as a reader), by name. The window compares them with what it shows each frame,
+    /// without a copy.
+    pub fn with_other_macs<T>(&self, f: impl FnOnce(Option<[u8; 32]>, &[OtherMac]) -> T) -> T {
+        let shown = lock(&self.shared.other_macs);
+        f(shown.epoch, &shown.macs)
     }
 
     /// What it takes to answer the remote question `id` of the view from this Mac: the
@@ -809,6 +833,7 @@ impl Shared {
         self.end_poll();
         self.end_feed_poll();
         self.forget_remote();
+        self.forget_feeds();
         let mut view = lock(&self.view);
         if view.on || !view.posted.is_empty() || !view.local_only.is_empty() {
             view.on = false;
@@ -2170,6 +2195,12 @@ fn feed_publisher(shared: &Shared) {
 fn feed_actions(shared: &Shared) {
     while !shared.stop.load(Ordering::SeqCst) {
         shared.actions_step();
+    }
+}
+
+fn feed_reading(shared: &Shared) {
+    while !shared.stop.load(Ordering::SeqCst) {
+        shared.feed_read_step();
     }
 }
 
