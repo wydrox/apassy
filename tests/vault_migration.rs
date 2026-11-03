@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 27;
+const CURRENT_VERSION: i64 = 29;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -2395,6 +2395,8 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     for name in names {
         conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
     }
+    // Schema 29 (the host of the bouncer brain) first.
+    conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
     // Schema 27 (the Bouncer figures) and 26 (the cloud agents of the node) first, then
     // 23 to 20.
     conn.execute_batch(
@@ -2504,4 +2506,145 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     created.unlock(PASS).expect("unlock");
     drop(created);
     assert_eq!(schema_ddl(&path), schema_ddl(&fresh));
+}
+
+/// The schema before schema 29 in the migration chain (`src/vault/schema29.rs`,
+/// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
+const PREVIOUS_VERSION: i64 = 27;
+
+/// What a file of schema 29 has and a file of the previous schema has not: the host of
+/// the bouncer brain and the candidate columns of unit F (plan 0035).
+const SCHEMA29_ONLY: &str = "
+DROP TABLE bouncer_host;
+ALTER TABLE model_candidate DROP COLUMN origin;
+ALTER TABLE model_candidate DROP COLUMN job_host;
+ALTER TABLE model_candidate DROP COLUMN job_id;
+ALTER TABLE model_candidate DROP COLUMN uploaded_to;
+ALTER TABLE model_activation DROP COLUMN heads_sha256;
+";
+
+/// A file of the previous schema: a current vault with an item, an agent, a candidate
+/// and a hosting choice, then without the parts of schema 29 and with the marks of the
+/// previous schema.
+fn build_previous(path: &Path) -> u64 {
+    let mut vault = Vault::create(path, PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    vault
+        .add(apassy::vault::ItemDraft {
+            title: "MIG previous".to_owned(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![apassy::vault::Field {
+                name: "token".to_owned(),
+                value: apassy::vault::SecretValue::new("MIG-SECRET-previous".to_owned()),
+                secret: true,
+            }],
+        })
+        .expect("item");
+    vault.register_agent("MIG previous agent").expect("agent");
+    let candidate = vault
+        .register_candidate(&migrated_candidate(), u64::try_from(now()).expect("now"))
+        .expect("candidate")
+        .id;
+    vault
+        .set_bouncer_host(
+            apassy::vault::BouncerHostRole::Hosting,
+            &apassy::vault::BouncerHostChange {
+                kind: apassy::vault::BouncerHostKind::OwnServer,
+                url: "https://brain.mig.invalid".to_owned(),
+                bearer: Some(apassy::vault::SecretValue::new(
+                    "MIG-bearer-0123456789abcdef".to_owned(),
+                )),
+                consent_version: apassy::vault::HOSTING_CONSENT_VERSION,
+            },
+            1_700_000_000,
+        )
+        .expect("host");
+    vault.lock().expect("lock");
+    drop(vault);
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
+    conn.execute_batch(&format!(
+        "UPDATE vault_meta SET schema_version = {PREVIOUS_VERSION} WHERE id = 1;
+         PRAGMA user_version = {PREVIOUS_VERSION};"
+    ))
+    .expect("previous marks");
+    conn.close().map_err(|(_, e)| e).expect("close");
+    assert_eq!(raw_versions(path), (PREVIOUS_VERSION, PREVIOUS_VERSION));
+    candidate
+}
+
+/// Unlock moves a file of the previous schema to schema 29. Its data stays, the hosting
+/// choice is "this Mac" (no row), and the candidate is a local one.
+#[test]
+fn unlock_migrates_the_previous_schema_to_29_with_this_mac() {
+    let dir = real_kdf_dir();
+    let path = dir.path().join("previous.db");
+    let candidate = build_previous(&path);
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_eq!(vault.search("").expect("search").len(), 1);
+    assert_eq!(vault.list_agents().expect("agents").len(), 1);
+    let record = vault
+        .candidate(candidate)
+        .expect("read")
+        .expect("the candidate stays");
+    assert_eq!(record.state, CandidateState::Shadow);
+    for role in apassy::vault::BouncerHostRole::ALL {
+        assert_eq!(vault.bouncer_host(role).expect("read"), None, "{role:?}");
+        assert!(vault.bouncer_host_bearer(role).expect("read").is_none());
+    }
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    let origin: String = conn
+        .query_row("SELECT origin FROM model_candidate", [], |row| row.get(0))
+        .expect("origin");
+    assert_eq!(origin, "local");
+    conn.close().map_err(|(_, e)| e).expect("close");
+}
+
+/// The step to schema 29 runs in one transaction. A table with the name of the new table
+/// makes it fail, and the file keeps the previous schema and its data.
+#[test]
+fn a_failed_migration_to_29_keeps_the_previous_schema_and_data() {
+    let dir = real_kdf_dir();
+    let path = dir.path().join("blocked-previous.db");
+    build_previous(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE bouncer_host (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, e)| e).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(
+        raw_versions(&path),
+        (PREVIOUS_VERSION, PREVIOUS_VERSION),
+        "no partial migration"
+    );
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let column = conn.prepare("SELECT origin FROM model_candidate LIMIT 0");
+        assert!(column.is_err(), "no column of schema 29");
+        drop(column);
+        conn.execute_batch("DROP TABLE bouncer_host;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, e)| e).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_eq!(vault.search("").expect("search").len(), 1);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 }

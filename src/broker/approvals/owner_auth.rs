@@ -357,6 +357,24 @@ pub enum OwnerAction {
     RollbackModel {
         activation_id: u64,
     },
+    /// Change who hosts the bouncer brain (ADR 0035 section 1): this Mac, the owner's
+    /// server, or Apassy Connect. The proof names the kind, the `https://` address as the
+    /// vault stores it (empty for this Mac) and the consent screen that the owner
+    /// accepted (0 for this Mac). A return to this Mac needs the check too. The global
+    /// owner window never covers it ([`OwnerAction::needs_fresh_local_check`]), and no
+    /// phone or other Mac can make it.
+    ChangeBouncerHosting {
+        kind: crate::vault::BouncerHostKind,
+        url: String,
+        consent_version: u32,
+    },
+    /// Change who trains the bouncer brain (ADR 0035 section 1), with the same rules as
+    /// [`OwnerAction::ChangeBouncerHosting`].
+    ChangeBouncerTraining {
+        kind: crate::vault::BouncerHostKind,
+        url: String,
+        consent_version: u32,
+    },
     /// Open a command-line session (ADR 0017). The session can read and change the vault
     /// like the views, but every action in this list still needs its own check.
     OpenCliSession,
@@ -411,6 +429,16 @@ pub enum OwnerAction {
         relay_url: String,
         team_id: Option<String>,
     },
+}
+
+/// Where the bouncer brain runs or trains, for the owner texts. No address: the dialog
+/// shows it.
+fn host_words(kind: crate::vault::BouncerHostKind) -> &'static str {
+    match kind {
+        crate::vault::BouncerHostKind::ThisMac => "on this Mac",
+        crate::vault::BouncerHostKind::OwnServer => "on your server",
+        crate::vault::BouncerHostKind::Connect => "at Apassy Connect",
+    }
 }
 
 /// The words for the Touch ID prompt after the relying party of a passkey. `None` is
@@ -532,6 +560,8 @@ impl OwnerAction {
                 "Remove an Apple Watch"
             }
             Self::RemoveOlderIphone { .. } => "Remove an iPhone",
+            Self::ChangeBouncerHosting { .. } => "Change the bouncer brain host",
+            Self::ChangeBouncerTraining { .. } => "Change the bouncer brain training",
             _ => "Confirm with Touch ID",
         }
     }
@@ -677,6 +707,12 @@ impl OwnerAction {
             }
             Self::PromoteModel { .. } => "promote a new bouncer brain".to_owned(),
             Self::RollbackModel { .. } => "roll back the bouncer brain".to_owned(),
+            Self::ChangeBouncerHosting { kind, .. } => {
+                format!("run the bouncer brain {}", host_words(*kind))
+            }
+            Self::ChangeBouncerTraining { kind, .. } => {
+                format!("train the bouncer brain {}", host_words(*kind))
+            }
             Self::OpenCliSession => "start a command-line session".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "bind 1 environment variable".to_owned(),
@@ -708,6 +744,17 @@ impl OwnerAction {
                 "send the questions of this vault through the relay".to_owned()
             }
         }
+    }
+
+    /// True for an action that only a fresh Touch ID or passphrase check on this Mac can
+    /// confirm: the global owner window never covers it (ADR 0035 section 1, plan 0035
+    /// C2). A change of the bouncer brain host or trainer sends request data to another
+    /// computer, so each change asks again.
+    pub fn needs_fresh_local_check(&self) -> bool {
+        matches!(
+            self,
+            Self::ChangeBouncerHosting { .. } | Self::ChangeBouncerTraining { .. }
+        )
     }
 
     /// The waiting run of an approval action.
@@ -2095,7 +2142,8 @@ pub(crate) enum LocalWindowSource {
 impl LocalWindowSource {
     fn permits(self, action: &OwnerAction) -> bool {
         match self {
-            Self::LocalOwner => true,
+            // A change of the bouncer brain host or trainer always asks again.
+            Self::LocalOwner => !action.needs_fresh_local_check(),
             Self::BrowserDebuggingClick => matches!(action, OwnerAction::BrowserDebugging { .. }),
             Self::BrowserGesture => matches!(
                 action,

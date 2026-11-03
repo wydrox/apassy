@@ -470,6 +470,17 @@ pub enum OwnerRequest {
         from: String,
         to: String,
     },
+    /// Change who hosts the bouncer brain (ADR 0035 section 1). `change` has the bearer
+    /// of an own server (redacted in `Debug`); the proof names the kind, the address and
+    /// the consent screen (`OwnerAction::ChangeBouncerHosting`). The global owner window
+    /// never covers it.
+    ChangeBouncerHosting {
+        change: crate::vault::BouncerHostChange,
+    },
+    /// Change who trains the bouncer brain (ADR 0035 section 1), with the same rules.
+    ChangeBouncerTraining {
+        change: crate::vault::BouncerHostChange,
+    },
     AllowOperation {
         agent_id: u64,
         item_id: u64,
@@ -892,6 +903,14 @@ impl OwnerRequest {
             Self::RollbackModel { activation_id, .. } => OwnerAction::RollbackModel {
                 activation_id: *activation_id,
             },
+            Self::ChangeBouncerHosting { change } => crate::broker::brain_host::owner_action(
+                crate::vault::BouncerHostRole::Hosting,
+                change,
+            ),
+            Self::ChangeBouncerTraining { change } => crate::broker::brain_host::owner_action(
+                crate::vault::BouncerHostRole::Training,
+                change,
+            ),
             Self::AllowOperation {
                 agent_id, item_id, ..
             }
@@ -1223,6 +1242,8 @@ impl OwnerRequest {
             Self::RollbackModel { from, to, .. } => {
                 format!("Roll back the bouncer brain from {from} to {to}.")
             }
+            Self::ChangeBouncerHosting { change } => hosting_words(change),
+            Self::ChangeBouncerTraining { change } => training_words(change),
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
             }
@@ -1414,6 +1435,46 @@ impl OwnerRequest {
                 )
             }
         }
+    }
+}
+
+/// The owner check text of a change of the bouncer brain host: what leaves the Mac and
+/// the trust warning (ADR 0035 sections 1, 4 and 5). No bearer.
+fn hosting_words(change: &crate::vault::BouncerHostChange) -> String {
+    use crate::vault::BouncerHostKind;
+    let url = page_text(&change.normalized_url());
+    let sent = "Each bouncer request goes there: the user request, the command, the relative folder, the purpose, the variable names and your rule. No secret value, vault path or full project path leaves this Mac, and the bouncer gate still decides on this Mac.";
+    let trust = "A server that someone else controls can make the bouncer run development commands without asking you. It can never allow production, a hard check, secret output or another host.";
+    match change.kind {
+        BouncerHostKind::ThisMac => {
+            "Run the bouncer brain on this Mac again. Bouncer requests stay on this Mac.".to_owned()
+        }
+        BouncerHostKind::OwnServer => {
+            format!("Use the bouncer brain on your server at {url}. {sent} {trust}")
+        }
+        BouncerHostKind::Connect => format!(
+            "Use the bouncer brain of Apassy Connect at {url}. {sent} Apassy keeps a request in memory only while it answers it. {trust}"
+        ),
+    }
+}
+
+/// The owner check text of a change of the bouncer brain trainer (ADR 0035 sections 1
+/// and 4). No bearer.
+fn training_words(change: &crate::vault::BouncerHostChange) -> String {
+    use crate::vault::BouncerHostKind;
+    let url = page_text(&change.normalized_url());
+    let sent = "For each training, the training examples go there: your past decisions with their requests, without secret values. A new head set always starts in shadow mode, and only you promote it.";
+    match change.kind {
+        BouncerHostKind::ThisMac => {
+            "Train the bouncer brain on this Mac again. Training examples stay on this Mac."
+                .to_owned()
+        }
+        BouncerHostKind::OwnServer => {
+            format!("Train the bouncer brain on your server at {url}. {sent}")
+        }
+        BouncerHostKind::Connect => format!(
+            "Train the bouncer brain at Apassy Connect ({url}). {sent} Apassy deletes the examples when the job ends, and at the latest after 24 hours."
+        ),
     }
 }
 
@@ -2110,6 +2171,12 @@ impl DesktopApp {
             }
             OwnerRequest::RollbackModel { activation_id, .. } => {
                 super::learning_ui::roll_back_model(self, activation_id, proof);
+            }
+            OwnerRequest::ChangeBouncerHosting { change } => {
+                self.change_bouncer_host(crate::vault::BouncerHostRole::Hosting, change, proof);
+            }
+            OwnerRequest::ChangeBouncerTraining { change } => {
+                self.change_bouncer_host(crate::vault::BouncerHostRole::Training, change, proof);
             }
             OwnerRequest::AllowOperation {
                 agent_id,
