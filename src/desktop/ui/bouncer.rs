@@ -504,6 +504,11 @@ pub(crate) struct ConnectLine {
     pub(crate) code: String,
     pub(crate) at: u64,
     pub(crate) expires_at: u64,
+    /// Where the code goes back: "Returns to <host>" (`crate::node::connect_returns_to`).
+    pub(crate) returns_to: String,
+    /// The code goes back to a program on a computer (`crate::node::connect_is_local`):
+    /// a program on this Mac can have started the request.
+    pub(crate) local: bool,
 }
 
 /// The remote access of another Mac, from its feed v2 (F6). Never its address.

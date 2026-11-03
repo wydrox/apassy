@@ -32,6 +32,8 @@ pub(crate) fn pending_connects(app: &DesktopApp) -> Vec<ConnectLine> {
             code: connect.code.clone(),
             at: connect.created_at,
             expires_at: connect.expires_at,
+            returns_to: crate::node::connect_returns_to(connect),
+            local: crate::node::connect_is_local(connect),
         })
         .collect();
     connects.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));

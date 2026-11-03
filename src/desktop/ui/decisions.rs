@@ -1661,6 +1661,8 @@ fn connect_detail(
         mac: this_mac_name(app),
         left: cards::left_text(connect.expires_at, unix_now()),
         code: connect.code.clone(),
+        returns_to: connect.returns_to.clone(),
+        local: connect.local,
     };
     columns::detail_toolbar(ui, |_| {});
     let answer = cards::card_bar(ui, ("connect", &connect.id), "Allow", true);

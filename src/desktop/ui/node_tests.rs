@@ -227,6 +227,16 @@ fn unix_now() -> u64 {
 
 /// Wait until the node (its host thread) lists the connect request `id`.
 pub(super) fn offered(fx: &Fixture, id: &str, client: &str) -> PendingConnect {
+    offered_to(fx, id, client, "grok.example")
+}
+
+/// [`offered`] for a request whose code goes back to `redirect_host`.
+pub(super) fn offered_to(
+    fx: &Fixture,
+    id: &str,
+    client: &str,
+    redirect_host: &str,
+) -> PendingConnect {
     fx.backend
         .state
         .lock()
@@ -239,7 +249,7 @@ pub(super) fn offered(fx: &Fixture, id: &str, client: &str) -> PendingConnect {
             code: "K7Q-4MD".to_owned(),
             created_at: unix_now(),
             expires_at: unix_now() + 300,
-            redirect_host: "grok.example".to_owned(),
+            redirect_host: redirect_host.to_owned(),
         });
     let end = Instant::now() + Duration::from_secs(20);
     loop {

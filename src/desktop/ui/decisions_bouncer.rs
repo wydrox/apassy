@@ -19,6 +19,11 @@ use eframe::egui::{self, Frame, Label, Margin, Ui};
 
 use super::bouncer::{self, ActivityScope, BouncerData, LogEvent, LogKind, LogOutcome, LogSource};
 use super::kit::{self, Font, Icon, Style, Tone};
+#[cfg(feature = "vault")]
+use crate::questions::envelope::LOCAL_CONNECT_WARNING;
+/// `questions::envelope::LOCAL_CONNECT_WARNING` for the demo build, which has no vault.
+#[cfg(not(feature = "vault"))]
+const LOCAL_CONNECT_WARNING: &str = "A program on this Mac can start this request.";
 
 /// The rows of History at most.
 pub(crate) const HISTORY_ROWS: usize = 200;
@@ -577,6 +582,11 @@ pub(crate) struct ConnectCard {
     /// "4:31".
     pub(crate) left: String,
     pub(crate) code: String,
+    /// "Returns to <host>": where the code goes back (`crate::node::connect_returns_to`).
+    pub(crate) returns_to: String,
+    /// The code goes back to a program on a computer (`crate::node::connect_is_local`):
+    /// the line is a warning, with [`LOCAL_CONNECT_WARNING`].
+    pub(crate) local: bool,
 }
 
 /// The time left of a request that ends at `expires_at`: "4:31".
@@ -620,19 +630,29 @@ pub(crate) fn connect_card(ui: &mut Ui, card: &ConnectCard) {
     kit::section(ui, None, None, |s| {
         s.labeled("Code", kit::text(&card.code, Font::Mono).color(kit::LABEL));
     });
+    if card.local {
+        warning_line(ui, &format!("{} {LOCAL_CONNECT_WARNING}", card.returns_to));
+    } else {
+        ui.horizontal(|ui| {
+            ui.add_space(2.0);
+            ui.add(
+                Label::new(kit::text(&card.returns_to, Font::Callout).color(kit::SECONDARY)).wrap(),
+            );
+        });
+    }
+    ui.add_space(6.0);
+    warning_line(
+        ui,
+        &format!("Deny unless you just added Apassy to {}.", card.name),
+    );
+}
+
+/// A line of a card with the warning mark, in the warning color.
+fn warning_line(ui: &mut Ui, text: &str) {
     ui.horizontal(|ui| {
         ui.add_space(2.0);
         kit::paint_icon_in(ui, Icon::Warning, 14.0, Tone::Warning.mark());
-        ui.add(
-            Label::new(
-                kit::text(
-                    format!("Deny unless you just added Apassy to {}.", card.name),
-                    Font::Callout,
-                )
-                .color(Tone::Warning.text()),
-            )
-            .wrap(),
-        );
+        ui.add(Label::new(kit::text(text, Font::Callout).color(Tone::Warning.text())).wrap());
     });
 }
 

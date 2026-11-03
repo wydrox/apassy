@@ -1263,6 +1263,8 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
         code: "K7Q-4MD".to_owned(),
         at: now.saturating_sub(29),
         expires_at: now + 271,
+        returns_to: DEMO_RETURNS_TO.to_owned(),
+        local: false,
     }];
     for line in &mut data.agents {
         if line.remote {
@@ -1634,6 +1636,8 @@ pub(super) fn agents_wide(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 /// The keys of the two cards of the demo in Decisions.
 const DEMO_CONNECT_KEY: u64 = 1;
+/// The redirect line of the demo connect request (`crate::node::connect_returns_to`).
+const DEMO_RETURNS_TO: &str = "Returns to grok.com";
 const DEMO_CLOUD_KEY: u64 = 2;
 
 /// The list column of Decisions in the demo: what waits (frame 5), then History.
@@ -1750,6 +1754,8 @@ pub(super) fn decisions_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         mac: "Mac mini (office)".to_owned(),
                         left: "4:31".to_owned(),
                         code: "K7Q-4MD".to_owned(),
+                        returns_to: DEMO_RETURNS_TO.to_owned(),
+                        local: false,
                     },
                 );
             });

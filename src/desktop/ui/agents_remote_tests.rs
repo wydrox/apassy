@@ -15,7 +15,7 @@ use eframe::egui::{self, Event, Modifiers, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
 use super::bouncer::AgentRef;
-use super::node_tests::{Fixture, fixture, offered, until};
+use super::node_tests::{Fixture, fixture, offered, offered_to, until};
 use super::owner_tests::{PASS, collect, socket_dir, unlocked_app_with_item};
 use super::{agents, agents_page, decisions, draw, kit};
 use crate::broker::approvals::OwnerCheck;
@@ -555,8 +555,8 @@ fn disconnect_works_for_a_remote_and_a_local_agent() {
     assert!(agents.iter().any(|a| a.id == local.id && a.revoked));
 }
 
-/// The connect card of Decisions: the code and one warning line; Allow opens the owner
-/// check for exactly that request, Deny needs none.
+/// The connect card of Decisions: the code, where the code goes back, and one warning
+/// line; Allow opens the owner check for exactly that request, Deny needs none.
 #[test]
 fn the_connect_card_goes_through_the_owner_check() {
     let mut fx = fixture();
@@ -578,6 +578,7 @@ fn the_connect_card_goes_through_the_owner_check() {
         "Grok Bot wants to connect",
         "Code",
         "K7Q-4MD",
+        "Returns to grok.example",
         "Deny unless you just added Apassy to Grok Bot.",
         "Deny",
         "Allow",
@@ -585,6 +586,11 @@ fn the_connect_card_goes_through_the_owner_check() {
     ] {
         assert!(window.has(expected), "{expected}: {}", window.text);
     }
+    assert!(
+        !window.has(crate::questions::envelope::LOCAL_CONNECT_WARNING),
+        "{}",
+        window.text
+    );
     let at = window.last("Allow");
     window.click_at(&mut fx.app, at);
     let text = fx
@@ -611,6 +617,35 @@ fn the_connect_card_goes_through_the_owner_check() {
             .iter()
             .any(|(id, _)| id == "cr_card")
     );
+}
+
+/// A connect request whose code goes back to a program on a computer: the card says so
+/// and warns that a program on this Mac can start it.
+#[test]
+fn the_connect_card_warns_about_a_local_redirect() {
+    let mut fx = fixture();
+    let ctx = egui::Context::default();
+    until(&ctx, &mut fx.app, "the node runs", |app| {
+        app.node.running_for.is_some()
+    });
+    let connect = offered_to(&fx, "cr_local", "client_local", "127.0.0.1");
+    assert!(crate::node::connect_is_local(&connect));
+    fx.app.place = Place::Decisions;
+    let mut window = Window::new();
+    window.idle(&mut fx.app);
+    decisions::select_key(
+        &mut fx.app,
+        decisions::Key::Connect(decisions::connect_key(&connect.id)),
+    );
+    window.idle(&mut fx.app);
+    for expected in [
+        crate::node::connect_returns_to(&connect).as_str(),
+        "Returns to a program on a computer (localhost)",
+        crate::questions::envelope::LOCAL_CONNECT_WARNING,
+        "Deny unless you just added Apassy to Grok Bot.",
+    ] {
+        assert!(window.has(expected), "{expected}: {}", window.text);
+    }
 }
 
 /// Frame 9a: "Turn On Remote Access" of the Overview asks for Touch ID and turns the route
