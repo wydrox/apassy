@@ -152,6 +152,12 @@ impl OwnerSession {
             .map_err(map_err)
     }
 
+    /// One decision log entry, for "Why" of a past decision in Decisions. Reading it
+    /// moves no authority.
+    pub fn decision_record(&self, id: u64) -> ModelResult<Option<crate::vault::DecisionRecord>> {
+        self.unlocked()?.decision(id).map_err(map_err)
+    }
+
     /// The owner interactions and the automatic decisions of the last 7 days.
     pub fn week_counts(&self) -> ModelResult<WeekCounts> {
         self.unlocked()?.week_counts(now()).map_err(map_err)

@@ -11,6 +11,8 @@ pub mod cli;
 pub mod contracts;
 /// CSV framing shared by the owner CLI and the vault import preview.
 pub mod csv;
+/// The bouncer decision log file for debugging (`apassy decisions log`).
+pub mod decision_log;
 
 /// Local agent broker (ADR 0004). It needs the vault.
 #[cfg(feature = "vault")]

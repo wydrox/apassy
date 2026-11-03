@@ -319,14 +319,14 @@ pub fn record(
     vault: &mut Vault,
     entry: &DecisionEntry,
     pattern: Option<&RequestPattern>,
-) -> VaultResult<()> {
-    vault.record_decision(entry)?;
+) -> VaultResult<u64> {
+    let id = vault.record_decision(entry)?;
     if entry.owner_denied()
         && let Some(pattern) = pattern
     {
         vault.block_pattern(&pattern.key, &pattern.display, entry.at)?;
     }
-    Ok(())
+    Ok(id)
 }
 
 /// "Approve and remember": one more approval for the pattern.

@@ -299,6 +299,7 @@ Agents and access:
 History and vault:
   activity                    Agent requests and decisions.
   decisions export            All bouncer decisions as JSON Lines.
+  decisions log               Why the bouncer asked you. No session needed.
   vault backup|change-passphrase|restore
   doctor                      Check the installation.
   completions zsh|bash|fish   Print a shell completion script.

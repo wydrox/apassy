@@ -68,7 +68,7 @@ use super::route_diagnostics::{Attempt, ReasonKind, RouteKind, TaskMatchBucket, 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
@@ -89,6 +89,7 @@ use super::proxy::{
 use super::shadow::{self, ShadowInput};
 use super::shell_risk::{self, Analysis, DB_HOST_FLAG, ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::{WireResponse, codes};
+use crate::decision_log;
 use crate::vault::answers::{AnswerScope, ProjectRef, normal_host};
 use crate::vault::exceptions::Standing;
 use crate::vault::providers;
@@ -733,6 +734,7 @@ fn run_inner(
     browser_fill: Option<&super::browser_fill::Fill>,
 ) -> WireResponse {
     let mut diagnostic = Attempt::new();
+    let started = Instant::now();
     let items = request.all_items();
     let (checked, label) = {
         let mut guard = lock(&ctx.vault);
@@ -756,6 +758,36 @@ fn run_inner(
                     &reason,
                 );
                 record_refused(vault, &agent, request, code);
+                if decision_log::enabled() {
+                    decision_log::append(&decision_log::Line {
+                        at: learning::now(),
+                        request: if browser_fill.is_some() {
+                            "browser_fill"
+                        } else {
+                            "run"
+                        }
+                        .to_owned(),
+                        agent: agent.name.clone(),
+                        items: items
+                            .iter()
+                            .map(|id| decision_log::Item {
+                                id: *id,
+                                name: String::new(),
+                            })
+                            .collect(),
+                        route: format!("{:?}", RouteKind::Refused),
+                        reason: format!("{:?}", ReasonKind::AccessCheck),
+                        headline: ReasonKind::AccessCheck.headline().to_owned(),
+                        why: vault
+                            .command_mask(&items)
+                            .map(|mask| mask.summary(&reason, decision_log::MAX_TEXT))
+                            .unwrap_or_default(),
+                        outcome: "refused".to_owned(),
+                        code: code.to_owned(),
+                        millis: millis(started),
+                        ..decision_log::Line::default()
+                    });
+                }
                 let user_request = request.user_request.unwrap_or_default();
                 let _ = vault.record_decision(
                     &RuleDenial {
@@ -1051,6 +1083,48 @@ fn run_inner(
     } else {
         format!("This run includes one-time codes. {risk_note}")
     };
+    // The line of the decision log file. It has no command, user request, or purpose:
+    // a remembered pattern names the command, so its note stays out.
+    let (brain, brain_model, brain_error) = brain_answers(&verdict);
+    let mut debug_line = decision_log::Line {
+        at: now,
+        request: if browser_fill.is_some() {
+            "browser_fill"
+        } else {
+            "run"
+        }
+        .to_owned(),
+        agent: checked.agent.name.clone(),
+        items: items
+            .iter()
+            .zip(&checked.facts)
+            .map(|(id, facts)| decision_log::Item {
+                id: *id,
+                name: facts.name.clone(),
+            })
+            .collect(),
+        project: project_text.clone(),
+        action: action.as_str().to_owned(),
+        route: format!("{route_kind:?}"),
+        reason: format!("{reason_kind:?}"),
+        headline: reason_kind.headline().to_owned(),
+        why: if route == Route::Pattern {
+            "Remembered pattern allowed.".to_owned()
+        } else {
+            risk_note.clone()
+        },
+        flags: analysis.flags.clone(),
+        task_source: learning::resolved_source(user_request, &resolved.source)
+            .as_str()
+            .to_owned(),
+        default_source,
+        brain,
+        brain_model,
+        brain_error,
+        hosts: hosts.clone(),
+        ..decision_log::Line::default()
+    };
+    let mut decision_id = None;
     let needs_approval = matches!(route, Route::Ask(..));
     let (decided_by, mut use_decided_by) = match route {
         Route::Ask(..) => ("Owner approved", UseDecidedBy::Owner),
@@ -1127,7 +1201,10 @@ fn run_inner(
             _ => Outcome::Automatic { by_pattern: false },
         };
         let entry = logged.entry(outcome, &risk_note);
-        record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
+        decision_id = record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
+        "allowed".clone_into(&mut debug_line.outcome);
+        debug_line.millis = millis(started);
+        log_decision(ctx, &items, debug_line.clone());
         if let Some(call) = shadow_call.take() {
             call.finish(RealOutcome::Run, OwnerLabel::None);
         }
@@ -1265,6 +1342,14 @@ fn run_inner(
                     QuestionRefusal::Busy => QUESTION_WAITING,
                     QuestionRefusal::Superseded => QUESTION_SUPERSEDED,
                 };
+                debug_line.outcome = match refusal {
+                    QuestionRefusal::Busy => "question_waiting",
+                    QuestionRefusal::Superseded => "superseded",
+                }
+                .to_owned();
+                codes::QUESTION_WAITING.clone_into(&mut debug_line.code);
+                debug_line.millis = millis(started);
+                log_decision(ctx, &items, debug_line.clone());
                 if own_entry {
                     let mut guard = lock(&ctx.vault);
                     if let Some(vault) = guard
@@ -1288,6 +1373,7 @@ fn run_inner(
                                 UseOutcome::Refused,
                                 UseDecidedBy::Rule,
                                 "",
+                                None,
                             );
                         }
                     }
@@ -1307,7 +1393,11 @@ fn run_inner(
         // Every owner answer goes to the decision log. A denial blocks the pattern.
         let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
         entry.at = learning::now();
-        record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
+        decision_id = record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
+        approval_text(outcome).clone_into(&mut debug_line.outcome);
+        debug_line.answered_on.clone_from(&answered_on);
+        debug_line.millis = millis(started);
+        log_decision(ctx, &items, debug_line.clone());
         if !attached {
             let mut guard = lock(&ctx.vault);
             if let Some(vault) = guard
@@ -1380,6 +1470,7 @@ fn run_inner(
                         use_outcome,
                         by,
                         &answered_on,
+                        decision_id,
                     );
                 }
             }
@@ -1466,6 +1557,7 @@ fn run_inner(
                 UseOutcome::Refused,
                 UseDecidedBy::Rule,
                 "",
+                decision_id,
             );
             return WireResponse::failure("authorization_changed", reason);
         }
@@ -1535,6 +1627,7 @@ fn run_inner(
                     UseOutcome::Refused,
                     UseDecidedBy::Rule,
                     &answered_on,
+                    decision_id,
                 );
                 return WireResponse::failure(codes::ANSWER_FAILED, reason);
             }
@@ -1564,6 +1657,7 @@ fn run_inner(
             UseOutcome::Allowed,
             use_decided_by,
             &answered_on,
+            decision_id,
         );
         super::corrections::consider_items(vault, &items);
         if vault.is_locked() {
@@ -2190,7 +2284,9 @@ fn run_hosts(command: &[String]) -> Vec<String> {
     hosts
 }
 
-/// Store one use of each item of the run (ADR 0025 §5).
+/// Store one use of each item of the run (ADR 0025 §5), with the decision log entry of
+/// the run when it has one.
+#[allow(clippy::too_many_arguments)]
 fn record_uses(
     vault: &mut Vault,
     checked: &Checked,
@@ -2199,6 +2295,7 @@ fn record_uses(
     outcome: UseOutcome,
     decided_by: UseDecidedBy,
     answered_on: &str,
+    decision_id: Option<u64>,
 ) {
     store_uses(
         vault,
@@ -2209,6 +2306,7 @@ fn record_uses(
         outcome,
         decided_by,
         answered_on,
+        decision_id,
     );
 }
 
@@ -2231,6 +2329,7 @@ fn record_refused(vault: &mut Vault, agent: &AgentSummary, request: &RunRequest<
         UseOutcome::Refused,
         UseDecidedBy::Rule,
         "",
+        None,
     );
 }
 
@@ -2244,6 +2343,7 @@ fn store_uses(
     outcome: UseOutcome,
     decided_by: UseDecidedBy,
     answered_on: &str,
+    decision_id: Option<u64>,
 ) {
     let hosts = run_hosts(request.command);
     // The whole command, masked with the values of every item of the request, and only
@@ -2271,7 +2371,7 @@ fn store_uses(
             outcome,
             decided_by,
             answered_on: answered_on.to_owned(),
-            decision_log_id: None,
+            decision_log_id: decision_id,
         });
     }
 }
@@ -2454,20 +2554,76 @@ fn record(
     );
 }
 
-/// Store a decision log entry when the vault is unlocked (ADR 0009).
+/// Store a decision log entry when the vault is unlocked (ADR 0009). Returns its id
+/// for the uses of the run.
 fn record_decision_locked(
     ctx: &BrokerContext,
     checked: &Checked,
     entry: &DecisionEntry,
     pattern: Option<&learning::RequestPattern>,
-) {
+) -> Option<u64> {
     let mut guard = lock(&ctx.vault);
-    if let Some(vault) = guard
+    guard
         .as_mut()
         .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
-    {
-        let _ = learning::record(vault, entry, pattern);
+        .and_then(|vault| learning::record(vault, entry, pattern).ok())
+}
+
+/// Append `line` to the decision log file, with the secret values of `items` masked in
+/// its reason. Without an unlocked vault the reason stays out.
+pub(super) fn log_decision(ctx: &BrokerContext, items: &[u64], mut line: decision_log::Line) {
+    if !decision_log::enabled() {
+        return;
     }
+    let why = std::mem::take(&mut line.why);
+    if !why.is_empty() {
+        let guard = lock(&ctx.vault);
+        if let Some(mask) = guard
+            .as_ref()
+            .filter(|vault| !vault.is_locked())
+            .and_then(|vault| vault.command_mask(items).ok())
+        {
+            line.why = mask.summary(&why, decision_log::MAX_TEXT);
+        }
+    }
+    decision_log::append(&line);
+}
+
+/// The answers of the bouncer brain for the decision log file: the facts, the model
+/// version, and the error when it gave no answer.
+fn brain_answers(
+    verdict: &BouncerVerdict,
+) -> (std::collections::BTreeMap<String, f64>, String, String) {
+    match verdict {
+        BouncerVerdict::Scored { facts, model } => (
+            facts
+                .iter()
+                .map(|fact| (fact.name.clone(), fact.probability))
+                .collect(),
+            model.clone().unwrap_or_default(),
+            String::new(),
+        ),
+        // The run did not reach the brain.
+        BouncerVerdict::Unavailable(reason) if reason == "not asked" => Default::default(),
+        BouncerVerdict::Unavailable(reason) => (Default::default(), String::new(), reason.clone()),
+    }
+}
+
+/// The owner answer as the decision log file names it.
+fn approval_text(outcome: ApprovalOutcome) -> &'static str {
+    match outcome {
+        ApprovalOutcome::Approved => "approved",
+        ApprovalOutcome::ApprovedAndRemembered => "approved_and_remembered",
+        ApprovalOutcome::ApprovedAndGranted => "approved_and_granted",
+        ApprovalOutcome::Denied => "denied",
+        ApprovalOutcome::TimedOut => "timed_out",
+        ApprovalOutcome::Invalidated => "invalidated",
+    }
+}
+
+/// Milliseconds since `started`.
+pub(super) fn millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn record_locked(

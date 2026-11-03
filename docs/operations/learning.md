@@ -41,6 +41,18 @@ Bounds:
 - Field limits: command 8192 bytes, user request 2000 bytes, purpose 500 bytes, note 1000 bytes, other text 2048 bytes.
 - A restore keeps the log. It removes all patterns.
 
+Each use of a credential in a run (`item_use`, schema 18) names its entry in `decision_log_id`, so the past decisions of Decisions show why the run asked you (the note), where the task came from, the rule flags, and the bouncer brain answers. Older uses have no entry.
+
+### 1a. Decision log file
+
+Code: `src/decision_log.rs`, and `src/broker/run.rs` and `src/broker/decide.rs` (the broker writes it).
+
+The vault log needs an owner session, so the window also writes one JSON line for each decision to `~/Library/Logs/Apassy/bouncer-decisions.log` (mode 0600). `apassy decisions log` reads it without a session ([command line](cli.md), section 6). An agent or a debugging session can read it too.
+
+A line has: the time, the request kind (`run`, `browser_fill`, `connector`), the agent, the IDs and names of the credentials, the project label, the action, the route (`Bouncer`, `Owner`, `Answer`, `Pattern`, `Connector`, `Refused`), the reason kind and its sentence (`route_diagnostics::ReasonKind`), the reason that the question showed, the rule flags, the task source (`host`, `agent`, `none`), "default classification", the bouncer brain answers and model version (or why it gave none), the destination hosts, the outcome (`allowed`, `approved`, `approved_and_remembered`, `approved_and_granted`, `denied`, `timed_out`, `invalidated`, `refused`, `question_waiting`), the device that answered, the error code, and the milliseconds to the decision.
+
+The file is outside the encrypted vault, so a line never has the command, the user request, the purpose, the owner instruction, the environment, or a pattern. The reason has the secret values of the items masked, as the vault does it; without an unlocked vault it is left out. Only the window writes the file (`decision_log::enable` in `src/main.rs`); `apassy-eval`, the Linux CLI, and tests that do not call `enable` write nothing. At 2 MiB the file moves to `bouncer-decisions.log.1`, so the two files keep at most about 4 MiB. Delete them at any time.
+
 ## 2. Remembered patterns ("Approve and remember")
 
 Code: `src/broker/patterns.rs` (generalization), `src/broker/learning.rs`, `src/vault/learning.rs` (table `remembered_pattern`).

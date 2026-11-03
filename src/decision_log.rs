@@ -1,0 +1,364 @@
+//! The bouncer decision log file, `~/Library/Logs/Apassy/bouncer-decisions.log`: one
+//! JSON line for each decision of the broker about a run, a browser fill, or a
+//! connector use. It says why a request asked the owner, so the owner and an agent can
+//! debug it without an owner session. `apassy decisions log` reads it.
+//!
+//! The file is outside the encrypted vault, so it never holds a command, a user
+//! request, a purpose, an environment value, or a secret value. A line holds names
+//! (agent, credentials, project), destination hosts, closed reason kinds, rule flags,
+//! the answers of the bouncer brain, the reason that the owner question shows (with
+//! the secret values of the items masked), and the outcome. The decision log in the
+//! vault keeps the full entry.
+//!
+//! Only the Apassy window writes it ([`enable`]). Tests and other hosts write nothing.
+//! The file moves to `bouncer-decisions.log.1` at [`MAX_BYTES`].
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
+
+pub const FILE_NAME: &str = "bouncer-decisions.log";
+/// The file moves to `<name>.1` at this size, so the log keeps at most about twice it.
+pub const MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// The longest reason or error text of a line, in bytes.
+pub const MAX_TEXT: usize = 1_000;
+/// The longest name of a line, in bytes.
+const MAX_NAME: usize = 160;
+/// The most hosts, flags, and credentials of a line.
+const MAX_LIST: usize = 16;
+
+static TARGET: OnceLock<PathBuf> = OnceLock::new();
+static WRITE: Mutex<()> = Mutex::new(());
+
+/// One decision. Every field is optional in the file, so older and newer lines read.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Line {
+    /// Unix time of the decision.
+    pub at: u64,
+    /// The same time as text, for example `2026-11-03T14:20:01Z`.
+    pub time: String,
+    /// `run`, `browser_fill`, or `connector`.
+    pub request: String,
+    pub agent: String,
+    pub items: Vec<Item>,
+    /// The project label. Empty: no project.
+    pub project: String,
+    /// `read`, `change`, `deploy`, or `delete`. Empty for a connector use.
+    pub action: String,
+    /// `Bouncer`, `Owner`, `Answer`, `Pattern`, `Connector`, or `Refused`.
+    pub route: String,
+    /// The reason kind, for example `LowTaskMatch` or `HookUnverified`.
+    pub reason: String,
+    /// The reason kind as one sentence.
+    pub headline: String,
+    /// The reason that the owner question shows. Secret values are masked.
+    pub why: String,
+    /// Rule flags of the command analysis and the prompt hook.
+    pub flags: Vec<String>,
+    /// Where the task came from: `host` (a prompt hook), `agent`, or `none`.
+    pub task_source: String,
+    /// A credential of the run has a default or unconfirmed classification, so the
+    /// task match needs 80%.
+    pub default_source: bool,
+    /// The answers of the bouncer brain, from 0 to 1. Empty: the brain was not asked.
+    pub brain: BTreeMap<String, f64>,
+    pub brain_model: String,
+    /// Why the brain gave no answer. Empty when it answered or was not asked.
+    pub brain_error: String,
+    /// The destination hosts that Apassy found in the command.
+    pub hosts: Vec<String>,
+    /// `allowed`, `approved`, `approved_and_remembered`, `approved_and_granted`,
+    /// `denied`, `timed_out`, `invalidated`, `refused`, or `question_waiting`.
+    pub outcome: String,
+    /// The device where the owner answered. Empty: no answer, or this Mac.
+    pub answered_on: String,
+    /// The error code of a refusal.
+    pub code: String,
+    /// Milliseconds from the request to the decision, with the wait for the owner.
+    pub millis: u64,
+}
+
+/// A credential of a line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Item {
+    pub id: u64,
+    /// Empty when the check refused the request before it read the credential.
+    pub name: String,
+}
+
+impl Line {
+    /// The route asked the owner.
+    pub fn asked(&self) -> bool {
+        self.route == "Owner"
+    }
+
+    /// The same line with each text and list cut to its limit.
+    fn bounded(&self) -> Self {
+        let mut line = self.clone();
+        line.time = utc_text(line.at);
+        for text in [
+            &mut line.request,
+            &mut line.agent,
+            &mut line.project,
+            &mut line.action,
+            &mut line.route,
+            &mut line.reason,
+            &mut line.task_source,
+            &mut line.brain_model,
+            &mut line.outcome,
+            &mut line.answered_on,
+            &mut line.code,
+        ] {
+            *text = cut(text, MAX_NAME);
+        }
+        line.headline = cut(&line.headline, MAX_TEXT);
+        line.why = cut(&line.why, MAX_TEXT);
+        line.brain_error = cut(&line.brain_error, MAX_TEXT);
+        line.items.truncate(MAX_LIST);
+        for item in &mut line.items {
+            item.name = cut(&item.name, MAX_NAME);
+        }
+        line.flags.truncate(MAX_LIST);
+        line.hosts.truncate(MAX_LIST);
+        for text in line.flags.iter_mut().chain(line.hosts.iter_mut()) {
+            *text = cut(text, MAX_NAME);
+        }
+        line
+    }
+}
+
+/// `~/Library/Logs/Apassy/bouncer-decisions.log`, next to `bouncer.log`.
+pub fn default_path() -> PathBuf {
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    home.join("Library")
+        .join("Logs")
+        .join("Apassy")
+        .join(FILE_NAME)
+}
+
+/// The older file of `path`: `<name>.1`.
+pub fn rotated(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".1");
+    path.with_file_name(name)
+}
+
+/// Write the lines of this process to `path`. Only the first call counts.
+pub fn enable(path: PathBuf) {
+    let _ = TARGET.set(path);
+}
+
+/// The process writes lines ([`enable`]).
+pub fn enabled() -> bool {
+    TARGET.get().is_some()
+}
+
+/// Append `line` to the file of [`enable`]. A failure to write is ignored: the log
+/// never stops a decision.
+pub fn append(line: &Line) {
+    if let Some(path) = TARGET.get() {
+        let _ = append_to(path, line);
+    }
+}
+
+/// Append `line` to `path` with mode 0600, after a move to [`rotated`] at
+/// [`MAX_BYTES`].
+pub fn append_to(path: &Path, line: &Line) -> io::Result<()> {
+    let _guard = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    if fs::metadata(path).is_ok_and(|meta| meta.len() >= MAX_BYTES) {
+        fs::rename(path, rotated(path))?;
+    }
+    let mut text = serde_json::to_string(&line.bounded()).map_err(io::Error::other)?;
+    text.push('\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(text.as_bytes())
+}
+
+/// The lines of [`rotated`] and then of `path`, oldest first. A line that does not
+/// read is left out. A missing file has no lines.
+pub fn read(path: &Path) -> Vec<Line> {
+    let mut lines = Vec::new();
+    for file in [rotated(path), path.to_path_buf()] {
+        let Ok(file) = fs::File::open(&file) else {
+            continue;
+        };
+        for text in BufReader::new(file).lines().map_while(Result::ok) {
+            if let Ok(line) = serde_json::from_str::<Line>(&text) {
+                lines.push(line);
+            }
+        }
+    }
+    lines
+}
+
+/// What a line of the reason kind can change so that the next run does not ask. Empty
+/// for a kind with no advice.
+pub fn advice(reason: &str) -> &'static str {
+    match reason {
+        "MissingTask" => {
+            "The agent sent no user request. Ask it to quote your words in user_request, or set up the prompt hook: apassy setup claude (or codex)."
+        }
+        "LowTaskMatch" => {
+            "The brain did not see the command as a step of your task. Answer with \"Remember for this project\" to allow this action in the project, or give the agent a clearer task."
+        }
+        "ModelUnavailable" | "ModelTimeout" => {
+            "Settings > Bouncer: start the bouncer brain with Apassy, and check ~/Library/Logs/Apassy/bouncer.log."
+        }
+        "HookUnverified" => {
+            "The prompt hook task does not match the host transcript. Run apassy setup claude (or codex) again, and restart the agent."
+        }
+        "HookAmbiguous" => {
+            "More than one agent session in this folder sent a task. Run one agent session per folder or worktree."
+        }
+        "HookFlags" => "The command analysis flagged the command. The reason names the flags.",
+        "NotProject" => {
+            "Start the agent in a project folder (a Git repository), not in your home folder or above it."
+        }
+        "AlwaysAsk" => {
+            "The credential is set to Always ask. Change it in the credential, Agent Access."
+        }
+        "Production" => {
+            "A production credential with write or admin scope. Allow production for the project and the action, or declare it read-only if it is."
+        }
+        "ForeignHost" => {
+            "The command goes to a host that the credential does not know. Add the host to the credential (Agent Access > Hosts and risk), or remember your answer for the project."
+        }
+        "ForeignProject" => {
+            "The credential is declared for another project. Change its project in Agent Access, or remember your answer for this project."
+        }
+        "MissingDeclaration" => {
+            "The credential has no declaration. Open it, Agent Access, and save its environment and risk."
+        }
+        "UnfitAnswer" => "Your earlier answer is for another action or host.",
+        "OneTimeCode" => "A one-time code always asks, unless a project answer includes codes.",
+        "ModelUnsure" => "The brain was not sure that the command is safe (writes or destroy).",
+        _ => "",
+    }
+}
+
+/// `2026-11-03T14:20:01Z`.
+pub fn utc_text(unix: u64) -> String {
+    let days = i64::try_from(unix / 86_400).unwrap_or(0);
+    let secs = unix % 86_400;
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        secs / 3_600,
+        (secs % 3_600) / 60,
+        secs % 60
+    )
+}
+
+/// `text` cut to at most `max` bytes at a character boundary, without control
+/// characters.
+fn cut(text: &str, max: usize) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if clean.len() <= max {
+        return clean;
+    }
+    let mut end = max.saturating_sub('…'.len_utf8());
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &clean[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(at: u64) -> Line {
+        Line {
+            at,
+            request: "run".to_owned(),
+            agent: "Claude Code".to_owned(),
+            items: vec![Item {
+                id: 92,
+                name: "Synthetic key".to_owned(),
+            }],
+            route: "Owner".to_owned(),
+            reason: "LowTaskMatch".to_owned(),
+            outcome: "approved".to_owned(),
+            brain: BTreeMap::from([("task_match".to_owned(), 0.69)]),
+            ..Line::default()
+        }
+    }
+
+    // `tempfile` is a dependency of the vault feature.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn lines_append_read_and_rotate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Logs/Apassy").join(FILE_NAME);
+        append_to(&path, &line(1)).unwrap();
+        append_to(&path, &line(2)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let read_back = read(&path);
+        assert_eq!(read_back.len(), 2);
+        assert_eq!(read_back[0].time, "1970-01-01T00:00:01Z");
+        assert!(read_back[1].asked());
+        assert_eq!(read_back[1].brain["task_match"], 0.69);
+
+        // A full file moves to `.1`; the reader returns the old lines first.
+        fs::write(&path, vec![b' '; usize::try_from(MAX_BYTES).unwrap()]).unwrap();
+        append_to(&path, &line(3)).unwrap();
+        assert!(rotated(&path).exists());
+        let read_back = read(&path);
+        assert_eq!(read_back.len(), 1, "the blank file has no lines");
+        assert_eq!(read_back[0].at, 3);
+    }
+
+    #[test]
+    fn lines_are_bounded_and_unknown_fields_read() {
+        let mut long = line(0);
+        long.why = "é".repeat(MAX_TEXT);
+        long.agent = "a\nb".to_owned();
+        long.hosts = (0..40).map(|n| format!("h{n}.example")).collect();
+        let bounded = long.bounded();
+        assert!(bounded.why.len() <= MAX_TEXT);
+        assert!(bounded.why.ends_with('…'));
+        assert_eq!(bounded.agent, "a b");
+        assert_eq!(bounded.hosts.len(), MAX_LIST);
+        let newer: Line =
+            serde_json::from_str(r#"{"at":5,"route":"Bouncer","later_field":true}"#).unwrap();
+        assert_eq!(newer.at, 5);
+        assert!(!newer.asked());
+    }
+
+    #[test]
+    fn utc_text_and_advice() {
+        assert_eq!(utc_text(1_793_715_280), "2026-11-03T14:14:40Z");
+        assert_eq!(utc_text(951_782_400), "2000-02-29T00:00:00Z");
+        assert!(advice("LowTaskMatch").contains("Remember for this project"));
+        assert_eq!(advice("ModelAllowed"), "");
+    }
+}

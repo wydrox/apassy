@@ -766,6 +766,7 @@ fn call(
     params: &BTreeMap<String, String>,
 ) -> WireResponse {
     let mut diagnostic = Attempt::new();
+    let started = std::time::Instant::now();
     let vault = &ctx.vault;
     let (checked, model_set) = {
         let mut guard = lock(vault);
@@ -821,13 +822,44 @@ fn call(
         VerdictKind::Allowed
     };
     diagnostic.finish_route();
+    // The line of the decision log file: no parameter of the operation.
+    let mut debug_line = crate::decision_log::Line {
+        at: super::learning::now(),
+        request: "connector".to_owned(),
+        agent: checked.agent.name.clone(),
+        items: vec![crate::decision_log::Item {
+            id: item_id,
+            name: checked.name.clone(),
+        }],
+        route: format!("{:?}", diagnostic.event.route),
+        reason: format!("{reason:?}"),
+        headline: reason.headline().to_owned(),
+        why: why.join(" "),
+        ..crate::decision_log::Line::default()
+    };
     let mut answered_on = "";
     if asked {
         match ask_owner(ctx, &checked, item_id, params, &why.join(" "), reason) {
-            Ok(on) => answered_on = on,
-            Err(response) => return response,
+            Ok(on) => {
+                answered_on = on;
+                "approved".clone_into(&mut debug_line.outcome);
+                on.clone_into(&mut debug_line.answered_on);
+            }
+            Err(response) => {
+                debug_line.outcome = response
+                    .error
+                    .as_ref()
+                    .map_or_else(|| "refused".to_owned(), |error| error.code.clone());
+                debug_line.millis = super::run::millis(started);
+                super::run::log_decision(ctx, &[item_id], debug_line);
+                return response;
+            }
         }
+    } else {
+        "allowed".clone_into(&mut debug_line.outcome);
     }
+    debug_line.millis = super::run::millis(started);
+    super::run::log_decision(ctx, &[item_id], debug_line);
     let decided_by = if asked {
         UseDecidedBy::Owner
     } else {
