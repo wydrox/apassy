@@ -77,23 +77,23 @@ impl SettingsSection {
 
     /// The tile of the section: its icon on a color, as in System Settings.
     fn tile(self) -> kit::Tile {
-        let (red, green, blue, icon) = match self {
+        let (color, icon) = match self {
             #[cfg(feature = "vault")]
-            Self::Vault => (0, 122, 255, Icon::Database),
+            Self::Vault => (kit::fixed::SETTINGS_VAULT, Icon::Database),
             #[cfg(feature = "vault")]
-            Self::Security => (88, 86, 214, Icon::Lock),
+            Self::Security => (kit::fixed::SETTINGS_SECURITY, Icon::Lock),
             #[cfg(feature = "vault")]
-            Self::Devices => (48, 160, 200, Icon::Laptop),
+            Self::Devices => (kit::fixed::SETTINGS_DEVICES, Icon::Laptop),
             #[cfg(feature = "vault")]
-            Self::Bouncer => (175, 82, 222, Icon::Shield),
+            Self::Bouncer => (kit::fixed::SETTINGS_BOUNCER, Icon::Shield),
             #[cfg(feature = "vault")]
-            Self::Tools => (99, 99, 102, Icon::Terminal),
+            Self::Tools => (kit::fixed::SETTINGS_TOOLS, Icon::Terminal),
             #[cfg(feature = "vault")]
-            Self::Updates => (142, 142, 147, Icon::Download),
+            Self::Updates => (kit::fixed::SETTINGS_UPDATES, Icon::Download),
             #[cfg(not(feature = "vault"))]
-            Self::Rules => (255, 149, 0, Icon::List),
+            Self::Rules => (kit::fixed::SETTINGS_RULES, Icon::List),
         };
-        kit::Tile::icon(egui::Color32::from_rgb(red, green, blue), icon)
+        kit::Tile::icon(color, icon)
     }
 }
 
@@ -214,11 +214,12 @@ fn header(app: &DesktopApp, ui: &mut egui::Ui, section: SettingsSection) {
         ui.add_space(4.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(kit::text(section.label(), Font::Title).color(kit::LABEL));
+            ui.label(kit::text(section.label(), Font::Title).color(kit::palette().label));
             let line = status(app, section);
             if !line.is_empty() {
                 ui.add(
-                    egui::Label::new(kit::text(line, Font::Body).color(kit::SECONDARY)).truncate(),
+                    egui::Label::new(kit::text(line, Font::Body).color(kit::palette().secondary))
+                        .truncate(),
                 );
             }
         });

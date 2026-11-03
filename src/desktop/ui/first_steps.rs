@@ -55,16 +55,16 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
     if !progress.credential {
         ui.vertical_centered(|ui| {
             ui.add_space(32.0);
-            kit::paint_icon_in(ui, Icon::Key, 34.0, kit::TERTIARY);
+            kit::paint_icon_in(ui, Icon::Key, 34.0, kit::palette().tertiary);
             ui.add_space(10.0);
-            ui.label(kit::text("No credentials yet", Font::Title3).color(kit::LABEL));
+            ui.label(kit::text("No credentials yet", Font::Title3).color(kit::palette().label));
             ui.add_space(2.0);
             ui.label(
                 kit::text(
                     "Add a login or import your existing credentials.",
                     Font::Callout,
                 )
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
             );
             ui.add_space(16.0);
         });
@@ -110,11 +110,11 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
                         step_mark(ui, done);
                         if done {
                             // Alone, the title stays centered with the mark.
-                            ui.label(kit::text(title, Font::Body).color(kit::SECONDARY));
+                            ui.label(kit::text(title, Font::Body).color(kit::palette().secondary));
                         } else {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.label(kit::text(title, Font::Body).color(kit::LABEL));
+                                ui.label(kit::text(title, Font::Body).color(kit::palette().label));
                                 kit::note(ui, note);
                             });
                         }
@@ -148,8 +148,11 @@ fn step_mark(ui: &mut egui::Ui, done: bool) {
     if done {
         kit::paint_icon(ui.painter(), rect, Icon::Check, Tone::Good.mark());
     } else {
-        ui.painter()
-            .circle_stroke(rect.center(), 6.5, egui::Stroke::new(1.3, kit::TERTIARY));
+        ui.painter().circle_stroke(
+            rect.center(),
+            6.5,
+            egui::Stroke::new(1.3, kit::palette().tertiary),
+        );
     }
 }
 

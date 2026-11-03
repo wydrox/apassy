@@ -651,8 +651,11 @@ pub(super) fn empty_list(
             ui.spacing_mut().item_spacing.y = 2.0;
             if clear {
                 ui.add(
-                    Label::new(kit::medium("Nothing waits for you.", Font::Body).color(kit::LABEL))
-                        .wrap(),
+                    Label::new(
+                        kit::medium("Nothing waits for you.", Font::Body)
+                            .color(kit::palette().label),
+                    )
+                    .wrap(),
                 );
                 ui.add(
                     Label::new(
@@ -660,13 +663,13 @@ pub(super) fn empty_list(
                             "A new question also shows as a macOS notification.",
                             Font::Footnote,
                         )
-                        .color(kit::SECONDARY),
+                        .color(kit::palette().secondary),
                     )
                     .wrap(),
                 );
                 ui.add_space(10.0);
             }
-            ui.label(kit::text("Recent decisions", Font::Headline).color(kit::LABEL));
+            ui.label(kit::text("Recent decisions", Font::Headline).color(kit::palette().label));
         });
     let recent = activity.recent_in(scope);
     let groups = by_day(&recent, now, local_offset(now));
@@ -732,9 +735,9 @@ fn past_row(
     }
     let painter = ui.painter();
     if selected {
-        painter.rect_filled(rect, 8, kit::SELECTION);
+        painter.rect_filled(rect, 8, kit::palette().selection);
     } else if response.hovered() {
-        painter.rect_filled(rect, 8, egui::Color32::from_rgb(247, 247, 248));
+        painter.rect_filled(rect, 8, kit::palette().list_hover);
     }
     if response.has_focus() {
         kit::inner_focus_ring(painter, rect, 8);
@@ -746,12 +749,20 @@ fn past_row(
     kit::paint_avatar(ui, avatar, &decision.agent);
     kit::paint_tile_ring(painter, avatar, true, selected);
     let (title_color, sub_color, result_color) = if selected {
-        let white = egui::Color32::WHITE;
-        (white, egui::Color32::from_white_alpha(210), white)
+        let white = kit::palette().on_accent;
+        (white, kit::palette().on_selection_secondary, white)
     } else if decision.allowed() {
-        (kit::LABEL, kit::SECONDARY, Tone::Good.text())
+        (
+            kit::palette().label,
+            kit::palette().secondary,
+            Tone::Good.text(),
+        )
     } else {
-        (kit::LABEL, kit::SECONDARY, Tone::Critical.text())
+        (
+            kit::palette().label,
+            kit::palette().secondary,
+            Tone::Critical.text(),
+        )
     };
     let galley = |value: RichText, max: f32| {
         WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)
@@ -807,13 +818,13 @@ pub(super) fn week_summary(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             kit::paint_icon_in(ui, Icon::CheckCircle, 16.0, Tone::Good.mark());
-            ui.label(kit::medium("All clear", Font::Body).color(kit::LABEL));
+            ui.label(kit::medium("All clear", Font::Body).color(kit::palette().label));
         });
         ui.add_space(14.0);
     }
     ui.horizontal(|ui| {
         ui.add_space(2.0);
-        ui.label(kit::text("This week", Font::Title3).color(kit::LABEL));
+        ui.label(kit::text("This week", Font::Title3).color(kit::palette().label));
     });
     ui.add_space(6.0);
     if let Some(week) = activity.week(scope) {
@@ -855,7 +866,7 @@ pub(super) fn week_summary(
                 s.status(
                     &mac.name,
                     Some(mac.note.as_str()),
-                    kit::text("No counts", Font::Body).color(kit::SECONDARY),
+                    kit::text("No counts", Font::Body).color(kit::palette().secondary),
                 );
             }
         }
@@ -892,7 +903,7 @@ pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision, why: Optio
                 Label::new(
                     kit::text(decision.title(), Font::Title)
                         .size(20.0)
-                        .color(kit::LABEL),
+                        .color(kit::palette().label),
                 )
                 .wrap(),
             );
@@ -902,7 +913,7 @@ pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision, why: Optio
                         format!("{} · {when}", decision.outcome_text()),
                         Font::Callout,
                     )
-                    .color(kit::SECONDARY),
+                    .color(kit::palette().secondary),
                 )
                 .wrap(),
             );
@@ -928,7 +939,10 @@ pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision, why: Optio
         kit::section(ui, Some(title), None, |s| {
             if !why.note.is_empty() {
                 s.row(|ui| {
-                    ui.add(Label::new(kit::text(&why.note, Font::Body).color(kit::LABEL)).wrap());
+                    ui.add(
+                        Label::new(kit::text(&why.note, Font::Body).color(kit::palette().label))
+                            .wrap(),
+                    );
                 });
             }
             s.labeled("Task", why.task.as_str());
@@ -945,7 +959,10 @@ pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision, why: Optio
         kit::section(ui, Some("Command"), None, |s| {
             s.row(|ui| {
                 ui.add(
-                    Label::new(kit::text(&decision.command, Font::Mono).color(kit::LABEL)).wrap(),
+                    Label::new(
+                        kit::text(&decision.command, Font::Mono).color(kit::palette().label),
+                    )
+                    .wrap(),
                 );
             });
         });

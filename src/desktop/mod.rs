@@ -581,7 +581,7 @@ impl eframe::App for DesktopApp {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        ui::WINDOW_COLOR.to_normalized_gamma_f32()
+        ui::window_color().to_normalized_gamma_f32()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

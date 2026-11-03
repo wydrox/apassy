@@ -140,16 +140,16 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
 
     let response = kit::sheet(ctx, "owner-check", 440.0, |ui| {
         ui.horizontal(|ui| {
-            kit::icon_tile_sized(ui, Icon::Lock, kit::ACCENT, 32.0);
+            kit::icon_tile_sized(ui, Icon::Lock, kit::palette().accent, 32.0);
             ui.add_space(2.0);
-            ui.label(kit::text("Confirm that it is you", Font::Title3).color(kit::LABEL));
+            ui.label(kit::text("Confirm that it is you", Font::Title3).color(kit::palette().label));
         });
         ui.add_space(8.0);
         if let Some(name) = &copy_item_name {
-            ui.label(kit::text(name, Font::Headline).color(kit::LABEL));
+            ui.label(kit::text(name, Font::Headline).color(kit::palette().label));
             ui.add_space(4.0);
         }
-        kit::paragraph(ui, action, Font::Body, kit::LABEL);
+        kit::paragraph(ui, action, Font::Body, kit::palette().label);
         if !variables.is_empty() {
             ui.add_space(4.0);
             variable_list(ui, &variables);
@@ -306,19 +306,22 @@ fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
     kit::section(ui, None, None, |s| {
         s.labeled(
             "Site",
-            kit::text(page_text(&choice.rp_id), Font::Mono).color(kit::LABEL),
+            kit::text(page_text(&choice.rp_id), Font::Mono).color(kit::palette().label),
         );
         let caller = match &choice.origin {
             Some(origin) => page_text(origin),
             None => "the macOS passkey sheet".to_owned(),
         };
-        s.labeled("Asked by", kit::text(caller, Font::Body).color(kit::LABEL));
+        s.labeled(
+            "Asked by",
+            kit::text(caller, Font::Body).color(kit::palette().label),
+        );
     });
     let count = match choice.rows.len() {
         1 => "1 account".to_owned(),
         count => format!("{count} accounts"),
     };
-    ui.label(kit::text(count, Font::Headline).color(kit::LABEL));
+    ui.label(kit::text(count, Font::Headline).color(kit::palette().label));
     egui::ScrollArea::vertical()
         .id_salt("owner-check-accounts")
         .max_height(ACCOUNTS_HEIGHT)
@@ -331,9 +334,12 @@ fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
                     let response = s.clickable_row(&name, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
-                                ui.label(kit::text(login, Font::Body).color(kit::LABEL));
+                                ui.label(kit::text(login, Font::Body).color(kit::palette().label));
                                 if !who.is_empty() {
-                                    ui.label(kit::text(who, Font::Callout).color(kit::SECONDARY));
+                                    ui.label(
+                                        kit::text(who, Font::Callout)
+                                            .color(kit::palette().secondary),
+                                    );
                                 }
                             });
                             ui.with_layout(
@@ -361,7 +367,7 @@ fn variable_list(ui: &mut egui::Ui, variables: &[(String, String)]) {
         1 => "1 variable".to_owned(),
         count => format!("{count} variables"),
     };
-    ui.label(kit::text(count, Font::Headline).color(kit::LABEL));
+    ui.label(kit::text(count, Font::Headline).color(kit::palette().label));
     egui::ScrollArea::vertical()
         .id_salt("owner-check-variables")
         .max_height(VARIABLES_HEIGHT)
@@ -369,7 +375,10 @@ fn variable_list(ui: &mut egui::Ui, variables: &[(String, String)]) {
         .show(ui, |ui| {
             kit::section(ui, None, None, |s| {
                 for (item, variable) in variables {
-                    s.labeled(item, kit::text(variable, Font::Mono).color(kit::LABEL));
+                    s.labeled(
+                        item,
+                        kit::text(variable, Font::Mono).color(kit::palette().label),
+                    );
                 }
             });
         });

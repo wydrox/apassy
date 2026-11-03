@@ -118,7 +118,9 @@ fn more_menu(ui: &mut egui::Ui, agent: &AgentSummary) -> bool {
     let more = kit::toolbar_button(ui, Some(Icon::More), "", "More actions for this agent");
     egui::Popup::menu(&more).show(|ui| {
         ui.set_min_width(200.0);
-        ui.label(kit::text(token_words(agent, now()), Font::Callout).color(kit::SECONDARY));
+        ui.label(
+            kit::text(token_words(agent, now()), Font::Callout).color(kit::palette().secondary),
+        );
         ui.separator();
         reconnect = ui
             .selectable_label(false, "Reconnect with a New Token…")
@@ -299,7 +301,7 @@ fn connection_progress(app: &mut DesktopApp, ui: &mut egui::Ui, cli: bool) {
                     if complete {
                         Tone::Good.text()
                     } else {
-                        kit::SECONDARY
+                        kit::palette().secondary
                     },
                 ),
             );
@@ -668,7 +670,10 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.add(
-                            Label::new(kit::text(text, Font::Callout).color(kit::SECONDARY)).wrap(),
+                            Label::new(
+                                kit::text(text, Font::Callout).color(kit::palette().secondary),
+                            )
+                            .wrap(),
                         );
                     });
             }
@@ -705,7 +710,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                     ),
                                     Font::Callout,
                                 )
-                                .color(kit::SECONDARY),
+                                .color(kit::palette().secondary),
                             );
                         }
                     });
@@ -808,8 +813,8 @@ fn header(ui: &mut egui::Ui, name: &str, line: &str) {
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(Label::new(kit::text(name, Font::Title).color(kit::LABEL)).wrap());
-            ui.add(Label::new(kit::text(line, Font::Body).color(kit::SECONDARY)).wrap());
+            ui.add(Label::new(kit::text(name, Font::Title).color(kit::palette().label)).wrap());
+            ui.add(Label::new(kit::text(line, Font::Body).color(kit::palette().secondary)).wrap());
         });
     });
     ui.add_space(16.0);
@@ -866,12 +871,12 @@ fn stats_group(
 fn fact_rows(s: &mut kit::Section<'_>, uses: usize, projects: &[String], sees: &str) {
     if uses == 0 {
         s.row(|ui| {
-            ui.label(kit::text("No use this week", Font::Body).color(kit::SECONDARY));
+            ui.label(kit::text("No use this week", Font::Body).color(kit::palette().secondary));
         });
     } else {
         s.labeled(
             "Uses this week",
-            kit::text(uses.to_string(), Font::Body).color(kit::SECONDARY),
+            kit::text(uses.to_string(), Font::Body).color(kit::palette().secondary),
         );
     }
     s.labeled(
@@ -884,9 +889,12 @@ fn fact_rows(s: &mut kit::Section<'_>, uses: usize, projects: &[String], sees: &
             },
             Font::Body,
         )
-        .color(kit::SECONDARY),
+        .color(kit::palette().secondary),
     );
-    s.labeled("Sees", kit::text(sees, Font::Body).color(kit::SECONDARY));
+    s.labeled(
+        "Sees",
+        kit::text(sees, Font::Body).color(kit::palette().secondary),
+    );
 }
 
 /// The row of an expired token: "Token" and `words` in red, with "Reconnect…" when
@@ -899,7 +907,7 @@ fn token_row(s: &mut kit::Section<'_>, words: &str, button: bool) -> bool {
             |ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(kit::text("Token", Font::Body).color(kit::LABEL));
+                    ui.label(kit::text("Token", Font::Body).color(kit::palette().label));
                     ui.add(
                         Label::new(kit::text(words, Font::Callout).color(Tone::Critical.text()))
                             .wrap(),
@@ -964,10 +972,10 @@ fn actions_group(ui: &mut egui::Ui, actions: &[ActionUse]) {
             match refused {
                 Some(refused) if used.is_empty() => add(refused, Tone::Critical.text()),
                 Some(refused) => {
-                    add(format!("{used} · "), kit::SECONDARY);
+                    add(format!("{used} · "), kit::palette().secondary);
                     add(refused, Tone::Critical.text());
                 }
-                None => add(used, kit::SECONDARY),
+                None => add(used, kit::palette().secondary),
             }
             (action_label(action.action), job)
         })
@@ -1020,8 +1028,10 @@ fn recent_group(ui: &mut egui::Ui, recent: &[RecentUse], now: u64) {
                         // control height.
                         ui.spacing_mut().interact_size.y = 0.0;
                         ui.add(
-                            Label::new(kit::text(&entry.item_name, Font::Body).color(kit::LABEL))
-                                .truncate(),
+                            Label::new(
+                                kit::text(&entry.item_name, Font::Body).color(kit::palette().label),
+                            )
+                            .truncate(),
                         );
                         let line = ui.add(Label::new(rows::small(words)).truncate());
                         if !command.is_empty() {
@@ -1029,7 +1039,7 @@ fn recent_group(ui: &mut egui::Ui, recent: &[RecentUse], now: u64) {
                         }
                     });
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        ui.label(kit::text(&when, Font::Callout).color(kit::TERTIARY));
+                        ui.label(kit::text(&when, Font::Callout).color(kit::palette().tertiary));
                     });
                 });
             });
@@ -1047,7 +1057,7 @@ fn group_label(ui: &mut egui::Ui, title: &str) {
         ui.label(
             kit::text(title, Font::Headline)
                 .size(12.0)
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
         );
     });
 }
@@ -1133,7 +1143,7 @@ fn exceptions_group(
                             ui.add(
                                 Label::new(
                                     kit::text(format!("{words}: {name}"), Font::Body)
-                                        .color(kit::LABEL),
+                                        .color(kit::palette().label),
                                 )
                                 .truncate(),
                             );
@@ -1369,7 +1379,8 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
                 );
             }
             if other {
-                let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+                let heading =
+                    ui.label(kit::text("Token", Font::Headline).color(kit::palette().label));
                 kit::code_block(ui, &token, 1).labelled_by(heading.id);
                 manual_config(ui, &token);
                 kit::note(
@@ -1415,7 +1426,8 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
             kit::disclosure(ui, &mut app.ui.agent_setup.advanced, "Advanced setup");
             if app.ui.agent_setup.advanced {
                 kit::note(ui, "Apassy shows this token one time. Keep it private.");
-                let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+                let heading =
+                    ui.label(kit::text("Token", Font::Headline).color(kit::palette().label));
                 kit::code_block(ui, &token, 1).labelled_by(heading.id);
                 ui.add_enabled_ui(!busy, |ui| setup_guidance(&mut app.ui, ui));
                 let mut manual = app.ui.is_expanded("manual-mcp-config");

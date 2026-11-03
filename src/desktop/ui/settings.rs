@@ -825,7 +825,7 @@ fn shortcuts_section(ui: &mut egui::Ui) {
             for (keys, action) in SHORTCUTS {
                 g.line(
                     action,
-                    Some(kit::text(keys, Font::Mono).color(kit::SECONDARY)),
+                    Some(kit::text(keys, Font::Mono).color(kit::palette().secondary)),
                     |_| {},
                 );
             }
@@ -1555,7 +1555,7 @@ fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 g.line_note(
                     host.name(),
                     None,
-                    Some(kit::text(&health.status, Font::Callout).color(kit::SECONDARY)),
+                    Some(kit::text(&health.status, Font::Callout).color(kit::palette().secondary)),
                     |ui| {
                         if let Some(action) = health.action
                             && kit::small_button(ui, action, Style::Bordered).clicked()

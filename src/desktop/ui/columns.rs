@@ -226,7 +226,10 @@ pub(super) fn grouped_rows<T>(
 pub(super) fn list_note(ui: &mut Ui, message: &str) {
     ui.add_space(24.0);
     ui.vertical_centered(|ui| {
-        ui.add(egui::Label::new(kit::text(message, Font::Callout).color(kit::SECONDARY)).wrap());
+        ui.add(
+            egui::Label::new(kit::text(message, Font::Callout).color(kit::palette().secondary))
+                .wrap(),
+        );
     });
 }
 

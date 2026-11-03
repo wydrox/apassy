@@ -112,9 +112,9 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 }
                 found += 1;
                 let (status, tone) = match &state {
-                    State::Connected => ("Connected", kit::ACCENT_TEXT),
+                    State::Connected => ("Connected", kit::palette().accent_text),
                     State::Other(_) => ("Connected to another Apassy", Tone::Warning.text()),
-                    _ => ("Not connected", kit::SECONDARY),
+                    _ => ("Not connected", kit::palette().secondary),
                 };
                 g.line(
                     browser.name,

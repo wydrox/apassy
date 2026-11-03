@@ -581,8 +581,8 @@ fn the_move_sheets_name_the_top_level() {
 fn tile_rings(window: &Window, app: &mut DesktopApp) -> usize {
     fn count(shape: &egui::Shape) -> usize {
         match shape {
-            egui::Shape::Rect(rect) if rect.stroke == kit::SELECTED_TILE_RING => 1,
-            egui::Shape::Circle(circle) if circle.stroke == kit::SELECTED_TILE_RING => 1,
+            egui::Shape::Rect(rect) if rect.stroke == kit::selected_tile_ring() => 1,
+            egui::Shape::Circle(circle) if circle.stroke == kit::selected_tile_ring() => 1,
             egui::Shape::Vec(shapes) => shapes.iter().map(count).sum(),
             _ => 0,
         }
@@ -605,13 +605,13 @@ fn tile_rings(window: &Window, app: &mut DesktopApp) -> usize {
 /// white ring. A row that is not selected has none, and the tile keeps its color.
 #[test]
 fn a_selected_row_rings_its_tile_in_white() {
-    assert_eq!(kit::tile_ring(true), Some(kit::SELECTED_TILE_RING));
+    assert_eq!(kit::tile_ring(true), Some(kit::selected_tile_ring()));
     assert_eq!(kit::tile_ring(false), None);
-    assert_eq!(kit::SELECTED_TILE_RING.color, egui::Color32::WHITE);
-    assert!((kit::SELECTED_TILE_RING.width - 1.5).abs() < f32::EPSILON);
+    assert_eq!(kit::selected_tile_ring().color, egui::Color32::WHITE);
+    assert!((kit::selected_tile_ring().width - 1.5).abs() < f32::EPSILON);
     assert_eq!(
         super::super::credential_tile(CredentialKind::Login, "", "Synthetic login").color,
-        kit::ACCENT
+        kit::palette().accent
     );
 
     let dir = TempDir::new().expect("temp dir");

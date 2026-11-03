@@ -33,7 +33,7 @@ pub(crate) enum Step {
 
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     egui::CentralPanel::default()
-        .frame(Frame::NONE.fill(kit::WINDOW))
+        .frame(Frame::NONE.fill(kit::palette().window))
         .show(ui, |ui| {
             let full = ui.max_rect();
             kit::window_drag_region(
@@ -100,20 +100,25 @@ fn mark(ui: &mut egui::Ui, icon: Icon, color: egui::Color32) {
         ui.painter().rect_filled(
             rect.translate(Vec2::new(0.0, 2.0)),
             16,
-            egui::Color32::from_black_alpha(22),
+            kit::palette().shadow.gamma_multiply_u8(22),
         );
         ui.painter().rect_filled(rect, 16, color);
-        kit::paint_icon(ui.painter(), rect.shrink(17.0), icon, egui::Color32::WHITE);
+        kit::paint_icon(
+            ui.painter(),
+            rect.shrink(17.0),
+            icon,
+            kit::palette().on_accent,
+        );
     });
     ui.add_space(14.0);
 }
 
 fn title(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.vertical_centered(|ui| {
-        ui.label(kit::text(title, Font::LargeTitle).color(kit::LABEL));
+        ui.label(kit::text(title, Font::LargeTitle).color(kit::palette().label));
         ui.add_space(4.0);
         ui.add(
-            Label::new(kit::text(subtitle, Font::Body).color(kit::SECONDARY))
+            Label::new(kit::text(subtitle, Font::Body).color(kit::palette().secondary))
                 .wrap()
                 .halign(Align::Center),
         );
@@ -129,7 +134,7 @@ fn back(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    mark(ui, Icon::Key, kit::ACCENT);
+    mark(ui, Icon::Key, kit::palette().accent);
     title(
         ui,
         "Welcome to Apassy",
@@ -186,12 +191,12 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
     } else {
         "Create a new vault"
     };
-    ui.label(kit::text(heading, Font::Title).color(kit::LABEL));
+    ui.label(kit::text(heading, Font::Title).color(kit::palette().label));
     kit::paragraph(
         ui,
         "Each vault has its own passphrase, agents, and rules. Choose a passphrase that you can remember. Apassy cannot recover a lost passphrase, and the data is then gone.",
         Font::Callout,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     ui.add_space(14.0);
     let ctx = ui.ctx().clone();
@@ -367,12 +372,12 @@ pub(super) fn ensure_private_folder(path: &Path) -> Result<(), String> {
 
 fn open(app: &mut DesktopApp, ui: &mut egui::Ui) {
     back(app, ui);
-    ui.label(kit::text("Open a vault", Font::Title).color(kit::LABEL));
+    ui.label(kit::text("Open a vault", Font::Title).color(kit::palette().label));
     kit::paragraph(
         ui,
         "Type the location of an Apassy vault file. Apassy adds it to your vaults. You unlock it on the next screen.",
         Font::Callout,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     ui.add_space(14.0);
     if app.vault_list.registry.is_empty() {
@@ -413,12 +418,12 @@ fn open(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 fn restore(app: &mut DesktopApp, ui: &mut egui::Ui) {
     back(app, ui);
-    ui.label(kit::text("Restore from a backup", Font::Title).color(kit::LABEL));
+    ui.label(kit::text("Restore from a backup", Font::Title).color(kit::palette().label));
     kit::paragraph(
         ui,
         "Apassy copies the backup to a new vault file and opens it locked. Agents are revoked, and each credential waits for your review before agents can use it.",
         Font::Callout,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     ui.add_space(14.0);
     let ctx = ui.ctx().clone();
@@ -538,7 +543,7 @@ fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui.painter().rect_filled(
             rect.translate(Vec2::new(0.0, 2.0)),
             16,
-            egui::Color32::from_black_alpha(22),
+            kit::palette().shadow.gamma_multiply_u8(22),
         );
         kit::paint_app_logo(ui.painter(), rect);
     });
@@ -577,7 +582,7 @@ fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
     ui.add_space(14.0);
     ui.vertical_centered(|ui| {
         ui.add(
-            Label::new(kit::text(file, Font::Footnote).color(kit::SECONDARY))
+            Label::new(kit::text(file, Font::Footnote).color(kit::palette().secondary))
                 .truncate()
                 .halign(Align::Center),
         );

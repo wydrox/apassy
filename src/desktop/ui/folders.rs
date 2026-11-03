@@ -652,15 +652,24 @@ pub(super) fn move_sheet(app: &mut DesktopApp, ctx: &egui::Context, item_id: u64
                     let response = s.clickable_row(&name, |ui| {
                         ui.horizontal(|ui| {
                             ui.add_space(14.0 * level as f32);
-                            kit::paint_icon_in(ui, Icon::Folder, 15.0, kit::ACCENT);
+                            kit::paint_icon_in(ui, Icon::Folder, 15.0, kit::palette().accent);
                             ui.add(
-                                Label::new(kit::text(&name, Font::Body).color(kit::LABEL))
-                                    .truncate(),
+                                Label::new(
+                                    kit::text(&name, Font::Body).color(kit::palette().label),
+                                )
+                                .truncate(),
                             );
                             if selected {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| kit::paint_icon_in(ui, Icon::Check, 13.0, kit::ACCENT),
+                                    |ui| {
+                                        kit::paint_icon_in(
+                                            ui,
+                                            Icon::Check,
+                                            13.0,
+                                            kit::palette().accent,
+                                        )
+                                    },
                                 );
                             }
                         });

@@ -178,7 +178,7 @@ pub(super) fn agents_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
             kit::list_row(
                 ui,
                 &kit::ListRow {
-                    tile: kit::Tile::letter(kit::ACCENT, &agent.name),
+                    tile: kit::Tile::letter(kit::palette().accent, &agent.name),
                     title: &agent.name,
                     subtitle: &agent.summary,
                     meta: agent.connected.then_some(agent.status_label),
@@ -218,8 +218,10 @@ fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
         kit::icon_tile_sized(ui, icon, color, 40.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(kit::text(&details.name, Font::Title).color(kit::LABEL));
-            ui.label(kit::text(details.kind.label(), Font::Callout).color(kit::SECONDARY));
+            ui.label(kit::text(&details.name, Font::Title).color(kit::palette().label));
+            ui.label(
+                kit::text(details.kind.label(), Font::Callout).color(kit::palette().secondary),
+            );
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             edit = kit::button(ui, "Edit", Style::Bordered).clicked();
@@ -239,9 +241,9 @@ fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 ui,
                 |ui| {
                     let color = if details.revealed {
-                        kit::LABEL
+                        kit::palette().label
                     } else {
-                        kit::SECONDARY
+                        kit::palette().secondary
                     };
                     ui.label(kit::text(&details.display_value, Font::Mono).color(color));
                 },
@@ -274,11 +276,14 @@ fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     .collect();
     kit::section(ui, Some("Details"), Some(details.agent_use_label), |s| {
         for (label, value) in rows {
-            s.labeled(label, kit::text(value, Font::Body).color(kit::SECONDARY));
+            s.labeled(
+                label,
+                kit::text(value, Font::Body).color(kit::palette().secondary),
+            );
         }
         s.labeled(
             "Revision",
-            kit::text(details.revision.to_string(), Font::Body).color(kit::SECONDARY),
+            kit::text(details.revision.to_string(), Font::Body).color(kit::palette().secondary),
         );
     });
     let mut delete = false;
@@ -593,7 +598,9 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     s.row(|ui| {
                         ui.horizontal(|ui| {
                             kit::tag(ui, clause.kind_label, Tone::Accent);
-                            ui.label(kit::text(&clause.text, Font::Body).color(kit::LABEL));
+                            ui.label(
+                                kit::text(&clause.text, Font::Body).color(kit::palette().label),
+                            );
                         });
                         kit::note(ui, &clause.meaning);
                     });
@@ -607,15 +614,15 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 if let Some(examples) = &draft.examples {
                     s.labeled(
                         "Permit",
-                        kit::text(&examples.allow, Font::Callout).color(kit::SECONDARY),
+                        kit::text(&examples.allow, Font::Callout).color(kit::palette().secondary),
                     );
                     s.labeled(
                         "Wait",
-                        kit::text(&examples.ask, Font::Callout).color(kit::SECONDARY),
+                        kit::text(&examples.ask, Font::Callout).color(kit::palette().secondary),
                     );
                     s.labeled(
                         "Deny",
-                        kit::text(&examples.deny, Font::Callout).color(kit::SECONDARY),
+                        kit::text(&examples.deny, Font::Callout).color(kit::palette().secondary),
                     );
                 }
             },
@@ -625,27 +632,28 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
         kit::section(ui, Some("Active rule"), Some(&rule.original_text), |s| {
             s.labeled(
                 "Status",
-                kit::text(rule.status, Font::Body).color(kit::SECONDARY),
+                kit::text(rule.status, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Agent",
-                kit::text(&rule.agent_name, Font::Body).color(kit::SECONDARY),
+                kit::text(&rule.agent_name, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Item",
-                kit::text(&rule.item_name, Font::Body).color(kit::SECONDARY),
+                kit::text(&rule.item_name, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Destination",
-                kit::text(rule.destination, Font::Body).color(kit::SECONDARY),
+                kit::text(rule.destination, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Denied",
-                kit::text(rule.denied_destinations.join(", "), Font::Body).color(kit::SECONDARY),
+                kit::text(rule.denied_destinations.join(", "), Font::Body)
+                    .color(kit::palette().secondary),
             );
             s.labeled(
                 "Operation",
-                kit::text(rule.operation, Font::Body).color(kit::SECONDARY),
+                kit::text(rule.operation, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Expiry",
@@ -653,7 +661,7 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     format!("{} ({})", rule.expiry_iso, rule.time_zone),
                     Font::Body,
                 )
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
             );
             s.labeled(
                 "Uses",
@@ -661,7 +669,7 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     format!("{} of {}", rule.use_count, rule.usage_limit),
                     Font::Body,
                 )
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
             );
         });
     }
@@ -684,7 +692,9 @@ pub(super) fn draw_agents(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     ui,
                     |ui| {
                         ui.vertical(|ui| {
-                            ui.label(kit::medium(&agent.name, Font::Body).color(kit::LABEL));
+                            ui.label(
+                                kit::medium(&agent.name, Font::Body).color(kit::palette().label),
+                            );
                             kit::note(ui, &agent.summary);
                         });
                     },
@@ -777,7 +787,7 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 let (label, tone) = decision_tone(current);
                 ui.horizontal(|ui| {
                     kit::tag(ui, label, tone);
-                    ui.label(kit::medium(&alert.title, Font::Body).color(kit::LABEL));
+                    ui.label(kit::medium(&alert.title, Font::Body).color(kit::palette().label));
                 });
                 if let Some(request) = &request
                     && request.initial_decision != request.decision
@@ -790,7 +800,7 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         ),
                     );
                 }
-                kit::paragraph(ui, &alert.message, Font::Callout, kit::LABEL);
+                kit::paragraph(ui, &alert.message, Font::Callout, kit::palette().label);
                 kit::note(
                     ui,
                     format!(
@@ -839,7 +849,10 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         for event in events {
             s.row(|ui| {
-                ui.add(Label::new(kit::text(&event.message, Font::Body).color(kit::LABEL)).wrap());
+                ui.add(
+                    Label::new(kit::text(&event.message, Font::Body).color(kit::palette().label))
+                        .wrap(),
+                );
                 kit::note(ui, format!("{} · {}", event.at_iso, event.kind));
             });
         }

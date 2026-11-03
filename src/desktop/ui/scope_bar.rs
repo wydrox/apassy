@@ -138,7 +138,7 @@ fn words(ui: &mut egui::Ui, text: &str) {
     ui.label(
         kit::text(text, Font::Callout)
             .size(SIZE)
-            .color(kit::SECONDARY),
+            .color(kit::palette().secondary),
     );
 }
 
@@ -258,7 +258,7 @@ pub(super) fn bouncer_bar(
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
-                        ui.label(kit::text(ONE_MAC, Font::Callout).color(kit::SECONDARY));
+                        ui.label(kit::text(ONE_MAC, Font::Callout).color(kit::palette().secondary));
                     });
                 }
             });
@@ -315,18 +315,18 @@ fn menu_button(ui: &mut egui::Ui, shown: &str, name: &str) -> egui::Response {
     }
     if ui.is_rect_visible(rect) {
         let fill = if response.is_pointer_button_down_on() {
-            kit::FILL_PRESSED
+            kit::palette().fill_pressed
         } else if response.hovered() {
-            kit::FILL
+            kit::palette().fill
         } else {
-            kit::SURFACE
+            kit::palette().surface
         };
         let painter = ui.painter();
         painter.rect_filled(rect, 6, fill);
         painter.rect_stroke(
             rect,
             6,
-            Stroke::new(1.0, kit::BORDER),
+            Stroke::new(1.0, kit::palette().border),
             egui::StrokeKind::Inside,
         );
         if response.has_focus() {
@@ -335,7 +335,7 @@ fn menu_button(ui: &mut egui::Ui, shown: &str, name: &str) -> egui::Response {
         painter.galley(
             Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0),
             galley,
-            kit::LABEL,
+            kit::palette().label,
         );
         let center = Pos2::new(rect.right() - 12.0, rect.center().y - 0.5);
         painter.line(
@@ -344,7 +344,7 @@ fn menu_button(ui: &mut egui::Ui, shown: &str, name: &str) -> egui::Response {
                 center + Vec2::new(0.0, 1.8),
                 center + Vec2::new(3.5, -1.8),
             ],
-            Stroke::new(1.4, kit::SECONDARY),
+            Stroke::new(1.4, kit::palette().secondary),
         );
     }
     response
@@ -368,15 +368,18 @@ fn menu_row(ui: &mut egui::Ui, item: &MenuItem, selected: bool) -> egui::Respons
     let highlight = response.hovered() || response.has_focus();
     let painter = ui.painter();
     if highlight {
-        painter.rect_filled(rect, 5, kit::SELECTION);
+        painter.rect_filled(rect, 5, kit::palette().selection);
     }
     let alpha = if item.dimmed { kit::DIMMED } else { 1.0 };
     let (label, secondary) = if highlight {
-        (egui::Color32::WHITE, egui::Color32::from_white_alpha(217))
+        (
+            kit::palette().on_accent,
+            kit::palette().on_accent.gamma_multiply_u8(217),
+        )
     } else {
         (
-            kit::LABEL.gamma_multiply(alpha),
-            kit::SECONDARY.gamma_multiply(alpha),
+            kit::palette().label.gamma_multiply(alpha),
+            kit::palette().secondary.gamma_multiply(alpha),
         )
     };
     if selected {

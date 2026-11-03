@@ -545,7 +545,7 @@ mod vault_view {
                 });
                 s.row(|ui| {
                     for line in active_lines(loaded.active.as_ref()) {
-                        kit::paragraph(ui, line, Font::Callout, kit::LABEL);
+                        kit::paragraph(ui, line, Font::Callout, kit::palette().label);
                     }
                     if let Some(active) = &loaded.active
                         && active.action == ActivationAction::Promote
@@ -818,7 +818,10 @@ mod vault_view {
                                 "Remembered answers",
                                 "Ask rate",
                             ] {
-                                ui.label(kit::medium(name, Font::Callout).color(kit::SECONDARY));
+                                ui.label(
+                                    kit::medium(name, Font::Callout)
+                                        .color(kit::palette().secondary),
+                                );
                             }
                             ui.end_row();
                             for day in days {
@@ -852,7 +855,7 @@ mod vault_view {
             Pos2::new(rect.right() - 4.0, rect.top() + height),
         );
         let painter = ui.painter();
-        let grid = Stroke::new(1.0 / ui.ctx().pixels_per_point(), kit::SEPARATOR);
+        let grid = Stroke::new(1.0 / ui.ctx().pixels_per_point(), kit::palette().separator);
         let y_of = |share: f32| plot.bottom() - share * plot.height();
         for share in [0.0_f32, 0.5, 1.0] {
             let y = y_of(share);
@@ -864,7 +867,7 @@ mod vault_view {
             painter.galley(
                 Pos2::new(plot.left() - 8.0 - label.size().x, y - label.size().y / 2.0),
                 label,
-                kit::SECONDARY,
+                kit::palette().secondary,
             );
         }
         // The goal line has a legend above the plot, so no label sits on a column.
@@ -877,7 +880,7 @@ mod vault_view {
         painter.galley(
             Pos2::new(text_x, legend_y - goal.size().y / 2.0),
             goal,
-            kit::SECONDARY,
+            kit::palette().secondary,
         );
         painter.hline((text_x - 22.0)..=(text_x - 6.0), legend_y, goal_stroke);
         let slot = plot.width() / DAYS_SHOWN as f32;
@@ -903,7 +906,8 @@ mod vault_view {
                     sw: 0,
                     se: 0,
                 };
-                ui.painter().rect_filled(column, radius, kit::ACCENT);
+                ui.painter()
+                    .rect_filled(column, radius, kit::palette().accent);
                 let tip = format!(
                     "{}: {} of {} requests asked you ({:.0}%). Bouncer {}, pattern {}, remembered answers {}.",
                     format_utc(day.day).split(' ').next().unwrap_or_default(),
@@ -934,7 +938,7 @@ mod vault_view {
                     ui.painter().galley(
                         Pos2::new(center - value.size().x / 2.0, bottom - value.size().y),
                         value,
-                        kit::LABEL,
+                        kit::palette().label,
                     );
                 }
             }
@@ -948,7 +952,7 @@ mod vault_view {
                 ui.painter().galley(
                     Pos2::new(center - label.size().x / 2.0, plot.bottom() + 5.0),
                     label,
-                    kit::SECONDARY,
+                    kit::palette().secondary,
                 );
             }
         }
@@ -1001,13 +1005,18 @@ mod vault_view {
                                     ui.add(
                                         Label::new(
                                             kit::text(short(&entry.command), Font::Mono)
-                                                .color(kit::LABEL),
+                                                .color(kit::palette().label),
                                         )
                                         .truncate(),
                                     );
                                 },
                                 |ui| {
-                                    kit::paint_icon_in(ui, Icon::ChevronRight, 12.0, kit::TERTIARY);
+                                    kit::paint_icon_in(
+                                        ui,
+                                        Icon::ChevronRight,
+                                        12.0,
+                                        kit::palette().tertiary,
+                                    );
                                     kit::tag(ui, by, Tone::Good);
                                 },
                             );
@@ -1033,7 +1042,9 @@ mod vault_view {
                     };
                     toggle = s
                         .clickable_row(&label, |ui| {
-                            ui.label(kit::text(&label, Font::Body).color(kit::ACCENT_TEXT));
+                            ui.label(
+                                kit::text(&label, Font::Body).color(kit::palette().accent_text),
+                            );
                         })
                         .clicked();
                 }
@@ -1161,7 +1172,10 @@ mod vault_view {
                 ui.add_space(10.0);
                 kit::section(ui, None, None, |s| {
                     for (term, value) in rows.iter().filter(|(_, value)| !value.is_empty()) {
-                        s.labeled(term, kit::text(value, Font::Callout).color(kit::SECONDARY));
+                        s.labeled(
+                            term,
+                            kit::text(value, Font::Callout).color(kit::palette().secondary),
+                        );
                     }
                 });
             });
@@ -1212,7 +1226,8 @@ mod vault_view {
                             |ui| {
                                 ui.add(
                                     Label::new(
-                                        kit::text(&pattern.display, Font::Mono).color(kit::LABEL),
+                                        kit::text(&pattern.display, Font::Mono)
+                                            .color(kit::palette().label),
                                     )
                                     .truncate(),
                                 );
@@ -1290,7 +1305,7 @@ mod vault_view {
                         ui,
                         format!("Active task_match level: {:.0}% ({since}).", level * 100.0),
                         Font::Body,
-                        kit::LABEL,
+                        kit::palette().label,
                     );
                     ui.horizontal(|ui| {
                         compute =

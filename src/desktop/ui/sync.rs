@@ -2093,7 +2093,7 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
             s.row(|ui| {
                 egui::Sides::new().show(
                     ui,
-                    |ui| ui.label(kit::text("Sync", Font::Body).color(kit::LABEL)),
+                    |ui| ui.label(kit::text("Sync", Font::Body).color(kit::palette().label)),
                     |ui| {
                         let current = match app.sync.create_folder.as_deref() {
                             Some(folder) if !app.sync.create_custom => Current::Folder(folder),
@@ -2266,7 +2266,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
     ui.add_space(8.0);
-    ui.label(kit::text("Use a vault from another Mac", Font::Title).color(kit::LABEL));
+    ui.label(kit::text("Use a vault from another Mac", Font::Title).color(kit::palette().label));
     ui.add_space(6.0);
     let before = app.sync.relay.source;
     kit::segmented(
@@ -2290,13 +2290,13 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui,
         "Select your vault file. Use the same vault passphrase as on the other Mac. Apassy keeps a local copy on this Mac.",
         Font::Callout,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     kit::paragraph(
         ui,
         "macOS can ask for permission to use iCloud Drive before Apassy can read the file.",
         Font::Callout,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     ui.add_space(14.0);
     if app.sync.open_found.is_none()
@@ -2322,9 +2322,10 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     (Some(base), true) => format!("{label} · a duplicate of {base}"),
                     (None, true) => label.clone(),
                 };
-                let detail =
-                    chosen.then(|| kit::text("Selected", Font::Footnote).color(kit::ACCENT_TEXT));
-                let gray = egui::Color32::from_rgb(99, 99, 104);
+                let detail = chosen.then(|| {
+                    kit::text("Selected", Font::Footnote).color(kit::palette().accent_text)
+                });
+                let gray = kit::fixed::VAULT_FILE;
                 if s.nav(
                     Some((kit::Icon::Lock, gray)),
                     &entry.name,
@@ -2342,7 +2343,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui,
             "No vault files were found. Select a file from your synced folder.",
             Font::Callout,
-            kit::SECONDARY,
+            kit::palette().secondary,
         );
     }
     if let Some(error) = app.sync.open_error {
@@ -2353,7 +2354,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         } else {
             format!("Apassy could not read the synced file or folder: {error}.")
         };
-        kit::paragraph(ui, &text, Font::Callout, kit::SECONDARY);
+        kit::paragraph(ui, &text, Font::Callout, kit::palette().secondary);
     }
     let refresh_label = if app.sync.open_error.is_some() {
         "Retry"
@@ -2393,7 +2394,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui,
             "If macOS shows an iCloud permission request, permit access for Apassy. In Finder, open iCloud Drive and find the vault file. If the file needs a download, use Download Now. Then select Refresh or Retry.",
             Font::Callout,
-            kit::SECONDARY,
+            kit::palette().secondary,
         );
     }
     if let Some(file) = app.sync.open_pick.clone() {
@@ -2421,14 +2422,14 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui,
             format!("Selected: {filename} · {service}"),
             Font::Body,
-            kit::LABEL,
+            kit::palette().label,
         );
         if app.sync.open_waiting {
             kit::paragraph(
                 ui,
                 "The file download is not complete. Apassy keeps this selection and checks the file again.",
                 Font::Callout,
-                kit::SECONDARY,
+                kit::palette().secondary,
             );
         }
         let mut submit = false;
