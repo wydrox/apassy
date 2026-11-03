@@ -12,8 +12,8 @@
   The visual language is copied from app-v2-mockup.html. Light appearance only: the app
   (kit::apply_theme sets ThemePreference::Light) and app-v2-mockup.html have no dark one.
   One self-contained file: inline CSS and SVG, no script, no font file, no network request.
-  Purple "F1" … "F6" tags mark data that relay-feed-v1 does not carry today; see the notes
-  at the end of the page.
+  Data that relay-feed-v1 does not carry today (F1 … F6) and the choices are in the notes
+  at the end of the page, not in the windows.
 -->
 <style>
 :root{
@@ -274,6 +274,19 @@ svg{display:block}
 .notes td:first-child{white-space:nowrap}
 .notes ul{margin:6px 0 16px;padding-left:18px;line-height:1.5}
 .notes code{font-family:var(--mono);font-size:11.5px;background:#f2f2f4;border-radius:4px;padding:0 4px}
+
+/* Help (i) and its popover, the Read-only tag, the empty-state block. */
+.hi{width:18px;height:18px;border-radius:50%;display:inline-grid;place-items:center;color:var(--sec);flex:none}
+.hi svg{width:15px;height:15px}
+.hi.open{color:var(--accent);background:rgba(10,108,255,.1)}
+.hpop{position:absolute;width:300px;background:#fff;border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.22);padding:11px 14px 9px;z-index:20;font-size:12px;line-height:1.45;color:var(--label)}
+.hpop p{margin:0 0 5px}
+.cap.ro svg{width:10px;height:10px}
+.es{padding:24px 16px;text-align:center}
+.es b{display:block;font-size:14px;font-weight:600}
+.es .l{color:var(--sec);font-size:12.5px;margin-top:3px}
+.es .bt{margin-top:12px;display:flex;gap:14px;justify-content:center;align-items:center}
+.es .bt:empty{display:none}
 </style>
 </head>
 <body>
@@ -308,32 +321,30 @@ svg{display:block}
 <div class="page">
 
 <div class="intro">
-  <h1>Apassy · Bouncer: agents across your Macs</h1>
-  <p>Mockup for work unit U3 (implementation-plan-0037-cloud-agents.md, "Owner feedback on the first mockup (2026-11-03)"). It replaces the rejected "Settings → Cloud agents" frames. The owner approves it before the UI unit writes code. All names, items, numbers, and addresses are synthetic.</p>
-  <p>The sidebar section "Agents" is now <b>Bouncer</b>: Overview, Decisions, Agents, Logs. Each Mac is an <b>environment</b>. The scope bar on every page shows all environments or one Mac. Nobody adds an agent by hand: local agents connect on their Mac, and remote agents ask to connect through the Mac's public address. Environments: <b>Mac mini (office)</b> (this Mac), <b>Mac mini (studio)</b>, <b>MacBook Pro</b> (has not reported for 2 days). Now is Tuesday 3 Nov 2026, 14:20.</p>
-  <p>Light appearance only, as the app. Purple tags such as <span class="nf">F3</span> mark data that relay-feed-v1 does not carry today (notes at the end).</p>
+  <h1>Apassy · Bouncer across your Macs</h1>
+  <p>Mockup for U3 of implementation-plan-0037-cloud-agents.md, after the owner's feedback of 2026-11-03. Synthetic data. Light appearance only. Environments: Mac mini (office) (this Mac), Mac mini (studio), MacBook Pro. Now: Tue 3 Nov 2026, 14:20. Feed fields, choices, and notes are at the end.</p>
   <ol>
-    <li>Bouncer → Overview, all environments</li>
-    <li>Bouncer → Agents, all environments, with remote access</li>
-    <li>Bouncer → Agents, one environment (the scope menu open)</li>
-    <li>An agent page: Grok Bot (remote), and an agent of another Mac</li>
-    <li>Bouncer → Decisions: a connect decision and a remote run question</li>
-    <li>Bouncer → Logs, with the proxied requests of a remote run</li>
-    <li>The browser page of the connect flow: waiting and done</li>
-    <li>Problem states of the remote access block</li>
-    <li>Empty: the first run (Overview, Agents, Decisions, Logs)</li>
-    <li>Empty: a quiet day (Decisions, Overview)</li>
-    <li>Empty: a scope with no results (a new Mac, a project)</li>
-    <li>Empty: other Macs (never reported, the only Mac)</li>
-    <li>Empty: a remote agent just connected; remote access with no remote agent</li>
-    <li>Empty: Logs filtered to nothing</li>
+    <li>Overview</li>
+    <li>Agents, all environments</li>
+    <li>Agents, one environment</li>
+    <li>Agent pages</li>
+    <li>Decisions</li>
+    <li>Logs</li>
+    <li>Browser connect page</li>
+    <li>Remote access problems</li>
+    <li>Empty: first run</li>
+    <li>Empty: quiet day</li>
+    <li>Empty: no results</li>
+    <li>Empty: other Macs</li>
+    <li>Empty: new remote agent</li>
+    <li>Empty: filtered Logs</li>
   </ol>
 </div>
 
 <!-- ============================================================ 1 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">1</span>Bouncer → Overview · All environments</b>
-    <span>The new sidebar section "Bouncer" replaces "Agents". Overview answers "how is it going": the numbers of the last 7 days, the runs per day, what needs attention, and every agent with its environment. Nothing here is an empty pane: with no runs, the tiles show 0 and the agent table lists the connected agents.</span></div>
+  <div class="flabel"><b><span class="fnum">1</span>Overview · All environments</b>
+    <span>Numbers, trend, attention, and agents across Macs.</span></div>
   <div class="win">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
@@ -350,73 +361,69 @@ svg{display:block}
         <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
         <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
       </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
     </aside>
     <section class="content">
-      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days · 3 environments</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span></div>
+      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
       <div class="wpad">
-
         <div class="stats">
-          <div class="stat"><div class="sl">Runs</div><div class="sn">424</div><div class="ss">In the last 7 days</div></div>
-          <div class="stat"><div class="sl">Allowed by the bouncer</div><div class="sn">370<small>87%</small></div><div class="ss">Without a question</div></div>
-          <div class="stat"><div class="sl">Asked you</div><div class="sn">51<small>12%</small></div><div class="ss">47 allowed · 4 denied</div></div>
-          <div class="stat"><div class="sl">Denied</div><div class="sn">7</div><div class="ss">4 by you · 3 by the bouncer</div></div>
-          <div class="stat"><div class="sl">Median answer<span class="nf">F4</span></div><div class="sn">14 s</div><div class="ss">From question to your answer</div></div>
+          <div class="stat"><div class="sl">Runs</div><div class="sn">424</div></div>
+          <div class="stat"><div class="sl">Allowed by bouncer</div><div class="sn">370<small>87%</small></div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">51<small>12%</small></div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">7</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">14 s</div></div>
         </div>
 
         <div class="two">
           <div>
-            <div class="gl">Runs per day<span class="nf" style="margin-left:0">F5</span></div>
+            <div class="gl">Runs per day</div>
             <div class="grp chart">
-              <div class="legend"><span><i style="background:var(--s-auto)"></i>Without a question</span><span><i style="background:var(--s-ask)"></i>Asked you</span></div>
+              <div class="legend"><span><i style="background:var(--s-auto)"></i>Allowed by bouncer</span><span><i style="background:var(--s-ask)"></i>Asked you</span></div>
               <svg viewBox="0 0 470 164" width="100%" role="img" aria-label="Runs per day, last 7 days. Wed 48, Thu 71, Fri 66, Sat 22, Sun 18, Mon 95, today 104. Asked you: 6, 9, 8, 2, 1, 11, 14.">
                 <path d="M30 140H460" stroke="rgba(0,0,0,.18)" stroke-width="1"/>
                 <path d="M30 85H460M30 30H460" stroke="rgba(0,0,0,.07)" stroke-width="1"/>
                 <text x="24" y="143.5" text-anchor="end">0</text><text x="24" y="88.5" text-anchor="end">50</text><text x="24" y="33.5" text-anchor="end">100</text>
-                <g><title>Wed 28 Oct: 48 runs, 42 without a question, 6 asked you</title><rect x="43" y="93.8" width="34" height="46.2" fill="#0a6cff"/><path d="M43,91.8V88.2Q43,85.2 46,85.2H74Q77,85.2 77,88.2V91.8Z" fill="#e8890c"/><text class="v" x="60" y="80" text-anchor="middle">48</text></g>
-                <g><title>Thu 29 Oct: 71 runs, 62 without a question, 9 asked you</title><rect x="103" y="71.8" width="34" height="68.2" fill="#0a6cff"/><path d="M103,69.8V62.9Q103,59.9 106,59.9H134Q137,59.9 137,62.9V69.8Z" fill="#e8890c"/><text class="v" x="120" y="54.7" text-anchor="middle">71</text></g>
-                <g><title>Fri 30 Oct: 66 runs, 58 without a question, 8 asked you</title><rect x="163" y="76.2" width="34" height="63.8" fill="#0a6cff"/><path d="M163,74.2V68.4Q163,65.4 166,65.4H194Q197,65.4 197,68.4V74.2Z" fill="#e8890c"/><text class="v" x="180" y="60.2" text-anchor="middle">66</text></g>
-                <g><title>Sat 31 Oct: 22 runs, 20 without a question, 2 asked you</title><rect x="223" y="118" width="34" height="22" fill="#0a6cff"/><path d="M223,116V114.9Q223,113.8 224.1,113.8H255.9Q257,113.8 257,114.9V116Z" fill="#e8890c"/><text class="v" x="240" y="108.6" text-anchor="middle">22</text></g>
-                <g><title>Sun 1 Nov: 18 runs, 17 without a question, 1 asked you</title><rect x="283" y="121.3" width="34" height="18.7" fill="#0a6cff"/><path d="M283,119.3V118.75Q283,118.2 283.55,118.2H316.45Q317,118.2 317,118.75V119.3Z" fill="#e8890c"/><text class="v" x="300" y="113" text-anchor="middle">18</text></g>
-                <g><title>Mon 2 Nov: 95 runs, 84 without a question, 11 asked you</title><rect x="343" y="47.6" width="34" height="92.4" fill="#0a6cff"/><path d="M343,45.6V36.5Q343,33.5 346,33.5H374Q377,33.5 377,36.5V45.6Z" fill="#e8890c"/><text class="v" x="360" y="28.3" text-anchor="middle">95</text></g>
-                <g><title>Today: 104 runs, 90 without a question, 14 asked you</title><rect x="403" y="41" width="34" height="99" fill="#0a6cff"/><path d="M403,39V26.6Q403,23.6 406,23.6H434Q437,23.6 437,26.6V39Z" fill="#e8890c"/><text class="v" x="420" y="18.4" text-anchor="middle">104</text></g>
+                <g><title>Wed 28 Oct: 48 runs, 6 asked you</title><rect x="43" y="93.8" width="34" height="46.2" fill="#0a6cff"/><path d="M43,91.8V88.2Q43,85.2 46,85.2H74Q77,85.2 77,88.2V91.8Z" fill="#e8890c"/><text class="v" x="60" y="80" text-anchor="middle">48</text></g>
+                <g><title>Thu 29 Oct: 71 runs, 9 asked you</title><rect x="103" y="71.8" width="34" height="68.2" fill="#0a6cff"/><path d="M103,69.8V62.9Q103,59.9 106,59.9H134Q137,59.9 137,62.9V69.8Z" fill="#e8890c"/><text class="v" x="120" y="54.7" text-anchor="middle">71</text></g>
+                <g><title>Fri 30 Oct: 66 runs, 8 asked you</title><rect x="163" y="76.2" width="34" height="63.8" fill="#0a6cff"/><path d="M163,74.2V68.4Q163,65.4 166,65.4H194Q197,65.4 197,68.4V74.2Z" fill="#e8890c"/><text class="v" x="180" y="60.2" text-anchor="middle">66</text></g>
+                <g><title>Sat 31 Oct: 22 runs, 2 asked you</title><rect x="223" y="118" width="34" height="22" fill="#0a6cff"/><path d="M223,116V114.9Q223,113.8 224.1,113.8H255.9Q257,113.8 257,114.9V116Z" fill="#e8890c"/><text class="v" x="240" y="108.6" text-anchor="middle">22</text></g>
+                <g><title>Sun 1 Nov: 18 runs, 1 asked you</title><rect x="283" y="121.3" width="34" height="18.7" fill="#0a6cff"/><path d="M283,119.3V118.75Q283,118.2 283.55,118.2H316.45Q317,118.2 317,118.75V119.3Z" fill="#e8890c"/><text class="v" x="300" y="113" text-anchor="middle">18</text></g>
+                <g><title>Mon 2 Nov: 95 runs, 11 asked you</title><rect x="343" y="47.6" width="34" height="92.4" fill="#0a6cff"/><path d="M343,45.6V36.5Q343,33.5 346,33.5H374Q377,33.5 377,36.5V45.6Z" fill="#e8890c"/><text class="v" x="360" y="28.3" text-anchor="middle">95</text></g>
+                <g><title>Today: 104 runs, 14 asked you</title><rect x="403" y="41" width="34" height="99" fill="#0a6cff"/><path d="M403,39V26.6Q403,23.6 406,23.6H434Q437,23.6 437,26.6V39Z" fill="#e8890c"/><text class="v" x="420" y="18.4" text-anchor="middle">104</text></g>
                 <text x="60" y="157" text-anchor="middle">Wed</text><text x="120" y="157" text-anchor="middle">Thu</text><text x="180" y="157" text-anchor="middle">Fri</text><text x="240" y="157" text-anchor="middle">Sat</text><text x="300" y="157" text-anchor="middle">Sun</text><text x="360" y="157" text-anchor="middle">Mon</text><text x="420" y="157" text-anchor="middle" style="font-weight:600;fill:rgba(0,0,0,.72)">Today</text>
               </svg>
             </div>
-            <div class="note">Asked you each day: 6, 9, 8, 2, 1, 11, 14. MacBook Pro counts up to 1 Nov.</div>
           </div>
           <div>
             <div class="gl">Needs attention<span>3</span></div>
             <div class="grp">
-              <div class="fr top"><div class="att"><div class="ai warn"><svg><use href="#i-warn"/></svg></div><div><div class="t1">Codex asks you often</div><div class="t2">Mac mini (studio) · 13 of 44 runs this week (30%), most for Deploy key in synthetic-shop.<span class="nf">F3</span></div><div class="t3 lnk">Open Codex</div></div></div></div>
-              <div class="fr top"><div class="att"><div class="ai crit"><svg><use href="#i-key"/></svg></div><div><div class="t1">Stripe live was used 3 times <span class="cap red">Production</span></div><div class="t2">Claude Code on Mac mini (office), in acme-billing. Each use asked you.</div><div class="t3 lnk">Show in Logs</div></div></div></div>
-              <div class="fr top"><div class="att"><div class="ai off"><svg><use href="#i-laptop"/></svg></div><div><div class="t1">MacBook Pro has not reported since 1 Nov, 18:40</div><div class="t2">Its numbers are from then. Open Apassy on it and unlock the vault.</div></div></div></div>
+              <div class="fr"><div class="att"><div class="ai warn"><svg><use href="#i-warn"/></svg></div><div><div class="t1">Codex asks often</div><div class="t2">Mac mini (studio) · 30% of runs</div></div></div><span class="chev">›</span></div>
+              <div class="fr"><div class="att"><div class="ai crit"><svg><use href="#i-key"/></svg></div><div><div class="t1">Stripe live used 3 times <span class="cap red">Production</span></div><div class="t2">Claude Code · Mac mini (office)</div></div></div><span class="chev">›</span></div>
+              <div class="fr"><div class="att"><div class="ai off"><svg><use href="#i-laptop"/></svg></div><div><div class="t1">MacBook Pro not reporting</div><div class="t2">Last report 1 Nov, 18:40</div></div></div><span class="chev">›</span></div>
             </div>
           </div>
         </div>
 
-        <div class="gl">Agents<span>8 agents · last 7 days</span></div>
+        <div class="gl">Agents<span>8</span></div>
         <div class="grp">
-          <div class="tr th g-ov"><div>Agent</div><div>Environment</div><div class="num">Runs</div><div class="num">Asks you</div><div class="num">Denied</div><div>Last active</div></div>
-          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">Mac mini (office)</div><div class="num">142</div><div class="num">6%</div><div class="num sec">1</div><div><span class="stt live"><span class="dot"></span>Active now</span></div></div>
-          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">98</div><div class="num">4%</div><div class="num sec">0</div><div><span class="stt live"><span class="dot"></span>Active now</span></div></div>
-          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">Mac mini (office)</div><div class="num">61</div><div class="num">11%</div><div class="num sec">0</div><div class="sec">25 min ago</div></div>
-          <div class="tr g-ov warnrow"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">44</div><div class="num hl">30%</div><div class="num hl">3</div><div class="sec">1 h ago</div></div>
-          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">MacBook Pro</div><div class="num">31</div><div class="num">10%</div><div class="num sec">1</div><div class="sec">1 Nov</div></div>
-          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">27</div><div class="num">7%</div><div class="num sec">0</div><div class="sec">3 h ago</div></div>
-          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span><span class="cap acc">Remote</span></div><div class="sec cut">Mac mini (office)</div><div class="num">12</div><div class="num">100%</div><div class="num sec">2</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div></div>
-          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">MacBook Pro</div><div class="num">9</div><div class="num">11%</div><div class="num sec">0</div><div class="sec">31 Oct</div></div>
+          <div class="tr th g-ov"><div>Agent</div><div>Environment</div><div class="num">Runs</div><div class="num">Asks You</div><div>Last Active</div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">Mac mini (office)</div><div class="num">142</div><div class="num">6%</div><div><span class="stt live"><span class="dot"></span>Active now</span></div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">98</div><div class="num">4%</div><div><span class="stt live"><span class="dot"></span>Active now</span></div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">Mac mini (office)</div><div class="num">61</div><div class="num">11%</div><div class="sec">25 min ago</div></div>
+          <div class="tr g-ov warnrow"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">44</div><div class="num hl">30%</div><div class="sec">1 h ago</div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">MacBook Pro</div><div class="num">31</div><div class="num">10%</div><div class="sec">1 Nov</div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">27</div><div class="num">7%</div><div class="sec">3 h ago</div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span><span class="cap acc">Remote</span></div><div class="sec cut">Mac mini (office)</div><div class="num">12</div><div class="num">100%</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">MacBook Pro</div><div class="num">9</div><div class="num">11%</div><div class="sec">31 Oct</div></div>
         </div>
-        <div class="note">Runs, Asks you, and Denied of other Macs come from their reports<span class="nf">F3</span>. Every run of a remote agent asks you, so Grok Bot is always at 100%. A click on a row opens the agent.</div>
 
         <div class="gl">Environments</div>
         <div class="grp">
-          <div class="fr"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-mini"/></svg><div class="k">Mac mini (office)</div><span class="cap">This Mac</span><div class="v">215 runs · 28 asked you</div></div>
-          <div class="fr"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-mini"/></svg><div class="k">Mac mini (studio)</div><div class="v">169 runs · 19 asked you · updated 1 min ago</div></div>
-          <div class="fr dim"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-laptop"/></svg><div class="k">MacBook Pro</div><div class="v">40 runs · 4 asked you · has not reported since 1 Nov</div></div>
+          <div class="fr"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-mini"/></svg><div class="k">Mac mini (office)</div><span class="cap">This Mac</span><div class="v">215 runs</div></div>
+          <div class="fr"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-mini"/></svg><div class="k">Mac mini (studio)</div><div class="v">169 runs</div></div>
+          <div class="fr dim"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-laptop"/></svg><div class="k">MacBook Pro</div><div class="v">40 runs · 1 Nov</div></div>
         </div>
-        <div class="note">The runs of each Mac are its <span class="mono">week</span> counts (by you + automatic). Settings → Bouncer still sets the brain of the bouncer on this Mac.</div>
       </div>
     </section>
   </div>
@@ -424,8 +431,8 @@ svg{display:block}
 
 <!-- ============================================================ 2 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">2</span>Bouncer → Agents · All environments</b>
-    <span>Every agent of every Mac, grouped by environment, this Mac first. At the top of this Mac's group: the remote access block (Tailscale Funnel switch, the MCP address with Copy). There is no "Add agent" button: a remote agent asks to connect by itself. Rows of other Macs open a read-only page.</span></div>
+  <div class="flabel"><b><span class="fnum">2</span>Agents · All environments</b>
+    <span>Grouped by Mac; remote access on this Mac. Help open.</span></div>
   <div class="win">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
@@ -442,47 +449,47 @@ svg{display:block}
         <div class="si on"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
         <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
       </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
     </aside>
     <section class="content">
-      <div class="tb"><div class="ttl"><b>Agents</b><small>8 agents in 3 environments</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span></div>
+      <div class="tb"><div class="ttl"><b>Agents</b><small>8 agents</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
       <div class="wpad">
 
-        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span><span class="r2"><span class="dot"></span>Remote access on</span></div>
-        <div class="grp">
-          <div class="fr top"><div class="kn"><div>Remote agents can reach this Mac</div><div class="nt">On. Through Tailscale Funnel on rafals-mac-mini.</div></div><span class="sw on"></span></div>
+        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span></div>
+        <div class="grp" style="position:relative">
+          <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="hi open"><svg><use href="#i-info"/></svg></span><span class="sw on"></span></div>
           <div class="fr"><div class="k" style="min-width:96px">MCP address</div><div class="v mono" style="color:var(--label);text-align:left">https://rafals-mac-mini.tail71fdd0.ts.net:8443/mcp</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
-          <div class="fr"><div class="np">
-            <p>The address opens only the MCP endpoint and the proxy for the runs that you allow. Credential values stay on this Mac.</p>
-            <p style="color:var(--label)">To connect a cloud agent, give it this address. It asks to connect, and you approve it in Decisions.</p>
-          </div></div>
+          <div class="hpop" style="right:44px;top:44px">
+            <p><b>Remote Access</b></p>
+            <p>Tailscale Funnel opens only the MCP endpoint and the proxy.</p>
+            <p>Credential values stay on this Mac.</p>
+            <p>Give a cloud agent the address. It asks to connect; you approve it in Decisions.</p>
+            <p>Switching needs Touch ID. Keep this Mac unlocked and awake.</p>
+          </div>
         </div>
-        <div class="note">Turning it on or off needs Touch ID. This Mac must be unlocked and awake for remote runs.</div>
 
         <div class="grp" style="margin-top:12px">
-          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs today<span class="nf">F3</span></div><div class="num">Asks you<span class="nf">F3</span></div><div></div></div>
+          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs Today</div><div class="num">Asks You</div><div></div></div>
           <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">apassy, acme-billing</div><div><span class="stt live"><span class="dot"></span>Active now</span></div><div class="num">41</div><div class="num">6%</div><span class="chev">›</span></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">acme-billing</div><div><span class="stt idle"><span class="dot off"></span>Idle · 25 min ago</span></div><div class="num">14</div><div class="num">11%</div><span class="chev">›</span></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span><span class="cap acc">Remote</span></div><div class="sec cut">No project</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div><div class="num">5</div><div class="num">100%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">acme-billing</div><div><span class="stt idle"><span class="dot off"></span>25 min ago</span></div><div class="num">14</div><div class="num">11%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span><span class="cap acc">Remote</span></div><div class="sec cut">—</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div><div class="num">5</div><div class="num">100%</div><span class="chev">›</span></div>
         </div>
-        <div class="disc">Disconnected agents (1)</div>
+        <div class="disc">Disconnected (1)</div>
 
-        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (studio)</b><span class="r2">Updated 1 min ago</span></div>
+        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (studio)</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">1 min ago</span></div>
         <div class="grp">
-          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs today</div><div class="num">Asks you</div><div></div></div>
+          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs Today</div><div class="num">Asks You</div><div></div></div>
           <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">synthetic-shop</div><div><span class="stt live"><span class="dot"></span>Active now</span></div><div class="num">29</div><div class="num">4%</div><span class="chev">›</span></div>
-          <div class="tr g-ag warnrow"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">synthetic-shop, infra</div><div><span class="stt idle"><span class="dot off"></span>Idle · 1 h ago</span></div><div class="num">9</div><div class="num hl">30%</div><span class="chev">›</span></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">apassy</div><div><span class="stt idle"><span class="dot off"></span>Idle · 3 h ago</span></div><div class="num">6</div><div class="num">7%</div><span class="chev">›</span></div>
+          <div class="tr g-ag warnrow"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">synthetic-shop, infra</div><div><span class="stt idle"><span class="dot off"></span>1 h ago</span></div><div class="num">9</div><div class="num hl">30%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">apassy</div><div><span class="stt idle"><span class="dot off"></span>3 h ago</span></div><div class="num">6</div><div class="num">7%</div><span class="chev">›</span></div>
         </div>
-        <div class="note">Read-only here. Change these agents on Mac mini (studio).</div>
 
-        <div class="envh dim"><svg><use href="#i-laptop"/></svg><b>MacBook Pro</b><span class="r2">The Mac has not reported since 1 Nov, 18:40</span></div>
+        <div class="envh dim"><svg><use href="#i-laptop"/></svg><b>MacBook Pro</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">Last report 1 Nov</span></div>
         <div class="grp dim">
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">side-project</div><div class="sec">Last seen 1 Nov</div><div class="num sec">—</div><div class="num">10%</div><span class="chev">›</span></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">side-project</div><div class="sec">Last seen 31 Oct</div><div class="num sec">—</div><div class="num">11%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">side-project</div><div class="sec">1 Nov</div><div class="num sec">—</div><div class="num">10%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">side-project</div><div class="sec">31 Oct</div><div class="num sec">—</div><div class="num">11%</div><span class="chev">›</span></div>
         </div>
-        <div class="note">Read-only here. Change these agents on MacBook Pro.</div>
       </div>
     </section>
   </div>
@@ -490,9 +497,9 @@ svg{display:block}
 
 <!-- ============================================================ 3 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">3</span>Bouncer → Agents · one environment: Mac mini (studio)</b>
-    <span>The same page in the scope of one Mac, with the scope menu open to show the switch. The menu lists "All environments", then this Mac, then the other Macs; a Mac that has not reported says so. The scope is shared by Overview, Decisions, Agents, and Logs, as in PR #88. Remote access is set on each Mac, so the block shows only in the scope of this Mac.</span></div>
-  <div class="win" style="min-height:560px">
+  <div class="flabel"><b><span class="fnum">3</span>Agents · Mac mini (studio)</b>
+    <span>One environment selected; the scope menu open.</span></div>
+  <div class="win" style="min-height:520px">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
       <div class="scroll">
@@ -508,35 +515,33 @@ svg{display:block}
         <div class="si on"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
         <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
       </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
     </aside>
     <section class="content">
-      <div class="tb"><div class="ttl"><b>Agents</b><small>3 agents on Mac mini (studio)</small></div></div>
-      <div class="scopebar">Showing <span class="popm open">Mac mini (studio)</span> in <span class="popm">All projects</span>
+      <div class="tb"><div class="ttl"><b>Agents</b><small>3 agents</small></div></div>
+      <div class="scopebar">Showing <span class="popm open">Mac mini (studio)</span> in <span class="popm">All Projects</span>
         <div class="menu" style="left:78px;top:28px">
-          <div class="mi"><span class="ck"></span>All environments</div>
+          <div class="mi"><span class="ck"></span>All Environments</div>
           <hr>
           <div class="mi"><span class="ck"></span>Mac mini (office)<small>This Mac</small></div>
-          <div class="mi hi"><span class="ck">✓</span>Mac mini (studio)<small>Updated 1 min ago</small></div>
-          <div class="mi dim"><span class="ck"></span>MacBook Pro<small>Not reported since 1 Nov</small></div>
+          <div class="mi hi"><span class="ck">✓</span>Mac mini (studio)<small>1 min ago</small></div>
+          <div class="mi dim"><span class="ck"></span>MacBook Pro<small>1 Nov</small></div>
         </div>
       </div>
       <div class="wpad">
-        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (studio)</b><span class="r2">Remote access off<span class="nf">F6</span> · Updated 1 min ago</span></div>
+        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (studio)</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">Remote access off · 1 min ago</span></div>
         <div class="grp">
-          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs today</div><div class="num">Asks you</div><div></div></div>
+          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs Today</div><div class="num">Asks You</div><div></div></div>
           <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">synthetic-shop</div><div><span class="stt live"><span class="dot"></span>Active now</span></div><div class="num">29</div><div class="num">4%</div><span class="chev">›</span></div>
-          <div class="tr g-ag warnrow"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">synthetic-shop, infra</div><div><span class="stt idle"><span class="dot off"></span>Idle · 1 h ago</span></div><div class="num">9</div><div class="num hl">30%</div><span class="chev">›</span></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">apassy</div><div><span class="stt idle"><span class="dot off"></span>Idle · 3 h ago</span></div><div class="num">6</div><div class="num">7%</div><span class="chev">›</span></div>
+          <div class="tr g-ag warnrow"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">synthetic-shop, infra</div><div><span class="stt idle"><span class="dot off"></span>1 h ago</span></div><div class="num">9</div><div class="num hl">30%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">apassy</div><div><span class="stt idle"><span class="dot off"></span>3 h ago</span></div><div class="num">6</div><div class="num">7%</div><span class="chev">›</span></div>
         </div>
-        <div class="note">Read-only here. Change these agents on Mac mini (studio).</div>
-
-        <div class="gl">This week on Mac mini (studio)</div>
+        <div class="gl">This week</div>
         <div class="stats four">
-          <div class="stat"><div class="sl">Runs</div><div class="sn">169</div><div class="ss">In the last 7 days</div></div>
-          <div class="stat"><div class="sl">Asked you</div><div class="sn">19<small>11%</small></div><div class="ss">By you, from its <span class="mono">week</span></div></div>
-          <div class="stat"><div class="sl">Denied</div><div class="sn">3</div><div class="ss">All for Codex</div></div>
-          <div class="stat"><div class="sl">Median answer<span class="nf">F4</span></div><div class="sn">19 s</div><div class="ss">From question to your answer</div></div>
+          <div class="stat"><div class="sl">Runs</div><div class="sn">169</div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">19<small>11%</small></div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">3</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">19 s</div></div>
         </div>
       </div>
     </section>
@@ -545,8 +550,8 @@ svg{display:block}
 
 <!-- ============================================================ 4 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">4</span>An agent page · Grok Bot (remote), and an agent of another Mac</b>
-    <span>A row of Agents opens the agent as a page, with "Agents" to go back. Grok Bot: who it is, what it does, how it performs, what it can see (the same controls as a local agent), and Disconnect… with Touch ID. Below: the compact, read-only page of an agent of another Mac.</span></div>
+  <div class="flabel"><b><span class="fnum">4</span>Agent pages</b>
+    <span>Grok Bot (remote); below, an agent of another Mac.</span></div>
   <div class="win">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
@@ -563,99 +568,68 @@ svg{display:block}
         <div class="si on"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
         <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
       </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
     </aside>
     <section class="content">
       <div class="tb"><span class="tbtn"><svg><use href="#i-back"/></svg>Agents</span><div class="ttl"></div><span class="ib"><svg><use href="#i-dots"/></svg></span></div>
       <div class="wpad n">
-        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1>Grok Bot</h1><div class="s">Remote agent · connected through Mac mini (office)</div><div class="caps"><span class="cap acc"><svg><use href="#i-cloud"/></svg>Remote</span><span class="cap">Every run asks you</span></div></div></div>
+        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1 style="display:flex;align-items:center;gap:8px">Grok Bot <span class="cap acc"><svg><use href="#i-cloud"/></svg>Remote</span><span class="hi"><svg><use href="#i-info"/></svg></span></h1><div class="s">Mac mini (office) · last seen now</div></div></div>
 
-        <div class="grp">
-          <div class="fr"><div class="k">Kind</div><div class="v">MCP client on the internet (xAI)</div></div>
-          <div class="fr"><div class="k">Connected through</div><div class="v">Mac mini (office) · Tailscale Funnel</div></div>
-          <div class="fr"><div class="k">Connected</div><div class="v">28 Oct 2026 · you allowed it with Touch ID</div></div>
-          <div class="fr"><div class="k">Last seen</div><div class="v"><span class="stt wait"><span class="dot warn"></span>Now · a run waits for you</span></div></div>
-          <div class="fr"><div class="k">Access</div><div class="v">Valid until 26 Jan 2027</div></div>
-          <div class="fr"><div class="k">Projects</div><div class="v">None. A remote agent sends no project.</div></div>
-        </div>
-
-        <div class="gl">Last 7 days</div>
         <div class="stats four">
-          <div class="stat"><div class="sl">Runs</div><div class="sn">12</div><div class="ss">5 today</div></div>
-          <div class="stat"><div class="sl">Asked you</div><div class="sn">12<small>100%</small></div><div class="ss">Every run asks you</div></div>
-          <div class="stat"><div class="sl">Denied</div><div class="sn">2</div><div class="ss">Both by you</div></div>
-          <div class="stat"><div class="sl">Median answer</div><div class="sn">21 s</div><div class="ss">From question to your answer</div></div>
+          <div class="stat"><div class="sl">Runs</div><div class="sn">12</div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">12<small>100%</small></div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">2</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">21 s</div></div>
         </div>
 
-        <div class="gl">Recent runs<span class="lnk">Show in Logs</span></div>
+        <div class="gl">Recent runs</div>
         <div class="grp">
-          <div class="fr top"><div class="act"><span class="st wait"><svg><use href="#i-dots"/></svg></span><div class="tx"><div class="a1 mono">curl -H "Authorization: Bearer $HTTPBIN_TOKEN" $APASSY_BASE_HTTPBIN_TOKEN/bearer</div><div class="a2">httpbin test token · Read · Waits for you</div></div><span class="when">1 min ago</span></div></div>
-          <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1 mono">gh api repos/acme/billing/issues --paginate</div><div class="a2">GitHub token · Read · Allowed · Answered on iPhone · 4 requests</div></div><span class="when">8 min ago</span></div></div>
-          <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1 mono">curl $APASSY_BASE_STRIPE_TEST/v1/customers?limit=3</div><div class="a2">Stripe test · Read · Allowed · By you · 1 request</div></div><span class="when">2 h ago</span></div></div>
-          <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1 mono">curl -X DELETE $APASSY_BASE_STRIPE_TEST/v1/customers/cus_TEST91</div><div class="a2">Stripe test · Delete · Not allowed: denied · By you</div></div><span class="when">Yesterday</span></div></div>
-          <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1 mono">gh api -X POST repos/acme/billing/issues -f title=Weekly</div><div class="a2">GitHub token · Change · Not allowed: denied · By you</div></div><span class="when">Yesterday</span></div></div>
+          <div class="fr top"><div class="act"><span class="st wait"><svg><use href="#i-dots"/></svg></span><div class="tx"><div class="a1 mono">curl -H "Authorization: Bearer $HTTPBIN_TOKEN" $APASSY_BASE_HTTPBIN_TOKEN/bearer</div><div class="a2">httpbin test token · Waits for you</div></div><span class="when">1 min ago</span></div></div>
+          <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1 mono">gh api repos/acme/billing/issues --paginate</div><div class="a2">GitHub token · Allowed on iPhone</div></div><span class="when">8 min ago</span></div></div>
+          <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1 mono">curl $APASSY_BASE_STRIPE_TEST/v1/customers?limit=3</div><div class="a2">Stripe test · Allowed by you</div></div><span class="when">2 h ago</span></div></div>
+          <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1 mono">curl -X DELETE $APASSY_BASE_STRIPE_TEST/v1/customers/cus_TEST91</div><div class="a2">Stripe test · Denied by you</div></div><span class="when">Yesterday</span></div></div>
+          <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1 mono">gh api -X POST repos/acme/billing/issues -f title=Weekly</div><div class="a2">GitHub token · Denied by you</div></div><span class="when">Yesterday</span></div></div>
         </div>
 
-        <div class="gl">What it can see</div>
+        <div class="gl">Can see</div>
         <div class="grp">
-          <div class="fr"><div class="k">Sees</div><div class="v">Only 3 credentials, never values</div></div>
-          <div class="fr"><div style="flex:1;display:flex;align-items:center;gap:8px"><div class="tile s" style="background:#8e8e93"><svg><use href="#i-key"/></svg></div>Only: httpbin test token</div><span class="pb">Remove</span></div>
-          <div class="fr"><div style="flex:1;display:flex;align-items:center;gap:8px"><div class="tile s" style="background:#24292f"><svg><use href="#i-key"/></svg></div>Only: GitHub token</div><span class="pb">Remove</span></div>
-          <div class="fr"><div style="flex:1;display:flex;align-items:center;gap:8px"><div class="tile s" style="background:#635bff"><svg><use href="#i-key"/></svg></div>Only: Stripe test</div><span class="pb">Remove</span></div>
-          <div class="fr"><div style="flex:1;display:flex;align-items:center;gap:8px"><div class="tile s" style="background:#635bff"><svg><use href="#i-key"/></svg></div>Never: Stripe live <span class="cap red">Production</span></div><span class="pb">Remove</span></div>
-          <div class="fr"><div class="kn lnk">Choose credentials…</div></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="tile s" style="background:#8e8e93"><svg><use href="#i-key"/></svg></div>httpbin test token</div><span class="pb">Remove</span></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="tile s" style="background:#24292f"><svg><use href="#i-key"/></svg></div>GitHub token</div><span class="pb">Remove</span></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="tile s" style="background:#635bff"><svg><use href="#i-key"/></svg></div>Stripe test</div><span class="pb">Remove</span></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="tile s" style="background:#635bff"><svg><use href="#i-key"/></svg></div>Stripe live <span class="cap red">Never</span></div><span class="pb">Remove</span></div>
+          <div class="fr"><div class="kn lnk">Choose Credentials…</div></div>
         </div>
-        <div class="note">A remote agent starts with no credentials. It sees the names that you choose, never a value. Exceptions also come from your answers in Decisions.</div>
 
-        <div class="gl">Note for the bouncer</div>
-        <div class="field">Grok Bot in the xAI workspace "acme-ops". Read-only checks of GitHub and Stripe test.</div>
-
-        <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Disconnect Grok Bot…</div><div class="v"></div><svg style="width:15px;height:15px;color:var(--sec)"><use href="#i-touch"/></svg></div></div>
-        <div class="note">Needs Touch ID. Its access stops at once, and a waiting run is denied. It can ask to connect again.</div>
+        <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Disconnect…</div><div class="v"></div><svg style="width:15px;height:15px;color:var(--sec)"><use href="#i-touch"/></svg></div></div>
       </div>
     </section>
   </div>
 
   <div class="pgrid" style="margin-top:22px">
     <div class="pcard">
-      <div class="plabel">4b · An agent of another Mac, read-only<small>The page of Codex on Mac mini (studio), from its report. No field and no button changes the agent.</small></div>
-      <div class="hdr" style="margin-top:16px"><div class="ava l" style="background:#10a37f">C</div><div><h1>Codex</h1><div class="s">Mac mini (studio) · updated 1 min ago</div></div></div>
+      <div class="plabel">4b · Agent of another Mac</div>
+      <div class="hdr" style="margin-top:16px"><div class="ava l" style="background:#10a37f">C</div><div><h1 style="display:flex;align-items:center;gap:8px">Codex <span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span></h1><div class="s">Mac mini (studio) · 1 h ago</div></div></div>
+      <div class="stats" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat"><div class="sl">Runs</div><div class="sn">44</div></div>
+        <div class="stat"><div class="sl">Asked you</div><div class="sn">13<small>30%</small></div></div>
+        <div class="stat"><div class="sl">Denied</div><div class="sn">3</div></div>
+      </div>
+      <div class="gl">Recent runs</div>
       <div class="grp">
-        <div class="fr"><div class="k">Runs this week<span class="nf">F3</span></div><div class="v">44 · asks you 30%</div></div>
-        <div class="fr"><div class="k">Projects</div><div class="v">synthetic-shop, infra</div></div>
-        <div class="fr"><div class="k">Sees</div><div class="v">Credential names, never values</div></div>
+        <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1">Deploy key</div><div class="a2">synthetic-shop · Denied by you</div></div><span class="when">1 h ago</span></div></div>
+        <div class="fr top"><div class="act"><span class="st you"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1">Deploy key</div><div class="a2">synthetic-shop · Allowed by you</div></div><span class="when">2 h ago</span></div></div>
+        <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1">Shop database</div><div class="a2">synthetic-shop · Allowed by bouncer</div></div><span class="when">3 h ago</span></div></div>
       </div>
-      <div class="gl">Actions this week</div>
-      <div class="grp">
-        <div class="fr"><div class="k">Read</div><div class="v">34 · synthetic-shop, infra</div></div>
-        <div class="fr"><div class="k">Deploy</div><div class="v">10 · synthetic-shop · <span style="color:var(--t-crit)">3 not allowed</span></div></div>
-      </div>
-      <div class="gl">Recent</div>
-      <div class="grp">
-        <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1">Deploy key</div><div class="a2">Deploy in synthetic-shop · Not allowed: denied</div></div><span class="when">1 h ago</span></div></div>
-        <div class="fr top"><div class="act"><span class="st you"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1">Deploy key</div><div class="a2">Deploy in synthetic-shop · Allowed by you</div></div><span class="when">2 h ago</span></div></div>
-        <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1">Shop database</div><div class="a2">Read in synthetic-shop · Allowed automatically</div></div><span class="when">3 h ago</span></div></div>
-      </div>
-      <div class="note" style="margin-top:14px;text-align:center">Change this agent on Mac mini (studio).</div>
-    </div>
-    <div class="pcard">
-      <div class="plabel">Notes on frame 4</div>
-      <div class="np" style="margin-top:10px">
-        <p><b style="color:var(--label)">Same controls for both kinds.</b> "Sees", the exceptions with Remove, and the note for the bouncer are the controls of a local agent today (ADR 0012 and ADR 0025 §3f). "Choose credentials…" adds "Only" rows; a remote agent needs it because it starts with none (plan decision 3). A local agent gets the same row.</p>
-        <p><b style="color:var(--label)">Answer times</b> of an agent of this Mac come from its decision log. For another Mac they would need F4; the compact page shows none.</p>
-        <p><b style="color:var(--label)">The "…" menu</b> of the toolbar has "Show in Logs" and "Disconnect Grok Bot…". On a page of another Mac it has only "Show in Logs".</p>
-        <p><b style="color:var(--label)">Status words</b> in the whole section: "Active now" (a use in the last 10 minutes, from <span class="mono">last_use_at</span>), "Waits for you" (an open question on this Mac), "Idle · 25 min ago" (today), "Last seen 1 Nov" (before today).</p>
-        <p><b style="color:var(--label)">No token row</b> for a remote agent: its access comes from the connect flow (OAuth). "Access: valid until" is the end of its grant; a new connect request renews it. A CLI bearer token, the fallback for clients without OAuth, shows the "Token" row of a local agent.</p>
-      </div>
+      <div class="note" style="margin-top:14px;text-align:center">Change on Mac mini (studio).</div>
     </div>
   </div>
 </section>
 
 <!-- ============================================================ 5 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">5</span>Bouncer → Decisions · open decisions and history</b>
-    <span>Open decisions on top, history below with filters, and the scope bar under the title. Selected: a connect decision of a remote agent (Allow with Touch ID / Deny), also on the iPhone. A second Grok Bot asks to connect while the first one (connected 28 Oct) waits for a run answer. 5b: the run question of Grok Bot.</span></div>
-  <div class="win" style="min-height:720px">
+  <div class="flabel"><b><span class="fnum">5</span>Decisions</b>
+    <span>Open on top, history below; 5b is the run card.</span></div>
+  <div class="win" style="min-height:640px">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
       <div class="scroll">
@@ -671,101 +645,65 @@ svg{display:block}
         <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
         <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
       </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
     </aside>
     <section class="listcol">
-      <div class="tb"><div class="ttl"><b>Decisions</b><small>51 by you · 373 automatic this week</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span></div>
+      <div class="tb"><div class="ttl"><b>Decisions</b><small>51 by you · 373 automatic</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
       <div class="rows">
         <div class="gh">Waiting<span>2</span></div>
-        <div class="r on"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot wants to connect</div><div class="sub">Remote agent · Mac mini (office)</div></div><div class="meta"><span class="tm">4:31</span></div></div>
-        <div class="r"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">httpbin test token</div><div class="sub">Grok Bot · No project · Mac mini (office)</div></div><div class="meta"><span class="dotp"></span><span class="tm">4:02</span></div></div>
+        <div class="r on"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot wants to connect</div><div class="sub">Mac mini (office)</div></div><div class="meta"><span class="tm">4:31</span></div></div>
+        <div class="r"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">httpbin test token</div><div class="sub">Grok Bot · Mac mini (office)</div></div><div class="meta"><span class="dotp"></span><span class="tm">4:02</span></div></div>
 
         <div class="gh" style="padding-top:16px">History</div>
-        <div style="display:flex;gap:6px;align-items:center;padding:2px 8px 4px;flex-wrap:wrap">
-          <span class="seg"><span class="on">All</span><span>Asked you</span><span>Automatic</span><span>Denied</span></span>
-        </div>
-        <div style="padding:2px 8px 6px"><span class="popm">All agents</span></div>
+        <div style="padding:2px 8px 4px"><span class="seg"><span class="on">All</span><span>Asked You</span><span>Automatic</span><span>Denied</span></span></div>
+        <div style="padding:2px 8px 6px"><span class="popm">All Agents</span></div>
         <div class="gh">Today</div>
-        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Shop database</div><div class="sub3">Read · synthetic-shop · Mac mini (studio)</div><div class="sub3">Allowed · Automatic</div></div><div class="meta">14:14</div></div>
-        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · GitHub token</div><div class="sub3">Read · No project · Mac mini (office)</div><div class="sub3">Allowed · Answered on iPhone</div></div><div class="meta">14:12</div></div>
-                <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Stripe live</div><div class="sub3">Deploy · acme-billing · Mac mini (office)</div><div class="sub3">Allowed · By you</div></div><div class="meta">14:02</div></div>
-        <div class="r top"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex · Deploy key</div><div class="sub3">Deploy · synthetic-shop · Mac mini (studio)</div><div class="sub3"><span class="bad">Not allowed: denied</span> · By you</div></div><div class="meta">13:18</div></div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Shop database</div><div class="sub3">Mac mini (studio)</div><div class="sub3">Allowed by bouncer</div></div><div class="meta">14:14</div></div>
+        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · GitHub token</div><div class="sub3">Mac mini (office)</div><div class="sub3">Allowed on iPhone</div></div><div class="meta">14:12</div></div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Stripe live</div><div class="sub3">Mac mini (office)</div><div class="sub3">Allowed by you</div></div><div class="meta">14:02</div></div>
+        <div class="r top"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex · Deploy key</div><div class="sub3">Mac mini (studio)</div><div class="sub3"><span class="bad">Denied by you</span></div></div><div class="meta">13:18</div></div>
         <div class="gh">Yesterday</div>
-        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · GitHub token</div><div class="sub3">Change · No project · Mac mini (office)</div><div class="sub3"><span class="bad">Not allowed: denied</span> · By you</div></div><div class="meta">18:22</div></div>
-        <div class="note" style="margin:8px 8px 0">The newest 20 decisions in the scope. Everything else is in Logs.</div>
+        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · GitHub token</div><div class="sub3">Mac mini (office)</div><div class="sub3"><span class="bad">Denied by you</span></div></div><div class="meta">18:22</div></div>
       </div>
     </section>
     <section class="detail">
       <div class="tb"></div>
       <div class="dscroll"><div class="dpad">
-        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1>Grok Bot wants to connect to Apassy on Mac mini (office)</h1><div class="s">Remote agent · <span class="tm">4:31</span> left to answer</div></div></div>
-
-        <div class="tn warn" style="margin:-8px 0 14px;font-size:12.5px"><svg><use href="#i-warn"/></svg><span>If you did not just add Apassy to Grok Bot, deny. Anyone on the internet can ask; only your answer connects it.</span></div>
-
+        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1>Grok Bot wants to connect</h1><div class="s">Mac mini (office) · <span class="tm">4:31</span> left</div></div></div>
         <div class="grp">
-          <div class="fr"><div class="k">Name it gives</div><div class="v">Grok Bot <span style="color:var(--ter)">· from the agent, not verified</span></div></div>
-          <div class="fr"><div class="k">Code on the page</div><div class="v mono" style="color:var(--label);font-size:15px;letter-spacing:2px">K7Q-4MD</div></div>
-          <div class="fr"><div class="k">Returns to</div><div class="v">grok.com</div></div>
-          <div class="fr"><div class="k">Comes through</div><div class="v">Tailscale Funnel · …ts.net:8443/mcp</div></div>
-          <div class="fr"><div class="k">Already connected</div><div class="v">Grok Bot, since 28 Oct</div></div>
+          <div class="fr"><div class="k">Code</div><div class="v mono" style="color:var(--label);font-size:17px;letter-spacing:3px">K7Q-4MD</div></div>
         </div>
-        <div class="note">Check that the browser page shows the same code. Grok Bot is already connected; if you allow, this one is listed as "Grok Bot 2".</div>
-
-        <div class="gl">After Allow</div>
-        <div class="grp"><div class="fr"><div class="np">
-          <p style="color:var(--label)">It becomes a remote agent of Mac mini (office), in Agents.</p>
-          <p>It sees no credential until you choose them on its page. Every run asks you, here and on your iPhone. You can disconnect it at any time.</p>
-        </div></div></div>
-
-        <div class="meta-foot">A connect request is not a run: it gives no credential and no value.<br>An allow needs Touch ID or the passphrase now. A notification is not an approval.</div>
+        <div class="tn warn" style="margin:10px 4px 0;font-size:12.5px"><svg><use href="#i-warn"/></svg><span>Deny unless you just added Apassy to Grok Bot.</span></div>
       </div></div>
-      <div class="abar"><span class="btn des">Deny</span><div class="cap2">Also on your iPhone.</div><span class="btn pri"><svg><use href="#i-touch"/></svg>Allow</span></div>
+      <div class="abar"><span class="btn des">Deny</span><div class="cap2"></div><span class="btn pri"><svg><use href="#i-touch"/></svg>Allow</span></div>
     </section>
   </div>
 
   <div class="pgrid" style="margin-top:22px">
     <div class="pcard flush">
-      <div class="plabel">5b · The run question of a remote agent<small>The detail when the second waiting row is selected. Only Allow once and Deny: nothing is remembered for a remote agent.</small></div>
-      <div style="padding:14px 22px 6px">
-        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1>Grok Bot wants to use httpbin test token</h1><div class="s">Remote agent · Mac mini (office) · <span class="tm">4:02</span> left</div></div></div>
+      <div class="plabel">5b · Run question of a remote agent</div>
+      <div style="padding:14px 22px 14px">
+        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1>Grok Bot wants to use httpbin test token</h1><div class="s">Mac mini (office) · <span class="tm">4:02</span> left</div></div></div>
         <div class="grp">
           <div class="fr"><div class="k">Credential</div><div class="v" style="display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--label)"><div class="tile s" style="background:#8e8e93"><svg><use href="#i-key"/></svg></div>httpbin test token<span class="cap">Development</span></div></div>
-          <div class="fr"><div class="k">Action</div><div class="v">Read</div></div>
-          <div class="fr"><div class="k">Project</div><div class="v">No project</div></div>
-          <div class="fr"><div class="k">Sends to</div><div class="v">httpbin.org</div></div>
+          <div class="fr"><div class="k">Agent</div><div class="v">Grok Bot</div></div>
+          <div class="fr"><div class="k">Sends To</div><div class="v">httpbin.org</div></div>
+          <div class="fr"><div class="k">Request</div><div class="v" style="color:var(--label)">"Test my httpbin token with curl." <span class="cap" style="background:rgba(255,149,0,.14);color:var(--t-warn)">Not verified</span></div></div>
         </div>
-        <div class="gl">What the agent says you asked</div>
-        <div class="grp"><div class="fr"><div style="flex:1;min-width:0">
-          <div>"Test my httpbin token with curl."</div>
-          <div class="tn warn" style="margin-top:4px"><svg><use href="#i-warn"/></svg><span>From the cloud agent, not verified.</span></div>
-        </div></div></div>
         <div class="gl">Command</div>
         <div class="grp"><div class="fr"><div class="cmd">curl -H "Authorization: Bearer $HTTPBIN_TOKEN" $APASSY_BASE_HTTPBIN_TOKEN/bearer</div></div></div>
-        <div class="gl">Why you are asked</div>
-        <div class="grp"><div class="fr"><div class="v l">Every run of a remote agent asks you. The bouncer does not allow it alone, and no answer is remembered.</div></div></div>
-        <div class="meta-foot" style="margin-bottom:12px">If you allow, Grok Bot gets a placeholder and a base URL for 10 minutes, never the value.<br>The proxy on this Mac adds the value only to requests to httpbin.org.</div>
       </div>
-      <div class="abar" style="margin-top:auto"><span class="btn des">Deny</span><div class="cap2">Nothing is remembered for a remote agent. Also on your iPhone.</div><span class="btn pri">Allow Once</span></div>
-    </div>
-    <div class="pcard">
-      <div class="plabel">Notes on frame 5</div>
-      <div class="np" style="margin-top:10px">
-        <p><b style="color:var(--label)">History</b> replaces the "Activity" button of Decisions: the filters choose All, Asked you, Automatic, or Denied, and one agent. The longer record is Logs. A decision of another Mac opens read-only: "This decision was made on Mac mini (studio). A change to the agent is made there."</p>
-        <p><b style="color:var(--label)">Only questions of this Mac wait here.</b> A question of another Mac waits on that Mac and on the iPhone; the feed does not carry open questions.</p>
-        <p><b style="color:var(--label)">The connect decision</b> has no "…" menu and no remember: only Allow and Deny. Deny tells the browser page "You denied the connection." After 5 minutes it ends as denied.</p>
-        <p><b style="color:var(--label)">The code</b> ties the browser page to this card, so a stranger's request cannot pass for yours. It is shown, not typed.</p>
-        <p><b style="color:var(--label)">The run question</b> keeps the card of the first mockup, with "Allow Once" in the button style of the app and the environment in the line under the title.</p>
-      </div>
+      <div class="abar" style="margin-top:auto"><span class="btn des">Deny</span><div class="cap2"></div><span class="btn pri">Allow Once</span></div>
     </div>
   </div>
 </section>
 
 <!-- ============================================================ 6 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">6</span>Bouncer → Logs · all environments</b>
-    <span>The activity log of every Mac: time, environment, agent, event, credential, outcome. Filters for the kind of event, the agent, and text. One remote run is open: the requests that the proxy of this Mac sent for it, with host and status, never a value.</span></div>
-  <div class="win" style="min-height:760px">
+  <div class="flabel"><b><span class="fnum">6</span>Logs · All environments</b>
+    <span>Activity of every Mac; one remote run expanded.</span></div>
+  <div class="win" style="min-height:700px">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
       <div class="scroll">
@@ -781,53 +719,50 @@ svg{display:block}
         <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
         <div class="si on"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
       </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
     </aside>
     <section class="content">
-      <div class="tb"><div class="ttl"><b>Logs</b><small>3 environments · newest first</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span><span class="grow"></span>
-        <span class="seg"><span class="on">All events</span><span>Runs</span><span>Connections</span><span>Not allowed</span></span>
-        <span class="popm">All agents</span>
-        <span class="searchf"><svg><use href="#i-search"/></svg>Filter by command or credential</span>
+      <div class="tb"><div class="ttl"><b>Logs</b></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span><span class="grow"></span>
+        <span class="seg"><span class="on">All</span><span>Runs</span><span>Connections</span><span>Denied</span></span>
+        <span class="popm">All Agents</span>
+        <span class="searchf"><svg><use href="#i-search"/></svg>Filter</span>
       </div>
       <div class="wpad" style="max-width:none;padding:2px 24px 28px">
         <div class="gl" style="margin-top:4px">Today</div>
         <div class="grp">
           <div class="tr th g-lg"><div>Time</div><div>Environment</div><div>Agent</div><div>Event</div><div>Credential</div><div>Outcome</div><div></div></div>
-          <div class="tr g-lg"><div class="sec">14:19</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot (new)</span></div><div>Connect request</div><div class="sec">—</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">14:19</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot (new)</span></div><div>Connect</div><div class="sec">—</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div><span class="chev">›</span></div>
           <div class="tr g-lg"><div class="sec">14:19</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">httpbin test token</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div><span class="chev">›</span></div>
-          <div class="tr g-lg"><div class="sec">14:14</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Shop database</div><div class="cut">Allowed · Automatic</div><span class="chev">›</span></div>
-          <div class="tr g-lg" style="background:#fafafb"><div class="sec">14:12</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut">Allowed · Answered on iPhone</div><svg style="width:13px;height:13px;color:var(--sec)"><use href="#i-down"/></svg></div>
+          <div class="tr g-lg"><div class="sec">14:14</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Shop database</div><div class="cut">Allowed by bouncer</div><span class="chev">›</span></div>
+          <div class="tr g-lg" style="background:#fafafb"><div class="sec">14:12</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut">Allowed on iPhone</div><svg style="width:13px;height:13px;color:var(--sec)"><use href="#i-down"/></svg></div>
           <div class="expand">
-            <div class="gl">Command</div>
             <div class="cmd" style="display:block">gh api repos/acme/billing/issues --paginate</div>
-            <div class="gl">Proxied requests<span>Session 14:12–14:16 · ended after 4 min</span></div>
+            <div class="gl">Proxied requests<span>4 min</span></div>
             <div class="grp">
               <div class="tr th g-px"><div>Time</div><div>Method</div><div>Host</div><div>Status</div></div>
               <div class="tr g-px"><div class="sec">14:12:08</div><div class="mono">GET</div><div class="mono">api.github.com</div><div><span class="dot"></span>200</div></div>
               <div class="tr g-px"><div class="sec">14:12:09</div><div class="mono">GET</div><div class="mono">api.github.com</div><div><span class="dot"></span>200</div></div>
               <div class="tr g-px"><div class="sec">14:12:11</div><div class="mono">GET</div><div class="mono">api.github.com</div><div><span class="dot"></span>200</div></div>
               <div class="tr g-px"><div class="sec">14:13:40</div><div class="mono">GET</div><div class="mono">api.github.com</div><div><span class="dot warn"></span>404</div></div>
-              <div class="tr g-px"><div class="sec">14:14:02</div><div class="mono">GET</div><div class="mono">uploads.example.net</div><div style="color:var(--t-crit)"><span class="dot crit"></span>Refused: not a host of GitHub token</div></div>
+              <div class="tr g-px"><div class="sec">14:14:02</div><div class="mono">GET</div><div class="mono">uploads.example.net</div><div style="color:var(--t-crit)"><span class="dot crit"></span>Refused: wrong host</div></div>
             </div>
-            <div class="note">The proxy adds the value only to requests to api.github.com. Apassy keeps no path, header, body, or value of a request.</div>
           </div>
-          <div class="tr g-lg"><div class="sec">14:02</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Stripe live <span class="cap red">Production</span></div><div class="cut">Allowed · By you</div><span class="chev">›</span></div>
-          <div class="tr g-lg"><div class="sec">13:55</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div>Run</div><div class="cut">OpenAI API</div><div class="cut">Allowed · Automatic</div><span class="chev">›</span></div>
-          <div class="tr g-lg"><div class="sec">13:18</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div>Run</div><div class="cut">Deploy key</div><div class="cut" style="color:var(--t-crit)">Not allowed: denied · By you</div><span class="chev">›</span></div>
-          <div class="tr g-lg"><div class="sec">13:05</div><div class="cut">Mac mini (office)</div><div class="sec">—</div><div>Remote access on</div><div class="sec">—</div><div class="cut">By you · Touch ID</div><span class="chev">›</span></div>
-          <div class="tr g-lg"><div class="sec">11:20</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut">Allowed · Automatic</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">14:02</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Stripe live <span class="cap red">Production</span></div><div class="cut">Allowed by you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">13:55</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div>Run</div><div class="cut">OpenAI API</div><div class="cut">Allowed by bouncer</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">13:18</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div>Run</div><div class="cut">Deploy key</div><div class="cut" style="color:var(--t-crit)">Denied by you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">13:05</div><div class="cut">Mac mini (office)</div><div class="sec">—</div><div>Remote access on</div><div class="sec">—</div><div class="cut">By you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">11:20</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut">Allowed by bouncer</div><span class="chev">›</span></div>
         </div>
         <div class="gl">Yesterday</div>
         <div class="grp">
-          <div class="tr g-lg"><div class="sec">18:22</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut" style="color:var(--t-crit)">Not allowed: denied · By you</div><span class="chev">›</span></div>
-          <div class="tr g-lg"><div class="sec">16:05</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">Stripe test</div><div class="cut" style="color:var(--t-crit)">Not allowed: denied · By you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">18:22</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut" style="color:var(--t-crit)">Denied by you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">16:05</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">Stripe test</div><div class="cut" style="color:var(--t-crit)">Denied by you</div><span class="chev">›</span></div>
         </div>
-        <div class="gl dim">1 Nov · MacBook Pro has not reported since 18:40</div>
+        <div class="gl dim">1 Nov</div>
         <div class="grp dim">
-          <div class="tr g-lg"><div class="sec">18:40</div><div class="cut">MacBook Pro</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Side project database</div><div class="cut">Allowed · Automatic</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">18:40</div><div class="cut">MacBook Pro</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Side project database</div><div class="cut">Allowed by bouncer</div><span class="chev">›</span></div>
         </div>
-        <div class="note">Rows of other Macs come from their reports: runs only, the newest 20 for each agent, with no proxied requests. Some older uses are on Mac mini (studio) only.</div>
       </div>
     </section>
   </div>
@@ -835,29 +770,25 @@ svg{display:block}
 
 <!-- ============================================================ 7 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">7</span>The browser page of the connect flow</b>
-    <span>Grok Bot shows "Authorize"; the owner's browser opens this page on the Mac's public address. The page has no form and no sign-in: the answer is given in Apassy on the Mac or the iPhone. The page shows the same code as the connect decision. Left: waiting. Right: done.</span></div>
+  <div class="flabel"><b><span class="fnum">7</span>Browser connect page</b>
+    <span>Served by this Mac's public address: waiting, then done.</span></div>
   <div class="pgrid">
     <div class="bwin">
       <div class="bbar"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><div class="burl"><svg><use href="#i-lock"/></svg><b>rafals-mac-mini.tail71fdd0.ts.net</b>:8443/oauth/authorize?client_id=…</div></div>
       <div class="bpage">
         <svg class="logo"><use href="#i-mark"/></svg>
-        <h2>Grok Bot wants to connect to Apassy on Mac mini (office)</h2>
-        <p>Approve on your Mac or iPhone.</p>
+        <h2>Grok Bot wants to connect to Mac mini (office)</h2>
         <div class="bcode">K7Q-4MD</div>
-        <p style="font-size:12px">Check that Apassy shows the same code.</p>
-        <div class="bwait"><span class="spin"></span>Waiting for your answer. This page changes by itself.</div>
-        <div class="bfoot">If you did not ask for this, deny it in Apassy, or close this page.<br>The request ends in 5 minutes.</div>
+        <p>Approve on your Mac or iPhone.</p>
+        <div class="bwait"><span class="spin"></span></div>
       </div>
     </div>
     <div class="bwin">
       <div class="bbar"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><div class="burl"><svg><use href="#i-lock"/></svg><b>rafals-mac-mini.tail71fdd0.ts.net</b>:8443/oauth/authorize?client_id=…</div></div>
       <div class="bpage">
         <div class="bdone"><svg><use href="#i-ok"/></svg></div>
-        <h2>Grok Bot is connected to Apassy on Mac mini (office)</h2>
-        <p>You can close this page. Grok Bot goes back to your chat by itself.</p>
-        <p>It sees no credential until you choose them in Apassy. Every run asks you.</p>
-        <div class="bfoot">Other endings, with the same layout and a gray mark:<br>"You denied the connection." · "The request ended. Ask Grok Bot to connect again."</div>
+        <h2>Connected</h2>
+        <p>You can close this page.</p>
       </div>
     </div>
   </div>
@@ -865,46 +796,35 @@ svg{display:block}
 
 <!-- ============================================================ 8 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">8</span>Problem states of the remote access block</b>
-    <span>The block at the top of this Mac's group in Agents, when the public route cannot work. The switch is off and cannot be turned on until the problem is gone. The MCP address does not show.</span></div>
+  <div class="flabel"><b><span class="fnum">8</span>Remote access problems</b>
+    <span>One line and one button each; switch disabled.</span></div>
   <div class="pgrid">
     <div class="pcard">
-      <div class="plabel">8a · Tailscale is not installed</div>
-      <div class="gl">Remote access</div>
-      <div class="grp">
-        <div class="fr top"><div class="kn"><div>Remote agents can reach this Mac</div><div class="nt">Off. It needs Tailscale.</div></div><span class="sw dis"></span></div>
-        <div class="fr"><div class="tn warn"><svg><use href="#i-warn"/></svg><span>Tailscale is not installed. Install Tailscale and sign in. Remote agents reach this Mac through Tailscale Funnel.</span></div></div>
-        <div class="fr"><div class="kn lnk">Get Tailscale…</div><span class="pb">Check Again</span></div>
+      <div class="plabel">8a · Not installed</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Tailscale is not installed.</span></div><span class="pb">Get Tailscale…</span></div>
       </div>
     </div>
     <div class="pcard">
-      <div class="plabel">8b · Tailscale is not connected</div>
-      <div class="gl">Remote access</div>
-      <div class="grp">
-        <div class="fr top"><div class="kn"><div>Remote agents can reach this Mac</div><div class="nt">Off. It needs a connected Tailscale.</div></div><span class="sw dis"></span></div>
-        <div class="fr"><div class="tn warn"><svg><use href="#i-warn"/></svg><span>Tailscale is not connected. Open Tailscale and connect this Mac.</span></div></div>
-        <div class="fr"><div class="kn"></div><span class="pb">Check Again</span></div>
+      <div class="plabel">8b · Not connected</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Tailscale is not connected.</span></div><span class="pb">Check Again</span></div>
       </div>
     </div>
     <div class="pcard">
-      <div class="plabel">8c · The tailnet policy does not allow Funnel</div>
-      <div class="gl">Remote access</div>
-      <div class="grp">
-        <div class="fr top"><div class="kn"><div>Remote agents can reach this Mac</div><div class="nt">Off.</div></div><span class="sw dis"></span></div>
-        <div class="fr"><div class="tn crit"><svg><use href="#i-warn"/></svg><span>Your tailnet policy does not allow Funnel for this Mac. An admin of the tailnet must allow it in the admin console.</span></div></div>
-        <div class="fr"><div class="cmd">Tailscale says: Funnel is not enabled on your tailnet.
-To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div></div>
-        <div class="fr"><div class="kn lnk">Open the Tailscale Admin Console…</div><span class="pb">Check Again</span></div>
+      <div class="plabel">8c · Funnel not allowed</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn crit" style="flex:1"><svg><use href="#i-warn"/></svg><span>Your tailnet policy blocks Funnel.</span></div><span class="pb">Open Admin Console…</span></div>
       </div>
     </div>
     <div class="pcard">
-      <div class="plabel">8d · Port 8443 is used by another program</div>
-      <div class="gl">Remote access</div>
-      <div class="grp">
-        <div class="fr top"><div class="kn"><div>Remote agents can reach this Mac</div><div class="nt">Off.</div></div><span class="sw dis"></span></div>
-        <div class="fr"><div class="tn warn"><svg><use href="#i-warn"/></svg><span>Port 8443 is used by another program. Tailscale Serve sends it to <span class="mono">http://127.0.0.1:3000</span>. Apassy does not change it.</span></div></div>
-        <div class="fr"><div class="np"><p>Funnel allows only ports 443, 8443, and 10000. Apassy never uses 443. With port 10000, the address is <span class="mono">…ts.net:10000/mcp</span>. Give the new address to each remote agent.</p></div></div>
-        <div class="fr"><div class="kn"></div><span class="pb">Check Again</span><span class="pb pri">Use Port 10000</span></div>
+      <div class="plabel">8d · Port 8443 in use</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Another app uses port 8443.</span></div><span class="pb pri">Use Port 10000</span></div>
       </div>
     </div>
   </div>
@@ -912,9 +832,9 @@ To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div>
 
 <!-- ============================================================ 9 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">9</span>Empty: the first run · one Mac, no agent ever, no run</b>
-    <span>Each page says what will show there and how it gets there, and offers the next step. Local agents connect on this Mac with "Connect an Agent" (the sheet of today: Claude Code, Codex, T3 Code, Other) or with <span class="mono">apassy setup claude --write</span> / <span class="mono">apassy setup codex --write</span> in Terminal. A cloud agent connects by itself once remote access is on. The buttons connect an agent of this Mac; none of them adds a remote agent.</span></div>
-  <div class="win" style="min-height:600px">
+  <div class="flabel"><b><span class="fnum">9</span>Empty · first run</b>
+    <span>One Mac, no agents, no runs.</span></div>
+  <div class="win" style="min-height:0">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
       <div class="scroll">
@@ -926,115 +846,63 @@ To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div>
         <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span></div>
         <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
       </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
     </aside>
     <section class="content">
-      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days · this Mac</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span></div>
-      <div class="wpad">
+      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="wpad" style="padding-bottom:40px">
         <div class="stats">
-          <div class="stat"><div class="sl">Runs</div><div class="sn">0</div><div class="ss">An agent run that uses a credential</div></div>
-          <div class="stat"><div class="sl">Allowed by the bouncer</div><div class="sn">0</div><div class="ss">Runs it allows without a question</div></div>
-          <div class="stat"><div class="sl">Asked you</div><div class="sn">0</div><div class="ss">Runs it was not sure of</div></div>
-          <div class="stat"><div class="sl">Denied</div><div class="sn">0</div><div class="ss">By you or by the bouncer</div></div>
-          <div class="stat"><div class="sl">Median answer</div><div class="sn">—</div><div class="ss">After your first answer</div></div>
+          <div class="stat"><div class="sl">Runs</div><div class="sn">0</div></div>
+          <div class="stat"><div class="sl">Allowed by bouncer</div><div class="sn">0</div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">0</div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">0</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">—</div></div>
         </div>
-        <div class="note">The numbers start with the first run of a connected agent. Nothing has run yet.</div>
-
-        <div class="gl">Get started</div>
-        <div class="grp">
-          <div class="fr top"><div class="att"><div class="ai" style="background:var(--accent)"><span style="color:#fff;font-weight:700;font-size:12px">1</span></div><div style="flex:1"><div class="t1">Connect an agent on this Mac</div><div class="t2">Claude Code and Codex get the Apassy MCP server and the prompt hook. T3 Code runs its agents through them. Then each use of a credential goes through the bouncer.</div>
-            <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap"><span class="btn">Claude Code</span><span class="btn">Codex</span><span class="btn">Other…</span><span class="note" style="margin:0">Or in Terminal: <span class="mono">apassy setup claude --write</span></span></div></div></div></div>
-          <div class="fr top"><div class="att"><div class="ai" style="background:#8e8e93"><span style="color:#fff;font-weight:700;font-size:12px">2</span></div><div><div class="t1">Let a cloud agent reach this Mac (optional)</div><div class="t2">Turn on remote access in Agents and give the cloud agent the MCP address. It asks to connect, and you approve it in Decisions. You never add it by hand.</div><div class="t3 lnk">Open Agents</div></div></div></div>
-          <div class="fr top"><div class="att"><div class="ai" style="background:#8e8e93"><span style="color:#fff;font-weight:700;font-size:12px">3</span></div><div><div class="t1">Use Apassy on your other Macs (optional)</div><div class="t2">Open this vault in Apassy on each Mac. Each Mac becomes an environment here, with its agents and numbers.</div></div></div></div>
-        </div>
-
-        <div class="gl">What shows here later</div>
-        <div class="grp"><div class="fr"><div class="np">
-          <p>The runs of each day, which agents ask you most, production credentials in use, and Macs that stopped reporting. Then one row for each agent with its runs, ask rate, denials, and last activity.</p>
-        </div></div></div>
+        <div class="grp" style="margin-top:16px"><div class="es"><b>No runs yet</b><div class="l">Connect an agent to see its runs here.</div><div class="bt"><span class="btn pri">Connect an Agent…</span><span class="lnk">Turn On Remote Access</span></div></div></div>
       </div>
     </section>
   </div>
 
-  <div class="win" style="min-height:540px;margin-top:22px">
-    <aside class="side">
-      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
-      <div class="scroll">
-        <div class="sh">Personal</div>
-        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">4</span></div>
-        <div class="sh">Bouncer</div>
-        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
-        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
-        <div class="si on"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span></div>
-        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
-      </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
-    </aside>
+  <div class="win" style="min-height:0;margin-top:22px">
     <section class="content">
-      <div class="tb"><div class="ttl"><b>Agents</b><small>No agents yet</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span></div>
-      <div class="wpad">
-        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span><span class="r2"><span class="dot off"></span>Remote access off</span></div>
+      <div class="tb"><div class="ttl"><b>Agents</b></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="wpad" style="padding-bottom:40px">
+        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span></div>
         <div class="grp">
-          <div class="fr top"><div class="kn"><div>Remote agents can reach this Mac</div><div class="nt">Off. Cloud agents cannot reach this Mac.</div></div><span class="sw"></span></div>
-          <div class="fr"><div class="np">
-            <p>When it is on, the internet can reach only the MCP endpoint and the proxy on this Mac, through Tailscale Funnel. Credential values stay on this Mac.</p>
-            <p style="color:var(--label)">Then give a cloud agent the address. It asks to connect, and you approve it in Decisions.</p>
-          </div></div>
+          <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw"></span></div>
         </div>
-        <div class="note">Turning it on needs Touch ID.</div>
-
-        <div class="grp" style="margin-top:12px">
-          <div class="fr top"><div class="att"><div class="ai off"><svg><use href="#i-agent"/></svg></div><div style="flex:1"><div class="t1">No agents on this Mac yet</div><div class="t2">Each agent that you connect shows here with its project, status, runs today, and how often it asks you. Remote agents show here too, after you allow them to connect.</div>
-            <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap"><span class="btn pri">Connect an Agent…</span><span class="note" style="margin:0">Or in Terminal: <span class="mono">apassy setup claude --write</span> or <span class="mono">apassy setup codex --write</span></span></div></div></div></div>
-        </div>
-        <div class="note">"Connect an Agent…" is the sheet of today for Claude Code, Codex, T3 Code, and Other. It connects an agent of this Mac; a remote agent never needs it.</div>
+        <div class="grp" style="margin-top:12px"><div class="es"><b>No agents yet</b><div class="l">Connected agents and their runs show here.</div><div class="bt"><span class="btn pri">Connect an Agent…</span></div></div></div>
       </div>
     </section>
   </div>
 
   <div class="pgrid" style="margin-top:22px">
-    <div class="win" style="min-height:470px">
-      <section class="listcol" style="width:250px">
-        <div class="tb"><div class="ttl"><b>Decisions</b><small>0 by you · 0 automatic this week</small></div></div>
-        <div class="rows">
-          <div style="padding:6px 8px 4px"><div style="font-weight:500">Nothing waits for you.</div><div class="note" style="margin:2px 0 0">A new question also shows as a macOS notification.</div></div>
-          <div class="gh" style="padding-top:16px">History</div>
-          <div class="note" style="margin:6px 8px 0">No decisions yet. Each run of an agent adds one, with its outcome and who decided.</div>
-        </div>
+    <div class="win" style="min-height:360px">
+      <section class="listcol" style="width:240px">
+        <div class="tb"><div class="ttl"><b>Decisions</b></div></div>
+        <div class="rows"><div class="es" style="padding-top:40px"><b>No decisions yet</b></div></div>
       </section>
       <section class="detail">
         <div class="tb"></div>
-        <div class="dscroll"><div class="dpad" style="padding:0 20px 24px">
-          <div style="display:flex;align-items:center;gap:6px;font-weight:500"><svg style="width:16px;height:16px;color:var(--green)"><use href="#i-checkc"/></svg>All clear</div>
-          <div class="gl" style="font-size:15px;color:var(--label);margin-top:16px">This week</div>
+        <div class="dpad" style="padding:0 20px 24px">
+          <div class="gl" style="font-size:15px;color:var(--label);margin-top:0">This week</div>
           <div class="stats" style="grid-template-columns:1fr 1fr">
-            <div class="stat"><div class="sl">By you</div><div class="sn">0</div><div class="ss">Questions and checks you answered</div></div>
-            <div class="stat"><div class="sl">Automatic</div><div class="sn">0</div><div class="ss">Allowed without a question</div></div>
+            <div class="stat"><div class="sl">By you</div><div class="sn">0</div></div>
+            <div class="stat"><div class="sl">Automatic</div><div class="sn">0</div></div>
           </div>
-          <div class="gl">How a question gets here</div>
-          <div class="grp"><div class="fr"><div class="np">
-            <p style="color:var(--label)">A connected agent asks to use a credential. The bouncer allows it, refuses it, or asks you here and on your iPhone.</p>
-            <p>A cloud agent that asks to connect also waits here.</p>
-          </div></div>
-          <div class="fr"><div class="kn lnk">Connect an Agent…</div></div></div>
-        </div></div>
+        </div>
       </section>
     </div>
-    <div class="win" style="min-height:470px">
+    <div class="win" style="min-height:360px">
       <section class="content">
-        <div class="tb"><div class="ttl"><b>Logs</b><small>This Mac</small></div></div>
-        <div class="scopebar">Showing <span class="popm">All environments</span><span class="grow"></span><span class="seg"><span class="on">All events</span><span>Runs</span><span>Connections</span></span></div>
+        <div class="tb"><div class="ttl"><b>Logs</b></div></div>
         <div class="wpad" style="padding:2px 20px 24px">
           <div class="grp">
             <div class="tr th" style="grid-template-columns:44px 1fr 1fr 1fr 1fr"><div>Time</div><div>Agent</div><div>Event</div><div>Credential</div><div>Outcome</div></div>
-            <div class="fr"><div class="np" style="padding:6px 0">
-              <p style="color:var(--label)">No activity yet.</p>
-              <p>Each run of an agent shows here with its credential and outcome. Connect requests, disconnects, and changes of remote access show too. A remote run lists the requests that the proxy sent, with host and status.</p>
-            </div></div>
+            <div class="es"><b>No activity yet</b></div>
           </div>
-          <div class="note">Apassy keeps the log on each Mac. Other Macs add their runs here when they use this vault.</div>
         </div>
       </section>
     </div>
@@ -1043,9 +911,9 @@ To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div>
 
 <!-- ============================================================ 10 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">10</span>Empty: a quiet day with agents present · Tuesday 3 Nov, 09:05</b>
-    <span>Decisions with nothing open is the empty state of the app today (decisions_activity.rs): "Nothing waits for you.", the recent decisions by day, and in the detail "All clear" with "This week". Overview has no run today and a week of history.</span></div>
-  <div class="win" style="min-height:620px">
+  <div class="flabel"><b><span class="fnum">10</span>Empty · quiet day</b>
+    <span>09:05: nothing open, a week of history.</span></div>
+  <div class="win" style="min-height:560px">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
       <div class="scroll">
@@ -1059,21 +927,21 @@ To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div>
         <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
         <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
       </div>
-      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
     </aside>
     <section class="listcol">
-      <div class="tb"><div class="ttl"><b>Decisions</b><small>37 by you · 283 automatic this week</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span></div>
+      <div class="tb"><div class="ttl"><b>Decisions</b><small>37 by you · 283 automatic</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
       <div class="rows">
-        <div style="padding:6px 8px 4px"><div style="font-weight:500">Nothing waits for you.</div><div class="note" style="margin:2px 0 0">A new question also shows as a macOS notification.</div></div>
+        <div style="padding:6px 8px 4px;font-weight:500">Nothing waits for you</div>
         <div class="gh" style="padding-top:14px">History</div>
-        <div style="padding:2px 8px 4px"><span class="seg"><span class="on">All</span><span>Asked you</span><span>Automatic</span><span>Denied</span></span></div>
+        <div style="padding:2px 8px 4px"><span class="seg"><span class="on">All</span><span>Asked You</span><span>Automatic</span><span>Denied</span></span></div>
         <div class="gh">Yesterday</div>
-        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · API token</div><div class="sub3">Deploy · apassy · Mac mini (office)</div><div class="sub3">Allowed · Automatic</div></div><div class="meta">19:42</div></div>
-        <div class="r top"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex · Deploy key</div><div class="sub3">Deploy · synthetic-shop · Mac mini (studio)</div><div class="sub3">Allowed · Answered on iPhone</div></div><div class="meta">18:10</div></div>
-        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · Stripe test</div><div class="sub3">Read · No project · Mac mini (office)</div><div class="sub3">Allowed · By you</div></div><div class="meta">16:31</div></div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · API token</div><div class="sub3">Mac mini (office)</div><div class="sub3">Allowed by bouncer</div></div><div class="meta">19:42</div></div>
+        <div class="r top"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex · Deploy key</div><div class="sub3">Mac mini (studio)</div><div class="sub3">Allowed on iPhone</div></div><div class="meta">18:10</div></div>
+        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · Stripe test</div><div class="sub3">Mac mini (office)</div><div class="sub3">Allowed by you</div></div><div class="meta">16:31</div></div>
         <div class="gh">Earlier</div>
-        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Stripe live</div><div class="sub3">Deploy · acme-billing · Mac mini (office)</div><div class="sub3"><span class="bad">Not allowed: denied</span> · By you</div></div><div class="meta">Sun</div></div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Stripe live</div><div class="sub3">Mac mini (office)</div><div class="sub3"><span class="bad">Denied by you</span></div></div><div class="meta">Sun</div></div>
       </div>
     </section>
     <section class="detail">
@@ -1082,43 +950,42 @@ To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div>
         <div style="display:flex;align-items:center;gap:6px;font-weight:500;margin-top:4px"><svg style="width:16px;height:16px;color:var(--green)"><use href="#i-checkc"/></svg>All clear</div>
         <div class="gl" style="font-size:15px;color:var(--label);margin-top:18px">This week</div>
         <div class="stats" style="grid-template-columns:1fr 1fr">
-          <div class="stat"><div class="sl">By you</div><div class="sn">37</div><div class="ss">Questions and checks you answered</div></div>
-          <div class="stat"><div class="sl">Automatic</div><div class="sn">283</div><div class="ss">Allowed without a question</div></div>
+          <div class="stat"><div class="sl">By you</div><div class="sn">37</div></div>
+          <div class="stat"><div class="sl">Automatic</div><div class="sn">283</div></div>
         </div>
         <div class="gl">Environments</div>
         <div class="grp">
-          <div class="fr"><div class="k">Mac mini (office)</div><span class="cap">This Mac</span><div class="v">22 by you · 141 automatic</div></div>
-          <div class="fr"><div class="k">Mac mini (studio)</div><div class="v">12 by you · 107 automatic</div></div>
-          <div class="fr dim"><div class="k">MacBook Pro</div><div class="v">3 by you · 35 automatic · not reported since 1 Nov</div></div>
+          <div class="fr"><div class="k">Mac mini (office)</div><span class="cap">This Mac</span><div class="v">22 · 141</div></div>
+          <div class="fr"><div class="k">Mac mini (studio)</div><div class="v">12 · 107</div></div>
+          <div class="fr dim"><div class="k">MacBook Pro</div><div class="v">3 · 35 · 1 Nov</div></div>
         </div>
-        <div class="gl">Most active agents</div>
+        <div class="gl">Most active</div>
         <div class="grp">
           <div class="fr"><div class="agc" style="flex:1"><div class="ava s" style="background:#d97757">C</div>Claude Code</div><div class="v">101 · Mac mini (office)</div></div>
           <div class="fr"><div class="agc" style="flex:1"><div class="ava s" style="background:#d97757">C</div>Claude Code</div><div class="v">69 · Mac mini (studio)</div></div>
           <div class="fr"><div class="agc" style="flex:1"><div class="ava s" style="background:#10a37f">C</div>Codex</div><div class="v">47 · Mac mini (office)</div></div>
         </div>
-        <div class="note">"Devices" of today is called "Environments" here, as in the rest of Bouncer.</div>
       </div></div>
     </section>
   </div>
 
   <div class="win" style="min-height:0;margin-top:22px">
     <section class="content">
-      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days · 3 environments · sidebar as in frame 1</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span></div>
+      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
       <div class="wpad">
         <div class="stats">
-          <div class="stat"><div class="sl">Runs</div><div class="sn">320</div><div class="ss">None today yet</div></div>
-          <div class="stat"><div class="sl">Allowed by the bouncer</div><div class="sn">280<small>88%</small></div><div class="ss">Without a question</div></div>
-          <div class="stat"><div class="sl">Asked you</div><div class="sn">37<small>12%</small></div><div class="ss">34 allowed · 3 denied</div></div>
-          <div class="stat"><div class="sl">Denied</div><div class="sn">6</div><div class="ss">3 by you · 3 by the bouncer</div></div>
-          <div class="stat"><div class="sl">Median answer</div><div class="sn">15 s</div><div class="ss">From question to your answer</div></div>
+          <div class="stat"><div class="sl">Runs</div><div class="sn">320</div></div>
+          <div class="stat"><div class="sl">Allowed by bouncer</div><div class="sn">280<small>88%</small></div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">37<small>12%</small></div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">6</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">15 s</div></div>
         </div>
         <div class="two">
           <div>
             <div class="gl">Runs per day</div>
             <div class="grp chart">
-              <div class="legend"><span><i style="background:var(--s-auto)"></i>Without a question</span><span><i style="background:var(--s-ask)"></i>Asked you</span></div>
+              <div class="legend"><span><i style="background:var(--s-auto)"></i>Allowed by bouncer</span><span><i style="background:var(--s-ask)"></i>Asked you</span></div>
               <svg viewBox="0 0 470 164" width="100%" role="img" aria-label="Runs per day, last 7 days. Wed 48, Thu 71, Fri 66, Sat 22, Sun 18, Mon 95, today 0.">
                 <path d="M30 140H460" stroke="rgba(0,0,0,.18)" stroke-width="1"/>
                 <path d="M30 85H460M30 30H460" stroke="rgba(0,0,0,.07)" stroke-width="1"/>
@@ -1133,17 +1000,14 @@ To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div>
                 <text x="60" y="157" text-anchor="middle">Wed</text><text x="120" y="157" text-anchor="middle">Thu</text><text x="180" y="157" text-anchor="middle">Fri</text><text x="240" y="157" text-anchor="middle">Sat</text><text x="300" y="157" text-anchor="middle">Sun</text><text x="360" y="157" text-anchor="middle">Mon</text><text x="420" y="157" text-anchor="middle" style="font-weight:600;fill:rgba(0,0,0,.72)">Today</text>
               </svg>
             </div>
-            <div class="note">No run today yet. The last one was yesterday at 19:42: Claude Code on Mac mini (office), in apassy.</div>
           </div>
           <div>
-            <div class="gl">Needs attention</div>
+            <div class="gl">Needs attention<span>1</span></div>
             <div class="grp">
-              <div class="fr top"><div class="att"><div class="ai" style="background:var(--green)"><svg><use href="#i-ok"/></svg></div><div><div class="t1">Everything else looks fine</div><div class="t2">No agent asks you often, and no production credential was used this week.</div></div></div></div>
-              <div class="fr top"><div class="att"><div class="ai off"><svg><use href="#i-laptop"/></svg></div><div><div class="t1">MacBook Pro has not reported since 1 Nov, 18:40</div><div class="t2">Its numbers are from then. Open Apassy on it and unlock the vault.</div></div></div></div>
+              <div class="fr"><div class="att"><div class="ai off"><svg><use href="#i-laptop"/></svg></div><div><div class="t1">MacBook Pro not reporting</div><div class="t2">Last report 1 Nov, 18:40</div></div></div><span class="chev">›</span></div>
             </div>
           </div>
         </div>
-        <div class="note" style="margin-top:12px">The Agents table follows, as in frame 1, with "Last active" in place of the status: nobody is active now.</div>
       </div>
     </section>
   </div>
@@ -1151,163 +1015,124 @@ To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div>
 
 <!-- ============================================================ 11 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">11</span>Empty: a scope with no results</b>
-    <span>11a: a new Mac mini (lab) that reported once and has no agent yet. 11b: a project that matches nothing, with "Show All Projects" and the projects that do have runs. Both keep the scope bar, so the way back is one click.</span></div>
-  <div class="win" style="min-height:0">
-    <section class="content">
-      <div class="tb"><div class="ttl"><b>Agents</b><small>No agents on Mac mini (lab) · sidebar as in frame 2</small></div></div>
-      <div class="scopebar">Showing <span class="popm">Mac mini (lab)</span> in <span class="popm">All projects</span></div>
-      <div class="wpad">
-        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (lab)</b><span class="r2">Reported once · today, 08:12</span></div>
-        <div class="grp">
-          <div class="fr top"><div class="att"><div class="ai off"><svg><use href="#i-agent"/></svg></div><div style="flex:1"><div class="t1">No agents on Mac mini (lab) yet</div><div class="t2">Its agents show here after you connect them on that Mac: "Connect an Agent" in Apassy there, or <span class="mono">apassy setup claude --write</span> in its Terminal. This Mac cannot connect agents for it.</div></div></div></div>
-          <div class="fr"><div class="k">Apassy on it</div><div class="v">Vault unlocked · reports on</div></div>
-          <div class="fr"><div class="k">Remote access</div><div class="v">Off<span class="nf">F6</span></div></div>
+  <div class="flabel"><b><span class="fnum">11</span>Empty · no results</b>
+    <span>A new Mac without agents; a project without runs.</span></div>
+  <div class="pgrid">
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Agents</b></div></div>
+        <div class="scopebar">Showing <span class="popm">Mac mini (lab)</span> in <span class="popm">All Projects</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (lab)</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">08:12</span></div>
+          <div class="grp"><div class="es"><b>No agents yet</b><div class="l">Connect agents on Mac mini (lab).</div><div class="bt"><span class="lnk">Show All Environments</span></div></div></div>
         </div>
-        <div class="gl">Other environments</div>
-        <div class="grp">
-          <div class="fr"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-mini"/></svg><div class="k">Mac mini (office)</div><span class="cap">This Mac</span><div class="v">3 agents</div><span class="lnk">Show</span></div>
-          <div class="fr"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-mini"/></svg><div class="k">Mac mini (studio)</div><div class="v">3 agents</div><span class="lnk">Show</span></div>
+      </section>
+    </div>
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days</small></div></div>
+        <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">billing-v2</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="grp" style="margin-top:8px"><div class="es"><b>No runs in billing-v2</b><div class="l">Last run 21 Oct, by Codex.</div><div class="bt"><span class="btn pri">Show All Projects</span></div></div></div>
         </div>
-        <div class="note">"Show" sets the scope to that Mac. "All environments" is in the menu.</div>
-      </div>
-    </section>
-  </div>
-  <div class="win" style="min-height:0;margin-top:22px">
-    <section class="content">
-      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days · billing-v2 · sidebar as in frame 1</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">billing-v2</span></div>
-      <div class="wpad">
-        <div class="grp">
-          <div class="fr top"><div class="att"><div class="ai off"><svg><use href="#i-folder"/></svg></div><div style="flex:1"><div class="t1">No runs in billing-v2 in the last 7 days</div><div class="t2">A run counts for a project when the agent works in it. billing-v2 had its last run on 21 Oct, by Codex on Mac mini (office). Older runs are in Logs.</div>
-            <div style="display:flex;gap:8px;margin-top:10px"><span class="btn pri">Show All Projects</span><span class="btn">Open Logs for billing-v2</span></div></div></div></div>
-        </div>
-        <div class="gl">Projects with runs this week</div>
-        <div class="grp">
-          <div class="fr"><div class="k">acme-billing</div><div class="v">151 runs · 3 environments</div><span class="lnk">Show</span></div>
-          <div class="fr"><div class="k">synthetic-shop</div><div class="v">142 runs · Mac mini (studio)</div><span class="lnk">Show</span></div>
-          <div class="fr"><div class="k">apassy</div><div class="v">88 runs · 2 environments</div><span class="lnk">Show</span></div>
-        </div>
-        <div class="note">The same block shows on Agents, Decisions, and Logs when the project matches nothing; the project menu keeps billing-v2 as a choice, as the scope bar does today.</div>
-      </div>
-    </section>
+      </section>
+    </div>
   </div>
 </section>
 
 <!-- ============================================================ 12 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">12</span>Empty: other Macs</b>
-    <span>12a: a Mac that is in the vault but never reported: its group says why and what to do on it. 12b: this is the only Mac: the scope menu has one environment and a line on how other Macs appear.</span></div>
-  <div class="win" style="min-height:0">
-    <section class="content">
-      <div class="tb"><div class="ttl"><b>Agents</b><small>6 agents in 3 environments · sidebar as in frame 2</small></div></div>
-      <div class="scopebar">Showing <span class="popm">All environments</span> in <span class="popm">All projects</span></div>
-      <div class="wpad">
-        <div class="note" style="margin:6px 4px 0">Mac mini (office) and Mac mini (studio) show above, as in frame 2.</div>
-        <div class="envh"><svg><use href="#i-laptop"/></svg><b>iMac (home)</b><span class="r2"><span class="dot off"></span>Never reported</span></div>
-        <div class="grp">
-          <div class="fr top"><div class="att"><div class="ai off"><svg><use href="#i-info"/></svg></div><div style="flex:1"><div class="t1">iMac (home) uses this vault but has not reported its agents</div><div class="t2">This Mac has never received a report from it, so it cannot show its agents or numbers. A Mac reports while Apassy runs on it with this vault unlocked and "Show agents on my other devices" on.</div>
-            <ol style="margin:8px 0 0;padding-left:18px;font-size:12.5px;color:var(--label);line-height:1.55"><li>On iMac (home), open Apassy and unlock this vault.</li><li>Turn on Settings &gt; Devices &gt; Relay &gt; "Show agents on my other devices".</li><li>Its agents show here within a minute.</li></ol></div></div></div>
+  <div class="flabel"><b><span class="fnum">12</span>Empty · other Macs</b>
+    <span>A Mac that never reported; this is the only Mac.</span></div>
+  <div class="pgrid">
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Agents</b></div></div>
+        <div class="scopebar">Showing <span class="popm">iMac (home)</span> in <span class="popm">All Projects</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="envh"><svg><use href="#i-laptop"/></svg><b>iMac (home)</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">Never reported</span></div>
+          <div class="grp"><div class="es"><b>No report yet</b><div class="l">Turn on Show agents on my other devices on that Mac.</div><div class="bt"><span class="hi"><svg><use href="#i-info"/></svg></span></div></div></div>
         </div>
-        <div class="note">Its runs still count on iMac (home); they are not lost. A report that does not open shows "Sync this vault to see the agents of iMac (home)" instead, as today.</div>
-      </div>
-    </section>
-  </div>
-  <div class="win" style="min-height:0;margin-top:22px">
-    <section class="content">
-      <div class="tb"><div class="ttl"><b>Agents</b><small>3 agents on this Mac · sidebar as in frame 2</small></div></div>
-      <div class="scopebar">Showing <span class="popm open">Mac mini (office)</span> in <span class="popm">All projects</span>
-        <div class="menu" style="left:78px;top:28px;width:360px">
-          <div class="mi hi"><span class="ck">✓</span>Mac mini (office)<small>This Mac</small></div>
-          <hr>
-          <div style="padding:4px 10px 6px 26px;font-size:12px;color:var(--sec);line-height:1.4">Other Macs show here when they use this vault. Open the vault in Apassy on each Mac; it reports while "Show agents on my other devices" is on.</div>
+      </section>
+    </div>
+    <div class="win" style="min-height:300px">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Agents</b><small>3 agents</small></div></div>
+        <div class="scopebar">Showing <span class="popm open">Mac mini (office)</span> in <span class="popm">All Projects</span>
+          <div class="menu" style="left:78px;top:28px;min-width:260px">
+            <div class="mi hi"><span class="ck">✓</span>Mac mini (office)<small>This Mac</small></div>
+            <hr>
+            <div style="padding:3px 10px 5px 26px;font-size:12px;color:var(--sec)">Other Macs appear when they use this vault.</div>
+          </div>
         </div>
-      </div>
-      <div class="wpad" style="padding-bottom:28px">
-        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span><span class="r2"><span class="dot"></span>Remote access on</span></div>
-        <div class="grp">
-          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs today</div><div class="num">Asks you</div><div></div></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">apassy, acme-billing</div><div><span class="stt live"><span class="dot"></span>Active now</span></div><div class="num">41</div><div class="num">6%</div><span class="chev">›</span></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">acme-billing</div><div><span class="stt idle"><span class="dot off"></span>Idle · 25 min ago</span></div><div class="num">14</div><div class="num">11%</div><span class="chev">›</span></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span><span class="cap acc">Remote</span></div><div class="sec cut">No project</div><div><span class="stt idle"><span class="dot off"></span>Idle · 2 h ago</span></div><div class="num">2</div><div class="num">100%</div><span class="chev">›</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span></div>
+          <div class="grp">
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#d97757">C</div>Claude Code</div><span class="stt live"><span class="dot"></span>Active now</span></div>
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#10a37f">C</div>Codex</div><span class="stt idle"><span class="dot off"></span>25 min ago</span></div>
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div>Grok Bot<span class="cap acc">Remote</span></div><span class="stt idle"><span class="dot off"></span>2 h ago</span></div>
+          </div>
         </div>
-        <div class="note">With one Mac the menu still shows, unlike the scope bar of today, so the word "environment" and the way to more Macs are visible from the start.</div>
-      </div>
-    </section>
+      </section>
+    </div>
   </div>
 </section>
 
 <!-- ============================================================ 13 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">13</span>Empty: a remote agent just connected, and remote access with no remote agent yet</b>
-    <span>13a: the page of Grok Bot right after Allow: no run yet and no credential chosen, so the next step is "Choose Credentials…". 13b: remote access is on and no remote agent has connected: the address and the one-line how-to stay at the top.</span></div>
-  <div class="win" style="min-height:0">
-    <section class="content">
-      <div class="tb"><span class="tbtn"><svg><use href="#i-back"/></svg>Agents</span><div class="ttl"></div><span class="ib"><svg><use href="#i-dots"/></svg></span></div>
-      <div class="wpad n">
-        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1>Grok Bot</h1><div class="s">Remote agent · connected through Mac mini (office) · 1 min ago</div><div class="caps"><span class="cap acc"><svg><use href="#i-cloud"/></svg>Remote</span><span class="cap">Every run asks you</span></div></div></div>
-        <div class="grp">
-          <div class="fr top"><div class="att"><div class="ai" style="background:var(--accent)"><svg><use href="#i-key"/></svg></div><div style="flex:1"><div class="t1">Next: choose what Grok Bot can see</div><div class="t2">It is connected and sees no credential yet. Pick the credentials it may ask for. It sees their names, never a value, and every run asks you.</div>
-            <div style="margin-top:10px"><span class="btn pri">Choose Credentials…</span></div></div></div></div>
+  <div class="flabel"><b><span class="fnum">13</span>Empty · new remote agent</b>
+    <span>Just connected; remote access on, no remote agent yet.</span></div>
+  <div class="pgrid">
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><span class="tbtn"><svg><use href="#i-back"/></svg>Agents</span><div class="ttl"></div></div>
+        <div class="wpad" style="padding:2px 22px 28px">
+          <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1 style="display:flex;align-items:center;gap:8px">Grok Bot <span class="cap acc"><svg><use href="#i-cloud"/></svg>Remote</span></h1><div class="s">Mac mini (office) · connected 1 min ago</div></div></div>
+          <div class="grp"><div class="es"><b>Choose what it can see</b><div class="l">It sees no credentials yet.</div><div class="bt"><span class="btn pri">Choose Credentials…</span></div></div></div>
+          <div class="gl">Recent runs</div>
+          <div class="grp"><div class="fr"><div class="v l" style="color:var(--sec)">No runs yet</div></div></div>
+          <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Disconnect…</div><div class="v"></div><svg style="width:15px;height:15px;color:var(--sec)"><use href="#i-touch"/></svg></div></div>
         </div>
-        <div class="grp" style="margin-top:12px">
-          <div class="fr"><div class="k">Connected</div><div class="v">Today, 14:21 · you allowed it with Touch ID</div></div>
-          <div class="fr"><div class="k">Access</div><div class="v">Valid until 1 Feb 2027</div></div>
-          <div class="fr"><div class="k">Sees</div><div class="v">No credentials yet</div></div>
+      </section>
+    </div>
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Agents</b><small>2 agents</small></div></div>
+        <div class="scopebar">Showing <span class="popm">Mac mini (office)</span> in <span class="popm">All Projects</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span></div>
+          <div class="grp">
+            <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw on"></span></div>
+            <div class="fr"><div class="v mono" style="color:var(--label);text-align:left;font-size:11px">https://rafals-mac-mini.tail71fdd0.ts.net:8443/mcp</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+            <div class="fr"><div class="tn acc"><svg><use href="#i-cloud"/></svg><span>No remote agents yet. Give one this address.</span></div></div>
+          </div>
+          <div class="grp" style="margin-top:12px">
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#d97757">C</div>Claude Code</div><span class="stt live"><span class="dot"></span>Active now</span></div>
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#10a37f">C</div>Codex</div><span class="stt idle"><span class="dot off"></span>25 min ago</span></div>
+          </div>
         </div>
-        <div class="gl">Recent runs</div>
-        <div class="grp"><div class="fr"><div class="np"><p>No run yet. When Grok Bot asks to run a command, the question waits in Decisions and on your iPhone, and the run shows here with its credential and outcome.</p></div></div></div>
-        <div class="gl">Note for the bouncer</div>
-        <div class="field ph">Optional. For example: Grok Bot of the acme-ops workspace, read-only checks.</div>
-        <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Disconnect Grok Bot…</div><div class="v"></div><svg style="width:15px;height:15px;color:var(--sec)"><use href="#i-touch"/></svg></div></div>
-        <div class="note">"Last 7 days" shows after the first run; before it, the tiles would all be 0.</div>
-      </div>
-    </section>
-  </div>
-  <div class="win" style="min-height:0;margin-top:22px">
-    <section class="content">
-      <div class="tb"><div class="ttl"><b>Agents</b><small>2 agents on this Mac · sidebar as in frame 2</small></div></div>
-      <div class="scopebar">Showing <span class="popm">Mac mini (office)</span> in <span class="popm">All projects</span></div>
-      <div class="wpad" style="padding-bottom:28px">
-        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span><span class="r2"><span class="dot"></span>Remote access on</span></div>
-        <div class="grp">
-          <div class="fr top"><div class="kn"><div>Remote agents can reach this Mac</div><div class="nt">On. Through Tailscale Funnel on rafals-mac-mini. No remote agent has connected yet.</div></div><span class="sw on"></span></div>
-          <div class="fr"><div class="k" style="min-width:96px">MCP address</div><div class="v mono" style="color:var(--label);text-align:left">https://rafals-mac-mini.tail71fdd0.ts.net:8443/mcp</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
-          <div class="fr"><div class="np">
-            <p>The address opens only the MCP endpoint and the proxy for the runs that you allow. Credential values stay on this Mac.</p>
-            <p style="color:var(--label)">To connect a cloud agent, give it this address. It asks to connect, and you approve it in Decisions.</p>
-          </div></div>
-        </div>
-        <div class="grp" style="margin-top:12px">
-          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs today</div><div class="num">Asks you</div><div></div></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">apassy, acme-billing</div><div><span class="stt live"><span class="dot"></span>Active now</span></div><div class="num">41</div><div class="num">6%</div><span class="chev">›</span></div>
-          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">acme-billing</div><div><span class="stt idle"><span class="dot off"></span>Idle · 25 min ago</span></div><div class="num">14</div><div class="num">11%</div><span class="chev">›</span></div>
-          <div class="fr" style="min-height:34px"><div class="tn" style="color:var(--sec)"><svg style="color:var(--accent)"><use href="#i-cloud"/></svg><span>No remote agent yet. It shows here, with a cloud badge, after you allow its connect request.</span></div></div>
-        </div>
-      </div>
-    </section>
+      </section>
+    </div>
   </div>
 </section>
 
 <!-- ============================================================ 14 -->
 <section class="frame">
-  <div class="flabel"><b><span class="fnum">14</span>Empty: Logs filtered to nothing</b>
-    <span>The filters stay visible and each one can be removed. The page says which filter empties it and offers "Clear Filters" and the nearest result.</span></div>
+  <div class="flabel"><b><span class="fnum">14</span>Empty · filtered Logs</b>
+    <span>Filters set, nothing matches.</span></div>
   <div class="win" style="min-height:0">
     <section class="content">
-      <div class="tb"><div class="ttl"><b>Logs</b><small>No rows match · sidebar as in frame 6</small></div></div>
+      <div class="tb"><div class="ttl"><b>Logs</b></div></div>
       <div class="scopebar">Showing <span class="popm">Mac mini (office)</span> in <span class="popm">acme-billing</span><span class="grow"></span>
-        <span class="seg"><span>All events</span><span>Runs</span><span>Connections</span><span class="on">Not allowed</span></span>
+        <span class="seg"><span>All</span><span>Runs</span><span>Connections</span><span class="on">Denied</span></span>
         <span class="popm">Grok Bot</span>
         <span class="searchf" style="color:var(--label)"><svg style="color:var(--ter)"><use href="#i-search"/></svg>delete</span>
       </div>
       <div class="wpad" style="max-width:none;padding:2px 24px 28px">
         <div class="grp">
           <div class="tr th g-lg"><div>Time</div><div>Environment</div><div>Agent</div><div>Event</div><div>Credential</div><div>Outcome</div><div></div></div>
-          <div class="fr top" style="padding:14px 14px"><div class="att"><div class="ai off"><svg><use href="#i-search"/></svg></div><div style="flex:1"><div class="t1">No rows match these filters</div><div class="t2">Grok Bot has no run in acme-billing: a remote agent sends no project. Without the project filter, 1 row matches: yesterday, 16:05, a denied DELETE with Stripe test.</div>
-            <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><span class="btn pri">Clear Filters</span><span class="btn">Show All Projects</span></div></div></div></div>
+          <div class="es"><b>No matches</b><div class="bt"><span class="btn pri">Clear Filters</span></div></div>
         </div>
-        <div class="note">The filters on: Mac mini (office), acme-billing, Not allowed, Grok Bot, "delete". "Clear Filters" sets all of them back, the scope too.</div>
       </div>
     </section>
   </div>
@@ -1316,43 +1141,56 @@ To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div>
 <!-- ============================================================ Notes -->
 <div class="notes">
   <h2>Data that relay-feed-v1 does not carry today</h2>
-  <p class="note" style="margin:0 0 4px">Everything else of other Macs in this mockup comes from fields that exist: <code>mac.name</code>, <code>generated_at</code> (stale after 24 hours), <code>week.by_you</code> and <code>week.automatic</code>, and each agent's <code>host</code>, <code>revoked</code>, <code>last_use_at</code>, <code>uses_this_week</code>, <code>projects</code>, <code>restricted</code>, <code>actions</code> (allowed, not_allowed), <code>exceptions</code>, and <code>recent</code> (at most 20). Data of this Mac (remote access, Grok Bot, open questions, proxied requests, answer times) is local and needs no feed field.</p>
+  <p class="note" style="margin:0 0 4px">Other Macs otherwise use existing fields: <code>mac.name</code>, <code>generated_at</code> (stale after 24 h), <code>week.by_you</code>, <code>week.automatic</code>, and each agent's <code>host</code>, <code>revoked</code>, <code>last_use_at</code>, <code>uses_this_week</code>, <code>projects</code>, <code>restricted</code>, <code>actions</code>, <code>exceptions</code>, <code>recent</code> (≤ 20). Data of this Mac is local.</p>
   <table>
-    <tr><th>Tag</th><th>Shown as</th><th>Proposed field (additive, section 7.1)</th><th>Note</th></tr>
-    <tr><td><span class="nf">F1</span></td><td>A remote agent of another Mac (cloud badge, "Connected through &lt;Mac&gt;")</td><td><code>agents[].where</code> = <code>"remote"</code></td><td>Not in a frame: Grok Bot is on this Mac. A new value of <code>where</code> makes a 0.5.2 reader refuse the whole feed ("Update Apassy"), so publish it only with the next feed version, or leave remote agents out for old readers.</td></tr>
-    <tr><td><span class="nf">F2</span></td><td>"Connected 28 Oct" for an agent of another Mac</td><td><code>agents[].connected_at</code></td><td>Not in a frame: the compact page shows "updated", as remote.rs does today. Needed when F1 ships.</td></tr>
-    <tr><td><span class="nf">F3</span></td><td>Runs, Runs today, Asks you (ask rate), Denied for each agent of another Mac</td><td><code>agents[].days</code>: 7 entries <code>{runs, asked, not_allowed}</code>, today first</td><td><code>uses_this_week</code> counts item uses, not runs; <code>actions[].not_allowed</code> also counts uses. One run with two credentials is one run and two uses.</td></tr>
-    <tr><td><span class="nf">F4</span></td><td>Median answer time of another Mac</td><td><code>week.answer_p50_secs</code> (number or <code>null</code>)</td><td>The time from a question to the owner's answer, last 7 days. For all environments, the tile weights the p50 of each Mac by its <code>week.by_you</code>: close to the true median, not exact.</td></tr>
-    <tr><td><span class="nf">F5</span></td><td>Runs per day of all Macs (the chart)</td><td><code>week.days</code>: 7 entries <code>{runs, asked}</code>, today first</td><td>Separate from F3 because a feed may leave agents out to fit (section 7.3); the totals must not depend on it.</td></tr>
-    <tr><td><span class="nf">F6</span></td><td>"Remote access off" on another Mac's header</td><td><code>remote_access</code>: <code>"off"</code>, <code>"on"</code>, or <code>"problem"</code></td><td>Never the address: it stays on its Mac.</td></tr>
+    <tr><th>Tag</th><th>Shown in</th><th>Proposed field (additive, section 7.1)</th><th>Note</th></tr>
+    <tr><td>F1</td><td>No frame yet: a remote agent of another Mac</td><td><code>agents[].where</code> = <code>"remote"</code></td><td>A 0.5.2 reader refuses a feed with an unknown value ("Update Apassy"): ship with the next feed version, or leave remote agents out for old readers.</td></tr>
+    <tr><td>F2</td><td>No frame yet: "connected" date of another Mac's agent</td><td><code>agents[].connected_at</code></td><td>Needed with F1.</td></tr>
+    <tr><td>F3</td><td>Frame 1 Agents table (Runs, Asks You of other Macs); frames 2, 3 Runs Today, Asks You; frame 4b tiles</td><td><code>agents[].days</code>: 7 × <code>{runs, asked, not_allowed}</code>, today first</td><td><code>uses_this_week</code> and <code>actions</code> count credential uses, not runs.</td></tr>
+    <tr><td>F4</td><td>Frame 1 and 10 Median answer (other Macs' part); frame 3 Median answer</td><td><code>week.answer_p50_secs</code> (number or <code>null</code>)</td><td>All environments: the p50 of each Mac weighted by <code>week.by_you</code>; close to the true median, not exact. Frame 4b has no Median tile for this reason.</td></tr>
+    <tr><td>F5</td><td>Frames 1 and 10 Runs per day</td><td><code>week.days</code>: 7 × <code>{runs, asked}</code>, today first</td><td>Top level, because a feed may leave agents out to fit (section 7.3).</td></tr>
+    <tr><td>F6</td><td>Frame 3 header "Remote access off"</td><td><code>remote_access</code>: <code>off</code> / <code>on</code> / <code>problem</code></td><td>Never the address.</td></tr>
   </table>
-  <p class="note" style="margin:0 0 16px">Not proposed, by design: the proxied requests of a run of another Mac (section 7.2 forbids destinations and host lists in the feed), open questions of another Mac (they go to the iPhone through the questions channel), and connect events of other Macs (Logs shows runs only for them). "Active now" uses <code>last_use_at</code> within 10 minutes, so it needs no field.</p>
+  <p class="note" style="margin:0 0 16px">Not proposed, by design: proxied requests of another Mac (section 7.2 forbids destinations), open questions of another Mac (they go through the questions channel), connect events of other Macs (Logs shows runs only for them). "Active now" = <code>last_use_at</code> within 10 minutes.</p>
 
-  <h2>Choices made in this mockup</h2>
+  <h2>Text rules of the windows</h2>
   <ul>
-    <li><b>Sidebar:</b> the section header "Agents" is now "Bouncer", with Overview, Decisions (red badge with the open count), Agents (count of connected agents of all Macs), Logs. Shortcuts follow the order: ⌘2 Overview, ⌘3 Decisions, ⌘4 Agents, ⌘5 Logs.</li>
-    <li><b>Scope bar:</b> the bar of PR #88, with "All devices" renamed "All environments". The menu shows each Mac by its name; this Mac has "This Mac" at the right, and a stale Mac says "Not reported since …". The scope is one for the whole section, as <span class="mono">activity_scope</span> today.</li>
-    <li><b>Layout:</b> Overview, Agents, an agent, and Logs are wide pages (sidebar and one pane), because they are tables; an agent opens as a page with "‹ Agents" in the toolbar. Decisions keeps the list column and the detail with the action bar.</li>
-    <li><b>Period:</b> fixed at the last 7 days, as the "This week" counts and the feed. No period menu.</li>
-    <li><b>Words:</b> "Runs" for decided run requests, "Asked you", "Allowed by the bouncer", "Denied", "Median answer". "Remote agent" in the app; "cloud agent" only in the run question ("From the cloud agent, not verified") and in the one help sentence of the remote access block, as the brief says. The switch is "Remote agents can reach this Mac".</li>
-    <li><b>Kind of agent:</b> the round letter avatar in the agent colour of <span class="mono">kit::agent_color</span> (Claude Code #d97757, Codex #10a37f, T3 Code #6e5ae6, Grok Bot #ff375f from the hash), plus a white cloud badge and a blue "Remote" cap for a remote agent.</li>
-    <li><b>Status:</b> "Active now", "Waits for you", "Idle · 25 min ago", "Last seen 1 Nov". A Mac that has not reported for 24 hours is dimmed with "The Mac has not reported since …" (section 8).</li>
-    <li><b>Read-only rows:</b> one gray line under each other Mac's group, "Read-only here. Change these agents on &lt;Mac&gt;."; the agent page ends with "Change this agent on &lt;Mac&gt;." (remote.rs).</li>
-    <li><b>Ask rate highlight:</b> 25% or more is orange in tables and is an attention item.</li>
-    <li><b>Attention items:</b> at most 5, in this order: an environment that has not reported, a production credential used this week, an agent that asks often, a remote agent with denied runs. Each has one link.</li>
-    <li><b>Connect decision:</b> Allow with Touch ID, Deny, no remember; a code shown both on the browser page and in the card; a warning line "If you did not just add Apassy to Grok Bot, deny."; a second agent with a used name gets a number ("Grok Bot 2").</li>
-    <li><b>Disconnect…:</b> one red row at the end of the page of an agent of this Mac, local or remote, with Touch ID. Not on agents of other Macs.</li>
-    <li><b>Logs:</b> replaces the "Activity" button of Decisions. Event words: Run, Connect request, Connected, Disconnected, Remote access on, Remote access off. Proxied requests show time, method, host, and status only.</li>
-    <li><b>Problem states:</b> the four states of the first mockup, moved into the remote access block; button words in title case as in the app ("Check Again", "Use Port 10000").</li>
-    <li><b>Settings → Bouncer</b> stays (the brain); Overview names it in its last line.</li>
-    <li><b>Empty states (frames 9–14):</b> never a lone icon. Each one says what will show, how it gets there, and gives one next step; numbers show as 0 with a line that explains them, and "Median answer" shows "—" until the first answer. The block sits in a group where the rows would be, so the page keeps its layout.</li>
-    <li><b>Ways in for local agents:</b> "Connect an Agent…" (the sheet of today) and <span class="mono">apassy setup claude --write</span> / <span class="mono">apassy setup codex --write</span>. They connect agents of this Mac only; remote agents never need a button.</li>
-    <li><b>A quiet Decisions page</b> is the app of today ("Nothing waits for you.", "All clear", "This week"), with "Recent decisions" called "History" and the "Devices" group called "Environments".</li>
-    <li><b>A Mac that never reported</b> is listed from the vault's <span class="mono">trusted_device</span> rows of kind <span class="mono">mac</span> (a change: the reader of today lists only Macs with a feed), with the three steps for that Mac and the Settings path of "Show agents on my other devices".</li>
-    <li><b>One Mac only:</b> the environment menu still shows with one entry and a line on how other Macs appear (the scope bar of today hides it with one device).</li>
-    <li><b>A project with no runs</b> keeps its choice in the menu and offers "Show All Projects", its last run, and the projects with runs this week.</li>
-    <li><b>A new remote agent</b> gets a "Next: choose what Grok Bot can see" block with "Choose Credentials…" on top of its page; the 7-day tiles show after its first run.</li>
-    <li><b>Logs filtered to nothing</b> says which filter empties it, the nearest result without that filter, "Clear Filters" (scope included), and "Show All Projects".</li>
+    <li>No paragraphs. At most one helper line of 12 words or fewer per block; longer text goes into an ⓘ popover (drawn open only in frame 2).</li>
+    <li>Stat tiles: label and number, a percentage where it helps. The page header says "Last 7 days" once.</li>
+    <li>Group headings and stat labels: sentence case, 3 words or fewer, as in the app. Column headings, buttons, menu items, and segmented choices: title-style ("Asks You", "Connect an Agent…", "Clear Filters", "All Environments").</li>
+    <li>Empty states: a title of 5 words or fewer, one line of 12 words or fewer, one primary button, at most one link.</li>
+    <li>Other Macs: one "Read-only" tag in the group or page header; "Change on &lt;Mac&gt;." only on the agent page.</li>
+    <li>Outcome words everywhere: "Allowed by bouncer", "Allowed by you", "Allowed on iPhone", "Denied by you", "Waits for you".</li>
+  </ul>
+
+  <h2>Help popovers (ⓘ)</h2>
+  <ul>
+    <li><b>Remote access</b> (frame 2, open): what Funnel opens, values stay on the Mac, how a cloud agent connects, Touch ID, unlocked and awake.</li>
+    <li><b>Agent header</b> (frame 4): kind (MCP client on the internet), connected 28 Oct with Touch ID, access valid until 26 Jan 2027, no project.</li>
+    <li><b>Never reported</b> (frame 12a): the three steps on that Mac: open Apassy, unlock the vault, turn on Settings &gt; Devices &gt; Relay &gt; "Show agents on my other devices".</li>
+  </ul>
+
+  <h2>Choices</h2>
+  <ul>
+    <li><b>Sidebar:</b> section "Bouncer" with Overview, Decisions (badge), Agents (count), Logs; ⌘2–⌘5 in that order.</li>
+    <li><b>Scope bar:</b> the bar of PR #88; "All devices" becomes "All Environments". The menu shows "This Mac" and the age of each report. With one Mac it still shows (frame 12b), unlike today.</li>
+    <li><b>Layout:</b> Overview, Agents, agent pages, and Logs are wide single panes (tables); an agent opens as a page with "‹ Agents". Decisions keeps list and detail.</li>
+    <li><b>Period:</b> fixed at 7 days, as "This week" and the feed.</li>
+    <li><b>Words:</b> "Remote" for remote agents in the app; "cloud agent" only in the remote access subtitle and help.</li>
+    <li><b>Kind of agent:</b> letter avatar in <span class="mono">kit::agent_color</span> (Grok Bot #ff375f), a cloud badge, and a "Remote" tag.</li>
+    <li><b>Status:</b> "Active now" (use in the last 10 min), "Waits for you", a relative time today, a date before today. A Mac silent for 24 h is dimmed.</li>
+    <li><b>Ask rate</b> of 25% or more is orange and an attention item. Attention order: a silent Mac, a production credential used, an agent that asks often, a remote agent with denials.</li>
+    <li><b>Agent page:</b> header, four tiles, five recent runs, Can See (Only rows, Never rows, "Choose Credentials…"), "Disconnect…" last with Touch ID. Local and remote agents share it. The note for the bouncer and the facts (kind, connected, access) move behind the header ⓘ or the "…" menu ("Show in Logs", "Edit Note…", "Disconnect…").</li>
+    <li><b>Connect decision:</b> code K7Q-4MD on the card and the browser page, one warning line, Allow (Touch ID) / Deny, nothing remembered. A second agent with a used name is listed as "Grok Bot 2". After 5 minutes it ends as denied.</li>
+    <li><b>Run question of a remote agent:</b> rows Credential, Agent, Sends To, Request with "Not verified"; the command; Deny / Allow Once. Every remote run asks you.</li>
+    <li><b>Decisions history</b> replaces the "Activity" button; filters All / Asked You / Automatic / Denied and one agent. Only questions of this Mac wait here. A decision of another Mac opens read-only.</li>
+    <li><b>Logs:</b> events Run, Connect, Disconnect, Remote access on/off. Proxied requests show time, method, host, status; no path, header, body, or value. Rows of other Macs: runs only, newest 20 per agent.</li>
+    <li><b>Browser page:</b> other endings with the same layout: "You denied the connection." and "The request ended."</li>
+    <li><b>Problem states:</b> the switch is disabled; the line and button change. 8c opens the link of Tailscale's message; 8d moves the address to port 10000.</li>
+    <li><b>Ways in for local agents:</b> "Connect an Agent…" (the sheet of today shows Claude Code, Codex, T3 Code, Other, and the <span class="mono">apassy setup claude|codex --write</span> commands). It connects agents of this Mac only; remote agents never need a button.</li>
+    <li><b>Never reported Mac</b> (frame 12a): listed from the vault's <span class="mono">trusted_device</span> rows of kind <span class="mono">mac</span>, a change: today's reader lists only Macs with a feed.</li>
+    <li><b>Quiet Decisions</b> (frame 10a): today's empty state, with "Recent decisions" called "History" and "Devices" called "Environments". The Environments rows show "by you · automatic".</li>
+    <li><b>Settings → Bouncer</b> stays for the brain.</li>
   </ul>
 </div>
 
