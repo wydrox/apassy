@@ -365,10 +365,18 @@ impl TailnetNode {
             node.inner
                 .call(name, |sd| code(ffi::set(sd, setting, value)))
         };
-        set("tailscale_set_dir", ffi::Setting::Dir, &dir)?;
-        set("tailscale_set_hostname", ffi::Setting::Hostname, &hostname)?;
+        set("tailscale_set_dir", ffi::Setting::Dir, dir.as_c_str())?;
+        set(
+            "tailscale_set_hostname",
+            ffi::Setting::Hostname,
+            hostname.as_c_str(),
+        )?;
         if let Some(url) = &control_url {
-            set("tailscale_set_control_url", ffi::Setting::ControlUrl, url)?;
+            set(
+                "tailscale_set_control_url",
+                ffi::Setting::ControlUrl,
+                url.as_c_str(),
+            )?;
         }
         if let Some(key) = &auth_key {
             let key = CStr::from_bytes_with_nul(key).map_err(|_| Error::InvalidOption {
@@ -523,7 +531,7 @@ impl TailnetNode {
     pub fn loopback(&self) -> Result<LoopbackApi> {
         let (addr, credential) = self.inner.call("tailscale_loopback", ffi::loopback)?;
         let credential = Zeroizing::new(credential);
-        let addr = addr.parse().map_err(|_| Error::Tailscale {
+        let addr: std::net::SocketAddr = addr.parse().map_err(|_| Error::Tailscale {
             call: "tailscale_loopback",
             message: format!("not a socket address: {addr}"),
         })?;
