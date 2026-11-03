@@ -95,6 +95,11 @@ impl IdleSource {
         s.session |= session;
         session
     }
+    /// Holds the sample, as a heartbeat that writes it does, until the guard drops.
+    #[cfg(test)]
+    pub(crate) fn hold_for_test(&self) -> std::sync::MutexGuard<'_, impl Sized> {
+        self.0.lock().unwrap()
+    }
     fn take(&self) -> (Option<Duration>, bool, u64) {
         let mut s = self.0.lock().unwrap();
         // Missing/stale telemetry must not unexpectedly interrupt agent runs.
@@ -443,35 +448,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_lock_never_vault_access_does_not_wait_for_idle_telemetry() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = DesktopApp::new();
-        app.owner_ui
-            .session
-            .create_file(&dir.path().join("never.db"), "synthetic-never-passphrase")
-            .unwrap();
-        app.owner_ui
-            .session
-            .unlock("synthetic-never-passphrase")
-            .unwrap();
-        app.poll_auto_lock(&egui::Context::default());
-        let source = app.auto_lock.source.clone();
-        let sample = source.0.lock().unwrap();
-        let vault = app.owner_ui.session.shared_vault();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            let guard = vault.lock().unwrap();
-            let vault = guard.as_ref().unwrap();
-            assert!(!vault.is_locked());
-            assert_eq!(vault.delivery_fence().deliver(|| 1), Some(1));
-            tx.send(()).unwrap();
-        });
-        let completed = rx.recv_timeout(Duration::from_secs(5));
-        drop(sample);
-        reader.join().unwrap();
-        assert!(completed.is_ok(), "Never waited for idle telemetry");
-    }
     #[test]
     fn auto_lock_each_option_with_injected_clock_and_idle() {
         for p in LockPolicy::ALL {

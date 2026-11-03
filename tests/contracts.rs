@@ -583,10 +583,7 @@ fn agent_request_rejects_unsupported_kinds_and_invalid_bounds() {
         |v| v["contract_version"] = json!(2),
         ErrorCode::ContractVersionMismatch,
     );
-}
-
-#[test]
-fn agent_request_rejects_epoch_mismatch_and_window_endpoints() {
+    // An epoch mismatch and the endpoints of the time window.
     assert_request_code(
         |v| v["agent"]["id"] = json!("agt_other"),
         ErrorCode::InvalidRequestBounds,

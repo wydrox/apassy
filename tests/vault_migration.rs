@@ -2205,54 +2205,68 @@ fn kinds(rows: &Derived, item: i64) -> Vec<&str> {
         .collect()
 }
 
-/// An expired grant does not come back as an item of "only these items".
+/// The exceptions that version 18 derives from the agents of [`migrated_v18_agents`],
+/// one migrated file for every case.
 #[test]
-fn version_18_drops_an_expired_grant_from_only() {
-    let (rows, _) = migrated_v18_agents();
-    let narrow = &rows[&11];
-    assert!(!kinds(narrow, 1).contains(&"only"), "{narrow:?}");
-    assert_eq!(kinds(narrow, 1), ["always_ask"], "an expiry is a limit");
-}
-
-/// A rule limit that the broker enforces today becomes "Always ask for this agent".
-#[test]
-fn version_18_turns_a_rule_limit_into_always_ask() {
+fn version_18_derives_the_exceptions_of_each_agent() {
     let (rows, now) = migrated_v18_agents();
+
+    // An expired grant does not come back as an item of "only these items".
+    let narrow = &rows[&11];
+    assert!(
+        !kinds(narrow, 1).contains(&"only"),
+        "an expired grant is not in only: {narrow:?}"
+    );
+    assert_eq!(kinds(narrow, 1), ["always_ask"], "an expiry is a limit");
+
+    // A rule limit that the broker enforces today becomes "Always ask for this agent".
     let wide = &rows[&12];
     for item in [1, 2, 3] {
-        assert_eq!(kinds(wide, item), ["always_ask"], "item {item}: {wide:?}");
+        assert_eq!(
+            kinds(wide, item),
+            ["always_ask"],
+            "a rule limit, item {item}: {wide:?}"
+        );
     }
-    assert!(wide.contains(&(1, "always_ask".to_owned(), now - 99)));
-    assert_eq!(kinds(&rows[&11], 2), ["always_ask", "only"]);
-}
+    assert!(
+        wide.contains(&(1, "always_ask".to_owned(), now - 99)),
+        "a rule limit keeps the time of its grant: {wide:?}"
+    );
+    assert_eq!(
+        kinds(&rows[&11], 2),
+        ["always_ask", "only"],
+        "a run limit of a narrow agent"
+    );
 
-/// A grant in any folder with the real value waits for the owner today: "Always ask".
-#[test]
-fn version_18_turns_any_folder_with_the_real_value_into_always_ask() {
-    let (rows, _) = migrated_v18_agents();
-    assert_eq!(kinds(&rows[&12], 5), ["always_ask"]);
-    assert_eq!(kinds(&rows[&13], 5), ["always_ask", "only"]);
-}
+    // A grant in any folder with the real value waits for the owner today: "Always ask".
+    assert_eq!(
+        kinds(&rows[&12], 5),
+        ["always_ask"],
+        "any folder with the real value, agent 12"
+    );
+    assert_eq!(
+        kinds(&rows[&13], 5),
+        ["always_ask", "only"],
+        "any folder with the real value, agent 13"
+    );
 
-/// A grant in any folder with a placeholder in "Bouncer decides" becomes nothing.
-#[test]
-fn version_18_turns_a_placeholder_any_folder_grant_into_nothing() {
-    let (rows, _) = migrated_v18_agents();
-    assert!(kinds(&rows[&12], 4).is_empty(), "{:?}", rows[&12]);
+    // A grant in any folder with a placeholder in "Bouncer decides" becomes nothing.
+    assert!(
+        kinds(&rows[&12], 4).is_empty(),
+        "a placeholder in any folder becomes nothing: {:?}",
+        rows[&12]
+    );
     assert_eq!(kinds(&rows[&11], 4), ["only"], "the visible item stays");
-}
 
-/// The items of connector grants are in "only these items", once, with the first time.
-#[test]
-fn version_18_puts_connector_grants_in_only() {
-    let (rows, now) = migrated_v18_agents();
+    // The items of connector grants are in "only these items", once, with the first time.
     let narrow = &rows[&11];
     assert_eq!(
         narrow
             .iter()
             .filter(|(item, ..)| *item == 3)
             .collect::<Vec<_>>(),
-        [&(3, "only".to_owned(), now - 70)]
+        [&(3, "only".to_owned(), now - 70)],
+        "a connector grant is in only once, with the first time"
     );
     assert_eq!(
         narrow
@@ -2266,20 +2280,21 @@ fn version_18_puts_connector_grants_in_only() {
             (2, "only"),
             (3, "only"),
             (4, "only"),
-        ]
+        ],
+        "every exception of the narrow agent 11"
     );
     assert!(
         rows[&1].iter().all(|(_, kind, _)| kind != "only"),
         "the connector grant of an agent that sees all: {:?}",
         rows[&1]
     );
-}
 
-/// An agent that sees only its grants and has none keeps seeing no item.
-#[test]
-fn version_18_gives_a_narrow_agent_without_grants_only_the_marker() {
-    let (rows, now) = migrated_v18_agents();
-    assert_eq!(rows[&10], [(marker(), "only".to_owned(), now - 990)]);
+    // An agent that sees only its grants and has none keeps seeing no item.
+    assert_eq!(
+        rows[&10],
+        [(marker(), "only".to_owned(), now - 990)],
+        "a narrow agent without grants gets only the marker"
+    );
 }
 
 /// What a file of schema 19 has and a file of schema 18 has not: the new tables go, and

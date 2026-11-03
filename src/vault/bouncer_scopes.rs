@@ -495,19 +495,19 @@ mod tests {
             Some("synthetic-command-digest")
         );
         assert_eq!(vault.evaluation_scopes(item).unwrap().len(), 2);
-    }
 
-    #[test]
-    fn removal_and_reauthorization_have_distinct_lifetime_ids() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (mut vault, item, agent) = fixture(&dir);
+        // A removal and each re-authorization have distinct lifetime ids. The first scope
+        // is the newest row, so an id that a removal frees would come back.
         let first = authorize(&mut vault, item, agent);
         assert!(vault.remove_evaluation_scope(first.id).unwrap());
-        assert!(!vault.remove_evaluation_scope(first.id).unwrap());
+        assert!(
+            !vault.remove_evaluation_scope(first.id).unwrap(),
+            "a removed scope is removed once"
+        );
         let second = authorize(&mut vault, item, agent);
-        assert!(second.id > first.id);
+        assert!(second.id > first.id, "a re-authorization has a new id");
         let third = authorize(&mut vault, item, agent);
-        assert!(third.id > second.id);
+        assert!(third.id > second.id, "each re-authorization has a new id");
     }
 
     #[test]
@@ -589,6 +589,26 @@ mod tests {
             )
             .unwrap();
         assert!(vault.evaluation_scopes(item).unwrap().is_empty());
+        // A classification revert discards the scope.
+        authorize(&mut vault, item, agent);
+        vault
+            .set_declaration_environment(item, Environment::Production)
+            .unwrap();
+        vault
+            .set_declaration_environment(item, Environment::Staging)
+            .unwrap();
+        assert!(
+            vault.evaluation_scopes(item).unwrap().is_empty(),
+            "a classification revert discards the scope"
+        );
+        // An archive revert discards the scope.
+        authorize(&mut vault, item, agent);
+        vault.set_archived(item, true).unwrap();
+        vault.set_archived(item, false).unwrap();
+        assert!(
+            vault.evaluation_scopes(item).unwrap().is_empty(),
+            "an archive revert discards the scope"
+        );
         authorize(&mut vault, item, agent);
         vault.revoke_agent(agent).unwrap();
         assert!(vault.evaluation_scopes(item).unwrap().is_empty());
@@ -605,24 +625,6 @@ mod tests {
                 )
                 .is_err()
         );
-    }
-
-    #[test]
-    fn archive_and_classification_revert_discard_scope() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (mut vault, item, agent) = fixture(&dir);
-        authorize(&mut vault, item, agent);
-        vault
-            .set_declaration_environment(item, Environment::Production)
-            .unwrap();
-        vault
-            .set_declaration_environment(item, Environment::Staging)
-            .unwrap();
-        assert!(vault.evaluation_scopes(item).unwrap().is_empty());
-        authorize(&mut vault, item, agent);
-        vault.set_archived(item, true).unwrap();
-        vault.set_archived(item, false).unwrap();
-        assert!(vault.evaluation_scopes(item).unwrap().is_empty());
     }
 
     #[test]

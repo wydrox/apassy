@@ -464,10 +464,7 @@ mod tests {
         // A multi-byte character at the cut must not panic.
         assert!(Totp::parse("ééééééééééé").is_err());
         assert!(Totp::parse("otpauth:/é").is_err());
-    }
-
-    #[test]
-    fn the_error_messages_are_plain() {
+        // The error messages are plain.
         assert!(OtpError::Hotp.to_string().contains("HOTP"));
         assert!(OtpError::Invalid.to_string().contains("TOTP"));
     }
@@ -510,10 +507,7 @@ mod tests {
         ] {
             assert!(!is_otp_label(label), "{label:?}");
         }
-    }
-
-    #[test]
-    fn the_canonical_label_is_recognized() {
+        // The canonical label is recognized.
         assert!(is_otp_label(LABEL));
     }
 

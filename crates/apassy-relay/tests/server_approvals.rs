@@ -326,8 +326,10 @@ fn a_manager_can_deny_but_not_release() {
 
 #[test]
 fn a_run_times_out_and_can_no_longer_be_released() {
+    // Every expiry below is forced with SQL. A long timeout keeps the waiting runs from
+    // expiring on their own while the later cases run (each vault edit derives keys).
     let relay = start_with(
-        |config| config.approval_timeout_secs = 2,
+        |config| config.approval_timeout_secs = 60,
         UpstreamOptions::default(),
     );
     let team = relay.setup("staging");
@@ -343,7 +345,44 @@ fn a_run_times_out_and_can_no_longer_be_released() {
         2
     );
     assert_eq!(relay.host_requests().len(), 2);
-    // Both runs are past their expiry (no wait for the 2 s): the relay sees it at a read.
+
+    // A late release is refused even before any read of the run: the release of a third
+    // run arrives first after its expiry.
+    let late = pending_run(&relay, &team);
+    let late_body = release_body(&relay, late, None);
+    relay.edit_vault_live(&format!("UPDATE run SET expires_at = 1 WHERE id = {late}"));
+    let (status, answer) = release_with(&relay, late, &late_body);
+    assert_eq!(status, 409, "late release: {answer}");
+    assert_eq!(get_run(&relay, &team, late)["status"], "timed_out");
+
+    // A run past its expiry is not listed for the host: a fourth run with a known safe
+    // command, listed while it waits.
+    let (status, listed) = relay.run(
+        &team.agent_token,
+        &team.request(&["git", "status"], Some(USER)),
+    );
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["result"]["status"], "pending");
+    let listed = listed["result"]["run_id"].as_u64().unwrap();
+    assert!(
+        relay
+            .host_requests()
+            .iter()
+            .any(|request| request["run_id"] == listed)
+    );
+    relay.edit_vault_live(&format!(
+        "UPDATE run SET expires_at = 1 WHERE id = {listed}"
+    ));
+    let requests = relay.host_requests();
+    assert!(
+        requests.iter().all(|request| request["run_id"] != listed),
+        "{requests:?}"
+    );
+    assert_eq!(requests.len(), 2, "the first two runs still wait");
+    assert_eq!(get_run(&relay, &team, listed)["status"], "timed_out");
+
+    // Both first runs are past their expiry (no wait for the timeout): the relay sees it at a
+    // read.
     relay.edit_vault_live(&format!(
         "UPDATE run SET expires_at = 1 WHERE id IN ({run}, {second})"
     ));
@@ -373,22 +412,7 @@ fn a_run_times_out_and_can_no_longer_be_released() {
         .iter()
         .filter(|r| r["action"] == "run_timed_out")
         .count();
-    assert_eq!(timed_out, 2, "one row per run, not per read");
-}
-
-#[test]
-fn a_late_release_is_refused_even_before_any_read() {
-    let relay = start_with(
-        |config| config.approval_timeout_secs = 2,
-        UpstreamOptions::default(),
-    );
-    let team = relay.setup("staging");
-    let run = pending_run(&relay, &team);
-    let body = release_body(&relay, run, None);
-    relay.edit_vault_live(&format!("UPDATE run SET expires_at = 1 WHERE id = {run}"));
-    let (status, answer) = release_with(&relay, run, &body);
-    assert_eq!(status, 409, "{answer}");
-    assert_eq!(get_run(&relay, &team, run)["status"], "timed_out");
+    assert_eq!(timed_out, 4, "one row per run, not per read");
 }
 
 #[test]

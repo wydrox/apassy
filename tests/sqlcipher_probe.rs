@@ -491,19 +491,6 @@ fn damage_encrypted_copy(path: &Path) {
 }
 
 #[test]
-fn cipher_version_is_nonempty_not_ordinary_sqlite() {
-    let dir = temp_store();
-    let path = db_path(&dir, "cipher-version.sqlite");
-    let conn = Connection::open(&path).expect("open probe database");
-    apply_key(&conn, SYNTHETIC_KEY).expect("set SQLCipher key before any schema access");
-    let version = require_sqlcipher(&conn);
-    assert!(
-        !version.trim().is_empty(),
-        "PRAGMA cipher_version must be nonempty"
-    );
-}
-
-#[test]
 fn queried_sqlcipher_defaults_match_sqlcipher4() {
     let dir = temp_store();
     let path = db_path(&dir, "defaults.sqlite");
@@ -532,13 +519,9 @@ fn right_key_opens_and_reads_synthetic_rows() {
         })
         .expect("read sensitive label");
     assert_eq!(label, CANARY_LABEL);
-}
+    close_db(conn);
 
-#[test]
-fn wrong_key_fails_on_actual_table_read() {
-    let dir = temp_store();
-    let path = db_path(&dir, "wrong-key.sqlite");
-    seed_store(&path).expect("seed encrypted store");
+    // The same seeded file with the wrong key: the PRAGMA succeeds, the table read fails.
     let conn = Connection::open(&path).expect("open existing encrypted file");
     apply_key(&conn, WRONG_KEY).expect("set wrong key");
     require_sqlcipher(&conn);
@@ -546,13 +529,9 @@ fn wrong_key_fails_on_actual_table_read() {
         read_item_credential(&conn),
         "wrong key must fail on actual table read",
     );
-}
+    drop(conn);
 
-#[test]
-fn missing_key_fails_on_actual_table_read() {
-    let dir = temp_store();
-    let path = db_path(&dir, "missing-key.sqlite");
-    seed_store(&path).expect("seed encrypted store");
+    // The same seeded file without a key: the table read fails.
     let conn = Connection::open(&path).expect("open existing encrypted file");
     require_sqlcipher(&conn);
     assert_table_read_fails(

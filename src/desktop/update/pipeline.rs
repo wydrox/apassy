@@ -714,6 +714,42 @@ pub(crate) mod tests {
         assert_eq!(result, Ok(Outcome::Ready(staged)));
         assert_eq!(names(&phases), ["checking"]);
         assert_eq!(fake.calls().iter().filter(|c| *c == "download").count(), 1);
+
+        // Another build of the same version (a newer date, a valid image) is up to
+        // date: nothing downloads.
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let dir = temp.path().join("update");
+        let mut fake = Fake::new(temp.path());
+        fake.manifest = manifest_json(&[
+            ("version", serde_json::json!("0.3.0")),
+            ("size", serde_json::json!(fake.image.len())),
+            ("sha256", serde_json::json!(digest_of(&fake.image))),
+        ]);
+        fake.app_version = "0.3.0".to_owned();
+        let (result, _) = check_with(&fake, &dir, true, None);
+        assert!(
+            matches!(result, Ok(Outcome::UpToDate)),
+            "same version, other build: {result:?}"
+        );
+        assert!(
+            !fake.calls().contains(&"download".to_owned()),
+            "same version, other build: no download"
+        );
+        assert!(
+            files(&dir).is_empty(),
+            "same version, other build: no files"
+        );
+
+        // A higher version installs also from an app without the build identity keys.
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let dir = temp.path().join("update");
+        let mut fake = Fake::new(temp.path());
+        fake.app_commit = None;
+        let (result, _) = check_with(&fake, &dir, true, None);
+        assert!(
+            matches!(result, Ok(Outcome::Ready(_))),
+            "app without a build commit: {result:?}"
+        );
     }
 
     /// A quit during a check stops it before it touches the update folder.
@@ -836,32 +872,6 @@ pub(crate) mod tests {
             );
             assert!(!calls.contains(&"copy".to_owned()), "{expected}");
         }
-    }
-
-    /// Another build of the same version is up to date: nothing downloads. A higher
-    /// version installs also from an app without the build identity keys.
-    #[test]
-    fn only_a_higher_version_downloads() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let dir = temp.path().join("update");
-        let mut fake = Fake::new(temp.path());
-        fake.manifest = manifest_json(&[
-            ("version", serde_json::json!("0.3.0")),
-            ("size", serde_json::json!(fake.image.len())),
-            ("sha256", serde_json::json!(digest_of(&fake.image))),
-        ]);
-        fake.app_version = "0.3.0".to_owned();
-        let (result, _) = check_with(&fake, &dir, true, None);
-        assert!(matches!(result, Ok(Outcome::UpToDate)), "{result:?}");
-        assert!(!fake.calls().contains(&"download".to_owned()));
-        assert!(files(&dir).is_empty());
-
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let dir = temp.path().join("update");
-        let mut fake = Fake::new(temp.path());
-        fake.app_commit = None;
-        let (result, _) = check_with(&fake, &dir, true, None);
-        assert!(matches!(result, Ok(Outcome::Ready(_))), "{result:?}");
     }
 
     fn digest_of(bytes: &[u8]) -> String {

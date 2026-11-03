@@ -476,8 +476,13 @@ fn a_dirty_edit_requires_confirmation_and_restores_focus() {
     let mut window = Window::new();
     window.idle(&mut app);
     window.tab_to(&mut app, "Edit", 40);
+    assert!(
+        window.focus_strokes > 0,
+        "the focused button has the focus ring"
+    );
     let edit_button = window.focused();
     window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_sheet_takes_the_focus(&app, &window);
     let name_field = window.focused();
     window.frame(&mut app, vec![Event::Text(" unsaved".to_owned())]);
     window
@@ -542,6 +547,55 @@ fn a_dirty_edit_requires_confirmation_and_restores_focus() {
     assert!(
         app.owner_ui.edit_secrets.is_blank(),
         "Undo does not restore the discarded secret"
+    );
+
+    // A clean sheet: Escape closes it at once, and the focus goes back to Edit.
+    window.press(&mut app, Key::Escape, Modifiers::NONE);
+    assert_eq!(app.ui.sheet, None, "Escape closes the clean form");
+    assert_eq!(window.focused(), edit_button, "the focus is back on Edit");
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_sheet_takes_the_focus(&app, &window);
+    window.press(&mut app, Key::Escape, Modifiers::NONE);
+    assert_eq!(app.ui.sheet, None);
+    assert_eq!(window.focused(), edit_button, "the focus is back on Edit");
+
+    // Return in the Name field saves and closes the sheet. The focus also comes back
+    // after a sheet closes with its own action.
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(app.ui.sheet, Some(Sheet::EditItem));
+    window.frame(&mut app, vec![Event::Text(" 2".to_owned())]);
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(app.ui.sheet, None, "Return saved");
+    assert!(
+        app.owner_ui
+            .session
+            .search("")
+            .unwrap()
+            .iter()
+            .any(|item| item.name.ends_with(" 2")),
+        "the new name is stored"
+    );
+    assert_eq!(
+        window.focused(),
+        edit_button,
+        "the focus is back on Edit after Save"
+    );
+}
+
+/// A sheet opened with Return takes the focus: its first control, the Name field.
+fn assert_sheet_takes_the_focus(app: &DesktopApp, window: &Window) {
+    assert_eq!(app.ui.sheet, Some(Sheet::EditItem));
+    let layer = window
+        .focused_layer()
+        .expect("a control in the sheet has the focus");
+    assert_eq!(
+        layer.order,
+        egui::Order::Foreground,
+        "the focus is in the sheet"
+    );
+    assert!(
+        window.ctx.text_edit_focused(),
+        "the first control is the Name field"
     );
 }
 
@@ -631,64 +685,6 @@ fn change_kind_keeps_typed_data_until_the_owner_confirms_discard() {
     assert!(!app.ui.discard_item_changes);
 }
 
-/// A sheet opened with Return takes the focus, Escape closes it, and the focus goes
-/// back to the button that opened it. The focus ring is the solid 2-point accent.
-#[test]
-fn a_sheet_takes_the_focus_and_gives_it_back() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, _) = open_item(&dir);
-    let mut window = Window::new();
-    window.idle(&mut app);
-
-    window.tab_to(&mut app, "Edit", 40);
-    assert!(
-        window.focus_strokes > 0,
-        "the focused button has the focus ring"
-    );
-    let edit = window.focused();
-
-    window.press(&mut app, Key::Enter, Modifiers::NONE);
-    assert_eq!(app.ui.sheet, Some(Sheet::EditItem));
-    let layer = window
-        .focused_layer()
-        .expect("a control in the sheet has the focus");
-    assert_eq!(
-        layer.order,
-        egui::Order::Foreground,
-        "the focus is in the sheet"
-    );
-    assert!(
-        window.ctx.text_edit_focused(),
-        "the first control is the Name field"
-    );
-
-    window.press(&mut app, Key::Escape, Modifiers::NONE);
-    assert_eq!(app.ui.sheet, None);
-    assert_eq!(window.focused(), edit, "the focus is back on Edit");
-
-    // Return in the Name field saves and closes the sheet. The focus also comes back
-    // after a sheet closes with its own action.
-    window.press(&mut app, Key::Enter, Modifiers::NONE);
-    assert_eq!(app.ui.sheet, Some(Sheet::EditItem));
-    window.frame(&mut app, vec![Event::Text(" 2".to_owned())]);
-    window.press(&mut app, Key::Enter, Modifiers::NONE);
-    assert_eq!(app.ui.sheet, None, "Return saved");
-    assert!(
-        app.owner_ui
-            .session
-            .search("")
-            .unwrap()
-            .iter()
-            .any(|item| item.name.ends_with(" 2")),
-        "the new name is stored"
-    );
-    assert_eq!(
-        window.focused(),
-        edit,
-        "the focus is back on Edit after Save"
-    );
-}
-
 /// Return in a single-line field does the default action of the sheet. Tab and the
 /// arrow keys stay in the sheet.
 #[test]
@@ -732,11 +728,36 @@ fn more_button(window: &Window) -> Pos2 {
     Pos2::new(window.size.x - 12.0 - 17.0, kit::LIGHTS_Y)
 }
 
-/// A destructive alert starts on Cancel. Return or Space cancels, never deletes.
+/// A destructive alert starts on Cancel. Return or Space cancels, never deletes. Opened
+/// with the pointer, it shows no focus ring, and Return or Space still presses Cancel:
+/// the key never reaches Delete, the first control of the alert.
 #[test]
 fn a_delete_alert_starts_on_cancel() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, id) = open_item(&dir);
+
+    // A pointer user, in a window of its own (a new egui memory).
+    let mut window = Window::new();
+    window.idle(&mut app);
+    for key in [Key::Enter, Key::Space] {
+        window.click_at(&mut app, more_button(&window));
+        window.click(&mut app, "Delete…");
+        assert!(app.pending_delete, "the alert is open");
+        assert!(!kit::keyboard_mode(&window.ctx), "a pointer user");
+        assert_ne!(
+            window.focused_layer().map(|layer| layer.order),
+            Some(egui::Order::Foreground),
+            "no control of the alert has the focus"
+        );
+        window.press(&mut app, key, Modifiers::NONE);
+        assert!(!app.pending_delete, "{key:?} pressed Cancel");
+        assert!(
+            app.owner_ui.session.details(id).is_ok_and(|d| !d.hidden),
+            "{key:?} kept the credential"
+        );
+    }
+
+    // A keyboard user.
     let mut window = Window::new();
     window.idle(&mut app);
     window.tab_to(&mut app, "More actions for this credential", 60);
@@ -761,33 +782,26 @@ fn a_delete_alert_starts_on_cancel() {
         !egui::Popup::is_any_open(&window.ctx),
         "the menu stays closed"
     );
-}
 
-/// A destructive alert opened with the pointer shows no focus ring. Return or Space
-/// still presses Cancel: the key never reaches Delete, the first control of the alert.
-#[test]
-fn return_on_a_delete_alert_opened_with_the_pointer_cancels() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, id) = open_item(&dir);
-    let mut window = Window::new();
+    // A control that goes away after a key press does not drop the focus to nothing:
+    // the first control of the page takes it, so the next Tab does not start again at
+    // the sidebar. (Last: it archives the item.)
+    window.press(&mut app, Key::Space, Modifiers::NONE);
+    window.tab_to(&mut app, "Archive…", 12);
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(app.ui.sheet, Some(Sheet::ArchiveItem));
+    // The archive sheet: Return archives (no button had to be clicked).
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(app.ui.sheet, None, "the item is archived");
     window.idle(&mut app);
-    for key in [Key::Enter, Key::Space] {
-        window.click_at(&mut app, more_button(&window));
-        window.click(&mut app, "Delete…");
-        assert!(app.pending_delete, "the alert is open");
-        assert!(!kit::keyboard_mode(&window.ctx), "a pointer user");
-        assert_ne!(
-            window.focused_layer().map(|layer| layer.order),
-            Some(egui::Order::Foreground),
-            "no control of the alert has the focus"
-        );
-        window.press(&mut app, key, Modifiers::NONE);
-        assert!(!app.pending_delete, "{key:?} pressed Cancel");
-        assert!(
-            app.owner_ui.session.details(id).is_ok_and(|d| !d.hidden),
-            "{key:?} kept the credential"
-        );
-    }
+    // The "Archive…" menu item is gone. The focus is on the page, not lost.
+    let layer = window.focused_layer().expect("a control has the focus");
+    assert_eq!(layer.order, egui::Order::Background, "focus after archive");
+    assert_ne!(window.focused_name().as_deref(), Some("Archive…"));
+    assert!(
+        !egui::Popup::is_any_open(&window.ctx),
+        "the menu stays closed after archive"
+    );
 }
 
 /// "Discard changes?" opened with the pointer: Return keeps editing and the typed text.
@@ -1035,34 +1049,6 @@ fn a_menu_choice_with_the_keyboard_closes_the_menu() {
         window.focused_name().as_deref(),
         Some("Folder, Menu folder"),
         "the folder changed"
-    );
-}
-
-/// A control that goes away after a key press does not drop the focus to nothing:
-/// the first control of the page takes it, so the next Tab does not start again at
-/// the sidebar.
-#[test]
-fn the_focus_survives_a_control_that_goes_away() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, _) = open_item(&dir);
-    let mut window = Window::new();
-    window.idle(&mut app);
-    window.tab_to(&mut app, "More actions for this credential", 60);
-    window.press(&mut app, Key::Space, Modifiers::NONE);
-    window.tab_to(&mut app, "Archive…", 12);
-    window.press(&mut app, Key::Enter, Modifiers::NONE);
-    assert_eq!(app.ui.sheet, Some(Sheet::ArchiveItem));
-    // The archive sheet: Return archives (no button had to be clicked).
-    window.press(&mut app, Key::Enter, Modifiers::NONE);
-    assert_eq!(app.ui.sheet, None, "the item is archived");
-    window.idle(&mut app);
-    // The "Archive…" menu item is gone. The focus is on the page, not lost.
-    let layer = window.focused_layer().expect("a control has the focus");
-    assert_eq!(layer.order, egui::Order::Background);
-    assert_ne!(window.focused_name().as_deref(), Some("Archive…"));
-    assert!(
-        !egui::Popup::is_any_open(&window.ctx),
-        "the menu stays closed"
     );
 }
 

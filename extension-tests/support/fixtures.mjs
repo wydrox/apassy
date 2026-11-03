@@ -276,7 +276,9 @@ export const test = base.extend({
     await context.close();
     server.close();
     fs.rmSync(root, { recursive: true, force: true });
-  }, { scope: "worker" }],
+    // Starting and closing Helium took over 30 s (the test timeout) on busy CI macOS
+    // runners, in setup (PR #75) and in teardown (PR #77). The fixture has its own limit.
+  }, { scope: "worker", timeout: 120_000 }],
 
   h: async ({ harness }, use) => {
     await harness.reset();

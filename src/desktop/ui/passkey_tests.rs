@@ -359,24 +359,6 @@ fn a_login_with_a_password_offers_to_remove_only_the_passkey() {
     assert_eq!(*request, OwnerRequest::Reveal { item_id: id });
 }
 
-#[test]
-fn a_login_without_a_passkey_has_no_passkey_section() {
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = unlocked_app(&dir, "plain.db");
-    let (id, _) = login_with_password(&mut app, "Plain");
-    select(&mut app, id);
-    let mut window = Window::new();
-    window.idle(&mut app);
-    for text in [
-        "Passkey",
-        "Credential ID",
-        "Remove passkey…",
-        "Delete login…",
-    ] {
-        assert!(!window.has(text), "{text}: {}", window.text);
-    }
-}
-
 // ---- The removal. ----
 
 #[test]
@@ -387,6 +369,24 @@ fn removing_a_passkey_asks_the_owner_with_the_shown_revision_and_name() {
     let shown_revision = revision(&app, id);
     let before = credential_id(&app, id);
     select(&mut app, id);
+
+    // The edit form of a login with a password and a passkey still shows the
+    // "Unchanged" hint of the password. (The form then closes unchanged.)
+    let (blank_form, blank_revision) = (app.edit_form.clone(), app.owner_ui.edit_revision);
+    open_edit(&mut app, id);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(window.has("Unchanged"), "with a passkey: {}", window.text);
+    assert!(
+        !window.text.contains("A password is optional"),
+        "with a passkey: {}",
+        window.text
+    );
+    app.ui.sheet = None;
+    app.edit_form = blank_form;
+    app.owner_ui.edit_revision = blank_revision;
+    assert_eq!(revision(&app, id), shown_revision);
+
     let mut window = Window::new();
     window.idle(&mut app);
     window.click(&mut app, "Remove passkey…");
@@ -420,6 +420,33 @@ fn removing_a_passkey_asks_the_owner_with_the_shown_revision_and_name() {
     assert!(details.secret_lines.iter().any(|l| l.name == "password"));
     assert!(window.has("Show"), "{}", window.text);
     assert!(!window.has("Credential ID"), "{}", window.text);
+
+    // Removing the passkey from a login with a password leaves a normal login: its edit
+    // form shows the normal hint, and a blank password keeps the stored password.
+    open_edit(&mut app, id);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(window.has("Unchanged"), "passkey gone: {}", window.text);
+    assert!(
+        !window.text.contains("A password is optional"),
+        "passkey gone: {}",
+        window.text
+    );
+    app.ui.sheet = None;
+
+    // A login that never had a passkey has no passkey section.
+    let (plain, _) = login_with_password(&mut app, "Plain");
+    select(&mut app, plain);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    for text in [
+        "Passkey",
+        "Credential ID",
+        "Remove passkey…",
+        "Delete login…",
+    ] {
+        assert!(!window.has(text), "plain login: {text}: {}", window.text);
+    }
 }
 
 #[test]
@@ -594,19 +621,6 @@ fn editing_a_login_with_only_a_passkey_keeps_the_passkey() {
 }
 
 #[test]
-fn editing_a_login_with_a_password_still_shows_the_unchanged_hint() {
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = unlocked_app(&dir, "edit-both.db");
-    let id = password_and_passkey(&mut app, "Both");
-    select(&mut app, id);
-    open_edit(&mut app, id);
-    let mut window = Window::new();
-    window.idle(&mut app);
-    assert!(window.has("Unchanged"), "{}", window.text);
-    assert!(!window.text.contains("A password is optional"));
-}
-
-#[test]
 fn a_new_login_without_a_password_stays_invalid() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = unlocked_app(&dir, "new.db");
@@ -628,26 +642,6 @@ fn a_new_login_without_a_password_stays_invalid() {
         app.status_text
     );
     assert!(app.owner_ui.session.search("").expect("search").is_empty());
-}
-
-#[test]
-fn a_login_with_a_password_keeps_requiring_one_when_the_passkey_is_gone() {
-    // Removing the passkey from a login with a password leaves a normal login. Its edit
-    // form shows the normal hint, and a blank password keeps the stored password.
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = unlocked_app(&dir, "after.db");
-    let id = password_and_passkey(&mut app, "Both");
-    let current = revision(&app, id);
-    app.owner_ui
-        .session
-        .with_vault(|vault| vault.remove_passkey(id, current).expect("remove"))
-        .expect("vault");
-    select(&mut app, id);
-    open_edit(&mut app, id);
-    let mut window = Window::new();
-    window.idle(&mut app);
-    assert!(window.has("Unchanged"), "{}", window.text);
-    assert!(!window.text.contains("A password is optional"));
 }
 
 #[test]

@@ -846,20 +846,6 @@ fn a_pending_run_ends_explicitly_at_restart_without_replaying_the_command() {
 }
 
 #[test]
-fn a_run_past_its_expiry_is_not_listed_even_before_a_sweep() {
-    let relay = start_with(
-        |config| config.approval_timeout_secs = 2,
-        UpstreamOptions::default(),
-    );
-    let team = relay.setup("staging");
-    let run = pending_run(&relay, &team, &["git", "status"]);
-    assert_eq!(relay.host_requests().len(), 1);
-    relay.edit_vault_live(&format!("UPDATE run SET expires_at = 1 WHERE id = {run}"));
-    assert!(relay.host_requests().is_empty());
-    assert_eq!(view(&relay, &team, run)["status"], "timed_out");
-}
-
-#[test]
 fn run_keys_are_made_for_every_pending_run_and_used_once() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");

@@ -2282,13 +2282,10 @@ fn owner_window_browser_fill_skips_prompt_inside_and_prompts_outside() {
     );
     assert!(app.owner.check.is_some());
     assert!(answer.try_recv().is_err());
-}
-#[test]
-fn owner_window_old_browser_without_gesture_stays_fresh() {
-    let dir = TempDir::new().unwrap();
-    let mut app = unlocked_app(&dir);
+
+    // An old browser without a trusted gesture: a fresh check, even inside the window.
+    next_owner_window_case(&mut app);
     let ctx = egui::Context::default();
-    let item = add_code_login(&mut app, ORIGIN, None, SEED);
     seed_owner_window(&mut app);
     let answer = ask(
         &mut app,
@@ -2298,14 +2295,133 @@ fn owner_window_old_browser_without_gesture_stays_fresh() {
             item,
         },
     );
-    assert!(app.owner.check.is_some());
-    assert!(answer.try_recv().is_err());
-}
+    assert!(app.owner.check.is_some(), "old browser: owner check");
+    assert!(answer.try_recv().is_err(), "old browser: no answer");
 
-#[test]
-fn owner_window_browser_mutations_and_codes_keep_their_exact_scope() {
-    let dir = TempDir::new().unwrap();
-    let mut app = unlocked_app(&dir);
+    // Reveal and a frequency change reuse the window for the local owner only.
+    {
+        use crate::broker::approvals::{LocalWindowSource, OwnerFrequency};
+        next_owner_window_case(&mut app);
+        seed_owner_window(&mut app);
+        for action in [
+            OwnerAction::Reveal { item_id: item },
+            OwnerAction::ChangeOwnerFrequency {
+                old: OwnerFrequency::FiveMinutes,
+                new: OwnerFrequency::OneHour,
+            },
+        ] {
+            assert!(
+                app.owner_gate()
+                    .reuse_local(action.clone(), LocalWindowSource::LocalOwner)
+                    .is_some(),
+                "{action:?}: local owner"
+            );
+            for source in [
+                LocalWindowSource::BrowserGesture,
+                LocalWindowSource::AutoFill,
+                LocalWindowSource::AllowOnceClick,
+            ] {
+                assert!(
+                    app.owner_gate()
+                        .reuse_local(action.clone(), source)
+                        .is_none(),
+                    "{action:?}: reused for a source other than the local owner"
+                );
+            }
+        }
+        app.ask_owner(OwnerRequest::Reveal { item_id: item }, None);
+        assert!(app.owner.check.is_none(), "local Reveal inside the window");
+    }
+
+    // A window proof is bound to its exact action and vault, and ends at invalidate.
+    {
+        use crate::broker::approvals::LocalWindowSource;
+        next_owner_window_case(&mut app);
+        seed_owner_window(&mut app);
+        let action = OwnerAction::FillLogin {
+            item_id: 1,
+            login: "Synthetic".into(),
+            origin: ORIGIN.into(),
+        };
+        let proof = app
+            .owner_gate()
+            .reuse_local(action.clone(), LocalWindowSource::BrowserGesture)
+            .unwrap();
+        let epoch = app.owner_ui.session.epoch().unwrap();
+        assert!(proof.check(&action, &epoch).is_ok(), "exact window proof");
+        for changed in [
+            OwnerAction::FillLogin {
+                item_id: 2,
+                login: "Synthetic".into(),
+                origin: ORIGIN.into(),
+            },
+            OwnerAction::FillLogin {
+                item_id: 1,
+                login: "Synthetic".into(),
+                origin: "https://evil.example".into(),
+            },
+            OwnerAction::FillSystemLogin {
+                rid: RID.into(),
+                item_id: 1,
+                login: "Synthetic".into(),
+            },
+        ] {
+            assert!(proof.check(&changed, &epoch).is_err(), "{changed:?}");
+        }
+        assert!(
+            proof
+                .check(&OwnerAction::Reveal { item_id: 1 }, &epoch)
+                .is_err(),
+            "window proof for Reveal"
+        );
+        assert!(
+            proof.check(&action, &[0; 32]).is_err(),
+            "window proof of another vault"
+        );
+        app.owner_ui.session.owner_window.invalidate();
+        assert!(
+            proof.check(&action, &epoch).is_err(),
+            "window proof after invalidate"
+        );
+    }
+
+    // A passkey get inside the window shows no sheet and sets UP and UV; after
+    // invalidate it asks again.
+    next_owner_window_case(&mut app);
+    let ctx = egui::Context::default();
+    let created = add_passkey(&app, "ada@example.com", "Example");
+    seed_owner_window(&mut app);
+    let request = get_request(&[&created.credential_id]);
+    let answer = ask_gesture(&mut app, &ctx, Command::PasskeyGet(request.clone()));
+    assert!(app.owner.check.is_none(), "passkey get inside the window");
+    let response = now(&answer);
+    assert!(response.ok, "passkey get: {}", response.message);
+    let data = serde_json::to_value(&response.data).unwrap();
+    let bytes = crate::browser::webauthn::decode_bytes(
+        data["authenticator_data"].as_str().unwrap(),
+        1,
+        4096,
+    )
+    .unwrap();
+    assert_eq!(
+        bytes[32] & 0x05,
+        0x05,
+        "recent owner verification sets UP and UV"
+    );
+    app.owner_ui.session.owner_window.invalidate();
+    let answer = ask_gesture(&mut app, &ctx, Command::PasskeyGet(request));
+    assert!(
+        app.owner.check.is_some(),
+        "passkey get after invalidate: owner check"
+    );
+    assert!(
+        answer.try_recv().is_err(),
+        "passkey get after invalidate: no answer"
+    );
+
+    // Browser mutations and codes skip the sheet inside the window, but keep their
+    // exact scope. (Last: it adds and changes logins.)
+    next_owner_window_case(&mut app);
     let ctx = egui::Context::default();
     let item = add_code_login(&mut app, ORIGIN, Some(OTP), SEED);
     let username = app
@@ -2343,7 +2459,10 @@ fn owner_window_browser_mutations_and_codes_keep_their_exact_scope() {
     ] {
         app.owner_ui.session.owner_window.observe(true);
         let answer = ask_gesture(&mut app, &ctx, command);
-        assert!(app.owner.check.is_none());
+        assert!(
+            app.owner.check.is_none(),
+            "browser mutation inside the window"
+        );
         let response = now(&answer);
         assert!(response.ok, "{}", response.message);
     }
@@ -2356,149 +2475,26 @@ fn owner_window_browser_mutations_and_codes_keep_their_exact_scope() {
             item,
         },
     );
-    assert!(!now(&answer).ok);
+    assert!(!now(&answer).ok, "fill on another site");
     // Registration shares the global window, retaining request/account binding.
     let answer = ask_gesture(
         &mut app,
         &ctx,
         Command::PasskeyCreate(create_request("new@example.com", &[], &[-7])),
     );
-    assert!(app.owner.check.is_none());
-    assert!(now(&answer).ok);
-}
-#[test]
-fn owner_window_passkey_get_skips_prompt_and_sets_up_uv() {
-    let dir = TempDir::new().unwrap();
-    let mut app = unlocked_app(&dir);
-    let ctx = egui::Context::default();
-    let created = add_passkey(&app, "ada@example.com", "Example");
-    seed_owner_window(&mut app);
-    let request = get_request(&[&created.credential_id]);
-    let answer = ask_gesture(&mut app, &ctx, Command::PasskeyGet(request.clone()));
-    assert!(app.owner.check.is_none());
-    let response = now(&answer);
-    assert!(response.ok);
-    let data = serde_json::to_value(&response.data).unwrap();
-    let bytes = crate::browser::webauthn::decode_bytes(
-        data["authenticator_data"].as_str().unwrap(),
-        1,
-        4096,
-    )
-    .unwrap();
-    assert_eq!(
-        bytes[32] & 0x05,
-        0x05,
-        "recent owner verification sets UP and UV"
-    );
-    app.owner_ui.session.owner_window.invalidate();
-    let answer = ask_gesture(&mut app, &ctx, Command::PasskeyGet(request));
-    assert!(app.owner.check.is_some());
-    assert!(answer.try_recv().is_err());
-}
-#[test]
-fn owner_window_setting_change_and_reveal_reuse_locally() {
-    use crate::broker::approvals::{LocalWindowSource, OwnerFrequency};
-    let dir = TempDir::new().unwrap();
-    let mut app = unlocked_app(&dir);
-    let item = add_code_login(&mut app, ORIGIN, None, SEED);
-    seed_owner_window(&mut app);
-    for action in [
-        OwnerAction::Reveal { item_id: item },
-        OwnerAction::ChangeOwnerFrequency {
-            old: OwnerFrequency::FiveMinutes,
-            new: OwnerFrequency::OneHour,
-        },
-    ] {
-        assert!(
-            app.owner_gate()
-                .reuse_local(action.clone(), LocalWindowSource::LocalOwner)
-                .is_some()
-        );
-        for source in [
-            LocalWindowSource::BrowserGesture,
-            LocalWindowSource::AutoFill,
-            LocalWindowSource::AllowOnceClick,
-        ] {
-            assert!(
-                app.owner_gate()
-                    .reuse_local(action.clone(), source)
-                    .is_none()
-            );
-        }
-    }
-    app.ask_owner(OwnerRequest::Reveal { item_id: item }, None);
-    assert!(app.owner.check.is_none());
-}
-#[test]
-fn owner_window_proofs_are_exact_action_and_vault_bound() {
-    use crate::broker::approvals::LocalWindowSource;
-    let dir = TempDir::new().unwrap();
-    let mut app = unlocked_app(&dir);
-    seed_owner_window(&mut app);
-    let action = OwnerAction::FillLogin {
-        item_id: 1,
-        login: "Synthetic".into(),
-        origin: ORIGIN.into(),
-    };
-    let proof = app
-        .owner_gate()
-        .reuse_local(action.clone(), LocalWindowSource::BrowserGesture)
-        .unwrap();
-    let epoch = app.owner_ui.session.epoch().unwrap();
-    assert!(proof.check(&action, &epoch).is_ok());
-    for changed in [
-        OwnerAction::FillLogin {
-            item_id: 2,
-            login: "Synthetic".into(),
-            origin: ORIGIN.into(),
-        },
-        OwnerAction::FillLogin {
-            item_id: 1,
-            login: "Synthetic".into(),
-            origin: "https://evil.example".into(),
-        },
-        OwnerAction::FillSystemLogin {
-            rid: RID.into(),
-            item_id: 1,
-            login: "Synthetic".into(),
-        },
-    ] {
-        assert!(proof.check(&changed, &epoch).is_err());
-    }
     assert!(
-        proof
-            .check(&OwnerAction::Reveal { item_id: 1 }, &epoch)
-            .is_err()
+        app.owner.check.is_none(),
+        "passkey create inside the window"
     );
-    assert!(proof.check(&action, &[0; 32]).is_err());
-    app.owner_ui.session.owner_window.invalidate();
-    assert!(proof.check(&action, &epoch).is_err());
+    assert!(now(&answer).ok, "passkey create inside the window");
 }
 
-#[test]
-fn owner_window_late_native_unlock_cannot_seed_after_lifecycle_revocation() {
-    let dir = TempDir::new().unwrap();
-    let mut app = unlocked_app(&dir);
-    let window = app.owner_ui.session.owner_window.clone();
-    window.configure(crate::broker::approvals::OwnerFrequency::UntilLock);
-    window.observe(true);
-    app.owner_ui.session.lock().unwrap();
-    let generation = window.generation();
-    window.observe(false);
-    window.observe(true);
-    assert!(
-        app.owner_ui
-            .session
-            .unlock_checked(
-                PASS,
-                Some(generation),
-                crate::broker::approvals::CheckMethod::TouchId
-            )
-            .is_err()
-    );
-    assert!(app.owner_ui.session.is_locked());
+/// Closes the owner check that the previous case left open (its browser request goes
+/// with it), so that the next case starts without a check.
+fn next_owner_window_case(app: &mut DesktopApp) {
+    app.close_owner_check(None);
+    assert!(app.owner.check.is_none());
 }
-
 #[test]
 fn owner_window_browser_gesture_requires_new_host_marker() {
     use super::browser::BrowserWire;
@@ -2532,36 +2528,37 @@ fn owner_window_browser_gesture_requires_new_host_marker() {
 }
 
 #[test]
-fn owner_window_unavailable_observer_keeps_fresh_checks_available() {
-    let dir = TempDir::new().unwrap();
-    let mut app = unlocked_app(&dir);
-    let item = add_code_login(&mut app, ORIGIN, None, SEED);
-    let window = app.owner_ui.session.owner_window.clone();
-    window.configure(crate::broker::approvals::OwnerFrequency::UntilLock);
-    window.observe(false);
-    let action = OwnerAction::Reveal { item_id: item };
-    let proof = app
-        .owner_gate()
-        .authorize(action.clone(), OwnerCheck::passphrase(PASS))
-        .unwrap();
-    window.observe(false);
-    window.observe(false);
-    let epoch = app.owner_ui.session.epoch().unwrap();
-    assert!(
-        proof.check(&action, &epoch).is_ok(),
-        "unavailable observation must not cancel every fresh check"
-    );
-    assert!(
-        window.ticket(epoch).is_none(),
-        "unobserved sessions can never reuse verification"
-    );
-}
-
-#[test]
 fn owner_window_touch_id_setup_seeds_only_after_fresh_passphrase() {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new().unwrap();
     let mut app = unlocked_app(&dir);
+
+    // A window that was never observed keeps fresh checks available, and it never
+    // gives a ticket. (First: before the window below is observed.)
+    {
+        let item = add_code_login(&mut app, ORIGIN, None, SEED);
+        let window = app.owner_ui.session.owner_window.clone();
+        window.configure(crate::broker::approvals::OwnerFrequency::UntilLock);
+        window.observe(false);
+        let action = OwnerAction::Reveal { item_id: item };
+        let proof = app
+            .owner_gate()
+            .authorize(action.clone(), OwnerCheck::passphrase(PASS))
+            .unwrap();
+        window.observe(false);
+        window.observe(false);
+        let epoch = app.owner_ui.session.epoch().unwrap();
+        assert!(
+            proof.check(&action, &epoch).is_ok(),
+            "unavailable observation must not cancel every fresh check"
+        );
+        assert!(
+            window.ticket(epoch).is_none(),
+            "unobserved sessions can never reuse verification"
+        );
+    }
+
+    // Touch ID setup seeds only after a fresh passphrase.
     let ctx = egui::Context::default();
     let helper = dir.path().join("synthetic-setup-helper");
     std::fs::write(&helper,"#!/usr/bin/python3\nimport sys,json,time,pathlib\nr=json.loads(sys.stdin.readline())\nassert r['cmd'] in ('keychain_store','keychain_exists')\nif r['cmd']=='keychain_store':\n pathlib.Path(__file__).with_suffix('.waiting').touch()\n while not pathlib.Path(__file__).with_suffix('.release').exists(): time.sleep(0.005)\nprint(json.dumps({'ok':True,'exists':True,'biometry_changed':False}))\n").unwrap();
@@ -2640,4 +2637,25 @@ fn owner_window_touch_id_setup_seeds_only_after_fresh_passphrase() {
             assert!(app.status_text.contains(expected), "{}", app.status_text);
         }
     }
+
+    // A late native unlock with the generation from before a lifecycle revocation
+    // is refused and leaves the session locked. (Last: it locks the session.)
+    window.configure(crate::broker::approvals::OwnerFrequency::UntilLock);
+    window.observe(true);
+    app.owner_ui.session.lock().unwrap();
+    let generation = window.generation();
+    window.observe(false);
+    window.observe(true);
+    assert!(
+        app.owner_ui
+            .session
+            .unlock_checked(
+                PASS,
+                Some(generation),
+                crate::broker::approvals::CheckMethod::TouchId
+            )
+            .is_err(),
+        "late native unlock after a lifecycle revocation"
+    );
+    assert!(app.owner_ui.session.is_locked());
 }

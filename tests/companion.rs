@@ -912,6 +912,19 @@ fn a_pair_request_on_a_locked_vault_is_locked_and_the_window_stays_open() {
 #[test]
 fn a_signed_request_is_answered_and_updates_last_seen() {
     let env = env();
+    // The certificate is the certificate of the vault: the pin of the listener is the
+    // pin of the certificate the vault keeps.
+    let der = env
+        .fx
+        .with(|vault| vault.companion_certificate())
+        .expect("certificate")
+        .expect("made at the start")
+        .der;
+    assert_eq!(
+        env.handle.certificate_pin(),
+        certificate_pin(&der),
+        "the certificate is the certificate of the vault"
+    );
     let phone = Phone::paired(&env, DEVICE);
     env.fx.with(|vault| {
         let device = vault
@@ -1994,18 +2007,6 @@ fn a_client_with_another_pin_cannot_connect() {
 }
 
 #[test]
-fn the_certificate_is_the_certificate_of_the_vault() {
-    let env = env();
-    let der = env
-        .fx
-        .with(|vault| vault.companion_certificate())
-        .expect("certificate")
-        .expect("made at the start")
-        .der;
-    assert_eq!(env.handle.certificate_pin(), certificate_pin(&der));
-}
-
-#[test]
 fn a_client_that_speaks_only_tls_12_is_refused() {
     let env = env();
     let config = client_config(env.handle.certificate_pin(), &[&rustls::version::TLS12]);
@@ -2553,34 +2554,11 @@ fn an_address_past_its_unsigned_budget_costs_no_vault_work() {
 }
 
 #[test]
-fn a_paired_device_gets_its_budget_of_requests_per_minute() {
+fn a_paired_device_gets_its_budget_and_a_refused_request_records_no_nonce_and_no_last_seen() {
     let env = env_with(small_budgets);
     let phone = Phone::paired(&env, DEVICE);
     let other = Phone::paired(&env, OTHER_DEVICE);
-    for n in 0..PER_DEVICE {
-        let reply = env.get(&phone, "/v1/status");
-        assert_eq!(reply.status, 200, "request {n}: {}", reply.body);
-    }
-    let reply = env.get(&phone, "/v1/status");
-    assert_eq!(
-        (reply.status, reply.code().as_str()),
-        (429, "too_many_requests")
-    );
-    // Another device has its own count.
-    assert_eq!(env.get(&other, "/v1/status").status, 200);
-    // An unsigned answer is not counted against a device: the address still has its
-    // budget.
-    assert_eq!(
-        env.send(&http_request("GET", "/v1/nothing", &[], b""))
-            .status,
-        404
-    );
-}
-
-#[test]
-fn a_request_refused_for_the_device_rate_records_no_nonce_and_no_last_seen() {
-    let env = env_with(small_budgets);
-    let phone = Phone::paired(&env, DEVICE);
+    // A paired device gets its budget of requests per minute.
     for n in 0..PER_DEVICE {
         let reply = env.get(&phone, "/v1/status");
         assert_eq!(reply.status, 200, "request {n}: {}", reply.body);
@@ -2601,7 +2579,8 @@ fn a_request_refused_for_the_device_rate_records_no_nonce_and_no_last_seen() {
     let first = env.send(&raw);
     assert_eq!(
         (first.status, first.code().as_str()),
-        (429, "too_many_requests")
+        (429, "too_many_requests"),
+        "the request after the budget of the device"
     );
     // The same bytes again, with the same nonce. Had the first one recorded its nonce,
     // this would be a reused nonce (401). It is the same 429.
@@ -2617,6 +2596,20 @@ fn a_request_refused_for_the_device_rate_records_no_nonce_and_no_last_seen() {
             .expect("paired");
         assert_eq!(device.last_seen_at, Some(seen), "a 429 changes nothing");
     });
+    // Another device has its own count.
+    assert_eq!(
+        env.get(&other, "/v1/status").status,
+        200,
+        "another device has its own count"
+    );
+    // An unsigned answer is not counted against a device: the address still has its
+    // budget.
+    assert_eq!(
+        env.send(&http_request("GET", "/v1/nothing", &[], b""))
+            .status,
+        404,
+        "the address still has its unsigned budget"
+    );
 }
 
 #[test]

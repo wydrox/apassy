@@ -144,16 +144,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn defaults_turn_both_settings_on() {
-        let file = UpdateFile::default();
-        assert!(file.auto_check);
-        assert!(file.auto_install);
-        assert_eq!(file.staged, None);
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        assert_eq!(UpdateFile::load(&dir.path().join("none.json")), file);
-    }
-
-    #[test]
     fn settings_and_results_persist_with_mode_0600() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let path = dir.path().join("data").join("update.json");
@@ -201,7 +191,17 @@ mod tests {
 
     #[test]
     fn a_damaged_or_partial_file_gives_defaults_for_what_is_missing() {
+        // The defaults turn both settings on, and a missing file gives them.
+        let defaults = UpdateFile::default();
+        assert!(defaults.auto_check, "default auto_check");
+        assert!(defaults.auto_install, "default auto_install");
+        assert_eq!(defaults.staged, None, "default staged");
         let dir = tempfile::TempDir::new().expect("temp dir");
+        assert_eq!(
+            UpdateFile::load(&dir.path().join("none.json")),
+            defaults,
+            "a missing file gives the defaults"
+        );
         let path = dir.path().join("update.json");
         fs::write(&path, b"{ not json").expect("write");
         assert_eq!(UpdateFile::load(&path), UpdateFile::default());
