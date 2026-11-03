@@ -37,6 +37,11 @@ pub enum Command {
     TeamCode {
         hours: u64,
     },
+    /// A node pairing code (`apassy pair`, node-pairing-v1 section 6): a team code of
+    /// kind `node` for 1 to 10 minutes. Only a node takes it at `POST /v1/teams`.
+    NodeCode {
+        minutes: u64,
+    },
     /// The teams: id, name, state, counts, last activity.
     Teams,
     /// Private readiness: active team databases and capacity, separate from liveness.
@@ -75,6 +80,10 @@ pub fn run(hub: &Hub, command: &Command, now: u64) -> RelayResult<Value> {
     match command {
         Command::TeamCode { hours } => {
             let (code, expires_at) = hub.directory.new_team_code(*hours, now)?;
+            Ok(json!({"code": code.expose(), "expires_at": expires_at}))
+        }
+        Command::NodeCode { minutes } => {
+            let (code, expires_at) = hub.directory.new_node_code(*minutes, now)?;
             Ok(json!({"code": code.expose(), "expires_at": expires_at}))
         }
         Command::Readiness => hub.readiness(),
@@ -216,6 +225,10 @@ mod tests {
                 r#"{"command":"team_code","hours":72}"#,
             ),
             (Command::Teams, r#"{"command":"teams"}"#),
+            (
+                Command::NodeCode { minutes: 10 },
+                r#"{"command":"node_code","minutes":10}"#,
+            ),
             (
                 Command::Limits {
                     team: team.clone(),

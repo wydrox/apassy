@@ -609,8 +609,12 @@ impl Hub {
                 .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
         let mut made: Option<TeamId> = None;
         let new = self.directory.store.tx(|tx| {
-            // The code is checked before any work for the team.
-            let code_id = directory::find_team_code(tx, request.code.expose(), now)?;
+            // The code is checked before any work for the team. A node pairing code
+            // (directory 1005) makes a team only on a node: a relay with a tailnet listener.
+            let (code_id, kind) = directory::find_team_code(tx, request.code.expose(), now)?;
+            if kind == directory::CodeKind::Node && self.config.tailnet_listen.is_none() {
+                return Err(directory::team_code_invalid());
+            }
             let new = make_team_file_with_device(
                 &self.config,
                 &request.team,
@@ -637,7 +641,7 @@ impl Hub {
                         RELAY_ACTOR,
                         "team_created",
                         None,
-                        &json!({"team_id": new.id, "code_id": code_id}),
+                        &json!({"team_id": new.id, "code_id": code_id, "code_kind": kind.text()}),
                     )
                 });
             added.map(|_| new)

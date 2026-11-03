@@ -1237,16 +1237,16 @@ fn the_directory_goes_back_to_1003_and_up_to_1004_again() {
         conn.query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap()
     };
-    assert_eq!(version(&node.config.directory_path()), 1004);
+    assert_eq!(version(&node.config.directory_path()), 1005);
     assert_eq!(
         Directory::downgrade_to_1003(&node.config).unwrap(),
-        (1004, 1003)
+        (1005, 1003)
     );
     assert_eq!(version(&node.config.directory_path()), 1003);
-    // The image of 1004 moves it up again; the OAuth state is gone.
+    // The image of 1005 moves it up again; the OAuth state is gone.
     let started = EmbeddedNode::start(node.config.clone()).unwrap();
     node.node = Some(started);
-    assert_eq!(version(&node.config.directory_path()), 1004);
+    assert_eq!(version(&node.config.directory_path()), 1005);
     assert!(node.node().has_team(&node.team));
     let answer = node.token_refresh(&connected.client_id, &connected.refresh);
     assert_eq!(answer.json()["error"], "invalid_grant");

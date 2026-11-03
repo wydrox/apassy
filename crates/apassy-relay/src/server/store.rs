@@ -753,7 +753,7 @@ fn write_pre(path: &Path, suffix: &str) -> RelayResult<()> {
 }
 
 /// True when `table` has `column`.
-fn has_column(conn: &Connection, table: &str, column: &str) -> RelayResult<bool> {
+pub(crate) fn has_column(conn: &Connection, table: &str, column: &str) -> RelayResult<bool> {
     conn.query_row(
         "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
         params![table, column],
