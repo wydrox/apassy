@@ -16,7 +16,7 @@ options:
   bundleIdPrefix: com.wydrox.apassy
   deploymentTarget:
     iOS: "26.0"
-    watchOS: "26.0"
+    watchOS: "27.0"
   createIntermediateGroups: true
 settings:
   base:
@@ -224,7 +224,9 @@ targets:
         INFOPLIST_FILE: Watch/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "4"
-        WATCHOS_DEPLOYMENT_TARGET: "26.0"
+        # watchOS 27 runs on arm64 watches only, so App Store Connect accepts an app
+        # without arm64_32. Below 27.0 it refuses the upload (missing arm64_32).
+        WATCHOS_DEPLOYMENT_TARGET: "27.0"
         # arm64 only (the vault core has no arm64_32 slice).
         ARCHS[sdk=watchos*]: arm64
         EXCLUDED_ARCHS[sdk=watchos*]: arm64_32

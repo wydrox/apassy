@@ -19,7 +19,7 @@ profile=${APASSY_CORE_PROFILE:-release}
 dir=$([ "$profile" = dev ] && echo debug || echo "$profile")
 export IPHONEOS_DEPLOYMENT_TARGET=26.0
 export MACOSX_DEPLOYMENT_TARGET=15.0
-export WATCHOS_DEPLOYMENT_TARGET=26.0
+export WATCHOS_DEPLOYMENT_TARGET=27.0
 
 slices=("$@")
 [ ${#slices[@]} -eq 0 ] && slices=(device sim mac watch watchsim)

@@ -7,7 +7,7 @@
 // - ApassyVaultCore: VaultService over the Rust core (ApassyCore.xcframework). Build the
 //   framework first: scripts/build-ios-core.sh
 //
-// Both also build for watchOS 26: the Apple Watch app that answers access requests only
+// Both also build for watchOS 27: the Apple Watch app that answers access requests only
 // (ADR 0039). The APIs that watchOS lacks are compiled out there.
 import PackageDescription
 
@@ -15,7 +15,7 @@ let strict: [SwiftSetting] = [.enableUpcomingFeature("ExistentialAny")]
 
 let package = Package(
     name: "ApassyVaultKit",
-    platforms: [.iOS("26.0"), .macOS("15.0"), .watchOS("26.0")],
+    platforms: [.iOS("26.0"), .macOS("15.0"), .watchOS("27.0")],
     products: [
         .library(name: "ApassyVaultKit", targets: ["ApassyVaultKit"]),
         .library(name: "ApassyVaultCore", targets: ["ApassyVaultCore"]),

@@ -27,6 +27,9 @@ contracts [relay-questions-v1](../contracts/relay-questions-v1.md) and
    - It is weaker than Face ID: anyone wearing the owner's unlocked watch can allow.
    - The owner accepted this.
 4. **arm64 watches only** (stable Rust has no `arm64_32` std). Older watches cannot install the app.
+   The minimum is **watchOS 27**: App Store Connect refuses a watch app without `arm64_32` when its
+   minimum is below watchOS 27 (found at the first TestFlight upload, 2026-11-03), and watchOS 27
+   runs only on arm64 watches.
 
 ## 1. Device kind `watch` (vault schema 24)
 
