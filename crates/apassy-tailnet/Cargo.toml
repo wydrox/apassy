@@ -1,0 +1,52 @@
+[package]
+name = "apassy-tailnet"
+# Not a release component (AGENTS.md names six). The T0 spike of ADR 0037 D9; TH-T
+# gives it the shared version when the app or the Linux node links it.
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+license = "Apache-2.0"
+repository = "https://github.com/wydrox/apassy"
+description = "The embedded Tailscale node (libtailscale) of a team host, behind a safe API"
+build = "build.rs"
+# go/ holds the vendored libtailscale (go/VENDORED.md); build.rs builds it with Go.
+
+[features]
+# Link the real libtailscale archive. build.rs then needs the pinned Go on PATH (or
+# APASSY_TAILNET_GO), or a prebuilt archive in APASSY_LIBTAILSCALE_DIR. Without this
+# feature the crate builds without Go and every constructor returns Error::NotBuilt.
+tailnet = []
+# The probes of the spike binary: signal dispositions and deliberate crashes
+# (unsafe helpers in src/ffi.rs). Never for a shipped build.
+spike = ["tailnet"]
+
+[dependencies]
+# All four are in Cargo.lock already, at these versions.
+libc = "=0.2.189"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+zeroize = "=1.9.0"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+# Joins a tailnet with an auth key from stdin, listens on 8443, and echoes.
+# docs/design/spike-tsnet.md lists its modes.
+[[bin]]
+name = "apassy-tailnet-spike"
+path = "src/bin/apassy-tailnet-spike.rs"
+required-features = ["spike"]
+
+# The size baseline: the same dependencies without the Go archive.
+[[bin]]
+name = "apassy-tailnet-baseline"
+path = "src/bin/apassy-tailnet-baseline.rs"
+
+[lints.rust]
+# src/ffi.rs is the one module of the workspace that may use unsafe; lib.rs allows
+# it there and nowhere else. The root crate, the relay, and the app keep `forbid`.
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
