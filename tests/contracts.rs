@@ -2102,6 +2102,9 @@ mod private_sharing {
         ensure(is_https_url(&settings.token_url), "token_url")?;
         if let Some(url) = &settings.revoke_url {
             ensure(is_https_url(url), "revoke_url")?;
+            // Revision 2026-11-03: the revocation goes to the host of the token URL.
+            let host = |url: &str| url[8..].split('/').next().unwrap_or("").to_ascii_lowercase();
+            ensure(host(url) == host(&settings.token_url), "revoke_url")?;
         }
         if let Some(scope) = &settings.scope {
             ensure((1..=1024).contains(&scope.len()), "scope")?;
@@ -3192,6 +3195,9 @@ fn private_sharing_v1_settings_are_strict_and_hold_no_secret() {
     });
     refused("oauth_refresh", &|v| {
         v["revoke_url"] = json!("https://auth.example.test/revoke?x=1")
+    });
+    refused("oauth_refresh", &|v| {
+        v["revoke_url"] = json!("https://other.example.test/oauth/revoke")
     });
     refused("oauth_refresh", &|v| v["scope"] = json!(""));
 

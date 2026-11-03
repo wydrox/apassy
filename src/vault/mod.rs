@@ -140,7 +140,8 @@ pub use schema18::ONLY_MARKER_ITEM;
 pub use short_lived::{
     AwsStsSettings, FieldSwap, GithubAppSettings, GithubPermission, GithubPermissions,
     GoogleSettings, KeyManagerKind, KindField, MAX_SETTINGS_BYTES, MemberKey, NewMemberKey, OauthClientAuth,
-    OauthSettings, ShortLived, ShortLivedKind, ShortLivedSettings, ShortLivedSource,
+    OauthSettings, ShortLived, ShortLivedChangeError, ShortLivedKind, ShortLivedSettings,
+    ShortLivedSource,
     check_draft_fields, check_kind_fields, field_value_ok, field_value_problem,
     is_aws_access_key_id, is_aws_region, is_aws_role_arn, is_aws_secret_access_key, is_aws_service,
     is_https_url, is_private_key_pem, is_service_account_email, is_service_account_key,

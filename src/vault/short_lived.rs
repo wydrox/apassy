@@ -10,7 +10,9 @@
 //!
 //! Way C is on when the row is `enabled`. Only the owner turns it off or on again
 //! (`OwnerAction::ChangeDelivery`); the vault does not check that proof, the caller does,
-//! as for the bouncer host. A row that is off keeps its kind and its settings, so a
+//! as for the bouncer host. A change of the kind or the settings of a row needs the
+//! owner check `OwnerAction::ChangeShortLivedSettings`, which
+//! [`Vault::change_short_lived`] checks itself, as `add_companion_device` does. A row that is off keeps its kind and its settings, so a
 //! signer item still reads its `region` and `services` ([`ShortLived::settings`]).
 //!
 //! Nothing here holds a secret: the settings refuse no secret by content, but none of
@@ -450,6 +452,13 @@ impl ShortLivedSettings {
         text.unwrap_or_else(|_| "{}".to_owned())
     }
 
+    /// The SHA-256 (lowercase hex) of the canonical settings text ([`Self::to_json`]): what
+    /// the owner check of a settings change names
+    /// (`OwnerAction::ChangeShortLivedSettings`).
+    pub fn digest(&self) -> String {
+        crate::sync::sha256_hex(self.to_json().as_bytes())
+    }
+
     /// Check each value of the settings against its rule of contract section 3.2. The
     /// parsers call it; a key holder calls it again for settings that it did not parse
     /// (the fields of the types are public). The reason names the setting, never its
@@ -494,6 +503,14 @@ pub fn is_https_url(url: &str) -> bool {
         && !host.is_empty()
         && !rest.contains(['@', '?', '#'])
         && rest.chars().all(|c| c.is_ascii_graphic())
+}
+
+/// The host and port of an `https://` URL, in lowercase (after [`is_https_url`]).
+fn url_authority(url: &str) -> String {
+    url.strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 /// `[a-z]{2}(-[a-z]+)+-[0-9]+`, for example `eu-central-1`, at most 32 bytes (the
@@ -642,6 +659,14 @@ fn check_oauth_settings(settings: &OauthSettings) -> Result<(), &'static str> {
         return Err(
             "the revoke_url setting is not an https:// URL without userinfo, query, or fragment.",
         );
+    }
+    // The access token goes only to the host that issued it.
+    if settings
+        .revoke_url
+        .as_deref()
+        .is_some_and(|url| url_authority(url) != url_authority(&settings.token_url))
+    {
+        return Err("the revoke_url setting is not on the host of the token_url.");
     }
     if !settings
         .scope
@@ -868,6 +893,31 @@ impl fmt::Debug for ShortLivedSource {
     }
 }
 
+/// Why [`Vault::change_short_lived`] changed nothing.
+#[derive(Debug)]
+pub enum ShortLivedChangeError {
+    /// The owner proof names another change, another session, or is stale.
+    Proof(crate::broker::approvals::ProofRefusal),
+    Vault(super::types::VaultError),
+}
+
+impl From<super::types::VaultError> for ShortLivedChangeError {
+    fn from(error: super::types::VaultError) -> Self {
+        Self::Vault(error)
+    }
+}
+
+impl fmt::Display for ShortLivedChangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Proof(refusal) => f.write_str(refusal.message()),
+            Self::Vault(error) => write!(f, "The settings did not change: {error}."),
+        }
+    }
+}
+
+impl std::error::Error for ShortLivedChangeError {}
+
 /// What [`Vault::swap_secret_field`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldSwap {
@@ -1083,14 +1133,14 @@ impl Vault {
         rows.into_iter().map(short_lived_from_row).collect()
     }
 
-    /// Make `item` a source of `kind` with `settings` (JSON text), or change the kind and
-    /// the settings of its row, at `now`. A new row is on; a changed row keeps its
-    /// switch (only [`Vault::set_short_lived_enabled`] flips it). Returns the stored row.
+    /// Make `item` a source of `kind` with `settings` (JSON text) at `now`. The new row is
+    /// on. Returns the stored row. A change of an existing row needs the owner check:
+    /// [`Vault::change_short_lived`].
     ///
-    /// `NotFound`: no such item. `InvalidInput`: a reserved kind, settings that are not
-    /// the strict settings of the kind, or fields of the item that are not the fields of
-    /// the kind (a missing required field, a wrong `secret` flag, a value in another
-    /// form, or a field twice).
+    /// `NotFound`: no such item. `AlreadyExists`: the item has a row. `InvalidInput`: a
+    /// reserved kind, settings that are not the strict settings of the kind, or fields of
+    /// the item that are not the fields of the kind (a missing required field, a wrong
+    /// `secret` flag, a value in another form, or a field twice).
     pub fn set_short_lived(
         &mut self,
         item: u64,
@@ -1099,6 +1149,51 @@ impl Vault {
         now: u64,
     ) -> VaultResult<ShortLived> {
         let parsed = ShortLivedSettings::parse(kind, settings)?;
+        self.write_short_lived(item, &parsed, false, now)
+    }
+
+    /// Change the kind and the settings of the row of `item` to `settings` (JSON text) at
+    /// `now`, with an activity entry. The row keeps its switch (only
+    /// [`Vault::set_short_lived_enabled`] flips it). `proof` must come from
+    /// `OwnerGate::authorize` for `OwnerAction::ChangeShortLivedSettings { item, kind,
+    /// settings_sha256 }` with the digest of exactly these settings
+    /// ([`ShortLivedSettings::digest`]), in this vault session; the proof is used up, also
+    /// when the call fails. The settings decide what a lease can do and where the
+    /// long-lived secret goes (the token, revoke, and API URLs), so no change skips it.
+    ///
+    /// Errors as [`Vault::set_short_lived`], with `NotFound` also for an item without a
+    /// row, and [`ShortLivedChangeError::Proof`] for a proof of another change.
+    pub fn change_short_lived(
+        &mut self,
+        item: u64,
+        kind: ShortLivedKind,
+        settings: &str,
+        proof: crate::broker::approvals::OwnerProof,
+        now: u64,
+    ) -> Result<ShortLived, ShortLivedChangeError> {
+        self.require_unlocked()?;
+        let parsed = ShortLivedSettings::parse(kind, settings)?;
+        let expected = crate::broker::approvals::OwnerAction::ChangeShortLivedSettings {
+            item,
+            kind,
+            settings_sha256: parsed.digest(),
+        };
+        proof
+            .check(&expected, &self.epoch())
+            .map_err(ShortLivedChangeError::Proof)?;
+        Ok(self.write_short_lived(item, &parsed, true, now)?)
+    }
+
+    /// Write the row of `item`: a new one (`change` false, refused when there is one) or a
+    /// change of the existing one (`change` true, refused when there is none).
+    fn write_short_lived(
+        &mut self,
+        item: u64,
+        parsed: &ShortLivedSettings,
+        change: bool,
+        now: u64,
+    ) -> VaultResult<ShortLived> {
+        let kind = parsed.kind();
         let canonical = parsed.to_json();
         let sql_id = to_sql_id(item)?;
         let at = to_sql_time(now)?;
@@ -1108,6 +1203,18 @@ impl Vault {
             .map_err(storage)?;
         if !item_exists(&tx, sql_id)? {
             return Err(err(VaultErrorKind::NotFound));
+        }
+        let has_row: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM short_lived WHERE item_id = ?1)",
+                [sql_id],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        match (change, has_row) {
+            (false, true) => return Err(err(VaultErrorKind::AlreadyExists)),
+            (true, false) => return Err(err(VaultErrorKind::NotFound)),
+            _ => {}
         }
         let fields = item_fields(&tx, sql_id)?;
         check_fields(
@@ -1125,6 +1232,14 @@ impl Vault {
             rusqlite::params![sql_id, kind.as_str(), canonical, at],
         )
         .map_err(storage)?;
+        if change {
+            owner_activity(
+                &tx,
+                at,
+                sql_id,
+                &format!("Temporary credentials settings changed ({}).", kind.label()),
+            )?;
+        }
         tx.commit().map_err(storage)?;
         self.short_lived(item)?
             .ok_or_else(|| err(VaultErrorKind::Storage))
@@ -1439,8 +1554,22 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::approvals::{OwnerAction, OwnerProof};
     use crate::contracts::CredentialKind;
     use crate::vault::ItemDraft;
+
+    /// A fresh owner proof for a change of the settings of `item` to `settings`.
+    fn settings_proof(vault: &Vault, item: u64, kind: ShortLivedKind, settings: &str) -> OwnerProof {
+        OwnerProof::issue_for_test(
+            OwnerAction::ChangeShortLivedSettings {
+                item,
+                kind,
+                settings_sha256: ShortLivedSettings::parse(kind, settings).unwrap().digest(),
+            },
+            vault.epoch(),
+            std::time::Instant::now(),
+        )
+    }
 
     const PASS: &str = "synthetic-short-lived-pass";
     const KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -1517,11 +1646,13 @@ mod tests {
         assert!(!source.enabled);
         assert_eq!(source.settings, ShortLivedSettings::AwsSts(aws.clone()));
         // A change of the settings of a row that is off keeps it off.
+        let proof = settings_proof(&vault, id, ShortLivedKind::AwsSts, r#"{"region":"us-west-2"}"#);
         vault
-            .set_short_lived(
+            .change_short_lived(
                 id,
                 ShortLivedKind::AwsSts,
                 r#"{"region":"us-west-2"}"#,
+                proof,
                 1_700_000_200,
             )
             .unwrap();
@@ -1543,7 +1674,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(reasons.len(), 2);
+        assert_eq!(reasons.len(), 3);
         for reason in &reasons {
             assert!(
                 !reason.contains(SECRET) && !reason.contains(KEY_ID),
@@ -1931,6 +2062,94 @@ mod tests {
             .unwrap();
         assert!(details.iter().any(|detail| detail == "secret:refresh_token"));
         assert!(details.iter().all(|detail| !detail.contains("SYNTH-refresh")));
+    }
+
+    #[test]
+    fn a_settings_change_needs_the_owner_check_of_exactly_those_settings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = vault(&dir);
+        let kind = ShortLivedKind::OauthRefresh;
+        let id = item(
+            &mut vault,
+            vec![
+                field("client_id", "synthetic-client", false),
+                field("refresh_token", "SYNTH-refresh", true),
+            ],
+        );
+        let first = r#"{"token_url":"https://auth.example.com/token","client_auth":"body"}"#;
+        vault.set_short_lived(id, kind, first, 1).unwrap();
+        // The create-only call cannot change an existing row.
+        let moved = r#"{"token_url":"https://attacker.example.net/token","client_auth":"body"}"#;
+        assert_eq!(
+            vault.set_short_lived(id, kind, moved, 2).unwrap_err().kind(),
+            VaultErrorKind::AlreadyExists
+        );
+        // A proof for other settings, for the on/off switch, or of another session
+        // changes nothing.
+        let wrong = [
+            settings_proof(&vault, id, kind, first),
+            OwnerProof::issue_for_test(
+                OwnerAction::ChangeDelivery { item: id, kind, on: true },
+                vault.epoch(),
+                std::time::Instant::now(),
+            ),
+            OwnerProof::issue_for_test(
+                OwnerAction::ChangeShortLivedSettings {
+                    item: id,
+                    kind,
+                    settings_sha256: ShortLivedSettings::parse(kind, moved).unwrap().digest(),
+                },
+                [0; 32],
+                std::time::Instant::now(),
+            ),
+        ];
+        for proof in wrong {
+            assert!(matches!(
+                vault.change_short_lived(id, kind, moved, proof, 3),
+                Err(ShortLivedChangeError::Proof(_))
+            ));
+        }
+        assert_eq!(
+            vault.short_lived(id).unwrap().unwrap().settings_json,
+            ShortLivedSettings::parse(kind, first).unwrap().to_json()
+        );
+        // The proof of exactly these settings changes them, with an activity row.
+        let proof = settings_proof(&vault, id, kind, moved);
+        let row = vault.change_short_lived(id, kind, moved, proof, 4).unwrap();
+        assert!(row.settings_json.contains("attacker.example.net"));
+        // An item without a row has nothing to change.
+        let other = aws(&mut vault);
+        let proof = settings_proof(&vault, other, ShortLivedKind::AwsSts, "{}");
+        assert!(matches!(
+            vault.change_short_lived(other, ShortLivedKind::AwsSts, "{}", proof, 5),
+            Err(ShortLivedChangeError::Vault(error)) if error.kind() == VaultErrorKind::NotFound
+        ));
+    }
+
+    #[test]
+    fn a_revoke_url_is_on_the_host_of_the_token_url() {
+        let kind = ShortLivedKind::OauthRefresh;
+        let with = |revoke: &str| {
+            ShortLivedSettings::parse_checked(
+                kind,
+                &format!(
+                    r#"{{"token_url":"https://auth.example.com/oauth/token","client_auth":"basic","revoke_url":"{revoke}"}}"#
+                ),
+            )
+        };
+        with("https://auth.example.com/oauth/revoke").expect("the same host");
+        with("https://AUTH.example.com/revoke").expect("the host in any case");
+        for other in [
+            "https://attacker.example.net/revoke",
+            "https://auth.example.com.attacker.net/revoke",
+            "https://auth.example.com:8443/revoke",
+        ] {
+            assert_eq!(
+                with(other).unwrap_err(),
+                "the revoke_url setting is not on the host of the token_url.",
+                "{other}"
+            );
+        }
     }
 
     #[test]

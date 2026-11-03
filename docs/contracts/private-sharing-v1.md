@@ -33,7 +33,11 @@ fixtures in the same change.
    row is `enabled`, in way A and in way B. Ways A and B then apply only to static keys. A run with a
    source ignores the delivery of the item's `env_binding` (S6-3).
 3. **Off only by the owner.** The owner can turn way C off for one item. The change MUST pass the owner
-   check `OwnerAction::ChangeDelivery { item, kind, on }`. Nothing else turns it off.
+   check `OwnerAction::ChangeDelivery { item, kind, on }`. Nothing else turns it off. A change of the
+   kind or the settings of an existing row (section 3.2: what a lease can do and where the long-lived
+   secret goes) MUST pass the owner check `OwnerAction::ChangeShortLivedSettings { item, kind,
+   settings_sha256 }`, where `settings_sha256` is the SHA-256 (lowercase hex) of the canonical
+   settings text; the global owner window never covers it.
 4. **No fallback.** A lease that cannot be made fails the run with `lease_failed` (section 9). The key
    holder MUST NOT deliver the long-lived value, a placeholder of it, or an older lease instead. The
    command does not start; on the relay the run is `denied` with `code` `lease_failed`.
@@ -107,7 +111,7 @@ userinfo, query, or fragment (an `http://` loopback URL is allowed only in tests
 | `google_service_account` | `impersonate` | A service-account email `<name>@<project>.iam.gserviceaccount.com`. | the key's own `client_email` |
 | `oauth_refresh` | `token_url` | URL. **Required.** | — |
 | `oauth_refresh` | `client_auth` | `basic` (HTTP Basic, RFC 6749 §2.3.1) or `body` (`client_id` and `client_secret` in the form). **Required.** | — |
-| `oauth_refresh` | `revoke_url` | URL of an RFC 7009 endpoint. | none: no revocation |
+| `oauth_refresh` | `revoke_url` | URL of an RFC 7009 endpoint, on the host (and port) of `token_url`. | none: no revocation |
 | `oauth_refresh` | `scope` | Space-separated scopes, 1 to 1024 bytes. | none: the grant's scope |
 
 A single-field AWS item (only the key id) is not a source. Its sheet offers "Add the secret key to make
