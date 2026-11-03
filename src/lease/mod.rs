@@ -38,6 +38,7 @@
 pub mod aws;
 pub mod github;
 pub mod google;
+pub mod holder;
 pub(crate) mod json;
 pub mod jwt;
 pub mod oauth;
@@ -179,9 +180,11 @@ pub enum Revoke {
     Oauth { url: String },
 }
 
-/// A rotated OAuth refresh token that the caller MUST store with `Vault::update` before
-/// it delivers the lease (contract section 4.2).
-#[derive(Debug)]
+/// A rotated OAuth refresh token that the caller MUST store before it delivers the lease
+/// or fails the run (contract section 4.2): [`holder::KeyHolder`] stores it with a
+/// compare-and-swap (`Vault::swap_secret_field`). `Debug` redacts the value; drop erases
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateField {
     pub field: String,
     pub value: SecretValue,
@@ -382,15 +385,27 @@ impl LeaseStatus {
 
 /// A lease that could not be made or revoked. The message names the provider and its
 /// status, never a provider body or a value (contract section 9).
+///
+/// `update_field` is the one secret that an error may carry: a refresh token that the
+/// token endpoint rotated in an answer that was otherwise unusable. The old token may be
+/// dead already, so the caller MUST store it (as for a lease) before it fails the run.
+/// `Debug` redacts it, and the message never holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseError {
     pub code: LeaseCode,
     pub kind: LeaseKind,
     pub status: LeaseStatus,
     pub message: String,
+    pub update_field: Option<UpdateField>,
 }
 
 impl LeaseError {
+    /// This error with the rotated refresh token `update` to store.
+    pub fn with_update_field(mut self, update: Option<UpdateField>) -> Self {
+        self.update_field = update;
+        self
+    }
+
     /// `lease_failed` with the provider's HTTP status: "AWS STS answered 403. No
     /// temporary credentials were made, so the command did not run."
     pub fn http_status(kind: LeaseKind, status: u16) -> Self {
@@ -399,6 +414,7 @@ impl LeaseError {
             kind,
             status: LeaseStatus::Http(status),
             message: format!("{} answered {status}. {NOT_RUN}", kind.provider_label()),
+            update_field: None,
         }
     }
 
@@ -440,6 +456,7 @@ impl LeaseError {
             kind,
             status,
             message,
+            update_field: None,
         }
     }
 
@@ -461,6 +478,7 @@ impl LeaseError {
             kind,
             status: LeaseStatus::InvalidAnswer,
             message,
+            update_field: None,
         }
     }
 
@@ -475,6 +493,7 @@ impl LeaseError {
                 "The {} item cannot make temporary credentials: {why} {NOT_RUN}",
                 kind.as_str()
             ),
+            update_field: None,
         }
     }
 
@@ -494,6 +513,7 @@ impl LeaseError {
                 kind.provider_label(),
                 status.detail()
             ),
+            update_field: None,
         }
     }
 }
@@ -662,7 +682,10 @@ pub(crate) fn acquire_at(
         || lease.secrets.first().map(|secret| secret.name.as_str())
             != Some(source.env_name.as_str())
     {
-        return Err(LeaseError::invalid_answer(source.kind()));
+        // A rotated refresh token goes with the error: the caller still stores it.
+        let mut lease = lease;
+        return Err(LeaseError::invalid_answer(source.kind())
+            .with_update_field(lease.update_field.take()));
     }
     Ok(lease)
 }

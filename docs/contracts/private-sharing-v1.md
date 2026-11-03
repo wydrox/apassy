@@ -176,9 +176,23 @@ local run, before the owner is asked, and `release_invalid` on the relay.
   each lease with a `revoke`: GitHub `DELETE /installation/token` with the token as bearer; OAuth an RFC
   7009 `POST revoke_url` with `token` and `token_type_hint=access_token`. Best effort: a failure writes
   `lease_revoke_failed` (section 10) and nothing else.
-- An `update_field` MUST be written to the item (`Vault::update`) before the lease is delivered. A failed
-  write still delivers the lease (the old token is already dead) and writes an activity row with the
-  error and "authorize again".
+- An `update_field` MUST be written to the item before the lease is delivered. A failed write still
+  delivers the lease (the old token is already dead) and writes an activity row with the error and
+  "authorize again". A token answer that rotates the refresh token but is otherwise unusable (no
+  access token, not a bearer token, a bad `expires_in`) is `lease_failed`, and its new refresh token
+  MUST be written before the run fails: the error carries it (`LeaseError.update_field`).
+- Single flight. The key holder refreshes one item at a time: one lock per item covers the read of the
+  source, the token request, and the write of a rotated refresh token, so a second run of the item
+  sends the token that the first run stored. The write is a compare-and-swap
+  (`Vault::swap_secret_field`): it stores the new token only while the field still holds the token
+  that was sent, and raises the item revision. When the field changed meanwhile (a synced copy, or the
+  owner), the newer stored token stays and the token of the answer is dropped. When the token endpoint
+  refuses the refresh token (400 or 401), the key holder reads the source once more and, when the
+  stored token differs from the one sent, tries it once.
+- Only the device that runs the lease refreshes; a synced copy never calls the token endpoint. Synced
+  copies converge by the compare-and-swap and the item revision. Limit: a provider with refresh-token
+  reuse detection can still revoke the grant when two Macs refresh the same item within the same
+  second, before either copy has synced; the owner then authorizes the item again.
 
 ## 5. Delivery on the agent's side
 

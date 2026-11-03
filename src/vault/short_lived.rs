@@ -868,6 +868,15 @@ impl fmt::Debug for ShortLivedSource {
     }
 }
 
+/// What [`Vault::swap_secret_field`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldSwap {
+    /// The field held the expected value and now holds the new one.
+    Stored,
+    /// The field no longer held the expected value; nothing was written.
+    Changed,
+}
+
 /// The provider API that made a member key (contract section 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KeyManagerKind {
@@ -1230,6 +1239,77 @@ impl Vault {
             enabled: row.enabled,
             fields,
         })
+    }
+
+    /// Store `new` in the secret field `field` of `item` only while the field still holds
+    /// `expected`: the compare-and-swap of a rotated OAuth refresh token (contract
+    /// private-sharing-v1 section 4.2). One transaction: the value, a new item revision
+    /// (so that a synced copy converges on it), and an edit event that names the field,
+    /// never a value. [`FieldSwap::Changed`] writes nothing: another run, another Mac
+    /// (through sync), or the owner changed the field after the key holder read it.
+    ///
+    /// `NotFound`: no item or no such field. `InvalidInput`: the field is not secret, is a
+    /// passkey field, or `new` is empty or over the field limit.
+    pub fn swap_secret_field(
+        &mut self,
+        item: u64,
+        field: &str,
+        expected: &SecretValue,
+        new: &SecretValue,
+    ) -> VaultResult<FieldSwap> {
+        if super::is_passkey_field(field)
+            || new.expose().is_empty()
+            || new.expose().len() > super::types::MAX_FIELD_VALUE_BYTES
+        {
+            return Err(invalid());
+        }
+        let sql_id = to_sql_id(item)?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let row: Option<(i64, SecretValue, bool)> = tx
+            .query_row(
+                "SELECT rowid, value, secret FROM item_field WHERE item_id = ?1 AND name = ?2",
+                rusqlite::params![sql_id, field],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        SecretValue::new(row.get::<_, String>(1)?),
+                        row.get::<_, i64>(2)? == 1,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some((rowid, current, secret)) = row else {
+            return Err(err(VaultErrorKind::NotFound));
+        };
+        if !secret {
+            return Err(invalid());
+        }
+        if current != *expected {
+            return Ok(FieldSwap::Changed);
+        }
+        drop(current);
+        tx.execute(
+            "UPDATE item_field SET value = ?1 WHERE rowid = ?2",
+            rusqlite::params![new.expose(), rowid],
+        )
+        .map_err(storage)?;
+        tx.execute(
+            "UPDATE item SET revision = revision + 1 WHERE id = ?1",
+            [sql_id],
+        )
+        .map_err(storage)?;
+        super::history::record(
+            &tx,
+            sql_id,
+            super::ItemEventKind::Edited,
+            &super::EditChange::detail(&[super::EditChange::Secret(field.to_owned())]),
+        )?;
+        tx.commit().map_err(storage)?;
+        Ok(FieldSwap::Stored)
     }
 
     /// Record a member key at `now` (unit J2): the item `key.item_id` is the key of one
@@ -1739,6 +1819,118 @@ mod tests {
         let revision = vault.details(key).unwrap().summary.revision;
         vault.delete(key, revision).unwrap();
         assert!(vault.member_keys().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rotated_refresh_token_is_stored_by_compare_and_swap() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = vault(&dir);
+        let oauth_fields = |refresh: &str| {
+            vec![
+                field("client_id", "synthetic-client", false),
+                field("refresh_token", refresh, true),
+            ]
+        };
+        let id = item(&mut vault, oauth_fields("SYNTH-refresh-1"));
+        vault
+            .set_short_lived(
+                id,
+                ShortLivedKind::OauthRefresh,
+                r#"{"token_url":"https://auth.example.com/token","client_auth":"body"}"#,
+                1,
+            )
+            .unwrap();
+        let secret = |text: &str| SecretValue::new(text.to_owned());
+        let revision = vault.details(id).unwrap().summary.revision;
+        // The field still holds the token that was sent: stored, with a new revision.
+        assert_eq!(
+            vault
+                .swap_secret_field(
+                    id,
+                    "refresh_token",
+                    &secret("SYNTH-refresh-1"),
+                    &secret("SYNTH-refresh-2")
+                )
+                .unwrap(),
+            FieldSwap::Stored
+        );
+        assert_eq!(
+            vault.reveal(id, "refresh_token").unwrap().expose(),
+            "SYNTH-refresh-2"
+        );
+        assert_eq!(vault.details(id).unwrap().summary.revision, revision + 1);
+        assert_eq!(
+            vault
+                .short_lived_source(id)
+                .unwrap()
+                .field("refresh_token")
+                .unwrap()
+                .expose(),
+            "SYNTH-refresh-2"
+        );
+        // A stale expected token writes nothing.
+        assert_eq!(
+            vault
+                .swap_secret_field(
+                    id,
+                    "refresh_token",
+                    &secret("SYNTH-refresh-1"),
+                    &secret("SYNTH-refresh-3")
+                )
+                .unwrap(),
+            FieldSwap::Changed
+        );
+        assert_eq!(
+            vault.reveal(id, "refresh_token").unwrap().expose(),
+            "SYNTH-refresh-2"
+        );
+        assert_eq!(vault.details(id).unwrap().summary.revision, revision + 1);
+        // Only a secret field that exists, and never an empty value.
+        for (name, new, kind) in [
+            ("client_id", "SYNTH-x", VaultErrorKind::InvalidInput),
+            ("missing", "SYNTH-x", VaultErrorKind::NotFound),
+            ("refresh_token", "", VaultErrorKind::InvalidInput),
+        ] {
+            assert_eq!(
+                vault
+                    .swap_secret_field(id, name, &secret("synthetic-client"), &secret(new))
+                    .unwrap_err()
+                    .kind(),
+                kind,
+                "{name}"
+            );
+        }
+        // `Vault::update` edits the Custom source item too.
+        let revision = vault.details(id).unwrap().summary.revision;
+        vault
+            .update(
+                id,
+                revision,
+                ItemDraft {
+                    title: "Synthetic source".to_owned(),
+                    kind: CredentialKind::Custom,
+                    notes: String::new(),
+                    tags: Vec::new(),
+                    fields: oauth_fields("SYNTH-refresh-4"),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            vault.reveal(id, "refresh_token").unwrap().expose(),
+            "SYNTH-refresh-4"
+        );
+        // The history names the field, never a value.
+        let details: Vec<String> = vault
+            .conn_ref()
+            .unwrap()
+            .prepare("SELECT detail FROM item_event WHERE item_id = ?1")
+            .unwrap()
+            .query_map([i64::try_from(id).unwrap()], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(details.iter().any(|detail| detail == "secret:refresh_token"));
+        assert!(details.iter().all(|detail| !detail.contains("SYNTH-refresh")));
     }
 
     #[test]

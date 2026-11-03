@@ -39,7 +39,12 @@ pub const MAX_REFRESH_TOKEN_BYTES: usize = 4096;
 const KIND: LeaseKind = LeaseKind::OauthRefresh;
 const REFUSED_HINT: &str =
     "The token endpoint refused the refresh token or the client: authorize the item again.";
-const ROTATED_BUT_FAILED: &str = "the token endpoint gave a new refresh token but no usable access token, so the stored one may no longer work: authorize the item again.";
+/// The end of the reason of a failed answer that rotated the refresh token, before the
+/// caller stored it. [`super::holder::KeyHolder`] replaces it with [`ROTATED_STORED`]
+/// when the new token is stored.
+pub const ROTATED_NOT_STORED: &str = "It also gave a new refresh token, so the stored one may no longer work: authorize the item again.";
+/// [`ROTATED_NOT_STORED`] after the new refresh token was stored.
+pub const ROTATED_STORED: &str = "It also gave a new refresh token, which Apassy stored.";
 
 /// The client of a source: its id and, for a confidential client, its secret. `Debug`
 /// redacts the secret.
@@ -179,8 +184,8 @@ pub(super) fn acquire(
     }
     let text = std::str::from_utf8(&answer).map_err(|_| LeaseError::invalid_answer(KIND))?;
     let object = Object::parse(text).ok_or_else(|| LeaseError::invalid_answer(KIND))?;
-    // The rotation is read first, so that a failure after it says that the stored
-    // refresh token may be dead.
+    // The rotation is read first: a failure after it carries the new refresh token, which
+    // the caller stores before it fails the run (the old one may be dead already).
     let rotated = match object.text(REFRESH_TOKEN_FIELD) {
         Some(token) if token.as_str() == prepared.refresh_token.expose() => None,
         Some(token) => Some(token),
@@ -192,19 +197,26 @@ pub(super) fn acquire(
         }
         None => None,
     };
-    let failed = |why: &str| {
-        if rotated.is_some() {
-            LeaseError::invalid_answer_because(KIND, ROTATED_BUT_FAILED)
-        } else {
-            LeaseError::invalid_answer_because(KIND, why)
-        }
-    };
     if rotated
         .as_ref()
         .is_some_and(|token| !(1..=MAX_REFRESH_TOKEN_BYTES).contains(&token.len()))
     {
-        return Err(failed("the new refresh token is not 1 to 4096 bytes."));
+        return Err(LeaseError::invalid_answer_because(
+            KIND,
+            &format!("the new refresh token is not 1 to 4096 bytes. {ROTATED_NOT_STORED}"),
+        ));
     }
+    let rotation = rotated.map(|token| UpdateField {
+        field: REFRESH_TOKEN_FIELD.to_owned(),
+        value: SecretValue::new(token.as_str().to_owned()),
+    });
+    let failed = |why: &str| match &rotation {
+        Some(update) => {
+            LeaseError::invalid_answer_because(KIND, &format!("{why} {ROTATED_NOT_STORED}"))
+                .with_update_field(Some(update.clone()))
+        }
+        None => LeaseError::invalid_answer_because(KIND, why),
+    };
     let token = object
         .text("access_token")
         .filter(|token| super::is_token(token))
@@ -245,20 +257,21 @@ pub(super) fn acquire(
             .revoke_url
             .clone()
             .map(|url| super::Revoke::Oauth { url }),
-        update_field: rotated.map(|token| UpdateField {
-            field: REFRESH_TOKEN_FIELD.to_owned(),
-            value: SecretValue::new(token.as_str().to_owned()),
-        }),
+        update_field: rotation,
         lifetime_assumed: assumed,
     };
     drop(token);
     drop(object);
     drop(answer);
     if lease.check().is_err() {
-        return Err(if lease.update_field.is_some() {
-            LeaseError::invalid_answer_because(KIND, ROTATED_BUT_FAILED)
-        } else {
-            LeaseError::invalid_answer(KIND)
+        let mut lease = lease;
+        return Err(match lease.update_field.take() {
+            Some(update) => LeaseError::invalid_answer_because(
+                KIND,
+                &format!("the lease breaks the contract. {ROTATED_NOT_STORED}"),
+            )
+            .with_update_field(Some(update)),
+            None => LeaseError::invalid_answer(KIND),
         });
     }
     Ok(lease)
@@ -589,6 +602,17 @@ mod tests {
             assert_eq!(error.code, LeaseCode::LeaseFailed, "{words}");
             assert_eq!(error.status, LeaseStatus::InvalidAnswer, "{words}");
             assert!(error.message.contains(words), "{words}: {}", error.message);
+            // A rotated refresh token goes with the error, for the caller to store
+            // before it fails the run; never in the message or the Debug form.
+            let rotated = answer.get("refresh_token").is_some_and(Value::is_string);
+            assert_eq!(
+                error
+                    .update_field
+                    .as_ref()
+                    .map(|update| (update.field.as_str(), update.value.expose())),
+                rotated.then_some(("refresh_token", ROTATED)),
+                "{words}"
+            );
             scan::assert_no_secrets(format!("{error} {error:?}"), &LONG_LIVED);
         }
     }
