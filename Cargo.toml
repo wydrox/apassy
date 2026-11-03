@@ -20,9 +20,9 @@ default-members = ["."]
 # Apple Watch core (ADR 0039 section 4), because openssl-src cannot configure OpenSSL for watchOS.
 default = ["openssl"]
 openssl = ["rusqlite?/bundled-sqlcipher-vendored-openssl"]
-desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "time?/local-offset"]
+desktop = ["dep:eframe", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "time?/local-offset"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
-vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium", "dep:rustix"]
+vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium"]
 # Tests only (docs/operations/checks.md, "Test vault KDF"): in a debug build, a vault
 # file in a `tempfile` directory uses 2 PBKDF2 iterations. CI tests with --all-features.
 # The release builds name their features, and a release build keeps 256,000 also
@@ -64,10 +64,12 @@ qrcode = { version = "=0.14.1", optional = true, default-features = false }
 time = { version = "=0.3.47", optional = true, default-features = false, features = ["std"] }
 # 0.3.0: the zip archive of a 1Password export (.1pux). The version that png already uses.
 flate2 = { version = "=1.1.10", optional = true, default-features = false, features = ["rust_backend"] }
-# Key-memory review F6: safe setrlimit for the core-dump limit of the desktop
-# process. The same version is already in Cargo.lock through tempfile. `termios`:
-# the owner command line turns off the echo when it reads a secret (ADR 0017).
-rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process", "termios", "time"] }
+# Key-memory review F6: safe setrlimit for the core-dump limit, and on Linux
+# `PR_SET_DUMPABLE` (src/harden.rs, ADR 0011 stage 6: every binary that holds a
+# secret calls it, so the dependency is not optional). The same version is already in
+# Cargo.lock through tempfile. `termios`: the owner command line turns off the echo
+# when it reads a secret (ADR 0017).
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "process", "termios", "time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Main-process native menus through a safe API; no application framework or GTK.

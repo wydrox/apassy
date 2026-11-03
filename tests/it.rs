@@ -51,6 +51,7 @@ mod eval_harness;
 mod exceptions;
 mod first_use;
 mod folder_sync;
+mod harden;
 mod host_coverage;
 mod host_hook;
 #[path = "isolation/product_profile.rs"]

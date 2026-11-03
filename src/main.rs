@@ -3,18 +3,13 @@
 //! Without arguments, it opens the window. With a command, it talks to the running
 //! window over the owner socket. It never prints a secret value of an item.
 
-use rustix::process::{Resource, Rlimit, setrlimit};
-
 mod owner_diagnostics;
 
 fn main() -> eframe::Result {
+    // Key-memory review F6 and ADR 0011 stage 6: no core file (it would contain the
+    // vault memory; the hard limit is 0 too) and, on Linux, not dumpable. First.
+    apassy::harden::harden_process_or_exit("apassy");
     owner_diagnostics::install();
-    // Key-memory review F6: a core file would contain the vault memory. The hard
-    // limit is 0 too, so a parent shell or a later call cannot raise it.
-    if disable_core_dumps().is_err() {
-        eprintln!("Apassy cannot turn off core dumps, so it does not start.");
-        std::process::exit(1);
-    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         // Only the window writes the decision log file; the owner command line reads it.
@@ -45,43 +40,4 @@ fn main() -> eframe::Result {
     }
     // Every other argument list is a command of the owner command line.
     std::process::exit(apassy::cli::run(args));
-}
-
-/// Set the soft and the hard core file size limit to 0. Child processes, such as
-/// agent commands with secrets, get the same limit.
-fn disable_core_dumps() -> rustix::io::Result<()> {
-    setrlimit(
-        Resource::Core,
-        Rlimit {
-            current: Some(0),
-            maximum: Some(0),
-        },
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rustix::process::getrlimit;
-
-    #[test]
-    fn core_dump_limit_is_zero_and_cannot_be_raised() {
-        disable_core_dumps().expect("set the core limit");
-        let limit = getrlimit(Resource::Core);
-        assert_eq!(limit.current, Some(0));
-        assert_eq!(limit.maximum, Some(0));
-        let raise = setrlimit(
-            Resource::Core,
-            Rlimit {
-                current: Some(4096),
-                maximum: Some(4096),
-            },
-        );
-        assert!(raise.is_err());
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", "ulimit -c; ulimit -H -c"])
-            .output()
-            .expect("run sh");
-        assert_eq!(String::from_utf8_lossy(&child.stdout), "0\n0\n");
-    }
 }

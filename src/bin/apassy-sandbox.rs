@@ -90,6 +90,8 @@ const CLOUD_DIR_IN_HOME: [&str; 4] = [
 ];
 
 fn main() {
+    // ADR 0011 stage 6: first, before anything reads a secret.
+    apassy::harden::harden_process_or_exit("apassy-sandbox");
     let args: Vec<String> = env::args().skip(1).collect();
     if args == ["--version"] {
         println!("apassy-sandbox {}", env!("CARGO_PKG_VERSION"));
