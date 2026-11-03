@@ -56,6 +56,14 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.15 coordinated release
+
+0.5.15 fixes the Touch ID panel for vault unlock (#80): the LSUIElement keychain
+helper fell back to the macOS dialog in 0.5.14. All six components move to
+0.5.15; only macOS changes functionally. The vault schema stays at 23. Build the
+relay image with `relay-image.yml` (tag `image-release-0.5.15`) and deploy it only
+after the owner approves the exact image and backup.
+
 ## 0.5.14 coordinated release
 
 0.5.14 collects the Touch ID panel (#54), the relay as a crate of this workspace
