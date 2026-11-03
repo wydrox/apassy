@@ -19,6 +19,10 @@
 name: Tailnet spike
 
 on:
+  # Temporary: a push to s4/t0-run runs the offline part (the file is not on main yet, so
+  # workflow_dispatch cannot start it). Remove with the branch.
+  push:
+    branches: [s4/t0-run]
   workflow_dispatch:
     inputs:
       online:
