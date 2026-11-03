@@ -1,0 +1,31 @@
+# Fuzz targets (cargo-fuzz). Not a member of the main workspace: it has its own
+# workspace and lock file, and it needs a nightly toolchain.
+#
+#   cd fuzz && cargo +nightly fuzz run tls_front_pump -- -max_total_time=300
+#
+# Unit N2 of docs/design/implementation-plan-s2-s3.md: the top-level agent runs it for
+# 5 minutes through ~/.local/bin/heavy-check.
+[package]
+name = "apassy-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+apassy = { path = "..", features = ["vault"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+
+[[bin]]
+name = "tls_front_pump"
+path = "fuzz_targets/tls_front_pump.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
