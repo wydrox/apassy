@@ -1688,6 +1688,32 @@ pub(crate) fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile) {
     }
 }
 
+/// The ring around a tile on a selected row: white, 1.5 points, just outside the tile.
+/// A tile in the accent blue, such as a login, keeps its shape on the blue selection.
+pub(crate) const SELECTED_TILE_RING: Stroke = Stroke {
+    width: 1.5,
+    color: Color32::WHITE,
+};
+
+/// The ring around the tile of a row: [`SELECTED_TILE_RING`] on a selected row, else
+/// none. The tile keeps its own color.
+pub(crate) fn tile_ring(selected: bool) -> Option<Stroke> {
+    selected.then_some(SELECTED_TILE_RING)
+}
+
+/// Paint [`tile_ring`] around the tile or avatar in `rect` of a row.
+pub(crate) fn paint_tile_ring(painter: &Painter, rect: Rect, round: bool, selected: bool) {
+    let Some(ring) = tile_ring(selected) else {
+        return;
+    };
+    let side = rect.width();
+    if round {
+        painter.circle_stroke(rect.center(), (side + ring.width) / 2.0, ring);
+    } else {
+        painter.rect_stroke(rect, (side * 0.25).round() as u8, ring, StrokeKind::Outside);
+    }
+}
+
 /// A tile of `side` points in the layout.
 pub(crate) fn tile(ui: &mut Ui, tile: &Tile, side: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
@@ -2015,6 +2041,7 @@ pub(crate) fn list_row(ui: &mut Ui, row: &ListRow<'_>) -> Response {
         Vec2::splat(32.0),
     );
     paint_tile(ui, tile_rect, &row.tile);
+    paint_tile_ring(painter, tile_rect, row.tile.round, row.selected);
     let (title_color, sub_color) = if row.selected {
         (Color32::WHITE, Color32::from_white_alpha(210))
     } else {
