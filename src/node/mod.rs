@@ -874,7 +874,8 @@ impl Node {
     /// the OAuth client, and `connected_with = oauth`, then the decision on the relay; a
     /// save that fails revokes the relay agent and denies the request. Errors:
     /// `connect_not_pending` (decided, ended, or unknown), `node_stopped`,
-    /// `vault_locked`, `team_limit` (20 remote agents), `vault_error`.
+    /// `vault_locked`, `team_limit` (20 remote agents), `agent_not_saved` (the vault did
+    /// not take the agent: the relay agent is revoked and the request denied).
     pub fn allow_connect_on(
         &self,
         vault: &SharedVault,
@@ -943,7 +944,7 @@ impl Node {
         );
         let (agent_id, name, created) = match made {
             Ok(made) => made,
-            Err(failure) if failure.code == "vault_error" => {
+            Err(failure) if failure.code == host::AGENT_NOT_SAVED => {
                 // Nothing was saved and the relay agent is revoked: the client must not
                 // wait for a connection that cannot come.
                 let _ = self.deny_connect(id);

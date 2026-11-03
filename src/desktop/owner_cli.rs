@@ -2140,7 +2140,7 @@ impl DesktopApp {
 
     /// `agent_add_remote`: checks before the owner check. The node must run (remote
     /// access on), so the check never waits for a start on the UI thread.
-    fn cli_add_remote(&mut self, name: &str, days: Option<u32>) -> Run {
+    fn cli_add_remote(&self, name: &str, days: Option<u32>) -> Run {
         let name = name.trim().to_owned();
         if name.is_empty() {
             return Err(invalid("Name the remote agent."));

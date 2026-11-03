@@ -880,4 +880,42 @@ mod tests {
                 .expect("parse an error without data");
         assert!(matches!(error.data, Data::None));
     }
+
+    #[test]
+    fn agent_add_remote_round_trips_and_its_token_is_redacted() {
+        let minimal: Request = serde_json::from_str(
+            r#"{"v":1,"command":{"cmd":"agent_add_remote","name":"Grok Bot"}}"#,
+        )
+        .expect("parse");
+        assert!(minimal.command.needs_session());
+        assert!(matches!(
+            &minimal.command,
+            Command::AgentAddRemote { name, days: None } if name == "Grok Bot"
+        ));
+        let response = Response::ok(
+            "Added.",
+            Data::RemoteToken {
+                agent: AgentRow {
+                    id: 4,
+                    name: "Grok Bot".to_owned(),
+                    created_at: 1,
+                    revoked: false,
+                    token_expires_at: 2,
+                    token_expired: false,
+                    sees_all: false,
+                },
+                token: SecretText::new("apassy_tagt_wire-canary".to_owned()),
+                mcp_url: "https://mac.example.ts.net:8443/mcp".to_owned(),
+            },
+        );
+        assert!(!format!("{response:?}").contains("canary"));
+        let line = serde_json::to_string(&response).expect("serialize");
+        assert!(line.contains(r#""type":"remote_token""#), "{line}");
+        let back: Response = serde_json::from_str(&line).expect("parse");
+        let Data::RemoteToken { token, mcp_url, .. } = back.data else {
+            panic!("wrong data");
+        };
+        assert_eq!(token.expose(), "apassy_tagt_wire-canary");
+        assert_eq!(mcp_url, "https://mac.example.ts.net:8443/mcp");
+    }
 }

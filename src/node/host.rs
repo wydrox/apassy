@@ -68,6 +68,9 @@ pub(super) const RETRY_PAUSE: Duration = Duration::from_secs(1);
 /// A retry mark of a run that the node no longer gives is dropped after this time (the
 /// relay times a run out after 300 s).
 const RETRY_FORGET: Duration = Duration::from_secs(600);
+/// The error code of [`Shared::add_agent`] when the vault did not take the agent: the
+/// node agent is revoked again.
+pub(super) const AGENT_NOT_SAVED: &str = "agent_not_saved";
 /// The refusal code of the broker for a second question of one agent.
 const QUESTION_WAITING: &str = "question_waiting";
 
@@ -317,7 +320,7 @@ impl Shared {
                 let _ = node.revoke_agent(&self.team, created.agent_id);
                 let _ = self.refresh_with(node, &mut state, &[]);
                 Err(NodeError::new(
-                    "vault_error",
+                    AGENT_NOT_SAVED,
                     "The remote agent cannot be saved in the vault. Nothing was made.",
                 ))
             }
@@ -347,9 +350,10 @@ struct AgentSlot<'a> {
 impl<'a> AgentSlot<'a> {
     /// The slot of `agent_id`, unless a run of the agent holds it.
     fn take(shared: &'a Shared, agent_id: u64) -> Option<Self> {
-        lock(&shared.asking)
-            .insert(agent_id)
-            .then_some(Self { shared, agent_id })
+        // The lock ends before a slot exists: a slot that is not given must never be
+        // made, since its drop would give back the slot of the run that holds it.
+        let free = lock(&shared.asking).insert(agent_id);
+        free.then(|| Self { shared, agent_id })
     }
 }
 

@@ -1157,7 +1157,7 @@ fn a_failed_vault_save_revokes_the_relay_agent_and_denies_the_connect() {
     // The vault locks between the relay agent and the save.
     fx.state().lock_on_create = Some(Arc::clone(&fx.vault));
     let failure = fx.node.allow_connect(&fx.vault, "cr_1").unwrap_err();
-    assert_eq!(failure.code, "vault_error", "{failure}");
+    assert_eq!(failure.code, "agent_not_saved", "{failure}");
     let state = fx.state();
     assert_eq!(state.agents.len(), 1);
     assert!(
