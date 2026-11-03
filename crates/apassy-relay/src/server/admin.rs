@@ -381,6 +381,11 @@ fn revoke_member(core: &Core, by: &MemberAuth, id: MemberId, now: u64) -> RelayR
             params![to_i(id.0)],
         )
         .map_err(db)?;
+        tx.execute(
+            "DELETE FROM push_handle WHERE device_id IN (SELECT id FROM device WHERE member_id = ?1)",
+            params![to_i(id.0)],
+        )
+        .map_err(db)?;
         // Their feeds go, and their open actions expire (docs/SPEC.md section 27.6).
         crate::server::feed::drop_devices(
             core,

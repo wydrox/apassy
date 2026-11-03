@@ -154,6 +154,13 @@ pub struct RelayMembership {
     pub purposes: BTreeSet<MembershipPurpose>,
     /// Unix seconds when the key was stored. A new row ignores the given value.
     pub created_at: u64,
+    /// The pin of a node relay (contract node-pairing-v1 section 4, schema 28): the b64u
+    /// SHA-256 of its certificate. `None` for a hosted relay. A membership with a pin
+    /// connects only with it (`RelayMember::from_membership`).
+    pub pin: Option<String>,
+    /// The alternative destinations of a node relay, `host:port` each, in order (at most
+    /// four). Empty for a hosted relay.
+    pub alt: Vec<String>,
 }
 
 impl fmt::Debug for RelayMembership {
@@ -163,6 +170,8 @@ impl fmt::Debug for RelayMembership {
             .field("relay_url", &self.relay_url)
             .field("device_id", &self.device_id)
             .field("purposes", &self.purposes)
+            .field("pin", &self.pin)
+            .field("alt", &self.alt)
             .field("key", &"[redacted]")
             .finish_non_exhaustive()
     }
@@ -176,7 +185,50 @@ impl RelayMembership {
             self.device_id,
             &self.public_key,
             &self.key_pkcs8,
-        )
+        ) && valid_trust(self.pin.as_deref(), &self.alt)
+    }
+}
+
+/// The most alternatives of a membership (node-pairing-v1 section 7).
+const MAX_ALTERNATIVES: usize = 4;
+/// The longest `host:port` text of an alternative: a 253-character name, brackets, a
+/// port.
+const MAX_ALTERNATIVE_BYTES: usize = 263;
+
+/// The shape of a stored pin and list of alternatives: a pin of 43 b64u characters, at
+/// most four alternatives of printable ASCII without `,` or white space, and
+/// alternatives only with a pin. The relay client checks their full form when it
+/// connects (`RelayUrl::alternatives`).
+fn valid_trust(pin: Option<&str>, alt: &[String]) -> bool {
+    let pin_ok = pin.is_none_or(|pin| {
+        pin.len() == 43
+            && pin
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    });
+    let alt_ok = alt.len() <= MAX_ALTERNATIVES
+        && (alt.is_empty() || pin.is_some())
+        && alt.iter().all(|entry| {
+            !entry.is_empty()
+                && entry.len() <= MAX_ALTERNATIVE_BYTES
+                && entry
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic() && byte != b',')
+        });
+    pin_ok && alt_ok
+}
+
+/// The stored form of the alternatives: a JSON list, `NULL` for none.
+fn alt_json(alt: &[String]) -> Option<String> {
+    (!alt.is_empty()).then(|| serde_json::to_string(alt).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// The alternatives of a stored row. Text that is not a JSON list of strings is
+/// `Storage`.
+fn parse_alt(text: Option<&str>) -> VaultResult<Vec<String>> {
+    match text {
+        None => Ok(Vec::new()),
+        Some(text) => serde_json::from_str(text).map_err(storage),
     }
 
     /// True for a vault store of Apassy Connect (schema 34, `key_source = 'account'`):
@@ -217,11 +269,22 @@ pub(super) fn load_memberships(
     conn: &Connection,
     team: Option<&str>,
 ) -> VaultResult<Vec<RelayMembership>> {
-    type Row = (String, String, i64, Vec<u8>, Vec<u8>, String, i64, String);
+    type Row = (
+        String,
+        String,
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        String,
+    );
     let mut stmt = conn
         .prepare(
             "SELECT team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at,
-                    key_source
+                    pin, alt, key_source
              FROM relay_membership WHERE ?1 IS NULL OR team_id = ?1 ORDER BY team_id",
         )
         .map_err(storage)?;
@@ -236,13 +299,25 @@ pub(super) fn load_memberships(
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
             ))
         })
         .map_err(storage)?;
     let mut out = Vec::new();
     for row in rows {
-        let (team_id, relay_url, device_id, public_key, key, purposes, created_at, source): Row =
-            row.map_err(storage)?;
+        let (
+            team_id,
+            relay_url,
+            device_id,
+            public_key,
+            key,
+            purposes,
+            created_at,
+            pin,
+            alt,
+            source,
+        ): Row = row.map_err(storage)?;
         let membership = RelayMembership {
             team_id,
             relay_url,
@@ -251,6 +326,8 @@ pub(super) fn load_memberships(
             key_pkcs8: Zeroizing::new(key),
             purposes: parse_purposes(&purposes)?,
             created_at: from_sql_time(created_at)?,
+            pin,
+            alt: parse_alt(alt.as_deref())?,
         };
         // A row that keeps its own key needs a valid one; an account row (schema 34)
         // holds none, and the column check of the table keeps it so.
@@ -708,8 +785,9 @@ impl Vault {
         }
         tx.execute(
             "INSERT INTO relay_membership
-                 (team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at,
+                  pin, alt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 membership.team_id,
                 membership.relay_url,
@@ -718,10 +796,39 @@ impl Vault {
                 membership.key_pkcs8.as_slice(),
                 purposes_json(&membership.purposes),
                 now,
+                membership.pin,
+                alt_json(&membership.alt),
             ],
         )
         .map_err(storage)?;
         tx.commit().map_err(storage)
+    }
+
+    /// Keep the pin `pin` and the alternatives `alt` of the relay of the membership of
+    /// `team_id` (contract node-pairing-v1 section 9, schema 28), in place of the earlier
+    /// ones: only a new pairing of that team calls it. `None` and an empty list make the
+    /// membership hosted again. `NotFound`: no membership. `InvalidInput`: a pin or a
+    /// list of a bad shape, or alternatives without a pin.
+    pub fn set_membership_trust(
+        &mut self,
+        team_id: &str,
+        pin: Option<&str>,
+        alt: &[String],
+    ) -> VaultResult<()> {
+        if !valid_trust(pin, alt) {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        let changed = self
+            .conn_ref()?
+            .execute(
+                "UPDATE relay_membership SET pin = ?1, alt = ?2 WHERE team_id = ?3",
+                (pin, alt_json(alt), team_id),
+            )
+            .map_err(storage)?;
+        if changed == 0 {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        Ok(())
     }
 
     /// Set the purposes of the membership of `team_id`. `InvalidInput`: no purpose (use
@@ -860,6 +967,8 @@ mod tests {
             key_pkcs8: Zeroizing::new(vec![0xab; 138]),
             purposes: purposes.iter().copied().collect(),
             created_at: 0,
+            pin: None,
+            alt: Vec::new(),
         }
     }
 

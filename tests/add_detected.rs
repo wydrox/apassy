@@ -511,3 +511,125 @@ fn providers_of_cli_tools_get_the_real_value() {
         );
     }
 }
+
+/// S6-14: an AWS key id and its secret in one paste make one item, a source of
+/// temporary credentials (way C on), bound to `AWS_ACCESS_KEY_ID`.
+#[test]
+fn an_aws_pair_becomes_one_short_lived_item() {
+    use apassy::vault::ShortLivedKind;
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    let id = fake("AKIA", 16);
+    let secret = fake("", 40);
+    let texts = [
+        format!("AWS_ACCESS_KEY_ID={id}\nAWS_SECRET_ACCESS_KEY={secret}\n"),
+        format!("export AWS_SECRET_ACCESS_KEY={secret}\nexport AWS_ACCESS_KEY_ID={id}\n"),
+        format!("{id}\n{secret}"),
+        format!("{secret} {id}"),
+    ];
+    for text in &texts {
+        let detected = one(text);
+        assert_eq!(detected.short_lived, Some(ShortLivedKind::AwsSts), "{text}");
+        assert_eq!(detected.provider.as_deref(), Some("aws"));
+        assert_eq!(detected.kind, CredentialKind::ApiKey);
+        let names: Vec<(&str, bool)> = detected
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.secret))
+            .collect();
+        assert_eq!(
+            names,
+            [("access_key_id", false), ("secret_access_key", true)]
+        );
+        // No part of the secret is in the title or the result line.
+        let line = apassy::vault::detect::summary_line(&detected);
+        assert!(!line.contains(&secret) && !detected.title.contains(&secret));
+
+        let summary = vault.add_detected(&detected, None, None).expect("add");
+        let row = vault
+            .short_lived(summary.id)
+            .unwrap()
+            .expect("a source row");
+        assert_eq!(row.kind, ShortLivedKind::AwsSts);
+        assert!(row.enabled, "way C is on");
+        assert_eq!(row.settings_json, "{}");
+        let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
+        assert_eq!(binding.field, "secret_access_key");
+        assert_eq!(binding.delivery, EnvDelivery::Value);
+        let source = vault.short_lived_source(summary.id).unwrap();
+        assert_eq!(source.field("access_key_id").unwrap().expose(), id);
+        let revision = vault.details(summary.id).unwrap().summary.revision;
+        vault.delete(summary.id, revision).unwrap();
+    }
+    // The first pair took the variable name of the contract.
+    let summary = vault.add_detected(&one(&texts[0]), None, None).unwrap();
+    assert_eq!(
+        vault.env_binding(summary.id).unwrap().unwrap().env_name,
+        "AWS_ACCESS_KEY_ID"
+    );
+
+    // A key id alone or a secret alone stays a static key; two pairs stay four items.
+    for text in [id.clone(), format!("AWS_SECRET_ACCESS_KEY={secret}")] {
+        assert_eq!(one(&text).short_lived, None, "{text}");
+    }
+    let other = fake("AKIA", 16).replace("EXAMPLE", "SAMPLES");
+    let two = format!(
+        "AWS_ACCESS_KEY_ID={id}\nAWS_SECRET_ACCESS_KEY={secret}\nAWS_ACCESS_KEY_ID={other}\nAWS_SECRET_ACCESS_KEY={secret}\n"
+    );
+    let found = detect(&two);
+    assert_eq!(found.len(), 4);
+    assert!(found.iter().all(|detected| detected.short_lived.is_none()));
+    // A temporary key (`ASIA`) is not a source.
+    let temporary = format!(
+        "AWS_ACCESS_KEY_ID={}\nAWS_SECRET_ACCESS_KEY={secret}\n",
+        fake("ASIA", 16)
+    );
+    assert!(detect(&temporary).iter().all(|d| d.short_lived.is_none()));
+}
+
+/// S6-14: a service-account key JSON with its private key and token URI makes one item,
+/// a source of Google access tokens, bound to `CLOUDSDK_AUTH_ACCESS_TOKEN`. A JSON
+/// without them stays the static key it was.
+#[test]
+fn a_service_account_json_becomes_a_short_lived_item() {
+    use apassy::vault::ShortLivedKind;
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    let key = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","private_key":"-----BEGIN PRIVATE KEY-----\nU1lOVEhFVElD\n-----END PRIVATE KEY-----\n","client_email":"bot@demo-project.iam.gserviceaccount.com","token_uri":"https://oauth2.googleapis.com/token"}"#;
+    let detected = one(key);
+    assert_eq!(
+        detected.short_lived,
+        Some(ShortLivedKind::GoogleServiceAccount)
+    );
+    assert_eq!(detected.provider.as_deref(), Some("gcp"));
+    assert_eq!(
+        detected.env_name.as_deref(),
+        Some("CLOUDSDK_AUTH_ACCESS_TOKEN")
+    );
+    assert_eq!(detected.fields.len(), 1);
+    assert_eq!(detected.fields[0].name, "key_json");
+    assert!(detected.fields[0].secret);
+    assert!(!detected.title.contains("PRIVATE KEY"));
+    let summary = vault.add_detected(&detected, None, None).expect("add");
+    let row = vault
+        .short_lived(summary.id)
+        .unwrap()
+        .expect("a source row");
+    assert_eq!(row.kind, ShortLivedKind::GoogleServiceAccount);
+    assert!(row.enabled);
+    let binding = vault.env_binding(summary.id).unwrap().unwrap();
+    assert_eq!(binding.env_name, "CLOUDSDK_AUTH_ACCESS_TOKEN");
+    assert_eq!(binding.field, "key_json");
+    assert_eq!(
+        vault
+            .short_lived_source(summary.id)
+            .unwrap()
+            .field("key_json")
+            .unwrap()
+            .expose(),
+        key
+    );
+
+    let partial = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","client_email":"bot@demo-project.iam.gserviceaccount.com"}"#;
+    assert_eq!(one(partial).short_lived, None);
+}

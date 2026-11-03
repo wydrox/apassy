@@ -23,6 +23,12 @@
 //!   (`decide_connect`).
 //! - Runs: the host loop of the app waits for pending runs (`wait_pending`), decides each
 //!   with the broker, and answers with `release` or `deny`.
+//! - On the tailnet (ADR 0037 stage 2, node-pairing-v1): a node started with a
+//!   `NodeTailnet` (`NodeBackend::start_on_tailnet`) also serves the devices of its teams
+//!   on a third loopback listener (`tailnet_addr`), the target of the TLS front. The app
+//!   makes a team of devices in process (`create_device_team`), lists and revokes its
+//!   devices (`devices`, `revoke_device`), and a node makes one-use pairing codes
+//!   (`make_node_code`).
 //!
 //! Times are seconds since the Unix epoch. Every method is safe to call from any thread.
 
@@ -109,12 +115,77 @@ pub struct NodeConfig {
     pub public_listen: Option<SocketAddr>,
 }
 
+/// The tailnet route of a node (node-pairing-v1 section 3, relay docs/SPEC.md section
+/// 32): what `NodeBackend::start_on_tailnet` adds to a `NodeConfig`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeTailnet {
+    /// `https://<Tailscale IPv4>:<port>` (default port 8444): the origin that every device
+    /// stores, signs at sign-in, and shows. The relay accepts sign-ins signed with it, and
+    /// with the Funnel `public_url` when the public route is on.
+    pub node_origin: String,
+    /// The loopback address of the tailnet listener, the target of the TLS front, such as
+    /// `127.0.0.1:0`. An address that is not on the loopback is refused.
+    pub tailnet_listen: SocketAddr,
+    /// The tailnet listener also serves the team routes (`/v1/runs`, `/mcp`, the host
+    /// lane): the Linux node. The Mac node serves the device routes only.
+    pub tailnet_agents: bool,
+    /// The push gateway whose handles the devices may give the node
+    /// (push-gateway-v1 section 10), such as `https://push.apassy.wyderka.cc`. `None`: no
+    /// push (`push_unavailable`).
+    pub push_gateway: Option<String>,
+}
+
 /// Starts nodes. Implemented by the relay crate (`apassy_relay::embedded::EmbeddedRelay`)
 /// and by the fakes of the tests.
 pub trait NodeBackend: Send + Sync {
     /// Opens the data directory (made at the first start), opens its teams, and starts
     /// the listeners. A second node on the same directory is refused (`conflict`).
     fn start(&self, config: NodeConfig) -> Result<Box<dyn RunningNode>, NodeError>;
+
+    /// `start` with the tailnet route of `tailnet`: the tailnet listener, the sign-in
+    /// origins, and push through the gateway. `None` is `start`. The default is for
+    /// backends without the route: `not_supported` for `Some`.
+    fn start_on_tailnet(
+        &self,
+        config: NodeConfig,
+        tailnet: Option<NodeTailnet>,
+    ) -> Result<Box<dyn RunningNode>, NodeError> {
+        match tailnet {
+            None => self.start(config),
+            Some(_) => Err(NodeError::new(
+                "not_supported",
+                "This node has no tailnet route.",
+            )),
+        }
+    }
+}
+
+/// A live device of a team of the node (`RunningNode::devices`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeDevice {
+    /// The relay's device id, for `revoke_device`.
+    pub id: u64,
+    /// The name the device gave, 1 to 64 bytes (not verified).
+    pub name: String,
+    pub member_id: u64,
+    pub member_name: String,
+    /// `owner`, `manager`, or `member`.
+    pub role: String,
+    /// The device holds the team's keys.
+    pub key_holder: bool,
+    pub created_at: u64,
+    /// Its last sign-in or request (written at most once a minute).
+    pub last_seen_at: Option<u64>,
+    /// It gave the node a push handle that has not failed.
+    pub push: bool,
+}
+
+/// A node pairing code (node-pairing-v1 section 6): a one-use team code of kind `node`.
+#[derive(Debug)]
+pub struct NodeCode {
+    /// `apassy_tcd_<64 hex>`, shown once.
+    pub code: NodeSecret,
+    pub expires_at: u64,
 }
 
 /// One item of the catalog mirror: metadata only, never a value.
@@ -442,6 +513,59 @@ pub trait RunningNode: Send + Sync {
         run: Option<NodeRunId>,
         limit: u32,
     ) -> Result<Vec<AuditRow>, NodeError>;
+
+    /// The bound address of the tailnet listener (the target of the TLS front), if the
+    /// node runs on the tailnet.
+    fn tailnet_addr(&self) -> Option<SocketAddr> {
+        None
+    }
+
+    /// Makes a team of devices without a code (the bootstrap of `POST /v1/teams`, ADR
+    /// 0019, in process): the owner member and its first device, `device_name` with the
+    /// P-256 public key `public_key_b64u` (65 bytes), which is the key holder. Returns the
+    /// team and the device id. The device signs in with the node origin like any other.
+    fn create_device_team(
+        &self,
+        name: &str,
+        device_name: &str,
+        public_key_b64u: &str,
+    ) -> Result<(NodeTeamId, u64), NodeError> {
+        let _ = (name, device_name, public_key_b64u);
+        Err(NodeError::new(
+            "not_supported",
+            "This node has no teams of devices.",
+        ))
+    }
+
+    /// The live devices of a team, oldest first.
+    fn devices(&self, team: &NodeTeamId) -> Result<Vec<NodeDevice>, NodeError> {
+        let _ = team;
+        Err(NodeError::new(
+            "not_supported",
+            "This node has no teams of devices.",
+        ))
+    }
+
+    /// Revokes a device of a team as its owner: its tokens stop at once, its push token
+    /// and handle go, and it signs in no more. The last device of the last owner is
+    /// refused (`conflict`).
+    fn revoke_device(&self, team: &NodeTeamId, device: u64) -> Result<(), NodeError> {
+        let _ = (team, device);
+        Err(NodeError::new(
+            "not_supported",
+            "This node has no teams of devices.",
+        ))
+    }
+
+    /// A node pairing code for 1 to 10 minutes: a one-use team code of kind `node`, which
+    /// makes a team at `POST /v1/teams` on this node only.
+    fn make_node_code(&self, minutes: u32) -> Result<NodeCode, NodeError> {
+        let _ = minutes;
+        Err(NodeError::new(
+            "not_supported",
+            "This node makes no pairing codes.",
+        ))
+    }
 
     /// Stops the listeners, ends every session, and drops every run key.
     fn stop(self: Box<Self>);

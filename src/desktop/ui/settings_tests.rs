@@ -832,3 +832,265 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
 }
+
+// ---------------------------------------------------------------- bouncer brain host
+
+/// The stored hosting choice of the open vault (plan 0035 J1).
+fn stored_hosting(app: &DesktopApp) -> Option<crate::vault::BouncerHost> {
+    let shared = app.owner_ui.session.shared_vault();
+    let guard = shared.lock().unwrap();
+    guard
+        .as_ref()
+        .expect("open vault")
+        .bouncer_host(crate::vault::BouncerHostRole::Hosting)
+        .expect("hosting row")
+}
+
+/// The generated token of the open "Use My Server" sheet, from its `docker run` line.
+fn draft_token(app: &DesktopApp) -> String {
+    let line = app
+        .bouncer_host
+        .draft
+        .as_ref()
+        .expect("draft")
+        .docker_line();
+    line.split("LAYA_API_KEY=")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .expect("token in the line")
+        .to_owned()
+}
+
+/// Settings > Bouncer starts on This Mac: one "Runs on" row, no note, no fallback, and
+/// the start rows of the local bouncer brain stay.
+#[test]
+fn the_runs_on_row_starts_on_this_mac() {
+    use crate::desktop::brain_hosting_ui::{FALLBACK_HEADLINE, GATE_STAYS, RUNS_ON};
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    super::super::open_settings(&mut app, SettingsSection::Bouncer);
+    let (text, _) = frames(&mut app, TALL);
+    assert!(text.contains(RUNS_ON), "{text}");
+    assert!(text.contains("This Mac"), "{text}");
+    assert!(!text.contains(GATE_STAYS), "{text}");
+    assert!(!text.contains(FALLBACK_HEADLINE), "{text}");
+    assert_eq!(stored_hosting(&app), None);
+}
+
+/// "Use My Server" ends in the fresh owner check of exactly that change, whose text has
+/// the trust warning (ADR 0035 section 5). Nothing is stored before the check passes; a
+/// wrong passphrase stores nothing. After it, the vault has the server with the
+/// generated token, and neither Settings nor the status message shows the token.
+#[test]
+fn the_hosting_picker_needs_the_owner_check_and_shows_the_trust_warning() {
+    use crate::desktop::brain_hosting_ui::{
+        self as hosting, GATE_STAYS, HostingStep, RunsOnAction,
+    };
+    use crate::vault::{BouncerHostKind, HOSTING_CONSENT_VERSION};
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    super::super::open_settings(&mut app, SettingsSection::Bouncer);
+    hosting::apply(&mut app, RunsOnAction::MyServer, None);
+    assert_eq!(app.ui.sheet, Some(super::super::Sheet::BrainHosting));
+    assert!(app.owner.check.is_none(), "the sheet comes first");
+    let token = draft_token(&app);
+    let (text, _) = frames(&mut app, TALL);
+    assert!(text.contains(hosting::SERVER_TITLE), "{text}");
+    assert!(text.contains(hosting::RUN_HEADER), "{text}");
+    assert!(text.contains("docker run"), "{text}");
+    assert!(!text.contains(&token), "the token is masked: {text}");
+
+    // A wrong address keeps step 1 and says why.
+    {
+        let draft = app.bouncer_host.draft.as_mut().expect("draft");
+        draft.address = "http://brain.synthetic.ts.net".to_owned();
+        assert!(draft.change().is_none());
+    }
+    let (text, _) = frames(&mut app, TALL);
+    assert!(text.contains(hosting::ADDRESS_HINT), "{text}");
+    hosting::submit(&mut app, None);
+    assert!(app.owner.check.is_none(), "no check without a valid change");
+
+    {
+        let draft = app.bouncer_host.draft.as_mut().expect("draft");
+        draft.address = "https://brain.synthetic.ts.net/".to_owned();
+        draft.step = HostingStep::Consent;
+    }
+    let (text, _) = frames(&mut app, TALL);
+    assert!(text.contains(hosting::TRUST_WARNING), "{text}");
+    hosting::submit(&mut app, None);
+    let request = app
+        .owner
+        .check
+        .as_ref()
+        .expect("owner check")
+        .request
+        .clone();
+    let expected = OwnerAction::ChangeBouncerHosting {
+        kind: BouncerHostKind::OwnServer,
+        url: "https://brain.synthetic.ts.net".to_owned(),
+        consent_version: HOSTING_CONSENT_VERSION,
+    };
+    assert_eq!(request.action(), expected);
+    assert!(request.action().needs_fresh_local_check());
+    let words = request.describe();
+    assert!(words.contains("someone else controls"), "{words}");
+    assert!(words.contains("https://brain.synthetic.ts.net"), "{words}");
+    assert!(!words.contains(&token), "{words}");
+    assert!(!format!("{request:?}").contains(&token));
+    assert_eq!(stored_hosting(&app), None, "nothing before the check");
+
+    assert_eq!(
+        app.confirm_owner_now(OwnerCheck::passphrase(WRONG)),
+        Err(OwnerAuthError::WrongPassphrase)
+    );
+    assert_eq!(
+        stored_hosting(&app),
+        None,
+        "nothing after a wrong passphrase"
+    );
+
+    hosting::submit(&mut app, None);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    let host = stored_hosting(&app).expect("stored host");
+    assert_eq!(host.kind, BouncerHostKind::OwnServer);
+    assert_eq!(host.url, "https://brain.synthetic.ts.net");
+    assert_eq!(host.consent_version, HOSTING_CONSENT_VERSION);
+    {
+        let shared = app.owner_ui.session.shared_vault();
+        let guard = shared.lock().unwrap();
+        let bearer = guard
+            .as_ref()
+            .expect("open vault")
+            .bouncer_host_bearer(crate::vault::BouncerHostRole::Hosting)
+            .expect("bearer")
+            .expect("a bearer");
+        assert_eq!(bearer.expose(), token, "the generated token is stored");
+    }
+    assert!(app.bouncer_host.draft.is_none(), "the draft ends");
+    assert!(!app.status_text.contains(&token), "{}", app.status_text);
+    let (text, _) = frames(&mut app, TALL);
+    assert_eq!(app.ui.sheet, None, "the sheet closes after the check");
+    assert!(text.contains("My Server"), "{text}");
+    assert!(
+        text.contains(&format!("brain.synthetic.ts.net · {GATE_STAYS}")),
+        "{text}"
+    );
+    assert!(!text.contains(&token), "{text}");
+}
+
+/// The consent step lists what leaves this Mac and what never does, names the host,
+/// the version of the words, and the Touch ID for each change. Back keeps the token.
+#[test]
+fn the_consent_sheet_lists_what_leaves_the_mac() {
+    use crate::desktop::brain_hosting_ui::{self as hosting, HostingStep, RunsOnAction};
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    super::super::open_settings(&mut app, SettingsSection::Bouncer);
+    hosting::apply(&mut app, RunsOnAction::MyServer, None);
+    let token = draft_token(&app);
+    {
+        let draft = app.bouncer_host.draft.as_mut().expect("draft");
+        draft.address = "https://brain.synthetic.ts.net".to_owned();
+        draft.step = HostingStep::Consent;
+    }
+    let (text, _) = frames(&mut app, TALL);
+    assert!(text.contains(hosting::CONSENT_TITLE), "{text}");
+    assert!(
+        text.contains("Each bouncer request goes to brain.synthetic.ts.net."),
+        "{text}"
+    );
+    for line in hosting::SENT.iter().chain(hosting::NEVER_SENT.iter()) {
+        assert!(text.contains(line), "missing {line}: {text}");
+    }
+    assert!(text.contains(hosting::TRUST_WARNING), "{text}");
+    assert!(text.contains(&hosting::consent_note()), "{text}");
+    assert!(text.contains(hosting::USE_SERVER), "{text}");
+    assert!(!text.contains(&token), "{text}");
+    app.bouncer_host.draft.as_mut().expect("draft").step = HostingStep::Server;
+    assert_eq!(draft_token(&app), token, "Back keeps the token");
+    // Cancel erases the draft.
+    let ctx = egui::Context::default();
+    super::super::close_sheet(&mut app, &ctx);
+    assert!(app.bouncer_host.draft.is_none());
+}
+
+/// A stored host that cannot be used shows the fallback: the brain runs on this Mac and
+/// the row says why, once. The return to this Mac needs the owner check too.
+#[test]
+fn a_host_that_cannot_be_used_shows_the_fallback_and_the_return_needs_the_check() {
+    use crate::desktop::brain_hosting_ui::{self as hosting, FALLBACK_HEADLINE, RunsOnAction};
+    use crate::vault::{BouncerHostChange, BouncerHostKind, HOSTING_CONSENT_VERSION};
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    super::super::open_settings(&mut app, SettingsSection::Bouncer);
+    {
+        let shared = app.owner_ui.session.shared_vault();
+        let mut guard = shared.lock().unwrap();
+        guard
+            .as_mut()
+            .expect("open vault")
+            .set_bouncer_host(
+                crate::vault::BouncerHostRole::Hosting,
+                &BouncerHostChange {
+                    kind: BouncerHostKind::Connect,
+                    url: "https://brain.connect.example".to_owned(),
+                    bearer: None,
+                    consent_version: HOSTING_CONSENT_VERSION,
+                },
+                1,
+            )
+            .expect("connect row");
+    }
+    app.bouncer_host.problem = Some(crate::broker::brain_host::CONNECT_UNAVAILABLE.to_owned());
+    let (text, _) = frames(&mut app, TALL);
+    assert!(text.contains("Apassy Connect"), "{text}");
+    assert!(text.contains(FALLBACK_HEADLINE), "{text}");
+    assert!(
+        text.contains("needs the Connect sign-in, which this version does not have yet."),
+        "{text}"
+    );
+    assert_eq!(text.matches("runs on this Mac").count(), 1, "{text}");
+
+    hosting::apply(&mut app, RunsOnAction::ThisMac, None);
+    let request = app
+        .owner
+        .check
+        .as_ref()
+        .expect("owner check")
+        .request
+        .clone();
+    assert_eq!(
+        request.action(),
+        OwnerAction::ChangeBouncerHosting {
+            kind: BouncerHostKind::ThisMac,
+            url: String::new(),
+            consent_version: 0,
+        }
+    );
+    assert!(request.action().needs_fresh_local_check());
+    assert!(stored_hosting(&app).is_some(), "nothing before the check");
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert_eq!(stored_hosting(&app), None);
+}
+
+/// A remote bouncer brain says whether the owner's server answers. No answer is not an
+/// allowance: every run waits for the owner. The note names no address.
+#[test]
+fn a_remote_brain_state_waits_for_the_owner_and_names_no_address() {
+    use super::super::kit::Tone;
+    let (words, tone, note) = super::remote_server_words(Some(false), None);
+    assert_eq!(words, "Not running");
+    assert_eq!(tone, Tone::Warning);
+    assert_eq!(note.as_deref(), Some(super::REMOTE_DOWN));
+    let (words, tone, note) = super::remote_server_words(Some(true), Some("apassy-base-v1"));
+    assert_eq!((words.as_str(), tone), ("Ready", Tone::Good));
+    assert_eq!(
+        note.as_deref(),
+        Some("Brain: apassy-base-v1 on your server.")
+    );
+    let (words, _, _) = super::remote_server_words(None, None);
+    assert_eq!(words, "Checking");
+}

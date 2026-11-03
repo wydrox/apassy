@@ -1,11 +1,17 @@
 # Isolation tests
 
-This directory holds two things:
+This directory holds three things:
 
 1. `product_profile.rs` — the product isolation test for goal items I1, I2, and
    I4. It uses the real Seatbelt profile in `sandbox/apassy-agent-host.sb` and
    the `apassy-sandbox` launcher.
-2. `test_fixture_boundary.py` — the older P0 filesystem boundary fixture. It is
+2. `linux_sandbox.rs` — the Linux bubblewrap sandbox (`apassy::isolation::linux`,
+   unit X1 of the s5 plan; [isolation-linux.md](../../docs/operations/isolation-linux.md)).
+   Linux only. It needs bubblewrap with user namespaces; without them it prints a
+   note and passes, except with `APASSY_REQUIRE_BWRAP=1` (the `linux-isolation`
+   CI job). Run it with
+   `APASSY_REQUIRE_BWRAP=1 cargo nextest run --all-features --test it -E 'test(/^isolation_linux::/)'`.
+3. `test_fixture_boundary.py` — the older P0 filesystem boundary fixture. It is
    not product isolation evidence.
 
 Real-secret gate: BLOCKED.

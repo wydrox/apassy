@@ -3846,6 +3846,8 @@ fn add_questions_membership(app: &mut DesktopApp, url: &str) {
                     crate::vault::MembershipPurpose::Questions,
                 ]),
                 created_at: 0,
+                pin: None,
+                alt: Vec::new(),
             })
         })
         .expect("open vault")

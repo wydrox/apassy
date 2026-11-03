@@ -277,6 +277,8 @@ fn relay_memberships_stay_on_their_mac() {
         key_pkcs8: Zeroizing::new(vec![0x3c; 138]),
         purposes: BTreeSet::from([MembershipPurpose::Questions]),
         created_at: 0,
+        pin: None,
+        alt: Vec::new(),
     })
     .unwrap();
     let copy = w.copy_of(true);
@@ -304,6 +306,8 @@ fn relay_memberships_stay_on_their_mac() {
         key_pkcs8: Zeroizing::new(vec![0x3d; 138]),
         purposes: BTreeSet::from([MembershipPurpose::Sync]),
         created_at: 0,
+        pin: None,
+        alt: Vec::new(),
     })
     .unwrap();
     assert!(solo.relay_device().unwrap().is_some());

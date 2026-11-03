@@ -53,18 +53,33 @@ mod secret_bytes {
         Vec::<u8>::deserialize(deserializer).map(Zeroizing::new)
     }
 }
+/// The link code of a device link without a handoff: the fragment up to its first
+/// parameter (`&pin=…`, contract node-pairing-v1 section 5).
+fn link_code_of(raw_link: &str) -> Option<&str> {
+    let fragment = raw_link.split_once("/link#")?.1;
+    fragment.split('&').next()
+}
+
 // Never print secret-bearing handoffs.
 impl PairingChannel {
     pub fn team_id(&self) -> Option<&str> {
-        crate::sync::relay_crypto::link_code_team(self.raw_link.split_once("/link#")?.1)
+        crate::sync::relay_crypto::link_code_team(link_code_of(&self.raw_link)?)
     }
     pub fn qid(&self) -> &str {
         &self.qid
     }
+    /// A new channel for the device link `raw_link` without a handoff: a hosted link, or
+    /// a pinned one with its `pin`, `alt`, and `name` (node-pairing-v1). The AAD and the
+    /// safety words cover `raw_link` exactly as written, so they cover the pin too
+    /// (section 8).
     pub fn generate(raw_link: &str) -> Option<Self> {
-        let (origin, code) = raw_link.split_once("/link#")?;
-        crate::sync::RelayUrl::parse(origin).ok()?;
-        crate::sync::relay_crypto::link_code_team(code)?;
+        let paired = crate::sync::PairedLink::parse(raw_link).ok()?;
+        if paired.kind != crate::sync::LinkKind::Device
+            || paired.handoff.is_some()
+            || paired.without_handoff.as_str() != raw_link
+        {
+            return None;
+        }
         let mac = DeviceKey::generate().ok()?;
         let mut bytes = Zeroizing::new([0; 32]);
         getrandom::fill(bytes.as_mut()).ok()?;
@@ -86,11 +101,22 @@ impl PairingChannel {
             encode_b64u(&self.mac_public)
         ))
     }
+    /// Read the handoff of a scanned or pasted device link. Returns "the original full
+    /// link without handoff" of the AAD (node-pairing-v1 section 8): the link, without
+    /// the white space at its ends, up to `&handoff=`, with its `pin`, `alt`, and `name`
+    /// exactly as written. A link without a pin gives the same text as before that
+    /// contract. A link that the grammar refuses has no channel.
     pub fn parse(link: &str) -> Option<(&str, Self)> {
-        let (raw, capsule) = link.rsplit_once(MARK)?;
-        let (origin, code) = raw.split_once("/link#")?;
-        crate::sync::RelayUrl::parse(origin).ok()?;
-        crate::sync::relay_crypto::link_code_team(code)?;
+        let paired = crate::sync::PairedLink::parse(link).ok()?;
+        if paired.kind != crate::sync::LinkKind::Device {
+            return None;
+        }
+        let capsule = paired.handoff.as_deref()?;
+        let trimmed = link.trim_matches(|c: char| c.is_ascii_whitespace());
+        let raw = trimmed.get(..paired.without_handoff.len())?;
+        if raw != paired.without_handoff.as_str() || !trimmed[raw.len()..].starts_with(MARK) {
+            return None;
+        }
         let mut parts = capsule.split('.');
         if parts.next()? != "2" {
             return None;
@@ -498,5 +524,80 @@ mod tests {
         assert!(handoff.devices.iter().any(|d| {
             d.kind == TrustedDeviceKind::Watch && d.sign_key == watch_relay.public_key()
         }));
+    }
+
+    const PIN: &str = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE";
+
+    fn link_code() -> String {
+        format!("apassy_lnk_{TEAM}_{}", "ab".repeat(32))
+    }
+
+    /// Contract node-pairing-v1 section 8: the AAD and the safety words take the link up
+    /// to `&handoff=` with the pin, the alternatives, and the name exactly as written, so
+    /// a changed pin gives other words; a link without a pin gives today's text.
+    #[test]
+    fn a_handoff_after_a_pinned_fragment_binds_the_pin() {
+        let raw = format!(
+            "https://100.64.0.7:8444/link#{}&pin={PIN}&alt=apassy-mini.tail0123.ts.net&name=Studio",
+            link_code()
+        );
+        let channel = PairingChannel::generate(&raw).unwrap();
+        assert_eq!(channel.team_id(), Some(TEAM));
+        let link = channel.link(&raw);
+        let (read, phone_channel) =
+            PairingChannel::parse(&format!(" {}\n", link.as_str())).unwrap();
+        assert_eq!(read, raw, "the original full link without handoff");
+        assert_eq!(phone_channel.qid(), channel.qid());
+        assert_eq!(phone_channel.team_id(), Some(TEAM));
+        // The relay call strips the handoff and the pin: the code alone goes.
+        let (url, code) = crate::sync::PendingJoin::parse_link(&link, "").unwrap();
+        assert_eq!(code.as_str(), link_code());
+        assert_eq!(url.pin().unwrap().text(), PIN);
+
+        // Both devices compute the same words; a link with another pin gives others.
+        let phone = DeviceKey::generate().unwrap();
+        let name = "Synthetic iPhone";
+        let mac_words = channel.mac_safety(TEAM, phone.public_key(), name).unwrap();
+        assert_eq!(
+            phone_channel.phone_safety(TEAM, &phone, name).unwrap(),
+            mac_words
+        );
+        let other_pin = crate::sync::encode_b64u(&[7u8; 32]);
+        let tampered = link.replace(PIN, &other_pin);
+        let (_, tampered_channel) = PairingChannel::parse(&tampered).unwrap();
+        assert_ne!(
+            tampered_channel.phone_safety(TEAM, &phone, name).unwrap(),
+            mac_words
+        );
+
+        // A hosted link keeps today's AAD text.
+        let hosted = format!("https://relay.example.test/link#{}", link_code());
+        let channel = PairingChannel::generate(&hosted).unwrap();
+        let (read, _) = PairingChannel::parse(&channel.link(&hosted)).unwrap();
+        assert_eq!(read, hosted);
+    }
+
+    #[test]
+    fn a_channel_needs_a_device_link_of_the_grammar() {
+        let code = link_code();
+        let team_code = format!("apassy_tcd_{}", "cd".repeat(32));
+        for raw in [
+            // A pair link, an unknown key, a pin of another form, and a link with a
+            // handoff already.
+            format!("https://100.64.0.7:8444/pair#{team_code}&pin={PIN}"),
+            format!("https://relay.example.test/link#{code}&foo=1"),
+            format!("https://100.64.0.7:8444/link#{code}&pin={}", &PIN[..42]),
+            format!("https://relay.example.test/link#{code}&alt=b.example.com"),
+            format!(" https://relay.example.test/link#{code}"),
+        ] {
+            assert!(PairingChannel::generate(&raw).is_none(), "{raw}");
+        }
+        let raw = format!("https://relay.example.test/link#{code}");
+        let channel = PairingChannel::generate(&raw).unwrap();
+        assert!(PairingChannel::generate(&channel.link(&raw)).is_none());
+        // A link without a handoff, or with a broken one, has no channel.
+        assert!(PairingChannel::parse(&raw).is_none());
+        let broken = channel.link(&raw).replace("&handoff=2.", "&handoff=3.");
+        assert!(PairingChannel::parse(&broken).is_none());
     }
 }

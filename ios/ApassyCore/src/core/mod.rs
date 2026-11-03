@@ -49,7 +49,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use apassy::sync::{RelayConfig, RelaySync};
+use apassy::sync::RelaySync;
 use apassy::vault::Vault;
 
 use config::{Paths, PhoneList, VaultEntry};
@@ -774,16 +774,13 @@ impl Core {
     /// The relay sync of the selected vault, made again after a selection.
     fn select_relay(&self) -> CoreResult<()> {
         let entry = guard(&self.list).selected_entry().cloned();
-        let relay = entry.and_then(|entry| {
-            entry.relay_url.as_ref().map(|url| {
-                RelaySync::new(RelayConfig::in_data_dir(
-                    &self.paths.data_dir,
-                    &self.paths.vault_file(&entry.id),
-                    url,
-                    &entry.id,
-                ))
-            })
-        });
+        // A node relay keeps its pin and its alternatives (node-pairing-v1 section 9).
+        let relay = match entry {
+            Some(entry) => entry
+                .relay_config(&self.paths.data_dir, &self.paths.vault_file(&entry.id))?
+                .map(RelaySync::new),
+            None => None,
+        };
         *guard(&self.relay) = relay;
         *guard(&self.status) = sync::Memory::default();
         Ok(())
@@ -938,6 +935,8 @@ impl Core {
             team_id: None,
             device_id: None,
             added_at: now() as i64,
+            pin: None,
+            alt: Vec::new(),
         };
         {
             let mut list = guard(&self.list);

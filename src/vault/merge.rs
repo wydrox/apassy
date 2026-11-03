@@ -49,7 +49,7 @@ use super::sync::{SyncIdentity, content_digest, hash_value, read_sync_row, to_he
 use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
 use super::{
     FOLDER_SCHEMA_VERSION, MAX_ITEM_EVENTS, TRUSTED_DEVICE_SCHEMA_VERSION, Vault, agents, history,
-    schema18, schema19, verify_expected_columns_in,
+    schema18, schema19, schema32, verify_expected_columns_in,
 };
 
 /// Child tables of a credential in schema 14. Their triggers come with schema 14.
@@ -123,7 +123,7 @@ pub const LOCAL_TABLES: [&str; 39] = [
 
 /// Tables whose rows sync. `vault_meta` syncs as the one row of the file; its token
 /// lifetime is set to the default in a pushed copy, because it is a setting of each Mac.
-pub const SYNCED_TABLES: [&str; 22] = [
+pub const SYNCED_TABLES: [&str; 24] = [
     "vault_meta",
     "item",
     "item_tag",
@@ -146,6 +146,8 @@ pub const SYNCED_TABLES: [&str; 22] = [
     "vault_secret",
     "trusted_device",
     "item_home",
+    "short_lived",
+    "member_key",
 ];
 
 /// History events of a credential that sync. The others (a reveal, agent access, a
@@ -173,15 +175,15 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
 /// only local tables and a local column (the cloud agents of the node, `schema26.rs`):
 /// a copy has none of their rows. Schema 27 adds local columns and a local table (the
 /// figures of the Bouncer section, `schema27.rs`): a copy has none of their rows either.
-/// Schema 29 adds only a local table and columns of local tables (the host of the
-/// bouncer brain, `schema29.rs`): a copy has none of their rows either. Schema 34 adds
-/// only a column of a local table (the account key source of relay memberships,
-/// `schema34.rs`): a copy has none of its rows either.
+/// Schema 28 adds only columns of a local table (the pin and the alternatives of a relay
+/// membership, `schema28.rs`): a copy has none of its rows either. Schema 29 adds only a
+/// local table and columns of local tables (the host of the bouncer brain,
+/// `schema29.rs`): a copy has none of their rows either. Schema 32 adds two synced child
+/// tables of a credential (short-lived credentials and member keys, `schema32.rs`): a
+/// copy of an earlier schema has none of their rows, so its records keep the rows of this
+/// vault ([`keep_local_v32`]). Schema 34 adds only a column of a local table (the account
+/// key source of relay memberships, `schema34.rs`): a copy has none of its rows either.
 pub(super) const UPGRADABLE_SCHEMA: i64 = super::schema34::PREVIOUS_SCHEMA_VERSION;
-
-/// Numbers inside the upgradable range that no build ever wrote: the chain went from 27
-/// to 29. A copy that claims one is refused.
-const NO_BUILD_SCHEMAS: [i64; 1] = [28];
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
@@ -189,19 +191,32 @@ pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERS
 
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
 // Schemas 20 through 23 add local state only, schema 24 only widens a `CHECK` of a
-// synced table, schema 25 only adds values of reserved item fields, and schemas 26,
-// 27, 29 and 34 add local state only; future synced schemas require another merge step.
+// synced table, schema 25 only adds values of reserved item fields, schemas 26, 27, 28,
+// 29, and 34 add local state only, and [`keep_local_v32`] covers 32; future synced
+// schemas require another merge step.
 const _: () = assert!(SCHEMA_VERSION == super::schema34::ACCOUNT_KEY_SCHEMA_VERSION);
-const _: () = assert!(UPGRADABLE_SCHEMA == super::schema29::BOUNCER_HOST_SCHEMA_VERSION);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 13);
+const _: () =
+    assert!(super::schema29::PREVIOUS_SCHEMA_VERSION == super::schema28::NODE_TRUST_SCHEMA_VERSION);
+const _: () = assert!(super::schema29::PREVIOUS_SCHEMA_VERSION == OLDEST_UPGRADABLE_SCHEMA + 12);
+
+/// The steps of the chain after the contiguous run of 16 to 28, in order. Numbers between
+/// them belong to no build (other plans hold them). A step that lands in a gap is added
+/// here with its own module.
+const LATER_SCHEMAS: [i64; 3] = [
+    super::schema29::BOUNCER_HOST_SCHEMA_VERSION,
+    super::schema32::SHORT_LIVED_SCHEMA_VERSION,
+    super::schema34::ACCOUNT_KEY_SCHEMA_VERSION,
+];
+// The schema before this one is the last of the later steps before it.
+const _: () = assert!(LATER_SCHEMAS[1] == UPGRADABLE_SCHEMA);
+const _: () = assert!(LATER_SCHEMAS[2] == SCHEMA_VERSION);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
-/// one of the earlier schemas that it upgrades. A number between the previous schema
-/// and this one belongs to no build, so it is refused.
+/// one of the earlier schemas that it upgrades. A number between two steps of the chain
+/// belongs to no build, so it is refused.
 pub(super) fn is_mergeable_schema(version: i64) -> bool {
-    ((OLDEST_UPGRADABLE_SCHEMA..=UPGRADABLE_SCHEMA).contains(&version)
-        && !NO_BUILD_SCHEMAS.contains(&version))
-        || version == SCHEMA_VERSION
+    (OLDEST_UPGRADABLE_SCHEMA..=super::schema29::PREVIOUS_SCHEMA_VERSION).contains(&version)
+        || LATER_SCHEMAS.contains(&version)
 }
 
 /// A table whose rows sync one by one.
@@ -655,6 +670,32 @@ struct Record {
     shares: Vec<String>,
     /// Schema 19: the shared vault and the home credential of a mirror.
     home: Option<(String, String)>,
+    /// Schema 32: the source row (way C), when the item is a source.
+    short_lived: Option<ShortLivedRow>,
+    /// Schema 32: the member key row, when the item is a key of one member.
+    member_key: Option<MemberKeyRow>,
+}
+
+/// The `short_lived` row of a record. Its times are not content: two copies with the
+/// same kind, settings, and switch hold the same source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShortLivedRow {
+    kind: String,
+    settings: String,
+    enabled: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+/// The `member_key` row of a record. Its time is not content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberKeyRow {
+    source_uuid: String,
+    team_id: String,
+    member_id: i64,
+    manager: String,
+    remote_id: String,
+    created_at: i64,
 }
 
 impl Record {
@@ -744,6 +785,29 @@ impl Record {
             text(shared_vault);
             text(home);
         }
+        if self.short_lived.is_some() || self.member_key.is_some() {
+            text("v32");
+            match &self.short_lived {
+                Some(row) => {
+                    text("l");
+                    text(&row.kind);
+                    text(&row.settings);
+                    text(&row.enabled.to_string());
+                }
+                None => text("-"),
+            }
+            match &self.member_key {
+                Some(row) => {
+                    text("k");
+                    text(&row.source_uuid);
+                    text(&row.team_id);
+                    text(&row.member_id.to_string());
+                    text(&row.manager);
+                    text(&row.remote_id);
+                }
+                None => text("-"),
+            }
+        }
         let mut out = [0u8; 32];
         out.copy_from_slice(ctx.finish().as_ref());
         out
@@ -782,6 +846,7 @@ fn load_records(
     let filter = scope.item_filter();
     let v18 = version >= FOLDER_SCHEMA_VERSION;
     let v19 = version >= TRUSTED_DEVICE_SCHEMA_VERSION;
+    let v32 = version >= schema32::SHORT_LIVED_SCHEMA_VERSION;
     let mut shares = if v18 {
         grouped(
             conn,
@@ -839,6 +904,21 @@ fn load_records(
     } else {
         ("NULL, NULL", String::new())
     };
+    let (v32_columns, v32_joins) = if v32 {
+        (
+            "sl.kind, sl.settings, sl.enabled, sl.created_at, sl.updated_at,
+             mk.source_uuid, mk.team_id, mk.member_id, mk.manager, mk.remote_id, mk.created_at",
+            format!(
+                "LEFT JOIN {schema}.short_lived sl ON sl.item_id = i.id
+                 LEFT JOIN {schema}.member_key mk ON mk.item_id = i.id"
+            ),
+        )
+    } else {
+        (
+            "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL",
+            String::new(),
+        )
+    };
     let mut records = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
@@ -847,7 +927,7 @@ fn load_records(
                  d.project, d.environment, d.risk, d.scope, d.reversibility, d.provider,
                  e.env_name, e.field, e.placeholder_hosts,
                  x.profile, x.base_url,
-                 {v18_columns}, {v19_columns}
+                 {v18_columns}, {v19_columns}, {v32_columns}
              FROM {schema}.item i
              LEFT JOIN {schema}.item_archive a ON a.item_id = i.id
              LEFT JOIN {schema}.declaration d ON d.item_id = i.id
@@ -855,6 +935,7 @@ fn load_records(
              LEFT JOIN {schema}.destination x ON x.item_id = i.id
              {v18_joins}
              {v19_joins}
+             {v32_joins}
              WHERE i.uuid IS NOT NULL AND ({filter})"
         ))
         .map_err(storage)?;
@@ -880,6 +961,44 @@ fn load_records(
         };
         let destination = match (text(18)?, text(19)?) {
             (Some(profile), Some(url)) => Some((profile, url)),
+            _ => None,
+        };
+        let number = |index: usize| row.get::<_, Option<i64>>(index).map_err(storage);
+        let short_lived = match (text(28)?, text(29)?, number(30)?, number(31)?, number(32)?) {
+            (Some(kind), Some(settings), Some(enabled), Some(created_at), Some(updated_at)) => {
+                Some(ShortLivedRow {
+                    kind,
+                    settings,
+                    enabled,
+                    created_at,
+                    updated_at,
+                })
+            }
+            _ => None,
+        };
+        let member_key = match (
+            text(33)?,
+            text(34)?,
+            number(35)?,
+            text(36)?,
+            text(37)?,
+            number(38)?,
+        ) {
+            (
+                Some(source_uuid),
+                Some(team_id),
+                Some(member_id),
+                Some(manager),
+                Some(remote_id),
+                Some(created_at),
+            ) => Some(MemberKeyRow {
+                source_uuid,
+                team_id,
+                member_id,
+                manager,
+                remote_id,
+                created_at,
+            }),
             _ => None,
         };
         let sources = match [text(22)?, text(23)?, text(24)?, text(25)?] {
@@ -909,6 +1028,8 @@ fn load_records(
                 (Some(shared_vault), Some(home)) => Some((shared_vault, home)),
                 _ => None,
             },
+            short_lived,
+            member_key,
         };
         records.insert(uuid, record);
     }
@@ -1110,6 +1231,19 @@ fn keep_local_v19(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String
     for (uuid, record) in remote.iter_mut() {
         if let Some(ours) = local.get(uuid) {
             record.home.clone_from(&ours.home);
+        }
+    }
+}
+
+/// Give the records of a copy before schema 32 the source row and the member key row of
+/// this vault, in memory, as [`keep_local_v18`] does for the values of schema 18: a copy
+/// of an earlier schema cannot hold them. So an old copy never turns way C off, and the
+/// upgrade makes no conflict.
+fn keep_local_v32(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String, Record>) {
+    for (uuid, record) in remote.iter_mut() {
+        if let Some(ours) = local.get(uuid) {
+            record.short_lived.clone_from(&ours.short_lived);
+            record.member_key.clone_from(&ours.member_key);
         }
     }
 }
@@ -1349,6 +1483,39 @@ fn write_children(
         )
         .map_err(storage)?;
     }
+    // A conflict copy has no variable, so it is neither a source nor a member key.
+    if let Some(row) = &record.short_lived {
+        tx.execute(
+            "INSERT INTO short_lived (item_id, kind, settings, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                id,
+                row.kind,
+                row.settings,
+                row.enabled,
+                row.created_at,
+                row.updated_at
+            ],
+        )
+        .map_err(storage)?;
+    }
+    if let Some(row) = &record.member_key {
+        tx.execute(
+            "INSERT INTO member_key
+                 (item_id, source_uuid, team_id, member_id, manager, remote_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                id,
+                row.source_uuid,
+                row.team_id,
+                row.member_id,
+                row.manager,
+                row.remote_id,
+                row.created_at
+            ],
+        )
+        .map_err(storage)?;
+    }
     if let Some(at) = record.archived_at {
         tx.execute(
             "INSERT INTO item_archive (item_id, archived_at) VALUES (?1, ?2)",
@@ -1407,7 +1574,7 @@ fn write_children(
 }
 
 fn delete_children(tx: &rusqlite::Transaction<'_>, id: i64) -> VaultResult<()> {
-    for table in CHILD_TABLES {
+    for table in CHILD_TABLES.into_iter().chain(schema32::CHILD_TABLES_V32) {
         tx.execute(&format!("DELETE FROM {table} WHERE item_id = ?1"), [id])
             .map_err(storage)?;
     }
@@ -1491,6 +1658,7 @@ fn delete_record(tx: &rusqlite::Transaction<'_>, id: i64) -> VaultResult<()> {
     agents::delete_item_links(tx, id)?;
     schema18::forget_item(tx, id)?;
     schema19::forget_item(tx, id)?;
+    schema32::forget_item(tx, id)?;
     history::forget_item(tx, id)?;
     tx.execute("DELETE FROM item WHERE id = ?1", [id])
         .map_err(storage)?;
@@ -1909,6 +2077,9 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
     if remote_schema < TRUSTED_DEVICE_SCHEMA_VERSION {
         keep_local_v19(&mut remote, &local);
     }
+    if remote_schema < schema32::SHORT_LIVED_SCHEMA_VERSION {
+        keep_local_v32(&mut remote, &local);
+    }
     // Folders, shared vaults, vault secrets, and trusted devices: the later row wins.
     for lww in &LWW_TABLES {
         report.folders += merge_lww(&tx, lww, remote_schema)?;
@@ -1995,6 +2166,19 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
                             "INSERT INTO item_policy (item_id, always_ask) VALUES (?1, 1)
                              ON CONFLICT(item_id) DO UPDATE SET always_ask = 1",
                             [ours.id],
+                        )
+                        .map_err(storage)?;
+                    }
+                    // Way C is a safety switch too: when both sides hold the same kind of
+                    // source and either has it on, it stays on, so a concurrent edit never
+                    // turns it off. Both Macs get the same result.
+                    if let (Some(a), Some(b)) = (&ours.short_lived, &theirs.short_lived)
+                        && a.kind == b.kind
+                        && (a.enabled == 1 || b.enabled == 1)
+                    {
+                        tx.execute(
+                            "UPDATE short_lived SET enabled = 1 WHERE item_id = ?1 AND kind = ?2",
+                            (ours.id, &a.kind),
                         )
                         .map_err(storage)?;
                     }

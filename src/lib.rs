@@ -53,9 +53,19 @@ pub mod relay {
 #[cfg(feature = "desktop")]
 pub mod desktop;
 
+/// Process isolation outside Seatbelt: the bubblewrap sandbox of Linux (ADR 0011
+/// stage 2, ADR 0037 stage 8). It needs no feature, so `apassy-sandbox` uses it.
+pub mod isolation;
+
 /// Import from 1Password (1PUX and CSV exports). It needs the vault types.
 #[cfg(feature = "vault")]
 pub mod import;
+
+/// Short-lived credentials, "way C" (ADR 0037 stage 6, contract private-sharing-v1):
+/// the lease providers, AWS SigV4, and the no-secret scan of the tests. It needs the
+/// vault (`ring`, the broker's HTTP client, the field types).
+#[cfg(feature = "vault")]
+pub mod lease;
 
 /// Time-based one-time passwords shared by the desktop and iPhone vaults.
 #[cfg(feature = "vault")]

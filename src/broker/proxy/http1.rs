@@ -49,6 +49,15 @@ impl<S: Read> Conn<S> {
         &self.buf[self.start..]
     }
 
+    /// Takes the bytes read from the stream but not used yet, for a protocol that
+    /// follows the HTTP heads (a WebSocket). The buffer is erased.
+    pub fn take_buffered(&mut self) -> Zeroizing<Vec<u8>> {
+        let rest = Zeroizing::new(self.buffered().to_vec());
+        self.buf.zeroize();
+        self.start = 0;
+        rest
+    }
+
     fn consume(&mut self, count: usize) {
         self.start += count;
         if self.start == self.buf.len() {

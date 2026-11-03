@@ -232,7 +232,7 @@ fn presize(value: &mut String, capacity: usize) {
 /// buffer (key-memory review F4). The widget ID is global ([`secret_field_id`]), so
 /// the app can clear the undo history (F1).
 #[cfg(feature = "vault")]
-fn secure_input(
+pub(crate) fn secure_input(
     ui: &mut egui::Ui,
     salt: &str,
     value: &mut String,
@@ -536,6 +536,10 @@ pub(crate) enum Sheet {
     Share {
         item_id: u64,
     },
+    /// "Use My Server": the address, the token and the consent of the bouncer brain
+    /// host (ADR 0035). The draft with the token is in `app.bouncer_host.draft`.
+    #[cfg(feature = "vault")]
+    BrainHosting,
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {
@@ -827,6 +831,7 @@ pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
             forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
         }
         Some(Sheet::Import) => app.import.forget(),
+        Some(Sheet::BrainHosting) => crate::desktop::brain_hosting_ui::forget(app, ctx),
         Some(Sheet::Duplicates) => {
             app.ui.duplicates = Default::default();
             app.import.forget();

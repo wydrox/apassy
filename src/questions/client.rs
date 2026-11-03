@@ -220,14 +220,11 @@ impl QuestionsClient {
         }
     }
 
-    /// The device of this Mac in the team of `membership`.
+    /// The device of this Mac in the team of `membership`. A membership of a node keeps
+    /// its pin and its alternatives (vault schema 28): the client then connects only with
+    /// that pin, never with the system trust store (contract node-pairing-v1 section 9).
     pub fn from_membership(membership: &RelayMembership) -> Result<Self, SyncError> {
-        let client = Self::new(
-            &membership.relay_url,
-            &membership.team_id,
-            membership.device_id,
-            membership.key_pkcs8.clone(),
-        )?;
+        let client = Self::from_member(RelayMember::from_membership(membership)?);
         if client.public_key() != membership.public_key.as_slice() {
             return Err(SyncError::Damaged);
         }

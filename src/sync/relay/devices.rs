@@ -23,7 +23,8 @@ use super::{
     sync_error,
 };
 use crate::sync::relay_crypto::{decode_b64u, link_code_team, safety_words};
-use crate::sync::{RelayRefusal, SyncError};
+use crate::sync::relay_http::RelayUrl;
+use crate::sync::{LinkKind, PairedLink, RelayRefusal, SyncError};
 use crate::vault::{Vault, VaultErrorKind};
 
 /// Where a device call finds the device key of this Mac.
@@ -96,6 +97,39 @@ impl fmt::Debug for LinkCode {
         f.debug_struct("LinkCode")
             .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
+    }
+}
+
+/// The text of a device link for `code` at `url`. A hosted address gives today's
+/// `<relay URL>/link#<code>`; a pinned one adds its pin, its alternatives, and the node
+/// name `name` (contract node-pairing-v1 section 5), and the result passes the grammar.
+pub(super) fn link_text(
+    url: &RelayUrl,
+    code: &str,
+    name: Option<&str>,
+) -> Result<Zeroizing<String>, SyncError> {
+    if url.pin().is_none() {
+        return Ok(Zeroizing::new(format!("{}/link#{code}", url.as_str())));
+    }
+    PairedLink::format(LinkKind::Device, url, code, name).map_err(SyncError::LinkInvalid)
+}
+
+impl LinkCode {
+    /// The same code as a link that names `advertised`: the origin that the other
+    /// device stores and signs, with its pin and alternatives when it is pinned, and the
+    /// node name `name` (node-pairing-v1 section 6, "the Mac's own device links name the
+    /// node origin"). The Mac's node reaches its relay over the loopback; the link never
+    /// names that destination.
+    pub fn for_origin(
+        &self,
+        advertised: &RelayUrl,
+        name: Option<&str>,
+    ) -> Result<LinkCode, SyncError> {
+        Ok(LinkCode {
+            code: self.code.clone(),
+            link: link_text(advertised, &self.code, name)?,
+            expires_at: self.expires_at,
+        })
     }
 }
 
@@ -183,7 +217,7 @@ impl RelaySync {
         if link_code_team(&code) != Some(session.team_id.as_str()) {
             return Err(SyncError::RelayUnreachable);
         }
-        let link = Zeroizing::new(format!("{}/link#{}", session.url.as_str(), code.as_str()));
+        let link = link_text(&session.url, &code, None)?;
         Ok(LinkCode {
             code,
             link,

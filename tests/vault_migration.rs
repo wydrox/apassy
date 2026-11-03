@@ -2395,10 +2395,12 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     for name in names {
         conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
     }
-    // Schema 34 (the account key source of relay memberships) and 29 (the host of the
-    // bouncer brain) first.
+    // Schema 34 (the account key source), 32 (short-lived credentials), 29 (the host
+    // of the bouncer brain), and 28 (the pinned trust of a membership) first.
     conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
+    conn.execute_batch(SCHEMA32_ONLY).expect("drop schema 32");
     conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
+    conn.execute_batch(SCHEMA28_ONLY).expect("drop schema 28");
     // Schema 27 (the Bouncer figures) and 26 (the cloud agents of the node) first, then
     // 23 to 20.
     conn.execute_batch(
@@ -2511,8 +2513,192 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
 }
 
 /// The schema before schema 29 in the migration chain (`src/vault/schema29.rs`,
-/// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
-const PREVIOUS_VERSION: i64 = 27;
+/// `PREVIOUS_SCHEMA_VERSION`): schema 28, the pinned trust of a membership. Change it
+/// with that constant when the step is renumbered.
+const PREVIOUS_VERSION: i64 = 28;
+
+/// The schema before schema 28 (`src/vault/schema28.rs`, `PREVIOUS_SCHEMA_VERSION`).
+const BEFORE_28_VERSION: i64 = 27;
+
+/// What a file of schema 28 has and a file of schema 27 has not: the pin and the
+/// alternatives of a relay membership (contract node-pairing-v1 section 9).
+const SCHEMA28_ONLY: &str = "
+ALTER TABLE relay_membership DROP COLUMN alt;
+ALTER TABLE relay_membership DROP COLUMN pin;
+";
+
+const NODE_PIN: &str = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE";
+const MIG_TEAM: &str = "t_mig0000028";
+
+fn mig_membership(relay_url: &str) -> apassy::vault::RelayMembership {
+    apassy::vault::RelayMembership {
+        team_id: MIG_TEAM.to_owned(),
+        relay_url: relay_url.to_owned(),
+        device_id: 4,
+        public_key: relay_public_key(),
+        key_pkcs8: zeroize::Zeroizing::new(vec![0x6b_u8; 138]),
+        purposes: std::collections::BTreeSet::from([apassy::vault::MembershipPurpose::Questions]),
+        created_at: 0,
+        pin: None,
+        alt: Vec::new(),
+    }
+}
+
+/// A file of schema 27: a current vault with an item and a hosted questions membership,
+/// then without the parts of schemas 32, 29, and 28 and with the marks of schema 27.
+fn build_schema27(path: &Path) {
+    let mut vault = Vault::create(path, PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    vault
+        .add(apassy::vault::ItemDraft {
+            title: "MIG 27".to_owned(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![apassy::vault::Field {
+                name: "token".to_owned(),
+                value: apassy::vault::SecretValue::new("MIG-SECRET-27".to_owned()),
+                secret: true,
+            }],
+        })
+        .expect("item");
+    vault
+        .add_relay_membership(&mig_membership("https://relay.mig.invalid"))
+        .expect("membership");
+    vault.lock().expect("lock");
+    drop(vault);
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
+    conn.execute_batch(SCHEMA32_ONLY).expect("drop schema 32");
+    conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
+    conn.execute_batch(SCHEMA28_ONLY).expect("drop schema 28");
+    conn.execute_batch(&format!(
+        "UPDATE vault_meta SET schema_version = {BEFORE_28_VERSION} WHERE id = 1;
+         PRAGMA user_version = {BEFORE_28_VERSION};"
+    ))
+    .expect("schema 27 marks");
+    conn.close().map_err(|(_, e)| e).expect("close");
+    assert_eq!(raw_versions(path), (BEFORE_28_VERSION, BEFORE_28_VERSION));
+}
+
+/// Unlock moves a file of schema 27 through schema 28 and 29 to the current schema in
+/// one migration: the membership stays hosted (no pin, no alternatives), the columns of
+/// 28 and the table of 29 are there, and a node pairing can then keep its pin with the
+/// membership.
+#[test]
+fn unlock_migrates_27_through_28_to_29_and_memberships_have_no_pin() {
+    let dir = real_kdf_dir();
+    let path = dir.path().join("schema27.db");
+    build_schema27(&path);
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_eq!(vault.search("").expect("search").len(), 1);
+    let kept = vault
+        .relay_membership(MIG_TEAM)
+        .expect("read")
+        .expect("the membership stays");
+    assert_eq!(kept.relay_url, "https://relay.mig.invalid");
+    assert_eq!(kept.pin, None);
+    assert!(kept.alt.is_empty());
+    for role in apassy::vault::BouncerHostRole::ALL {
+        assert_eq!(vault.bouncer_host(role).expect("read"), None, "{role:?}");
+    }
+    // A new pairing of the team keeps the pin and the alternatives of its node.
+    let alt = vec!["apassy-mini.tail0123.ts.net:8444".to_owned()];
+    vault
+        .set_membership_trust(MIG_TEAM, Some(NODE_PIN), &alt)
+        .expect("trust");
+    let pinned = vault
+        .relay_membership(MIG_TEAM)
+        .expect("read")
+        .expect("row");
+    assert_eq!(pinned.pin.as_deref(), Some(NODE_PIN));
+    assert_eq!(pinned.alt, alt);
+    // Alternatives without a pin, and a pin of another shape, are refused.
+    assert_eq!(
+        vault
+            .set_membership_trust(MIG_TEAM, None, &alt)
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::InvalidInput
+    );
+    assert_eq!(
+        vault
+            .set_membership_trust(MIG_TEAM, Some("short"), &[])
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::InvalidInput
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    let stored: (Option<String>, Option<String>) = conn
+        .query_row("SELECT pin, alt FROM relay_membership", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("row");
+    assert_eq!(stored.0.as_deref(), Some(NODE_PIN));
+    assert_eq!(
+        stored.1.as_deref(),
+        Some(r#"["apassy-mini.tail0123.ts.net:8444"]"#)
+    );
+    let host_rows: i64 = conn
+        .query_row("SELECT count(*) FROM bouncer_host", [], |row| row.get(0))
+        .expect("schema 29 table");
+    assert_eq!(host_rows, 0);
+    conn.close().map_err(|(_, e)| e).expect("close");
+
+    // The migrated file and a new vault have the same tables, columns, and triggers.
+    let fresh = dir.path().join("fresh-29.db");
+    let mut created = Vault::create(&fresh, PASS).expect("create");
+    created.unlock(PASS).expect("unlock");
+    drop(created);
+    assert_eq!(schema_ddl(&path), schema_ddl(&fresh));
+}
+
+/// The step to schema 28 runs in the same transaction as the step to 29: when the step
+/// to 29 fails, the file keeps schema 27, without the columns of 28.
+#[test]
+fn a_failed_step_to_29_keeps_schema_27_without_the_columns_of_28() {
+    let dir = real_kdf_dir();
+    let path = dir.path().join("blocked-27.db");
+    build_schema27(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE bouncer_host (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, e)| e).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(
+        raw_versions(&path),
+        (BEFORE_28_VERSION, BEFORE_28_VERSION),
+        "no partial migration"
+    );
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let column = conn.prepare("SELECT pin FROM relay_membership LIMIT 0");
+        assert!(column.is_err(), "no column of schema 28");
+        drop(column);
+        conn.execute_batch("DROP TABLE bouncer_host;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, e)| e).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_eq!(vault.search("").expect("search").len(), 1);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
 
 /// What a file of schema 29 has and a file of the previous schema has not: the host of
 /// the bouncer brain and the candidate columns of unit F (plan 0035).
@@ -2568,6 +2754,7 @@ fn build_previous(path: &Path) -> u64 {
     let conn = rusqlite::Connection::open(path).expect("open");
     conn.pragma_update(None, "key", PASS).expect("key");
     conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
+    conn.execute_batch(SCHEMA32_ONLY).expect("drop schema 32");
     conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
     conn.execute_batch(&format!(
         "UPDATE vault_meta SET schema_version = {PREVIOUS_VERSION} WHERE id = 1;
@@ -2652,9 +2839,135 @@ fn a_failed_migration_to_29_keeps_the_previous_schema_and_data() {
     assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 }
 
+/// The schema before schema 32 in the migration chain (`src/vault/schema32.rs`,
+/// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
+const BEFORE_32: i64 = 29;
+
+/// What a file of schema 32 has and a file of the previous schema has not: the source
+/// rows of short-lived credentials and the member keys (plan s6 unit D). Their triggers
+/// go with the tables.
+const SCHEMA32_ONLY: &str = "
+DROP TABLE member_key;
+DROP TABLE short_lived;
+";
+
+/// A file of the schema before 32: a current vault with an AWS pair item and its source
+/// row, then without the tables of schema 32 and with the marks of the previous schema.
+fn build_before_32(path: &Path) -> u64 {
+    let mut vault = Vault::create(path, PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    let item = vault
+        .add(apassy::vault::ItemDraft {
+            title: "MIG AWS".to_owned(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![
+                apassy::vault::Field {
+                    name: "access_key_id".to_owned(),
+                    value: apassy::vault::SecretValue::new("AKIAIOSFODNN7EXAMPLE".to_owned()),
+                    secret: false,
+                },
+                apassy::vault::Field {
+                    name: "secret_access_key".to_owned(),
+                    value: apassy::vault::SecretValue::new(
+                        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
+                    ),
+                    secret: true,
+                },
+            ],
+        })
+        .expect("item")
+        .id;
+    vault
+        .set_short_lived(
+            item,
+            apassy::vault::ShortLivedKind::AwsSts,
+            "{}",
+            1_700_000_000,
+        )
+        .expect("source");
+    vault.lock().expect("lock");
+    drop(vault);
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
+    conn.execute_batch(SCHEMA32_ONLY).expect("drop schema 32");
+    conn.execute_batch(&format!(
+        "UPDATE vault_meta SET schema_version = {BEFORE_32} WHERE id = 1;
+         PRAGMA user_version = {BEFORE_32};"
+    ))
+    .expect("previous marks");
+    conn.close().map_err(|(_, e)| e).expect("close");
+    assert_eq!(raw_versions(path), (BEFORE_32, BEFORE_32));
+    item
+}
+
+/// Unlock moves a file of the previous schema to 32: the tables come empty, so every item
+/// is a static key as before, and a source can be made. A failed step keeps the previous
+/// schema and its data.
+#[test]
+fn schema_32_adds_short_lived_and_member_key() {
+    let dir = real_kdf_dir();
+    let path = dir.path().join("before-32.db");
+    let item = build_before_32(&path);
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_eq!(vault.search("").expect("search").len(), 1);
+    assert_eq!(vault.short_lived(item).expect("read"), None);
+    assert!(vault.member_keys().expect("read").is_empty());
+    vault
+        .set_short_lived(
+            item,
+            apassy::vault::ShortLivedKind::AwsSts,
+            r#"{"region":"eu-central-1"}"#,
+            1_700_000_100,
+        )
+        .expect("a source after the migration");
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+
+    // A table with the name of a new table makes the step fail as a whole.
+    let blocked = dir.path().join("blocked-32.db");
+    build_before_32(&blocked);
+    {
+        let conn = rusqlite::Connection::open(&blocked).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE member_key (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, e)| e).expect("close");
+    }
+    let mut vault = Vault::open(&blocked).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(
+        raw_versions(&blocked),
+        (BEFORE_32, BEFORE_32),
+        "no partial migration"
+    );
+    {
+        let conn = rusqlite::Connection::open(&blocked).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let table = conn.prepare("SELECT kind FROM short_lived LIMIT 0");
+        assert!(table.is_err(), "no table of schema 32");
+        drop(table);
+        conn.execute_batch("DROP TABLE member_key;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, e)| e).expect("close");
+    }
+    let mut vault = Vault::open(&blocked).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_eq!(vault.search("").expect("search").len(), 1);
+    drop(vault);
+    assert_eq!(raw_versions(&blocked), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
 /// The schema before schema 34 in the migration chain (`src/vault/schema34.rs`,
 /// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
-const BEFORE_34: i64 = 29;
+const BEFORE_34: i64 = 32;
 
 /// What a file of schema 34 has and a file of the previous schema has not: the key source
 /// of relay memberships. The way back deletes the account rows first (they hold no key
@@ -2699,6 +3012,8 @@ fn build_before_34(path: &Path) {
                 apassy::vault::MembershipPurpose::Questions,
             ]),
             created_at: 0,
+            pin: None,
+            alt: Vec::new(),
         })
         .expect("membership");
     vault.lock().expect("lock");

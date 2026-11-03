@@ -260,14 +260,30 @@ pub fn new_questions_team(
     vault_name: &str,
     device_name: &str,
 ) -> Result<RelayMembership, SyncError> {
-    let url = RelayUrl::parse(relay_url)?;
+    new_questions_team_at(
+        &RelayUrl::parse(relay_url)?,
+        team_code,
+        vault_name,
+        device_name,
+    )
+}
+
+/// [`new_questions_team`] at the address `url` with its trust: on a pinned node the
+/// membership keeps the pin and the alternatives of `url` (vault schema 28), and the
+/// team is made only after the pin check.
+pub fn new_questions_team_at(
+    url: &RelayUrl,
+    team_code: &str,
+    vault_name: &str,
+    device_name: &str,
+) -> Result<RelayMembership, SyncError> {
     let team_code = team_code.trim();
     if !valid_team_code(team_code) {
         return Err(SyncError::Relay(RelayRefusal::InviteInvalid));
     }
     let key = DeviceKey::generate()?;
     let team = clean_name(vault_name, "Vault");
-    let created = create_team_on_relay(&url, team_code, &team, device_name, &key)?;
+    let created = create_team_on_relay(url, team_code, &team, device_name, &key)?;
     Ok(RelayMembership {
         team_id: created.team_id,
         relay_url: url.as_str().to_owned(),
@@ -279,6 +295,8 @@ pub fn new_questions_team(
             .unwrap_or_else(|| Zeroizing::new(Vec::new())),
         purposes: BTreeSet::from([MembershipPurpose::Questions]),
         created_at: 0,
+        pin: url.trust().pin_text(),
+        alt: url.alternative_list(),
     })
 }
 

@@ -33,6 +33,9 @@ pub(crate) struct BouncerHostFlows {
     /// Why the chosen host is not in use, for Settings. The bouncer brain then runs on
     /// this Mac.
     pub(crate) problem: Option<String>,
+    /// The "Use My Server" sheet as the owner fills it, with its token (unit J1). It
+    /// ends with the sheet and with the vault session.
+    pub(crate) draft: Option<super::brain_hosting_ui::HostingDraft>,
 }
 
 fn now() -> u64 {
@@ -70,6 +73,8 @@ impl DesktopApp {
     /// Give the model server the hosting row of the open vault when the vault session
     /// changed or a change was made. Cheap when nothing changed: one look at the epoch.
     pub(crate) fn sync_bouncer_host(&mut self) {
+        // A closed sheet or another vault session erases the draft and its token.
+        super::brain_hosting_ui::forget_closed_draft(self);
         let Some(server) = self.model_server.clone() else {
             return;
         };
@@ -125,6 +130,8 @@ impl DesktopApp {
         match result {
             Ok(()) => {
                 if role == BouncerHostRole::Hosting {
+                    // The token is in the vault now; the sheet closes after the check.
+                    self.bouncer_host.draft = None;
                     self.bouncer_host.dirty = true;
                     self.sync_bouncer_host();
                 }

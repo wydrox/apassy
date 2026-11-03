@@ -33,9 +33,10 @@ use super::verify_expected_columns_in;
 /// The schema version of the bouncer brain host.
 pub(super) const BOUNCER_HOST_SCHEMA_VERSION: i64 = 29;
 /// The newest schema before this one in the migration chain.
-pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema27::STATS_SCHEMA_VERSION;
+pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema28::NODE_TRUST_SCHEMA_VERSION;
 
-const _: () = assert!(SCHEMA_VERSION >= BOUNCER_HOST_SCHEMA_VERSION);
+// Schema 32 (`schema32.rs`) follows this step.
+const _: () = assert!(BOUNCER_HOST_SCHEMA_VERSION < SCHEMA_VERSION);
 const _: () = assert!(PREVIOUS_SCHEMA_VERSION < BOUNCER_HOST_SCHEMA_VERSION);
 
 /// The table and the columns of schema 29. The DDL is the one of the plan.
@@ -83,24 +84,20 @@ pub(super) fn add_schema_v29(tx: &Transaction<'_>) -> VaultResult<()> {
     verify_expected_columns_in(tx, "main", BOUNCER_HOST_SCHEMA_VERSION)
 }
 
-/// The way back from the current schema to the previous schema of this step, for test
-/// fixtures and for the rollback notes: the later steps first (schema 34, the account key
-/// source of relay memberships, `schema34.rs`), then the host rows go with their table
-/// (the next unlock of this build starts again with "this Mac"), then the columns of
-/// unit F go.
+/// The way back to the previous schema, for test fixtures and for the rollback notes:
+/// the host rows go with their table (the next unlock of this build starts again with
+/// "this Mac"), then the columns of unit F go.
 #[cfg(test)]
 pub(super) fn downgrade_sql() -> String {
-    let mut sql = super::schema34::downgrade_sql();
-    sql.push_str(
-        "
+    let mut sql = "
 DROP TABLE bouncer_host;
 ALTER TABLE model_candidate DROP COLUMN origin;
 ALTER TABLE model_candidate DROP COLUMN job_host;
 ALTER TABLE model_candidate DROP COLUMN job_id;
 ALTER TABLE model_candidate DROP COLUMN uploaded_to;
 ALTER TABLE model_activation DROP COLUMN heads_sha256;
-",
-    );
+"
+    .to_owned();
     sql.push_str(&marks_sql(PREVIOUS_SCHEMA_VERSION));
     sql
 }
@@ -169,6 +166,12 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
+        // Schema 34 (the account key source, `schema34.rs`) and 32 (short-lived
+        // credentials, `schema32.rs`) first.
+        conn.execute_batch(&crate::vault::schema34::downgrade_sql())
+            .unwrap();
+        conn.execute_batch(&crate::vault::schema32::downgrade_sql())
+            .unwrap();
         conn.execute(
             "INSERT INTO model_candidate
                  (version, url, checkpoint, checkpoint_sha256, created_at, state, report)
@@ -191,8 +194,8 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), SCHEMA_VERSION);
-        assert_eq!(meta_version(conn), SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
+        assert_eq!(meta_version(conn), crate::vault::SCHEMA_VERSION);
         let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = conn
             .prepare("SELECT origin, job_host, job_id, uploaded_to FROM model_candidate")
             .unwrap()
@@ -248,7 +251,10 @@ mod tests {
         close_conn(conn).unwrap();
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
-        assert_eq!(version(vault.conn_ref().unwrap()), SCHEMA_VERSION);
+        assert_eq!(
+            version(vault.conn_ref().unwrap()),
+            crate::vault::SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -257,7 +263,7 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("new.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
         assert!(has_table(conn, "bouncer_host"));
         assert!(crate::vault::merge::LOCAL_TABLES.contains(&"bouncer_host"));
         assert!(!crate::vault::merge::SYNCED_TABLES.contains(&"bouncer_host"));

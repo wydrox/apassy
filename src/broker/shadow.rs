@@ -1,43 +1,50 @@
 //! Shadow mode, promotion, and rollback of a candidate model (ADR 0010, goal items B9
-//! and B10).
+//! and B10; shadow in one request: ADR 0035, plan 0035 unit F).
 //!
 //! - [`models`] reads the vault for each request: the active model (the default bouncer,
-//!   or a promoted model that is pinned to its version) and the candidate in shadow
-//!   mode.
-//! - [`begin`] asks the candidate on its own thread, in parallel with the active model,
-//!   for each request that reaches the model step. The broker decides with the active
-//!   model only. The candidate answer goes only to the vault, next to the real outcome
-//!   and the owner decision. The broker does not wait for the candidate.
+//!   or a promoted head set that is pinned to its version and head hash) on the current
+//!   bouncer brain client, and the candidate in shadow mode with its [`ShadowPin`].
+//! - The candidate rides in the request of the active model as `shadow_heads`
+//!   ([`BouncerClient::evaluate_with_shadow`], contract bouncer-brain-v1 section 3): one
+//!   request, one encoder pass, no second server. The broker decides with the active
+//!   answer only. [`begin`] keeps the shadow answer, and [`ShadowCall::finish`] stores it
+//!   in the vault next to the real outcome and the owner decision. A missing shadow
+//!   part, a `shadow.error`, another head set or version, or a head file that is not on
+//!   the host records [`ShadowAnswer::NoAnswer`]; none of them changes the active
+//!   decision.
 //! - [`promote`] and [`roll_back`] change the active model. Each needs a fresh owner
 //!   check (`OwnerAction::PromoteModel`, `OwnerAction::RollbackModel`). A promotion also
-//!   needs the shadow gate of ADR 0010: 100 owner decisions in shadow mode, 95%
-//!   agreement, and no owner denial that the candidate would allow. Apassy never
-//!   promotes a model by itself (`docs/concept.md`).
+//!   needs the shadow gate of ADR 0010 (100 owner decisions in shadow mode, 95%
+//!   agreement, and no owner denial that the candidate would allow) and the head file on
+//!   the host of the bouncer brain ([`placement_refusal`]). Apassy never promotes a model
+//!   by itself (`docs/concept.md`).
 
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use std::fmt;
 
 use super::SharedVault;
 use super::approvals::{OwnerAction, OwnerProof};
 use super::bouncer::{
-    BouncerClient, BouncerRequest, BouncerVerdict, DecisionContext, Learned, Thresholds,
+    BouncerClient, BouncerRequest, BouncerVerdict, DecisionContext, Learned, ShadowPin, Thresholds,
     decide_learned, decide_routed,
 };
 use super::decide::lock;
 use super::learning;
 use super::shell_risk::Analysis;
 use crate::vault::{
-    CandidateAgreement, CandidateRecord, CandidateState, Declaration, ModelActivation, OwnerLabel,
-    RealOutcome, ShadowAnswer, ShadowEntry, Vault, VaultError, VaultErrorKind,
+    BouncerHostKind, BouncerHostRole, CandidateAgreement, CandidateRecord, CandidateState,
+    Declaration, ModelActivation, OwnerLabel, RealOutcome, ShadowAnswer, ShadowEntry,
+    THIS_MAC_HOST, Vault, VaultError, VaultErrorKind, normalize_url,
 };
 
-/// Environment variable with the address of the candidate server.
+/// Environment variable with the address of a separate candidate server, before schema 29.
 pub const CANDIDATE_URL_ENV: &str = "APASSY_CANDIDATE_URL";
-/// Default address of the candidate server. The active model uses 8770.
+/// The address of a separate candidate server, before schema 29. The broker no longer
+/// asks it: the candidate answers in the request of the active model.
 pub const DEFAULT_CANDIDATE_URL: &str = "http://127.0.0.1:8775";
 
-/// The address for a new candidate: `APASSY_CANDIDATE_URL`, or the default.
+/// The address that a new candidate row keeps in its old `url` column:
+/// `APASSY_CANDIDATE_URL`, or the default. The broker does not read it (plan 0035 unit
+/// F); unit G removes it with the 8775 server.
 pub fn candidate_url() -> String {
     std::env::var(CANDIDATE_URL_ENV)
         .ok()
@@ -46,12 +53,33 @@ pub fn candidate_url() -> String {
         .unwrap_or_else(|| DEFAULT_CANDIDATE_URL.to_owned())
 }
 
-/// The candidate in shadow mode, with a client that accepts only its version.
+/// The host key of `client` for `model_candidate.uploaded_to`: [`THIS_MAC_HOST`] for the
+/// bouncer brain on this Mac, else the `https://` address of the remote host.
+pub fn host_key(client: &BouncerClient) -> String {
+    if client.is_remote() {
+        normalize_url(client.url())
+    } else {
+        THIS_MAC_HOST.to_owned()
+    }
+}
+
+/// The host key of the hosting choice in the vault (ADR 0035): no row or "this Mac" is
+/// [`THIS_MAC_HOST`], else the address of the row.
+pub fn hosting_key(vault: &Vault) -> Result<String, VaultError> {
+    Ok(match vault.bouncer_host(BouncerHostRole::Hosting)? {
+        Some(host) if !matches!(host.kind, BouncerHostKind::ThisMac) => normalize_url(&host.url),
+        _ => THIS_MAC_HOST.to_owned(),
+    })
+}
+
+/// The candidate in shadow mode.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub id: u64,
     pub version: String,
-    pub client: BouncerClient,
+    /// The head set as `shadow_heads`, when the host of the bouncer brain has its head
+    /// file. `None`: the request goes without it, and the row records `NoAnswer`.
+    pub pin: Option<ShadowPin>,
 }
 
 /// The models for one request.
@@ -63,31 +91,36 @@ pub struct Models {
     pub candidate: Option<Candidate>,
 }
 
-fn client_for(default: Option<&BouncerClient>, url: &str) -> Option<BouncerClient> {
-    match default {
-        Some(default) => default.at_url(url).ok(),
-        None => BouncerClient::new(url).ok(),
-    }
-}
-
-/// Read the active model and the candidate from the vault. Without a promotion, the
-/// default bouncer decides. A promoted model is pinned to its version. A read error or
-/// a bad address gives no active model, so the owner decides. It never falls back to
-/// another model.
-pub fn models(vault: &Vault, default: Option<&BouncerClient>) -> Models {
+/// Read the active model and the candidate from the vault, for the bouncer brain client
+/// `current` (`ModelGate::bouncer_client` of this request, or the client of the broker
+/// start). Without a promotion, the default head set of `current` decides. A promoted
+/// head set is pinned to its version and its head hash, on the same host. A read error,
+/// no client, or a promotion without a known head hash gives no active model, so the
+/// owner decides. It never falls back to another model.
+pub fn models(vault: &Vault, current: Option<&BouncerClient>) -> Models {
     let active = match vault.active_model() {
-        Ok(None) => default.cloned(),
-        Ok(Some(activation)) if activation.is_default() => default.cloned(),
-        Ok(Some(activation)) => client_for(default, &activation.url)
-            .map(|client| client.expect_model(&activation.version)),
+        Ok(None) => current.cloned(),
+        Ok(Some(activation)) if activation.is_default() => current.cloned(),
+        Ok(Some(activation)) => match (current, vault.activation_heads(&activation)) {
+            (Some(client), Ok(Some(heads))) => Some(
+                client
+                    .clone()
+                    .expect_model(&activation.version)
+                    .expect_heads(&heads),
+            ),
+            _ => None,
+        },
         Err(_) => None,
     };
     let candidate = match vault.shadow_candidate() {
-        Ok(Some(record)) => client_for(default, &record.url).map(|client| Candidate {
-            id: record.id,
-            client: client.expect_model(&record.version),
-            version: record.version,
-        }),
+        Ok(Some(record)) => {
+            let on_host = current.is_some_and(|client| record.is_on_host(&host_key(client)));
+            Some(Candidate {
+                id: record.id,
+                pin: on_host.then(|| ShadowPin::new(record.heads_sha256(), &record.version)),
+                version: record.version,
+            })
+        }
         _ => None,
     };
     Models { active, candidate }
@@ -134,65 +167,99 @@ pub fn candidate_answer(verdict: &BouncerVerdict, input: &ShadowInput) -> Shadow
     }
 }
 
-/// A candidate call in progress. [`ShadowCall::finish`] gives it the real outcome. Drop
-/// without `finish` stores nothing.
-#[derive(Debug)]
+/// A shadow answer that waits for the real outcome. [`ShadowCall::finish`] stores it.
+/// Drop without `finish` stores nothing.
 pub struct ShadowCall {
-    sender: mpsc::Sender<(RealOutcome, OwnerLabel)>,
+    vault: SharedVault,
+    epoch: [u8; 32],
+    candidate_id: u64,
+    answer: ShadowAnswer,
+    facts: Vec<(String, f64)>,
 }
 
-impl ShadowCall {
-    /// The real outcome and the owner decision. The thread stores the row when the
-    /// candidate answered. This call does not wait.
-    pub fn finish(self, real: RealOutcome, owner: OwnerLabel) {
-        let _ = self.sender.send((real, owner));
+impl fmt::Debug for ShadowCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShadowCall")
+            .field("candidate_id", &self.candidate_id)
+            .field("answer", &self.answer)
+            .finish_non_exhaustive()
     }
 }
 
-/// Ask the candidate on a new thread. The thread waits up to `wait` for
-/// [`ShadowCall::finish`], then stores one row if the vault is still unlocked in the
-/// session `epoch`. `None` when the thread did not start.
+impl ShadowCall {
+    /// The answer of the candidate with the policy of the broker.
+    pub fn answer(&self) -> ShadowAnswer {
+        self.answer
+    }
+
+    /// The real outcome and the owner decision. Stores one row if the vault is still
+    /// unlocked in the same session. The caller must not hold the vault lock.
+    pub fn finish(self, real: RealOutcome, owner: OwnerLabel) {
+        let mut guard = lock(&self.vault);
+        if let Some(vault) = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.epoch() == self.epoch)
+        {
+            let _ = vault.record_shadow(&ShadowEntry {
+                candidate_id: self.candidate_id,
+                at: learning::now(),
+                real,
+                candidate: self.answer,
+                owner,
+                facts: self.facts,
+            });
+        }
+    }
+}
+
+/// Keep the shadow answer of `candidate` from the request of the active model.
+/// `verdict` is the second value of [`BouncerClient::evaluate_with_shadow`]: `None` when
+/// the request went without the candidate (its head file is not on the host, or no
+/// active model was asked), which records `NoAnswer`. The row is stored in the vault
+/// session `epoch` at [`ShadowCall::finish`].
 pub fn begin(
     vault: SharedVault,
     epoch: [u8; 32],
-    candidate: Candidate,
-    request: BouncerRequest,
-    input: ShadowInput,
-    wait: Duration,
-) -> Option<ShadowCall> {
-    let (sender, receiver) = mpsc::channel::<(RealOutcome, OwnerLabel)>();
-    thread::Builder::new()
-        .name("apassy-shadow".to_owned())
-        .spawn(move || {
-            let verdict = candidate.client.evaluate(&request);
-            let answer = candidate_answer(&verdict, &input);
-            let Ok((real, owner)) = receiver.recv_timeout(wait) else {
-                return;
-            };
-            let facts = match &verdict {
+    candidate: &Candidate,
+    verdict: Option<&BouncerVerdict>,
+    input: &ShadowInput,
+) -> ShadowCall {
+    let (answer, facts) = match verdict {
+        Some(verdict) => {
+            let facts = match verdict {
                 BouncerVerdict::Scored { facts, .. } => facts
                     .iter()
                     .map(|fact| (fact.name.clone(), fact.probability))
                     .collect(),
                 BouncerVerdict::Unavailable(_) => Vec::new(),
             };
-            let mut guard = lock(&vault);
-            if let Some(vault) = guard
-                .as_mut()
-                .filter(|vault| !vault.is_locked() && vault.epoch() == epoch)
-            {
-                let _ = vault.record_shadow(&ShadowEntry {
-                    candidate_id: candidate.id,
-                    at: learning::now(),
-                    real,
-                    candidate: answer,
-                    owner,
-                    facts,
-                });
-            }
-        })
-        .ok()
-        .map(|_| ShadowCall { sender })
+            (candidate_answer(verdict, input), facts)
+        }
+        None => (ShadowAnswer::NoAnswer, Vec::new()),
+    };
+    ShadowCall {
+        vault,
+        epoch,
+        candidate_id: candidate.id,
+        answer,
+        facts,
+    }
+}
+
+/// Why a candidate cannot be promoted on the host `host` (a key of [`host_key`] or
+/// [`hosting_key`]): its head file is not there yet. `None` when it is.
+pub fn placement_refusal(candidate: &CandidateRecord, host: &str) -> Option<String> {
+    if candidate.is_on_host(host) {
+        return None;
+    }
+    let place = if host == THIS_MAC_HOST {
+        "the bouncer brain on this Mac".to_owned()
+    } else {
+        format!("the bouncer brain server {host}")
+    };
+    Some(format!(
+        "Its head set is not on {place} yet, so it gives no shadow answers there. Apassy uploads it first."
+    ))
 }
 
 /// Why the shadow gate of ADR 0010 refuses a promotion. `None` when it passes.
@@ -231,7 +298,8 @@ fn vault_message(error: &VaultError) -> String {
 }
 
 /// The owner promotes a candidate (ADR 0010). The proof must name this candidate and its
-/// version, in this vault session. The shadow gate runs again with the rows of now.
+/// version, in this vault session. The shadow gate runs again with the rows of now, and
+/// the head file must be on the host of the bouncer brain ([`placement_refusal`]).
 /// The call holds the vault, so no shadow row can arrive between the gate and the
 /// change.
 pub fn promote(
@@ -263,6 +331,12 @@ pub fn promote(
         .shadow_summary(candidate_id)
         .map_err(|error| vault_message(&error))?;
     if let Some(reason) = promotion_refusal(&summary.agreement) {
+        return Err(format!("Not promoted. {reason}"));
+    }
+    // The promoted head set answers on the host of the bouncer brain, pinned by its
+    // hash: without its head file there, every run would ask the owner.
+    let host = hosting_key(vault).map_err(|error| vault_message(&error))?;
+    if let Some(reason) = placement_refusal(&candidate, &host) {
         return Err(format!("Not promoted. {reason}"));
     }
     vault
@@ -359,6 +433,199 @@ mod tests {
             ..input()
         };
         assert_eq!(candidate_answer(&scored(1.0), &flagged), ShadowAnswer::Ask);
+    }
+
+    const PASS: &str = "shadow-unit-pass";
+    const HEADS: &str = "0badc0de0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+    const VERSION: &str = "apassy-local-v1+0badc0de";
+    const REMOTE: &str = "https://brain.synthetic.ts.net";
+
+    fn vault(dir: &tempfile::TempDir) -> Vault {
+        let mut vault = Vault::create(&dir.path().join("shadow.db"), PASS).expect("create");
+        vault.unlock(PASS).expect("unlock");
+        vault
+    }
+
+    fn register(vault: &mut Vault, url: &str) -> CandidateRecord {
+        vault
+            .register_candidate(
+                &crate::vault::NewCandidate {
+                    version: VERSION.to_owned(),
+                    url: url.to_owned(),
+                    checkpoint: "/tmp/apassy-test/candidate.safetensors".to_owned(),
+                    checkpoint_sha256: HEADS.to_owned(),
+                    report: "{}".to_owned(),
+                },
+                1,
+            )
+            .expect("candidate")
+    }
+
+    fn local() -> BouncerClient {
+        BouncerClient::new("http://127.0.0.1:8770").expect("local")
+    }
+
+    fn remote() -> BouncerClient {
+        let tls = std::sync::Arc::new(super::super::http::TlsClient::platform().expect("TLS"));
+        let bearer = super::super::bouncer::StaticBearer::new(zeroize::Zeroizing::new(
+            "SYNTH-shadow-unit-bearer-0123456789".to_owned(),
+        ))
+        .expect("bearer");
+        BouncerClient::remote(&format!("{REMOTE}/"), std::sync::Arc::new(bearer), tls)
+            .expect("remote")
+    }
+
+    /// The host key: this Mac for a loopback client, the address for a remote one.
+    #[test]
+    fn the_host_key_names_this_mac_or_the_remote_address() {
+        assert_eq!(host_key(&local()), THIS_MAC_HOST);
+        assert_eq!(host_key(&remote()), REMOTE);
+        let dir = tempfile::TempDir::new().expect("dir");
+        let mut vault = vault(&dir);
+        assert_eq!(hosting_key(&vault).expect("key"), THIS_MAC_HOST);
+        vault
+            .set_bouncer_host(
+                BouncerHostRole::Hosting,
+                &crate::vault::BouncerHostChange {
+                    kind: BouncerHostKind::OwnServer,
+                    url: REMOTE.to_owned(),
+                    bearer: Some(crate::vault::SecretValue::new(
+                        "SYNTH-shadow-unit-bearer-0123456789".to_owned(),
+                    )),
+                    consent_version: crate::vault::HOSTING_CONSENT_VERSION,
+                },
+                2,
+            )
+            .expect("host");
+        assert_eq!(hosting_key(&vault).expect("key"), REMOTE);
+    }
+
+    /// The candidate rides as `shadow_heads` only on the host that has its head file.
+    /// The old `url` of the row is not read.
+    #[test]
+    fn the_candidate_has_a_pin_only_on_the_host_with_its_head_file() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let mut vault = vault(&dir);
+        let record = register(&mut vault, "http://127.0.0.1:8775");
+        let first = models(&vault, Some(&local()));
+        assert_eq!(
+            first.active.as_ref().map(BouncerClient::url),
+            Some("http://127.0.0.1:8770"),
+            "the default head set of the current client decides"
+        );
+        let candidate = first.candidate.expect("candidate");
+        assert_eq!(candidate.id, record.id);
+        assert_eq!(candidate.pin, None, "no host has the head file yet");
+        vault
+            .mark_candidate_uploaded(record.id, Some(THIS_MAC_HOST))
+            .expect("mark");
+        let pin = models(&vault, Some(&local()))
+            .candidate
+            .and_then(|candidate| candidate.pin);
+        assert_eq!(pin, Some(ShadowPin::new(HEADS, VERSION)));
+        assert_eq!(
+            models(&vault, Some(&remote()))
+                .candidate
+                .and_then(|candidate| candidate.pin),
+            None,
+            "the remote host does not have it"
+        );
+        vault
+            .mark_candidate_uploaded(record.id, Some(REMOTE))
+            .expect("mark");
+        assert!(
+            models(&vault, Some(&remote()))
+                .candidate
+                .is_some_and(|candidate| candidate.pin.is_some())
+        );
+        // No client: nothing decides and nothing rides.
+        let none = models(&vault, None);
+        assert!(none.active.is_none());
+        assert_eq!(none.candidate.and_then(|candidate| candidate.pin), None);
+    }
+
+    /// A promoted head set decides on the current client, pinned by version and hash.
+    #[test]
+    fn a_promoted_head_set_is_pinned_on_the_current_client() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let mut vault = vault(&dir);
+        let record = register(&mut vault, "");
+        vault
+            .mark_candidate_uploaded(record.id, Some(REMOTE))
+            .expect("mark");
+        for _ in 0..100 {
+            vault
+                .record_shadow(&ShadowEntry {
+                    candidate_id: record.id,
+                    at: 1,
+                    real: RealOutcome::Ask,
+                    candidate: ShadowAnswer::Run,
+                    owner: OwnerLabel::Allow,
+                    facts: Vec::new(),
+                })
+                .expect("row");
+        }
+        vault.promote_candidate(record.id, 2).expect("promote");
+        let active = models(&vault, Some(&remote())).active.expect("active");
+        assert_eq!(active.url(), REMOTE);
+        assert!(active.is_remote());
+        assert_eq!(active.expected_model(), Some(VERSION));
+        assert_eq!(active.expected_heads(), Some(HEADS));
+        let active = models(&vault, Some(&local())).active.expect("active");
+        assert_eq!(active.url(), "http://127.0.0.1:8770");
+        assert_eq!(active.expected_heads(), Some(HEADS));
+    }
+
+    /// The shadow answer comes from the request of the active model. No shadow verdict
+    /// and an unavailable one record `NoAnswer` with no facts.
+    #[test]
+    fn begin_keeps_the_shadow_answer_and_no_answer_without_one() {
+        let shared: SharedVault = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let candidate = Candidate {
+            id: 7,
+            version: VERSION.to_owned(),
+            pin: Some(ShadowPin::new(HEADS, VERSION)),
+        };
+        let call = begin(
+            std::sync::Arc::clone(&shared),
+            [0; 32],
+            &candidate,
+            Some(&scored(0.9)),
+            &input(),
+        );
+        assert_eq!(call.answer(), ShadowAnswer::Run);
+        assert_eq!(call.facts.len(), 2);
+        let unavailable = BouncerVerdict::Unavailable("the shadow head set failed".into());
+        for verdict in [None, Some(&unavailable)] {
+            let call = begin(
+                std::sync::Arc::clone(&shared),
+                [0; 32],
+                &candidate,
+                verdict,
+                &input(),
+            );
+            assert_eq!(call.answer(), ShadowAnswer::NoAnswer);
+            assert!(call.facts.is_empty());
+            // A closed vault stores nothing and does not panic.
+            call.finish(RealOutcome::Run, OwnerLabel::None);
+        }
+    }
+
+    /// The placement refusal names the host.
+    #[test]
+    fn the_placement_refusal_names_the_host() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let mut vault = vault(&dir);
+        let record = register(&mut vault, "");
+        let refusal = placement_refusal(&record, THIS_MAC_HOST).expect("refused");
+        assert!(refusal.contains("on this Mac"), "{refusal}");
+        let refusal = placement_refusal(&record, REMOTE).expect("refused");
+        assert!(refusal.contains(REMOTE), "{refusal}");
+        vault
+            .mark_candidate_uploaded(record.id, Some(REMOTE))
+            .expect("mark");
+        let record = vault.candidate(record.id).expect("read").expect("some");
+        assert_eq!(placement_refusal(&record, REMOTE), None);
     }
 
     /// The refusal names each threshold of ADR 0010 that fails.

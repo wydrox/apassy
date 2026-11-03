@@ -225,9 +225,10 @@ impl Vault {
     /// Store the relay identity of this vault: the membership of its team gets the
     /// purpose `sync` and this address, device number, and key (one key pair per team).
     /// It replaces an earlier identity: another team loses the purpose `sync`, and its
-    /// row goes when it has no other purpose. The time is now; `device.created_at` is
-    /// ignored. A value of a bad shape, or no private key (an account row is
-    /// [`Vault::set_account_relay_device`]), is `InvalidInput`.
+    /// row goes when it has no other purpose. The pin and the alternatives of the row
+    /// (schema 28) stay while the address stays, and go with another address. The time
+    /// is now; `device.created_at` is ignored. A value of a bad shape, or no private key
+    /// (an account row is [`Vault::set_account_relay_device`]), is `InvalidInput`.
     pub fn set_relay_device(&mut self, device: &RelayDevice) -> VaultResult<()> {
         if device.key_pkcs8.is_empty() || !device.is_valid() {
             return Err(err(VaultErrorKind::InvalidInput));
@@ -308,7 +309,9 @@ impl Vault {
              ON CONFLICT(team_id) DO UPDATE SET relay_url = excluded.relay_url,
                  device_id = excluded.device_id, public_key = excluded.public_key,
                  key_pkcs8 = excluded.key_pkcs8, purposes = excluded.purposes,
-                 created_at = excluded.created_at, key_source = excluded.key_source",
+                 created_at = excluded.created_at, key_source = excluded.key_source,
+                 pin = CASE WHEN relay_url = excluded.relay_url THEN pin END,
+                 alt = CASE WHEN relay_url = excluded.relay_url THEN alt END",
             rusqlite::params![
                 team_id,
                 relay_url,

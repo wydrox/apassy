@@ -26,7 +26,10 @@
 //! The environment always asks for the edge secret (`EdgeMode::Required`). A Mac's own
 //! node (`RelayConfig::embedded`, docs/SPEC.md section 30) has no edge: `EdgeMode::Off`,
 //! which `RelayConfig::check_listeners` permits only when every listener is on the
-//! loopback.
+//! loopback. A node on the tailnet (docs/SPEC.md section 32) has a third loopback
+//! listener that its TLS front forwards to (`Scope::Tailnet`), a set of sign-in origins,
+//! and push through the push gateway (`PushConfig::Gateway`). The environment keeps the
+//! hosted relay's one origin and the Worker push (`PushConfig::Worker`).
 //!
 //! A `_FILE` variable names a file whose content (trailing newline removed) is the
 //! value. It wins over the plain variable.
@@ -80,6 +83,11 @@ pub const LEGACY_VAULT_FILE: &str = "team.db";
 pub const ADMIN_SOCKET: &str = "admin.sock";
 /// The lock file of the data directory: one relay process at a time.
 pub const LOCK_FILE: &str = "relay.lock";
+/// The push gateway of the Apassy project (push-gateway-v1 section 2): the default gateway
+/// of a node. A self-hoster names their own.
+pub const DEFAULT_PUSH_GATEWAY: &str = "https://push.apassy.wyderka.cc";
+/// The default port of a node origin (node-pairing-v1 section 3).
+pub const DEFAULT_NODE_PORT: u16 = 8444;
 /// The session lifetime of an embedded node (docs/SPEC.md section 30).
 pub const EMBEDDED_SESSION_TTL_SECS: u64 = 600;
 /// How long a run of an embedded node waits for the owner: the broker's question wait.
@@ -258,11 +266,26 @@ pub struct EmbeddedOptions {
     /// Opens `relay.db`. At least `MIN_KEY_BYTES`.
     pub master_key: SecretString,
     /// The origin that agents use: the Funnel origin `https://<name>:8443`. Base URLs
-    /// start with it.
+    /// start with it. A node without Funnel (the Linux node) gives its node origin.
     pub public_url: String,
     /// The loopback address of the public listener (`Scope::Public`), or `None` for no
     /// public route.
     pub public_listen: Option<SocketAddr>,
+    /// The node origin `https://<Tailscale IPv4>:<port>` (node-pairing-v1 section 3): the
+    /// origin that devices store, sign, and show. `None`: no tailnet route (the devices of
+    /// this node reach it only through the app, in process). With it, `tailnet_listen` is
+    /// required.
+    pub node_origin: Option<String>,
+    /// The loopback address of the tailnet listener (`Scope::Tailnet`), the target of the
+    /// TLS front, such as `127.0.0.1:0`. Required with `node_origin`, refused without it.
+    pub tailnet_listen: Option<SocketAddr>,
+    /// The tailnet listener also serves the team routes (`/v1/runs`, `/mcp`, the host
+    /// lane, ...): the Linux node. The Mac node serves the device routes only.
+    pub tailnet_agents: bool,
+    /// The push gateway of the node (`DEFAULT_PUSH_GATEWAY` unless the owner names
+    /// another), the one that its devices may name at `PUT /v1/push/handle`. `None`: no
+    /// push (409 `push_unavailable`). Needs `node_origin`.
+    pub push_gateway: Option<String>,
 }
 
 /// Everything the relay server needs to start.
@@ -274,8 +297,20 @@ pub struct RelayConfig {
     /// A second listener that serves only `POST /mcp` and `/p/` (`Scope::Public`, an
     /// embedded node). `None` on the hosted relay.
     pub public_listen: Option<SocketAddr>,
+    /// A third listener for the TLS front of a node on the tailnet (`Scope::Tailnet`,
+    /// docs/SPEC.md section 32): the device routes, and with `tailnet_agents` the team
+    /// routes. On the loopback. `None` on the hosted relay. A relay with it is a node: it
+    /// takes node pairing codes at `POST /v1/teams`.
+    pub tailnet_listen: Option<SocketAddr>,
+    /// The tailnet listener also serves the team routes (the Linux node).
+    pub tailnet_agents: bool,
     /// For example `https://apassy-relay.wyderka.cc`. Base URLs start with it.
     pub public_url: String,
+    /// The origins that a device may sign at sign-in (docs/SPEC.md section 23.2, 32.3).
+    /// Empty: `public_url` alone, as the hosted relay. A node: its node origin first, and
+    /// with the public route on, the Funnel `public_url`. Read it with
+    /// `RelayConfig::sign_in_origins`.
+    pub sign_in_origins: Vec<String>,
     pub edge: EdgeMode,
     /// Opens the directory `relay.db`. Each team file has its own random key, kept in
     /// the directory.
@@ -289,7 +324,8 @@ pub struct RelayConfig {
     pub request_handle_timeout: Duration,
     /// Where `apassy-relay admin backup` writes (`APASSY_RELAY_BACKUP_DIR`).
     pub backup_dir: PathBuf,
-    /// The push trigger (docs/SPEC.md section 25.6). `None`: push is off.
+    /// The push trigger (docs/SPEC.md section 25.6): the Worker of the hosted relay, or
+    /// the push gateway of a node (section 32.5). `None`: push is off.
     pub push: Option<PushConfig>,
     /// Shared team vaults, runs, MCP, and the proxy are served (`APASSY_RELAY_TEAM_VAULTS`).
     /// Off on the hosted relay (ADR 0037, D8): those requests are 410 `team_vaults_retired`,
@@ -344,26 +380,44 @@ impl OAuthConfig {
     }
 }
 
-/// Where and how the relay asks the Worker to send pushes.
+/// Where and how the relay sends pushes.
 #[derive(Debug, Clone)]
-pub struct PushConfig {
-    /// The Worker's push route: `https://`, or `http://` to a loopback address (tests).
-    pub url: String,
-    /// The bundle id of the iPhone app (the APNs topic). A push token names it.
-    pub topic: String,
-    /// Sent as `X-Apassy-Push`. Never logged.
-    pub secret: SecretString,
-    /// One call to the Worker, from the connection to the last byte of the answer: 10 s.
-    pub timeout: Duration,
-    /// The unit of the retry backoff (1, 2, 4 … 60 units, plus 0..2 units of jitter):
-    /// one second.
-    pub backoff_unit: Duration,
+pub enum PushConfig {
+    /// The hosted relay: the relay asks the Worker to send pushes to the push tokens of
+    /// its devices (docs/SPEC.md section 25.6). `from_env` makes only this form.
+    Worker {
+        /// The Worker's push route: `https://`, or `http://` to a loopback address (tests).
+        url: String,
+        /// The bundle id of the iPhone app (the APNs topic). A push token names it.
+        topic: String,
+        /// Sent as `X-Apassy-Push`. Never logged.
+        secret: SecretString,
+        /// One call to the Worker, from the connection to the last byte of the answer:
+        /// 10 s.
+        timeout: Duration,
+        /// The unit of the retry backoff (1, 2, 4 … 60 units, plus 0..2 units of jitter):
+        /// one second.
+        backoff_unit: Duration,
+    },
+    /// A node: the relay asks a push gateway to push to the handles of its devices, one
+    /// request per handle, with the proof of push-gateway-v1 section 7 (docs/SPEC.md
+    /// section 32.5). No token reaches the node.
+    Gateway {
+        /// The gateways that a device may name at `PUT /v1/push/handle`, as origins
+        /// (`checked_gateway`): the node calls no other address.
+        gateways: Vec<String>,
+        /// One call to a gateway, from the connection to the last byte of the answer:
+        /// 10 s. No retry.
+        timeout: Duration,
+        /// Kept for the shape of `Worker`: the gateway mode does not retry.
+        backoff_unit: Duration,
+    },
 }
 
 impl PushConfig {
-    /// The push settings of the relay with the deadlines of docs/SPEC.md section 25.6.
+    /// The Worker push of the relay with the deadlines of docs/SPEC.md section 25.6.
     pub fn new(url: String, topic: String, secret: SecretString) -> Self {
-        Self {
+        Self::Worker {
             url,
             topic,
             secret,
@@ -371,6 +425,116 @@ impl PushConfig {
             backoff_unit: crate::server::push::BACKOFF_UNIT,
         }
     }
+
+    /// The gateway push of a node with the deadline of push-gateway-v1 section 10. Each
+    /// gateway is an origin (`checked_gateway`); at least one.
+    pub fn gateway(gateways: Vec<String>) -> RelayResult<Self> {
+        if gateways.is_empty() {
+            return Err(RelayError::invalid(
+                "A node with push names a push gateway.",
+            ));
+        }
+        let gateways = gateways
+            .iter()
+            .map(|gateway| checked_gateway(gateway))
+            .collect::<RelayResult<Vec<_>>>()?;
+        Ok(Self::Gateway {
+            gateways,
+            timeout: crate::server::push::TIMEOUT,
+            backoff_unit: crate::server::push::BACKOFF_UNIT,
+        })
+    }
+
+    /// One call to the Worker or a gateway, at most.
+    pub fn timeout(&self) -> Duration {
+        match self {
+            Self::Worker { timeout, .. } | Self::Gateway { timeout, .. } => *timeout,
+        }
+    }
+
+    /// The unit of the retry backoff of the Worker mode.
+    pub fn backoff_unit(&self) -> Duration {
+        match self {
+            Self::Worker { backoff_unit, .. } | Self::Gateway { backoff_unit, .. } => *backoff_unit,
+        }
+    }
+
+    /// The APNs topic of the Worker mode (`PUT /v1/push/token`); `None` for a gateway.
+    pub fn topic(&self) -> Option<&str> {
+        match self {
+            Self::Worker { topic, .. } => Some(topic),
+            Self::Gateway { .. } => None,
+        }
+    }
+}
+
+/// A push gateway origin (push-gateway-v1 section 10): `https://` with a host and an
+/// optional port, lowercase, no path, query, fragment, user, or trailing slash; or
+/// `http://` to `127.0.0.1` or `localhost` (tests). The text is compared as it is: a
+/// device names a gateway with exactly this text.
+pub fn checked_gateway(text: &str) -> RelayResult<String> {
+    let invalid = || {
+        RelayError::invalid(
+            "A push gateway is an origin such as https://push.example.com, with no path.",
+        )
+    };
+    let text = text.trim();
+    let (rest, loopback_only) = if let Some(rest) = text.strip_prefix("https://") {
+        (rest, false)
+    } else if let Some(rest) = text.strip_prefix("http://") {
+        (rest, true)
+    } else {
+        return Err(invalid());
+    };
+    if rest.is_empty()
+        || rest.len() > 261
+        || rest.bytes().any(|b| {
+            !(b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b':'))
+        })
+    {
+        return Err(invalid());
+    }
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (rest, None),
+    };
+    if host.is_empty()
+        || host.contains(':')
+        || port.is_some_and(|port| {
+            port.starts_with('0') || port.parse::<u16>().is_err() || port.is_empty()
+        })
+    {
+        return Err(invalid());
+    }
+    if loopback_only && !matches!(host, "127.0.0.1" | "localhost") {
+        return Err(invalid());
+    }
+    Ok(text.to_string())
+}
+
+/// A node origin (node-pairing-v1 section 3): `https://<host>:<port>`, lowercase, an
+/// explicit port that is not 443, and nothing else. The text is the value that devices
+/// sign, so it is kept exactly.
+pub fn checked_node_origin(text: &str) -> RelayResult<String> {
+    let invalid = || {
+        RelayError::invalid(
+            "The node origin is https://<Tailscale IPv4>:<port>, such as https://100.64.0.7:8444.",
+        )
+    };
+    let rest = text.strip_prefix("https://").ok_or_else(invalid)?;
+    let (host, port) = rest.rsplit_once(':').ok_or_else(invalid)?;
+    let port_ok = !port.is_empty()
+        && !port.starts_with('0')
+        && port.parse::<u16>().is_ok_and(|port| port != 443);
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-'));
+    if !port_ok || !host_ok {
+        return Err(invalid());
+    }
+    Ok(text.to_string())
 }
 
 impl RelayConfig {
@@ -401,12 +565,39 @@ impl RelayConfig {
         self.data_dir.join(ADMIN_SOCKET)
     }
 
+    /// The origins that a device may sign at sign-in, in order: `sign_in_origins`, or
+    /// `public_url` alone when it is empty. The first is the one a challenge names when
+    /// the request's `Host` names none of them (`devices::challenge_for`).
+    pub fn sign_in_origins(&self) -> Vec<&str> {
+        if self.sign_in_origins.is_empty() {
+            vec![self.public_url.as_str()]
+        } else {
+            self.sign_in_origins.iter().map(String::as_str).collect()
+        }
+    }
+
+    /// True for a node on the tailnet: a relay with a tailnet listener. Only a node takes
+    /// a node pairing code (directory 1005).
+    pub fn is_node(&self) -> bool {
+        self.tailnet_listen.is_some()
+    }
+
     /// Refuses `EdgeMode::Off` unless every listener is on the loopback: without the
-    /// edge, nothing else keeps a caller from the network away.
+    /// edge, nothing else keeps a caller from the network away. The tailnet listener is
+    /// on the loopback in every mode: only the TLS front of the node reaches it.
     pub fn check_listeners(&self) -> RelayResult<()> {
+        if self
+            .tailnet_listen
+            .is_some_and(|addr| !addr.ip().is_loopback())
+        {
+            return Err(RelayError::invalid(
+                "The tailnet listener must be on a loopback address: only the TLS front forwards to it.",
+            ));
+        }
         if matches!(self.edge, EdgeMode::Off) {
             let loopback = std::iter::once(self.listen)
                 .chain(self.public_listen)
+                .chain(self.tailnet_listen)
                 .all(|addr| addr.ip().is_loopback());
             if !loopback {
                 return Err(RelayError::invalid(
@@ -418,11 +609,14 @@ impl RelayConfig {
     }
 
     /// The configuration of a Mac's own node (docs/SPEC.md section 30): the node
-    /// listener on `127.0.0.1:0`, the public listener of `options`, no edge, no push,
-    /// shared team vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs
-    /// that wait `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, the MCP
-    /// authorization flow on (`OAuthConfig::new` with `EMBEDDED_MAC_NAME`; the app sets the
-    /// name of the Mac), and the operator socket in the data directory.
+    /// listener on `127.0.0.1:0`, the public listener of `options`, no edge, shared team
+    /// vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs that wait
+    /// `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, the MCP authorization
+    /// flow on (`OAuthConfig::new` with `EMBEDDED_MAC_NAME`; the app sets the name of the
+    /// Mac), and the operator socket in the data directory. With `node_origin`, the
+    /// tailnet listener of `options` (docs/SPEC.md section 32), the sign-in origins (the
+    /// node origin, then `public_url` when the public route is on), and push through
+    /// `push_gateway`; without it, one sign-in origin (`public_url`) and no push.
     pub fn embedded(options: EmbeddedOptions) -> RelayResult<Self> {
         let public_url = checked_public_url(&options.public_url)?;
         if options.master_key.len() < MIN_KEY_BYTES {
@@ -430,12 +624,41 @@ impl RelayConfig {
                 "The master key must have at least {MIN_KEY_BYTES} bytes."
             )));
         }
+        let node_origin = options
+            .node_origin
+            .as_deref()
+            .map(checked_node_origin)
+            .transpose()?;
+        if node_origin.is_some() != options.tailnet_listen.is_some() {
+            return Err(RelayError::invalid(
+                "A node origin and a tailnet listener go together.",
+            ));
+        }
+        if node_origin.is_none() && (options.tailnet_agents || options.push_gateway.is_some()) {
+            return Err(RelayError::invalid(
+                "The team routes and push of a node need its node origin.",
+            ));
+        }
+        let mut sign_in_origins = Vec::new();
+        if let Some(origin) = &node_origin {
+            sign_in_origins.push(origin.clone());
+            if options.public_listen.is_some() && public_url != *origin {
+                sign_in_origins.push(public_url.clone());
+            }
+        }
+        let push = options
+            .push_gateway
+            .map(|gateway| PushConfig::gateway(vec![gateway]))
+            .transpose()?;
         let config = Self {
             backup_dir: options.data_dir.join("backups"),
             data_dir: options.data_dir,
             listen: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
             public_listen: options.public_listen,
+            tailnet_listen: options.tailnet_listen,
+            tailnet_agents: options.tailnet_agents,
             public_url,
+            sign_in_origins,
             edge: EdgeMode::Off,
             master_key: options.master_key,
             session_ttl_secs: EMBEDDED_SESSION_TTL_SECS,
@@ -444,7 +667,7 @@ impl RelayConfig {
             limits: Limits::default(),
             request_read_timeout: Duration::from_secs(30),
             request_handle_timeout: Duration::from_secs(90),
-            push: None,
+            push,
             team_vaults: true,
             questions_to_approvers: false,
             connect_teams_per_day: 0,
@@ -534,7 +757,10 @@ impl RelayConfig {
             data_dir,
             listen,
             public_listen: None,
+            tailnet_listen: None,
+            tailnet_agents: false,
             public_url,
+            sign_in_origins: Vec::new(),
             edge: EdgeMode::Required(edge_secret),
             master_key,
             session_ttl_secs,
@@ -913,9 +1139,19 @@ mod tests {
             "push-secret-for-tests-0123456789abcdef",
         );
         let push = with(&[url, topic, secret]).unwrap().push.unwrap();
-        assert_eq!(push.url, "https://relay.example.test/internal/push");
-        assert_eq!(push.topic, "com.wydrox.apassy.companion");
-        assert_eq!(push.secret.expose(), secret.1);
+        let PushConfig::Worker {
+            url: push_url,
+            topic: push_topic,
+            secret: push_secret,
+            ..
+        } = &push
+        else {
+            panic!("the environment makes the Worker form");
+        };
+        assert_eq!(push_url, "https://relay.example.test/internal/push");
+        assert_eq!(push_topic, "com.wydrox.apassy.companion");
+        assert_eq!(push_secret.expose(), secret.1);
+        assert_eq!(push.topic(), Some("com.wydrox.apassy.companion"));
         // Some but not all is an error, and so is a value out of its form.
         for partial in [vec![url], vec![topic, secret], vec![url, topic]] {
             assert!(with(&partial).is_err());
@@ -967,7 +1203,144 @@ mod tests {
             master_key: SecretString::new("a synthetic node master key".into()),
             public_url: "https://mac.example.ts.net:8443/".into(),
             public_listen: public_listen.map(|addr| addr.parse().unwrap()),
+            node_origin: None,
+            tailnet_listen: None,
+            tailnet_agents: false,
+            push_gateway: None,
         }
+    }
+
+    fn tailnet_options() -> EmbeddedOptions {
+        EmbeddedOptions {
+            node_origin: Some("https://100.64.0.7:8444".into()),
+            tailnet_listen: Some("127.0.0.1:0".parse().unwrap()),
+            push_gateway: Some(DEFAULT_PUSH_GATEWAY.into()),
+            ..embedded_options(Some("127.0.0.1:49200"))
+        }
+    }
+
+    #[test]
+    fn a_node_on_the_tailnet_has_a_third_listener_two_origins_and_gateway_push() {
+        let config = RelayConfig::embedded(tailnet_options()).unwrap();
+        assert!(config.is_node());
+        assert_eq!(config.tailnet_listen, Some("127.0.0.1:0".parse().unwrap()));
+        assert!(!config.tailnet_agents);
+        assert_eq!(
+            config.sign_in_origins(),
+            ["https://100.64.0.7:8444", "https://mac.example.ts.net:8443"]
+        );
+        let Some(PushConfig::Gateway {
+            gateways, timeout, ..
+        }) = &config.push
+        else {
+            panic!("a node pushes through the gateway");
+        };
+        assert_eq!(gateways, &[DEFAULT_PUSH_GATEWAY.to_string()]);
+        assert_eq!(*timeout, Duration::from_secs(10));
+        assert_eq!(config.push.as_ref().unwrap().topic(), None);
+        config.check_listeners().unwrap();
+        // Without the public route, the node origin alone; without a gateway, no push.
+        let config = RelayConfig::embedded(EmbeddedOptions {
+            public_listen: None,
+            push_gateway: None,
+            tailnet_agents: true,
+            ..tailnet_options()
+        })
+        .unwrap();
+        assert_eq!(config.sign_in_origins(), ["https://100.64.0.7:8444"]);
+        assert!(config.push.is_none());
+        assert!(config.tailnet_agents);
+        // The hosted relay and a node without the tailnet: `public_url` alone.
+        let config = RelayConfig::embedded(embedded_options(None)).unwrap();
+        assert!(!config.is_node());
+        assert_eq!(
+            config.sign_in_origins(),
+            ["https://mac.example.ts.net:8443"]
+        );
+        let hosted = RelayConfig::from_lookup(lookup(&[
+            ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+            ("APASSY_RELAY_EDGE_SECRET", EDGE),
+            ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+        ]))
+        .unwrap();
+        assert_eq!(hosted.sign_in_origins(), ["https://relay.example.test"]);
+        assert!(hosted.tailnet_listen.is_none() && !hosted.is_node());
+    }
+
+    #[test]
+    fn the_tailnet_options_are_checked() {
+        let refused = |options: EmbeddedOptions| {
+            RelayConfig::embedded(options).unwrap_err().code == crate::error::codes::INVALID_REQUEST
+        };
+        // The origin and the listener go together; the team routes and push need them.
+        assert!(refused(EmbeddedOptions {
+            tailnet_listen: None,
+            ..tailnet_options()
+        }));
+        assert!(refused(EmbeddedOptions {
+            node_origin: None,
+            push_gateway: None,
+            ..tailnet_options()
+        }));
+        assert!(refused(EmbeddedOptions {
+            push_gateway: Some(DEFAULT_PUSH_GATEWAY.into()),
+            ..embedded_options(None)
+        }));
+        assert!(refused(EmbeddedOptions {
+            tailnet_agents: true,
+            ..embedded_options(None)
+        }));
+        // The tailnet listener is on the loopback.
+        for listen in ["0.0.0.0:8444", "100.64.0.7:8444", "[::]:8444"] {
+            assert!(
+                refused(EmbeddedOptions {
+                    tailnet_listen: Some(listen.parse().unwrap()),
+                    ..tailnet_options()
+                }),
+                "{listen}"
+            );
+        }
+        // The node origin of node-pairing-v1 section 3.
+        for origin in [
+            "http://100.64.0.7:8444",
+            "https://100.64.0.7",
+            "https://100.64.0.7:443",
+            "https://100.64.0.7:8444/",
+            "https://100.64.0.7:08444",
+            "https://100.64.0.7:70000",
+            "https://Mac.example:8444",
+            "https://user@100.64.0.7:8444",
+        ] {
+            assert!(checked_node_origin(origin).is_err(), "{origin}");
+        }
+        assert_eq!(
+            checked_node_origin("https://100.64.0.7:8444").unwrap(),
+            "https://100.64.0.7:8444"
+        );
+        assert!(checked_node_origin("https://apassy-mini.tail0123.ts.net:8444").is_ok());
+        // A gateway is an origin.
+        for gateway in [
+            "https://push.apassy.wyderka.cc",
+            "https://push.example.com:8443",
+            "http://127.0.0.1:9",
+        ] {
+            assert_eq!(checked_gateway(gateway).unwrap(), gateway);
+        }
+        for gateway in [
+            "https://push.example.com/",
+            "https://push.example.com/v1/push",
+            "http://push.example.com",
+            "https://Push.example.com",
+            "https://push.example.com:",
+            "https://push.example.com:0443",
+            "https://user@push.example.com",
+            "https://push.example.com?x",
+            "ftp://push.example.com",
+            "https://",
+        ] {
+            assert!(checked_gateway(gateway).is_err(), "{gateway}");
+        }
+        assert!(PushConfig::gateway(Vec::new()).is_err());
     }
 
     #[test]

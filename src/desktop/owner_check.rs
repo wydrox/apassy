@@ -481,6 +481,14 @@ pub enum OwnerRequest {
     ChangeBouncerTraining {
         change: crate::vault::BouncerHostChange,
     },
+    /// Turn temporary credentials (way C) on or off for one source item
+    /// (`OwnerAction::ChangeDelivery`). `name` is the item title for the texts.
+    ChangeDelivery {
+        item_id: u64,
+        name: String,
+        kind: crate::vault::ShortLivedKind,
+        on: bool,
+    },
     AllowOperation {
         agent_id: u64,
         item_id: u64,
@@ -940,6 +948,13 @@ impl OwnerRequest {
                 crate::vault::BouncerHostRole::Training,
                 change,
             ),
+            Self::ChangeDelivery {
+                item_id, kind, on, ..
+            } => OwnerAction::ChangeDelivery {
+                item: *item_id,
+                kind: *kind,
+                on: *on,
+            },
             Self::AllowOperation {
                 agent_id, item_id, ..
             }
@@ -1308,6 +1323,9 @@ impl OwnerRequest {
             }
             Self::ChangeBouncerHosting { change } => hosting_words(change),
             Self::ChangeBouncerTraining { change } => training_words(change),
+            Self::ChangeDelivery {
+                name, kind, on, ..
+            } => delivery_words(name, *kind, *on),
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
             }
@@ -1557,6 +1575,29 @@ fn hosting_words(change: &crate::vault::BouncerHostChange) -> String {
 
 /// The owner check text of a change of the bouncer brain trainer (ADR 0035 sections 1
 /// and 4). No bearer.
+/// The text of a change of the delivery of a source item. It names the item and what
+/// each run gets, never a value.
+fn delivery_words(name: &str, kind: crate::vault::ShortLivedKind, on: bool) -> String {
+    let name = dialog_cut(name);
+    let lease = match kind {
+        crate::vault::ShortLivedKind::GithubApp => "a GitHub token that is revoked after the run",
+        crate::vault::ShortLivedKind::AwsSts
+        | crate::vault::ShortLivedKind::GoogleServiceAccount => {
+            "a credential that expires in 15 minutes"
+        }
+        _ => "a credential made for that run",
+    };
+    if on {
+        format!(
+            "Use temporary credentials for \"{name}\". Each run gets {lease}; the long-lived key stays in Apassy."
+        )
+    } else {
+        format!(
+            "Stop temporary credentials for \"{name}\". Runs then get the long-lived key as the variable says (a placeholder or the value)."
+        )
+    }
+}
+
 fn training_words(change: &crate::vault::BouncerHostChange) -> String {
     use crate::vault::BouncerHostKind;
     let url = page_text(&change.normalized_url());
@@ -2279,6 +2320,12 @@ impl DesktopApp {
             OwnerRequest::ChangeBouncerTraining { change } => {
                 self.change_bouncer_host(crate::vault::BouncerHostRole::Training, change, proof);
             }
+            OwnerRequest::ChangeDelivery {
+                item_id,
+                name,
+                kind,
+                on,
+            } => self.complete_change_delivery(item_id, &name, kind, on, proof),
             OwnerRequest::AllowOperation {
                 agent_id,
                 item_id,
@@ -2588,6 +2635,52 @@ impl DesktopApp {
                 self.reload_declaration_form(item_id);
                 self.set_ok(format!("{name} is marked as {}.", environment.as_str()));
             }
+            Some(Err(message)) => self.set_err(message),
+            None => self.set_err("The vault is locked."),
+        }
+    }
+
+    /// Turn way C on or off for a source item with `proof` (contract private-sharing-v1
+    /// rule 3). The proof must name the item, the kind of its row, and the new state; the
+    /// row keeps its kind and settings.
+    fn complete_change_delivery(
+        &mut self,
+        item_id: u64,
+        name: &str,
+        kind: crate::vault::ShortLivedKind,
+        on: bool,
+        proof: OwnerProof,
+    ) {
+        let action = OwnerAction::ChangeDelivery {
+            item: item_id,
+            kind,
+            on,
+        };
+        let result = self.owner_ui.session.with_vault(|vault| {
+            proof
+                .check(&action, &vault.epoch())
+                .map_err(|refusal| refusal.message().to_owned())?;
+            // The stored kind must be the kind that the owner confirmed.
+            match vault.short_lived(item_id) {
+                Ok(Some(row)) if row.kind == kind => {}
+                Ok(_) => return Err("The item changed. Nothing changed.".to_owned()),
+                Err(err) => return Err(format!("The delivery did not change: {err}.")),
+            }
+            vault
+                .set_short_lived_enabled(
+                    item_id,
+                    on,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |elapsed| elapsed.as_secs()),
+                )
+                .map_err(|err| format!("The delivery did not change: {err}."))
+        });
+        match result {
+            Some(Ok(())) if on => self.set_ok(format!("{name} now gives temporary credentials.")),
+            Some(Ok(())) => self.set_ok(format!(
+                "{name} no longer gives temporary credentials. Runs get its long-lived key."
+            )),
             Some(Err(message)) => self.set_err(message),
             None => self.set_err("The vault is locked."),
         }
@@ -3183,5 +3276,41 @@ impl DesktopApp {
         }
         // A local fine-tune stops with the app (goal item B9).
         self.learning.stop_training();
+    }
+}
+
+#[cfg(test)]
+mod change_delivery_tests {
+    use super::*;
+    use crate::vault::ShortLivedKind;
+
+    #[test]
+    fn the_delivery_request_names_its_exact_action_and_no_value() {
+        for on in [true, false] {
+            let request = OwnerRequest::ChangeDelivery {
+                item_id: 7,
+                name: "Synthetic AWS".to_owned(),
+                kind: ShortLivedKind::AwsSts,
+                on,
+            };
+            assert_eq!(
+                request.action(),
+                OwnerAction::ChangeDelivery {
+                    item: 7,
+                    kind: ShortLivedKind::AwsSts,
+                    on,
+                }
+            );
+            assert!(request.is_ready());
+            assert!(!request.needs_live_ticket());
+            let text = request.describe();
+            assert!(text.contains("\"Synthetic AWS\""), "{text}");
+            if on {
+                assert!(text.contains("15 minutes"), "{text}");
+            } else {
+                assert!(text.contains("long-lived key"), "{text}");
+            }
+            assert!(!text.contains("AKIA") && !text.contains("secret_access_key"));
+        }
     }
 }

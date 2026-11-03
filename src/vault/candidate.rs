@@ -1,9 +1,12 @@
 //! Candidate models, shadow mode, and model promotion (schema v9, ADR 0010, goal items
 //! B9 and B10).
 //!
-//! - A local fine-tune gives a candidate model. The candidate starts in shadow mode. The
-//!   broker asks it in parallel at the model step, and the answer has no effect. A newer
-//!   candidate replaces the candidate in shadow mode.
+//! - A local fine-tune (or a remote training job, schema 29) gives a candidate model: a
+//!   head set whose file is on this Mac. The candidate starts in shadow mode. Its hash
+//!   rides in each request of the active model as `shadow_heads` (ADR 0035, contract
+//!   bouncer-brain-v1 section 3), and the answer has no effect. It answers only on the
+//!   host that has its head file (`uploaded_to`). A newer candidate replaces the
+//!   candidate in shadow mode.
 //! - Each shadow answer is one row: the candidate outcome (run, ask, or no answer), the
 //!   real outcome of the request (run or ask), and the owner decision when the owner
 //!   decided. A row has no request data. It has the model answers as probabilities.
@@ -12,7 +15,8 @@
 //!   candidate would allow (`CandidateAgreement::can_promote`). Only the owner promotes,
 //!   with a fresh owner check (`broker::shadow::promote`). A rollback returns to the
 //!   model before the promotion. Each change goes to the activity log in the same
-//!   transaction.
+//!   transaction. Since schema 29 a promotion pins the head hash (`heads_sha256`); the
+//!   `url` of a row is kept for old rows and is no longer read.
 
 use rusqlite::{OptionalExtension, Row, TransactionBehavior};
 use serde_json::{Map, Value, json};
@@ -88,9 +92,33 @@ const MAX_REPORT_BYTES: usize = 8192;
 const PRUNE_EVERY: u64 = 64;
 
 const CANDIDATE_COLUMNS: &str =
-    "id, version, url, checkpoint, checkpoint_sha256, created_at, state, ended_at, report";
+    "id, version, url, checkpoint, checkpoint_sha256, created_at, state, ended_at,
+     report, origin, job_host, job_id, uploaded_to";
 const ACTIVATION_COLUMNS: &str =
-    "id, at, action, version, url, candidate_id, previous_version, previous_url, report";
+    "id, at, action, version, url, candidate_id, previous_version, previous_url,
+     report, heads_sha256";
+/// The host key of the bouncer brain on this Mac, in `model_candidate.uploaded_to`. A
+/// remote host has its `https://` address (trimmed, without a trailing `/`) instead.
+pub const THIS_MAC_HOST: &str = "this-mac";
+/// Longest job id of a remote training job.
+const MAX_JOB_ID_BYTES: usize = 128;
+
+/// A SHA-256 as 64 lowercase hex characters.
+fn is_sha256(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// A host key: [`THIS_MAC_HOST`], or an `https://` address of at most 200 bytes.
+fn valid_host_key(host: &str) -> bool {
+    host == THIS_MAC_HOST
+        || (host.starts_with("https://")
+            && host.len() <= MAX_URL_BYTES
+            && !host.ends_with('/')
+            && host.chars().all(|c| c.is_ascii_graphic()))
+}
 
 /// A model version is short and has only ASCII letters, digits, and `.`, `_`, `+`, `-`.
 pub fn valid_model_version(text: &str) -> bool {
@@ -135,15 +163,28 @@ impl CandidateState {
     }
 }
 
+/// Where a head set was trained (schema 29).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateOrigin {
+    /// A fine-tune on this Mac.
+    Local,
+    /// A training job on a server: its host key and its job id. The head file is on this
+    /// Mac after the download, as for a local fine-tune.
+    RemoteJob { host: String, job_id: String },
+}
+
 /// A candidate model from a local fine-tune.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCandidate {
     /// The version that the model server reports, for example `apassy-local-v1+1a2b3c4d`.
     pub version: String,
-    /// The loopback address of the candidate server.
+    /// Before schema 29: the loopback address of a separate candidate server. Kept for
+    /// old rows and no longer read; it can be empty. The candidate answers in the
+    /// request of the active model (`shadow_heads`).
     pub url: String,
-    /// The checkpoint file on this computer.
+    /// The checkpoint file on this computer. Every head set is on this Mac first.
     pub checkpoint: String,
+    /// The SHA-256 of the head file: the `heads` hash of contract bouncer-brain-v1.
     pub checkpoint_sha256: String,
     /// Training numbers as JSON: time, memory, and example counts. No request data.
     pub report: String,
@@ -162,6 +203,24 @@ pub struct CandidateRecord {
     /// Unix time of the promotion, the replacement, or the rollback.
     pub ended_at: Option<u64>,
     pub report: String,
+    /// Where the head set was trained (schema 29).
+    pub origin: CandidateOrigin,
+    /// The host key ([`THIS_MAC_HOST`] or an `https://` address) that has the head file
+    /// now. `None`: no host has it yet, so the candidate gives no shadow answer and
+    /// cannot be promoted.
+    pub uploaded_to: Option<String>,
+}
+
+impl CandidateRecord {
+    /// The head hash that a request names as `heads` or `shadow_heads`.
+    pub fn heads_sha256(&self) -> &str {
+        &self.checkpoint_sha256
+    }
+
+    /// The head file is on the host with the key `host`.
+    pub fn is_on_host(&self, host: &str) -> bool {
+        self.uploaded_to.as_deref() == Some(host)
+    }
 }
 
 /// What the broker did with a request that reached the model step.
@@ -187,7 +246,9 @@ impl RealOutcome {
 pub enum ShadowAnswer {
     Run,
     Ask,
-    /// The candidate server did not answer, or it answered with another model version.
+    /// The shadow head set gave no valid answer: the request failed, the answer had no
+    /// shadow part or a `shadow.error`, it named another head set or model version, or
+    /// the head file is not on the host.
     NoAnswer,
 }
 
@@ -270,8 +331,8 @@ impl ActivationAction {
     }
 }
 
-/// One promotion or rollback. The newest row names the active model. An empty version
-/// and address mean the default bouncer (`APASSY_BOUNCER_URL`).
+/// One promotion or rollback. The newest row names the active model. No address and no
+/// head hash mean the default bouncer (the default head set of the host).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelActivation {
     pub id: u64,
@@ -284,12 +345,15 @@ pub struct ModelActivation {
     pub previous_url: String,
     /// Shadow numbers at the time of the change, as JSON.
     pub report: String,
+    /// The head hash of the active model (schema 29). `None` for the default bouncer and
+    /// for a row from before schema 29 (see [`Vault::activation_heads`]).
+    pub heads_sha256: Option<String>,
 }
 
 impl ModelActivation {
-    /// The row names the default bouncer.
+    /// The row names the default bouncer: no address and no head hash.
     pub fn is_default(&self) -> bool {
-        self.url.is_empty()
+        self.url.is_empty() && self.heads_sha256.is_none()
     }
 }
 
@@ -310,14 +374,36 @@ impl Vault {
         candidate: &NewCandidate,
         now: u64,
     ) -> VaultResult<CandidateRecord> {
-        let sha_ok = candidate.checkpoint_sha256.len() == 64
-            && candidate
-                .checkpoint_sha256
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+        self.register_candidate_from(candidate, &CandidateOrigin::Local, now)
+    }
+
+    /// Register a candidate with its origin (schema 29). The head file must be on this
+    /// Mac (`checkpoint`), also for a remote job. No host has it yet: unit G marks the
+    /// upload with [`Vault::mark_candidate_uploaded`].
+    pub fn register_candidate_from(
+        &mut self,
+        candidate: &NewCandidate,
+        origin: &CandidateOrigin,
+        now: u64,
+    ) -> VaultResult<CandidateRecord> {
+        let sha_ok = is_sha256(&candidate.checkpoint_sha256);
+        let (origin_text, job_host, job_id) = match origin {
+            CandidateOrigin::Local => ("local", None, None),
+            CandidateOrigin::RemoteJob { host, job_id } => {
+                if !valid_host_key(host)
+                    || host == THIS_MAC_HOST
+                    || job_id.is_empty()
+                    || job_id.len() > MAX_JOB_ID_BYTES
+                    || !job_id.chars().all(|c| c.is_ascii_graphic())
+                {
+                    return Err(err(VaultErrorKind::InvalidInput));
+                }
+                ("remote_job", Some(host.as_str()), Some(job_id.as_str()))
+            }
+        };
         if !valid_model_version(&candidate.version)
-            || !candidate.url.starts_with("http://")
             || candidate.url.len() > MAX_URL_BYTES
+            || candidate.url.chars().any(char::is_control)
             || candidate.checkpoint.is_empty()
             || candidate.checkpoint.len() > MAX_PATH_BYTES
             || candidate.checkpoint.contains('\0')
@@ -338,8 +424,8 @@ impl Vault {
         .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute(
             "INSERT INTO model_candidate (version, url, checkpoint, checkpoint_sha256,
-                 created_at, state, ended_at, report)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'shadow', NULL, ?6)",
+                 created_at, state, ended_at, report, origin, job_host, job_id, uploaded_to)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'shadow', NULL, ?6, ?7, ?8, ?9, NULL)",
             rusqlite::params![
                 candidate.version,
                 candidate.url,
@@ -347,6 +433,9 @@ impl Vault {
                 candidate.checkpoint_sha256,
                 at,
                 candidate.report,
+                origin_text,
+                job_host,
+                job_id,
             ],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -355,6 +444,24 @@ impl Vault {
         let record = find_candidate(&tx, id)?.ok_or_else(|| err(VaultErrorKind::Storage))?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
         Ok(record)
+    }
+
+    /// The head file of candidate `id` is on the host `host` now ([`THIS_MAC_HOST`] or an
+    /// `https://` address), or on no host with `None`. Unit G calls it after an upload
+    /// (`PUT /v1/heads/<sha256>`) and before a hosting change completes. Returns false
+    /// when there is no such candidate.
+    pub fn mark_candidate_uploaded(&mut self, id: u64, host: Option<&str>) -> VaultResult<bool> {
+        if host.is_some_and(|host| !valid_host_key(host)) {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        let changed = self
+            .conn_mut()?
+            .execute(
+                "UPDATE model_candidate SET uploaded_to = ?1 WHERE id = ?2",
+                rusqlite::params![host, to_sql_id(id)?],
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(changed > 0)
     }
 
     /// The candidate in shadow mode, if there is one.
@@ -511,6 +618,26 @@ impl Vault {
         Ok(self.model_activations(1)?.into_iter().next())
     }
 
+    /// The head hash that `activation` pins. `Ok(None)`: the default bouncer, or a row
+    /// from before schema 29 that cannot name its head set (a rollback to an older
+    /// promotion). A promotion from before schema 29 has no `heads_sha256`; its
+    /// candidate's head hash pins it.
+    pub fn activation_heads(&self, activation: &ModelActivation) -> VaultResult<Option<String>> {
+        if let Some(heads) = &activation.heads_sha256 {
+            return Ok(Some(heads.clone()));
+        }
+        if activation.is_default() || activation.action != ActivationAction::Promote {
+            return Ok(None);
+        }
+        let Some(id) = activation.candidate_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .candidate(id)?
+            .map(|candidate| candidate.checkpoint_sha256)
+            .filter(|heads| is_sha256(heads)))
+    }
+
     /// Promotions and rollbacks, newest first.
     pub fn model_activations(&self, limit: usize) -> VaultResult<Vec<ModelActivation>> {
         let limit = i64::try_from(limit).map_err(|_| err(VaultErrorKind::InvalidInput))?;
@@ -551,6 +678,9 @@ impl Vault {
         if !summary.agreement.can_promote() {
             return Err(err(VaultErrorKind::InvalidInput));
         }
+        if !is_sha256(&candidate.checkpoint_sha256) {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
         let previous = self.active_model()?;
         let (previous_version, previous_url) = previous
             .map(|active| (active.version, active.url))
@@ -579,8 +709,8 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute(
             "INSERT INTO model_activation (at, action, version, url, candidate_id,
-                 previous_version, previous_url, report)
-             VALUES (?1, 'promote', ?2, ?3, ?4, ?5, ?6, ?7)",
+                 previous_version, previous_url, report, heads_sha256)
+             VALUES (?1, 'promote', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 at,
                 candidate.version,
@@ -589,6 +719,7 @@ impl Vault {
                 previous_version,
                 previous_url,
                 report,
+                candidate.checkpoint_sha256,
             ],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -619,6 +750,15 @@ impl Vault {
         if active.id != activation_id || active.action != ActivationAction::Promote {
             return Err(err(VaultErrorKind::InvalidInput));
         }
+        // The model before the promotion: the row before it names its head set. Without
+        // that row (pruned, or the default bouncer) the head hash stays empty; a
+        // non-default model without a head hash makes the owner decide.
+        let previous_heads = match self.activation_before(active.id)? {
+            Some(before) if !active.previous_version.is_empty() => {
+                self.activation_heads(&before)?
+            }
+            _ => None,
+        };
         let reason = format!(
             "The owner rolled back model {} to {}.",
             model_label(&active.version),
@@ -631,8 +771,8 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute(
             "INSERT INTO model_activation (at, action, version, url, candidate_id,
-                 previous_version, previous_url, report)
-             VALUES (?1, 'rollback', ?2, ?3, ?4, ?5, ?6, '{}')",
+                 previous_version, previous_url, report, heads_sha256)
+             VALUES (?1, 'rollback', ?2, ?3, ?4, ?5, ?6, '{}', ?7)",
             rusqlite::params![
                 at,
                 active.previous_version,
@@ -640,6 +780,7 @@ impl Vault {
                 active.candidate_id.map(to_sql_id).transpose()?,
                 active.version,
                 active.url,
+                previous_heads,
             ],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -655,6 +796,23 @@ impl Vault {
         let activation = find_activation(&tx, id)?.ok_or_else(|| err(VaultErrorKind::Storage))?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
         Ok(activation)
+    }
+
+    /// The newest activation before the row `id`.
+    fn activation_before(&self, id: u64) -> VaultResult<Option<ModelActivation>> {
+        self.conn_ref()?
+            .query_row(
+                &format!(
+                    "SELECT {ACTIVATION_COLUMNS} FROM model_activation WHERE id < ?1
+                     ORDER BY id DESC LIMIT 1"
+                ),
+                [to_sql_id(id)?],
+                activation_row,
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?
+            .map(activation_from)
+            .transpose()
     }
 }
 
@@ -721,6 +879,9 @@ fn prune_candidates(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
     Ok(())
 }
 
+/// The columns of schema 29 of a candidate row.
+type CandidateRow29 = (String, Option<String>, Option<String>, Option<String>);
+
 type CandidateRow = (
     i64,
     String,
@@ -731,6 +892,7 @@ type CandidateRow = (
     String,
     Option<i64>,
     String,
+    CandidateRow29,
 );
 
 fn candidate_row(row: &Row<'_>) -> rusqlite::Result<CandidateRow> {
@@ -744,12 +906,35 @@ fn candidate_row(row: &Row<'_>) -> rusqlite::Result<CandidateRow> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        (row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?),
     ))
 }
 
+fn origin_from(
+    origin: &str,
+    job_host: Option<String>,
+    job_id: Option<String>,
+) -> VaultResult<CandidateOrigin> {
+    match (origin, job_host, job_id) {
+        ("local", _, _) => Ok(CandidateOrigin::Local),
+        ("remote_job", Some(host), Some(job_id)) => Ok(CandidateOrigin::RemoteJob { host, job_id }),
+        _ => Err(err(VaultErrorKind::Storage)),
+    }
+}
+
 fn candidate_from(row: CandidateRow) -> VaultResult<CandidateRecord> {
-    let (id, version, url, checkpoint, checkpoint_sha256, created_at, state, ended_at, report) =
-        row;
+    let (
+        id,
+        version,
+        url,
+        checkpoint,
+        checkpoint_sha256,
+        created_at,
+        state,
+        ended_at,
+        report,
+        (origin, job_host, job_id, uploaded_to),
+    ) = row;
     Ok(CandidateRecord {
         id: to_public_id(id)?,
         version,
@@ -760,6 +945,8 @@ fn candidate_from(row: CandidateRow) -> VaultResult<CandidateRecord> {
         state: CandidateState::parse(&state)?,
         ended_at: ended_at.map(from_sql_time).transpose()?,
         report,
+        origin: origin_from(&origin, job_host, job_id)?,
+        uploaded_to,
     })
 }
 
@@ -785,6 +972,7 @@ type ActivationRow = (
     String,
     String,
     String,
+    Option<String>,
 );
 
 fn activation_row(row: &Row<'_>) -> rusqlite::Result<ActivationRow> {
@@ -798,11 +986,23 @@ fn activation_row(row: &Row<'_>) -> rusqlite::Result<ActivationRow> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
     ))
 }
 
 fn activation_from(row: ActivationRow) -> VaultResult<ModelActivation> {
-    let (id, at, action, version, url, candidate_id, previous_version, previous_url, report) = row;
+    let (
+        id,
+        at,
+        action,
+        version,
+        url,
+        candidate_id,
+        previous_version,
+        previous_url,
+        report,
+        heads_sha256,
+    ) = row;
     Ok(ModelActivation {
         id: to_public_id(id)?,
         at: from_sql_time(at)?,
@@ -813,6 +1013,7 @@ fn activation_from(row: ActivationRow) -> VaultResult<ModelActivation> {
         previous_version,
         previous_url,
         report,
+        heads_sha256,
     })
 }
 
@@ -930,7 +1131,11 @@ mod tests {
                 ..new_candidate("x")
             },
             NewCandidate {
-                url: "https://example.com".to_owned(),
+                url: "u".repeat(MAX_URL_BYTES + 1),
+                ..new_candidate("x")
+            },
+            NewCandidate {
+                url: "http://127.0.0.1:8775\n".to_owned(),
                 ..new_candidate("x")
             },
             NewCandidate {
@@ -979,5 +1184,194 @@ mod tests {
         // The real outcome of every row is "ask".
         assert_eq!(summary.same_as_active, 2);
         assert!(!summary.agreement.can_promote());
+    }
+
+    /// The shadow gate of ADR 0010 for `candidate`: 100 owner approvals that it runs.
+    fn pass_the_gate(vault: &mut Vault, candidate: u64) {
+        for _ in 0..100 {
+            assert!(shadow(
+                vault,
+                candidate,
+                ShadowAnswer::Run,
+                OwnerLabel::Allow
+            ));
+        }
+    }
+
+    /// Schema 29: the candidate answers in the request of the active model, so its
+    /// address is no longer read. An empty address or an `https://` address is
+    /// accepted; the head file on this Mac and its hash are still required.
+    #[test]
+    fn a_candidate_needs_no_server_address_since_29() {
+        let (_dir, mut vault) = temp_vault();
+        for url in ["", "https://brain.synthetic.ts.net"] {
+            let record = vault
+                .register_candidate(
+                    &NewCandidate {
+                        url: url.to_owned(),
+                        ..new_candidate("apassy-local-v1+01234567")
+                    },
+                    1,
+                )
+                .expect(url);
+            assert_eq!(record.url, url);
+            assert_eq!(record.origin, CandidateOrigin::Local);
+            assert_eq!(record.uploaded_to, None, "no host has the head file yet");
+            assert_eq!(record.heads_sha256(), SHA);
+        }
+    }
+
+    /// A remote training job keeps its host and job id. The head file is on this Mac;
+    /// the upload mark names the host that has it.
+    #[test]
+    fn a_remote_job_candidate_and_its_upload_mark_round_trip() {
+        let (_dir, mut vault) = temp_vault();
+        let origin = CandidateOrigin::RemoteJob {
+            host: "https://brain.synthetic.ts.net".to_owned(),
+            job_id: "job-0001".to_owned(),
+        };
+        let record = vault
+            .register_candidate_from(&new_candidate("apassy-local-v1+01234567"), &origin, 5)
+            .expect("remote job");
+        assert_eq!(record.origin, origin);
+        for bad in [
+            CandidateOrigin::RemoteJob {
+                host: THIS_MAC_HOST.to_owned(),
+                job_id: "job".to_owned(),
+            },
+            CandidateOrigin::RemoteJob {
+                host: "http://brain.synthetic".to_owned(),
+                job_id: "job".to_owned(),
+            },
+            CandidateOrigin::RemoteJob {
+                host: "https://brain.synthetic.ts.net".to_owned(),
+                job_id: String::new(),
+            },
+        ] {
+            assert_eq!(
+                vault
+                    .register_candidate_from(&new_candidate("v"), &bad, 6)
+                    .unwrap_err()
+                    .kind(),
+                VaultErrorKind::InvalidInput,
+                "{bad:?}"
+            );
+        }
+        assert!(
+            vault
+                .mark_candidate_uploaded(record.id, Some(THIS_MAC_HOST))
+                .expect("mark")
+        );
+        let read = vault.candidate(record.id).expect("read").expect("some");
+        assert!(read.is_on_host(THIS_MAC_HOST));
+        assert!(!read.is_on_host("https://brain.synthetic.ts.net"));
+        assert!(
+            vault
+                .mark_candidate_uploaded(record.id, Some("https://brain.synthetic.ts.net"))
+                .expect("mark")
+        );
+        assert!(
+            vault
+                .candidate(record.id)
+                .expect("read")
+                .expect("some")
+                .is_on_host("https://brain.synthetic.ts.net")
+        );
+        assert!(
+            vault
+                .mark_candidate_uploaded(record.id, None)
+                .expect("unmark")
+        );
+        assert_eq!(
+            vault
+                .candidate(record.id)
+                .expect("read")
+                .expect("some")
+                .uploaded_to,
+            None
+        );
+        for bad in ["http://127.0.0.1:8770", "https://brain.synthetic/", ""] {
+            assert_eq!(
+                vault
+                    .mark_candidate_uploaded(record.id, Some(bad))
+                    .unwrap_err()
+                    .kind(),
+                VaultErrorKind::InvalidInput,
+                "{bad}"
+            );
+        }
+        assert!(
+            !vault
+                .mark_candidate_uploaded(record.id + 99, None)
+                .expect("none")
+        );
+    }
+
+    /// A promotion writes the head hash; a rollback writes the head hash of the model
+    /// before it, or none for the default bouncer.
+    #[test]
+    fn a_promotion_pins_the_head_hash_and_a_rollback_restores_the_one_before() {
+        let (_dir, mut vault) = temp_vault();
+        let other = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        let first = vault
+            .register_candidate(&new_candidate("apassy-local-v1+01234567"), 1)
+            .expect("first");
+        pass_the_gate(&mut vault, first.id);
+        let promoted = vault.promote_candidate(first.id, 2).expect("promote");
+        assert_eq!(promoted.heads_sha256.as_deref(), Some(SHA));
+        assert!(!promoted.is_default());
+        let second = vault
+            .register_candidate(
+                &NewCandidate {
+                    url: String::new(),
+                    checkpoint_sha256: other.to_owned(),
+                    ..new_candidate("apassy-local-v1+fedcba98")
+                },
+                3,
+            )
+            .expect("second");
+        pass_the_gate(&mut vault, second.id);
+        let newer = vault.promote_candidate(second.id, 4).expect("promote");
+        assert_eq!(newer.heads_sha256.as_deref(), Some(other));
+        assert!(newer.url.is_empty());
+        assert!(
+            !newer.is_default(),
+            "a head hash without an address is not the default"
+        );
+        let back = vault.roll_back_model(newer.id, 5).expect("roll back");
+        assert_eq!(back.version, "apassy-local-v1+01234567");
+        assert_eq!(back.heads_sha256.as_deref(), Some(SHA));
+        assert_eq!(
+            vault.activation_heads(&back).expect("heads").as_deref(),
+            Some(SHA)
+        );
+    }
+
+    /// A promotion from before schema 29 has no head hash: its candidate pins it. A
+    /// rollback to the default bouncer has none and is the default.
+    #[test]
+    fn an_activation_from_before_29_is_pinned_by_its_candidate_hash() {
+        let (_dir, mut vault) = temp_vault();
+        let candidate = vault
+            .register_candidate(&new_candidate("apassy-local-v1+01234567"), 1)
+            .expect("candidate");
+        pass_the_gate(&mut vault, candidate.id);
+        let promoted = vault.promote_candidate(candidate.id, 2).expect("promote");
+        vault
+            .conn_mut()
+            .expect("conn")
+            .execute("UPDATE model_activation SET heads_sha256 = NULL", [])
+            .expect("old row");
+        let old = vault.active_model().expect("read").expect("some");
+        assert_eq!(old.id, promoted.id);
+        assert_eq!(old.heads_sha256, None);
+        assert!(!old.is_default(), "the old row has its candidate address");
+        assert_eq!(
+            vault.activation_heads(&old).expect("heads").as_deref(),
+            Some(SHA)
+        );
+        let back = vault.roll_back_model(old.id, 3).expect("roll back");
+        assert!(back.is_default());
+        assert_eq!(vault.activation_heads(&back).expect("heads"), None);
     }
 }

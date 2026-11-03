@@ -14,6 +14,9 @@ pub(crate) mod auto_lock;
 /// The host of the bouncer brain from the vault (ADR 0035).
 #[cfg(feature = "vault")]
 mod brain_host;
+/// The "Runs on" row and the "Use My Server" sheet of Settings > Bouncer (ADR 0035).
+#[cfg(feature = "vault")]
+mod brain_hosting_ui;
 /// The browser socket (ADR 0021).
 #[cfg(feature = "vault")]
 pub(crate) mod browser;

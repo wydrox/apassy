@@ -36,7 +36,7 @@ use super::verify_expected_columns_in;
 /// The schema version of the account key source of relay memberships.
 pub(super) const ACCOUNT_KEY_SCHEMA_VERSION: i64 = 34;
 /// The newest schema before this one in the migration chain.
-pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema29::BOUNCER_HOST_SCHEMA_VERSION;
+pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema32::SHORT_LIVED_SCHEMA_VERSION;
 
 const _: () = assert!(SCHEMA_VERSION == ACCOUNT_KEY_SCHEMA_VERSION);
 const _: () = assert!(PREVIOUS_SCHEMA_VERSION < ACCOUNT_KEY_SCHEMA_VERSION);
@@ -137,6 +137,8 @@ mod tests {
             key_pkcs8: Zeroizing::new(vec![0xab; 138]),
             purposes: BTreeSet::from([MembershipPurpose::Questions]),
             created_at: 0,
+            pin: None,
+            alt: Vec::new(),
         }
     }
 
@@ -297,7 +299,7 @@ mod tests {
                 "{version}"
             );
         }
-        for version in [28, 30, 33, ACCOUNT_KEY_SCHEMA_VERSION + 1] {
+        for version in [30, 31, 33, ACCOUNT_KEY_SCHEMA_VERSION + 1] {
             assert!(
                 !crate::vault::merge::is_mergeable_schema(version),
                 "{version}"

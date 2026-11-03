@@ -9,7 +9,9 @@
 //! sequence, so a device that lists with its last `seq` sees each change once.
 //! Maintenance expires questions at `expires_at`, drops the ciphertexts and answers of
 //! a question 10 minutes after it ended, and deletes the rest 24 hours after it was
-//! posted. A post hands the push tokens of the routing set to `server::push`.
+//! posted. A post hands the push targets of the routing set to `server::push`: push
+//! tokens on the hosted relay, push handles on a node (with the sealed summary of the
+//! post, push-gateway-v1 section 12).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -28,7 +30,6 @@ use crate::server::Core;
 use crate::server::approvals::MAX_WAIT_SECS;
 use crate::server::audit::{RELAY_ACTOR, member_actor};
 use crate::server::auth::{MemberAuth, device_member, parse_role, role_text};
-use crate::server::push::PushTarget;
 use crate::server::store::{db, to_i, to_u};
 
 /// The largest ciphertext of a card, an answer, and a settle (plaintext + 16).
@@ -292,32 +293,6 @@ fn routing_set(
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db)
 }
 
-/// The push tokens of `devices` that did not fail.
-fn push_targets(conn: &Connection, devices: &[DeviceId]) -> RelayResult<Vec<PushTarget>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT token, environment FROM push_token WHERE device_id = ?1 AND failed_at IS NULL",
-        )
-        .map_err(db)?;
-    let mut targets = Vec::new();
-    for device in devices {
-        let row = statement
-            .query_row(params![to_i(device.0)], |row| {
-                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
-            })
-            .optional()
-            .map_err(db)?;
-        if let Some((token, environment)) = row {
-            targets.push(PushTarget {
-                device: *device,
-                token: String::from_utf8_lossy(&token).into_owned(),
-                environment,
-            });
-        }
-    }
-    Ok(targets)
-}
-
 /// The posted fields of a question, checked: 400, then 413.
 struct NewQuestion {
     qid: Qid,
@@ -467,6 +442,19 @@ fn still_the_caller(conn: &Connection, by: &MemberAuth, device: DeviceId) -> Rel
 
 /// `POST /v1/questions`.
 pub fn post(core: &Core, by: &MemberAuth, request: &QuestionPost, now: u64) -> RelayResult<Value> {
+    post_with_summary(core, by, request, None, now)
+}
+
+/// `POST /v1/questions` with the checked sealed summary of `X-Apassy-Push-Summary`
+/// (`push::checked_summary`, a node in the gateway mode only). The summary goes to the
+/// push job in memory and nowhere else.
+pub fn post_with_summary(
+    core: &Core,
+    by: &MemberAuth,
+    request: &QuestionPost,
+    summary: Option<&str>,
+    now: u64,
+) -> RelayResult<Value> {
     let device = device_of(by)?;
     let new = checked_post(request, now)?;
     if new.to_approvers && !core.config.questions_to_approvers {
@@ -558,12 +546,18 @@ pub fn post(core: &Core, by: &MemberAuth, request: &QuestionPost, now: u64) -> R
             None,
             &json!({"device_id": device, "to_approvers": new.to_approvers, "routed": routed.len()}),
         )?;
-        Ok(Ok((seq, push_targets(tx, &routed)?)))
+        Ok(Ok((seq, core.push.targets(tx, &routed)?)))
     })?;
     let (seq, targets) = outcome.inspect_err(|error| refused(core, now, device, error))?;
     core.notify.notify();
-    core.push
-        .trigger(core, new.qid.as_str(), targets, request.expires_at, now);
+    core.push.trigger(
+        core,
+        new.qid.as_str(),
+        targets,
+        request.expires_at,
+        summary.map(str::to_owned),
+        now,
+    );
     Ok(json!({
         "qid": new.qid.as_str(),
         "seq": seq,
@@ -943,7 +937,7 @@ pub fn settle(
 /// Best-effort restart replay from existing open questions: no schema/outbox change.
 /// APNs' constant collapse id coalesces duplicates after a restart.
 pub fn recover_push(core: &Core, now: u64) -> RelayResult<()> {
-    if core.push.topic().is_none() {
+    if !core.push.enabled() {
         return Ok(());
     }
     let pending = core.store.with(|conn| {
@@ -971,12 +965,13 @@ pub fn recover_push(core: &Core, now: u64) -> RelayResult<()> {
         let mut pending = Vec::new();
         for (qid, device, member, approvers, expiry) in rows {
             let routing = routing_set(conn, device, member, approvers)?;
-            pending.push((qid, expiry, push_targets(conn, &routing)?));
+            pending.push((qid, expiry, core.push.targets(conn, &routing)?));
         }
         Ok(pending)
     })?;
     for (qid, expiry, targets) in pending {
-        core.push.trigger(core, &qid, targets, expiry, now);
+        // A restart has no summary: the push carries the fixed text.
+        core.push.trigger(core, &qid, targets, expiry, None, now);
     }
     Ok(())
 }

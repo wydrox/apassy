@@ -267,6 +267,8 @@ pub fn create_connect(pending: &PendingConnect) -> Result<RelayMembership, Conne
         key_pkcs8: pending.key_pkcs8.clone(),
         purposes: BTreeSet::from([MembershipPurpose::Questions]),
         created_at: 0,
+        pin: None,
+        alt: Vec::new(),
     })
 }
 
