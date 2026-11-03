@@ -96,8 +96,8 @@ impl RunCa {
             .configs
             .lock()
             .map_err(|_| io::Error::other("certificate cache"))?;
-        let key = (host.to_owned(), alpn);
-        if let Some(config) = configs.get(&key) {
+        let cache_key = (host.to_owned(), alpn);
+        if let Some(config) = configs.get(&cache_key) {
             return Ok(Arc::clone(config));
         }
         let now = OffsetDateTime::now_utc();
@@ -123,7 +123,7 @@ impl RunCa {
             .map_err(error)?;
         config.alpn_protocols = alpn.protocols();
         let config = Arc::new(config);
-        configs.insert(key, Arc::clone(&config));
+        configs.insert(cache_key, Arc::clone(&config));
         Ok(config)
     }
 }
