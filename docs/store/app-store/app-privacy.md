@@ -2,8 +2,9 @@
 
 Unit M18 (Appendix A.2 of [implementation-plan-misc.md](../../design/implementation-plan-misc.md)).
 This file gives the answers for **App Store Connect › App Privacy** and the reason for each one.
-Every answer is a **recommendation for the owner**, not legal advice. Declaring more than the
-minimum is always allowed.
+The choices were settled by the owner's decision of 2026-11-03 ("describe the app correctly"):
+the conservative answer wherever the plan had a choice. It is not legal advice. Declaring more than
+the minimum is always allowed.
 
 Apple's rule, in short: data is "collected" when it leaves the device and the developer (or a
 partner of the developer) can access it for longer than it takes to serve the request in real time.
@@ -43,7 +44,7 @@ Not present in the code (checked 2026-11-03): no analytics SDK, no crash reporte
 tracking, no web view, no favicon or icon download (credential tiles use local colors,
 `Sources/Vault/CredentialLooks.swift`), no breach-check service, no purchase.
 
-Retention at the relay (relay `docs/OPERATIONS.md` §19 and §21):
+Retention at the relay (relay `docs/OPERATIONS.md` §13, §19, §21 and §22):
 
 - A question's sealed card, answers and settle: deleted 10 minutes after it is settled or expires;
   its row (devices, times, state) 24 hours after the post.
@@ -52,12 +53,18 @@ Retention at the relay (relay `docs/OPERATIONS.md` §19 and §21):
 - Device rows, device names, public keys and push tokens: until the device is removed on a Mac. A push
   token that Apple refuses for good is marked and no longer used.
 - Expired or refused device links: 7 days.
+- The team's append-only event log (device ids, versions, sizes, times; no content): no fixed end
+  date; an encrypted archive of it stays when the sweep deletes an unused Connect team (relay
+  `docs/OPERATIONS.md` §22).
+- Backups of the relay data (encrypted): daily, 14 days on the server, with a pull off the server
+  (relay `docs/OPERATIONS.md` §13).
 
 ## 3. The answers
 
 ### Do you or your third-party partners collect data from this app?
 
-**Yes.** Reason: rows 2.4 and 2.5 are stored on the relay, which the developer runs.
+**Yes.** Reason: rows 2.2 to 2.5 store device ids, device names, public keys and push tokens on the
+relay, which the developer runs.
 
 ### Tracking
 
@@ -69,9 +76,10 @@ identifier, so it needs no App Tracking Transparency prompt.
 
 | Apple category | Type | Declare? | Purposes | Linked to the user? | Used for tracking? | Reason |
 | --- | --- | --- | --- | --- | --- | --- |
-| Identifiers | Device ID | **Yes** | App Functionality | No (plan value; see the note below) | No | The APNs device token (row 2.5) and the relay device id (row 2.4) |
-| Other Data | Other Data Types | **Yes** | App Functionality | No (plan value; see the note below) | No | Device names and device public keys (row 2.4). Describe it as "device names and public keys of your devices, for sync and requests" |
-| Contact Info | Name, Email, Phone, Address, Other | No | | | | The app asks for none. A device name can contain a person's name only if the owner types it (iOS gives apps the generic name "iPhone"). See the note below |
+| Identifiers | Device ID | **Yes** | App Functionality | **Yes** (note 1) | No | The APNs device token (row 2.5) and the relay device id (row 2.4) |
+| Identifiers | User ID | **Yes** | App Functionality | **Yes** (note 1) | No | The pseudonymous relay team id of a vault and the relay device ids (rows 2.2 to 2.4): an id that the relay assigns, under which it keeps a device's data (note 2) |
+| Other Data | Other Data Types | **Yes** | App Functionality | **Yes** (note 1) | No | Device names and device public keys (row 2.4). Describe it as "device names and public keys of your devices, for sync and requests" (note 3) |
+| Contact Info | Name, Email, Phone, Address, Other | No | | | | The app asks for none. Device names are declared under Other Data (note 3) |
 | Health and Fitness | all | No | | | | |
 | Financial Info | all | No | | | | Cards imported into the vault are vault content: on the device, and only end-to-end encrypted off it |
 | Location | Precise, Coarse | No | | | | The app reads no location. IP addresses are not used to find a location |
@@ -80,27 +88,26 @@ identifier, so it needs no App Tracking Transparency prompt.
 | User Content | Emails or Text Messages, Photos or Videos, Audio, Gameplay, Customer Support, Other User Content | No | | | | The vault, the requests and the answers leave the device only end-to-end encrypted (rows 2.1 to 2.3). The camera saves no picture |
 | Browsing History | | No | | | | |
 | Search History | | No | | | | Search runs in the local vault |
-| Identifiers | User ID | No (plan value; see the note below) | | | | No Apassy account. The relay team id of a vault is random |
 | Purchases | Purchase History | No | | | | No purchase in the app |
 | Usage Data | Product Interaction, Advertising Data, Other Usage Data | No | | | | No analytics. The history of reveals is local |
 | Diagnostics | Crash Data, Performance Data, Other Diagnostic Data | No | | | | No crash or analytics SDK. Crash reports that iPhone users share with developers through Apple are Apple's flow and need no declaration |
 | Surroundings, Body | | No | | | | |
 
-### Notes for the owner (recommendations)
+### Notes
 
-1. **"Linked to the user."** The plan answers "No" because there is no Apassy account. But the relay
-   stores the push token, the device id, the device name and the public keys of a device together
-   under the relay team of one vault, and the vault is one person's. Apple counts data as linked when it
-   is tied to an account or a device of the user. A pseudonymous team can be read as an account.
-   Answering **"Linked to you"** for Device ID and Other Data is always allowed and cannot cause a
-   rejection. Recommendation: choose "linked" if in doubt; the label then reads "Data Linked to You:
-   Identifiers, Other Data".
-2. **User ID.** With the reading of note 1, the relay team id and the device id are an "assigned user
-   ID". If the owner chooses "linked", also declare Identifiers › User ID (App Functionality).
-3. **Device names.** iOS gives apps the generic name "iPhone" (the app has no user-assigned device name
-   entitlement); the owner can type another name in the app. A watch sends `WKInterfaceDevice.current().name`,
-   cut to 17 bytes. If names such as "Rafal's iPhone" are expected, Contact Info › Name is a careful
-   extra declaration; the plan does not make it.
+1. **"Linked to the user": Yes (decided 2026-11-03).** There is no Apassy account, but the relay stores
+   the push token, the device id, the device name and the public keys of a device together under the
+   relay team of one vault, and the vault is one person's. Apple counts data as linked when it is tied
+   to an account or a device of the user, and a pseudonymous team can be read as an account. "Linked"
+   is the conservative answer: it is always allowed and cannot cause a rejection.
+2. **User ID: declared (decided 2026-11-03).** With note 1, the relay team id and the device id are an
+   "assigned user ID" (pseudonymous: random, with no name or e-mail behind it), so Identifiers › User ID
+   is declared with App Functionality.
+3. **Device names: Other Data (decided 2026-11-03).** iOS gives apps the generic name "iPhone" (the app
+   has no user-assigned device name entitlement); the owner can type another name in the app. A watch
+   sends `WKInterfaceDevice.current().name`, cut to 17 bytes. The names are declared as Other Data,
+   linked, App Functionality. Contact Info › Name is not declared: the app does not ask for a person's
+   name, and a name that the owner types into a device name is still a device name.
 4. **End-to-end encrypted content.** The vault copies, sealed questions, answers and feeds are not
    declared, by Apple's end-to-end encryption guidance. The developer runs the relay, but has no key:
    the vault passphrase and the question key stay on the owner's devices.
@@ -119,7 +126,11 @@ identifier, so it needs no App Tracking Transparency prompt.
    App Group defaults; `C617.1` or `3B52.1` for file timestamps if used). Upload a build and read the
    email from App Store Connect: it names each missing reason.
 
-## 4. The label that App Store Connect will show (with the plan values)
+## 4. The label that App Store Connect will show
 
-- **Data Not Linked to You:** Identifiers, Other Data.
 - **Data Used to Track You:** none.
+- **Data Linked to You:** Identifiers (User ID, Device ID), Other Data. Purpose: App Functionality.
+- **Data Not Linked to You:** none.
+
+The privacy page (`site/src/pages/privacy.astro`, "The Apassy relay") names the same data: device
+ids, device names and public keys, push tokens, sizes and times. Keep the two the same.

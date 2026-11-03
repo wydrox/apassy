@@ -6,10 +6,13 @@ extension, and the site. It says "The iPhone companion talks to your Mac on your
 which is **no longer true**: the iPhone app syncs through iCloud Drive or the relay, and gets questions
 and push notifications through the relay.
 
-This draft is the text to add to that page before the App Store submission. Changing the page is a
-site change (another unit or the owner); this unit does not edit `site/`. **The legal parts (the
-controller, the legal bases, the rights, the processors, the countries) are recommendations for the
-owner** and need the owner's check; under the GDPR the owner is the controller of the relay data.
+**Published in the source on 2026-11-03** (owner: "describe the app correctly"): the factual sections
+of this draft are in `site/src/pages/privacy.astro` ("The iPhone and Apple Watch apps" and "The Apassy
+relay"), and that line is gone. They go live with the next site deploy. **Not on the page yet: the
+legal parts (the controller, the legal bases, the rights, the processors, the countries).** They stay
+recommendations for the owner and need the owner's check; under the GDPR the owner is the controller
+of the relay data. The event log row and the backups are on the page as the relay docs state them
+(no fixed end date for the log; backups 14 days).
 
 Every flow of [app-privacy.md](app-privacy.md) section 2 (Appendix A.2) is named below:
 
@@ -95,7 +98,8 @@ repository (`crates/apassy-relay`). For each vault that uses it, it keeps:
 | Sealed agent feeds of your Macs | Agent Access on your other devices | Until the Mac is removed, or 30 days after the last update |
 | The name of each device (for example "iPhone", or the name you type), its public keys, and the id that the relay gives it | To know which devices belong to the vault and to check their signatures | Until you remove the device on a Mac |
 | The push token of each iPhone with notifications on | Notifications | Until you turn notifications off and remove the iPhone, or until Apple says that the token is no longer valid |
-| A log of events (device ids, versions, sizes, times; no names of items, no content) | Security and operation | As long as the vault's relay team exists *(owner: confirm, or set a limit)* |
+| A log of events (device ids, versions, sizes, times; no names of items, no content) | Security and operation | No fixed end date today: as long as the vault's relay team exists, and an encrypted archive after the relay deletes an unused team *(owner: set a limit if wanted)* |
+| Backups of the relay data (encrypted) | Recovery | 14 days on the server, with a copy off the server *(owner: state the retention of the off-server copy)* |
 | IP address and time of each request | To deliver and protect the service (rate limits, abuse) | In the usual request logs of Cloudflare and the server, for a short time |
 
 We use this data only to run the relay. We do not sell it, share it for advertising, or use it to
@@ -129,10 +133,9 @@ We change this page when the apps change what they send. The date at the top sho
 
 ## Notes for the site change
 
-- Replace the line "The iPhone companion talks to your Mac on your local network only." with a link to
-  the new section.
+- Done 2026-11-03: the line "The iPhone companion talks to your Mac on your local network only." is
+  replaced, and `UPDATED` is 2026-11-03.
 - Change "There are no Apassy accounts" only when stage 7 ships the Connect account; then add the
   account e-mail and the Stripe checkout (on the Mac) to the page.
-- Update `UPDATED` in `site/src/pages/privacy.astro`.
 - Keep the page true to [app-privacy.md](app-privacy.md): the App Privacy label and the policy must say
   the same.
