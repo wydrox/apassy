@@ -1422,3 +1422,117 @@ fn the_app_start_turns_off_only_its_own_stale_route() {
     fx.node.clear_stale_route();
     assert_eq!(*fx.cli.serve.lock().unwrap(), serve_443_only());
 }
+
+#[test]
+fn use_port_10000_moves_the_route_and_is_kept_for_the_next_start() {
+    let fx = fixture();
+    // Another program serves 8443: the start fails, and the problem offers 10000.
+    *fx.cli.serve.lock().unwrap() = serve_with_8443("http://127.0.0.1:8080", true);
+    let failure = fx.node.start(&fx.vault, fx.broker.clone()).unwrap_err();
+    assert_eq!(failure.code, "funnel_port_taken");
+    let status = fx.node.status(&fx.vault);
+    assert_eq!(
+        status.problem,
+        Some(super::RouteProblem::PortTaken {
+            alternative: Some(super::funnel::OTHER_FUNNEL_PORT)
+        })
+    );
+    assert_eq!(status.funnel_port, super::funnel::FUNNEL_PORT);
+    // Only the two Funnel ports are taken.
+    assert_eq!(
+        fx.node.use_funnel_port(443).unwrap_err().code,
+        "invalid_port"
+    );
+    fx.node
+        .use_funnel_port(super::funnel::OTHER_FUNNEL_PORT)
+        .unwrap();
+    assert_eq!(fx.node.status(&fx.vault).problem, None);
+    fx.running();
+    let status = fx.node.status(&fx.vault);
+    assert_eq!(
+        status.url.as_deref(),
+        Some("https://mac.example-tailnet.ts.net:10000/mcp")
+    );
+    assert_eq!(status.funnel_port, super::funnel::OTHER_FUNNEL_PORT);
+    assert!(
+        fx.cli
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("funnel --bg --https=10000 ")),
+        "{:?}",
+        fx.cli.calls()
+    );
+    // Not while the node runs.
+    assert_eq!(
+        fx.node
+            .use_funnel_port(super::funnel::FUNNEL_PORT)
+            .unwrap_err()
+            .code,
+        "node_running"
+    );
+    fx.node.stop();
+    assert!(
+        fx.cli
+            .calls()
+            .contains(&"funnel --https=10000 off".to_owned())
+    );
+    // A new process of the app reads the choice from the node directory.
+    let again = Node::new(NodeOptions {
+        backend: Arc::new(fx.backend.clone()),
+        keys: Arc::new(FakeKeys::empty()),
+        cli: fx.cli.clone(),
+        data_dir: fx.node.data_dir().to_path_buf(),
+    });
+    assert_eq!(again.funnel_port(), super::funnel::OTHER_FUNNEL_PORT);
+}
+
+#[test]
+fn a_policy_problem_keeps_the_admin_console_link() {
+    let failure = NodeError::new(
+        "funnel_policy",
+        "The tailnet policy does not allow Funnel: Funnel is not enabled. Allow it at https://login.tailscale.com/f/funnel?node=nSynthetic123",
+    );
+    assert_eq!(
+        super::RouteProblem::of(&failure, super::funnel::FUNNEL_PORT),
+        Some(super::RouteProblem::Policy {
+            link: Some("https://login.tailscale.com/f/funnel?node=nSynthetic123".to_owned())
+        })
+    );
+    // A port taken on 10000 has no other port to offer.
+    let taken = NodeError::new("funnel_port_taken", "taken");
+    assert_eq!(
+        super::RouteProblem::of(&taken, super::funnel::OTHER_FUNNEL_PORT),
+        Some(super::RouteProblem::PortTaken { alternative: None })
+    );
+}
+
+#[test]
+fn run_audit_reads_the_rows_of_one_run_beyond_the_newest_twenty() {
+    let fx = fixture();
+    fx.running();
+    {
+        let mut state = fx.state();
+        state.audit(
+            "proxy_request",
+            Some(NodeRunId(7)),
+            r#"{"at":1,"method":"GET","host":"httpbingo.org","status":200,"outcome":"forwarded"}"#
+                .to_owned(),
+        );
+        // 30 newer rows of another run push it out of "Recent cloud activity".
+        for _ in 0..30 {
+            state.audit("proxy_request", Some(NodeRunId(8)), "{}".to_owned());
+        }
+    }
+    assert!(
+        !fx.node
+            .recent_activity()
+            .iter()
+            .any(|row| row.run_id == Some(NodeRunId(7)))
+    );
+    let rows = fx.node.run_audit(7);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, "proxy_request");
+    assert_eq!(rows[0].run_id, Some(NodeRunId(7)));
+    fx.node.stop();
+    assert!(fx.node.run_audit(7).is_empty(), "no node, no rows");
+}
