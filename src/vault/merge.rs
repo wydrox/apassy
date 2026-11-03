@@ -79,7 +79,7 @@ pub(super) const CHILD_TABLES: [&str; 11] = [
 
 /// Tables that stay on each Mac. A pushed copy keeps only the default companion setting, and a merge never
 /// reads them from another copy.
-pub const LOCAL_TABLES: [&str; 38] = [
+pub const LOCAL_TABLES: [&str; 39] = [
     "agent",
     "grant_rule",
     "activity",
@@ -118,6 +118,7 @@ pub const LOCAL_TABLES: [&str; 38] = [
     "cloud_item",
     "cloud_node",
     "cloud_run",
+    "bouncer_host",
 ];
 
 /// Tables whose rows sync. `vault_meta` syncs as the one row of the file; its token
@@ -172,7 +173,9 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
 /// only local tables and a local column (the cloud agents of the node, `schema26.rs`):
 /// a copy has none of their rows. Schema 27 adds local columns and a local table (the
 /// figures of the Bouncer section, `schema27.rs`): a copy has none of their rows either.
-pub(super) const UPGRADABLE_SCHEMA: i64 = 26;
+/// Schema 29 adds only a local table and columns of local tables (the host of the
+/// bouncer brain, `schema29.rs`): a copy has none of their rows either.
+pub(super) const UPGRADABLE_SCHEMA: i64 = super::schema29::PREVIOUS_SCHEMA_VERSION;
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
@@ -180,15 +183,16 @@ pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERS
 
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
 // Schemas 20 through 23 add local state only, schema 24 only widens a `CHECK` of a
-// synced table, schema 25 only adds values of reserved item fields, and schemas 26 and
-// 27 add local state only; future synced schemas require another merge step.
-const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 10);
+// synced table, schema 25 only adds values of reserved item fields, and schemas 26,
+// 27 and 29 add local state only; future synced schemas require another merge step.
+const _: () = assert!(SCHEMA_VERSION == super::schema29::BOUNCER_HOST_SCHEMA_VERSION);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 11);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
-/// one of the earlier schemas that it upgrades.
+/// one of the earlier schemas that it upgrades. A number between the previous schema
+/// and this one belongs to no build, so it is refused.
 pub(super) fn is_mergeable_schema(version: i64) -> bool {
-    (OLDEST_UPGRADABLE_SCHEMA..=SCHEMA_VERSION).contains(&version)
+    (OLDEST_UPGRADABLE_SCHEMA..=UPGRADABLE_SCHEMA).contains(&version) || version == SCHEMA_VERSION
 }
 
 /// A table whose rows sync one by one.
