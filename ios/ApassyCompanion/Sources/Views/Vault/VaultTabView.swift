@@ -151,7 +151,7 @@ struct VaultTabView: View {
 
     /// A development aid of the Simulator, and of the demo in every build (screenshots), to reach
     /// a screen without taps:
-    /// `-ApassyOpen vault|items|all|watchtower|folder:<uuid or name>|decisions|approvals|questions|agents|settings[:<group>]|generator|search:<text>|new:<kind>|newcredential|edit:<id>|item:<id>[:reveal|:large|:options]`.
+    /// `-ApassyOpen vault|items|all|watchtower|folder:<uuid or name>|decisions|approvals|questions|access:<request id>|agents|settings[:<group>]|generator|search:<text>|new:<kind>|newcredential|edit:<id>|item:<id>[:reveal|:large|:options]`.
     /// `items` (`all`), `watchtower`, and `folder` open on the Vault tab, where they are now;
     /// `approvals` is the old name of `decisions`. `:reveal`, `:large`, and `:options` work in the
     /// Simulator only.
@@ -173,6 +173,8 @@ struct VaultTabView: View {
         case "newcredential": ui.sheet = .newCredential(folder: nil)
         case "decisions", "approvals": ui.tab = .decisions
         case "questions": ui.tab = .decisions
+        // The detail itself is opened by Requests (`DecisionsView`).
+        case "access": ui.tab = .decisions
         case "agents": ui.sheet = .agentAccess
         case "settings": ui.sheet = .settings
         case "generator": ui.sheet = .generator

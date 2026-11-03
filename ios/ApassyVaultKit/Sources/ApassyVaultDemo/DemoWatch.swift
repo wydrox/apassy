@@ -37,7 +37,7 @@ public enum DemoWatch {
     public static func request(answerKey: Data, now: Date = Date()) -> RelayAccessRequest {
         let created = UInt64(now.timeIntervalSince1970) - 15
         return DemoVault.access(
-            id: "demo-watch-81", agent: "Claude Code", host: "claude-code", item: "GitHub", binding: "GITHUB_TOKEN",
+            id: "demo-watch-81", agentID: "4", agent: "Claude Code", host: "claude-code", item: "GitHub", binding: "GITHUB_TOKEN",
             hosts: ["api.github.com"], reason: "Push the release tag of the demo project.", project: "acme-billing",
             created: created, expires: created + UInt64(DemoVault.waitLifetime), state: "open", answerKey: answerKey,
             rowVaultID: vault.id)

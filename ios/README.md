@@ -238,6 +238,7 @@ The `-ApassyOpen` routes:
 | `folder:<uuid or name>` | A folder, with its parents pushed. |
 | `newcredential` | New Credential. |
 | `decisions`, `questions`, or `approvals` | The Requests tab; all three compatibility route names remain accepted. |
+| `access:<request id>` | The detail of an access request in Requests, waiting or in History (the demo: `access:demo-81`, `access:demo-79`). |
 | `agents` | Settings > Agent Access. |
 | `settings` or `settings:general\|agents\|devices\|security\|advanced` | Settings, or one of its groups. |
 | `generator` | The password generator. |
