@@ -1193,28 +1193,8 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         );
         ui.spacing_mut().item_spacing.y = 0.0;
     }
-    footer(app, ui, id);
+    footer(app, ui, &details);
     removal_sheet(app, ui.ctx(), &details, passkey.as_ref());
-}
-
-fn detail_disclosure(
-    app: &mut DesktopApp,
-    ui: &mut egui::Ui,
-    id: u64,
-    section: &str,
-    label: &str,
-    add: impl FnOnce(&mut DesktopApp, &mut egui::Ui),
-) {
-    let key = format!("credential-{section}-{id}");
-    let mut open = app.ui.is_expanded(&key);
-    if kit::disclosure(ui, &mut open, label).changed() {
-        app.ui.set_expanded(&key, open);
-    }
-    if open {
-        ui.add_space(8.0);
-        add(app, ui);
-    }
-    ui.add_space(14.0);
 }
 
 /// Open the edit sheet with the stored values. With `add_detail`, the form gets a new
@@ -1501,19 +1481,6 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
             .show(ui, |ui| kit::note(ui, footer));
     }
     ui.add_space(rows::GROUP_GAP);
-    if details.details.iter().any(is_import_data) {
-        detail_disclosure(app, ui, id, "import", "Import data", |app, ui| {
-            kit::section(ui, None, None, |s| {
-                for detail in details
-                    .details
-                    .iter()
-                    .filter(|detail| is_import_data(detail))
-                {
-                    toggle |= custom_value_row(app, s, details, detail, revealed, &mut copy);
-                }
-            });
-        });
-    }
     if !details.notes.is_empty() {
         rows::group_label(ui, "Notes", None);
         rows::group(ui, |s| {
@@ -1997,7 +1964,8 @@ fn rules_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) 
 }
 
 /// The third group: "Always ask me", the environment, and "Hosts and risk" with the
-/// declaration, the variable, and the connector.
+/// declaration, the variable, and the connector. "Hosts and risk" names the known hosts
+/// of [`bouncer_hosts`]: one host, "N hosts", or "Not set".
 fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let id = details.id;
     let always_ask = app
@@ -2038,11 +2006,23 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
         .with_vault(|vault| vault.declaration_sources(id))
         .and_then(Result::ok)
         .is_some_and(|sources| sources == crate::vault::DeclarationSources::default());
-    let hosts = match state {
-        EnvState::None => "Not set",
-        _ if by_owner => "Set by you",
-        _ => "Set automatically",
+    let known = bouncer_hosts(app, id);
+    let hosts = match known.as_slice() {
+        [] => "Not set".to_owned(),
+        [host] => host.clone(),
+        several => format!("{} hosts", several.len()),
     };
+    let mut about = Vec::new();
+    match known.len() {
+        0 => about.push("The bouncer knows no host of this credential.".to_owned()),
+        1 => {}
+        _ => about.push(known.join(", ")),
+    }
+    match state {
+        EnvState::None => {}
+        _ if by_owner => about.push("Declaration: set by you.".to_owned()),
+        _ => about.push("Declaration: set automatically.".to_owned()),
+    }
     let mut toggle_access = false;
     rows::group(ui, |s| {
         s.toggle("Always ask me", &mut ask)
@@ -2061,7 +2041,12 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
                 });
             });
         });
-        let access = s.chevron("Hosts and risk", hosts);
+        let access = s.chevron("Hosts and risk", &hosts);
+        let access = if about.is_empty() {
+            access
+        } else {
+            access.on_hover_text(about.join("\n"))
+        };
         ui_expanded(&access, access_open);
         toggle_access = access.clicked();
     });
@@ -2082,6 +2067,44 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
     {
         set_environment(app, ui.ctx(), details, environment);
     }
+}
+
+/// The known hosts of an item, as the broker collects them for a run (`check` and
+/// `push_item` in `crate::broker::run`): the hosts of the stored provider, the hosts of
+/// a placeholder, and the plain `host` field. Lowercase, without a port, sorted. The
+/// website of a login is not one of them.
+fn bouncer_hosts(app: &DesktopApp, id: u64) -> Vec<String> {
+    use crate::vault::answers::normal_host;
+    let session = &app.owner_ui.session;
+    let mut hosts: Vec<String> = session
+        .with_vault(|vault| vault.declaration_provider(id))
+        .and_then(Result::ok)
+        .flatten()
+        .map(|provider| providers::known_hosts(&provider).to_vec())
+        .unwrap_or_default();
+    if let Some(EnvDelivery::Placeholder(rules)) = session
+        .process_binding(id)
+        .ok()
+        .flatten()
+        .map(|binding| binding.delivery)
+    {
+        hosts.extend(
+            rules
+                .iter()
+                .filter_map(|rule| crate::vault::parse_placeholder_host(rule))
+                .map(|(host, _)| host),
+        );
+    }
+    let mut hosts: Vec<String> = hosts.iter().filter_map(|host| normal_host(host)).collect();
+    hosts.extend(
+        session
+            .with_vault(|vault| vault.item_host_field(id))
+            .and_then(Result::ok)
+            .flatten(),
+    );
+    hosts.sort();
+    hosts.dedup();
+    hosts
 }
 
 /// A row that opens and closes a part says so to VoiceOver.
@@ -2246,9 +2269,15 @@ fn environment_question(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
     }
 }
 
-/// "Added … · Changed …". "Added by AGENT in PROJECT" comes with the API of
-/// `item_origin` (stream T2).
-fn footer(app: &DesktopApp, ui: &mut egui::Ui, id: u64) {
+/// The link of the footer that shows and hides the import rows.
+const IMPORT_DETAILS: &str = "Import details…";
+
+/// "Added … · Changed …". An imported credential starts with "Imported from 1Password"
+/// and ends with "Import details…", which shows its import rows under the footer. The
+/// open state uses the key `credential-import-{id}`. "Added by AGENT in PROJECT" comes
+/// with the API of `item_origin` (stream T2).
+fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+    let id = details.id;
     let times = app
         .owner_ui
         .session
@@ -2257,7 +2286,24 @@ fn footer(app: &DesktopApp, ui: &mut egui::Ui, id: u64) {
         .and_then(|times| times.get(&id).copied())
         .unwrap_or_default();
     let now = timeline::now();
+    let imported: Vec<&DetailLine> = details
+        .details
+        .iter()
+        .filter(|detail| is_import_data(detail))
+        .collect();
     let mut parts = Vec::new();
+    if !imported.is_empty() {
+        // "Source record" alone does not name the app it came from.
+        let from = if imported
+            .iter()
+            .any(|detail| detail.label.starts_with("1Password "))
+        {
+            "Imported from 1Password"
+        } else {
+            "Imported"
+        };
+        parts.push(from.to_owned());
+    }
     if let Some(added) = times.added {
         parts.push(format!("Added {}", relative_time(added, now)));
     }
@@ -2272,10 +2318,93 @@ fn footer(app: &DesktopApp, ui: &mut egui::Ui, id: u64) {
     }
     // Each group adds its gap under it; the footer sits 22 points under the last one.
     ui.add_space(rows::FOOTER_GAP - rows::GROUP_GAP);
-    ui.vertical_centered(|ui| {
-        ui.label(kit::text(parts.join(" · "), Font::Footnote).color(kit::TERTIARY));
-    });
+    let line = parts.join(" · ");
+    if imported.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.label(kit::text(line, Font::Footnote).color(kit::TERTIARY));
+        });
+        ui.add_space(8.0);
+        return;
+    }
+    let key = format!("credential-import-{id}");
+    let open = app.ui.is_expanded(&key);
+    // One centered line when the words and the link fit, else the link under them.
+    let words = format!("{line} · ");
+    let width = kit::galley(ui, kit::text(&words, Font::Footnote)).size().x
+        + kit::galley(ui, kit::text(IMPORT_DETAILS, Font::Footnote))
+            .size()
+            .x;
+    let mut toggle_open = false;
+    if width <= ui.available_width() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+            ui.add(Label::new(kit::text(words, Font::Footnote).color(kit::TERTIARY)).extend());
+            toggle_open = footer_link(ui, IMPORT_DETAILS, open).clicked();
+        });
+    } else {
+        ui.vertical_centered(|ui| {
+            ui.label(kit::text(line, Font::Footnote).color(kit::TERTIARY));
+            toggle_open = footer_link(ui, IMPORT_DETAILS, open).clicked();
+        });
+    }
     ui.add_space(8.0);
+    if open {
+        // The rows of the old "Import data" part. A hidden value keeps Show and Copy,
+        // and both still need the owner check.
+        let revealed = details.any_revealed();
+        let mut toggle = false;
+        let mut copy = None;
+        kit::section(ui, None, None, |s| {
+            for detail in &imported {
+                toggle |= custom_value_row(app, s, details, detail, revealed, &mut copy);
+            }
+        });
+        ui.add_space(rows::GROUP_GAP);
+        if let Some(field) = copy {
+            app.ask_owner(
+                OwnerRequest::CopyField {
+                    item_id: id,
+                    field,
+                    revision: details.revision,
+                },
+                Some(ui.ctx()),
+            );
+        } else if toggle {
+            toggle_values(app, ui.ctx());
+        }
+    }
+    if toggle_open {
+        app.ui.set_expanded(&key, !open);
+    }
+}
+
+/// A small link in the accent color, as "Import details…" of the footer. It tells
+/// VoiceOver whether its part is open.
+fn footer_link(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response {
+    let galley = kit::galley(ui, kit::text(label, Font::Footnote).color(kit::ACCENT_TEXT));
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    ui_expanded(&response, open);
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.has_focus() {
+            kit::focus_ring(painter, rect.expand(2.0), 4);
+        }
+        if response.hovered() {
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                egui::Stroke::new(1.0, kit::ACCENT_TEXT),
+            );
+        }
+        painter.galley(rect.min, galley, kit::ACCENT_TEXT);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Labels and values share one reading edge, including paths and long identifiers.
@@ -2286,11 +2415,15 @@ fn value_row(section: &mut Section<'_>, label: &str, value: &str) {
     });
 }
 
+/// A detail that an import added to say where the credential came from: a label that
+/// starts with "1Password " (its item, account, and vault IDs, its vault, and its source
+/// JSON) or "Source record". The footer shows these rows, not the main card. Only the
+/// page uses this; the vault and the agents see each detail as before. A one-time
+/// password and a visible setup key stay where the page hides their values.
 fn is_import_data(detail: &DetailLine) -> bool {
-    matches!(
-        detail.label.as_str(),
-        "1Password item ID" | "1Password source JSON"
-    )
+    (detail.label.starts_with("1Password ") || detail.label == "Source record")
+        && !otp::is_otp_detail(detail)
+        && !otp::exposes_setup_key(detail)
 }
 
 fn custom_value_row(
@@ -2325,6 +2458,10 @@ fn custom_value_row(
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "detail_page_tests.rs"]
+mod detail_page_tests;
 
 fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: CredentialKind) {
     let session = &app.owner_ui.session;
