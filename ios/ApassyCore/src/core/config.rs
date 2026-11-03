@@ -275,7 +275,7 @@ mod tests {
         assert!(text.contains(PIN), "{text}");
         let read = PhoneList::load(dir.path()).unwrap();
         assert_eq!(read.version, 1);
-        assert_eq!(read.vaults, [entry.clone()]);
+        assert_eq!(read.vaults, std::slice::from_ref(&entry));
         let vault_file = dir.path().join("vault.apassy");
         let config = entry
             .relay_config(dir.path(), &vault_file)

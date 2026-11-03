@@ -36,6 +36,25 @@ use crate::server::Core;
 use crate::server::hub::Hub;
 use crate::server::store::{db, to_i, to_u};
 
+/// A `connect_request` row for its wait page: status, redirect_uri, state, match_code,
+/// client_id, expires_at, decided_at, and whether a code was issued.
+type WaitRow = (String, String, Option<String>, String, String, i64, Option<i64>, bool);
+/// A `connect_request` row for a code redemption: id, client_id, redirect_uri,
+/// code_challenge, status, code_expires_at, team_id, agent_id.
+type CodeRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+);
+/// A refresh token row: family, client_id, team_id, agent_id, expires_at, used_at,
+/// revoked_at.
+type RefreshRow = (String, String, String, i64, i64, Option<i64>, Option<i64>);
+
 /// The lifetime of an access token: 24 hours. The physical test may lower it in a
 /// development build to see the refresh work.
 pub const ACCESS_TOKEN_SECS: u64 = 86_400;
@@ -1156,7 +1175,7 @@ impl Flow<'_> {
         let origin = self.origin;
         self.hub.directory.store.tx(|tx| {
             expire_requests(tx, now)?;
-            let row: Option<(String, String, Option<String>, String, String, i64, Option<i64>, bool)> = tx
+            let row: Option<WaitRow> = tx
                 .query_row(
                     "SELECT r.status, r.redirect_uri, r.state, r.match_code, r.client_id, \
                      r.expires_at, r.decided_at, r.code_hash IS NOT NULL \
@@ -1288,16 +1307,7 @@ impl Flow<'_> {
         let now = self.now;
         let refresh_secs = self.oauth.refresh_token_secs;
         let redeemed = self.hub.directory.store.tx(|tx| {
-            let row: Option<(
-                String,
-                String,
-                String,
-                String,
-                String,
-                Option<i64>,
-                Option<String>,
-                Option<i64>,
-            )> = tx
+            let row: Option<CodeRow> = tx
                 .query_row(
                     "SELECT id, client_id, redirect_uri, code_challenge, status, code_expires_at, \
                      team_id, agent_id FROM connect_request WHERE code_hash = ?1",
@@ -1414,7 +1424,7 @@ impl Flow<'_> {
         let refresh_secs = self.oauth.refresh_token_secs;
         let hash = hash_of(refresh);
         let redeemed = self.hub.directory.store.tx(|tx| {
-            let row: Option<(String, String, String, i64, i64, Option<i64>, Option<i64>)> = tx
+            let row: Option<RefreshRow> = tx
                 .query_row(
                     "SELECT family, client_id, team_id, agent_id, expires_at, used_at, revoked_at \
                      FROM oauth_refresh WHERE token_hash = ?1",
