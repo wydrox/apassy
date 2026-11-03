@@ -38,7 +38,16 @@ use crate::server::store::{db, to_i, to_u};
 
 /// A `connect_request` row for its wait page: status, redirect_uri, state, match_code,
 /// client_id, expires_at, decided_at, and whether a code was issued.
-type WaitRow = (String, String, Option<String>, String, String, i64, Option<i64>, bool);
+type WaitRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    i64,
+    Option<i64>,
+    bool,
+);
 /// A `connect_request` row for a code redemption: id, client_id, redirect_uri,
 /// code_challenge, status, code_expires_at, team_id, agent_id.
 type CodeRow = (

@@ -95,8 +95,12 @@ pub fn hosting_client(
                 .bouncer_host_bearer(BouncerHostRole::Hosting)
                 .map_err(|error| vault_message(&error))?
                 .ok_or_else(|| "The server of the bouncer brain has no token in the vault. Choose the server again.".to_owned())?;
-            let bearer = StaticBearer::new(Zeroizing::new(bearer.expose().to_owned()))
-                .ok_or_else(|| "The token of the bouncer brain server is not valid. Choose the server again.".to_owned())?;
+            let bearer = StaticBearer::new(Zeroizing::new(bearer.expose().to_owned())).ok_or_else(
+                || {
+                    "The token of the bouncer brain server is not valid. Choose the server again."
+                        .to_owned()
+                },
+            )?;
             let credential: Arc<dyn BrainCredential> = Arc::new(bearer);
             BouncerClient::remote(&host.url, credential, Arc::clone(tls))
                 .map(Some)

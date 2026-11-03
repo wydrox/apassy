@@ -295,20 +295,44 @@ fn the_entitlement_vectors_verify_and_fail_as_the_contract_says() {
         let account = claims["acc"].as_str().unwrap();
         let iat = claims["iat"].as_u64().unwrap();
         let exp = claims["exp"].as_u64().unwrap();
-        let read = entitlement::verify(text, std::slice::from_ref(&key), Feature::Brain, account, iat + 10)
-            .expect("verifies");
+        let read = entitlement::verify(
+            text,
+            std::slice::from_ref(&key),
+            Feature::Brain,
+            account,
+            iat + 10,
+        )
+        .expect("verifies");
         assert_eq!(read.exp, exp);
         assert_eq!(read.group.as_deref(), claims["group"].as_str());
         assert_eq!(
-            entitlement::verify(text, std::slice::from_ref(&key), Feature::Brain, account, exp),
+            entitlement::verify(
+                text,
+                std::slice::from_ref(&key),
+                Feature::Brain,
+                account,
+                exp
+            ),
             Err(EntitlementError::Expired)
         );
         assert_eq!(
-            entitlement::verify(text, std::slice::from_ref(&other), Feature::Brain, account, iat + 10),
+            entitlement::verify(
+                text,
+                std::slice::from_ref(&other),
+                Feature::Brain,
+                account,
+                iat + 10
+            ),
             Err(EntitlementError::Signature)
         );
         assert_eq!(
-            entitlement::verify(text, std::slice::from_ref(&key), Feature::Brain, "acc_aaaaaaaaaa", iat),
+            entitlement::verify(
+                text,
+                std::slice::from_ref(&key),
+                Feature::Brain,
+                "acc_aaaaaaaaaa",
+                iat
+            ),
             Err(EntitlementError::OtherAccount)
         );
         // A changed claim breaks the signature.
@@ -320,7 +344,13 @@ fn the_entitlement_vectors_verify_and_fail_as_the_contract_says() {
             apassy::sync::encode_b64u(claims_text.as_bytes())
         );
         assert_eq!(
-            entitlement::verify(&forged, std::slice::from_ref(&key), Feature::Brain, account, iat),
+            entitlement::verify(
+                &forged,
+                std::slice::from_ref(&key),
+                Feature::Brain,
+                account,
+                iat
+            ),
             Err(EntitlementError::Signature)
         );
         assert_eq!(
