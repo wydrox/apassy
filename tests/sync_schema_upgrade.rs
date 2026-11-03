@@ -1026,13 +1026,6 @@ fn aws_pair(title: &str) -> ItemDraft {
     }
 }
 
-fn id_of(vault: &Vault, title: &str) -> u64 {
-    let found = vault.search("").unwrap();
-    let matches: Vec<_> = found.iter().filter(|item| item.title == title).collect();
-    assert_eq!(matches.len(), 1, "one item {title}");
-    matches[0].id
-}
-
 /// Schema 32 (plan s6 unit D): the source rows and member keys sync with their item and
 /// hold no secret. A row that is off keeps its settings on the other Mac, and the switch
 /// syncs. A copy of the previous schema has no such rows: it merges, and this Mac keeps

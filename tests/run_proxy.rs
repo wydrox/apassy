@@ -1063,9 +1063,10 @@ fn a_server_frame_with_the_value_reaches_the_client_as_the_placeholder() {
     }
     assert_eq!(message, format!("v={};", proxied.placeholder).into_bytes());
     close_ws(&mut client);
+    let placeholder = proxied.placeholder.clone();
     let log = events(proxied);
     assert!(!format!("{log:?}").contains(REAL));
-    assert!(!format!("{log:?}").contains(&proxied.placeholder));
+    assert!(!format!("{log:?}").contains(&placeholder));
 }
 
 #[test]

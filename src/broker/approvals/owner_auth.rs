@@ -2123,13 +2123,16 @@ mod evaluation_tests {
             assert!(reason.contains("Apassy Connect"), "{reason}");
             assert_ne!(action.touch_id_title(), "Confirm with Touch ID");
         }
-        let confirm = OwnerAction::ConfirmConnectDevice {
-            account_id: "acc_k7m2q4x3ca".into(),
-            join_id: 4,
-            device_name: "iPhone".into(),
-            public_key: vec![4; 65],
-            words: "blaze cable flute board seal tiger".into(),
+        let connect = |join_id: u64, public_key: Vec<u8>, words: &str| {
+            OwnerAction::ConfirmConnectDevice {
+                account_id: "acc_k7m2q4x3ca".into(),
+                join_id,
+                device_name: "iPhone".into(),
+                public_key,
+                words: words.into(),
+            }
         };
+        let confirm = connect(4, vec![4; 65], "blaze cable flute board seal tiger");
         assert!(
             confirm
                 .reason()
@@ -2137,18 +2140,9 @@ mod evaluation_tests {
         );
         // Another join, key, or set of words is another action.
         for other in [
-            OwnerAction::ConfirmConnectDevice {
-                join_id: 5,
-                ..confirm.clone()
-            },
-            OwnerAction::ConfirmConnectDevice {
-                public_key: vec![5; 65],
-                ..confirm.clone()
-            },
-            OwnerAction::ConfirmConnectDevice {
-                words: "blaze cable flute board seal tile".into(),
-                ..confirm.clone()
-            },
+            connect(5, vec![4; 65], "blaze cable flute board seal tiger"),
+            connect(4, vec![5; 65], "blaze cable flute board seal tiger"),
+            connect(4, vec![4; 65], "blaze cable flute board seal tile"),
         ] {
             assert_ne!(other, confirm);
         }
