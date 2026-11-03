@@ -352,7 +352,7 @@ for (const code of FALLBACK_CODES) {
     const bg = setup();
     const port = await request(bg, { op: "get", options: getOptions() });
     bg.natives[0].port.postMessage(fail(code));
-    await flush();
+    await waitFor(() => port.received.length > 0);
     assert.deepEqual(port.received, [{ kind: "fallback" }]);
   });
 }
@@ -362,7 +362,7 @@ for (const code of ["cancelled", "owner_check_failed", "refused", "busy", "timeo
     const bg = setup();
     const port = await request(bg, { op: "create", options: createOptions() });
     bg.natives[0].port.postMessage(fail(code));
-    await flush();
+    await waitFor(() => port.received.length > 0);
     assert.deepEqual(port.received, [{ kind: "error", name: "NotAllowedError" }]);
   });
 }
@@ -371,11 +371,11 @@ test("excluded: InvalidStateError for create, NotAllowedError for get", async ()
   const bg = setup();
   const create = await request(bg, { op: "create", options: createOptions() });
   bg.natives[0].port.postMessage(fail("excluded"));
-  await flush();
+  await waitFor(() => create.received.length > 0);
   assert.deepEqual(create.received, [{ kind: "error", name: "InvalidStateError" }]);
   const get = await request(bg, { op: "get", options: getOptions() });
   bg.natives[1].port.postMessage(fail("excluded"));
-  await flush();
+  await waitFor(() => get.received.length > 0);
   assert.deepEqual(get.received, [{ kind: "error", name: "NotAllowedError" }]);
 });
 
@@ -401,7 +401,7 @@ for (const [name, make] of Object.entries(BAD_ANSWERS)) {
     const bg = setup();
     const port = await request(bg, { op: "get", options: getOptions() });
     bg.natives[0].port.postMessage(make(bg.natives[0].sent[0]));
-    await flush();
+    await waitFor(() => port.received.length > 0);
     assert.deepEqual(port.received, [{ kind: "error", name: "NotAllowedError" }]);
   });
 }
@@ -413,7 +413,7 @@ test("a credential outside the allow list is refused", async () => {
   const wire = bg.natives[0].sent[0];
   assert.deepEqual(wire.allowed, [b64(allowed)]);
   bg.natives[0].port.postMessage(getAnswer(wire));
-  await flush();
+  await waitFor(() => port.received.length > 0);
   assert.deepEqual(port.received, [{ kind: "error", name: "NotAllowedError" }]);
 });
 

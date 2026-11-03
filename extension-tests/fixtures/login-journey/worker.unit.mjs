@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loadBackground, senderFor } from "../passkey-bridge/mock-chrome.mjs";
+import { loadBackground, senderFor, waitFor } from "../passkey-bridge/mock-chrome.mjs";
 
 const ORIGIN = "https://login.example.com";
 const TOKEN = "11111111-1111-4111-8111-111111111111";
@@ -128,7 +128,7 @@ test("disabling suggestions during owner approval invalidates pending inline del
   });
   await api.handleLoginField({ type: "login_suggestions", token: TOKEN, username: "" }, senderFor(ORIGIN));
   const filling = api.handleLoginField({ type: "login_fill", token: TOKEN, item: 7 }, senderFor(ORIGIN));
-  for (let i = 0; i < 20 && !pending; i++) await new Promise(setImmediate);
+  await waitFor(() => pending);
   assert.ok(pending);
   await api.loginAccessChange(URL, false);
   pending.port.postMessage(ok({ type: "fill", origin: ORIGIN, item: 7, username: "user", password: "secret" }));
