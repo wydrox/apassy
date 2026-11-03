@@ -938,7 +938,7 @@ impl Keys {
     /// the request history and the run answers never take it.
     fn open(&self, record: &Record) -> Result<envelope::Card, &'static str> {
         match self.open_any(record)? {
-            AnyCard::Run(card) => Ok(card),
+            AnyCard::Run(card) => Ok(*card),
             AnyCard::Connect(_) => Err(UPDATE),
         }
     }
@@ -2266,7 +2266,7 @@ impl Core {
         let using = self.context_for(&answer.qid, answer.vault_id.as_deref())?;
         let own = using.keys.own_row_as(self.role)?;
         let (record, card) = match self.opened_any(&answer.qid, &using)? {
-            (record, AnyCard::Run(card)) => (record, card),
+            (record, AnyCard::Run(card)) => (record, *card),
             (record, AnyCard::Connect(card)) => {
                 return self
                     .prepare_connect(answer, time, using, own, record, card)
@@ -3384,6 +3384,7 @@ mod tests {
             node_origin: None,
             node_words: None,
             questions_only: true,
+            node_origin: None,
         };
         {
             let mut state = guard(&core.questions);
@@ -3459,6 +3460,7 @@ mod tests {
             node_origin: None,
             node_words: None,
             questions_only: true,
+            node_origin: None,
         };
         (keys, key)
     }

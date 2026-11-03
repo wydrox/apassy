@@ -506,7 +506,7 @@ pub struct ConnectCard {
 /// A card of either kind: a run (card v1) or a connect request (card v2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnyCard {
-    Run(Card),
+    Run(Box<Card>),
     Connect(ConnectCard),
 }
 
@@ -608,7 +608,7 @@ pub fn parse_any_card(plaintext: &[u8], relay_qid: &str) -> Result<AnyCard, Card
     if v2 {
         parse_connect_card(plaintext, relay_qid).map(AnyCard::Connect)
     } else {
-        parse_card(plaintext, relay_qid).map(AnyCard::Run)
+        parse_card(plaintext, relay_qid).map(|card| AnyCard::Run(Box::new(card)))
     }
 }
 

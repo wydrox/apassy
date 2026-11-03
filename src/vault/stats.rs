@@ -561,7 +561,7 @@ impl Vault {
             let Some(item) = row.item_id else {
                 continue;
             };
-            if !titles.contains_key(&item) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = titles.entry(item) {
                 let found: Option<String> = match to_sql_id(item) {
                     Ok(sql) => rusqlite::OptionalExtension::optional(
                         title.query_row([sql], |row| row.get(0)),
@@ -569,7 +569,7 @@ impl Vault {
                     .map_err(storage)?,
                     Err(_) => None,
                 };
-                titles.insert(item, found.unwrap_or_default());
+                slot.insert(found.unwrap_or_default());
             }
             row.item_name.clone_from(&titles[&item]);
         }

@@ -196,7 +196,8 @@ mod tests {
         let conn = vault.conn_ref().unwrap();
         assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
         assert_eq!(meta_version(conn), crate::vault::SCHEMA_VERSION);
-        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = conn
+        type CandidateRow = (String, Option<String>, Option<String>, Option<String>);
+        let rows: Vec<CandidateRow> = conn
             .prepare("SELECT origin, job_host, job_id, uploaded_to FROM model_candidate")
             .unwrap()
             .query_map([], |row| {

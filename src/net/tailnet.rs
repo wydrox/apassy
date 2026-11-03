@@ -98,16 +98,8 @@ pub fn parse_status(json: &str) -> TailscaleSelf {
             continue;
         };
         match ip {
-            IpAddr::V4(address) if is_tailnet_v4(address) => {
-                if !v4.contains(&ip) {
-                    v4.push(ip);
-                }
-            }
-            IpAddr::V6(address) if is_tailnet_v6(address) => {
-                if !v6.contains(&ip) {
-                    v6.push(ip);
-                }
-            }
+            IpAddr::V4(address) if is_tailnet_v4(address) && !v4.contains(&ip) => v4.push(ip),
+            IpAddr::V6(address) if is_tailnet_v6(address) && !v6.contains(&ip) => v6.push(ip),
             _ => {}
         }
     }
@@ -234,7 +226,7 @@ pub fn serve_tcp_target(local_port: u16) -> String {
     format!("127.0.0.1:{local_port}")
 }
 
-fn port_entry<'a>(map: Option<&'a Value>, port: u16) -> Option<&'a Value> {
+fn port_entry(map: Option<&Value>, port: u16) -> Option<&Value> {
     map.and_then(Value::as_object)?
         .iter()
         .find_map(|(key, value)| {

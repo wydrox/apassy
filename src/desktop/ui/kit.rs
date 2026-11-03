@@ -2796,7 +2796,6 @@ pub(crate) enum Cell {
     },
     /// A text with a red "Production" cap after it.
     Production(RichText),
-    Empty,
 }
 
 impl Cell {
@@ -2818,7 +2817,6 @@ impl Cell {
                     label.clone()
                 }
             }
-            Self::Empty => String::new(),
         }
     }
 }
@@ -2913,7 +2911,6 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
         WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)
     };
     match cell {
-        Cell::Empty => {}
         Cell::Text(value) => {
             let galley = fit(value.clone(), rect.width());
             let x = if right {

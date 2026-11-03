@@ -825,10 +825,10 @@ fn shadow_verdict(answer: &Value, pin: &ShadowPin, asked: &[(&str, &str)]) -> Bo
     }
     if let Some(error) = shadow.get("error") {
         // Only the codes of the contract are named; other server text is not logged.
-        let code = match error.as_str() {
-            Some(code @ ("unknown_heads" | "shadow_failed")) => code,
-            _ => "another error",
-        };
+        let code = error
+            .as_str()
+            .filter(|code| matches!(*code, "unknown_heads" | "shadow_failed"))
+            .unwrap_or("another error");
         return BouncerVerdict::Unavailable(format!("the shadow head set failed ({code})"));
     }
     match answers_in(shadow, asked) {

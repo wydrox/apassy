@@ -143,7 +143,7 @@ impl Options {
 
     /// True when `--name` was given.
     pub fn flag(&self, name: &str) -> bool {
-        self.flags.iter().any(|flag| *flag == name)
+        self.flags.contains(&name)
     }
 
     /// The number of `--name`, from `min` to `max`, or `default`.

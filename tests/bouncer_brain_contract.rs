@@ -453,8 +453,8 @@ mod v2 {
     use serde_json::{Value, json};
 
     use super::{
-        ErrorBody, MANIFEST, MAX_ANSWER_BYTES, Manifest, assert_model_names_heads,
-        has_sha256_run, has_word_prefix, is_lower_hex, is_model_name, is_sha256, parse,
+        ErrorBody, MANIFEST, MAX_ANSWER_BYTES, Manifest, assert_model_names_heads, has_sha256_run,
+        has_word_prefix, is_lower_hex, is_model_name, is_sha256, parse,
     };
 
     const HEALTH: &str = include_str!("fixtures/bouncer-brain-v2/health.json");
@@ -528,9 +528,21 @@ mod v2 {
     const ERRORS: [(&str, &str, &str); 5] = [
         ("error-job-busy.json", ERROR_JOB_BUSY, "job_busy"),
         ("error-unknown-job.json", ERROR_UNKNOWN_JOB, "unknown_job"),
-        ("error-not-entitled.json", ERROR_NOT_ENTITLED, "not_entitled"),
-        ("error-sign-in-failed.json", ERROR_SIGN_IN_FAILED, "sign_in_failed"),
-        ("error-unauthenticated.json", ERROR_UNAUTHENTICATED, "unauthenticated"),
+        (
+            "error-not-entitled.json",
+            ERROR_NOT_ENTITLED,
+            "not_entitled",
+        ),
+        (
+            "error-sign-in-failed.json",
+            ERROR_SIGN_IN_FAILED,
+            "sign_in_failed",
+        ),
+        (
+            "error-unauthenticated.json",
+            ERROR_UNAUTHENTICATED,
+            "unauthenticated",
+        ),
     ];
 
     /// The new codes of section 1.3.
@@ -786,13 +798,7 @@ mod v2 {
     }
 
     /// Section 5.2: the parts joined with `\0`, no trailing `\0`.
-    fn sign_in_message(
-        tag: &str,
-        origin: &str,
-        account: &str,
-        key: &str,
-        nonce: &str,
-    ) -> Vec<u8> {
+    fn sign_in_message(tag: &str, origin: &str, account: &str, key: &str, nonce: &str) -> Vec<u8> {
         [tag, origin, account, key, nonce].join("\0").into_bytes()
     }
 
@@ -809,9 +815,7 @@ mod v2 {
     fn is_metric(value: &Value, depth: usize) -> bool {
         match value {
             Value::Number(_) => true,
-            Value::Object(map) if depth > 0 => {
-                map.values().all(|item| is_metric(item, depth - 1))
-            }
+            Value::Object(map) if depth > 0 => map.values().all(|item| is_metric(item, depth - 1)),
             _ => false,
         }
     }
@@ -919,7 +923,11 @@ mod v2 {
             ("/base/revision", json!("0".repeat(40)), "base"),
             ("/base/weights_sha256", json!("0".repeat(64)), "base"),
             ("/name", json!("-remote"), "name"),
-            ("/stats/owner_decisions", json!(MIN_OWNER_DECISIONS - 1), "gate"),
+            (
+                "/stats/owner_decisions",
+                json!(MIN_OWNER_DECISIONS - 1),
+                "gate",
+            ),
             ("/stats/owner_denials", json!(MIN_OWNER_DENIALS - 1), "gate"),
             ("/stats/val", json!(0), "gate"),
         ];
@@ -969,7 +977,12 @@ mod v2 {
                 "{pointer}/{field} is outside the contract"
             );
         }
-        for count in [json!("Run the migrations"), json!(-1), json!(1.5), json!(null)] {
+        for count in [
+            json!("Run the migrations"),
+            json!(-1),
+            json!(1.5),
+            json!(null),
+        ] {
             let mut value: Value = parse("job-manifest.json", JOB_MANIFEST);
             value["stats"]["train"] = count.clone();
             assert!(
@@ -1261,7 +1274,10 @@ mod v2 {
             &request.nonce,
         );
         assert!(relay.starts_with(RELAY_SIGN_IN_TAG.as_bytes()));
-        let (ours, theirs) = (&brain[SIGN_IN_TAG.len()..], &relay[RELAY_SIGN_IN_TAG.len()..]);
+        let (ours, theirs) = (
+            &brain[SIGN_IN_TAG.len()..],
+            &relay[RELAY_SIGN_IN_TAG.len()..],
+        );
         assert_eq!(ours, theirs, "the same form");
 
         let signature = key.sign(&brain).expect("a signature");

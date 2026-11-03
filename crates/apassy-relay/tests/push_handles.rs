@@ -10,7 +10,6 @@ mod node;
 #[path = "common/relay.rs"]
 mod relay;
 
-use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
