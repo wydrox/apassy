@@ -194,7 +194,7 @@ works only when the account has no live device. The signature is over `apassy-co
 - `GET /.well-known/apassy-connect.json` (edge) publishes the keys: `{"v":1,"origin":"https://apassy-relay.wyderka.cc","keys":[{"kid":"ek_…","alg":"Ed25519","public_key":"<b64u of 32 bytes>"}]}`. A rotation adds the new key before tokens use it and removes the old key 24 hours after the last token signed with it.
 - A service checks: two parts, canonical b64u; a known `kid`; the signature; strict claims (unknown fields refused); `v` is 1; `now < exp`; `iat <= now + 300`; `exp - iat <= 86400`; its feature in `feats`; and `acc` equals the account that the service authenticated by other means (the brain: the I-3 answer for the signed-in device). It never calls Connect for a request (ADR 0035 section 5). A plan that ends is refused within 24 hours; I-4 `forget` is the hard removal.
 - The token is not a credential for Connect: Connect never accepts it in `Authorization`.
-- The Mac sends to the brain `Authorization: Bearer <the brain's own token>` (from the `apassy-bouncer sign-in v1` sign-in) and `X-Apassy-Entitlement: <entitlement token>`, and never the account token (I-2).
+- The Mac sends to the brain only `Authorization: Bearer <the brain's own token>` (from the `apassy-bouncer sign-in v1` sign-in), never the account token (I-2) and no entitlement header. The brain learns the account and its entitlement from the I-3 directory answer at that sign-in ([bouncer-brain-v2](bouncer-brain-v2.md)), and its token lives 15 minutes, so an ended plan is refused at the next sign-in. Other services check the entitlement token as above.
 
 ## 11. The bouncer brain (plan 0035 I-1 to I-5)
 
