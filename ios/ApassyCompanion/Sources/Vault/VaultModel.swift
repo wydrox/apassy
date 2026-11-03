@@ -64,6 +64,17 @@ final class VaultModel {
     var unlockMessage: String?
     /// iOS dropped the stored passphrase (a new Face ID enrollment). The next unlock stores it again.
     private(set) var faceIDNeedsRepair = false
+    /// The lock screen tries Face ID by itself before it shows the passphrase field, and shows the
+    /// cover of the app until then, so the field never flashes behind the prompt. False once that
+    /// try ended without opening the vault; true again when the app comes back, after an unlock,
+    /// and for another vault.
+    private(set) var triesFaceIDFirst = true
+    /// Another vault is being selected: no Face ID try until it is the selected one.
+    private(set) var isSelecting = false
+    @ObservationIgnored private var isTryingFaceID = false
+    /// Bumped when the app leaves: a try that ends after that leaves the field hidden, and the
+    /// return tries again.
+    @ObservationIgnored private var faceIDTry = 0
 
     /// A message for an alert after a failed action.
     var alert: String?
@@ -181,6 +192,41 @@ final class VaultModel {
     var hasStoredPassphrase: Bool {
         guard let vault else { return false }
         return passphraseStore.hasPassphrase(vaultID: vault.id)
+    }
+
+    /// Whether the lock screen shows the passphrase field. While Face ID tries by itself it shows
+    /// the cover of the app instead.
+    var showsPassphraseField: Bool {
+        !(triesFaceIDFirst && faceIDUnlockOn && hasStoredPassphrase)
+    }
+
+    /// Whether the lock screen should start the Face ID try (`unlockWithFaceIDFirst`) once the app
+    /// is active.
+    var waitsForFaceIDTry: Bool { triesFaceIDFirst && !isSelecting }
+
+    /// Face ID by itself, when the lock screen shows and the app is active (a prompt cannot show
+    /// in the background). One try each time: when it does not open the vault (a cancel, a failed
+    /// match, a changed enrollment, a wrong stored passphrase), the passphrase field shows.
+    func unlockWithFaceIDFirst() async {
+        guard triesFaceIDFirst, !isSelecting, !isTryingFaceID, !isUnlocked, !isInBackground else { return }
+        guard faceIDUnlockOn, hasStoredPassphrase else {
+            triesFaceIDFirst = false
+            return
+        }
+        isTryingFaceID = true
+        defer { isTryingFaceID = false }
+        while true {
+            let attempt = faceIDTry
+            await unlockWithFaceID()
+            if isUnlocked { return }
+            if attempt == faceIDTry, !isInBackground {
+                triesFaceIDFirst = false
+                return
+            }
+            // The app left during the prompt, so the field stays hidden. Still away: the return
+            // starts the next try. Already back: the return came while this try ran, so try now.
+            guard !isInBackground, triesFaceIDFirst, !isSelecting else { return }
+        }
     }
 
     func unlock(passphrase: String) async {
@@ -301,6 +347,10 @@ final class VaultModel {
 
     func select(vaultID: String) async {
         guard vaultID != vault?.id else { return }
+        // The new vault tries Face ID first too, once it is the selected one.
+        isSelecting = true
+        triesFaceIDFirst = true
+        defer { isSelecting = false }
         await lock()
         do {
             try await service.select(vaultID: vaultID)
@@ -316,6 +366,8 @@ final class VaultModel {
         isUnlocked = true
         isSuspended = false
         leftAt = nil
+        // The next lock screen tries Face ID first again.
+        triesFaceIDFirst = true
         let reads = pendingReads
         pendingReads = nil
         if let questions { questions.vaultDidOpen(reads: reads) } else { reads?.end() }
@@ -353,6 +405,10 @@ final class VaultModel {
     /// one before it.
     func enterBackground() {
         isInBackground = true
+        // Each return to the app tries Face ID first again; behind the privacy cover the
+        // passphrase field goes away unseen.
+        triesFaceIDFirst = true
+        faceIDTry += 1
         questions?.vaultWillLeave()
         agents?.vaultWillLeave()
         gate.cancel()

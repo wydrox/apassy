@@ -297,6 +297,161 @@ struct VaultModelTests {
         #expect(vault.unlockMessage == nil)
     }
 
+    // MARK: Face ID first
+
+    /// A started, locked model whose vault opens with Face ID.
+    private func faceIDVault(
+        service: any VaultService = PreviewVaultService(empty: false, unlocked: false),
+        store: MemoryPassphraseStore = MemoryPassphraseStore()
+    ) async throws -> (VaultModel, VaultRecorder) {
+        let settings = makeSettings()
+        settings.setFaceIDUnlock(true, vaultID: previewVaultID)
+        try store.save(PreviewVaultService.passphrase, vaultID: previewVaultID)
+        let (vault, recorder) = makeVault(service: service, store: store, settings: settings)
+        await vault.start()
+        return (vault, recorder)
+    }
+
+    @Test("the lock screen opens with Face ID first, without the passphrase field")
+    func faceIDFirstOpens() async throws {
+        let store = MemoryPassphraseStore()
+        let (vault, _) = try await faceIDVault(store: store)
+        #expect(!vault.showsPassphraseField)
+        #expect(vault.waitsForFaceIDTry)
+
+        await vault.unlockWithFaceIDFirst()
+        defer { vault.stopSync() }
+        #expect(vault.isUnlocked)
+        #expect(store.prompts.count == 1)
+    }
+
+    @Test("a cancelled first Face ID shows the field once; a return to the app tries again")
+    func faceIDFirstCancelled() async throws {
+        let store = MemoryPassphraseStore()
+        let (vault, _) = try await faceIDVault(store: store)
+        store.readError = VaultError(.cancelled, "Cancelled.")
+
+        await vault.unlockWithFaceIDFirst()
+        #expect(!vault.isUnlocked)
+        #expect(vault.showsPassphraseField)
+        #expect(!vault.waitsForFaceIDTry)
+        await vault.unlockWithFaceIDFirst()
+        #expect(store.prompts.count == 1)
+
+        await vault.didEnterBackground()
+        #expect(!vault.showsPassphraseField)
+        await vault.unlockWithFaceIDFirst()
+        #expect(store.prompts.count == 1)
+
+        store.readError = nil
+        await vault.didBecomeActive()
+        await vault.unlockWithFaceIDFirst()
+        defer { vault.stopSync() }
+        #expect(vault.isUnlocked)
+        #expect(store.prompts.count == 2)
+    }
+
+    @Test("a first Face ID that ends after the app left keeps the field hidden")
+    func faceIDFirstLeft() async throws {
+        let store = MemoryPassphraseStore()
+        let (vault, _) = try await faceIDVault(store: store)
+        store.readError = VaultError(.cancelled, "Cancelled by the system.")
+        store.readDelay = .milliseconds(200)
+
+        let attempt = Task { await vault.unlockWithFaceIDFirst() }
+        #expect(await waitUntil { store.prompts.count == 1 })
+        await vault.didEnterBackground()
+        await attempt.value
+        #expect(!vault.showsPassphraseField)
+        #expect(vault.waitsForFaceIDTry)
+    }
+
+    @Test("a return while the first Face ID still ends tries again by itself")
+    func faceIDFirstReturnedDuringTry() async throws {
+        let store = MemoryPassphraseStore()
+        let (vault, _) = try await faceIDVault(store: store)
+        store.readError = VaultError(.cancelled, "Cancelled by the system.")
+        store.readDelay = .milliseconds(200)
+
+        let attempt = Task { await vault.unlockWithFaceIDFirst() }
+        #expect(await waitUntil { store.prompts.count == 1 })
+        await vault.didEnterBackground()
+        await vault.didBecomeActive()
+        // The lock screen asks on the return; the first try still runs.
+        await vault.unlockWithFaceIDFirst()
+        await attempt.value
+        #expect(store.prompts.count == 2)
+        #expect(vault.showsPassphraseField)
+    }
+
+    @Test("a wrong stored passphrase shows the field with the message")
+    func faceIDFirstWrongPassphrase() async throws {
+        let store = MemoryPassphraseStore()
+        let (vault, _) = try await faceIDVault(store: store)
+        try store.save("not the passphrase", vaultID: previewVaultID)
+
+        await vault.unlockWithFaceIDFirst()
+        #expect(!vault.isUnlocked)
+        #expect(vault.showsPassphraseField)
+        #expect(vault.unlockMessage == wrongMessage)
+    }
+
+    @Test("without Face ID unlock the field shows at once, and nothing prompts")
+    func faceIDFirstOff() async {
+        let store = MemoryPassphraseStore()
+        let (vault, _) = makeVault(store: store)
+        await vault.start()
+        #expect(vault.showsPassphraseField)
+
+        await vault.unlockWithFaceIDFirst()
+        #expect(!vault.isUnlocked)
+        #expect(store.prompts.isEmpty)
+    }
+
+    @Test("after an unlock, the next lock screen tries Face ID first again")
+    func faceIDFirstAfterUnlock() async throws {
+        let store = MemoryPassphraseStore()
+        let (vault, _) = try await faceIDVault(store: store)
+        store.readError = VaultError(.cancelled, "Cancelled.")
+        await vault.unlockWithFaceIDFirst()
+        #expect(vault.showsPassphraseField)
+
+        await vault.unlock(passphrase: PreviewVaultService.passphrase)
+        vault.stopSync()
+        await vault.lock()
+        #expect(!vault.showsPassphraseField)
+        #expect(vault.waitsForFaceIDTry)
+    }
+
+    @Test("another vault tries its own Face ID first once it is selected")
+    func faceIDFirstOtherVault() async throws {
+        let spy = SpyVaultService()
+        let store = MemoryPassphraseStore()
+        let settings = makeSettings()
+        let second = try await spy.createLocalVault(name: "Second", passphrase: "a long fixture passphrase")
+        try await spy.select(vaultID: previewVaultID)
+        settings.setFaceIDUnlock(true, vaultID: previewVaultID)
+        settings.setFaceIDUnlock(true, vaultID: second.id)
+        try store.save(PreviewVaultService.passphrase, vaultID: previewVaultID)
+        // The preview service opens every vault with its own passphrase.
+        try store.save(PreviewVaultService.passphrase, vaultID: second.id)
+        let (vault, _) = makeVault(service: spy, store: store, settings: settings)
+        await vault.start()
+        store.readError = VaultError(.cancelled, "Cancelled.")
+        await vault.unlockWithFaceIDFirst()
+        #expect(vault.showsPassphraseField)
+
+        store.readError = nil
+        await vault.select(vaultID: second.id)
+        #expect(vault.vault?.id == second.id)
+        #expect(vault.waitsForFaceIDTry)
+        #expect(!vault.showsPassphraseField)
+        await vault.unlockWithFaceIDFirst()
+        defer { vault.stopSync() }
+        #expect(vault.isUnlocked)
+        #expect(store.prompts.last == "Unlock “Second”")
+    }
+
     // MARK: Removing the vault
 
     @Test("removing the vault forgets its passphrase, settings, and QuickType logins")
