@@ -242,6 +242,13 @@ impl BouncerClient {
         self.api_key.as_deref()
     }
 
+    /// The same client with the bearer `key`: the random key of this start of Apassy,
+    /// which a server that Apassy starts gets as `LAYA_API_KEY` (plan 0035 C2).
+    pub fn with_api_key(mut self, key: &str) -> Self {
+        self.api_key = Some(key.to_owned());
+        self
+    }
+
     /// The TCP port of the address.
     pub fn port(&self) -> Option<u16> {
         match &self.destination {

@@ -15,6 +15,16 @@
 //!   start downloads them. That start gets more time ([`FIRST_START_WAIT`]).
 //! - [`scan_launch_agents`] finds a LaunchAgent that runs `tools/basemodel/start.sh`.
 //!   Settings shows how to remove it. Apassy never changes a LaunchAgent.
+//! - A remote host of the bouncer brain (ADR 0035, plan 0035 C2) comes from the vault,
+//!   never from `bouncer.json` ([`ModelServer::set_remote`]). Then Apassy starts no
+//!   server: the monitor checks only `GET /health` of that host every
+//!   [`REMOTE_PROBE_EVERY`], and asks a readiness question at the selection, after a
+//!   failure, and every [`REMOTE_WARM_EVERY`]. A local server that runs stops at the idle
+//!   time.
+//! - The client of a local server has a random key for each start of Apassy (unless
+//!   `APASSY_BOUNCER_KEY` sets one). A server that Apassy starts gets it as
+//!   `LAYA_API_KEY`, so its routes that write work on this Mac; a server without a key
+//!   ignores it.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -77,6 +87,16 @@ const TICK: Duration = Duration::from_secs(2);
 const PROBE_EVERY: Duration = Duration::from_secs(10);
 /// After a crash or a time-out, a run does not start the server again for this long.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// A remote bouncer brain (ADR 0035) gets a health check this often. Never the 10 s of a
+/// local server managed outside Apassy: the host can serve many owners.
+pub const REMOTE_PROBE_EVERY: Duration = Duration::from_secs(60);
+/// A remote bouncer brain answers a readiness question at the selection, after a failed
+/// check, and this often.
+pub const REMOTE_WARM_EVERY: Duration = Duration::from_secs(60 * 60);
+/// The health check of a remote host: a TLS handshake and a round trip over the network.
+const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The random bytes of the key of a local server, for each start of Apassy.
+const START_KEY_BYTES: usize = 32;
 /// The log starts again when it is larger than this.
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const LOG_TAIL_LINES: usize = 6;
@@ -601,6 +621,8 @@ pub struct Status {
     pub url: String,
     /// `APASSY_BOUNCER_URL` sets the address.
     pub url_from_env: bool,
+    /// The address is the remote host of the bouncer brain from the vault (ADR 0035).
+    pub remote: bool,
     pub log: PathBuf,
     pub laya_dir: PathBuf,
     /// The folder of `start.sh`, for the install commands.
@@ -629,6 +651,13 @@ pub trait ModelGate: fmt::Debug + Send + Sync {
     /// `Ok`: ask the model. `Err(reason)`: do not ask it; the run waits for the owner
     /// with this reason.
     fn before_model(&self) -> Result<(), String>;
+
+    /// The client of the bouncer brain now: the remote host from the vault, or the
+    /// server of this Mac (ADR 0035). `None`: the broker keeps the client it started
+    /// with. The broker reads it for each request (plan 0035 unit F wires it).
+    fn client(&self) -> Option<BouncerClient> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -653,6 +682,19 @@ struct Inner {
     /// The LaunchAgents that run `start.sh`, from the last scan.
     agents: Vec<LaunchAgent>,
     agents_scanned: Option<Instant>,
+    /// The remote host of the bouncer brain from the vault. `Some`: Apassy starts no
+    /// server, and the monitor checks only that host.
+    remote: Option<RemoteHost>,
+}
+
+/// A remote bouncer brain host (ADR 0035) and its readiness checks.
+#[derive(Debug)]
+struct RemoteHost {
+    client: BouncerClient,
+    /// The last successful readiness question.
+    warmed_at: Option<Instant>,
+    /// The next check asks a readiness question: at the selection and after a failure.
+    warm_due: bool,
 }
 
 /// The install of the Laya environment. It has its own lock.
@@ -668,6 +710,8 @@ struct Installer {
 enum Job {
     Launch(u64),
     Probe(u64),
+    /// The check of a remote host, with a readiness question when `true`.
+    RemoteProbe(u64, bool),
     Stop(Child),
 }
 
@@ -682,6 +726,10 @@ struct Timing {
     tick: Duration,
     /// How often a server that Apassy did not start gets a health check.
     probe_every: Duration,
+    /// How often a remote host gets a health check.
+    remote_probe_every: Duration,
+    /// How often a remote host answers a readiness question without a failure.
+    remote_warm_every: Duration,
 }
 
 impl Default for Timing {
@@ -691,8 +739,25 @@ impl Default for Timing {
             first_start_wait: FIRST_START_WAIT,
             tick: TICK,
             probe_every: PROBE_EVERY,
+            remote_probe_every: REMOTE_PROBE_EVERY,
+            remote_warm_every: REMOTE_WARM_EVERY,
         }
     }
+}
+
+/// `client` with a new random key, unless it has one from `APASSY_BOUNCER_KEY`. Without
+/// a random source the client keeps no key, as before.
+fn with_start_key(client: BouncerClient) -> BouncerClient {
+    if client.api_key().is_some() {
+        return client;
+    }
+    let mut bytes = zeroize::Zeroizing::new([0u8; START_KEY_BYTES]);
+    if getrandom::fill(&mut bytes[..]).is_err() {
+        return client;
+    }
+    let key: zeroize::Zeroizing<String> =
+        zeroize::Zeroizing::new(bytes.iter().map(|byte| format!("{byte:02x}")).collect());
+    client.with_api_key(&key)
 }
 
 /// The supervisor of the model server. Share it with [`Arc`]. Each method takes the
@@ -779,7 +844,7 @@ impl ModelServer {
         host: Host,
         timing: Timing,
     ) -> Arc<Self> {
-        let client = BouncerClient::from_env_or(settings.file_url());
+        let client = BouncerClient::from_env_or(settings.file_url()).map(with_start_key);
         let now = Instant::now();
         let preflight = preflight(&layout);
         let launch = settings.start == StartMode::WithApassy;
@@ -802,6 +867,7 @@ impl ModelServer {
                 quit: false,
                 agents: Vec::new(),
                 agents_scanned: None,
+                remote: None,
             }),
             wake: Condvar::new(),
             layout,
@@ -839,9 +905,75 @@ impl ModelServer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The client for the address of the settings (`APASSY_BOUNCER_URL` wins).
+    /// The client of the bouncer brain: the remote host from the vault, else the address
+    /// of the settings (`APASSY_BOUNCER_URL` wins) with the key of this start.
     pub fn client(&self) -> Result<BouncerClient, &'static str> {
+        if let Some(remote) = &self.lock().remote {
+            return Ok(remote.client.clone());
+        }
         self.client.clone()
+    }
+
+    /// True while the bouncer brain runs on a remote host from the vault.
+    pub fn is_remote(&self) -> bool {
+        self.lock().remote.is_some()
+    }
+
+    /// Use the remote host `remote` from the vault (ADR 0035), or this Mac again with
+    /// `None`. Call it after each unlock with the hosting row, after each change of the
+    /// choice, and with `None` at a lock, so the bearer leaves memory. It returns at once.
+    ///
+    /// With a remote host Apassy starts no server. A local server that runs keeps running
+    /// until the idle time and then stops. The next check of the monitor asks the remote
+    /// host a readiness question. Back on this Mac, the server starts when a run needs
+    /// it, also in "With Apassy" (a lock does not start a server).
+    pub fn set_remote(&self, remote: Option<BouncerClient>) {
+        {
+            let mut inner = self.lock();
+            if remote.is_none() && inner.remote.is_none() {
+                return;
+            }
+            // A start or a check of the old host in progress stops counting. A child
+            // that already runs stays for the idle stop.
+            inner.generation += 1;
+            inner.launch = false;
+            inner.last_probe = None;
+            inner.last_failure = None;
+            match remote {
+                Some(client) => {
+                    // A local server that runs stops at the idle time from now.
+                    inner.last_use = Instant::now();
+                    inner.remote = Some(RemoteHost {
+                        client,
+                        warmed_at: None,
+                        warm_due: true,
+                    });
+                    inner.state = ServerState::External {
+                        up: None,
+                        model: None,
+                    };
+                }
+                None => {
+                    inner.remote = None;
+                    inner.state = match inner.settings.start {
+                        StartMode::Off => ServerState::Off,
+                        StartMode::External => ServerState::External {
+                            up: None,
+                            model: None,
+                        },
+                        _ if inner.child.is_some() => ServerState::Starting {
+                            since: Instant::now(),
+                        },
+                        _ => ServerState::Stopped,
+                    };
+                    if inner.child.is_some() {
+                        // The server of this Mac still runs: check it again.
+                        inner.launch = inner.settings.start.managed();
+                    }
+                }
+            }
+        }
+        self.wake.notify_all();
     }
 
     pub fn settings(&self) -> BouncerSettings {
@@ -868,10 +1000,14 @@ impl ModelServer {
             settings: inner.settings.clone(),
             state: inner.state.clone(),
             preflight: inner.preflight.clone(),
-            url: self.client.as_ref().map_or_else(
-                |_| inner.settings.file_url().to_owned(),
-                |client| client.url().to_owned(),
-            ),
+            url: match &inner.remote {
+                Some(remote) => remote.client.url().to_owned(),
+                None => self.client.as_ref().map_or_else(
+                    |_| inner.settings.file_url().to_owned(),
+                    |client| client.url().to_owned(),
+                ),
+            },
+            remote: inner.remote.is_some(),
             url_from_env: self.url_from_env,
             log: self.layout.log.clone(),
             laya_dir: self.layout.laya_dir.clone(),
@@ -911,6 +1047,22 @@ impl ModelServer {
             let old = inner.settings.start;
             inner.settings = settings;
             let mode = inner.settings.start;
+            if inner.remote.is_some() {
+                // The remote host stays. A local server stops when the new mode does not
+                // manage it; nothing starts.
+                inner.launch = false;
+                let child = if mode.managed() {
+                    None
+                } else {
+                    inner.child.take()
+                };
+                drop(inner);
+                if let Some(child) = child {
+                    stop_in_background(child);
+                }
+                self.wake.notify_all();
+                return Ok(());
+            }
             let child = if mode.managed() {
                 None
             } else {
@@ -942,7 +1094,8 @@ impl ModelServer {
     pub fn start_now(&self) {
         {
             let mut inner = self.lock();
-            if !inner.settings.start.managed()
+            if inner.remote.is_some()
+                || !inner.settings.start.managed()
                 || matches!(
                     inner.state,
                     ServerState::Running { .. } | ServerState::Starting { .. }
@@ -961,9 +1114,15 @@ impl ModelServer {
     pub fn stop(&self) {
         let child = {
             let mut inner = self.lock();
-            let child = Self::take_for_stop(&mut inner);
-            inner.state = base_state(inner.settings.start);
-            child
+            if inner.remote.is_some() {
+                // The state is the one of the remote host; only a local server stops.
+                inner.launch = false;
+                inner.child.take()
+            } else {
+                let child = Self::take_for_stop(&mut inner);
+                inner.state = base_state(inner.settings.start);
+                child
+            }
         };
         self.wake.notify_all();
         if let Some(child) = child {
@@ -995,6 +1154,11 @@ impl ModelServer {
     pub fn ensure_running(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         let mut inner = self.lock();
+        if inner.remote.is_some() {
+            // A remote host does not keep a local server alive.
+            drop(inner);
+            return self.ensure_remote(timeout);
+        }
         inner.last_use = Instant::now();
         if inner.quit {
             return Err("the model server stopped".to_owned());
@@ -1062,6 +1226,47 @@ impl ModelServer {
         }
     }
 
+    /// Wait for the first check of the remote host, at most `timeout`. A host that did
+    /// not answer its last check is unavailable at once: a run never pokes the remote
+    /// host, and it never starts a server on this Mac.
+    fn ensure_remote(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let mut inner = self.lock();
+        loop {
+            if inner.quit {
+                return Err("the model server stopped".to_owned());
+            }
+            let Some(remote) = &inner.remote else {
+                return Err("the host of the bouncer brain changed".to_owned());
+            };
+            match &inner.state {
+                ServerState::External { up: Some(true), .. } => return Ok(()),
+                ServerState::External {
+                    up: Some(false), ..
+                } => {
+                    return Err(format!(
+                        "the bouncer brain at {} did not answer its last check",
+                        remote.client.url()
+                    ));
+                }
+                _ => {}
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(format!(
+                    "the bouncer brain at {} did not answer within {} seconds",
+                    remote.client.url(),
+                    timeout.as_secs()
+                ));
+            }
+            inner = self
+                .wake
+                .wait_timeout(inner, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
     fn request_launch(inner: &mut Inner) {
         inner.launch = true;
         inner.first_start_waited = false;
@@ -1103,6 +1308,7 @@ impl ModelServer {
             match job {
                 Some(Job::Launch(generation)) => self.launch(generation),
                 Some(Job::Probe(generation)) => self.probe(generation),
+                Some(Job::RemoteProbe(generation, warm)) => self.probe_remote(generation, warm),
                 Some(Job::Stop(child)) => terminate(child, STOP_GRACE),
                 None => {}
             }
@@ -1125,6 +1331,9 @@ impl ModelServer {
     fn next_job(&self, inner: &mut Inner) -> Option<Job> {
         let now = Instant::now();
         inner.preflight = preflight(&self.layout);
+        if inner.remote.is_some() {
+            return self.next_remote_job(inner, now);
+        }
         if inner.launch {
             inner.launch = false;
             return Some(Job::Launch(inner.generation));
@@ -1174,6 +1383,94 @@ impl ModelServer {
             return Some(Job::Probe(inner.generation));
         }
         None
+    }
+
+    /// The job of the monitor with a remote host: the idle stop of a local server that
+    /// still runs, then the check of the remote host when it is due. Never a launch.
+    fn next_remote_job(&self, inner: &mut Inner, now: Instant) -> Option<Job> {
+        inner.launch = false;
+        if let Some(child) = inner.child.as_mut()
+            && let Ok(Some(_)) = child.try_wait()
+        {
+            // The local server ended. The state is the one of the remote host.
+            inner.child = None;
+        }
+        if inner.child.is_some()
+            && now.saturating_duration_since(inner.last_use)
+                >= self.timing.idle.unwrap_or_else(|| inner.settings.idle())
+        {
+            return inner.child.take().map(Job::Stop);
+        }
+        let remote = inner.remote.as_ref()?;
+        let warm = remote.warm_due
+            || remote.warmed_at.is_none_or(|at| {
+                now.saturating_duration_since(at) >= self.timing.remote_warm_every
+            });
+        if inner
+            .last_probe
+            .is_none_or(|at| now.saturating_duration_since(at) >= self.timing.remote_probe_every)
+        {
+            inner.last_probe = Some(now);
+            return Some(Job::RemoteProbe(inner.generation, warm));
+        }
+        None
+    }
+
+    /// The check of a remote host: `GET /health`, and with `warm` one readiness question.
+    /// No request data. A failure makes the next check ask the question again.
+    fn probe_remote(&self, generation: u64, warm: bool) {
+        let client = {
+            let inner = self.lock();
+            match &inner.remote {
+                Some(remote) if inner.generation == generation && !inner.quit => {
+                    remote.client.clone()
+                }
+                _ => return,
+            }
+        };
+        let health = client.probe_health(REMOTE_PROBE_TIMEOUT);
+        let ready = if health != Health::Healthy {
+            Err(())
+        } else if warm {
+            client.warm_up(WARM_UP_LIMIT).map(Some).map_err(|_| ())
+        } else {
+            Ok(None)
+        };
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        if inner.generation != generation || inner.quit {
+            return;
+        }
+        let now = Instant::now();
+        inner.last_probe = Some(now);
+        let model = match &inner.state {
+            ServerState::External { model, .. } => model.clone(),
+            _ => None,
+        };
+        let Some(remote) = inner.remote.as_mut() else {
+            return;
+        };
+        inner.state = match ready {
+            Ok(Some(answered)) => {
+                remote.warmed_at = Some(now);
+                remote.warm_due = false;
+                ServerState::External {
+                    up: Some(true),
+                    model: answered,
+                }
+            }
+            Ok(None) => ServerState::External {
+                up: Some(true),
+                model,
+            },
+            Err(()) => {
+                remote.warm_due = true;
+                ServerState::External {
+                    up: Some(false),
+                    model: None,
+                }
+            }
+        };
     }
 
     /// The health check of a server that Apassy did not start.
@@ -1363,14 +1660,23 @@ impl ModelServer {
 }
 
 impl ModelGate for ModelServer {
+    fn client(&self) -> Option<BouncerClient> {
+        ModelServer::client(self).ok()
+    }
+
     fn before_model(&self) -> Result<(), String> {
-        let mode = {
+        let (mode, remote) = {
             let mut inner = self.lock();
-            inner.last_use = Instant::now();
-            inner.settings.start
+            let remote = inner.remote.is_some();
+            // A remote host does not keep a local server alive.
+            if !remote {
+                inner.last_use = Instant::now();
+            }
+            (inner.settings.start, remote)
         };
         match mode {
             StartMode::Off => Err(OFF_REASON.to_owned()),
+            _ if remote => self.ensure_remote(NEEDED_WAIT),
             StartMode::WhenNeeded | StartMode::WithApassy if self.weights_ready() => {
                 self.ensure_running(NEEDED_WAIT)
             }
@@ -2210,6 +2516,332 @@ mod tests {
             BouncerSettings::load(&path).file_url(),
             "http://127.0.0.1:8771"
         );
+    }
+
+    #[test]
+    fn a_remote_url_in_bouncer_json_is_ignored() {
+        if bouncer::env_url().is_some() {
+            return;
+        }
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join(SETTINGS_FILE);
+        // Any process of the user can write this file: a remote address there never
+        // becomes the host of the bouncer brain (ADR 0035, plan 0035 C2).
+        for url in [
+            "https://brain.synthetic.ts.net",
+            "https://brain.synthetic.ts.net:8443/",
+            "http://brain.synthetic.ts.net:8770",
+        ] {
+            fs::write(&path, format!(r#"{{"start": "off", "url": "{url}"}}"#)).expect("write");
+            let read = BouncerSettings::load(&path);
+            assert_eq!(read.start, StartMode::Off);
+            assert_eq!(read.url, None, "{url}");
+            let server = ModelServer::start(Some(path.clone()), layout(dir.path()));
+            let status = server.status();
+            assert_eq!(status.url, DEFAULT_URL, "{url}");
+            assert!(!status.remote);
+            assert!(!server.is_remote());
+            let client = server.client().expect("client");
+            assert_eq!(client.port(), Some(8770), "a loopback client");
+            server.shutdown();
+        }
+    }
+
+    #[test]
+    fn the_client_of_a_local_server_has_a_random_key_for_each_start() {
+        if std::env::var_os("APASSY_BOUNCER_KEY").is_some() {
+            return;
+        }
+        let dir = TempDir::new().expect("temp dir");
+        let settings = BouncerSettings {
+            start: StartMode::Off,
+            idle_minutes: 10,
+            url: Some(format!("http://127.0.0.1:{}", free_port())),
+        };
+        let one = ModelServer::start_for_test(
+            settings.clone(),
+            layout(dir.path()),
+            Host::none(),
+            None,
+            FIRST_START_WAIT,
+        );
+        let two = ModelServer::start_for_test(
+            settings,
+            layout(dir.path()),
+            Host::none(),
+            None,
+            FIRST_START_WAIT,
+        );
+        let key_one = one.client().expect("client").api_key().map(str::to_owned);
+        let key_two = two.client().expect("client").api_key().map(str::to_owned);
+        let key_one = key_one.expect("a key for this start");
+        assert_eq!(key_one.len(), START_KEY_BYTES * 2);
+        assert!(key_one.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(Some(key_one.clone()), key_two, "a new key for each start");
+        // The server that Apassy starts checks the same key.
+        let ready = Ready {
+            script: PathBuf::from("/tmp/x/start.sh"),
+            laya_dir: PathBuf::from("/tmp/x/laya"),
+            checkpoint: None,
+        };
+        let client = one.client().expect("client");
+        let command = server_command(&ready, 8771, client.api_key());
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "LAYA_API_KEY"
+                    && value.is_some_and(|value| value == key_one.as_str()))
+        );
+        one.shutdown();
+        two.shutdown();
+    }
+
+    #[test]
+    fn a_remote_host_never_spawns_a_server() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = TempDir::new().expect("temp dir");
+        let pids = dir.path().join("pids");
+        let local_port = free_port();
+        let server = ModelServer::start_timed(
+            None,
+            BouncerSettings {
+                start: StartMode::WhenNeeded,
+                idle_minutes: 10,
+                url: Some(format!("http://127.0.0.1:{local_port}")),
+            },
+            fake_server_layout(dir.path(), &pids),
+            Host::none(),
+            fast_timing(None),
+        );
+        // The remote host: a fake brain. The model server treats any client given to
+        // `set_remote` as the remote host.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let remote_url = format!("http://{}", listener.local_addr().expect("addr"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let fake = serve_fake_model(listener, Arc::clone(&stop));
+        server.set_remote(Some(BouncerClient::new(&remote_url).expect("client")));
+        assert!(server.is_remote());
+        assert_eq!(server.status().url, remote_url);
+        assert!(server.status().remote);
+        assert_eq!(server.client().expect("client").url(), remote_url);
+
+        assert_eq!(server.before_model(), Ok(()));
+        assert_eq!(
+            server.state(),
+            ServerState::External {
+                up: Some(true),
+                model: Some("fake-base-v1".to_owned())
+            }
+        );
+        // No mode, no button and no run starts a server on this Mac.
+        server
+            .set_settings(BouncerSettings {
+                start: StartMode::WithApassy,
+                idle_minutes: 10,
+                url: Some(format!("http://127.0.0.1:{local_port}")),
+            })
+            .expect("settings");
+        server.start_now();
+        assert_eq!(server.ensure_running(Duration::from_secs(2)), Ok(()));
+        assert_eq!(server.before_model(), Ok(()));
+        thread::sleep(Duration::from_millis(500));
+        assert!(!pids.is_file(), "no server process on this Mac");
+        assert!(!server.status().owned);
+
+        // A remote host that is down: the run is unavailable at once, and still no
+        // process starts here.
+        server.set_remote(Some(
+            BouncerClient::new(&format!("http://127.0.0.1:{}", free_port())).expect("client"),
+        ));
+        wait_until(Duration::from_secs(5), "the failed check", || {
+            matches!(
+                server.state(),
+                ServerState::External {
+                    up: Some(false),
+                    ..
+                }
+            )
+        });
+        let started = Instant::now();
+        let reason = server.before_model().expect_err("unavailable");
+        assert!(reason.contains("did not answer"), "{reason}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "no wait, no retry"
+        );
+        thread::sleep(Duration::from_millis(300));
+        assert!(!pids.is_file(), "no server process on this Mac");
+
+        // Back on this Mac: the run starts the local server again.
+        server.set_remote(None);
+        assert!(!server.is_remote());
+        assert_eq!(
+            server.client().expect("client").url(),
+            format!("http://127.0.0.1:{local_port}")
+        );
+        server.shutdown();
+        stop.store(true, Ordering::SeqCst);
+        fake.join().expect("fake server");
+    }
+
+    #[test]
+    fn a_remote_host_is_not_warmed_up_every_probe() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let dir = TempDir::new().expect("temp dir");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let remote_url = format!("http://{}", listener.local_addr().expect("addr"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let healthy = Arc::new(AtomicBool::new(true));
+        let health_checks = Arc::new(AtomicUsize::new(0));
+        let answers = Arc::new(AtomicUsize::new(0));
+        let fake = {
+            let healthy = Arc::clone(&healthy);
+            let health_checks = Arc::clone(&health_checks);
+            let answers = Arc::clone(&answers);
+            serve_fake_model_with_health(
+                listener,
+                Arc::clone(&stop),
+                move || {
+                    health_checks.fetch_add(1, Ordering::SeqCst);
+                    if healthy.load(Ordering::SeqCst) {
+                        (200, r#"{"status":"ok"}"#)
+                    } else {
+                        (503, r#"{"status":"loading"}"#)
+                    }
+                },
+                move || {
+                    answers.fetch_add(1, Ordering::SeqCst);
+                    (
+                        200,
+                        r#"{"model":"fake-base-v1","answers":{"ready":{"type":"noul","noul":0.5}}}"#,
+                        Duration::ZERO,
+                    )
+                },
+            )
+        };
+        let server = ModelServer::start_timed(
+            None,
+            BouncerSettings {
+                start: StartMode::External,
+                idle_minutes: 10,
+                url: Some(format!("http://127.0.0.1:{}", free_port())),
+            },
+            layout(dir.path()),
+            Host::none(),
+            Timing {
+                remote_probe_every: Duration::from_millis(100),
+                ..fast_timing(None)
+            },
+        );
+        server.set_remote(Some(BouncerClient::new(&remote_url).expect("client")));
+        // The selection: one readiness question, then health checks only.
+        wait_until(Duration::from_secs(10), "several health checks", || {
+            health_checks.load(Ordering::SeqCst) >= 5
+        });
+        assert_eq!(
+            answers.load(Ordering::SeqCst),
+            1,
+            "one warm-up at the selection"
+        );
+        assert_eq!(
+            server.state(),
+            ServerState::External {
+                up: Some(true),
+                model: Some("fake-base-v1".to_owned())
+            }
+        );
+        // Runs do not poke the host either.
+        for _ in 0..5 {
+            assert_eq!(server.before_model(), Ok(()));
+        }
+        assert_eq!(answers.load(Ordering::SeqCst), 1);
+
+        // A failed check makes the next good check ask the question again.
+        healthy.store(false, Ordering::SeqCst);
+        wait_until(Duration::from_secs(10), "the failed check", || {
+            matches!(
+                server.state(),
+                ServerState::External {
+                    up: Some(false),
+                    ..
+                }
+            )
+        });
+        assert!(server.before_model().is_err());
+        healthy.store(true, Ordering::SeqCst);
+        wait_until(Duration::from_secs(10), "the host answers again", || {
+            matches!(server.state(), ServerState::External { up: Some(true), .. })
+        });
+        assert_eq!(
+            answers.load(Ordering::SeqCst),
+            2,
+            "one warm-up after the failure"
+        );
+        let checks = health_checks.load(Ordering::SeqCst);
+        wait_until(Duration::from_secs(10), "more health checks", || {
+            health_checks.load(Ordering::SeqCst) >= checks + 3
+        });
+        assert_eq!(answers.load(Ordering::SeqCst), 2);
+        server.shutdown();
+        stop.store(true, Ordering::SeqCst);
+        fake.join().expect("fake server");
+    }
+
+    #[test]
+    fn a_local_server_stops_at_the_idle_time_after_the_switch_to_a_remote_host() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = TempDir::new().expect("temp dir");
+        let pids = dir.path().join("pids");
+        let port = free_port();
+        let server = ModelServer::start_timed(
+            None,
+            BouncerSettings {
+                start: StartMode::WhenNeeded,
+                idle_minutes: 10,
+                url: Some(format!("http://127.0.0.1:{port}")),
+            },
+            fake_server_layout(dir.path(), &pids),
+            Host::none(),
+            fast_timing(Some(Duration::from_millis(1_500))),
+        );
+        server.start_now();
+        wait_until(Duration::from_secs(10), "the script starts", || {
+            pids.is_file()
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
+        let fake = serve_fake_model(listener, Arc::clone(&stop));
+        wait_until(Duration::from_secs(10), "the server runs", || {
+            matches!(server.state(), ServerState::Running { .. })
+        });
+        let pgid = first_pid(&pids);
+        assert!(group_alive(pgid));
+
+        // The owner chose a remote host: the local server keeps running for now, and
+        // the runs go to the remote host, so the local server stops at the idle time.
+        let remote_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let remote_url = format!("http://{}", remote_listener.local_addr().expect("addr"));
+        let remote = serve_fake_model(remote_listener, Arc::clone(&stop));
+        server.set_remote(Some(BouncerClient::new(&remote_url).expect("client")));
+        assert!(server.status().owned, "not stopped at the switch");
+        for _ in 0..3 {
+            assert_eq!(server.before_model(), Ok(()));
+            thread::sleep(Duration::from_millis(200));
+        }
+        wait_until(Duration::from_secs(15), "the idle stop", || {
+            !server.status().owned
+        });
+        wait_until(Duration::from_secs(5), "the process group ends", || {
+            !group_alive(pgid)
+        });
+        assert!(matches!(
+            server.state(),
+            ServerState::External { up: Some(true), .. }
+        ));
+        server.shutdown();
+        stop.store(true, Ordering::SeqCst);
+        fake.join().expect("fake server");
+        remote.join().expect("fake remote");
     }
 
     #[test]
@@ -3147,6 +3779,8 @@ mod tests {
         assert_eq!(timing.first_start_wait, FIRST_START_WAIT);
         assert_eq!(timing.tick, Duration::from_secs(2));
         assert_eq!(timing.probe_every, Duration::from_secs(10));
+        assert_eq!(timing.remote_probe_every, Duration::from_secs(60));
+        assert_eq!(timing.remote_warm_every, Duration::from_secs(60 * 60));
     }
 
     /// A port on 127.0.0.1 where nothing listens now.
@@ -3200,6 +3834,16 @@ mod tests {
     fn serve_fake_model_replies(
         listener: std::net::TcpListener,
         stop: Arc<std::sync::atomic::AtomicBool>,
+        reply: impl FnMut() -> (u16, &'static str, Duration) + Send + 'static,
+    ) -> thread::JoinHandle<()> {
+        serve_fake_model_with_health(listener, stop, || (200, r#"{"status":"ok"}"#), reply)
+    }
+
+    /// As [`serve_fake_model_replies`], with the answer of `GET /health` from `health`.
+    fn serve_fake_model_with_health(
+        listener: std::net::TcpListener,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        mut health: impl FnMut() -> (u16, &'static str) + Send + 'static,
         mut reply: impl FnMut() -> (u16, &'static str, Duration) + Send + 'static,
     ) -> thread::JoinHandle<()> {
         listener.set_nonblocking(true).expect("nonblocking");
@@ -3236,7 +3880,8 @@ mod tests {
                     }
                 }
                 let (status, body, delay) = if head.starts_with("get /health") {
-                    (200, r#"{"status":"ok"}"#, Duration::ZERO)
+                    let (status, body) = health();
+                    (status, body, Duration::ZERO)
                 } else {
                     reply()
                 };

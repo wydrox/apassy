@@ -350,3 +350,93 @@ printf '%s\n' '{"ok":true}'
     locker.join().expect("locker");
     assert_eq!(err, OwnerAuthError::SessionChanged);
 }
+
+/// ADR 0035 section 1, plan 0035 C2: each change of who hosts or trains the bouncer
+/// brain needs its own fresh owner check on this Mac, also the return to this Mac. A
+/// proof names exactly one change. A paired iPhone cannot confirm it.
+#[test]
+fn changing_the_hosting_or_training_needs_a_fresh_check() {
+    use apassy::broker::brain_host;
+    use apassy::vault::{
+        BouncerHostChange, BouncerHostKind, BouncerHostRole, HOSTING_CONSENT_VERSION, SecretValue,
+    };
+    const BEARER: &str = "SYNTH-owner-auth-bearer-0123456789";
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _path) = vault(&dir);
+    session.unlock(PASS).expect("unlock");
+    let fake = FakeNative::new("brain-host");
+    let gate = OwnerGate::new(session.shared_vault(), Some(fake.helper()));
+    fake.respond("authenticate", r#"{"ok":true}"#);
+    let own = BouncerHostChange {
+        kind: BouncerHostKind::OwnServer,
+        url: "https://brain.synthetic.ts.net".to_owned(),
+        bearer: Some(SecretValue::new(BEARER.to_owned())),
+        consent_version: HOSTING_CONSENT_VERSION,
+    };
+    let shared = session.shared_vault();
+    let mut checks = 0;
+    for role in BouncerHostRole::ALL {
+        for change in [own.clone(), BouncerHostChange::this_mac()] {
+            let action = brain_host::owner_action(role, &change);
+            // A paired iPhone cannot confirm it.
+            assert_eq!(
+                gate.authorize(
+                    action.clone(),
+                    OwnerCheck::Companion {
+                        device_id: "synthetic-phone".to_owned(),
+                        time: 1,
+                        signature: vec![0; 70],
+                    },
+                )
+                .unwrap_err(),
+                OwnerAuthError::CompanionUnsupported
+            );
+            let proof = gate
+                .authorize(action.clone(), OwnerCheck::TouchId)
+                .expect("Touch ID proof");
+            checks += 1;
+            assert_eq!(
+                fake.requests_for("authenticate").len(),
+                checks,
+                "a new check"
+            );
+            let request = &fake.requests_for("authenticate")[checks - 1];
+            let reason = request["reason"].as_str().expect("reason");
+            assert!(reason.contains("bouncer brain"), "{reason}");
+            assert!(!reason.contains(BEARER), "{reason}");
+            let mut guard = shared.lock().expect("vault");
+            let vault = guard.as_mut().expect("open vault");
+            brain_host::change(vault, role, &change, proof, 1_700_000_000).expect("changed");
+            let stored = vault.bouncer_host(role).expect("read");
+            assert_eq!(
+                stored.map(|host| host.kind),
+                (change.kind != BouncerHostKind::ThisMac).then_some(change.kind),
+                "{role:?}"
+            );
+        }
+    }
+
+    // A proof of another action, or of the other role, changes nothing.
+    let other = gate
+        .authorize(
+            OwnerAction::ChangeCalibration { level: 80 },
+            OwnerCheck::TouchId,
+        )
+        .expect("proof");
+    let training = gate
+        .authorize(
+            brain_host::owner_action(BouncerHostRole::Training, &own),
+            OwnerCheck::TouchId,
+        )
+        .expect("proof");
+    let mut guard = shared.lock().expect("vault");
+    let vault = guard.as_mut().expect("open vault");
+    for proof in [other, training] {
+        assert!(brain_host::change(vault, BouncerHostRole::Hosting, &own, proof, 1).is_err());
+    }
+    assert_eq!(
+        vault.bouncer_host(BouncerHostRole::Hosting).expect("read"),
+        None
+    );
+}
