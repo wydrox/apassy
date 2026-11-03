@@ -19,6 +19,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 pub const FILE_NAME: &str = "bouncer-decisions.log";
@@ -33,6 +34,62 @@ const MAX_LIST: usize = 16;
 
 static TARGET: OnceLock<PathBuf> = OnceLock::new();
 static WRITE: Mutex<()> = Mutex::new(());
+/// A failed chmod warns once on stderr ([`warn_once`]).
+static CHMOD_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// `O_NOFOLLOW | O_NONBLOCK`: a symlink at the path of the log is never followed, so a
+/// link that another process plants there makes the broker write, or chmod, no other
+/// file; and a FIFO there does not block the decision. The values are the target's own
+/// (rustix), not written numbers.
+#[cfg(any(feature = "vault", feature = "desktop"))]
+fn no_follow() -> io::Result<i32> {
+    Ok((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+}
+
+/// Without rustix the log is not written: no open without `O_NOFOLLOW`.
+#[cfg(not(any(feature = "vault", feature = "desktop")))]
+fn no_follow() -> io::Result<i32> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the decision log needs O_NOFOLLOW",
+    ))
+}
+
+/// Open `path` without following a symlink, and only as a regular file.
+fn open_no_follow(options: &mut OpenOptions, path: &Path) -> io::Result<fs::File> {
+    let file = options.custom_flags(no_follow()?).open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the decision log is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+/// Print `text` on stderr when `warned` is not set yet, and set it. True when it printed.
+fn warn_once(warned: &AtomicBool, text: &str) -> bool {
+    let first = !warned.swap(true, Ordering::Relaxed);
+    if first {
+        eprintln!("{text}");
+    }
+    first
+}
+
+/// Mode 0600 through the open `file` (fchmod: no window for a swapped path). A failure
+/// warns once and does not stop the line: the file holds no secret value, and a log
+/// without its lines helps no one.
+fn make_private(file: &fs::File) {
+    if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+        warn_once(
+            &CHMOD_WARNED,
+            &format!(
+                "apassy: the bouncer decision log cannot get mode 0600 ({}); it is written anyway.",
+                error.kind()
+            ),
+        );
+    }
+}
 
 /// One decision. Every field is optional in the file, so older and newer lines read.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -170,25 +227,29 @@ pub fn append(line: &Line) {
 /// Append `line` to `path` with mode 0600, after a move to [`rotated`] at
 /// [`MAX_BYTES`]. The mode of `open` applies to a new file only, and a rename keeps the
 /// mode, so both files get 0600 again here: an older or copied file may be 0644.
+///
+/// A symlink at `path` is never followed: its size is not the size of the log
+/// (`symlink_metadata`), it does not rotate, and the open fails (`O_NOFOLLOW`). The
+/// file that moves to `.1` gets 0600 through a handle of its own before the rename, so
+/// no chmod follows a symlink at `.1` either.
 pub fn append_to(path: &Path, line: &Line) -> io::Result<()> {
     let _guard = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    if fs::metadata(path).is_ok_and(|meta| meta.len() >= MAX_BYTES) {
-        let old = rotated(path);
-        fs::rename(path, &old)?;
-        fs::set_permissions(&old, fs::Permissions::from_mode(0o600))?;
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() >= MAX_BYTES) {
+        let full = open_no_follow(OpenOptions::new().read(true), path)?;
+        make_private(&full);
+        drop(full);
+        fs::rename(path, rotated(path))?;
     }
     let mut text = serde_json::to_string(&line.bounded()).map_err(io::Error::other)?;
     text.push('\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)?;
-    // fchmod on the open file: no window for a swapped path.
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let mut file = open_no_follow(
+        OpenOptions::new().create(true).append(true).mode(0o600),
+        path,
+    )?;
+    make_private(&file);
     file.write_all(text.as_bytes())
 }
 
@@ -363,6 +424,61 @@ mod tests {
         append_to(&path, &line(2)).unwrap();
         assert_eq!(mode(&rotated(&path)), 0o600);
         assert_eq!(mode(&path), 0o600);
+    }
+
+    /// Finding 6 of the 0.5.16 review: the log followed a symlink at its path, so the
+    /// broker could append to, chmod, or rotate another file of the owner.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn a_symlink_at_the_log_or_its_rotation_is_never_followed() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let victim = dir.path().join("victim.txt");
+        let path = dir.path().join(FILE_NAME);
+        symlink(&victim, &path).unwrap();
+        for size in [4, usize::try_from(MAX_BYTES).unwrap()] {
+            fs::write(&victim, vec![b'k'; size]).unwrap();
+            fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(append_to(&path, &line(1)).is_err(), "{size}");
+            // No line, no chmod, and no rotation of the file behind the link.
+            assert_eq!(fs::read(&victim).unwrap(), vec![b'k'; size]);
+            assert_eq!(mode(&victim), 0o644);
+            assert!(
+                fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(fs::symlink_metadata(rotated(&path)).is_err());
+        }
+
+        // A symlink at `.1`: the rename replaces the link, and the chmod went through
+        // the handle of the full log, so the file behind the link keeps its mode.
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, vec![b' '; usize::try_from(MAX_BYTES).unwrap()]).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&victim, b"keep").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, rotated(&path)).unwrap();
+        append_to(&path, &line(2)).unwrap();
+        let old = fs::symlink_metadata(rotated(&path)).unwrap();
+        assert!(old.is_file());
+        assert_eq!(old.len(), MAX_BYTES);
+        assert_eq!(mode(&rotated(&path)), 0o600);
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert_eq!(mode(&victim), 0o644);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(read(&path).last().map(|line| line.at), Some(2));
+    }
+
+    /// A failed chmod warns once; it does not drop the lines (`make_private`).
+    #[test]
+    fn a_chmod_warning_is_printed_once() {
+        let warned = AtomicBool::new(false);
+        assert!(warn_once(&warned, "first"));
+        assert!(!warn_once(&warned, "second"));
+        assert!(warned.load(Ordering::Relaxed));
     }
 
     #[test]
