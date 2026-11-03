@@ -426,6 +426,7 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let relay_state = relay_questions_state(app);
     // ADR 0037 D14: the free approvals through the hosted relay end (plan s7 unit N1).
     let free_notice = app.questions_free_notice();
+    let can_move = app.questions_can_move();
     let relay_devices = if matches!(relay_state, Some(QuestionsAvailability::On { .. })) {
         app.questions_devices()
     } else {
@@ -450,6 +451,7 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut switch_feed = None;
     let mut switch_relay = None;
     let mut add_relay_iphone = false;
+    let mut move_to_node = false;
     let mut remove_device = None;
     rows::section(
         ui,
@@ -524,6 +526,14 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     )
                     .clicked();
             }
+            if can_move {
+                move_to_node = g
+                    .link("Move approvals to this Mac")
+                    .on_hover_text(
+                        "The questions of this vault then go through this Mac on your tailnet, not the hosted relay.",
+                    )
+                    .clicked();
+            }
             if let Some(notice) = &free_notice {
                 g.note_row(notice.as_str());
             }
@@ -540,6 +550,8 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
         app.questions_ask_remove(&uuid, Some(&ctx));
     } else if add_relay_iphone {
         app.questions_add_iphone(Some(&ctx));
+    } else if move_to_node {
+        app.questions_move_to_node(Some(&ctx));
     }
 }
 
