@@ -19,6 +19,7 @@
 //! It gets what the swap rules allow, each request is logged, and it never gets a
 //! value.
 
+pub mod base_env;
 mod ca;
 mod http1;
 mod public_addr;
