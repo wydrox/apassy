@@ -224,9 +224,9 @@ struct VaultTabView: View {
 enum LaunchRoutes {
     static func enabled(isDemo: Bool) -> Bool {
         #if targetEnvironment(simulator)
-            true
+            return true
         #else
-            isDemo
+            return isDemo
         #endif
     }
 }

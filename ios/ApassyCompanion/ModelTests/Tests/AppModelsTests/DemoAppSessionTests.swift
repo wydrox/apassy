@@ -147,7 +147,8 @@ private final class Prompts: Sendable {
         let request = try #require(demo.questions.access.requests.first { $0.id == DemoVault.accessRequestID })
         #expect(demo.questions.access.canAllow(request))
         await demo.questions.access.answer(request, choice: .allow_once)
-        #expect(prompts.reasons.contains("allow one scoped use attempt by Codex"))
+        // The reason text of a real Allow Once (`AccessRequestsModel.answer`).
+        #expect(prompts.reasons.contains { $0.hasPrefix("allow one scoped use attempt by") && $0.contains("Codex") })
         let posts = await demo.demo.service.accessPosts()
         #expect(posts.map(\.choice) == [.allow_once])
         #expect(posts.first?.signature != nil)
