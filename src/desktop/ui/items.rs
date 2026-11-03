@@ -55,6 +55,9 @@ pub(crate) enum Filter {
     /// Archived versions retained after concurrent sync changes.
     Conflicts,
     Archived,
+    /// Look-alike credentials (see [`look_alike_groups`]), each set next to each other.
+    /// Archived credentials stay hidden, as in [`Filter::All`].
+    Duplicates,
 }
 
 impl Filter {
@@ -63,7 +66,97 @@ impl Filter {
             Self::All => "All credentials",
             Self::Conflicts => "Conflicting changes",
             Self::Archived => "Archived",
+            Self::Duplicates => "Possible duplicates",
         }
+    }
+}
+
+/// The name without one trailing tag in brackets, such as the " [1P befydv]" of an
+/// import, and without spaces at the ends. A name that is only a tag stays whole.
+fn untagged_name(name: &str) -> &str {
+    let name = name.trim();
+    if let Some(inner) = name.strip_suffix(']')
+        && let Some(open) = inner.rfind('[')
+        && !inner[open + 1..].contains(']')
+    {
+        let rest = name[..open].trim();
+        if !rest.is_empty() {
+            return rest;
+        }
+    }
+    name
+}
+
+/// The name that look-alikes share: [`untagged_name`] in lowercase.
+fn look_alike_key(name: &str) -> String {
+    untagged_name(&name.trim().to_lowercase()).to_owned()
+}
+
+/// Sets of look-alike credentials: two or more of the same kind with the same
+/// [`look_alike_key`]. Each set keeps the order of `items`, and the sets follow the
+/// order of their first credential. Nothing is merged or renamed.
+fn look_alike_groups<'a>(
+    items: impl IntoIterator<Item = (u64, CredentialKind, &'a str)>,
+) -> Vec<Vec<u64>> {
+    let mut groups: Vec<Vec<u64>> = Vec::new();
+    let mut index: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+    for (id, kind, name) in items {
+        let at = *index
+            .entry((kind.label(), look_alike_key(name)))
+            .or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+        groups[at].push(id);
+    }
+    groups.retain(|group| group.len() > 1);
+    groups
+}
+
+/// The host of a website or a host field: `https://odealo-admin.vercel.app/login`
+/// gives `odealo-admin.vercel.app`. The website comes first. Empty without one.
+fn list_host(website: &str, host: &str) -> String {
+    [website, host]
+        .into_iter()
+        .map(bare_host)
+        .find(|host| !host.is_empty())
+        .unwrap_or_default()
+}
+
+/// The host name of one value, without the scheme, user info, port, and path. Empty
+/// when the split is not certain or the rest is not a plain host name, so that no part
+/// of user info shows in the list.
+fn bare_host(text: &str) -> String {
+    let text = text.trim();
+    let authority = match providers::split_url(text) {
+        Some(parts) => parts.host,
+        None if text.contains("://") || text.contains('@') => return String::new(),
+        None => text.split(['/', '?', '#']).next().unwrap_or_default(),
+    };
+    let host = authority
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_lowercase();
+    let plain = host.contains(|c: char| c.is_ascii_alphanumeric())
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if plain { host } else { String::new() }
+}
+
+/// The second line of a look-alike row: `line · host` with a known host, else
+/// `line · folder` when its look-alikes are in other folders, else the line.
+fn look_alike_line(line: &str, host: &str, folder: Option<&str>) -> String {
+    let extra = if host.is_empty() { folder } else { Some(host) };
+    match extra {
+        Some(extra) if line.is_empty() => extra.to_owned(),
+        Some(extra) => format!("{line} · {extra}"),
+        None => line.to_owned(),
     }
 }
 
@@ -163,9 +256,20 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         columns::list_note(ui, "No items");
         return;
     }
+    let duplicates: usize = look_alike_groups(
+        in_place
+            .iter()
+            .filter(|item| !archived.contains_key(&item.id))
+            .map(|item| (item.id, item.kind, item.name.as_str())),
+    )
+    .iter()
+    .map(Vec::len)
+    .sum();
     columns::list_inset(ui, |ui| {
-        toolbar(app, ui);
-        if !app.ui.selected_items.is_empty() {
+        toolbar(app, ui, duplicates);
+        // A plain click selects one row: the bar is for a choice of several. ⇧⌘M also
+        // moves the one selected credential.
+        if app.ui.selected_items.len() > 1 {
             ui.horizontal_wrapped(|ui| {
                 kit::note(ui, format!("{} selected", app.ui.selected_items.len()));
                 if kit::small_button(ui, "Move…", Style::Bordered)
@@ -174,7 +278,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     super::folders::open_move_many(app);
                 }
-                if kit::small_button(ui, "Clear Selection", Style::Link).clicked() {
+                if kit::small_button(ui, "Clear Selection", Style::Bordered).clicked() {
                     app.ui.selected_items.clear();
                 }
             });
@@ -223,11 +327,33 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         })
         .collect();
     items.sort_by_key(|item| item.name.to_lowercase());
-    let hidden_archived = if filter == Filter::Archived || !query.is_empty() {
-        0
-    } else {
-        archived_count
-    };
+    // Look-alikes among the listed credentials, and the folder of each when its set
+    // spans several folders.
+    let alike_groups = look_alike_groups(
+        items
+            .iter()
+            .map(|item| (item.id, item.kind, item.name.as_str())),
+    );
+    let mut alike_folder: BTreeMap<u64, Option<String>> = BTreeMap::new();
+    for group in &alike_groups {
+        let labels: Vec<String> = group
+            .iter()
+            .map(|id| tree.path_label(tree.folder_of(*id)))
+            .collect();
+        let differ = labels.iter().any(|label| label != &labels[0]);
+        for (id, label) in group.iter().zip(labels) {
+            alike_folder.insert(*id, differ.then_some(label));
+        }
+    }
+    if filter == Filter::Duplicates {
+        items.retain(|item| alike_folder.contains_key(&item.id));
+    }
+    let hidden_archived =
+        if matches!(filter, Filter::Archived | Filter::Duplicates) || !query.is_empty() {
+            0
+        } else {
+            archived_count
+        };
     let listed = |item: &OwnerSummary| {
         let status = if archived.contains_key(&item.id) && conflicts.contains_key(&item.id) {
             "Conflict copy".to_owned()
@@ -240,22 +366,50 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let username = matches!(item.kind, CredentialKind::Login | CredentialKind::Database)
             .then(|| page_text(&plain_field(app, item.id, "username")))
             .unwrap_or_default();
+        let mut subtitle = if username.is_empty() {
+            looks.kind_label.clone()
+        } else {
+            username
+        };
+        // A look-alike row tells itself apart by its host (plain fields only), else
+        // by its folder.
+        if let Some(folder) = alike_folder.get(&item.id) {
+            let host = list_host(
+                &plain_field(app, item.id, "website"),
+                &plain_field(app, item.id, "host"),
+            );
+            subtitle = look_alike_line(&subtitle, &host, folder.as_deref());
+        }
         ListedItem {
             id: item.id,
             name: item.name.clone(),
-            subtitle: if username.is_empty() {
-                looks.kind_label.clone()
-            } else {
-                username
-            },
+            subtitle,
             status,
             production: looks.environment == EnvState::Production,
             shared: !looks.shared.is_empty(),
             tile: looks.tile,
         }
     };
-    let grouped = filter != Filter::Conflicts;
-    let groups: Vec<columns::Group<ListedItem>> = if grouped {
+    let grouped = !matches!(filter, Filter::Conflicts | Filter::Duplicates);
+    let groups: Vec<columns::Group<ListedItem>> = if filter == Filter::Duplicates {
+        // One group for each set of look-alikes, named without the tag.
+        alike_groups
+            .iter()
+            .map(|group| {
+                let rows: Vec<&OwnerSummary> = group
+                    .iter()
+                    .filter_map(|id| items.iter().find(|item| item.id == *id))
+                    .collect();
+                columns::Group {
+                    title: rows
+                        .first()
+                        .map(|item| untagged_name(&item.name).to_owned())
+                        .unwrap_or_default(),
+                    rows: rows.into_iter().map(&listed).collect(),
+                }
+            })
+            .collect()
+    } else if grouped {
         // The top level first, then each folder by its path.
         let mut by_folder: BTreeMap<(bool, String), Vec<ListedItem>> = BTreeMap::new();
         for item in &items {
@@ -286,6 +440,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         _ if !query.is_empty() => format!("No credential matches “{query}”."),
         Filter::Archived => "No credential is archived.".to_owned(),
         Filter::Conflicts => "No archived conflict copy needs review.".to_owned(),
+        Filter::Duplicates => "No possible duplicates.".to_owned(),
         _ if place != Place::CREDENTIALS && active == 0 => {
             "No credentials in this folder.".to_owned()
         }
@@ -427,6 +582,10 @@ fn update_selection(
     *anchor = Some(id);
 }
 
+#[cfg(test)]
+#[path = "list_tests.rs"]
+mod list_tests;
+
 /// The list of a shared vault: "From you" and "From others" (ADR 0026 §6). Shared vaults
 /// come later, so the list has no item yet.
 fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
@@ -438,8 +597,10 @@ fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
 /// The search field. ⌘F puts the focus in it. The list has no filter or order menus,
 /// as in the mockup: the rows group by folder. A list of archived credentials or of
 /// conflict copies (from "Show archived" and from the review of conflicting changes)
-/// says so under the field, with "Show All" to go back.
-fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
+/// says so under the field, with "Show All" to go back. With `duplicates` look-alike
+/// credentials, "Possible duplicates (N)" under the field lists only them. It is a
+/// filter, not a notice: it goes away when no look-alike is left.
+fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, duplicates: usize) {
     let field = kit::search_field(ui, &mut app.search, "credential-search", "Search")
         .on_hover_text("Search by name, username, website, host, project, service, or notes  ⌘F");
     ui.ctx()
@@ -454,13 +615,29 @@ fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui.selectable_value(&mut app.ui.search_all, true, "All Credentials");
         });
     }
+    let duplicates_label = format!("{} ({duplicates})", Filter::Duplicates.label());
+    if app.ui.credential_filter == Filter::All && duplicates > 0 {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if kit::small_button(ui, &duplicates_label, Style::Link)
+                .on_hover_text("Show credentials with the same kind and name")
+                .clicked()
+            {
+                app.search.clear();
+                app.ui.credential_filter = Filter::Duplicates;
+            }
+        });
+    }
     if app.ui.credential_filter != Filter::All {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(
-                kit::text(app.ui.credential_filter.label(), Font::Footnote).color(kit::SECONDARY),
-            );
+            let label = if app.ui.credential_filter == Filter::Duplicates {
+                duplicates_label.as_str()
+            } else {
+                app.ui.credential_filter.label()
+            };
+            ui.label(kit::text(label, Font::Footnote).color(kit::SECONDARY));
             if kit::small_button(ui, "Show All", Style::Link).clicked() {
                 app.ui.credential_filter = Filter::All;
             }
