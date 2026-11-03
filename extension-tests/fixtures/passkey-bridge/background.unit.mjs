@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
-import { flush, loadBackground, senderFor } from "./mock-chrome.mjs";
+import { flush, loadBackground, senderFor, waitFor } from "./mock-chrome.mjs";
 import { createSyntheticAuthenticator, fail, ok } from "./synthetic-authenticator.mjs";
 
 const ORIGIN = "https://login.example.com";
@@ -175,6 +175,7 @@ for (const [name, sender] of Object.entries(BAD_SENDERS)) {
     const bg = setup();
     const port = await request(bg, { op: "get", options: getOptions() }, sender);
     assert.deepEqual(port.received, [{ kind: "fallback" }]);
+    await waitFor(() => port.closed);
     assert.equal(port.closed, true);
     assert.equal(bg.natives.length, 0);
   });
@@ -184,6 +185,7 @@ test("a port with another name is closed at once", async () => {
   const bg = setup();
   const port = bg.connect(senderFor(ORIGIN), "other");
   await flush();
+  await waitFor(() => port.closed);
   assert.equal(port.closed, true);
   assert.equal(bg.natives.length, 0);
 });
@@ -313,6 +315,7 @@ test("no request within 10 s: a fallback", async () => {
   assert.equal(port.received.length, 0);
   await bg.clock.advance(1);
   assert.deepEqual(port.received, [{ kind: "fallback" }]);
+  await waitFor(() => port.closed);
   assert.equal(port.closed, true);
 });
 
@@ -338,6 +341,7 @@ test("a signed answer reaches the page as base64url, and both ports close", asyn
     userHandle: b64u(Buffer.from("user-handle")),
     clientExtensionResults: {},
   });
+  await waitFor(() => port.closed);
   assert.equal(port.closed, true);
   assert.equal(native.disconnected, true);
 });
@@ -523,6 +527,7 @@ test("the tab went to another origin before the answer: nothing delivered", asyn
   bg.natives[0].port.postMessage(getAnswer(bg.natives[0].sent[0]));
   await flush();
   assert.equal(port.received.length, 0);
+  await waitFor(() => port.closed);
   assert.equal(port.closed, true);
   assert.equal(bg.badge.text, "", "no badge for a sign-in");
 });
@@ -535,6 +540,7 @@ test("the document that asked is gone (same origin, new document): nothing deliv
   bg.natives[0].port.postMessage(getAnswer(bg.natives[0].sent[0]));
   await flush();
   assert.equal(port.received.length, 0);
+  await waitFor(() => port.closed);
   assert.equal(port.closed, true);
 });
 
@@ -555,6 +561,7 @@ test("the tab navigated before the request reached the app: nothing is sent", as
   bg.tabs.set(5, "https://evil.example/");
   const port = await request(bg, { op: "get", options: getOptions() });
   assert.equal(bg.natives.length, 0);
+  await waitFor(() => port.closed);
   assert.equal(port.closed, true);
 });
 
