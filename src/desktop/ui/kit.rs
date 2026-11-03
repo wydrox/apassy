@@ -2895,7 +2895,6 @@ pub(crate) enum Icon {
     #[cfg(not(feature = "vault"))]
     List,
     Folder,
-    Eye,
     /// A window with a sidebar, for "Hide sidebar" and "Show sidebar".
     Sidebar,
     /// The Settings gear with teeth, as SF Symbols `gearshape`.
@@ -3080,10 +3079,6 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
             (0.92, 0.82),
             (0.08, 0.82),
         ]),
-        Icon::Eye => {
-            closed(&arc(0.5, 0.5, 0.42, 0.26, 0.0, TAU));
-            circle(0.5, 0.5, 0.12);
-        }
         Icon::Sidebar => {
             painter.rect_stroke(
                 Rect::from_min_max(p(0.06, 0.16), p(0.94, 0.84)),
