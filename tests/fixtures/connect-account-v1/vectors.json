@@ -1,0 +1,123 @@
+{
+  "origin": "https://connect.example.test",
+  "brain_origin": "https://brain.example.test",
+  "account_id": "acc_k7m2q4x3ca",
+  "device_a": {
+    "device_id": "dev_m2k7q3x4ab",
+    "private_hex": "4f2d9c6e1b3a7d8f0c5e2a9b7f4d1c3e6a8b0d2f4c6e8a1b3d5f7a9c0e2b4d6f",
+    "public_hex": "04ea47901e55bd31d76b0a545d9c60bb8e10f7b2366f3abd1bfb88ead14cf668fc0ded38eded5f35623c3081110ec6b18410b48a1d433df5da33899d05b1318eb0",
+    "public_b64u": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+    "public_key_sha256": "07e24384070f776e5f97167dda0cec8b8b1deed53f1e0ce5d7ec4f0d68c895c4"
+  },
+  "device_b": {
+    "device_id": "dev_p4n6r2t7bc",
+    "private_hex": "1c9a5e3f7b2d4a6c8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a1b3c5d",
+    "public_hex": "0474f49f8166e7d274dd9b225bdd26f5076e6017a55ad455dd40969d56adfb8be1315c2b1ba61bd4de3d74c740a0c8f26eaec417c54788abf0d980035da97457c5",
+    "public_b64u": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+    "public_key_sha256": "5b3c19be00d78c1d7fca98a6e3d9dadf3b8a4a22bd165a97b2b45b4a29abf407"
+  },
+  "nonce_b64u": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "messages": [
+    {
+      "name": "account",
+      "tag": "apassy-connect account v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgYWNjb3VudCB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQ",
+      "sha256": "c5c2149eeecf005d73996c15679548f44f01ce75e9165f882e88067084fd7b09",
+      "signature_b64u": "MEYCIQDLCqQAaXw6ELz0osjgUd6ep-PWtaTWQChc4LNjAdzqrwIhAM_yc2zz20100IW4BGjGWKmEXcSkGvhMUyJMFKuBRLnG"
+    },
+    {
+      "name": "sign_in",
+      "tag": "apassy-connect sign-in v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3Qgc2lnbi1pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEJPcEhrQjVWdlRIWGF3cFVYWnhndTQ0UTk3STJienE5R191STZ0Rk05bWo4RGUwNDdlMWZOV0k4TUlFUkRzYXhoQkMwaWgxRFBmWGFNNG1kQmJFeGpyQQBBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4",
+      "sha256": "d3f0b4542809fd46fb8e43e311818189e1c3105db90fd2251baa6b6fdf061f78",
+      "signature_b64u": "MEUCIDHdgGPhR4AKRBXenUGCgo6g1S9nD4CAgFdrbQl64ZcfAiEAk7EVrrC_JG4A8GL4Ts9vxlqu_WVbbcJ5Cy06EYPVl9M"
+    },
+    {
+      "name": "join",
+      "tag": "apassy-connect join v1",
+      "signer": "device_b",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3Qgam9pbiB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEs2dGdLcF9vcWo3WGJpV3FXbURoSnEtRElUaHR2aHFiRVdZOHRlZzVKYlkAQkhUMG40Rm01OUowM1pzaVc5MG05UWR1WUJlbFd0UlYzVUNXblZhdC00dmhNVndyRzZZYjFONDlkTWRBb01qeWJxN0VGOFZIaUt2dzJZQURYYWwwVjhV",
+      "sha256": "f73761cd3449c61940144209b857c7450bcfaafd7211eea5e409778325677063",
+      "signature_b64u": "MEYCIQCo0191DUmH6H6NGblv-i2IdCeYf3xb8sLUxGeaNVVTUQIhANkozKZhV8QLRitHg-IPmsZJhq7cDrKmeyzqif2IgK_H"
+    },
+    {
+      "name": "recover",
+      "tag": "apassy-connect recover v1",
+      "signer": "device_b",
+      "message_b64u": "YXBhc3N5LWNvbm5lY3QgcmVjb3ZlciB2MQBodHRwczovL2Nvbm5lY3QuZXhhbXBsZS50ZXN0AGFjY19rN20ycTR4M2NhAEJIVDBuNEZtNTlKMDNac2lXOTBtOVFkdVlCZWxXdFJWM1VDV25WYXQtNHZoTVZ3ckc2WWIxTjQ5ZE1kQW9NanlicTdFRjhWSGlLdncyWUFEWGFsMFY4VQ",
+      "sha256": "842c9eb545540e9a67d2542c5179a3f9c97dce602037aaf9e71f92643db12267",
+      "signature_b64u": "MEQCIAP_PjwLasP5lX3a-GoqJmIaRlnfof23sd2YPICtdpg7AiAQqrZwojrdi2imx533HM_W65GdPGKM29x0Vp4ViJa5YA"
+    },
+    {
+      "name": "brain_sign_in",
+      "tag": "apassy-bouncer sign-in v1",
+      "signer": "device_a",
+      "message_b64u": "YXBhc3N5LWJvdW5jZXIgc2lnbi1pbiB2MQBodHRwczovL2JyYWluLmV4YW1wbGUudGVzdABhY2NfazdtMnE0eDNjYQBCT3BIa0I1VnZUSFhhd3BVWFp4Z3U0NFE5N0kyYnpxOUdfdUk2dEZNOW1qOERlMDQ3ZTFmTldJOE1JRVJEc2F4aEJDMGloMURQZlhhTTRtZEJiRXhqckEAQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOA",
+      "sha256": "00300bab39c17bf919f9413f075a20f1ff8f4b29d9bb7f12408c71889fca3ce7",
+      "signature_b64u": "MEQCICDqYZEGxtdYIijNMcvnbWpY39c0gjyn2gWif0zG_BenAiAW3GyJBDLTThbqPKOwBnbgyqJdw3JvUD5AC5B9l0Ns0g"
+    }
+  ],
+  "link": {
+    "code": "apassy_alk_acc_k7m2q4x3ca_cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "link_hash": "K6tgKp_oqj7XbiWqWmDhJq-DIThtvhqbEWY8teg5JbY"
+  },
+  "safety": {
+    "sha256": "283a792aecfa3a5fe3945c19244f2faf765ba531bb55a353e99bdabab611ebd9",
+    "words": "blaze cable flute board seal tiger"
+  },
+  "recovery": {
+    "bytes_hex": "101112131415161718191a1b1c1d1e1f",
+    "code": "apassy_rec_101112131415161718191a1b1c1d1e1f",
+    "words": "atlas attic audio aunt autumn award bacon badge bagel baker bamboo banana band barn basil basket",
+    "recovery_hash": "480e5d5b48881b734d093b637f4d49183f0b1b050cc83b7bd656a871351e93a1"
+  },
+  "entitlement": {
+    "kid": "ek_test_1",
+    "seed_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "public_b64u": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+    "tokens": [
+      {
+        "name": "personal",
+        "claims": {
+          "v": 1,
+          "kid": "ek_test_1",
+          "acc": "acc_k7m2q4x3ca",
+          "plan": "personal",
+          "group": null,
+          "feats": [
+            "brain",
+            "sync",
+            "tunnel"
+          ],
+          "iat": 1790000000,
+          "exp": 1790086400
+        },
+        "payload_b64u": "eyJ2IjoxLCJraWQiOiJla190ZXN0XzEiLCJhY2MiOiJhY2NfazdtMnE0eDNjYSIsInBsYW4iOiJwZXJzb25hbCIsImdyb3VwIjpudWxsLCJmZWF0cyI6WyJicmFpbiIsInN5bmMiLCJ0dW5uZWwiXSwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwODY0MDB9",
+        "signature_b64u": "5dTIkm3UYq0q7b7x4YTXdmZFxfo_-g6Lm3AUan5KEVA8a2vSZpb3IeZ9Cw83zNb7gt75uMnNm0fAJXOby3fQAw",
+        "token": "eyJ2IjoxLCJraWQiOiJla190ZXN0XzEiLCJhY2MiOiJhY2NfazdtMnE0eDNjYSIsInBsYW4iOiJwZXJzb25hbCIsImdyb3VwIjpudWxsLCJmZWF0cyI6WyJicmFpbiIsInN5bmMiLCJ0dW5uZWwiXSwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwODY0MDB9.5dTIkm3UYq0q7b7x4YTXdmZFxfo_-g6Lm3AUan5KEVA8a2vSZpb3IeZ9Cw83zNb7gt75uMnNm0fAJXOby3fQAw"
+      },
+      {
+        "name": "family_member",
+        "claims": {
+          "v": 1,
+          "kid": "ek_test_1",
+          "acc": "acc_m3n5p7q2rb",
+          "plan": "family",
+          "group": "grp_f4m6n2p7qa",
+          "feats": [
+            "brain",
+            "sync",
+            "tunnel"
+          ],
+          "iat": 1790000000,
+          "exp": 1790086400
+        },
+        "payload_b64u": "eyJ2IjoxLCJraWQiOiJla190ZXN0XzEiLCJhY2MiOiJhY2NfbTNuNXA3cTJyYiIsInBsYW4iOiJmYW1pbHkiLCJncm91cCI6ImdycF9mNG02bjJwN3FhIiwiZmVhdHMiOlsiYnJhaW4iLCJzeW5jIiwidHVubmVsIl0sImlhdCI6MTc5MDAwMDAwMCwiZXhwIjoxNzkwMDg2NDAwfQ",
+        "signature_b64u": "kJe9mFdWUlPQuwmB3Hp6_SVLL2wDdext4G4Jhvu694paBcs5zrdxPO7ZnmvpcHyfJbsh6QvzFbB99EttzrlADQ",
+        "token": "eyJ2IjoxLCJraWQiOiJla190ZXN0XzEiLCJhY2MiOiJhY2NfbTNuNXA3cTJyYiIsInBsYW4iOiJmYW1pbHkiLCJncm91cCI6ImdycF9mNG02bjJwN3FhIiwiZmVhdHMiOlsiYnJhaW4iLCJzeW5jIiwidHVubmVsIl0sImlhdCI6MTc5MDAwMDAwMCwiZXhwIjoxNzkwMDg2NDAwfQ.kJe9mFdWUlPQuwmB3Hp6_SVLL2wDdext4G4Jhvu694paBcs5zrdxPO7ZnmvpcHyfJbsh6QvzFbB99EttzrlADQ"
+      }
+    ]
+  }
+}

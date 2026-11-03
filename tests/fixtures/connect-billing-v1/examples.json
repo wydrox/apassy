@@ -1,0 +1,448 @@
+{
+  "contract": "connect-billing-v1",
+  "examples": [
+    {
+      "name": "plans",
+      "route": "GET /v1/plans",
+      "part": "result",
+      "body": {
+        "currency": "eur",
+        "tax": "inclusive",
+        "plans": [
+          {
+            "plan": "personal",
+            "name": "Connect Personal",
+            "unit": "account",
+            "included": 1,
+            "max": 1,
+            "prices": [
+              {
+                "interval": "month",
+                "lookup_key": "connect_personal_month",
+                "amount": 300,
+                "extra": null
+              },
+              {
+                "interval": "year",
+                "lookup_key": "connect_personal_year",
+                "amount": 3000,
+                "extra": null
+              }
+            ]
+          },
+          {
+            "plan": "family",
+            "name": "Connect Family",
+            "unit": "person",
+            "included": 4,
+            "max": 10,
+            "prices": [
+              {
+                "interval": "month",
+                "lookup_key": "connect_family_month",
+                "amount": 500,
+                "extra": 100
+              },
+              {
+                "interval": "year",
+                "lookup_key": "connect_family_year",
+                "amount": 5000,
+                "extra": 1000
+              }
+            ]
+          },
+          {
+            "plan": "team",
+            "name": "Connect Team",
+            "unit": "member",
+            "included": 1,
+            "max": 250,
+            "prices": [
+              {
+                "interval": "month",
+                "lookup_key": "connect_team_month",
+                "amount": 400,
+                "extra": 400
+              },
+              {
+                "interval": "year",
+                "lookup_key": "connect_team_year",
+                "amount": 4000,
+                "extra": 4000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "checkout_personal",
+      "route": "POST /v1/account/checkout",
+      "part": "request",
+      "body": {
+        "plan": "personal",
+        "interval": "month"
+      }
+    },
+    {
+      "name": "checkout_family",
+      "route": "POST /v1/account/checkout",
+      "part": "request",
+      "body": {
+        "plan": "family",
+        "interval": "year",
+        "people": 6
+      }
+    },
+    {
+      "name": "checkout_team",
+      "route": "POST /v1/account/checkout",
+      "part": "request",
+      "body": {
+        "plan": "team",
+        "interval": "month",
+        "seats": 5
+      }
+    },
+    {
+      "name": "checkout_answer",
+      "route": "POST /v1/account/checkout",
+      "part": "result",
+      "body": {
+        "url": "https://checkout.stripe.com/c/pay/cs_test_SynthSession0001",
+        "session_id": "cs_test_SynthSession0001",
+        "expires_at": 1790086400
+      }
+    },
+    {
+      "name": "stripe_checkout_form",
+      "route": "POST /v1/account/checkout",
+      "part": "stripe_request",
+      "body": [
+        [
+          "mode",
+          "subscription"
+        ],
+        [
+          "line_items[0][price]",
+          "price_SynthFamilyYear"
+        ],
+        [
+          "line_items[0][quantity]",
+          "6"
+        ],
+        [
+          "automatic_tax[enabled]",
+          "true"
+        ],
+        [
+          "billing_address_collection",
+          "required"
+        ],
+        [
+          "client_reference_id",
+          "acc_k7m2q4x3ca"
+        ],
+        [
+          "metadata[account_id]",
+          "acc_k7m2q4x3ca"
+        ],
+        [
+          "subscription_data[metadata][account_id]",
+          "acc_k7m2q4x3ca"
+        ],
+        [
+          "consent_collection[terms_of_service]",
+          "required"
+        ],
+        [
+          "success_url",
+          "https://apassy.wyderka.cc/connect/done?session_id={CHECKOUT_SESSION_ID}"
+        ],
+        [
+          "cancel_url",
+          "https://apassy.wyderka.cc/connect/cancel"
+        ]
+      ]
+    },
+    {
+      "name": "portal",
+      "route": "POST /v1/account/portal",
+      "part": "request",
+      "body": {}
+    },
+    {
+      "name": "portal_answer",
+      "route": "POST /v1/account/portal",
+      "part": "result",
+      "body": {
+        "url": "https://billing.stripe.com/p/session/test_SynthPortal0001"
+      }
+    },
+    {
+      "name": "plan_active",
+      "route": "GET /v1/account/plan",
+      "part": "result",
+      "body": {
+        "plan": "personal",
+        "status": "active",
+        "entitled": true,
+        "interval": "month",
+        "quantity": 1,
+        "renews_at": 1792592000,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "group_id": null
+      }
+    },
+    {
+      "name": "plan_past_due",
+      "route": "GET /v1/account/plan",
+      "part": "result",
+      "body": {
+        "plan": "personal",
+        "status": "past_due",
+        "entitled": true,
+        "interval": "month",
+        "quantity": 1,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": 1793801700,
+        "read_only_until": null,
+        "delete_at": null,
+        "group_id": null
+      }
+    },
+    {
+      "name": "plan_read_only",
+      "route": "GET /v1/account/plan",
+      "part": "result",
+      "body": {
+        "plan": "personal",
+        "status": "read_only",
+        "entitled": false,
+        "interval": "month",
+        "quantity": 1,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": 1796393700,
+        "delete_at": 1801577700,
+        "group_id": null
+      }
+    },
+    {
+      "name": "plan_none",
+      "route": "GET /v1/account/plan",
+      "part": "result",
+      "body": {
+        "plan": null,
+        "status": "none",
+        "entitled": false,
+        "interval": null,
+        "quantity": null,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "group_id": null
+      }
+    },
+    {
+      "name": "plan_family_member",
+      "route": "GET /v1/account/plan",
+      "part": "result",
+      "body": {
+        "plan": "family",
+        "status": "active",
+        "entitled": true,
+        "interval": "month",
+        "quantity": 4,
+        "renews_at": 1792592000,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "group_id": "grp_f4m6n2p7qa"
+      }
+    },
+    {
+      "name": "group",
+      "route": "GET /v1/account/group",
+      "part": "result",
+      "body": {
+        "group_id": "grp_f4m6n2p7qa",
+        "kind": "family",
+        "role": "owner",
+        "owner_account": "acc_k7m2q4x3ca",
+        "included": 4,
+        "quantity": 4,
+        "members": [
+          {
+            "account_id": "acc_k7m2q4x3ca",
+            "name": "Rafal",
+            "role": "owner",
+            "state": "active",
+            "joined_at": 1790000000
+          },
+          {
+            "account_id": "acc_m3n5p7q2rb",
+            "name": "Ola",
+            "role": "member",
+            "state": "active",
+            "joined_at": 1790000300
+          },
+          {
+            "account_id": "acc_r5s7t2u4vc",
+            "name": "Jan",
+            "role": "member",
+            "state": "pending",
+            "joined_at": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "invite",
+      "route": "POST /v1/account/group/invites",
+      "part": "request",
+      "body": {
+        "role": "member"
+      }
+    },
+    {
+      "name": "invite_answer",
+      "route": "POST /v1/account/group/invites",
+      "part": "result",
+      "body": {
+        "invite_id": 3,
+        "url": "https://apassy.wyderka.cc/connect/join#apassy_gin_grp_f4m6n2p7qa_abababababababababababababababababababababababababababababababab",
+        "expires_at": 1790604800
+      }
+    },
+    {
+      "name": "group_join",
+      "route": "POST /v1/account/group/join",
+      "part": "request",
+      "body": {
+        "code": "apassy_gin_grp_f4m6n2p7qa_abababababababababababababababababababababababababababababababab"
+      }
+    },
+    {
+      "name": "group_join_answer",
+      "route": "POST /v1/account/group/join",
+      "part": "result",
+      "body": {
+        "group_id": "grp_f4m6n2p7qa",
+        "kind": "family",
+        "state": "pending",
+        "owner_name": "Rafal"
+      }
+    },
+    {
+      "name": "member_confirm",
+      "route": "POST /v1/account/group/members/{account_id}/confirm",
+      "part": "request",
+      "body": {}
+    },
+    {
+      "name": "member_confirm_answer",
+      "route": "POST /v1/account/group/members/{account_id}/confirm",
+      "part": "result",
+      "body": {
+        "account_id": "acc_r5s7t2u4vc",
+        "name": "Jan",
+        "role": "member",
+        "state": "active",
+        "joined_at": 1790001000
+      }
+    },
+    {
+      "name": "member_removed",
+      "route": "DELETE /v1/account/group/members/{account_id}",
+      "part": "result",
+      "body": {
+        "account_id": "acc_r5s7t2u4vc",
+        "removed_from_stores": 1
+      }
+    },
+    {
+      "name": "seats",
+      "route": "POST /v1/account/group/seats",
+      "part": "request",
+      "body": {
+        "quantity": 6
+      }
+    },
+    {
+      "name": "seats_answer",
+      "route": "POST /v1/account/group/seats",
+      "part": "result",
+      "body": {
+        "quantity": 6,
+        "pending": true
+      }
+    },
+    {
+      "name": "webhook_answer",
+      "route": "POST /v1/stripe/webhook",
+      "part": "result",
+      "body": {
+        "received": true,
+        "duplicate": false
+      }
+    },
+    {
+      "name": "webhook_duplicate",
+      "route": "POST /v1/stripe/webhook",
+      "part": "result",
+      "body": {
+        "received": true,
+        "duplicate": true
+      }
+    },
+    {
+      "name": "error_seat_limit",
+      "route": "POST /v1/account/group/seats",
+      "part": "error",
+      "status": 409,
+      "body": {
+        "code": "seat_limit",
+        "message": "The family has 5 people; choose at least 5."
+      }
+    },
+    {
+      "name": "error_not_in_group",
+      "route": "GET /v1/account/group",
+      "part": "error",
+      "status": 403,
+      "body": {
+        "code": "not_in_group",
+        "message": "This account is not in that family or team."
+      }
+    },
+    {
+      "name": "error_plan_required",
+      "route": "GET /v1/account/plan",
+      "part": "error",
+      "status": 403,
+      "body": {
+        "code": "plan_required",
+        "message": "This account is not on Apassy Connect."
+      }
+    },
+    {
+      "name": "error_webhook_signature",
+      "route": "POST /v1/stripe/webhook",
+      "part": "error",
+      "status": 400,
+      "body": {
+        "code": "invalid_request",
+        "message": "The Stripe signature does not verify."
+      }
+    }
+  ]
+}

@@ -85,14 +85,26 @@ UPDATE vault_meta SET schema_version = 26 WHERE id = 1;
 PRAGMA user_version = 26;
 ";
 
+/// The way back from the current schema to schema 27: `schema29::downgrade_sql` (the
+/// host of the bouncer brain) and then `schema28::downgrade_sql` (the pinned trust of a
+/// membership).
+#[cfg(test)]
+pub(super) fn downgrade_to_27_sql() -> String {
+    format!(
+        "{}{}",
+        super::schema29::downgrade_sql(),
+        super::schema28::downgrade_sql()
+    )
+}
+
 /// The way back from the current schema to schema 25, which the fixtures of schema 25
-/// and earlier start with: `schema28::downgrade_sql` (the pinned trust of a membership),
-/// [`DOWNGRADE_TO_26_SQL`], and then `schema26::DOWNGRADE_TO_25_SQL`.
+/// and earlier start with: [`downgrade_to_27_sql`], [`DOWNGRADE_TO_26_SQL`], and then
+/// `schema26::DOWNGRADE_TO_25_SQL`.
 #[cfg(test)]
 pub(super) fn downgrade_to_25_sql() -> String {
     format!(
         "{}{DOWNGRADE_TO_26_SQL}{}",
-        super::schema28::downgrade_sql(),
+        downgrade_to_27_sql(),
         super::schema26::DOWNGRADE_TO_25_SQL
     )
 }
@@ -206,9 +218,8 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
-        // Schema 28 (the pinned trust of a membership, `schema28.rs`) first.
-        conn.execute_batch(&crate::vault::schema28::downgrade_sql())
-            .unwrap();
+        // Schemas 29 and 28 (`schema29.rs`, `schema28.rs`) first.
+        conn.execute_batch(&downgrade_to_27_sql()).unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
         assert_eq!(version(&conn), 26);
         assert!(!has_table(&conn, "cloud_run"));
@@ -303,9 +314,8 @@ mod tests {
         drop(vault);
 
         let conn = raw(&path);
-        // Schema 28 (the pinned trust of a membership, `schema28.rs`) first.
-        conn.execute_batch(&crate::vault::schema28::downgrade_sql())
-            .unwrap();
+        // Schemas 29 and 28 (`schema29.rs`, `schema28.rs`) first.
+        conn.execute_batch(&downgrade_to_27_sql()).unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
         assert_eq!(version(&conn), 26);
         assert_eq!(meta_version(&conn), 26);
@@ -373,7 +383,7 @@ mod tests {
         assert!(!crate::vault::merge::is_mergeable_schema(
             crate::vault::SCHEMA_VERSION + 1
         ));
-        // Schema 28 (`schema28.rs`) follows 27.
+        // Schemas 28 and 29 (`schema28.rs`, `schema29.rs`) follow 27.
         const { assert!(STATS_SCHEMA_VERSION < crate::vault::SCHEMA_VERSION) };
     }
 

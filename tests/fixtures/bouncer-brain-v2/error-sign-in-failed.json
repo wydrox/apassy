@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "code": "sign_in_failed",
+    "message": "the sign-in failed"
+  }
+}

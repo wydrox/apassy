@@ -18,6 +18,7 @@ mod add;
 pub mod agent_items;
 mod agents;
 pub mod answers;
+mod bouncer_host;
 pub mod bouncer_scopes;
 mod candidate;
 mod cloud;
@@ -46,6 +47,7 @@ mod schema25;
 mod schema26;
 mod schema27;
 mod schema28;
+mod schema29;
 pub mod stats;
 pub use connect::PendingConnect;
 mod suggestions;
@@ -83,10 +85,17 @@ pub use agents::{
     MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS, NewActivity, Reversibility, RiskLevel, Scope,
     checked_env_name, format_utc, parse_placeholder_host,
 };
+pub use bouncer_host::{
+    BRAIN_IMAGE, BouncerHost, BouncerHostChange, BouncerHostKind, BouncerHostRole,
+    GENERATED_BEARER_BYTES, HOSTING_CONSENT_VERSION, MAX_BEARER_BYTES, MAX_HOST_URL_BYTES,
+    MIN_BEARER_BYTES, docker_run_line, generate_bearer, normalize_url, valid_bearer,
+    valid_host_url,
+};
 pub use candidate::{
-    ActivationAction, CandidateRecord, CandidateState, MAX_ACTIVATIONS, MAX_CANDIDATES,
-    MAX_MODEL_VERSION, MAX_SHADOW_ROWS, ModelActivation, NewCandidate, OwnerLabel, RealOutcome,
-    ShadowAnswer, ShadowEntry, ShadowSummary, model_label, valid_model_version,
+    ActivationAction, CandidateOrigin, CandidateRecord, CandidateState, MAX_ACTIVATIONS,
+    MAX_CANDIDATES, MAX_MODEL_VERSION, MAX_SHADOW_ROWS, ModelActivation, NewCandidate, OwnerLabel,
+    RealOutcome, ShadowAnswer, ShadowEntry, ShadowSummary, THIS_MAC_HOST, model_label,
+    valid_model_version,
 };
 pub use cloud::{
     CLOUD_PORT_MAX, CLOUD_PORT_MIN, CLOUD_TOKEN_DAYS, CloudAgent, CloudNodeSetting, CloudRun,
@@ -1145,6 +1154,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | schema25::PASSKEY_EXTENSIONS_SCHEMA_VERSION
         | schema26::CLOUD_SCHEMA_VERSION
         | schema27::STATS_SCHEMA_VERSION
+        | schema28::NODE_TRUST_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1332,6 +1342,11 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
+    let v29: &[&str] = if version >= schema29::BOUNCER_HOST_SCHEMA_VERSION {
+        &schema29::COLUMNS
+    } else {
+        &[]
+    };
     for sql in v1
         .iter()
         .chain(v2)
@@ -1358,6 +1373,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v26)
         .chain(v27)
         .chain(v28)
+        .chain(v29)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1477,6 +1493,9 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < schema28::NODE_TRUST_SCHEMA_VERSION {
         schema28::add_schema_v28(&tx)?;
     }
+    if from < schema29::BOUNCER_HOST_SCHEMA_VERSION {
+        schema29::add_schema_v29(&tx)?;
+    }
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1540,6 +1559,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     schema26::add_schema_v26(&tx)?;
     schema27::add_schema_v27(&tx)?;
     schema28::add_schema_v28(&tx)?;
+    schema29::add_schema_v29(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

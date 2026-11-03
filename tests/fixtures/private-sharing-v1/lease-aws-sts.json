@@ -1,0 +1,13 @@
+{
+  "kind": "aws_sts",
+  "secrets": [
+    {"name": "AWS_ACCESS_KEY_ID", "value": "ASIAEXAMPLESYNTH0001"},
+    {"name": "AWS_SECRET_ACCESS_KEY", "value": "SyntheticLeaseSecretKey/0000000000000001"},
+    {"name": "AWS_SESSION_TOKEN", "value": "IQoJb3JpZ2luX2VjEXAMPLE-synthetic-session-token-0001"}
+  ],
+  "plain": [{"name": "AWS_CREDENTIAL_EXPIRATION", "text": "2026-11-03T10:15:00Z"}],
+  "made_at": 1793700000,
+  "expires_at": 1793700900,
+  "revoke": null,
+  "update_field": null
+}

@@ -1,0 +1,31 @@
+{
+  "aws_sts": {
+    "env_name": "AWS_ACCESS_KEY_ID",
+    "fields": [
+      {"name": "access_key_id", "value": "AKIAIOSFODNN7EXAMPLE", "secret": false},
+      {"name": "secret_access_key", "value": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", "secret": true}
+    ]
+  },
+  "github_app": {
+    "env_name": "GITHUB_TOKEN",
+    "fields": [
+      {"name": "app_id", "value": "123456", "secret": false},
+      {"name": "installation_id", "value": "7654321", "secret": false},
+      {"name": "private_key", "value": "-----BEGIN RSA PRIVATE KEY-----\nU1lOVEhFVElDLU5PVC1BLUtFWQ==\n-----END RSA PRIVATE KEY-----\n", "secret": true}
+    ]
+  },
+  "google_service_account": {
+    "env_name": "CLOUDSDK_AUTH_ACCESS_TOKEN",
+    "fields": [
+      {"name": "key_json", "value": "{\"type\":\"service_account\",\"project_id\":\"synthetic-project\",\"private_key_id\":\"synthetic0private0key0id00000000000001\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\nU1lOVEhFVElDLUdPT0dMRS1LRVk=\\n-----END PRIVATE KEY-----\\n\",\"client_email\":\"apassy-test@synthetic-project.iam.gserviceaccount.com\",\"token_uri\":\"https://oauth2.googleapis.com/token\"}", "secret": true}
+    ]
+  },
+  "oauth_refresh": {
+    "env_name": "EXAMPLE_ACCESS_TOKEN",
+    "fields": [
+      {"name": "client_id", "value": "synthetic-client-id", "secret": false},
+      {"name": "client_secret", "value": "synthetic-oauth-client-secret-0001", "secret": true},
+      {"name": "refresh_token", "value": "synthetic-refresh-token-long-lived-0001", "secret": true}
+    ]
+  }
+}

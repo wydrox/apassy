@@ -1,0 +1,1 @@
+{"ok": false, "error": {"code": "lease_failed", "message": "AWS STS answered 403. No temporary credentials were made, so the command did not run."}}

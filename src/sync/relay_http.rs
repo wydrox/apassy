@@ -57,7 +57,8 @@ use rustls::{ClientConnection, StreamOwned};
 use zeroize::Zeroizing;
 
 use super::SyncError;
-use crate::broker::http::{DestinationUrl, Pin, TlsClient, is_pin_mismatch, parse_destination};
+use crate::broker::http::{DestinationUrl, TlsClient, is_pin_mismatch, parse_destination};
+use crate::net::pin::{Pin, parse as parse_pin};
 
 /// The relay address that the app proposes.
 pub const DEFAULT_RELAY_URL: &str = "https://apassy-relay.wyderka.cc";
@@ -97,7 +98,7 @@ impl TlsTrust {
     pub fn from_pin_text(pin: Option<&str>) -> Result<Self, SyncError> {
         match pin {
             None => Ok(Self::System),
-            Some(text) => Pin::parse(text)
+            Some(text) => parse_pin(text)
                 .map(Self::Pinned)
                 .ok_or(SyncError::InvalidRelayAddress),
         }
@@ -2038,7 +2039,7 @@ mod tests {
     const CONTRACT_PIN: &str = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE";
 
     fn contract_pin() -> TlsTrust {
-        TlsTrust::Pinned(Pin::parse(CONTRACT_PIN).unwrap())
+        TlsTrust::Pinned(parse_pin(CONTRACT_PIN).unwrap())
     }
 
     /// A node certificate and a server that presents it.

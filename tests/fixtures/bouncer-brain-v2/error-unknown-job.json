@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "code": "unknown_job",
+    "message": "this owner has no such job"
+  }
+}

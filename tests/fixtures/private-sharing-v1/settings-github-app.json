@@ -1,0 +1,5 @@
+{
+  "repositories": ["apassy-test"],
+  "permissions": {"contents": "read", "metadata": "read"},
+  "api_url": "https://api.github.com"
+}

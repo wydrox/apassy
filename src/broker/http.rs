@@ -3,9 +3,12 @@
 //!
 //! `https://` uses rustls with the macOS trust store. Plain `http://` is
 //! permitted only on loopback addresses. The client sends no agent-controlled
-//! header, follows no redirect, and reads at most 64 KiB of a JSON answer. The
-//! head-file transfers of the bouncer brain ([`put_file`], [`get_to_file`]) stream
-//! the file, with their own caps and a progress deadline.
+//! header, follows no redirect, and reads at most 64 KiB of a JSON answer.
+//! [`send`] is the general request of the way C lease providers (implementation
+//! plan s6, unit B): form or JSON bodies, the caller's own headers, `PUT` and
+//! `DELETE`, and the response headers. The head-file transfers of the bouncer
+//! brain ([`put_file`], [`get_to_file`]) stream the file, with their own caps and
+//! a progress deadline.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
@@ -35,7 +38,9 @@ pub enum DestinationUrl {
 }
 
 impl DestinationUrl {
-    fn host_header(&self) -> String {
+    /// The `Host` header value that the client sends: the host, with the port
+    /// unless it is 443 for `https://`. A SigV4 signer signs this value.
+    pub fn host_header(&self) -> String {
         match self {
             Self::Loopback { host_header, .. } => host_header.clone(),
             Self::Https { host, port } => {
@@ -202,74 +207,10 @@ impl TlsClient {
     }
 }
 
-/// The pin of a node certificate: the SHA-256 of the leaf DER (contract node-pairing-v1
-/// section 4). Its text is the canonical b64u of the 32 bytes, 43 characters without
-/// padding, the format of the Wi-Fi companion and of `PinnedTLS.pinText` on the iPhone.
-/// A pin is not a secret.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Pin([u8; 32]);
-
-/// The length of the text of a pin.
-pub const PIN_TEXT_LEN: usize = 43;
-
-impl Pin {
-    /// The pin of the certificate `der`.
-    pub fn of_certificate(der: &[u8]) -> Self {
-        let digest = ring::digest::digest(&ring::digest::SHA256, der);
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(digest.as_ref());
-        Self(bytes)
-    }
-
-    /// Parse the text of a pin: exactly 43 characters of the b64u alphabet, the canonical
-    /// text of 32 bytes (no padding bits set). Anything else is `None`.
-    pub fn parse(text: &str) -> Option<Self> {
-        if text.len() != PIN_TEXT_LEN {
-            return None;
-        }
-        let bytes = crate::sync::decode_b64u(text)?;
-        let bytes: [u8; 32] = bytes.as_slice().try_into().ok()?;
-        // `decode_b64u` takes only canonical text; the round trip says so again.
-        (crate::sync::encode_b64u(&bytes) == text).then_some(Self(bytes))
-    }
-
-    /// The text of the pin.
-    pub fn text(&self) -> String {
-        crate::sync::encode_b64u(&self.0)
-    }
-
-    /// The 32 bytes of the SHA-256.
-    pub fn bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    /// Whether `der` is the pinned certificate. The comparison of the digests takes the
-    /// same time whatever bytes differ.
-    pub fn matches(&self, der: &[u8]) -> bool {
-        constant_time_eq(&Self::of_certificate(der).0, &self.0)
-    }
-}
-
-impl std::fmt::Debug for Pin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Pin").field(&self.text()).finish()
-    }
-}
-
-impl std::fmt::Display for Pin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.text())
-    }
-}
-
-/// Compare two digests without an early exit.
-fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    let mut difference = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        difference |= x ^ y;
-    }
-    std::hint::black_box(difference) == 0
-}
+/// The pin of a node certificate (contract node-pairing-v1 section 4): the one type of
+/// `src/net/pin.rs`, which the TLS front and the companion use too. Its comparison is
+/// constant-time ([`Pin::matches`]).
+pub use crate::net::pin::{PIN_TEXT_CHARS, Pin, parse as parse_pin};
 
 /// The certificate check of [`TlsClient::pinned`].
 struct PinnedVerifier {
@@ -342,10 +283,36 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
     }
 }
 
-#[derive(Debug)]
+/// One response. The body and the header values can hold a provider's secret
+/// (a lease, a token), so `Debug` shows the status, the header names, and the
+/// body length only.
 pub struct HttpResponse {
     pub status: u16,
+    /// The response header fields in their order: the name in lowercase, the
+    /// value without surrounding white space. A repeated field is repeated here.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    /// The value of the first header field `name` (any case), if there is one.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(field, _)| field.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("headers", &names)
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 /// Why a request failed. None of these values contains the token.
@@ -527,18 +494,13 @@ fn get_health_with(
     resolve: Resolve,
 ) -> Result<HttpResponse, HttpFailure> {
     let deadline = Instant::now() + timeout;
-    if !is_request_path(path) {
-        return Err(HttpFailure::Protocol);
-    }
-    let host = destination.host_header();
-    let request = request_bytes(&[
-        b"GET ",
-        path.as_bytes(),
-        b" HTTP/1.1\r\nHost: ",
-        host.as_bytes(),
-        b"\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
-    ]);
-    send_before(destination, &request, deadline, tls, resolve)
+    send_with(
+        destination,
+        &HttpRequest::new(Method::Get, path),
+        deadline,
+        tls,
+        resolve,
+    )
 }
 
 fn is_request_path(path: &str) -> bool {
@@ -549,11 +511,13 @@ fn is_bearer(bearer: &str) -> bool {
     !bearer.is_empty() && bearer.bytes().all(|b| (0x21..0x7f).contains(&b))
 }
 
-/// The methods of [`request_json`].
+/// The methods of [`request_json`] and [`send`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
     Post,
+    /// `PUT` with a short body. A head file goes up with [`put_file`].
+    Put,
     Delete,
 }
 
@@ -562,18 +526,26 @@ impl Method {
         match self {
             Self::Get => b"GET",
             Self::Post => b"POST",
+            Self::Put => b"PUT",
             Self::Delete => b"DELETE",
         }
+    }
+
+    /// `POST` and `PUT` carry a body (`Content-Length: 0` without one). `GET`
+    /// and `DELETE` never do: a body with them is a protocol failure.
+    fn takes_body(self) -> bool {
+        matches!(self, Self::Post | Self::Put)
     }
 }
 
 /// Send one request with a bearer token and an optional JSON body, and read the
 /// JSON response before `deadline`: name lookup, connect, TLS handshake, request,
 /// and response (ADR 0035). The bouncer brain uses it for `GET` and `DELETE` of
-/// `/v1/heads/<sha256>` and `DELETE /v1/owner`. Only `POST` has a body; a body
-/// with `GET` or `DELETE` is a protocol failure. The TLS rules and the 64 KiB
-/// cap are the ones of [`post_json`]. Unlike [`get`], the name lookup has the
-/// deadline too.
+/// `/v1/heads/<sha256>` and `DELETE /v1/owner`. Only `POST` and `PUT` have a
+/// body; a body with `GET` or `DELETE` is a protocol failure. The TLS rules and
+/// the 64 KiB caps are the ones of [`send`], which this wraps with the bearer
+/// and a JSON body; the bytes are the ones of [`send`]. Unlike [`get`], the name
+/// lookup has the deadline too.
 #[allow(clippy::too_many_arguments)]
 pub fn request_json(
     method: Method,
@@ -607,41 +579,322 @@ fn request_json_with(
     tls: Option<&TlsClient>,
     resolve: Resolve,
 ) -> Result<HttpResponse, HttpFailure> {
-    if !is_request_path(path) || !is_bearer(bearer) {
+    // A missing bearer is a protocol failure here; `send` permits none.
+    if !is_bearer(bearer) {
         return Err(HttpFailure::Protocol);
     }
-    if method != Method::Post && body.is_some() {
+    let request = HttpRequest {
+        bearer: Some(bearer),
+        body: body.map(Body::Json),
+        ..HttpRequest::new(method, path)
+    };
+    send_with(destination, &request, deadline, tls, resolve)
+}
+
+/// Largest request body of [`send`]. A larger one is [`HttpFailure::TooLarge`]
+/// before any connection. Chosen by implementation plan s6 (unit B): the largest
+/// provider body of way C is a few KiB (an STS session policy is at most 2 KiB).
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+/// Most extra header fields of one [`send`] request.
+pub const MAX_REQUEST_HEADERS: usize = 32;
+/// Longest extra header name of [`send`].
+const MAX_HEADER_NAME_BYTES: usize = 64;
+/// Longest extra header value of [`send`]. An `X-Amz-Security-Token` or a
+/// SigV4 `Authorization` value is far shorter.
+pub const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
+/// Longest path and query of [`send`].
+const MAX_PATH_BYTES: usize = 8 * 1024;
+
+/// The header fields that the client writes itself. An extra header with one
+/// of these names is a protocol failure: they decide the framing or the
+/// connection, or they name the destination.
+const CLIENT_HEADERS: [&str; 11] = [
+    "host",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "te",
+    "trailer",
+    "upgrade",
+    "expect",
+    "user-agent",
+];
+
+/// The body of a [`send`] request, with the `Content-Type` that it sets.
+#[derive(Clone, Copy)]
+pub enum Body<'a> {
+    /// `Content-Type: application/json`.
+    Json(&'a [u8]),
+    /// `Content-Type: application/x-www-form-urlencoded`. Build the bytes with
+    /// [`form_body`], so a signer (SigV4) can hash the exact bytes that are sent.
+    Form(&'a [u8]),
+}
+
+impl<'a> Body<'a> {
+    fn content_type(self) -> &'static [u8] {
+        match self {
+            Self::Json(_) => b"application/json",
+            Self::Form(_) => b"application/x-www-form-urlencoded",
+        }
+    }
+
+    fn bytes(self) -> &'a [u8] {
+        match self {
+            Self::Json(bytes) | Self::Form(bytes) => bytes,
+        }
+    }
+}
+
+/// One request of [`send`]. The caller owns every value; the client copies them
+/// once into the request buffer, which it erases after the exchange.
+///
+/// `Debug` shows the method, the path without its query, the header names, and
+/// the body length: never the bearer, a header value, or a body byte.
+#[derive(Clone, Copy)]
+pub struct HttpRequest<'a> {
+    pub method: Method,
+    /// The path and the query, already percent-encoded: printable ASCII that
+    /// starts with `/`, at most 8 KiB.
+    pub path: &'a str,
+    /// `Authorization: Bearer <token>`. With a bearer, an extra `Authorization`
+    /// header is a protocol failure.
+    pub bearer: Option<&'a str>,
+    /// Extra header fields, sent in this order after `Host` and the bearer. A
+    /// name is an HTTP token (at most 64 bytes); a value is printable ASCII
+    /// without surrounding spaces (at most 8 KiB); a name appears at most once
+    /// (any case); at most 32 fields. An `Accept` field replaces the default
+    /// `Accept: application/json`. The names that the client writes itself are
+    /// refused: `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`,
+    /// `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Upgrade`, `Expect`, and
+    /// `User-Agent`.
+    pub headers: &'a [(&'a str, &'a str)],
+    /// The body. Only `POST` and `PUT` take one; at most 64 KiB.
+    pub body: Option<Body<'a>>,
+}
+
+impl<'a> HttpRequest<'a> {
+    /// A request with no bearer, no extra header, and no body.
+    pub const fn new(method: Method, path: &'a str) -> Self {
+        Self {
+            method,
+            path,
+            bearer: None,
+            headers: &[],
+            body: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for HttpRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path = self
+            .path
+            .split_once('?')
+            .map_or(self.path, |(path, _)| path);
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| *name).collect();
+        let body = self.body.map(|body| match body {
+            Body::Json(bytes) => ("json", bytes.len()),
+            Body::Form(bytes) => ("form", bytes.len()),
+        });
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("path", &path)
+            .field("bearer", &self.bearer.is_some())
+            .field("headers", &names)
+            .field("body", &body)
+            .finish()
+    }
+}
+
+/// Encode `pairs` as an `application/x-www-form-urlencoded` body: `name=value`
+/// joined by `&`, each byte outside the RFC 3986 unreserved set
+/// (`A-Z a-z 0-9 - . _ ~`) as `%XX` with uppercase hex, a space as `%20`. This
+/// is also the `UriEncode` of AWS SigV4. The buffer has the exact size and is
+/// erased when dropped, because a value can be a secret (a refresh token).
+pub fn form_body(pairs: &[(&str, &str)]) -> Zeroizing<Vec<u8>> {
+    fn encoded_len(text: &str) -> usize {
+        text.bytes()
+            .map(|byte| if is_unreserved(byte) { 1 } else { 3 })
+            .sum()
+    }
+    fn push_encoded(out: &mut Vec<u8>, text: &str) {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        for byte in text.bytes() {
+            if is_unreserved(byte) {
+                out.push(byte);
+            } else {
+                out.extend_from_slice(&[
+                    b'%',
+                    HEX[usize::from(byte >> 4)],
+                    HEX[usize::from(byte & 0x0f)],
+                ]);
+            }
+        }
+    }
+    let size = pairs
+        .iter()
+        .map(|(name, value)| encoded_len(name) + 1 + encoded_len(value))
+        .sum::<usize>()
+        + pairs.len().saturating_sub(1);
+    let mut out = Zeroizing::new(Vec::with_capacity(size));
+    for (index, (name, value)) in pairs.iter().enumerate() {
+        if index > 0 {
+            out.push(b'&');
+        }
+        push_encoded(&mut out, name);
+        out.push(b'=');
+        push_encoded(&mut out, value);
+    }
+    out
+}
+
+fn is_unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+/// An HTTP field name (RFC 9110 `token`), at most 64 bytes.
+fn is_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_HEADER_NAME_BYTES
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+/// A header value: printable ASCII and spaces, no control character (no CR, LF,
+/// NUL, or tab), no space at either end, at most 8 KiB. It may be empty.
+fn is_header_value(value: &str) -> bool {
+    value.len() <= MAX_HEADER_VALUE_BYTES
+        && value.bytes().all(|byte| (0x20..0x7f).contains(&byte))
+        && !value.starts_with(' ')
+        && !value.ends_with(' ')
+}
+
+/// Check the extra headers of `request`. Returns whether they hold an `Accept`.
+fn check_headers(request: &HttpRequest<'_>) -> Result<bool, HttpFailure> {
+    if request.headers.len() > MAX_REQUEST_HEADERS {
         return Err(HttpFailure::Protocol);
+    }
+    let mut accept = false;
+    for (index, (name, value)) in request.headers.iter().enumerate() {
+        if !is_header_name(name) || !is_header_value(value) {
+            return Err(HttpFailure::Protocol);
+        }
+        if CLIENT_HEADERS
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        {
+            return Err(HttpFailure::Protocol);
+        }
+        if name.eq_ignore_ascii_case("authorization") && request.bearer.is_some() {
+            return Err(HttpFailure::Protocol);
+        }
+        if request.headers[..index]
+            .iter()
+            .any(|(earlier, _)| earlier.eq_ignore_ascii_case(name))
+        {
+            return Err(HttpFailure::Protocol);
+        }
+        accept |= name.eq_ignore_ascii_case("accept");
+    }
+    Ok(accept)
+}
+
+/// Send one request and read its response before `deadline`: name lookup,
+/// connect, TLS handshake, request, and response, all within the one deadline
+/// (a caller that makes several calls for one result, such as a lease, passes
+/// the same deadline to each). The way C lease providers (implementation plan
+/// s6) use it for form and JSON bodies, their own headers (`X-Amz-Date`, a SigV4
+/// `Authorization`, `Accept: application/vnd.github+json`), `PUT`, and `DELETE`.
+///
+/// The rules are the ones of [`post_json`]: `https://` needs `tls` and sends no
+/// byte before the handshake and the certificate check succeed; plain `http://`
+/// only to the loopback; the response, headers included, at most 64 KiB
+/// ([`MAX_RESPONSE_BYTES`]), else [`HttpFailure::TooLarge`]. The client follows
+/// no redirect: a 3xx is returned as it is, with its `Location` in
+/// [`HttpResponse::headers`]. A request that breaks a rule of [`HttpRequest`] is
+/// [`HttpFailure::Protocol`], and a body over 64 KiB is
+/// [`HttpFailure::TooLarge`], both before any connection. No failure value holds
+/// a byte of the request or the response.
+///
+/// The request is `<METHOD> <path> HTTP/1.1`, `Host`, the bearer, the extra
+/// headers in their order, `Content-Type` and `Content-Length` (or
+/// `Content-Length: 0` for a `POST` or `PUT` without a body), `Accept:
+/// application/json` unless an extra `Accept` is given, `User-Agent:
+/// apassy-broker/0`, and `Connection: close`. A signer that signs `host` uses
+/// [`DestinationUrl::host_header`].
+pub fn send(
+    destination: &DestinationUrl,
+    request: &HttpRequest<'_>,
+    deadline: Instant,
+    tls: Option<&TlsClient>,
+) -> Result<HttpResponse, HttpFailure> {
+    send_with(destination, request, deadline, tls, system_resolve)
+}
+
+fn send_with(
+    destination: &DestinationUrl,
+    request: &HttpRequest<'_>,
+    deadline: Instant,
+    tls: Option<&TlsClient>,
+    resolve: Resolve,
+) -> Result<HttpResponse, HttpFailure> {
+    if !is_request_path(request.path) || request.path.len() > MAX_PATH_BYTES {
+        return Err(HttpFailure::Protocol);
+    }
+    if request.bearer.is_some_and(|bearer| !is_bearer(bearer)) {
+        return Err(HttpFailure::Protocol);
+    }
+    if request.body.is_some() && !request.method.takes_body() {
+        return Err(HttpFailure::Protocol);
+    }
+    let has_accept = check_headers(request)?;
+    if request
+        .body
+        .is_some_and(|body| body.bytes().len() > MAX_REQUEST_BODY_BYTES)
+    {
+        return Err(HttpFailure::TooLarge);
     }
     let host = destination.host_header();
-    let length = body.map(|body| body.len().to_string());
-    let (content_start, content_length, content_end, body): (&[u8], &[u8], &[u8], &[u8]) =
-        match (&length, body) {
-            (Some(length), Some(body)) => (
-                b"Content-Type: application/json\r\nContent-Length: ",
-                length.as_bytes(),
-                b"\r\n",
-                body,
-            ),
-            _ if method == Method::Post => (b"Content-Length: 0\r\n", b"", b"", b""),
-            _ => (b"", b"", b"", b""),
-        };
-    let request = request_bytes(&[
-        method.as_bytes(),
+    let length = request.body.map(|body| body.bytes().len().to_string());
+    let mut parts: Vec<&[u8]> = Vec::with_capacity(16 + 4 * request.headers.len());
+    parts.extend_from_slice(&[
+        request.method.as_bytes(),
         b" ",
-        path.as_bytes(),
+        request.path.as_bytes(),
         b" HTTP/1.1\r\nHost: ",
         host.as_bytes(),
-        b"\r\nAuthorization: Bearer ",
-        bearer.as_bytes(),
         b"\r\n",
-        content_start,
-        content_length,
-        content_end,
-        b"Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
-        body,
     ]);
-    send_before(destination, &request, deadline, tls, resolve)
+    if let Some(bearer) = request.bearer {
+        parts.extend_from_slice(&[b"Authorization: Bearer ", bearer.as_bytes(), b"\r\n"]);
+    }
+    for (name, value) in request.headers {
+        parts.extend_from_slice(&[name.as_bytes(), b": ", value.as_bytes(), b"\r\n"]);
+    }
+    match (request.body, &length) {
+        (Some(body), Some(length)) => parts.extend_from_slice(&[
+            b"Content-Type: ",
+            body.content_type(),
+            b"\r\nContent-Length: ",
+            length.as_bytes(),
+            b"\r\n",
+        ]),
+        _ if request.method.takes_body() => parts.push(b"Content-Length: 0\r\n"),
+        _ => {}
+    }
+    if !has_accept {
+        parts.push(b"Accept: application/json\r\n");
+    }
+    parts.push(b"User-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n");
+    if let Some(body) = request.body {
+        parts.push(body.bytes());
+    }
+    let bytes = request_bytes(&parts);
+    drop(parts);
+    send_before(destination, &bytes, deadline, tls, resolve)
 }
 
 /// Largest head file that [`put_file`] sends (contract bouncer-brain-v1 section 5).
@@ -1375,13 +1628,16 @@ fn classify(err: &io::Error) -> HttpFailure {
 fn exchange<S: Read + Write>(stream: &mut S, request: &[u8]) -> Result<HttpResponse, HttpFailure> {
     stream.write_all(request).map_err(|err| classify(&err))?;
     stream.flush().map_err(|err| classify(&err))?;
-    let mut raw = Vec::new();
-    let mut chunk = [0u8; 4096];
+    // The answer can hold a provider's secret (a lease, a token). The buffer has
+    // room for the whole capped answer, so it never grows and leaves no partial
+    // copy in freed memory; `Zeroizing` erases it and the read chunk on return.
+    let mut raw = Zeroizing::new(Vec::with_capacity(MAX_RESPONSE_BYTES + EXCHANGE_CHUNK));
+    let mut chunk = Zeroizing::new([0u8; EXCHANGE_CHUNK]);
     loop {
         if let Some(response) = complete_response(&raw)? {
             return Ok(response);
         }
-        match stream.read(&mut chunk) {
+        match stream.read(&mut chunk[..]) {
             Ok(0) => return finish_at_eof(&raw),
             Ok(read) => {
                 raw.extend_from_slice(&chunk[..read]);
@@ -1397,6 +1653,9 @@ fn exchange<S: Read + Write>(stream: &mut S, request: &[u8]) -> Result<HttpRespo
     }
 }
 
+/// One socket read of [`exchange`].
+const EXCHANGE_CHUNK: usize = 4096;
+
 enum BodyKind {
     Length(usize),
     Chunked,
@@ -1407,6 +1666,8 @@ struct Head {
     status: u16,
     body_start: usize,
     kind: BodyKind,
+    /// The header fields: the name in lowercase, the value trimmed.
+    headers: Vec<(String, String)>,
 }
 
 fn parse_head(raw: &[u8]) -> Result<Option<Head>, HttpFailure> {
@@ -1426,10 +1687,12 @@ fn parse_head(raw: &[u8]) -> Result<Option<Head>, HttpFailure> {
         .and_then(|code| code.parse().ok())
         .ok_or(HttpFailure::Protocol)?;
     let mut kind = BodyKind::UntilClose;
+    let mut headers = Vec::new();
     for line in lines {
         let (name, value) = line.split_once(':').ok_or(HttpFailure::Protocol)?;
         let name = name.trim().to_ascii_lowercase();
         let value = value.trim();
+        headers.push((name.clone(), value.to_owned()));
         if name == "transfer-encoding" {
             if value.eq_ignore_ascii_case("chunked") {
                 kind = BodyKind::Chunked;
@@ -1444,6 +1707,7 @@ fn parse_head(raw: &[u8]) -> Result<Option<Head>, HttpFailure> {
         status,
         body_start: split + 4,
         kind,
+        headers,
     }))
 }
 
@@ -1456,10 +1720,12 @@ fn complete_response(raw: &[u8]) -> Result<Option<HttpResponse>, HttpFailure> {
     match head.kind {
         BodyKind::Length(length) if body.len() >= length => Ok(Some(HttpResponse {
             status: head.status,
+            headers: head.headers,
             body: body[..length].to_vec(),
         })),
         BodyKind::Chunked => Ok(decode_chunked(body)?.map(|body| HttpResponse {
             status: head.status,
+            headers: head.headers,
             body,
         })),
         BodyKind::Length(_) | BodyKind::UntilClose => Ok(None),
@@ -1471,6 +1737,7 @@ fn finish_at_eof(raw: &[u8]) -> Result<HttpResponse, HttpFailure> {
     match head.kind {
         BodyKind::UntilClose => Ok(HttpResponse {
             status: head.status,
+            headers: head.headers,
             body: raw[head.body_start..].to_vec(),
         }),
         // A length or chunked body that ends early is not complete.
@@ -3113,6 +3380,622 @@ mod tests {
         server.join().expect("server");
     }
 
+    // Unit B of implementation plan s6: `send` for the way C lease providers.
+
+    /// A synthetic long-lived value. No test sends it anywhere but the loopback.
+    const SYNTHETIC_SECRET: &str = "synthetic-long-lived-secret-0123456789";
+
+    /// A loopback destination whose port is closed. A request that passes the
+    /// checks fails with `Connect`; one that fails them never connects.
+    fn closed_loopback() -> DestinationUrl {
+        let (listener, destination) = loopback_listener();
+        drop(listener);
+        destination
+    }
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn a_form_body_is_encoded_exactly() {
+        let body = form_body(&[
+            ("Action", "AssumeRole"),
+            ("RoleSessionName", "apassy-run 1"),
+            ("Policy", r#"{"a":"b/c+d=e&f"}"#),
+            ("Empty", ""),
+            ("Unicode", "zł~._-"),
+        ]);
+        assert_eq!(
+            std::str::from_utf8(&body).expect("ascii"),
+            "Action=AssumeRole&RoleSessionName=apassy-run%201\
+             &Policy=%7B%22a%22%3A%22b%2Fc%2Bd%3De%26f%22%7D&Empty=&Unicode=z%C5%82~._-"
+        );
+        // The exact size: the buffer never grew, so no partial copy is left.
+        assert_eq!(body.capacity(), body.len());
+        assert!(form_body(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_form_post_sends_the_exact_bytes() {
+        let (listener, destination) = loopback_listener();
+        let host = destination.host_header();
+        let server = capture_one_request(listener);
+        let body = form_body(&[("Action", "GetFederationToken"), ("DurationSeconds", "900")]);
+        let authorization = "AWS4-HMAC-SHA256 \
+            Credential=AKIDEXAMPLE/20261103/us-east-1/sts/aws4_request, \
+            SignedHeaders=content-type;host;x-amz-date, Signature=0000";
+        let headers = [
+            ("X-Amz-Date", "20261103T120000Z"),
+            ("Authorization", authorization),
+        ];
+        let request = HttpRequest {
+            headers: &headers,
+            body: Some(Body::Form(&body)),
+            ..HttpRequest::new(Method::Post, "/")
+        };
+        let response = send(&destination, &request, soon(), None).expect("form post");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"{}");
+        assert_eq!(body.len(), 45);
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "POST / HTTP/1.1\r\nHost: {host}\r\nX-Amz-Date: 20261103T120000Z\r\n\
+                 Authorization: {authorization}\r\n\
+                 Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 45\r\n\
+                 Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n\
+                 Action=GetFederationToken&DurationSeconds=900"
+            )
+        );
+    }
+
+    #[test]
+    fn a_delete_with_a_bearer_sends_no_body() {
+        let (listener, destination) = loopback_listener();
+        let host = destination.host_header();
+        let server = capture_one_request(listener);
+        let headers = [
+            ("Accept", "application/vnd.github+json"),
+            ("X-GitHub-Api-Version", "2022-11-28"),
+        ];
+        let request = HttpRequest {
+            bearer: Some("ghs_synthetic0123456789"),
+            headers: &headers,
+            ..HttpRequest::new(Method::Delete, "/installation/token")
+        };
+        let response = send(&destination, &request, soon(), None).expect("delete");
+        assert_eq!(response.status, 200);
+        // An extra `Accept` replaces the default one; there is no body and no
+        // `Content-Length` with `DELETE`.
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "DELETE /installation/token HTTP/1.1\r\nHost: {host}\r\n\
+                 Authorization: Bearer ghs_synthetic0123456789\r\n\
+                 Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n\
+                 User-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+            )
+        );
+        // A body with DELETE or GET is refused before any connection.
+        let closed = closed_loopback();
+        for method in [Method::Delete, Method::Get] {
+            for body in [Body::Json(b"{}"), Body::Form(b"a=1"), Body::Json(b"")] {
+                let request = HttpRequest {
+                    body: Some(body),
+                    ..HttpRequest::new(method, "/x")
+                };
+                assert_eq!(
+                    send(&closed, &request, soon(), None).unwrap_err(),
+                    HttpFailure::Protocol,
+                    "{method:?}"
+                );
+            }
+        }
+        // Without a body the same request reaches the (closed) port.
+        assert_eq!(
+            send(
+                &closed,
+                &HttpRequest::new(Method::Delete, "/x"),
+                soon(),
+                None
+            )
+            .unwrap_err(),
+            HttpFailure::Connect
+        );
+    }
+
+    #[test]
+    fn a_header_with_a_control_character_is_protocol() {
+        let closed = closed_loopback();
+        let long_value = "v".repeat(MAX_HEADER_VALUE_BYTES + 1);
+        let long_name = "N".repeat(MAX_HEADER_NAME_BYTES + 1);
+        let refused: Vec<(&str, &str)> = vec![
+            ("X-Amz-Date", "2026\r\nInjected: yes"),
+            ("X-Amz-Date", "2026\n"),
+            ("X-Amz-Date", "2026\r"),
+            ("X-Amz-Date", "20\0"),
+            ("X-Amz-Date", "a\tb"),
+            ("X-Amz-Date", "a\u{7f}b"),
+            ("X-Amz-Date", " leading"),
+            ("X-Amz-Date", "trailing "),
+            ("X-Amz-Date", "zł"),
+            ("X-Amz-Date", long_value.as_str()),
+            ("", "value"),
+            ("X Amz", "value"),
+            ("X-Amz:Date", "value"),
+            ("X-Amz\r\nDate", "value"),
+            ("X-Amz\0", "value"),
+            (long_name.as_str(), "value"),
+            ("Host", "other.example"),
+            ("content-length", "0"),
+            ("Content-Type", "text/plain"),
+            ("Transfer-Encoding", "chunked"),
+            ("Connection", "keep-alive"),
+            ("Keep-Alive", "timeout=5"),
+            ("TE", "trailers"),
+            ("Trailer", "X-Amz-Date"),
+            ("Upgrade", "h2c"),
+            ("Expect", "100-continue"),
+            ("User-Agent", "other"),
+        ];
+        for header in &refused {
+            let headers = [*header];
+            for method in [Method::Get, Method::Post] {
+                let request = HttpRequest {
+                    headers: &headers,
+                    ..HttpRequest::new(method, "/")
+                };
+                assert_eq!(
+                    send(&closed, &request, soon(), None).unwrap_err(),
+                    HttpFailure::Protocol,
+                    "{:?} {method:?}",
+                    header.0
+                );
+            }
+        }
+        // A name twice (any case), an `Authorization` beside a bearer, and too
+        // many fields.
+        let twice = [("X-Amz-Date", "1"), ("x-amz-date", "2")];
+        let auth = [("Authorization", "Basic c3ludGhldGlj")];
+        let names: Vec<String> = (0..=MAX_REQUEST_HEADERS)
+            .map(|index| format!("X-Field-{index}"))
+            .collect();
+        let many: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "1")).collect();
+        for request in [
+            HttpRequest {
+                headers: &twice,
+                ..HttpRequest::new(Method::Get, "/")
+            },
+            HttpRequest {
+                bearer: Some("synthetic-bearer"),
+                headers: &auth,
+                ..HttpRequest::new(Method::Get, "/")
+            },
+            HttpRequest {
+                headers: &many,
+                ..HttpRequest::new(Method::Get, "/")
+            },
+            HttpRequest {
+                bearer: Some("bad bearer"),
+                ..HttpRequest::new(Method::Get, "/")
+            },
+            HttpRequest {
+                bearer: Some(""),
+                ..HttpRequest::new(Method::Get, "/")
+            },
+        ] {
+            assert_eq!(
+                send(&closed, &request, soon(), None).unwrap_err(),
+                HttpFailure::Protocol,
+                "{request:?}"
+            );
+        }
+        // A path with a control character, a space, or no leading slash, or a
+        // path over 8 KiB.
+        let long_path = format!("/{}", "p".repeat(MAX_PATH_BYTES));
+        for path in [
+            "/a b",
+            "/a\r\nX-Injected: yes",
+            "/a\0",
+            "relative",
+            "",
+            long_path.as_str(),
+        ] {
+            assert_eq!(
+                send(&closed, &HttpRequest::new(Method::Get, path), soon(), None).unwrap_err(),
+                HttpFailure::Protocol,
+                "{:?}",
+                path.len()
+            );
+        }
+        // Permitted: an `Authorization` without a bearer, an empty value, inner
+        // spaces, the most fields, and a query. They reach the (closed) port.
+        let fine = [
+            ("Authorization", "Basic c3ludGhldGlj"),
+            ("X-Empty", ""),
+            ("X-Inner", "a b, c"),
+        ];
+        let at_most = &many[..MAX_REQUEST_HEADERS];
+        for request in [
+            HttpRequest {
+                headers: &fine,
+                ..HttpRequest::new(Method::Get, "/v1/tokens?page=2&per_page=50")
+            },
+            HttpRequest {
+                headers: at_most,
+                ..HttpRequest::new(Method::Get, "/")
+            },
+        ] {
+            assert_eq!(
+                send(&closed, &request, soon(), None).unwrap_err(),
+                HttpFailure::Connect,
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_body_over_the_cap_is_too_large_before_any_connection() {
+        let closed = closed_loopback();
+        let over = vec![b'a'; MAX_REQUEST_BODY_BYTES + 1];
+        let at_cap = vec![b'a'; MAX_REQUEST_BODY_BYTES];
+        for method in [Method::Post, Method::Put] {
+            for (body, failure) in [
+                (Body::Form(&over), HttpFailure::TooLarge),
+                (Body::Json(&over), HttpFailure::TooLarge),
+                (Body::Form(&at_cap), HttpFailure::Connect),
+            ] {
+                let request = HttpRequest {
+                    body: Some(body),
+                    ..HttpRequest::new(method, "/")
+                };
+                assert_eq!(
+                    send(&closed, &request, soon(), None).unwrap_err(),
+                    failure,
+                    "{method:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_put_sends_json_and_the_response_headers_are_read() {
+        let (listener, destination) = loopback_listener();
+        let host = destination.host_header();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let seen = read_request(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\
+                      X-RateLimit-Remaining:  4 \r\nSet-Cookie: a=1\r\nset-cookie: b=2\r\n\r\n{}",
+                )
+                .expect("write");
+            seen
+        });
+        let request = HttpRequest {
+            bearer: Some("synthetic-bearer"),
+            body: Some(Body::Json(br#"{"ttl":900}"#)),
+            ..HttpRequest::new(Method::Put, "/v1/passwords?x=1")
+        };
+        let response = send(&destination, &request, soon(), None).expect("put");
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body, b"{}");
+        assert_eq!(response.header("x-ratelimit-remaining"), Some("4"));
+        assert_eq!(response.header("X-RATELIMIT-REMAINING"), Some("4"));
+        assert_eq!(response.header("set-cookie"), Some("a=1"));
+        assert_eq!(response.header("location"), None);
+        let pairs: Vec<(&str, &str)> = response
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("content-length", "2"),
+                ("x-ratelimit-remaining", "4"),
+                ("set-cookie", "a=1"),
+                ("set-cookie", "b=2"),
+            ]
+        );
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "PUT /v1/passwords?x=1 HTTP/1.1\r\nHost: {host}\r\n\
+                 Authorization: Bearer synthetic-bearer\r\n\
+                 Content-Type: application/json\r\nContent-Length: 11\r\n\
+                 Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n\
+                 {{\"ttl\":900}}"
+            )
+        );
+
+        // `POST` and `PUT` without a body send `Content-Length: 0` and no type.
+        for (method, name) in [(Method::Put, "PUT"), (Method::Post, "POST")] {
+            let (listener, destination) = loopback_listener();
+            let host = destination.host_header();
+            let server = capture_one_request(listener);
+            send(
+                &destination,
+                &HttpRequest::new(method, "/v1/x"),
+                soon(),
+                None,
+            )
+            .expect("send");
+            assert_eq!(
+                String::from_utf8(server.join().expect("server")).expect("text"),
+                format!(
+                    "{name} /v1/x HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\n\
+                     Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn request_json_bytes_are_unchanged_by_the_send_wrapper() {
+        for (method, body, expected_content) in [
+            (
+                Method::Post,
+                Some(&br#"{"a":1}"#[..]),
+                "Content-Type: application/json\r\nContent-Length: 7\r\n",
+            ),
+            (Method::Post, None, "Content-Length: 0\r\n"),
+            (Method::Get, None, ""),
+        ] {
+            let (listener, destination) = loopback_listener();
+            let host = destination.host_header();
+            let server = capture_one_request(listener);
+            request_json(
+                method,
+                &destination,
+                "/v1/heads",
+                BRAIN_KEY,
+                body,
+                soon(),
+                None,
+            )
+            .expect("request");
+            let tail = body.map_or(String::new(), |body| {
+                String::from_utf8(body.to_vec()).expect("text")
+            });
+            let verb = std::str::from_utf8(method.as_bytes()).expect("method");
+            assert_eq!(
+                String::from_utf8(server.join().expect("server")).expect("text"),
+                format!(
+                    "{verb} /v1/heads HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {BRAIN_KEY}\r\n\
+                     {expected_content}Accept: application/json\r\nUser-Agent: apassy-broker/0\r\n\
+                     Connection: close\r\n\r\n{tail}"
+                )
+            );
+        }
+        // `request_json` still needs a bearer; `send` permits none.
+        assert_eq!(
+            request_json(Method::Get, &closed_loopback(), "/", "", None, soon(), None).unwrap_err(),
+            HttpFailure::Protocol
+        );
+    }
+
+    #[test]
+    fn a_redirect_is_returned_and_not_followed() {
+        let (listener, destination) = loopback_listener();
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_head(&mut stream);
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{addr}/again\r\nContent-Length: 0\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("write");
+            drop(stream);
+            // No second connection arrives.
+            std::thread::sleep(Duration::from_millis(300));
+            listener.set_nonblocking(true).expect("nonblocking");
+            listener.accept().is_err()
+        });
+        let request = HttpRequest {
+            bearer: Some("synthetic-bearer"),
+            ..HttpRequest::new(Method::Get, "/first")
+        };
+        let response = send(&destination, &request, soon(), None).expect("redirect answer");
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            response.header("location"),
+            Some(format!("http://{addr}/again").as_str())
+        );
+        assert!(
+            server.join().expect("server"),
+            "the client followed the redirect"
+        );
+    }
+
+    #[test]
+    fn send_has_one_deadline_for_the_whole_exchange() {
+        let (listener, destination) = loopback_listener();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_request(&mut stream);
+            // Every fragment arrives before the deadline, the whole answer does not.
+            for chunk in [
+                b"HTTP/1.1 200 OK\r\n".as_slice(),
+                b"Content-Length: 2\r\n",
+                b"\r\n",
+                b"{",
+                b"}",
+            ] {
+                std::thread::sleep(Duration::from_millis(80));
+                if stream.write_all(chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        let body = form_body(&[("grant_type", "refresh_token")]);
+        let request = HttpRequest {
+            body: Some(Body::Form(&body)),
+            ..HttpRequest::new(Method::Post, "/token")
+        };
+        let began = Instant::now();
+        assert_eq!(
+            send(
+                &destination,
+                &request,
+                began + Duration::from_millis(200),
+                None
+            )
+            .unwrap_err(),
+            HttpFailure::Timeout
+        );
+        assert!(
+            began.elapsed() < Duration::from_millis(350),
+            "{:?}",
+            began.elapsed()
+        );
+        server.join().expect("server");
+
+        // The name lookup has the deadline too.
+        let pki = test_tls();
+        let remote = DestinationUrl::Https {
+            host: "sts.example.invalid".to_owned(),
+            port: 443,
+        };
+        let timeout = Duration::from_millis(300);
+        let began = Instant::now();
+        assert_eq!(
+            send_with(
+                &remote,
+                &request,
+                began + timeout,
+                Some(&pki.client),
+                resolve_slowly
+            )
+            .unwrap_err(),
+            HttpFailure::Timeout
+        );
+        assert!(began.elapsed() < timeout + Duration::from_secs(1));
+
+        // A deadline that has passed sends nothing; `https://` without TLS
+        // settings is a protocol failure.
+        let (listener, destination) = loopback_listener();
+        listener.set_nonblocking(true).expect("nonblocking");
+        assert_eq!(
+            send(&destination, &request, Instant::now(), None).unwrap_err(),
+            HttpFailure::Timeout
+        );
+        assert!(
+            listener.accept().is_err(),
+            "no connection after the deadline"
+        );
+        assert_eq!(
+            send(&remote, &request, soon(), None).unwrap_err(),
+            HttpFailure::Protocol
+        );
+    }
+
+    #[test]
+    fn a_form_post_over_tls_returns_the_status_headers_and_body() {
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let port = listener.local_addr().expect("addr").port();
+        let (_release, held) = mpsc::channel();
+        let server = answer_one_tls_request(
+            listener,
+            Arc::clone(&pki.config),
+            Some(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/xml\r\nContent-Length: 7\r\n\r\n<Error>"
+                    .to_vec(),
+            ),
+            held,
+        );
+        let body = form_body(&[("Action", "AssumeRole"), ("Version", "2011-06-15")]);
+        let headers = [("X-Amz-Date", "20261103T120000Z")];
+        let request = HttpRequest {
+            headers: &headers,
+            body: Some(Body::Form(&body)),
+            ..HttpRequest::new(Method::Post, "/")
+        };
+        let response = send_with(
+            &destination,
+            &request,
+            soon(),
+            Some(&pki.client),
+            resolve_to_this_computer,
+        )
+        .expect("form post over TLS");
+        assert_eq!(response.status, 400);
+        assert_eq!(response.header("content-type"), Some("text/xml"));
+        assert_eq!(response.body, b"<Error>");
+        let seen = String::from_utf8(server.join().expect("server")).expect("text");
+        assert!(
+            seen.starts_with(&format!("POST / HTTP/1.1\r\nHost: localhost:{port}\r\n")),
+            "{seen}"
+        );
+        assert!(seen.ends_with("\r\n\r\nAction=AssumeRole&Version=2011-06-15"));
+    }
+
+    #[test]
+    fn debug_output_holds_no_secret() {
+        let body = form_body(&[("refresh_token", SYNTHETIC_SECRET)]);
+        let headers = [
+            ("Authorization", SYNTHETIC_SECRET),
+            ("X-Amz-Security-Token", SYNTHETIC_SECRET),
+        ];
+        let query = format!("/v1/token?key={SYNTHETIC_SECRET}");
+        for request in [
+            HttpRequest {
+                headers: &headers,
+                body: Some(Body::Form(&body)),
+                ..HttpRequest::new(Method::Post, &query)
+            },
+            HttpRequest {
+                bearer: Some(SYNTHETIC_SECRET),
+                body: Some(Body::Json(SYNTHETIC_SECRET.as_bytes())),
+                ..HttpRequest::new(Method::Put, &query)
+            },
+        ] {
+            let text = format!("{request:?} {request:#?}");
+            assert!(!text.contains(SYNTHETIC_SECRET), "{text}");
+            assert!(text.contains("/v1/token"), "{text}");
+        }
+        let response = HttpResponse {
+            status: 200,
+            headers: vec![("set-cookie".to_owned(), SYNTHETIC_SECRET.to_owned())],
+            body: SYNTHETIC_SECRET.as_bytes().to_vec(),
+        };
+        let text = format!("{response:?} {response:#?}");
+        assert!(!text.contains(SYNTHETIC_SECRET), "{text}");
+        assert!(
+            text.contains("set-cookie") && text.contains("200"),
+            "{text}"
+        );
+        let failure = TransferFailure::Status(response);
+        assert!(!format!("{failure:?}").contains(SYNTHETIC_SECRET));
+
+        // A response that carries the secret: the failures of `send` hold no byte
+        // of it, only a kind.
+        let (listener, destination) = loopback_listener();
+        let server = answer_once(
+            listener,
+            format!("HTTP/1.1 200 OK\r\nContent-Length: 9999\r\n\r\n{SYNTHETIC_SECRET}")
+                .into_bytes(),
+        );
+        let failure = send(
+            &destination,
+            &HttpRequest::new(Method::Get, "/"),
+            soon(),
+            None,
+        )
+        .expect_err("cut answer");
+        assert_eq!(failure, HttpFailure::Protocol);
+        assert!(!format!("{failure:?}").contains(SYNTHETIC_SECRET));
+        server.join().expect("server");
+    }
+
     // ---- Pinned trust (contract node-pairing-v1 section 4). ----
 
     const CONTRACT_PIN: &str = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE";
@@ -3165,17 +4048,17 @@ mod tests {
         let der = include_bytes!("../../tests/fixtures/node-pairing-v1/node-cert.der");
         let pin = Pin::of_certificate(der);
         assert_eq!(pin.text(), CONTRACT_PIN);
-        assert_eq!(Pin::parse(CONTRACT_PIN), Some(pin));
-        assert_eq!(pin.text().len(), PIN_TEXT_LEN);
+        assert_eq!(parse_pin(CONTRACT_PIN), Some(pin));
+        assert_eq!(pin.text().len(), PIN_TEXT_CHARS);
         assert!(pin.matches(der));
         assert!(!pin.matches(&der[1..]));
         assert_eq!(format!("{pin}"), CONTRACT_PIN);
         // 42 characters, padding bits set, padding, and another alphabet are refused.
-        assert_eq!(Pin::parse(&CONTRACT_PIN[..42]), None);
-        assert_eq!(Pin::parse(&format!("{}F", &CONTRACT_PIN[..42])), None);
-        assert_eq!(Pin::parse(&format!("{CONTRACT_PIN}=")), None);
-        assert_eq!(Pin::parse(&CONTRACT_PIN.replace('_', "/")), None);
-        assert_eq!(Pin::parse(""), None);
+        assert_eq!(parse_pin(&CONTRACT_PIN[..42]), None);
+        assert_eq!(parse_pin(&format!("{}F", &CONTRACT_PIN[..42])), None);
+        assert_eq!(parse_pin(&format!("{CONTRACT_PIN}=")), None);
+        assert_eq!(parse_pin(&CONTRACT_PIN.replace('_', "/")), None);
+        assert_eq!(parse_pin(""), None);
     }
 
     #[test]

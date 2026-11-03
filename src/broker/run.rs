@@ -41,6 +41,10 @@
 //!       default-source classifications (ADR 0031). Default sources need 80% task
 //!       match even for known safe commands and reads. Calibration cannot lower it.
 //!       Low confidence asks. Evaluation scopes are retained data, not routing gates.
+//!       A credential that the owner labeled development or local is judged with the
+//!       development defaults for its default risk and reversibility
+//!       ([`DeclarationSources::judged`], ADR 0031 of 2026-11-03), so that default
+//!       risk is no default source.
 //! 7. A question waits for the owner (at most one per agent; the same request again
 //!    joins it while the state that step 8 checks is the same, else it asks again). It
 //!    names the answers that can take effect. "Allow ACTION in PROJECT"
@@ -79,7 +83,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::json;
 
@@ -94,8 +98,8 @@ use super::exec::{self, Network, SecretEnv};
 use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
 use super::project::{Project, project_of};
 use super::proxy::{
-    HostRule, OtherHosts, ProxyEvent, ProxyOptions, ProxyOutcome, ProxySecret, RunProxy,
-    mint_placeholder,
+    HostRule, NetworkRule, OtherHosts, ProxyEvent, ProxyOptions, ProxyOutcome, ProxySecret,
+    RunProxy, mint_placeholder,
 };
 use super::shadow::{self, ShadowInput};
 use super::shell_risk::{self, Analysis, DB_HOST_FLAG, ProviderHosts, analyze_run, injection_flag};
@@ -116,9 +120,6 @@ use crate::vault::{
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod tests;
-
-/// A shadow thread waits this long after the owner time limit for the real outcome.
-const SHADOW_MARGIN: Duration = Duration::from_secs(30);
 
 const MAX_ITEMS: usize = 16;
 const MAX_ARGS: usize = 64;
@@ -1185,14 +1186,17 @@ fn run_inner(
     };
     // Goal item B9: the active model (the default bouncer or a promoted model) and the
     // candidate in shadow mode come from the vault, together with execution answers
-    // (ADR 0031); stored evaluation scopes no longer affect routing.
+    // (ADR 0031); stored evaluation scopes no longer affect routing. The bouncer brain
+    // client is the current one of this request (ADR 0035): a hosting change in
+    // Settings applies at the next run. It is read before the vault lock.
+    let bouncer = super::decide::current_bouncer(ctx);
     let (learned, models, known) = lock(&ctx.vault)
         .as_ref()
         .filter(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
         .map(|vault| {
             (
                 learning::lookup(vault, pattern.as_ref(), now),
-                shadow::models(vault, ctx.bouncer.as_ref()),
+                shadow::models(vault, bouncer.as_ref()),
                 known_state(vault, &items, &checked, action, certain, &hosts),
             )
         })
@@ -1232,34 +1236,35 @@ fn run_inner(
         env_names: checked.env_names.clone(),
         instruction: String::new(),
     };
-    // Shadow mode (ADR 0010): for a request that reaches the model step, the candidate
-    // answers on its own thread. Its answer goes only to the vault. The decision below
-    // uses the active model only, and the broker does not wait for the candidate.
-    let mut shadow_call = if route == Route::Model {
-        models.candidate.clone().and_then(|candidate| {
-            shadow::begin(
-                Arc::clone(&ctx.vault),
-                checked.epoch,
-                candidate,
-                bouncer_request.clone(),
-                ShadowInput {
-                    analysis: analysis.clone(),
-                    declarations: checked.declarations.clone(),
-                    has_user_request: context.has_user_request,
-                    thresholds: learned.learned.thresholds,
-                    routed: true,
-                    default_source,
-                },
-                ctx.approval_timeout + SHADOW_MARGIN,
-            )
-        })
-    } else {
-        None
-    };
     diagnostic.event.inference_attempted = route == Route::Model && models.active.is_some();
-    let verdict = match (&route, &models.active) {
-        (Route::Model, Some(bouncer)) => bouncer.evaluate(&bouncer_request),
-        _ => BouncerVerdict::Unavailable("not asked".to_owned()),
+    // Shadow mode (ADR 0010, ADR 0035): for a request that reaches the model step, the
+    // candidate rides in the same request as `shadow_heads` when the host has its head
+    // file. Its answer goes only to the vault. The decision below uses the active answer
+    // only; a shadow failure never changes it.
+    let shadow_pin = models
+        .candidate
+        .as_ref()
+        .and_then(|candidate| candidate.pin.as_ref());
+    let (verdict, shadow_verdict) = match (&route, &models.active) {
+        (Route::Model, Some(bouncer)) => bouncer.evaluate_with_shadow(&bouncer_request, shadow_pin),
+        _ => (BouncerVerdict::Unavailable("not asked".to_owned()), None),
+    };
+    let mut shadow_call = match (&route, &models.candidate) {
+        (Route::Model, Some(candidate)) => Some(shadow::begin(
+            Arc::clone(&ctx.vault),
+            checked.epoch,
+            candidate,
+            shadow_verdict.as_ref(),
+            &ShadowInput {
+                analysis: analysis.clone(),
+                declarations: checked.declarations.clone(),
+                has_user_request: context.has_user_request,
+                thresholds: learned.learned.thresholds,
+                routed: true,
+                default_source,
+            },
+        )),
+        _ => None,
     };
     // The model step: a remembered pattern never acts here, it acted in `route`.
     let route = if route == Route::Model {
@@ -2055,7 +2060,7 @@ fn run_inner(
             }
         },
     );
-    let enforced = network.is_some_and(|network| network.sandbox_profile.is_some());
+    let enforced = network.is_some_and(|network| network.rule != NetworkRule::None);
     let requests = proxy.map(RunProxy::finish).unwrap_or_default();
     drop(secrets);
     let proxy_note = proxy_summary(&requests);
@@ -2366,8 +2371,9 @@ fn check_inner(
             includes_code,
             standing,
             always_ask,
-            weak_source: sources.environment == DeclarationSource::Default
-                || sources.risk == DeclarationSource::Default,
+            // ADR 0031, 2026-11-03: a default risk of a credential that the owner
+            // labeled development follows the label, so it is no weak source.
+            weak_source: sources.weak(declaration.as_ref()),
             production: is_production && !unconfirmed,
             unconfirmed,
             foreign_project: declaration
@@ -2415,7 +2421,8 @@ struct Collected<'a> {
     known_hosts: &'a mut Vec<String>,
 }
 
-/// Add the variable, the declaration, the provider hosts, and the authorization of one
+/// Add the variable, the declaration as the bouncer judges it
+/// ([`DeclarationSources::judged`]), the provider hosts, and the authorization of one
 /// item. `authorization` comes without its binding and provider; this fills them in.
 fn push_item(
     vault: &Vault,
@@ -2424,7 +2431,15 @@ fn push_item(
     mut authorization: ItemAuthorization,
     out: &mut Collected<'_>,
 ) -> Result<(), (&'static str, String)> {
-    out.declarations.push(authorization.declaration.clone());
+    // The bouncer judges a development label with the development defaults (ADR 0031,
+    // 2026-11-03), also for a label from before 0.5.16. The authorization keeps the
+    // stored values, so the recheck compares what the vault has.
+    out.declarations.push(
+        authorization
+            .declaration
+            .as_ref()
+            .map(|declaration| authorization.sources.judged(declaration)),
+    );
     // Goal item B4: only the stored provider name. The broker does not run the
     // detection. An unknown provider has no hosts, as an item without a provider.
     let provider = vault.declaration_provider(item_id).map_err(|_| {

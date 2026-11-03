@@ -64,7 +64,9 @@ pub struct BrokerContext {
     pub approval_timeout: Duration,
     /// How long a process can run before the broker stops it.
     pub run_timeout: Duration,
-    /// Local decision model (ADR 0007). `None` means that every run needs the owner.
+    /// The bouncer brain client of the broker start (ADR 0007). The current client of
+    /// `model_gate` wins for each request ([`current_bouncer`]). `None` from both means
+    /// that every run needs the owner.
     pub bouncer: Option<BouncerClient>,
     /// The hook before each model request (Settings > Agents). It can start the model
     /// server first, or say that the bouncer is off. `None`: ask the model directly.
@@ -747,6 +749,18 @@ fn connector_rules(checked: &CallChecked) -> Vec<String> {
     why
 }
 
+/// The client of the bouncer brain for this request: the current client of the gate
+/// of Settings > Agents (the hosting choice in the vault, or the server of this Mac;
+/// ADR 0035), else the client that the broker started with. It is read for each
+/// request, so a change of the hosting choice applies at the next run without a
+/// restart. Call it without the vault lock: the gate takes its own lock.
+pub(crate) fn current_bouncer(ctx: &BrokerContext) -> Option<BouncerClient> {
+    ctx.model_gate
+        .as_ref()
+        .and_then(|gate| gate.bouncer_client())
+        .or_else(|| ctx.bouncer.clone())
+}
+
 /// The bouncer runs (ADR 0025 §3): a model is set, and the gate of Settings > Agents
 /// lets it answer. The gate can start the model server.
 fn bouncer_runs(ctx: &BrokerContext, model_set: bool) -> Result<(), String> {
@@ -768,6 +782,7 @@ fn call(
     let mut diagnostic = Attempt::new();
     let started = std::time::Instant::now();
     let vault = &ctx.vault;
+    let bouncer = current_bouncer(ctx);
     let (checked, model_set) = {
         let mut guard = lock(vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
@@ -775,7 +790,7 @@ fn call(
         };
         match check_call(vault, token, item_id, operation, params) {
             Ok(checked) => {
-                let model_set = super::shadow::models(vault, ctx.bouncer.as_ref())
+                let model_set = super::shadow::models(vault, bouncer.as_ref())
                     .active
                     .is_some();
                 (checked, model_set)

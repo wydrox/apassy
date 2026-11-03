@@ -1,0 +1,9 @@
+{
+  "run_id": 12,
+  "status": "denied",
+  "decided_by": "host",
+  "code": "lease_failed",
+  "note": "GitHub answered 404. No temporary credentials were made, so the command did not run.",
+  "flags": [],
+  "created_at": 1793699990
+}

@@ -294,13 +294,17 @@ class Lookup(Routes):
         self.put(first)
         self.put(second)
         response = self.client.delete("/v1/owner", headers=self.auth())
-        self.assertEqual(response.status_code, 204)
+        # v2 section 6.3: 200 with the counts (a v1 client takes 200 and 204 as success).
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"deleted": {"heads": 2, "jobs": 0, "examples": 0}})
         self.assert_nothing_stored()
+        again = self.client.delete("/v1/owner", headers=self.auth())
+        self.assertEqual(again.json(), {"deleted": {"heads": 0, "jobs": 0, "examples": 0}})
         for body in (first, second):
             self.assert_code(self.ask(heads=sha(body)), 409, "unknown_heads")
         self.assertEqual(self.client.get("/v1/heads/" + DEFAULT_SHA, headers=self.auth()).status_code, 200)
 
-    def test_training_and_docs_routes_are_not_served(self):
+    def test_without_a_job_manager_training_and_docs_routes_are_not_served(self):
         for method, path in [("POST", "/v1/train"), ("GET", "/v1/train/1"), ("GET", "/v1/train/1/result"),
                              ("GET", "/docs"), ("GET", "/openapi.json")]:
             with self.subTest(path):
@@ -466,13 +470,16 @@ class Auth(Routes):
         self.assertEqual(health.json()["status"], "ok")
         self.assertEqual(health.json()["loaded"], ["english"])
         self.assertIsInstance(health.json()["device"], str)
+        self.assertEqual(health.json()["contract"], "bouncer-brain-v2")
+        self.assertIs(health.json()["jobs"], False)
+        self.assertIs(health.json()["sign_in"], False)
 
     def test_the_token_opens_every_route(self):
         body = head_file(1)
         self.assertEqual(self.put(body).status_code, 201)
         self.assertEqual(self.ask(heads=sha(body)).status_code, 200)
         self.assertEqual(self.client.get("/v1/heads/" + sha(body), headers=self.auth()).status_code, 200)
-        self.assertEqual(self.client.delete("/v1/owner", headers=self.auth()).status_code, 204)
+        self.assertEqual(self.client.delete("/v1/owner", headers=self.auth()).status_code, 200)
 
 
 class NoToken(Routes):

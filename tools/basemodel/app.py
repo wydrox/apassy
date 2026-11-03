@@ -1,4 +1,4 @@
-"""HTTP surface of the bouncer brain server (ADR 0035, unit D1; contract bouncer-brain-v1).
+"""HTTP surface of the bouncer brain server (ADR 0035, units D1 and I-srv; contract bouncer-brain-v2).
 
 Routes (HTTP/1.1, JSON; every route except `GET /health` needs
 `Authorization: Bearer <LAYA_API_KEY>` when `LAYA_API_KEY` is set):
@@ -10,11 +10,20 @@ Routes (HTTP/1.1, JSON; every route except `GET /health` needs
 - `GET`, `PUT`, `DELETE /v1/heads/<sha256>` and `DELETE /v1/owner`: head sets.
   The routes that write (`PUT`, both `DELETE`) are served only when the server has
   a token: without `LAYA_API_KEY` they answer 403 `no_token` and change nothing.
+  `DELETE /v1/owner` also deletes the jobs and answers 200 with the counts (v2 6.3).
+- `PUT`, `GET`, `DELETE /v1/train/<sha256>` and `GET /v1/train/<sha256>/result`:
+  training jobs (v2 section 4, `jobs.py`), only when `create_app` gets a job manager.
+  Every job route needs the token; without `LAYA_API_KEY` they answer 403 `no_token`.
+
+Owners: an own server has one owner, the holder of `LAYA_API_KEY` (`own_server_owner`).
+The Connect sign-in of v2 section 5 (unit D2) passes its own `owner_of(authorization,
+entitlement)`: it returns the account of a live sign-in token, or raises 401
+`unauthenticated` / 403 `not_entitled`; `entitlement` is "training", "hosting" or None.
 
 The app replaces laya-serve's `create_app` (laya 0.3.20): laya's `/v1/systemone`
 cannot pass `heads` to the router, so the route, its guardrails, the single
 inference worker and the bearer check are the same code here, with the head fields
-added. Training routes are not served in v1.
+added.
 
 The server never logs the state, the questions or the answers: only counts,
 latency, status codes and head-set hashes.
@@ -38,6 +47,7 @@ if HERE not in sys.path:
 _WRITE_BYTECODE = sys.dont_write_bytecode
 sys.dont_write_bytecode = True
 import heads_cache  # noqa: E402
+import jobs as jobs_module  # noqa: E402
 
 sys.dont_write_bytecode = _WRITE_BYTECODE
 
@@ -90,15 +100,22 @@ def declared_length_over(request, limit):
         return False
 
 
-def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLOAD_BYTES):
-    """The FastAPI app. `router.predict(state, questions, heads=, shadow_heads=)` answers."""
+def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLOAD_BYTES,
+               jobs=None, owner_of=None):
+    """The FastAPI app. `router.predict(state, questions, heads=, shadow_heads=)` answers.
+
+    `jobs`: a `jobs.JobManager`, or None (no job routes, `jobs: false` in `/health`).
+    `owner_of(authorization, entitlement)`: the owner of a request (the seam of unit D2);
+    default: the one owner of an own server.
+    """
     import asyncio
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import asynccontextmanager
     from typing import Optional
 
     from fastapi import FastAPI, Header, HTTPException, Request, Response
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
+    from starlette.concurrency import run_in_threadpool
 
     if api_key is _FROM_ENV:
         api_key = os.environ.get("LAYA_API_KEY") or None
@@ -114,9 +131,12 @@ def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLO
         try:
             yield
         finally:
+            if jobs is not None:
+                # A running job ends as `interrupted`, and its examples go.
+                jobs.close()
             pool.shutdown(wait=True, cancel_futures=True)
 
-    app = FastAPI(title="apassy-bouncer-brain", summary="bouncer-brain-v1", lifespan=lifespan,
+    app = FastAPI(title="apassy-bouncer-brain", summary="bouncer-brain-v2", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
 
     def require_auth(authorization):
@@ -133,12 +153,24 @@ def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLO
             raise refused(heads_cache.HeadsError(
                 403, "no_token", "this server has no token, so it does not serve the routes that write"))
 
+    def own_server_owner(authorization, entitlement=None):
+        # One owner: the holder of the token. An own server has no entitlements.
+        require_write_token(authorization)
+        return jobs_module.OWN_SERVER
+
+    if owner_of is None:
+        owner_of = own_server_owner
+    serve_jobs = jobs is not None and jobs.available
+
     @app.get("/health")
     def health():
         return {
             "status": "ok",
             "loaded": router.loaded,
             "device": os.environ.get("LAYA_DEVICE") or "auto",
+            "contract": "bouncer-brain-v2",
+            "jobs": serve_jobs,
+            "sign_in": False,
         }
 
     @app.post("/v1/systemone")
@@ -278,9 +310,102 @@ def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLO
 
     @app.delete("/v1/owner")
     def delete_owner(authorization: Optional[str] = Header(default=None)):
-        require_write_token(authorization)
+        owner = owner_of(authorization, None)
+        # Jobs first: a running job stops before its folder goes.
+        counts = jobs.delete_owner(owner) if jobs is not None else {"jobs": 0, "examples": 0}
+        heads = cache.stored_count()
         removed = cache.delete_all()
-        LOG.info("owner delete status=204 files=%d", removed)
+        deleted = {"heads": heads, "jobs": counts["jobs"], "examples": counts["examples"]}
+        LOG.info("owner delete status=200 heads=%d jobs=%d examples=%d files=%d",
+                 heads, counts["jobs"], counts["examples"], removed)
+        return {"deleted": deleted}
+
+    if not serve_jobs:
+        return app
+
+    # ------------------------------------------------------------- jobs (v2 section 4)
+    @app.put("/v1/train/{sha}")
+    async def put_train(sha: str, request: Request,
+                        authorization: Optional[str] = Header(default=None),
+                        manifest_header: Optional[str] = Header(default=None, alias="Apassy-Manifest")):
+        started = time.perf_counter()
+        status, size, upload = 500, 0, None
+        try:
+            # Everything before the body: the client sends no byte before 100 Continue,
+            # and uvicorn sends that only when this route reads the body.
+            owner = owner_of(authorization, "training")
+            jobs_module.check_job_id(sha)
+            _raw, manifest = jobs_module.decode_manifest_header(manifest_header)
+            jobs_module.check_job_manifest(manifest, jobs.base)
+            expected = jobs_module.body_size(manifest)
+            declared = request.headers.get("content-length")
+            if declared is None or not declared.isdigit():
+                raise jobs_module.bad_job("a job upload needs a Content-Length")
+            if int(declared) > jobs.max_upload or expected > jobs.max_upload:
+                raise heads_cache.HeadsError(413, "too_large", "the job body is larger than %d bytes"
+                                             % jobs.max_upload)
+            if int(declared) != expected:
+                raise jobs_module.bad_job("the body size is not the sum of the file sizes of the manifest")
+            existing, upload = jobs.begin(owner, sha, manifest)
+            if existing is not None:
+                status = 200
+                return JSONResponse(status_code=200, content=existing)
+            async for chunk in request.stream():
+                if chunk:
+                    size += len(chunk)
+                    upload.write(chunk)
+            pending, upload = upload, None
+            created, view = await run_in_threadpool(jobs.commit, pending)
+            status = 201 if created else 200
+            return JSONResponse(status_code=status, content=view)
+        except heads_cache.HeadsError as error:
+            status = error.status
+            raise refused(error) from None
+        except HTTPException as error:
+            status = error.status_code
+            raise
+        finally:
+            if upload is not None:
+                upload.discard()
+            LOG.info("train put status=%d job=%s bytes=%d latency_ms=%.0f",
+                     status, jobs_module.log_id(sha), size, (time.perf_counter() - started) * 1000.0)
+
+    @app.get("/v1/train/{sha}")
+    def get_train(sha: str, authorization: Optional[str] = Header(default=None)):
+        owner = owner_of(authorization, None)
+        try:
+            return jobs.get(owner, jobs_module.check_job_id(sha))
+        except heads_cache.HeadsError as error:
+            raise refused(error) from None
+
+    @app.get("/v1/train/{sha}/result")
+    def get_train_result(sha: str, authorization: Optional[str] = Header(default=None)):
+        owner = owner_of(authorization, "training")
+        try:
+            f, size = jobs.open_result(owner, jobs_module.check_job_id(sha))
+        except heads_cache.HeadsError as error:
+            LOG.info("train result status=%d job=%s", error.status, jobs_module.log_id(sha))
+            raise refused(error) from None
+
+        def chunks():
+            with f:
+                while True:
+                    block = f.read(1 << 20)
+                    if not block:
+                        return
+                    yield block
+
+        LOG.info("train result status=200 job=%s bytes=%d", jobs_module.log_id(sha), size)
+        return StreamingResponse(chunks(), media_type="application/octet-stream",
+                                 headers={"Content-Length": str(size)})
+
+    @app.delete("/v1/train/{sha}")
+    def delete_train(sha: str, authorization: Optional[str] = Header(default=None)):
+        owner = owner_of(authorization, None)
+        try:
+            jobs.delete(owner, jobs_module.check_job_id(sha))
+        except heads_cache.HeadsError as error:
+            raise refused(error) from None
         return Response(status_code=204)
 
     return app

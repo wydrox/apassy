@@ -51,6 +51,10 @@
 //!
 //! This program uses only `std` and no `unsafe`. `CommandExt::exec` replaces the
 //! process image; it is a safe call that returns an error if the exec fails.
+//!
+//! On Linux this program is also PID 1 and the network bridge of the bubblewrap
+//! sandbox (`apassy-sandbox __netns-bridge …`, see `apassy::isolation::linux` and
+//! docs/operations/isolation-linux.md). The Seatbelt launcher runs only on macOS.
 
 // The launcher is for macOS. On Linux it only prints that, so its parts are unused.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
@@ -92,6 +96,19 @@ const CLOUD_DIR_IN_HOME: [&str; 4] = [
 fn main() {
     // ADR 0011 stage 6: first, before anything reads a secret.
     apassy::harden::harden_process_or_exit("apassy-sandbox");
+    // Linux: PID 1 and the network bridge of a bubblewrap sandbox
+    // (apassy::isolation::linux). The program arguments after `--` can be any bytes,
+    // so this check comes before `env::args`, which needs UTF-8.
+    #[cfg(target_os = "linux")]
+    {
+        let mut raw = env::args_os().skip(1);
+        if raw
+            .next()
+            .is_some_and(|first| apassy::isolation::linux::is_bridge_call(&first))
+        {
+            std::process::exit(apassy::isolation::linux::bridge_main(raw));
+        }
+    }
     let args: Vec<String> = env::args().skip(1).collect();
     if args == ["--version"] {
         println!("apassy-sandbox {}", env!("CARGO_PKG_VERSION"));

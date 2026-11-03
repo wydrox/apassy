@@ -146,7 +146,9 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
-        conn.execute_batch(&downgrade_sql()).unwrap();
+        // Schema 29 (`schema29.rs`) first, then this one.
+        conn.execute_batch(&crate::vault::schema27::downgrade_to_27_sql())
+            .unwrap();
         assert_eq!(version(&conn), PREVIOUS_SCHEMA_VERSION);
         assert_eq!(meta_version(&conn), PREVIOUS_SCHEMA_VERSION);
         assert!(!has_columns(&conn));
@@ -211,7 +213,8 @@ mod tests {
         drop(vault);
 
         let conn = raw(&path);
-        conn.execute_batch(&downgrade_sql()).unwrap();
+        conn.execute_batch(&crate::vault::schema27::downgrade_to_27_sql())
+            .unwrap();
         assert_eq!(version(&conn), PREVIOUS_SCHEMA_VERSION);
         let rows: i64 = conn
             .query_row("SELECT count(*) FROM relay_membership", [], |row| {

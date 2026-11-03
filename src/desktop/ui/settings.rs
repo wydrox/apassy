@@ -115,7 +115,15 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
         }
         SettingsSection::Bouncer => app.model_server.as_ref().map_or_else(
             || "Every run waits for you".to_owned(),
-            |server| format!("Brain: {}", model_server_words(&server.status()).0),
+            |server| {
+                let status = server.status();
+                let words = model_server_words(&status).0;
+                if status.remote {
+                    format!("Brain: {words} · My server")
+                } else {
+                    format!("Brain: {words}")
+                }
+            },
         ),
         SettingsSection::Tools => {
             if super::cli_tools::installed() {
@@ -874,7 +882,10 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let server = app.model_server.clone();
     let status = server.as_ref().map(|server| server.status());
     let mut action = None;
+    let mut runs_on = None;
     rows::group(ui, Some("Bouncer brain"), |g| {
+        // Who runs the bouncer brain (ADR 0035, plan 0035 J1), above its state.
+        runs_on = crate::desktop::brain_hosting_ui::runs_on_rows(app, g);
         if let Some(status) = &status {
             action = model_server_rows(g, status);
         }
@@ -932,6 +943,10 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         }
     });
+    if let Some(choice) = runs_on {
+        let ctx = ui.ctx().clone();
+        crate::desktop::brain_hosting_ui::apply(app, choice, Some(&ctx));
+    }
     crate::desktop::learning_ui::settings_panel(app, ui);
     let Some(server) = server else {
         return;
@@ -1030,6 +1045,11 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
         }
         (!note.is_empty()).then_some(note)
     };
+    if status.remote
+        && let ServerState::External { up, model } = &status.state
+    {
+        return remote_server_words(*up, model.as_deref());
+    }
     match &status.state {
         ServerState::Off => (
             "Off".to_owned(),
@@ -1117,6 +1137,39 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
     }
 }
 
+/// The note of the "Bouncer brain" row while the owner's server does not answer (ADR
+/// 0035 section 3: no answer is never an allowance, and there is no silent fallback).
+pub(super) const REMOTE_DOWN: &str =
+    "Your server does not answer. Until it answers, every run waits for you.";
+
+/// The state of a remote bouncer brain host (ADR 0035) in words, its tone and a note.
+/// The note names neither the address nor the token: the "Runs on" row names the host.
+pub(super) fn remote_server_words(
+    up: Option<bool>,
+    model: Option<&str>,
+) -> (String, Tone, Option<String>) {
+    match up {
+        None => (
+            "Checking".to_owned(),
+            Tone::Neutral,
+            Some("Apassy checks your server.".to_owned()),
+        ),
+        Some(true) => (
+            "Ready".to_owned(),
+            Tone::Good,
+            Some(model.map_or_else(
+                || "Your server answers.".to_owned(),
+                |model| format!("Brain: {model} on your server."),
+            )),
+        ),
+        Some(false) => (
+            "Not running".to_owned(),
+            Tone::Warning,
+            Some(REMOTE_DOWN.to_owned()),
+        ),
+    }
+}
+
 /// The install commands of `docs/operations/bouncer.md` section 1, with the paths of
 /// this Mac. The menu of the "Bouncer brain" row copies them.
 pub(super) fn install_commands(status: &Status) -> String {
@@ -1157,7 +1210,12 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
     let mut action = None;
     let current = status.settings.start;
     let (words, tone, status_note) = model_server_words(status);
-    let install = install_offer(status);
+    // A server of the owner runs the brain: the install is about this Mac.
+    let install = if status.remote {
+        InstallOffer::default()
+    } else {
+        install_offer(status)
+    };
     let note = install.note.clone().or(status_note);
     let active = matches!(
         status.state,
@@ -1203,7 +1261,7 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
                 {
                     action = Some(ModelAction::Install);
                 }
-            } else if current.managed() {
+            } else if current.managed() && !status.remote {
                 // A start would fail while the preflight fails, so there is no
                 // "Start now". The note names what is missing.
                 if status.owned {
@@ -1224,6 +1282,13 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
     }
     if status.url_from_env {
         g.note_row("APASSY_BOUNCER_URL sets the address. It wins over the setting.");
+    }
+    if status.remote {
+        // The start rows are about a server on this Mac; they return with This Mac.
+        if let Some(next) = launch_agent_rows(g, status) {
+            action = Some(next);
+        }
+        return action;
     }
     g.field("Start the bouncer brain", |ui| {
         let mut mode = current;

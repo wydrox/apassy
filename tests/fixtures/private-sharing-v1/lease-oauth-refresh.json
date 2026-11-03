@@ -1,0 +1,9 @@
+{
+  "kind": "oauth_refresh",
+  "secrets": [{"name": "EXAMPLE_ACCESS_TOKEN", "value": "synthetic-access-token-0001"}],
+  "plain": [],
+  "made_at": 1793700000,
+  "expires_at": 1793703600,
+  "revoke": {"type": "oauth", "url": "https://auth.example.test/oauth/revoke"},
+  "update_field": {"field": "refresh_token", "value": "synthetic-refresh-token-rotated-0002"}
+}

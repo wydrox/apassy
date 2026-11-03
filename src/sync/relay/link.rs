@@ -18,7 +18,7 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
-use crate::broker::http::Pin;
+use crate::net::pin::{Pin, parse as parse_pin};
 use crate::sync::SyncError;
 use crate::sync::relay_crypto::{decode_b64u, link_code_team, valid_team_code};
 use crate::sync::relay_http::{MAX_ALTERNATIVES, RelayUrl, TlsTrust, split_host_port};
@@ -203,7 +203,7 @@ impl PairedLink {
         }
         let (origin_host, origin_port) = parse_origin(origin, pin.is_some())?;
         let pin = match pin {
-            Some(text) => Some(Pin::parse(text).ok_or(LinkRefusal::BadPin)?),
+            Some(text) => Some(parse_pin(text).ok_or(LinkRefusal::BadPin)?),
             None => None,
         };
         let alt = match alt {
@@ -472,7 +472,7 @@ mod tests {
     }
 
     fn pin() -> Pin {
-        Pin::parse(PIN).unwrap()
+        parse_pin(PIN).unwrap()
     }
 
     /// The refused links of section 12: each is link 1 or link 3 with one change.

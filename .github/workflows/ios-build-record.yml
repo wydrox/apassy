@@ -1,0 +1,143 @@
+# The iPhone build record (ADR 0037 section 8, implementation-plan-misc D11): the owner
+# runs scripts/ios-testflight.sh on a Mac, which writes target/ios/build-record.json, and
+# then starts this workflow with that JSON:
+#   gh workflow run ios-build-record.yml --ref main -f record="$(cat target/ios/build-record.json)"
+# The job checks the record (at most 64 KiB, its fields, a commit on main, the version of
+# that commit), writes it as apassy-ios-<version>-<build>.json, and attests it with an SPDX
+# SBOM of the commit's Cargo.lock. The App Store re-signs and encrypts the app, so the
+# record is a signed claim of the build, not a check that a user can repeat.
+# See docs/operations/release.md, "Attestations and SBOMs".
+name: iPhone build record
+
+on:
+  workflow_dispatch:
+    inputs:
+      record:
+        description: The JSON of target/ios/build-record.json (scripts/ios-testflight.sh), at most 64 KiB.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-record
+  cancel-in-progress: false
+
+jobs:
+  record:
+    if: github.ref == 'refs/heads/main' && github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      # The full history of main, to check that the commit of the record is on it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The input goes through the environment only, never into the script text.
+      - name: Check and write the record
+        env:
+          RECORD: ${{ inputs.record }}
+        run: |
+          python3 -I - <<'PY'
+          import json, os, re, subprocess, sys
+          from pathlib import Path
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+          raw = os.environ["RECORD"]
+          if len(raw.encode()) > 64 * 1024:
+              fail(f"The record has {len(raw.encode())} bytes, more than 64 KiB.")
+          try:
+              record = json.loads(raw)
+          except json.JSONDecodeError as error:
+              fail(f"The record is not JSON: {error}")
+          expected = {"format", "kind", "version", "build", "commit", "xcode", "sdk", "uploaded", "ipa_sha256", "binaries"}
+          if not isinstance(record, dict) or set(record) != expected:
+              fail(f"The record must have exactly the fields {sorted(expected)}.")
+          if record["format"] != 1 or record["kind"] != "apassy-ios-build-record":
+              fail("Unknown record format or kind.")
+          if record["uploaded"] is not True:
+              fail("The record is of a test build (--no-upload); publish only the record of an uploaded build.")
+          version, build, commit = record["version"], record["build"], record["commit"]
+          if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+              fail("version must be MAJOR.MINOR.PATCH.")
+          if not isinstance(build, str) or not re.fullmatch(r"[1-9][0-9]{0,17}", build):
+              fail("build must be a decimal build number.")
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              fail("commit must be a full commit SHA.")
+          for field in ("xcode", "sdk"):
+              if not isinstance(record[field], str) or not record[field] or len(record[field]) > 200:
+                  fail(f"{field} must be a short text.")
+          if record["ipa_sha256"] is not None and not (
+                  isinstance(record["ipa_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", record["ipa_sha256"])):
+              fail("ipa_sha256 must be a SHA-256 or null.")
+          binaries = record["binaries"]
+          if not isinstance(binaries, list) or not binaries:
+              fail("binaries must list the Mach-O files of the archive.")
+          for entry in binaries:
+              if (not isinstance(entry, dict) or set(entry) != {"path", "sha256", "sha256_unsigned"}
+                      or not isinstance(entry["path"], str) or entry["path"].startswith("/") or ".." in entry["path"].split("/")
+                      or not all(isinstance(entry[k], str) and re.fullmatch(r"[0-9a-f]{64}", entry[k]) for k in ("sha256", "sha256_unsigned"))):
+                  fail(f"Bad binaries entry: {entry!r:.200}")
+
+          def git(*args):
+              return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+          if git("cat-file", "-e", f"{commit}^{{commit}}").returncode != 0:
+              fail(f"{commit} is not a commit of this repository.")
+          if git("merge-base", "--is-ancestor", commit, "HEAD").returncode != 0:
+              fail(f"{commit} is not on main.")
+          project = git("show", f"{commit}:ios/ApassyCompanion/project.yml")
+          match = re.search(r"^\s*MARKETING_VERSION:\s*\"?([0-9][0-9.]*)\"?\s*$", project.stdout, re.M)
+          if project.returncode != 0 or not match:
+              fail(f"Cannot read MARKETING_VERSION at {commit}.")
+          if match.group(1) != version:
+              fail(f"The record says {version}, but MARKETING_VERSION at {commit} is {match.group(1)}.")
+
+          name = f"apassy-ios-{version}-{build}.json"
+          out = Path("target/proof")
+          out.mkdir(parents=True, exist_ok=True)
+          (out / name).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+          sbom = Path("target/sbom-ios")
+          sbom.mkdir(parents=True, exist_ok=True)
+          lock = git("show", f"{commit}:Cargo.lock")
+          if lock.returncode != 0:
+              fail(f"No Cargo.lock at {commit}.")
+          (sbom / "Cargo.lock").write_text(lock.stdout)
+          # The resolved Swift packages. Today the app has only local packages, so there is none.
+          listed = git("ls-tree", "-r", "--name-only", commit, "--", "ios")
+          for path in listed.stdout.splitlines():
+              if path.endswith("/Package.resolved"):
+                  target = sbom / path
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_text(git("show", f"{commit}:{path}").stdout)
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"RECORD_FILE=target/proof/{name}\nRECORD_NAME={name[:-5]}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"### {name}\n\nApassy {version} ({build}) from `{commit}`, {len(binaries)} Mach-O files.\n")
+          PY
+
+      - name: Attest the record
+        uses: ./.github/actions/attest
+        with:
+          subject-path: ${{ env.RECORD_FILE }}
+          sbom-path: target/sbom-ios
+          sbom-output: target/proof/${{ env.RECORD_NAME }}.spdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.RECORD_NAME }}
+          path: |
+            ${{ env.RECORD_FILE }}
+            target/proof/${{ env.RECORD_NAME }}.spdx.json
+          if-no-files-found: error
+          retention-days: 90

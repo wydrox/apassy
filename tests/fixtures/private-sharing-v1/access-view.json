@@ -1,0 +1,44 @@
+{
+  "agent_id": 3,
+  "agent": "Synthetic cloud agent",
+  "member": "Owner",
+  "items": [
+    {
+      "item_id": 7,
+      "item_name": "httpbin test token",
+      "collection": "cloud",
+      "env_name": "HTTPBIN_TOKEN",
+      "hosts": ["httpbingo.org"],
+      "environment": "development",
+      "base_url_vars": ["APASSY_BASE_HTTPBIN_TOKEN"],
+      "approval": "Every run waits for the owner's host, which asks the owner (the policy of the collection).",
+      "rule": {"allowed_prefixes": [], "forbidden_words": [], "expires_at": null, "max_runs_per_hour": null, "instruction": ""},
+      "delivery": "placeholder"
+    },
+    {
+      "item_id": 8,
+      "item_name": "GitHub App test installation",
+      "collection": "cloud",
+      "env_name": "GITHUB_TOKEN",
+      "hosts": ["api.github.com"],
+      "environment": "development",
+      "base_url_vars": [],
+      "approval": "Every run waits for the owner's host, which asks the owner (the policy of the collection).",
+      "rule": {"allowed_prefixes": [], "forbidden_words": [], "expires_at": null, "max_runs_per_hour": null, "instruction": ""},
+      "delivery": "temporary_credentials"
+    },
+    {
+      "item_id": 9,
+      "item_name": "AWS test key",
+      "collection": "cloud",
+      "env_name": "AWS_SECRET_ACCESS_KEY",
+      "hosts": ["amazonaws.com"],
+      "environment": "development",
+      "base_url_vars": [],
+      "approval": "Every run waits for the owner's host, which asks the owner (the policy of the collection).",
+      "rule": {"allowed_prefixes": [], "forbidden_words": [], "expires_at": null, "max_runs_per_hour": null, "instruction": ""},
+      "delivery": "signed_requests"
+    }
+  ],
+  "note": "Run apassy_request_run with the item ids you need."
+}

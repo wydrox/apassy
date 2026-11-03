@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-pub use crate::broker::http::{PIN_TEXT_LEN, Pin};
+pub use crate::net::pin::{PIN_TEXT_CHARS, Pin, parse as parse_pin};
 pub use cloud::{CloudDownload, CloudFileStatus, CloudProbe, SystemCloud};
 pub use folder::{
     FOLDER_NAME, FolderEntry, PUSH_SUFFIX, SYNC_FILE_EXTENSION, SyncFolder, detect_folders_in,

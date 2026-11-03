@@ -36,7 +36,7 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 28;
+const CURRENT: i64 = 29;
 /// Schema 18: folders, before trusted devices. Never released.
 const MID: i64 = 18;
 const OLD: i64 = 17;
@@ -193,6 +193,18 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         content_digest(&conn),
         "the test digest is the algorithm of the app"
     );
+    if version < 29 {
+        // Schema 29: the host of the bouncer brain (`src/vault/schema29.rs`).
+        conn.execute_batch(
+            "DROP TABLE bouncer_host;
+             ALTER TABLE model_candidate DROP COLUMN origin;
+             ALTER TABLE model_candidate DROP COLUMN job_host;
+             ALTER TABLE model_candidate DROP COLUMN job_id;
+             ALTER TABLE model_candidate DROP COLUMN uploaded_to;
+             ALTER TABLE model_activation DROP COLUMN heads_sha256;",
+        )
+        .unwrap();
+    }
     if version < 28 {
         // Schema 28: the pinned trust of a relay membership (`src/vault/schema28.rs`).
         conn.execute_batch(
@@ -871,4 +883,109 @@ fn an_18_copy_merges_and_is_replaced_by_a_19_copy() {
     assert!(again.remote_outdated());
     assert_eq!(a.item_home(alpha).unwrap(), Some(home));
     assert_eq!(content(&b), content(&a));
+}
+
+/// The schema before schema 29 in the migration chain (`src/vault/schema29.rs`,
+/// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
+const BEFORE_29: i64 = 28;
+
+/// Schema 29 (ADR 0035, plan 0035 C2): the host of the bouncer brain is local. A pushed
+/// copy has no row of `bouncer_host` and no bearer. A copy of the previous schema merges
+/// and keeps the host of this Mac. A device refuses a copy of a later schema, as a device
+/// of the previous schema refuses a copy of 29 (`UnsupportedSchema`).
+#[test]
+fn a_pushed_copy_has_no_bouncer_host_row_and_a_later_copy_is_refused() {
+    const BEARER: &str = "SYNTH-sync-bearer-0123456789abcdef";
+    let root = TempDir::new().unwrap();
+    let mut a = Vault::create(&root.path().join("a.db"), PASS).unwrap();
+    a.unlock(PASS).unwrap();
+    a.add(item("Alpha", "SYNTH-alpha")).unwrap();
+    let host = apassy::vault::BouncerHostChange {
+        kind: apassy::vault::BouncerHostKind::OwnServer,
+        url: "https://brain.synthetic.ts.net".to_owned(),
+        bearer: Some(SecretValue::new(BEARER.to_owned())),
+        consent_version: apassy::vault::HOSTING_CONSENT_VERSION,
+    };
+    for role in apassy::vault::BouncerHostRole::ALL {
+        a.set_bouncer_host(role, &host, 1_700_000_000).unwrap();
+    }
+
+    // The pushed copy: the table is there and empty, and the bearer is in no byte of it.
+    let copy = root.path().join("a-copy.apassy");
+    a.write_sync_copy(&copy, "Mac A").unwrap();
+    assert_eq!(versions(&copy, PASS), (CURRENT, CURRENT));
+    let conn = open_raw(&copy, PASS);
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM bouncer_host", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "a pushed copy carries no host row");
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let (mut b, adopted) = Vault::adopt_sync_copy(&copy, &root.path().join("b.db"), PASS).unwrap();
+    assert!(!adopted.outdated());
+    b.unlock(PASS).unwrap();
+    for role in apassy::vault::BouncerHostRole::ALL {
+        assert_eq!(b.bouncer_host(role).unwrap(), None, "{role:?}");
+        assert!(b.bouncer_host_bearer(role).unwrap().is_none());
+    }
+    assert_eq!(titles(&b), ["Alpha"]);
+
+    // A copy of the previous schema merges; the host of this Mac stays.
+    b.add(item("Beta", "SYNTH-beta")).unwrap();
+    let old = root.path().join("b-old.apassy");
+    b.write_sync_copy(&old, "Mac B").unwrap();
+    set_schema(&old, PASS, BEFORE_29, true);
+    let report = a.merge_from(&old, &SyncScope::vault()).unwrap();
+    assert_eq!(report.remote_schema, BEFORE_29);
+    assert!(report.remote_outdated());
+    assert_eq!(titles(&a), ["Alpha", "Beta"]);
+    // A copy of schema 27, before the pinned trust of schema 28, merges too.
+    b.add(item("Gamma", "SYNTH-gamma")).unwrap();
+    let older = root.path().join("b-27.apassy");
+    b.write_sync_copy(&older, "Mac B").unwrap();
+    set_schema(&older, PASS, 27, true);
+    let report = a.merge_from(&older, &SyncScope::vault()).unwrap();
+    assert_eq!(report.remote_schema, 27);
+    assert_eq!(titles(&a), ["Alpha", "Beta", "Gamma"]);
+    let kept = a
+        .bouncer_host(apassy::vault::BouncerHostRole::Hosting)
+        .unwrap()
+        .expect("the host of this Mac stays");
+    assert_eq!(kept.url, "https://brain.synthetic.ts.net");
+    assert_eq!(
+        a.bouncer_host_bearer(apassy::vault::BouncerHostRole::Hosting)
+            .unwrap()
+            .unwrap()
+            .expose(),
+        BEARER
+    );
+
+    // A copy of a later schema is refused for adoption and for a merge, and the copy
+    // does not change.
+    let later = root.path().join("later.apassy");
+    a.write_sync_copy(&later, "Mac A").unwrap();
+    set_schema(&later, PASS, CURRENT + 1, true);
+    let before = sha(&later);
+    assert_eq!(
+        Vault::adopt_sync_copy(&later, &root.path().join("c.db"), PASS)
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::UnsupportedSchema
+    );
+    assert_eq!(
+        a.merge_from(&later, &SyncScope::vault())
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::UnsupportedSchema
+    );
+    assert_eq!(sha(&later), before);
+    // A number between the previous schema and 29 belongs to no build: refused too.
+    if BEFORE_29 + 1 < CURRENT {
+        let gap = root.path().join("gap.apassy");
+        a.write_sync_copy(&gap, "Mac A").unwrap();
+        set_schema(&gap, PASS, BEFORE_29 + 1, true);
+        assert_eq!(
+            a.merge_from(&gap, &SyncScope::vault()).unwrap_err().kind(),
+            VaultErrorKind::UnsupportedSchema
+        );
+    }
 }

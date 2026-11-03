@@ -1,0 +1,55 @@
+{
+  "job": "7e57da7a7e57da7a7e57da7a7e57da7a7e57da7a7e57da7a7e57da7a7e57da7a",
+  "state": "done",
+  "created_at": 1790000000,
+  "started_at": 1790000004,
+  "ended_at": 1790000412,
+  "examples_held": false,
+  "examples_deleted_at": 1790000412,
+  "examples_deadline": 1790086400,
+  "result_deadline": 1790605212,
+  "error": null,
+  "result": {
+    "heads": "c0de1234c0de1234c0de1234c0de1234c0de1234c0de1234c0de1234c0de1234",
+    "model": "apassy-remote-v1+c0de1234",
+    "size_bytes": 104996060,
+    "stored": false,
+    "manifest": {
+      "schema": 1,
+      "name": "apassy-remote-v1",
+      "version": "apassy-remote-v1+c0de1234",
+      "checkpoint": {
+        "file": "candidate.safetensors",
+        "sha256": "c0de1234c0de1234c0de1234c0de1234c0de1234c0de1234c0de1234c0de1234",
+        "size_bytes": 104996060,
+        "format": "safetensors, float32 head tensors: head., type_emb., scorer."
+      },
+      "base": {
+        "repo": "convaiinnovations/laya",
+        "revision": "ba5e0000ba5e0000ba5e0000ba5e0000ba5e0000",
+        "weights_file": "model.safetensors",
+        "weights_sha256": "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e",
+        "package": "laya[serve]==0.3.20"
+      },
+      "serve": {"zero_shot_questions": ["leak"]},
+      "init": null,
+      "training": {
+        "method": "heads-only fine-tune on owner decisions in a server job (ADR 0035), teacher rows keep the other answers",
+        "best_epoch": 4,
+        "train_examples": 540,
+        "val_examples": 60,
+        "teacher_rows": 1200,
+        "train_seconds": 391.7
+      }
+    },
+    "metrics": {
+      "train_seconds": 391.7,
+      "total_seconds": 408.2,
+      "train_examples": 540,
+      "val_examples": 60,
+      "teacher_rows": 1200,
+      "best_epoch": 4,
+      "val_after": {"all_nll": 0.3}
+    }
+  }
+}
