@@ -615,7 +615,7 @@ pub fn native_options() -> eframe::NativeOptions {
 #[derive(Default)]
 pub struct RunOptions {
     /// Starts the Mac's own node for cloud agents: the embedded relay that the app crate
-    /// (`crates/apassy-app`) passes in. `None`: no node, and Settings > Cloud agents says
+    /// (`crates/apassy-app`) passes in. `None`: no node, and Bouncer > Agents says
     /// so.
     #[cfg(feature = "vault")]
     pub node: Option<std::sync::Arc<dyn crate::node::backend::NodeBackend>>,

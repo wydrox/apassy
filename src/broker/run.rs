@@ -267,7 +267,7 @@ fn authenticate_cloud(
                 item_id: None,
                 operation: action.to_owned(),
                 decision: ActivityDecision::Deny,
-                reason: "The token of the cloud agent expired. Add the agent again in Settings > Cloud agents.".to_owned(),
+                reason: "The token of the remote agent expired. Connect the agent again: give it the MCP address of Bouncer > Agents.".to_owned(),
             });
             Err(WireResponse::failure(
                 "token_expired",
