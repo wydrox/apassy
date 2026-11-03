@@ -640,6 +640,35 @@ pub enum OwnerRequest {
         choice: Choice,
         action: OwnerAction,
     },
+    /// Add a device to the Apassy Connect account (connect-account-v1 section 7.1): the
+    /// join exactly as "Add a device…" showed it, with the six safety words. The proof
+    /// goes to [`OwnerFlows::connect_proof`] for the Connect view (unit M2), which passes it
+    /// to `ConnectAccount::confirm_join`.
+    ConfirmConnectDevice {
+        account_id: String,
+        join_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
+        words: String,
+    },
+    /// Revoke a device of the Apassy Connect account (section 7.4); `this_device` is
+    /// "Forget this device".
+    RevokeConnectDevice {
+        account_id: String,
+        device_id: String,
+        device_name: String,
+        this_device: bool,
+    },
+    /// Delete the Apassy Connect account (section 6).
+    DeleteConnectAccount {
+        account_id: String,
+    },
+    /// Change the Family or Team group (connect-billing-v1 section 6).
+    ChangeConnectGroup {
+        account_id: String,
+        group_id: String,
+        change: crate::broker::approvals::ConnectGroupChange,
+    },
 }
 
 impl OwnerRequest {
@@ -1042,6 +1071,41 @@ impl OwnerRequest {
                 }
             }
             Self::AnswerRemoteQuestion { action, .. } => action.clone(),
+            Self::ConfirmConnectDevice {
+                account_id,
+                join_id,
+                device_name,
+                public_key,
+                words,
+            } => OwnerAction::ConfirmConnectDevice {
+                account_id: account_id.clone(),
+                join_id: *join_id,
+                device_name: device_name.clone(),
+                public_key: public_key.clone(),
+                words: words.clone(),
+            },
+            Self::RevokeConnectDevice {
+                account_id,
+                device_id,
+                device_name,
+                ..
+            } => OwnerAction::RevokeConnectDevice {
+                account_id: account_id.clone(),
+                device_id: device_id.clone(),
+                device_name: device_name.clone(),
+            },
+            Self::DeleteConnectAccount { account_id } => OwnerAction::DeleteConnectAccount {
+                account_id: account_id.clone(),
+            },
+            Self::ChangeConnectGroup {
+                account_id,
+                group_id,
+                change,
+            } => OwnerAction::ChangeConnectGroup {
+                account_id: account_id.clone(),
+                group_id: group_id.clone(),
+                change: change.clone(),
+            },
         }
     }
 
@@ -1434,6 +1498,39 @@ impl OwnerRequest {
                     page_text(asker)
                 )
             }
+            Self::ConfirmConnectDevice {
+                device_name, words, ..
+            } => format!(
+                "\"{}\" asks to join your Apassy Connect account. Both devices show: {}. Confirm only if the other device shows the same words. It can then sign in to your account; it still needs the passphrase to open a vault.",
+                page_text(device_name),
+                page_text(words)
+            ),
+            Self::RevokeConnectDevice {
+                device_name,
+                this_device: true,
+                ..
+            } => format!(
+                "Forget this Mac (\"{}\") in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this Mac.",
+                page_text(device_name)
+            ),
+            Self::RevokeConnectDevice { device_name, .. } => format!(
+                "Remove \"{}\" from your Apassy Connect account? It signs out at once and leaves every vault store of the account.",
+                page_text(device_name)
+            ),
+            Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
+            Self::ChangeConnectGroup { change, .. } => match change {
+                crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
+                    "Add \"{}\" to your Apassy Connect family or team? They get the plan and can join the vaults that you share.",
+                    page_text(name)
+                ),
+                crate::broker::approvals::ConnectGroupChange::RemoveMember { name, .. } => format!(
+                    "Remove \"{}\" from your Apassy Connect family or team? They keep a free account and leave the vaults that you share.",
+                    page_text(name)
+                ),
+                crate::broker::approvals::ConnectGroupChange::SetSeats { quantity } => format!(
+                    "Change your Apassy Connect plan to {quantity} people or seats? Stripe charges the difference."
+                ),
+            },
         }
     }
 }
@@ -1652,6 +1749,10 @@ pub struct OwnerFlows {
     pub(crate) acknowledged: BTreeSet<EventKey>,
     /// A copied one-time code and its clear.
     pub(crate) clipboard: CodeClipboard,
+    /// The proof of the last Apassy Connect account check (`OwnerRequest::
+    /// ConfirmConnectDevice` and the other Connect requests), until the Connect view
+    /// takes it. A lock drops it; it is bound to the vault session and lives 60 s.
+    pub(crate) connect_proof: Option<OwnerProof>,
 }
 
 impl OwnerFlows {
@@ -2408,6 +2509,14 @@ impl DesktopApp {
             OwnerRequest::AnswerRemoteQuestion {
                 remote_id, choice, ..
             } => self.answer_remote_question(remote_id, choice, Some(proof)),
+            // The Connect view takes the proof and runs the step (plan s7 M1/M2); the
+            // account checks it again against the exact action before it calls Connect.
+            OwnerRequest::ConfirmConnectDevice { .. }
+            | OwnerRequest::RevokeConnectDevice { .. }
+            | OwnerRequest::DeleteConnectAccount { .. }
+            | OwnerRequest::ChangeConnectGroup { .. } => {
+                self.owner.connect_proof = Some(proof);
+            }
         }
     }
 
@@ -3016,6 +3125,8 @@ impl DesktopApp {
         }
         // The feeds of the other Macs go with the session (relay-feed-v1).
         self.forget_remote_feeds();
+        // A Connect proof of this session is worthless after the lock.
+        self.owner.connect_proof = None;
         self.erase_typed_secrets(ctx);
     }
 

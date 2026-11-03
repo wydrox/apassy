@@ -429,6 +429,49 @@ pub enum OwnerAction {
         relay_url: String,
         team_id: Option<String>,
     },
+    /// Add a device to the Apassy Connect account of this Mac (connect-account-v1
+    /// section 7.1, plan s7 M1). The proof names the join exactly as the owner confirmed
+    /// it: the account, the join at Connect, the name and the public key of the device
+    /// (X9.63, 65 bytes), and the six safety words that both devices show. Only a fresh
+    /// check on this Mac makes it ([`OwnerAction::needs_fresh_local_check`]); no phone or
+    /// other Mac can.
+    ConfirmConnectDevice {
+        account_id: String,
+        join_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
+        words: String,
+    },
+    /// Revoke a device of the Apassy Connect account (section 7.4), also this Mac
+    /// itself ("Forget this device"). The proof names the account and the device.
+    RevokeConnectDevice {
+        account_id: String,
+        device_id: String,
+        device_name: String,
+    },
+    /// Delete the Apassy Connect account (section 6): its vault stores, devices, and
+    /// subscription end.
+    DeleteConnectAccount {
+        account_id: String,
+    },
+    /// Change the Family or Team group of the Apassy Connect account (connect-billing-v1
+    /// section 6): confirm or remove a member, or change the seats.
+    ChangeConnectGroup {
+        account_id: String,
+        group_id: String,
+        change: ConnectGroupChange,
+    },
+}
+
+/// A change of a Connect group that needs the owner check (connect-billing-v1 section 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectGroupChange {
+    /// Make a pending member active: it gets the plan and can be in shared vaults.
+    ConfirmMember { account_id: String, name: String },
+    /// Remove a member: it leaves the shared vault stores of the group.
+    RemoveMember { account_id: String, name: String },
+    /// Change the people or seats of the subscription.
+    SetSeats { quantity: u64 },
 }
 
 /// Where the bouncer brain runs or trains, for the owner texts. No address: the dialog
@@ -562,6 +605,10 @@ impl OwnerAction {
             Self::RemoveOlderIphone { .. } => "Remove an iPhone",
             Self::ChangeBouncerHosting { .. } => "Change the bouncer brain host",
             Self::ChangeBouncerTraining { .. } => "Change the bouncer brain training",
+            Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
+            Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
+            Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
+            Self::ChangeConnectGroup { .. } => "Change your family or team",
             _ => "Confirm with Touch ID",
         }
     }
@@ -743,17 +790,55 @@ impl OwnerAction {
             Self::EnableRelayQuestions { .. } => {
                 "send the questions of this vault through the relay".to_owned()
             }
+            Self::ConfirmConnectDevice {
+                device_name, words, ..
+            } => format!(
+                "add the device \"{}\" to your Apassy Connect account; both devices show: {}",
+                short_device_name(device_name),
+                words
+                    .chars()
+                    .filter(|c| c.is_ascii_lowercase() || *c == ' ')
+                    .take(80)
+                    .collect::<String>()
+            ),
+            Self::RevokeConnectDevice { device_name, .. } => format!(
+                "remove the device \"{}\" from your Apassy Connect account",
+                short_device_name(device_name)
+            ),
+            Self::DeleteConnectAccount { .. } => {
+                "delete your Apassy Connect account, its vault stores, and its plan".to_owned()
+            }
+            Self::ChangeConnectGroup { change, .. } => match change {
+                ConnectGroupChange::ConfirmMember { name, .. } => format!(
+                    "add \"{}\" to your Apassy Connect family or team",
+                    short_device_name(name)
+                ),
+                ConnectGroupChange::RemoveMember { name, .. } => format!(
+                    "remove \"{}\" from your Apassy Connect family or team",
+                    short_device_name(name)
+                ),
+                ConnectGroupChange::SetSeats { quantity } => {
+                    format!("change your Apassy Connect plan to {quantity} people or seats")
+                }
+            },
         }
     }
 
     /// True for an action that only a fresh Touch ID or passphrase check on this Mac can
     /// confirm: the global owner window never covers it (ADR 0035 section 1, plan 0035
     /// C2). A change of the bouncer brain host or trainer sends request data to another
-    /// computer, so each change asks again.
+    /// computer, so each change asks again. The Apassy Connect account actions (plan s7
+    /// M1) add or remove a device or a person of the account, or end it, so each asks
+    /// again too.
     pub fn needs_fresh_local_check(&self) -> bool {
         matches!(
             self,
-            Self::ChangeBouncerHosting { .. } | Self::ChangeBouncerTraining { .. }
+            Self::ChangeBouncerHosting { .. }
+                | Self::ChangeBouncerTraining { .. }
+                | Self::ConfirmConnectDevice { .. }
+                | Self::RevokeConnectDevice { .. }
+                | Self::DeleteConnectAccount { .. }
+                | Self::ChangeConnectGroup { .. }
         )
     }
 
@@ -1949,6 +2034,88 @@ mod evaluation_tests {
             },
         ] {
             assert!(LocalWindowSource::LocalOwner.permits(&action), "{action:?}");
+        }
+    }
+
+    /// The Apassy Connect account actions (plan s7 M1) always need a fresh check on this
+    /// Mac: the global window never covers them, no phone or other Mac makes them, and
+    /// their texts name the device and the words without passing the Touch ID limit.
+    #[test]
+    fn connect_account_actions_need_a_fresh_local_check() {
+        let long = "N".repeat(200);
+        for action in [
+            OwnerAction::ConfirmConnectDevice {
+                account_id: "acc_k7m2q4x3ca".into(),
+                join_id: 4,
+                device_name: long.clone(),
+                public_key: vec![4; 65],
+                words: "blaze cable flute board seal tiger".into(),
+            },
+            OwnerAction::RevokeConnectDevice {
+                account_id: "acc_k7m2q4x3ca".into(),
+                device_id: "dev_p4n6r2t7bc".into(),
+                device_name: long.clone(),
+            },
+            OwnerAction::DeleteConnectAccount {
+                account_id: "acc_k7m2q4x3ca".into(),
+            },
+            OwnerAction::ChangeConnectGroup {
+                account_id: "acc_k7m2q4x3ca".into(),
+                group_id: "grp_f4m6n2p7qa".into(),
+                change: ConnectGroupChange::ConfirmMember {
+                    account_id: "acc_m3n5p7q2rb".into(),
+                    name: long.clone(),
+                },
+            },
+            OwnerAction::ChangeConnectGroup {
+                account_id: "acc_k7m2q4x3ca".into(),
+                group_id: "grp_f4m6n2p7qa".into(),
+                change: ConnectGroupChange::SetSeats { quantity: 6 },
+            },
+        ] {
+            assert!(action.needs_fresh_local_check(), "{action:?}");
+            #[cfg(feature = "desktop")]
+            assert!(
+                !LocalWindowSource::LocalOwner.permits(&action),
+                "{action:?}"
+            );
+            assert!(matches!(
+                remote_choice(&action, None),
+                Err(OwnerAuthError::RemoteUnsupported)
+            ));
+            let reason = action.reason();
+            assert!(reason.chars().count() <= MAX_REASON_CHARS, "{reason}");
+            assert!(reason.contains("Apassy Connect"), "{reason}");
+            assert_ne!(action.touch_id_title(), "Confirm with Touch ID");
+        }
+        let confirm = OwnerAction::ConfirmConnectDevice {
+            account_id: "acc_k7m2q4x3ca".into(),
+            join_id: 4,
+            device_name: "iPhone".into(),
+            public_key: vec![4; 65],
+            words: "blaze cable flute board seal tiger".into(),
+        };
+        assert!(
+            confirm
+                .reason()
+                .ends_with("both devices show: blaze cable flute board seal tiger")
+        );
+        // Another join, key, or set of words is another action.
+        for other in [
+            OwnerAction::ConfirmConnectDevice {
+                join_id: 5,
+                ..confirm.clone()
+            },
+            OwnerAction::ConfirmConnectDevice {
+                public_key: vec![5; 65],
+                ..confirm.clone()
+            },
+            OwnerAction::ConfirmConnectDevice {
+                words: "blaze cable flute board seal tile".into(),
+                ..confirm.clone()
+            },
+        ] {
+            assert_ne!(other, confirm);
         }
     }
 
