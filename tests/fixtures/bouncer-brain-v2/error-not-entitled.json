@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "code": "not_entitled",
+    "message": "the plan of this account does not include this service"
+  }
+}

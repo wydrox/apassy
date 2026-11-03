@@ -348,7 +348,7 @@ v1 section 9 applies. A v2 client sends only the fields of this contract; a v2 s
 | `owner-deleted.json` | 200 body of `DELETE /v1/owner` |
 | `sign-in-challenge-request.json` | Request of `POST /v1/sign-in/challenge` |
 | `sign-in-challenge.json` | 200 body of `POST /v1/sign-in/challenge` |
-| `sign-in-request.json` | Request of `POST /v1/sign-in` (the signature is a placeholder; the test signs) |
+| `sign-in-request.json` | Request of `POST /v1/sign-in`. Its signature is the relay-sync-v1 vector of the relay sign-in message: it must verify as a relay sign-in and never as a brain sign-in. The test signs a brain message with the vector key |
 | `sign-in.json` | 200 body of `POST /v1/sign-in` |
 | `directory-request.json`, `directory-answer.json` | Section 7.1 |
 | `revoke-request.json`, `revoke.json`, `forget-request.json`, `forget.json` | Section 7.2 |

@@ -1,0 +1,13 @@
+{
+  "job": "7e57da7a7e57da7a7e57da7a7e57da7a7e57da7a7e57da7a7e57da7a7e57da7a",
+  "state": "deleted",
+  "created_at": 1790000000,
+  "started_at": 1790000004,
+  "ended_at": 1790000412,
+  "examples_held": false,
+  "examples_deleted_at": 1790000412,
+  "examples_deadline": 1790086400,
+  "result_deadline": null,
+  "error": null,
+  "result": null
+}

@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "kind": "apassy-train-job-v1",
+  "name": "apassy-remote-v1",
+  "base": {
+    "revision": "ba5e0000ba5e0000ba5e0000ba5e0000ba5e0000",
+    "weights_sha256": "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e"
+  },
+  "files": {
+    "train": {"size_bytes": 41213, "sha256": "7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a7a1a"},
+    "val": {"size_bytes": 9204, "sha256": "0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a0a1a"}
+  },
+  "stats": {
+    "lines": 420,
+    "owner_decisions": 340,
+    "owner_approvals": 300,
+    "owner_denials": 40,
+    "without_user_request": 12,
+    "flagged_denials": 4,
+    "conflicts": 2,
+    "task_match_yes": 296,
+    "task_match_no": 36,
+    "destroy_yes": 8,
+    "keep": 1200,
+    "denial_weight": 3,
+    "train": 540,
+    "val": 60
+  },
+  "keep_heads": false
+}
