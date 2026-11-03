@@ -68,7 +68,7 @@ Text for the form:
 >    console → Access controls: the `funnel` node attribute for this Mac).
 > 2. Install Apassy from https://apassy.wyderka.cc, create a vault, and add a synthetic item:
 >    name `httpbin test`, value `httpbin-test-7f3a9c1e5b2d4f60a8e1c3b5d7f9a2c4`, variable
->    `HTTPBIN_TOKEN`, host `httpbin.org`. If Apassy says that `httpbin.org` is a whole domain, allow it
+>    `HTTPBIN_TOKEN`, host `httpbingo.org`. If Apassy says that `httpbingo.org` is a whole domain, allow it
 >    for this test item.
 > 3. In Apassy → Settings → Cloud agents, turn on **Public route (Tailscale Funnel)**. Click
 >    **Add a cloud agent…**, name it `Grok Bot`, kind Grok Bot, pick only `httpbin test`, and click
@@ -81,8 +81,8 @@ Text for the form:
 >    Expected: the Bot adds the server and lists the tools `apassy_list_access`, `apassy_request_run`,
 >    and `apassy_run_status`.
 > 2. Prompt: `Use Apassy: list the credentials that you can use.`
->    Expected: exactly one item, `httpbin test`, variable `HTTPBIN_TOKEN`, host `httpbin.org`. No value.
-> 3. Prompt: `Use Apassy to call https://httpbin.org/bearer with my HTTPBIN_TOKEN as a bearer token,
+>    Expected: exactly one item, `httpbin test`, variable `HTTPBIN_TOKEN`, host `httpbingo.org`. No value.
+> 3. Prompt: `Use Apassy to call https://httpbingo.org/bearer with my HTTPBIN_TOKEN as a bearer token,
 >    and show me the response body.`
 >    Expected: the Bot calls `apassy_request_run` with a command like
 >    `curl -s -H "Authorization: Bearer $HTTPBIN_TOKEN" "$APASSY_BASE_HTTPBIN_TOKEN/bearer"` and says that

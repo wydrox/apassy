@@ -260,11 +260,11 @@ Example (synthetic):
   "expires_at": 1793700600,
   "env": {
     "HTTPBIN_TOKEN": "httpbin-test-Qm4tZ8rV1xK0pL6sYw2nC9dF3hJ5aB7e",
-    "APASSY_BASE_HTTPBIN_TOKEN": "https://my-mac.tailnet-example.ts.net:8443/p/apassy_ses_…/httpbin.org",
+    "APASSY_BASE_HTTPBIN_TOKEN": "https://my-mac.tailnet-example.ts.net:8443/p/apassy_ses_…/httpbingo.org",
     "APASSY_RELAY_SESSION_EXPIRES": "1793700600"
   },
   "placeholders": ["HTTPBIN_TOKEN"],
-  "base_urls": {"httpbin.org": "https://my-mac.tailnet-example.ts.net:8443/p/apassy_ses_…/httpbin.org"}
+  "base_urls": {"httpbingo.org": "https://my-mac.tailnet-example.ts.net:8443/p/apassy_ses_…/httpbingo.org"}
 }
 ```
 
