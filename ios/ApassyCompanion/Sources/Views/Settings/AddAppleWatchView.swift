@@ -87,7 +87,7 @@ struct AddAppleWatchView: View {
     /// Why the scan cannot start, or why the last code did not reach the watch.
     private var problem: String? {
         if !watch.isPaired { return "Pair an Apple Watch with this iPhone first." }
-        if !watch.isWatchAppInstalled { return "Install Apassy on your Apple Watch in the Watch app on this iPhone." }
+        if !watch.isWatchAppInstalled { return AppleWatchLink.installHint }
         switch step {
         case .failed(let message?):
             return "Couldn't send the code to your watch. Keep the watch near this iPhone and try again. \(message)"

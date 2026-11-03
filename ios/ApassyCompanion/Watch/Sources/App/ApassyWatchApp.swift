@@ -22,6 +22,7 @@ struct ApassyWatchApp: App {
         WindowGroup {
             WatchRootView(model: model)
                 .onAppear { receiver.activate() }
+                .onChange(of: model.connectionReport, initial: true) { _, report in receiver.publish(report) }
         }
     }
 }
