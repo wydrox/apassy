@@ -1,0 +1,8 @@
+{
+  "status": "ok",
+  "loaded": ["english"],
+  "device": "cpu",
+  "contract": "bouncer-brain-v2",
+  "jobs": true,
+  "sign_in": false
+}
