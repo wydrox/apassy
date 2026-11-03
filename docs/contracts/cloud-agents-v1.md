@@ -412,16 +412,20 @@ and the names of the swapped variables. Never a header, a query, a body, a place
 **The failed-auth limiter.** The public listener counts its failed authentications: a bearer token that
 names no team or that the node refuses (401 `unauthenticated` or `token_expired`), and a proxy path whose
 session key names no live session. A code or refresh token that `POST /oauth/token` refuses counts for
-its client only (section 4.2). The window is 60 seconds from the first failure. With 20 failures in
-the window, every further request of the public listener in that window gets HTTP 429 `rate_limited`
-with `Retry-After: 60`, also a request with a good token. Then the window ends and the count starts
-again. The check comes after the 404 of section 3 and before the token, the body, or the proxy. The node
-writes at most one audit row in 10 seconds for it (`rate_limited`, scope `public`). The count is in
-memory only.
+its client only (section 4.2), and the routes of the authorization flow are answered before this check:
+the limiter never refuses them. Since 0.5.16 (review 0.5.16) `POST /mcp` and `/p/` count by the source
+address that Funnel forwards (the last address of `X-Forwarded-For`; an IPv6 address by its /64): with
+20 failures of one address in a window of 60 seconds from its first failure, every further request of
+that address in the window gets HTTP 429 `rate_limited` with `Retry-After: 60`, also a request with a
+good token. Requests without an address share one window with a limit of 600. The listener keeps at
+most 4096 address windows; when the table is full, a new address counts in the shared window. Then the
+window ends and the count starts again. The check comes after the 404 of section 3 and before the
+token, the body, or the proxy. The node writes at most one audit row in 10 seconds for it
+(`rate_limited`, scope `public`, bucket `source` or `shared`). The counts are in memory only.
 
-A stranger with bad tokens can hold the public listener at 429 for the rest of each window, and the
-owner's cloud agents with it. A client that gets 429 waits `Retry-After` seconds and does not send bad
-tokens in a loop.
+A stranger with bad tokens holds only their own address at 429; the owner's cloud agents from other
+addresses keep working. A stranger with thousands of addresses can fill the table and then the shared
+window. A client that gets 429 waits `Retry-After` seconds and does not send bad tokens in a loop.
 
 ## 11. Revocation, lock, and quit
 
