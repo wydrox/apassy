@@ -274,11 +274,11 @@ impl World {
     }
 
     fn face_id(&self) -> impl Fn(&[u8]) -> Vec<u8> {
-        |message| answer_key().sign(message).expect("sign")
+        |message: &[u8]| answer_key().sign(message).expect("sign")
     }
 
     fn relay_key(&self) -> impl Fn(&[u8]) -> Vec<u8> + '_ {
-        |message| self.phone.client.sign(message).expect("sign")
+        |message: &[u8]| self.phone.client.sign(message).expect("sign")
     }
 
     fn refused_lines(&self) -> Vec<String> {
@@ -466,25 +466,13 @@ fn a_forged_or_replayed_connect_answer_is_refused_and_logged() {
             now() - 600,
         )
         .expect("posted");
-    // A run answer kind on the connect card.
-    let mut run_kind = AnswerBody::connect(
-        &record.qid,
-        PHONE_UUID,
-        ConnectChoice::Allow,
-        &card.digest,
-        now(),
-        b"sig",
-    );
-    run_kind.kind = "approve_once".to_owned();
-    world.post_body(&record, &run_kind).expect("posted");
-    let lines = wait_until("three refused lines", || {
+    let lines = wait_until("two refused lines", || {
         let lines = world.refused_lines();
-        (lines.len() >= 3).then_some(lines)
+        (lines.len() >= 2).then_some(lines)
     });
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Test iPhone did not count: its signature does not verify")),
+        lines.iter().any(|line| line
+            .contains("An answer from Test iPhone did not count: its signature does not verify.")),
         "{lines:?}"
     );
     assert!(
@@ -494,17 +482,12 @@ fn a_forged_or_replayed_connect_answer_is_refused_and_logged() {
         "{lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("did not count: it has a bad form")),
-        "{lines:?}"
-    );
-    assert!(
         world.answers.lock().unwrap().is_empty(),
         "nothing reached the node"
     );
     assert_eq!(world.record(&record.qid).state, "open");
-    // A valid Deny with the relay key counts, and settles the question as denied.
+    // A valid Deny with the relay key counts, and settles the question as denied (the
+    // relay takes three answers of a device per question).
     world
         .answer(
             &record,
@@ -524,6 +507,42 @@ fn a_forged_or_replayed_connect_answer_is_refused_and_logged() {
     let settle = open_settle(&settled, &world.phone.team, &world.phone.keys).expect("settle");
     assert_eq!(settle.outcome, "denied");
     assert_eq!(settle.kind.as_deref(), Some("deny"));
+
+    // The next connect request (one card at a time): a run answer kind does not count.
+    wait_until("the first card leaves the view", || {
+        world.worker.view().connect_posted.is_empty().then_some(())
+    });
+    world
+        .worker
+        .post_connect(connect("cr_kind"))
+        .expect("taken");
+    let (record, card) = world.posted("cr_kind");
+    let mut run_kind = AnswerBody::connect(
+        &record.qid,
+        PHONE_UUID,
+        ConnectChoice::Allow,
+        &card.digest,
+        now(),
+        b"sig",
+    );
+    run_kind.kind = "approve_once".to_owned();
+    world.post_body(&record, &run_kind).expect("posted");
+    wait_until("a third refused line", || {
+        world
+            .refused_lines()
+            .iter()
+            .any(|line| line.contains("did not count: it has a bad form"))
+            .then_some(())
+    });
+    assert_eq!(
+        world.answers.lock().unwrap().len(),
+        1,
+        "still only the Deny"
+    );
+    world.worker.end_connect("cr_kind", ConnectEnd::Expired);
+    let settled = world.settled(&record.qid);
+    let settle = open_settle(&settled, &world.phone.team, &world.phone.keys).expect("settle");
+    assert_eq!(settle.outcome, "timed_out");
 }
 
 #[test]
