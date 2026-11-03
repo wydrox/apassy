@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apassy · Settings → Devices</title>
+<!--
+  Mockup for work unit N7 of implementation-plan-s2-s3.md: Mac Settings → Devices (D9) and
+  the Wi-Fi companion notice (W1, ADR 0028 stage 3). Static frames, final quality, for the
+  implementer; the owner asked not to approve intermediate steps. Synthetic data only.
+  The visual language is copied from cloud-agents-mockup.html (the approved layout) and
+  app-v2-mockup.html: the same CSS block, then a short block of additions. Light
+  appearance only, as the app. One self-contained file: inline CSS and SVG, no script,
+  no font file, no network request. The QR codes are decorative and encode nothing.
+-->
+<style>
+:root{
+  --bg:#ffffff;--side:#ececef;--detail:#f6f6f7;--group:#ffffff;
+  --line:rgba(0,0,0,.09);--line2:rgba(0,0,0,.06);
+  --label:rgba(0,0,0,.88);--sec:rgba(0,0,0,.52);--ter:rgba(0,0,0,.30);
+  --fill:rgba(0,0,0,.05);--fill2:rgba(0,0,0,.08);--fill3:rgba(0,0,0,.12);
+  --accent:#0a6cff;--accent-press:#005ee0;--sel:#0a6cff;--link:#0066d6;
+  --red:#e0352b;--orange:#c86a00;--green:#24a148;
+  --t-warn:#a65200;--t-crit:#c81e1e;--t-good:#1d8036;--t-acc:#0066d6;
+  --s-auto:#0a6cff;--s-ask:#e8890c;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;color:var(--label);-webkit-font-smoothing:antialiased;background:#cfd0d5}
+svg{display:block}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+
+/* ---- The page of frames. ---- */
+.page{min-width:1260px;padding:36px 40px 70px}
+.intro{max-width:1180px;margin:0 auto 34px}
+.intro h1{font-size:22px;font-weight:700;margin:0 0 6px;letter-spacing:-.01em}
+.intro p{margin:0 0 6px;color:rgba(0,0,0,.62);max-width:900px}
+.intro ol{margin:10px 0 0;padding-left:20px;color:rgba(0,0,0,.62);columns:2;column-gap:40px;max-width:900px}
+.frame{max-width:1180px;margin:0 auto 52px}
+.flabel{margin:0 0 12px 4px}
+.flabel b{font-size:14px;font-weight:700;color:#232327}
+.flabel span{display:block;font-size:12px;color:rgba(0,0,0,.55);margin-top:2px;max-width:940px}
+.flabel .fnum{display:inline-grid;color:#fff;font-size:11px;margin-top:0;max-width:none}
+.fnum{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#232327;color:#fff;font-size:11px;font-weight:700;margin-right:8px;vertical-align:1px}
+.nf{display:inline-block;font-size:9.5px;font-weight:700;color:#7a3ec2;background:rgba(122,62,194,.12);border-radius:4px;padding:0 4px;margin-left:4px;vertical-align:1px;letter-spacing:.02em;line-height:14px;font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+
+/* ---- The window, as in app-v2-mockup.html. ---- */
+.win{display:flex;width:100%;min-height:660px;background:var(--bg);border-radius:12px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 22px 70px rgba(0,0,0,.28);position:relative}
+.side{width:216px;flex:none;background:var(--side);border-right:.5px solid var(--line);display:flex;flex-direction:column}
+.side .chrome{height:52px;flex:none;display:flex;align-items:center;padding:0 18px;gap:8px}
+.lights{display:flex;gap:8px}.lights i{width:12px;height:12px;border-radius:50%;display:block;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.15)}
+.sidetoggle{margin-left:auto;width:28px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--sec)}
+.sidetoggle svg{width:17px;height:17px}
+.side .scroll{flex:1;padding:0 10px 10px}
+.sh{font-size:11px;font-weight:600;color:var(--sec);padding:12px 8px 4px}
+.si{display:flex;align-items:center;gap:7px;width:100%;height:28px;border-radius:6px;padding:0 8px}
+.si.on{background:rgba(0,0,0,.09)}
+.si svg{width:15px;height:15px;flex:none;color:var(--accent)}
+.si .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.si .cnt{color:var(--sec);font-size:12px;font-variant-numeric:tabular-nums}
+.si .bdg{font-size:11px;font-weight:600;border-radius:9px;padding:0 6px;min-width:18px;text-align:center;background:var(--red);color:#fff}
+.si.l1{padding-left:22px}
+.sq{width:13px;height:13px;border-radius:3.5px;flex:none;margin:0 1px;display:grid;place-items:center;color:#fff;font-size:8.5px;font-weight:700;line-height:1}
+.side .foot{padding:8px 10px 10px;border-top:.5px solid var(--line)}
+.me{display:flex;align-items:center;gap:8px;padding:4px 6px}
+.me .av{width:22px;height:22px;border-radius:50%;background:linear-gradient(#ffa43a,#ff8a00);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:600;flex:none}
+.me .t{flex:1;line-height:1.2}.me .t small{display:block;color:var(--sec);font-size:11px}
+.ib{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--sec);flex:none}
+.ib svg{width:16px;height:16px}
+
+/* The list column and the detail of Decisions, as today. */
+.listcol{width:300px;flex:none;border-right:.5px solid var(--line);display:flex;flex-direction:column;background:var(--bg)}
+.tb{height:52px;flex:none;display:flex;align-items:center;padding:0 10px 0 16px;gap:6px}
+.tb .ttl{flex:1;min-width:0;line-height:1.2}
+.tb .ttl b{font-size:13px;font-weight:700;display:block}
+.tb .ttl small{font-size:11px;color:var(--sec)}
+.rows{flex:1;padding:4px 8px 12px}
+.gh{font-size:11px;font-weight:600;color:var(--sec);padding:10px 8px 4px;display:flex;align-items:center}
+.gh span{margin-left:auto;font-weight:400}
+.r{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;min-height:48px}
+.r.top{align-items:flex-start}
+.r.on{background:var(--sel);color:#fff}
+.r.on .sub,.r.on .meta,.r.on .sub3{color:rgba(255,255,255,.82)}
+.r .tx{flex:1;min-width:0}
+.r .ttl2{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub,.r .sub3{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub3 .bad{color:var(--t-crit)}
+.r .meta{display:flex;align-items:center;gap:6px;color:var(--sec);font-size:12px;flex:none;font-variant-numeric:tabular-nums}
+.dotp{width:7px;height:7px;border-radius:50%;background:var(--red);flex:none}
+.r.on .dotp{background:#fff}
+.tm{color:var(--orange);font-weight:500;font-variant-numeric:tabular-nums}
+.r.on .tm{color:#fff}
+.tile{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px;flex:none;letter-spacing:-.02em;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12)}
+.tile svg{width:16px;height:16px}
+.tile.s{width:20px;height:20px;border-radius:5px;font-size:10px}.tile.s svg{width:11px;height:11px}
+.ava{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px;flex:none;position:relative}
+.ava.l{width:56px;height:56px;font-size:22px}
+.ava.s{width:22px;height:22px;font-size:10.5px}
+.ava .cl{position:absolute;right:-3px;bottom:-3px;width:15px;height:15px;border-radius:50%;background:#fff;color:var(--accent);display:grid;place-items:center;box-shadow:0 0 0 .5px rgba(0,0,0,.15)}
+.ava .cl svg{width:10px;height:10px}
+.ava.s .cl{width:13px;height:13px;right:-4px;bottom:-4px}.ava.s .cl svg{width:8.5px;height:8.5px}
+.ava.l .cl{width:22px;height:22px;right:-2px;bottom:-2px}.ava.l .cl svg{width:14px;height:14px}
+.detail{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.detail .tb{justify-content:flex-end;padding:0 12px;gap:4px}
+.dscroll{flex:1}
+.dpad{max-width:640px;margin:0 auto;padding:0 28px 34px}
+
+/* The wide pages of Bouncer: Overview, Agents, an agent, Logs. */
+.content{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.content .tb{padding:0 16px 0 24px}
+.tbtn{height:28px;border-radius:6px;padding:0 9px 0 5px;display:flex;align-items:center;gap:2px;color:var(--label);flex:none;background:var(--fill)}
+.tbtn svg{width:16px;height:16px;color:var(--sec)}
+.scopebar{display:flex;align-items:center;gap:6px;padding:0 24px 12px;font-size:12.5px;color:var(--sec);flex-wrap:wrap;position:relative}
+.scopebar .grow{flex:1}
+.listcol .scopebar{padding:0 16px 8px;row-gap:6px}
+.popm{display:inline-flex;align-items:center;gap:7px;height:22px;padding:0 8px 0 9px;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 .5px 1px rgba(0,0,0,.07);color:var(--label);font-size:12.5px;white-space:nowrap}
+.popm::after{content:"";width:5px;height:5px;border-right:1.5px solid var(--sec);border-bottom:1.5px solid var(--sec);transform:rotate(45deg) translateY(-2px)}
+.popm.open{box-shadow:0 0 0 2px rgba(10,108,255,.45)}
+.wpad{max-width:900px;margin:0 auto;padding:2px 28px 34px}
+.wpad.n{max-width:720px}
+.menu{position:absolute;background:rgba(250,250,250,.98);border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.2);padding:5px;z-index:30;min-width:290px;font-size:13px;color:var(--label)}
+.menu .mi{display:flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:5px}
+.menu .mi .ck{width:14px;flex:none;font-size:12px;text-align:center}
+.menu .mi small{margin-left:auto;padding-left:14px;color:var(--sec);font-size:12px}
+.menu .mi.sel{background:var(--accent);color:#fff}.menu .mi.sel small{color:rgba(255,255,255,.85)}
+.menu .mi.dim{color:var(--sec)}
+.menu hr{border:0;border-top:.5px solid var(--line);margin:4px 6px}
+
+.hdr{display:flex;align-items:center;gap:14px;margin:6px 0 22px}
+.hdr h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-.01em;line-height:1.2}
+.hdr .s{color:var(--sec);margin-top:2px}
+.caps{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
+.cap{font-size:11px;font-weight:500;border-radius:5px;padding:1px 6px;background:var(--fill2);color:var(--sec);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.cap svg{width:11px;height:11px}
+.cap.red{background:rgba(224,53,43,.1);color:#c42b22}
+.cap.acc{background:rgba(10,108,255,.1);color:var(--t-acc)}
+.gl{font-size:12px;font-weight:600;color:var(--sec);margin:20px 2px 6px;display:flex;align-items:center;gap:6px}
+.gl span{margin-left:auto;font-weight:400}
+.grp{background:var(--group);border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.08),0 .5px 1.5px rgba(0,0,0,.05)}
+.fr{display:flex;align-items:center;gap:10px;min-height:38px;padding:7px 12px;position:relative}
+.fr+.fr::before,.tr+.tr::before,.expand+.tr::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.fr.top{align-items:flex-start}
+.fr .k{flex:none;min-width:130px;color:var(--label)}
+.fr .v{flex:1;min-width:0;text-align:right;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fr .v.l{text-align:left;color:var(--label);white-space:normal}
+.fr .kn{flex:1;min-width:0}
+.fr .kn .nt{font-size:12px;color:var(--sec);margin-top:2px;line-height:1.4}
+.fr .chev,.tr .chev{color:var(--ter);font-size:15px}
+.lnk{color:var(--link)}
+.mono{font-family:var(--mono);font-size:12px}
+.pb{border:0;border-radius:6px;height:24px;padding:0 10px;background:var(--fill2);font-size:12.5px;font-weight:500;flex:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit;color:var(--label)}
+.pb svg{width:13px;height:13px;color:var(--sec)}
+.pb.pri{background:var(--accent);color:#fff}
+.sw{width:32px;height:19px;border-radius:10px;background:var(--fill3);position:relative;flex:none;border:0;padding:0}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 .5px 2px rgba(0,0,0,.3)}
+.sw.on{background:var(--green)}.sw.on::after{left:15px}
+.sw.dis{opacity:.4}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px;vertical-align:0;flex:none}
+.dot.warn{background:#ff9500}.dot.crit{background:#ff3b30}.dot.off{background:#a0a0a6}
+.tn{font-size:12px;line-height:1.4;display:flex;gap:6px;align-items:flex-start}
+.tn svg{width:13px;height:13px;flex:none;margin-top:1.5px}
+.tn.warn{color:var(--t-warn)}.tn.crit{color:var(--t-crit)}.tn.good{color:var(--t-good)}.tn.acc{color:var(--t-acc)}
+.np p{margin:0 0 5px;font-size:12px;color:var(--sec);line-height:1.4}.np p:last-child{margin:0}
+.act{display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0}
+.act .tx{flex:1;min-width:0;text-align:left}
+.act .a1{color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act .a1.mono{font-size:12px}
+.act .a2{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act .when{font-size:12px;color:var(--ter);flex:none}
+.st{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;flex:none;margin-top:1px}
+.st svg{width:10px;height:10px;color:#fff}
+.st.ok{background:var(--green)}.st.you{background:var(--accent)}.st.no{background:var(--red)}.st.wait{background:#ff9500}
+.cmd{font-family:var(--mono);font-size:12px;background:#f2f2f4;border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-all;color:var(--label);flex:1;text-align:left}
+.note{font-size:12px;color:var(--sec);margin:6px 4px 0;line-height:1.4}
+.meta-foot{text-align:center;font-size:11px;color:var(--ter);margin-top:22px;line-height:1.45}
+.abar{flex:none;border-top:.5px solid var(--line);background:rgba(246,246,247,.92);padding:10px 16px;display:flex;align-items:center;gap:8px}
+.abar .cap2{flex:1;font-size:11.5px;color:var(--sec);min-width:0}
+.btn{border:0;border-radius:7px;height:28px;padding:0 14px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.16),0 .5px 1px rgba(0,0,0,.08);font-weight:500;white-space:nowrap;flex:none;font-family:inherit;font-size:13px;color:var(--label);display:inline-flex;align-items:center;gap:6px}
+.btn svg{width:14px;height:14px;color:var(--sec)}
+.btn.pri{background:var(--accent);color:#fff;box-shadow:0 .5px 1px rgba(0,0,0,.2)}
+.btn.pri svg{color:#fff}
+.btn.des{color:var(--red)}
+.field{width:100%;border:0;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.18) inset;padding:5px 9px;display:block;font:inherit;color:inherit;min-height:44px}
+.field.ph{color:var(--ter)}
+.seg{display:inline-flex;background:var(--fill2);border-radius:7px;padding:2px;gap:2px;flex:none}
+.seg span{padding:1px 10px;border-radius:5px;font-size:12px;color:var(--label)}
+.seg span.on{background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.12);font-weight:500}
+.searchf{height:24px;border-radius:7px;background:var(--fill);display:flex;align-items:center;gap:6px;padding:0 8px;color:var(--ter);font-size:12.5px;width:230px}
+.searchf svg{width:13px;height:13px}
+.pgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.pcard{background:var(--detail);border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18);padding:14px 22px 20px}
+.pcard.flush{padding:0;overflow:hidden;display:flex;flex-direction:column}
+.pcard .plabel{font-size:12px;font-weight:600;color:#232327;margin:0 0 2px}
+.pcard .plabel small{display:block;font-weight:400;color:rgba(0,0,0,.5)}
+.pcard.flush .plabel{padding:14px 22px 0}
+
+/* Overview. */
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.stats.four{grid-template-columns:repeat(4,1fr)}
+.stat{background:#fff;border-radius:10px;box-shadow:0 0 0 1px rgba(0,0,0,.07);padding:11px 14px 12px}
+.stat .sl{font-size:12px;color:var(--sec)}
+.stat .sn{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em;margin:1px 0 1px;line-height:1.25}
+.stat .sn small{font-size:13px;font-weight:500;color:var(--sec);margin-left:3px}
+.stat .ss{font-size:11.5px;color:var(--sec);line-height:1.35}
+.two{display:grid;grid-template-columns:1.2fr 1fr;gap:16px;align-items:start}
+.chart{padding:12px 14px 8px}
+.chart svg text{font:11px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;fill:rgba(0,0,0,.52)}
+.chart svg text.v{fill:rgba(0,0,0,.72);font-weight:500}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--sec);margin:0 0 6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.att{display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0}
+.att .ai{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;flex:none;margin-top:1px}
+.att .ai svg{width:13px;height:13px;color:#fff}
+.att .ai.warn{background:#ff9500}.att .ai.crit{background:#ff3b30}.att .ai.off{background:#8e8e93}
+.att .t1{color:var(--label);font-weight:500}
+.att .t2{font-size:12px;color:var(--sec);line-height:1.4;margin-top:1px}
+.att .t3{font-size:12px;margin-top:3px}
+
+/* Tables in groups. */
+.tr{display:grid;align-items:center;gap:10px;padding:7px 12px;min-height:40px;position:relative}
+.tr.th{font-size:11px;font-weight:600;color:var(--sec);min-height:28px;padding:6px 12px 5px}
+.tr .num{text-align:right;font-variant-numeric:tabular-nums}
+.tr .sec{color:var(--sec)}
+.tr .cut{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.tr.warnrow .hl{color:var(--t-warn);font-weight:500}
+.agc{display:flex;align-items:center;gap:9px;min-width:0}
+.agc .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.g-ov{grid-template-columns:2fr 1.5fr .7fr .8fr .7fr 1.1fr}
+.g-ag{grid-template-columns:1.7fr 1.5fr 1.35fr .75fr .75fr 14px}
+.g-lg{grid-template-columns:52px 1.25fr 1.05fr 1.05fr 1.3fr 1.5fr 14px}
+.g-px{grid-template-columns:70px 56px 1fr 1.2fr}
+.stt{display:inline-flex;align-items:center;gap:0;white-space:nowrap}
+.stt.live{color:var(--t-good)}
+.stt.wait{color:var(--t-warn)}
+.stt.idle{color:var(--sec)}
+.envh{display:flex;align-items:center;gap:8px;margin:24px 2px 8px}
+.envh:first-child{margin-top:8px}
+.envh svg{width:17px;height:17px;color:var(--sec)}
+.envh b{font-size:13.5px;font-weight:700}
+.envh .r2{margin-left:auto;font-size:12px;color:var(--sec);display:flex;align-items:center;gap:4px}
+.dim{opacity:.5}
+.expand{background:#fafafb;border-top:.5px solid var(--line2);padding:10px 14px 12px 76px}
+.expand .gl{margin:10px 0 5px}
+.expand .gl:first-child{margin-top:0}
+.disc{display:flex;align-items:center;gap:6px;color:var(--sec);font-size:12.5px;margin:10px 6px 0}
+.disc::before{content:"";width:5px;height:5px;border-right:1.5px solid var(--sec);border-bottom:1.5px solid var(--sec);transform:rotate(-45deg);margin-right:3px}
+
+/* The browser page of the connect flow. */
+.bwin{background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18)}
+.bbar{height:38px;background:#ececef;border-bottom:.5px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 12px}
+.bbar .lights i{width:11px;height:11px}
+.burl{flex:1;height:24px;border-radius:6px;background:#fff;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12);display:flex;align-items:center;gap:6px;padding:0 9px;font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden}
+.burl svg{width:11px;height:11px;flex:none}
+.burl b{color:var(--label);font-weight:400}
+.bpage{padding:48px 40px 44px;text-align:center;min-height:360px}
+.bpage .logo{width:44px;height:40px;margin:0 auto 18px}
+.bpage h2{font-size:19px;font-weight:700;margin:0 auto 8px;max-width:360px;line-height:1.3;letter-spacing:-.01em}
+.bpage p{margin:0 auto 6px;color:var(--sec);max-width:340px;line-height:1.45}
+.bcode{display:inline-block;margin:16px 0 4px;font-family:var(--mono);font-size:20px;letter-spacing:3px;background:#f2f2f4;border-radius:8px;padding:8px 16px;color:var(--label)}
+.bwait{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:22px;color:var(--sec);font-size:12.5px}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid rgba(0,0,0,.12);border-top-color:var(--accent)}
+.bdone{width:44px;height:44px;border-radius:50%;background:var(--green);display:grid;place-items:center;margin:0 auto 16px}
+.bdone svg{width:24px;height:24px;color:#fff}
+.bfoot{margin-top:26px;font-size:11px;color:var(--ter)}
+
+/* The notes at the end. */
+.notes{max-width:1180px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.15);padding:22px 28px 24px}
+.notes h2{font-size:15px;margin:0 0 8px}
+.notes h2+p{margin-top:0}
+.notes table{border-collapse:collapse;width:100%;font-size:12.5px;margin:8px 0 18px}
+.notes th,.notes td{text-align:left;vertical-align:top;padding:6px 10px 6px 0;border-top:.5px solid var(--line)}
+.notes th{font-size:11.5px;color:var(--sec);font-weight:600;border-top:0}
+.notes td:first-child{white-space:nowrap}
+.notes ul{margin:6px 0 16px;padding-left:18px;line-height:1.5}
+.notes code{font-family:var(--mono);font-size:11.5px;background:#f2f2f4;border-radius:4px;padding:0 4px}
+
+/* Help (i) and its popover, the Read-only tag, the empty-state block. */
+.hi{width:18px;height:18px;border-radius:50%;display:inline-grid;place-items:center;color:var(--sec);flex:none}
+.hi svg{width:15px;height:15px}
+.hi.open{color:var(--accent);background:rgba(10,108,255,.1)}
+.hpop{position:absolute;width:300px;background:#fff;border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.22);padding:11px 14px 9px;z-index:20;font-size:12px;line-height:1.45;color:var(--label)}
+.hpop p{margin:0 0 5px}
+.cap.ro svg{width:10px;height:10px}
+.es{padding:24px 16px;text-align:center}
+.es b{display:block;font-size:14px;font-weight:600}
+.es .l{color:var(--sec);font-size:12.5px;margin-top:3px}
+.es .bt{margin-top:12px;display:flex;gap:14px;justify-content:center;align-items:center}
+.es .bt:empty{display:none}
+
+/* ---- Added for the Devices mockup (N7). Everything above is copied from cloud-agents-mockup.html. ---- */
+.ib.on{background:rgba(0,0,0,.09);color:var(--label)}
+.listcol.set{width:260px}
+.listcol.set .r{min-height:46px}
+.listcol.set .tile{width:28px;height:28px;border-radius:7px}
+.listcol.set .tile svg{width:16px;height:16px}
+.hdr .tile{width:40px;height:40px;border-radius:10px}.hdr .tile svg{width:22px;height:22px}
+.dv{width:28px;height:28px;border-radius:7px;background:var(--fill2);display:grid;place-items:center;flex:none;color:var(--label)}
+.dv svg{width:17px;height:17px}
+.fr .when{font-size:12px;color:var(--sec);flex:none;min-width:62px;text-align:right;font-variant-numeric:tabular-nums}
+.route{font-size:11px;font-weight:500;border-radius:5px;padding:1px 6px;white-space:nowrap;flex:none;display:inline-flex;align-items:center;gap:4px}
+.route svg{width:11px;height:11px}
+.route.mac{background:rgba(36,161,72,.12);color:var(--t-good)}
+.route.hosted{background:var(--fill2);color:var(--sec)}
+.route.tail{background:rgba(10,108,255,.1);color:var(--t-acc)}
+.route.wifi{background:rgba(255,149,0,.14);color:var(--t-warn)}
+.words{font-family:var(--mono);font-size:12.5px;color:var(--label);letter-spacing:.02em}
+.bigwords{font-size:22px;font-weight:600;letter-spacing:.01em;text-align:center;margin:14px 0 4px;color:var(--label)}
+.bigwords span{display:inline-block;background:#fff;border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.12);padding:6px 14px;margin:0 4px}
+.pgrid.three{grid-template-columns:1fr 1fr 1fr}
+.shc{background:#f6f6f7;border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 18px 50px rgba(0,0,0,.22);padding:18px 20px 16px;display:flex;flex-direction:column}
+.shc .plabel{font-size:11px;font-weight:600;color:rgba(0,0,0,.45);margin:0 0 10px;text-transform:none}
+.shc h2{font-size:13px;font-weight:700;margin:0 0 2px}
+.shc .lead{color:var(--sec);font-size:12px;margin:0 0 12px}
+.shc .sbar{display:flex;gap:8px;justify-content:flex-end;margin-top:auto;padding-top:16px;align-items:center}
+.shc .sbar .left{margin-right:auto}
+.qrbox{display:flex;flex-direction:column;align-items:center;gap:8px;margin:2px 0 12px}
+.qr{width:168px;height:168px;border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.14)}
+.qr.s{width:132px;height:132px}
+.steps{counter-reset:s}
+.step{display:flex;gap:10px;align-items:flex-start;padding:8px 12px;position:relative}
+.step+.step::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.step .n{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;flex:none;font-size:10.5px;font-weight:700;background:var(--fill2);color:var(--sec);margin-top:1px}
+.step .n svg{width:10px;height:10px;color:#fff}
+.step.done .n{background:var(--green)}
+.step.now .n{background:var(--accent);color:#fff}
+.step .t1{font-weight:500}.step .t2{font-size:12px;color:var(--sec)}
+.step.later{color:var(--sec)}.step.later .t1{font-weight:400}
+.alert{display:flex;flex-direction:column;align-items:center;text-align:center}
+.alert .aic{width:44px;height:44px;border-radius:11px;display:grid;place-items:center;margin:4px 0 12px;color:#fff}
+.alert .aic svg{width:24px;height:24px}
+.alert h2{font-size:13px;margin-bottom:6px}
+.alert p{margin:0 0 4px;font-size:12px;color:var(--label);max-width:300px}
+.alert .sbar{justify-content:center;width:100%}
+.alert .sbar .btn{flex:1;justify-content:center}
+.chk{display:inline-grid;place-items:center;width:14px;height:14px;border-radius:4px;background:var(--accent);flex:none}
+.chk svg{width:9px;height:9px;color:#fff}
+.hud{display:inline-flex;align-items:center;gap:8px;background:rgba(40,40,42,.92);color:#fff;border-radius:10px;padding:8px 14px;font-size:12.5px}
+.hud svg{width:14px;height:14px}
+.veilw{position:absolute;inset:0;background:rgba(0,0,0,.12);display:flex;justify-content:center;align-items:flex-start;z-index:40}
+.veilw .shc{margin-top:70px;width:420px}
+.fnotes{max-width:1180px;margin:14px auto 0;padding:10px 16px 10px 34px;background:rgba(255,255,255,.55);border-radius:10px;font-size:12px;color:rgba(0,0,0,.66);line-height:1.5}
+.fnotes li{margin:1px 0}
+.fnotes b{color:#232327}
+.fnotes code,.flabel code{font-family:var(--mono);font-size:11px;background:rgba(0,0,0,.06);border-radius:4px;padding:0 4px}
+.hpop.below::before{content:"";position:absolute;top:-6px;right:18px;width:12px;height:12px;background:#fff;transform:rotate(45deg);box-shadow:-.5px -.5px 0 rgba(0,0,0,.12)}
+</style>
+</head>
+<body>
+
+<!-- The icons, used with <use href="#…">. -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9.5 5v14"/><path d="M5.5 8.5h2M5.5 11h2"/></g></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></g></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></g></symbol>
+  <symbol id="i-checkc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></g></symbol>
+  <symbol id="i-agent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></g></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19.5V13M10 19.5V8M15 19.5v-9M20 19.5V5"/></g></symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r=".6"/><circle cx="4.8" cy="12" r=".6"/><circle cx="4.8" cy="17.5" r=".6"/></g></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></g></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></g></symbol>
+  <symbol id="i-touch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 5.6A8.5 8.5 0 0 1 20.5 12v1.5M3.5 12a8.5 8.5 0 0 1 1.2-4.4M7 19.5a12 12 0 0 0 1.5-6.5 3.5 3.5 0 0 1 7 0v1M12 13a14 14 0 0 1-2 7.5M15.3 17.5a17 17 0 0 1-1 3M3.6 15.5a9 9 0 0 0 1-3.5"/></g></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4M12 17h.01"/></g></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></g></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></g></symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12.5l4 4 8-9"/></g></symbol>
+  <symbol id="i-no" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10M17 7L7 17"/></g></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6.5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="17.5" cy="12" r="1.7"/></g></symbol>
+  <symbol id="i-mini" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="8" width="17" height="8" rx="2.5"/><path d="M7 13h.01"/></g></symbol>
+  <symbol id="i-laptop" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></g></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></g></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></g></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></g></symbol>
+  <symbol id="i-mark" viewBox="0 0 229 206.2"><path d="M0,114.5A114.5,114.5 0 0 1 229,114.5L229,204.2A2,2 0 0 1 227,206.2L190.5,206.2A21,21 0 0 1 169.5,185.2L169.5,114.5A55,55 0 0 0 59.5,114.5L59.5,204.2A2,2 0 0 1 57.5,206.2L2,206.2A2,2 0 0 1 0,204.2Z" fill="#0e1820"/><path d="M75,97.76A2.5,2.5 0 0 1 78.47,95.45L105.54,106.78A26,26 0 0 1 121.5,130.76L121.5,178.76A3,3 0 0 1 119.95,181.39L76.48,205.38A1,1 0 0 1 75,204.51Z" fill="#0a77fe"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.6"/><path d="M5 6v12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6M5 12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6"/></g></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l7 2.6v5.4c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V6.1z"/></g></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M7.5 10l2.5 2-2.5 2M12.5 14.5h4"/></g></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5v10M7.5 10.5l4.5 4.5 4.5-4.5M5 19.5h14"/></g></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="10" height="18" rx="2.4"/><path d="M11 18h2"/></g></symbol>
+  <symbol id="i-watch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="6.5" width="10" height="11" rx="2.6"/><path d="M9 6.5l.6-3h4.8l.6 3M9 17.5l.6 3h4.8l.6-3M12 10v2.2l1.4 1"/></g></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4.5" width="16" height="6.5" rx="1.8"/><rect x="4" y="13" width="16" height="6.5" rx="1.8"/><path d="M7.5 7.75h.01M7.5 16.25h.01M11 7.75h5M11 16.25h5"/></g></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 9.5a12 12 0 0 1 17 0M6.5 12.8a7.5 7.5 0 0 1 11 0M9.5 16a3.2 3.2 0 0 1 5 0"/><circle cx="12" cy="19" r=".8" fill="currentColor"/></g></symbol>
+  <symbol id="i-tailnet" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6" cy="6" r="1.9"/><circle cx="12" cy="6" r="1.9"/><circle cx="18" cy="6" r="1.9" opacity=".35"/><circle cx="6" cy="12" r="1.9" opacity=".35"/><circle cx="12" cy="12" r="1.9"/><circle cx="18" cy="12" r="1.9"/><circle cx="6" cy="18" r="1.9" opacity=".35"/><circle cx="12" cy="18" r="1.9"/><circle cx="18" cy="18" r="1.9" opacity=".35"/></g></symbol>
+  <symbol id="i-relay" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.4 5.3 3.4 8.5s-1 6.1-3.4 8.5c-2.4-2.4-3.4-5.3-3.4-8.5s1-6.1 3.4-8.5z"/></g></symbol>
+  <symbol id="i-move" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h15M14 7l5 5-5 5"/></g></symbol>
+</svg>
+
+<div class="page">
+
+<div class="intro">
+  <h1>Apassy · Settings → Devices</h1>
+  <p>Mockup for N7 of implementation-plan-s2-s3.md (D9, with W1). Final frames for the implementer. Synthetic data, light appearance only. This Mac: Mac mini (office), tailnet address 100.101.7.12, port 8444. Now: Tue 3 Nov 2026, 14:20. Exact texts, help texts, choices, and open questions are at the end.</p>
+  <ol>
+    <li>Devices · tailnet on</li>
+    <li>Add an iPhone over the tailnet</li>
+    <li>Node states</li>
+    <li>Move approvals to this Mac</li>
+    <li>Revoke</li>
+    <li>Wi-Fi pairing notice</li>
+    <li>First run · no Tailscale</li>
+  </ol>
+</div>
+
+<!-- ============================================================ 1 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">1</span>Devices · tailnet on</b>
+    <span>The node group, every kind of device, and the Wi-Fi group in its notice state.</span></div>
+  <div class="win" style="min-height:820px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b></div></div><div class="rows"><div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · Apassy relay</div></div></div><div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div><div class="r on"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">Tailnet on · 6 devices</div></div></div><div class="r"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div><div class="r"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line · Extension</div></div></div><div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Apassy 0.5.18</div></div></div></div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div><h1>Devices</h1><div class="s">Tailnet on · 6 devices</div></div></div>
+
+        <div class="gl">This Mac</div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Your iPhone and Macs reach this Mac directly.</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw on"></span></div>
+          <div class="fr"><div class="k">Address</div><div class="v mono" style="color:var(--label)">100.101.7.12</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+          <div class="fr"><div class="k">Port</div><div class="v">8444</div></div>
+          <div class="fr"><div class="k">Node Words</div><div class="v words">harbor lemon quartz otter cedar mango</div><span class="hi"><svg><use href="#i-info"/></svg></span></div>
+          <div class="fr"><div class="k">Notifications</div><div class="v">On</div></div>
+        </div>
+
+        <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span><span>6</span></div>
+        <div class="grp">
+          <div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Hosts approvals</div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">iPhone · Approves runs</div></div><span class="route mac">via your Mac</span><span class="when">Now</span><span class="pb">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-watch"/></svg></div><div class="kn"><div>Rafal's Apple Watch</div><div class="nt">Apple Watch · Sees requests</div></div><span class="route mac">via your Mac</span><span class="when">4 min ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div><div class="nt">Mac · Syncs Personal</div></div><span class="route hosted">via Apassy relay</span><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (studio)</div><div class="nt">Mac · Syncs Personal</div></div><span class="route hosted">via Apassy relay</span><span class="when">1 h ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-server"/></svg></div><div class="kn"><div>build-box</div><div class="nt">Linux node · Syncs Acme team</div></div><span class="route tail">Tailnet</span><span class="when">5 min ago</span><span class="pb">Details…</span></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn pri">Add an iPhone or a Mac…</span></div>
+
+        <div class="gl">Wi-Fi Pairing</div>
+        <div class="grp">
+          <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Wi-Fi pairing ends in two versions.</span></div><span class="hi"><svg><use href="#i-info"/></svg></span></div>
+          <div class="fr"><div class="kn"><div>Listen on This Network</div></div><span class="sw on"></span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">Paired 12 Sep</div></div><span class="route wifi">Wi-Fi</span><span class="when">3 h ago</span><span class="pb">Remove…</span></div>
+          <div class="fr"><div class="k" style="color:var(--red)">Reset Pairing…</div><div class="v"></div></div>
+        </div>
+      </div></div>
+    </section>
+  </div>
+  <ul class="fnotes">
+    <li><b>Order:</b> This Mac (the node), Devices, the add button, Wi-Fi Pairing. Wi-Fi Pairing shows only while a Wi-Fi iPhone is paired.</li>
+    <li><b>Data:</b> <code>Node::status().tailnet</code> gives on, origin, bound, <code>pin_words</code>, devices. Other Macs come from the sync link, build-box from a pinned <code>RelayLink</code>.</li>
+    <li><b>One row per device.</b> A device in two teams gets one row; its roles join with " · ". The node's own team for cloud agents has no device rows.</li>
+    <li><b>Route</b> is one of four words: <code>via your Mac</code>, <code>via Apassy relay</code>, <code>Tailnet</code>, <code>Wi-Fi</code>. For a device in two teams, the approvals route wins.</li>
+    <li><b>Last contact:</b> "Now" under a minute, then "4 min ago", "3 h ago", "Yesterday", "12 Sep".</li>
+    <li><b>Owner checks:</b> the switch (<code>SetTailnetRoute</code>, Touch ID glyph beside it) and every Revoke… (<code>RevokeNodeDevice</code>, frame 5). The Linux node row opens the relay sheet (L4) with Details…, not Revoke.</li>
+    <li><b>One primary button:</b> Add an iPhone or a Mac…. It replaces "Get approvals on your iPhone" and the relay group's add button.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 2 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">2</span>Add an iPhone over the tailnet</b>
+    <span>The sheet of "Add an iPhone or a Mac…": the link, the safety words, done.</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">2a · The link</div>
+      <h2>Add a Device</h2>
+      <p class="lead">Scan with the Apassy app on the iPhone.</p>
+      <div class="qrbox"><svg viewBox="-2 -2 33 33" class="qr" role="img" aria-label="Pairing QR code (synthetic)"><rect x="-2" y="-2" width="33" height="33" fill="#fff"/><path d="M0 0h1v1h-1zM1 0h1v1h-1zM2 0h1v1h-1zM3 0h1v1h-1zM4 0h1v1h-1zM5 0h1v1h-1zM6 0h1v1h-1zM8 0h1v1h-1zM9 0h1v1h-1zM10 0h1v1h-1zM11 0h1v1h-1zM12 0h1v1h-1zM14 0h1v1h-1zM15 0h1v1h-1zM19 0h1v1h-1zM22 0h1v1h-1zM23 0h1v1h-1zM24 0h1v1h-1zM25 0h1v1h-1zM26 0h1v1h-1zM27 0h1v1h-1zM28 0h1v1h-1zM0 1h1v1h-1zM6 1h1v1h-1zM8 1h1v1h-1zM9 1h1v1h-1zM11 1h1v1h-1zM12 1h1v1h-1zM15 1h1v1h-1zM20 1h1v1h-1zM22 1h1v1h-1zM28 1h1v1h-1zM0 2h1v1h-1zM2 2h1v1h-1zM3 2h1v1h-1zM4 2h1v1h-1zM6 2h1v1h-1zM10 2h1v1h-1zM12 2h1v1h-1zM17 2h1v1h-1zM18 2h1v1h-1zM20 2h1v1h-1zM22 2h1v1h-1zM24 2h1v1h-1zM25 2h1v1h-1zM26 2h1v1h-1zM28 2h1v1h-1zM0 3h1v1h-1zM2 3h1v1h-1zM3 3h1v1h-1zM4 3h1v1h-1zM6 3h1v1h-1zM8 3h1v1h-1zM9 3h1v1h-1zM12 3h1v1h-1zM13 3h1v1h-1zM14 3h1v1h-1zM15 3h1v1h-1zM18 3h1v1h-1zM19 3h1v1h-1zM20 3h1v1h-1zM22 3h1v1h-1zM24 3h1v1h-1zM25 3h1v1h-1zM26 3h1v1h-1zM28 3h1v1h-1zM0 4h1v1h-1zM2 4h1v1h-1zM3 4h1v1h-1zM4 4h1v1h-1zM6 4h1v1h-1zM8 4h1v1h-1zM9 4h1v1h-1zM10 4h1v1h-1zM11 4h1v1h-1zM12 4h1v1h-1zM13 4h1v1h-1zM14 4h1v1h-1zM15 4h1v1h-1zM16 4h1v1h-1zM17 4h1v1h-1zM18 4h1v1h-1zM22 4h1v1h-1zM24 4h1v1h-1zM25 4h1v1h-1zM26 4h1v1h-1zM28 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM10 5h1v1h-1zM12 5h1v1h-1zM17 5h1v1h-1zM18 5h1v1h-1zM19 5h1v1h-1zM22 5h1v1h-1zM28 5h1v1h-1zM0 6h1v1h-1zM1 6h1v1h-1zM2 6h1v1h-1zM3 6h1v1h-1zM4 6h1v1h-1zM5 6h1v1h-1zM6 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h1v1h-1zM23 6h1v1h-1zM24 6h1v1h-1zM25 6h1v1h-1zM26 6h1v1h-1zM27 6h1v1h-1zM28 6h1v1h-1zM8 7h1v1h-1zM9 7h1v1h-1zM12 7h1v1h-1zM13 7h1v1h-1zM14 7h1v1h-1zM17 7h1v1h-1zM0 8h1v1h-1zM3 8h1v1h-1zM4 8h1v1h-1zM5 8h1v1h-1zM6 8h1v1h-1zM8 8h1v1h-1zM9 8h1v1h-1zM10 8h1v1h-1zM12 8h1v1h-1zM13 8h1v1h-1zM16 8h1v1h-1zM21 8h1v1h-1zM22 8h1v1h-1zM23 8h1v1h-1zM24 8h1v1h-1zM26 8h1v1h-1zM27 8h1v1h-1zM1 9h1v1h-1zM5 9h1v1h-1zM7 9h1v1h-1zM8 9h1v1h-1zM14 9h1v1h-1zM19 9h1v1h-1zM21 9h1v1h-1zM26 9h1v1h-1zM1 10h1v1h-1zM2 10h1v1h-1zM3 10h1v1h-1zM4 10h1v1h-1zM5 10h1v1h-1zM6 10h1v1h-1zM10 10h1v1h-1zM13 10h1v1h-1zM16 10h1v1h-1zM18 10h1v1h-1zM22 10h1v1h-1zM23 10h1v1h-1zM25 10h1v1h-1zM26 10h1v1h-1zM27 10h1v1h-1zM0 11h1v1h-1zM2 11h1v1h-1zM3 11h1v1h-1zM4 11h1v1h-1zM7 11h1v1h-1zM11 11h1v1h-1zM12 11h1v1h-1zM13 11h1v1h-1zM15 11h1v1h-1zM16 11h1v1h-1zM17 11h1v1h-1zM20 11h1v1h-1zM21 11h1v1h-1zM25 11h1v1h-1zM26 11h1v1h-1zM28 11h1v1h-1zM0 12h1v1h-1zM4 12h1v1h-1zM6 12h1v1h-1zM8 12h1v1h-1zM9 12h1v1h-1zM12 12h1v1h-1zM13 12h1v1h-1zM15 12h1v1h-1zM16 12h1v1h-1zM17 12h1v1h-1zM18 12h1v1h-1zM19 12h1v1h-1zM20 12h1v1h-1zM21 12h1v1h-1zM23 12h1v1h-1zM25 12h1v1h-1zM26 12h1v1h-1zM27 12h1v1h-1zM28 12h1v1h-1zM0 13h1v1h-1zM3 13h1v1h-1zM4 13h1v1h-1zM8 13h1v1h-1zM11 13h1v1h-1zM15 13h1v1h-1zM19 13h1v1h-1zM20 13h1v1h-1zM21 13h1v1h-1zM22 13h1v1h-1zM23 13h1v1h-1zM25 13h1v1h-1zM26 13h1v1h-1zM27 13h1v1h-1zM2 14h1v1h-1zM3 14h1v1h-1zM4 14h1v1h-1zM5 14h1v1h-1zM6 14h1v1h-1zM7 14h1v1h-1zM8 14h1v1h-1zM12 14h1v1h-1zM14 14h1v1h-1zM15 14h1v1h-1zM16 14h1v1h-1zM17 14h1v1h-1zM18 14h1v1h-1zM20 14h1v1h-1zM22 14h1v1h-1zM23 14h1v1h-1zM24 14h1v1h-1zM25 14h1v1h-1zM26 14h1v1h-1zM27 14h1v1h-1zM28 14h1v1h-1zM0 15h1v1h-1zM7 15h1v1h-1zM8 15h1v1h-1zM10 15h1v1h-1zM13 15h1v1h-1zM19 15h1v1h-1zM0 16h1v1h-1zM1 16h1v1h-1zM2 16h1v1h-1zM3 16h1v1h-1zM4 16h1v1h-1zM6 16h1v1h-1zM11 16h1v1h-1zM17 16h1v1h-1zM19 16h1v1h-1zM20 16h1v1h-1zM21 16h1v1h-1zM23 16h1v1h-1zM27 16h1v1h-1zM28 16h1v1h-1zM4 17h1v1h-1zM5 17h1v1h-1zM8 17h1v1h-1zM10 17h1v1h-1zM11 17h1v1h-1zM12 17h1v1h-1zM16 17h1v1h-1zM18 17h1v1h-1zM19 17h1v1h-1zM20 17h1v1h-1zM22 17h1v1h-1zM25 17h1v1h-1zM26 17h1v1h-1zM0 18h1v1h-1zM1 18h1v1h-1zM2 18h1v1h-1zM4 18h1v1h-1zM6 18h1v1h-1zM9 18h1v1h-1zM14 18h1v1h-1zM17 18h1v1h-1zM18 18h1v1h-1zM20 18h1v1h-1zM21 18h1v1h-1zM22 18h1v1h-1zM23 18h1v1h-1zM24 18h1v1h-1zM26 18h1v1h-1zM0 19h1v1h-1zM4 19h1v1h-1zM5 19h1v1h-1zM9 19h1v1h-1zM10 19h1v1h-1zM11 19h1v1h-1zM12 19h1v1h-1zM13 19h1v1h-1zM15 19h1v1h-1zM17 19h1v1h-1zM18 19h1v1h-1zM20 19h1v1h-1zM21 19h1v1h-1zM1 20h1v1h-1zM3 20h1v1h-1zM6 20h1v1h-1zM7 20h1v1h-1zM9 20h1v1h-1zM10 20h1v1h-1zM11 20h1v1h-1zM12 20h1v1h-1zM15 20h1v1h-1zM17 20h1v1h-1zM19 20h1v1h-1zM20 20h1v1h-1zM21 20h1v1h-1zM22 20h1v1h-1zM25 20h1v1h-1zM28 20h1v1h-1zM10 21h1v1h-1zM11 21h1v1h-1zM13 21h1v1h-1zM14 21h1v1h-1zM15 21h1v1h-1zM16 21h1v1h-1zM18 21h1v1h-1zM22 21h1v1h-1zM23 21h1v1h-1zM24 21h1v1h-1zM25 21h1v1h-1zM26 21h1v1h-1zM0 22h1v1h-1zM1 22h1v1h-1zM2 22h1v1h-1zM3 22h1v1h-1zM4 22h1v1h-1zM5 22h1v1h-1zM6 22h1v1h-1zM8 22h1v1h-1zM13 22h1v1h-1zM14 22h1v1h-1zM15 22h1v1h-1zM22 22h1v1h-1zM24 22h1v1h-1zM26 22h1v1h-1zM0 23h1v1h-1zM6 23h1v1h-1zM9 23h1v1h-1zM10 23h1v1h-1zM12 23h1v1h-1zM13 23h1v1h-1zM14 23h1v1h-1zM18 23h1v1h-1zM19 23h1v1h-1zM20 23h1v1h-1zM23 23h1v1h-1zM24 23h1v1h-1zM27 23h1v1h-1zM28 23h1v1h-1zM0 24h1v1h-1zM2 24h1v1h-1zM3 24h1v1h-1zM4 24h1v1h-1zM6 24h1v1h-1zM11 24h1v1h-1zM13 24h1v1h-1zM15 24h1v1h-1zM16 24h1v1h-1zM18 24h1v1h-1zM21 24h1v1h-1zM22 24h1v1h-1zM23 24h1v1h-1zM26 24h1v1h-1zM27 24h1v1h-1zM28 24h1v1h-1zM0 25h1v1h-1zM2 25h1v1h-1zM3 25h1v1h-1zM4 25h1v1h-1zM6 25h1v1h-1zM10 25h1v1h-1zM11 25h1v1h-1zM14 25h1v1h-1zM16 25h1v1h-1zM17 25h1v1h-1zM18 25h1v1h-1zM19 25h1v1h-1zM20 25h1v1h-1zM21 25h1v1h-1zM22 25h1v1h-1zM24 25h1v1h-1zM26 25h1v1h-1zM27 25h1v1h-1zM0 26h1v1h-1zM2 26h1v1h-1zM3 26h1v1h-1zM4 26h1v1h-1zM6 26h1v1h-1zM9 26h1v1h-1zM10 26h1v1h-1zM13 26h1v1h-1zM14 26h1v1h-1zM15 26h1v1h-1zM17 26h1v1h-1zM20 26h1v1h-1zM21 26h1v1h-1zM24 26h1v1h-1zM26 26h1v1h-1zM27 26h1v1h-1zM28 26h1v1h-1zM0 27h1v1h-1zM6 27h1v1h-1zM9 27h1v1h-1zM10 27h1v1h-1zM11 27h1v1h-1zM14 27h1v1h-1zM20 27h1v1h-1zM21 27h1v1h-1zM22 27h1v1h-1zM24 27h1v1h-1zM25 27h1v1h-1zM27 27h1v1h-1zM28 27h1v1h-1zM0 28h1v1h-1zM1 28h1v1h-1zM2 28h1v1h-1zM3 28h1v1h-1zM4 28h1v1h-1zM5 28h1v1h-1zM6 28h1v1h-1zM8 28h1v1h-1zM11 28h1v1h-1zM12 28h1v1h-1zM13 28h1v1h-1zM19 28h1v1h-1zM21 28h1v1h-1zM23 28h1v1h-1zM25 28h1v1h-1zM26 28h1v1h-1zM27 28h1v1h-1zM28 28h1v1h-1z" fill="#0e1820"/></svg><span class="route mac"><svg><use href="#i-tailnet"/></svg>via your Mac</span></div>
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:76px">Link</div><div class="v mono" style="color:var(--label);text-align:left">https://100.101.7.12:8444/link#…</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+        <div class="fr"><div class="k" style="min-width:76px">Expires In</div><div class="v"><span class="tm">9:41</span></div></div>
+      </div>
+      <div class="note">On a Mac, paste the link instead.</div>
+      <div class="sbar"><span class="btn">Cancel</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">2b · The safety words</div>
+      <h2>Rafal's iPhone Wants to Join</h2>
+      <p class="lead">Confirm only if the iPhone shows these words.</p>
+      <div class="bigwords"><span>amber</span><span>falcon</span></div>
+      <div class="grp" style="margin-top:14px">
+        <div class="fr"><div class="k" style="min-width:76px">Kind</div><div class="v">iPhone</div></div>
+        <div class="fr"><div class="k" style="min-width:76px">Route</div><div class="v"><span class="route mac">via your Mac</span></div></div>
+      </div>
+      <div class="sbar"><span class="btn des left">Refuse</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Confirm…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">2c · Done</div>
+      <div class="alert" style="margin-top:18px">
+        <div class="bdone"><svg><use href="#i-ok"/></svg></div>
+        <h2>Rafal's iPhone Added</h2>
+        <p>It approves runs through this Mac.</p>
+        <p style="color:var(--sec)">The iPhone needs Tailscale on to reach this Mac.</p>
+      </div>
+      <div class="sbar"><span class="btn pri">Done</span></div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Link:</b> <code>Node::pairing_link</code> = node origin + <code>/link#code&amp;pin=…&amp;alt=…&amp;name=…&amp;handoff=…</code> (node-pairing-v1). The field shows the origin and "…"; Copy copies the whole link.</li>
+    <li><b>Expires In</b> counts down 10 minutes. At 0:00 the lead becomes "The link expired." and the only button is <b>New Link</b> (primary).</li>
+    <li><b>Route chip</b> says where the device will go: "via your Mac" with the route on, else "via Apassy relay" (hosted Connect, ADR 0032). Nothing else in the sheet changes.</li>
+    <li><b>Safety words:</b> two words from <code>safety_words(team, code, key)</code>, as today. Confirm… runs the owner check, then 2c. Refuse closes the sheet and refuses the join.</li>
+    <li>A Mac that pastes the link gets the same 2b with Kind "Mac". The Apple Watch pairs from the iPhone; it appears in 2b with Kind "Apple Watch".</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 3 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">3</span>Node states</b>
+    <span>The This Mac group in each state. One line and at most one button per problem.</span></div>
+  <div class="pgrid">
+    <div class="pcard">
+      <div class="plabel">3a · Tailscale not installed</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Approvals go through Apassy relay.</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Tailscale is not installed.</span></div><span class="pb">Get Tailscale…</span></div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">3b · Tailscale not connected</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Approvals go through Apassy relay.</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Tailscale is not connected.</span></div><span class="pb">Check Again</span></div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">3c · Tailscale on, route off</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Approvals go through Apassy relay.</div></div><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw"></span></div>
+        <div class="fr"><div class="k">Notifications</div><div class="v">On</div></div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">3d · Starting</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Your iPhone and Macs reach this Mac directly.</div></div><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw on"></span></div>
+        <div class="fr"><div class="k">Address</div><div class="v" style="display:flex;justify-content:flex-end;align-items:center;gap:7px"><span class="spin"></span>Starting…</div></div>
+      </div>
+    </div>
+    <div class="pcard" style="position:relative;min-height:290px">
+      <div class="plabel">3e · On, help open</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Your iPhone and Macs reach this Mac directly.</div></div><span class="hi open"><svg><use href="#i-info"/></svg></span><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw on"></span></div>
+        <div class="fr"><div class="k">Address</div><div class="v mono" style="color:var(--label)">100.101.7.12</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+        <div class="fr"><div class="k">Port</div><div class="v">8444</div></div>
+      </div>
+      <div class="hpop below" style="right:50px;top:92px">
+        <p><b>Reachable on Your Tailnet</b></p>
+        <p>Your iPhone and Macs reach this Mac over Tailscale.</p>
+        <p>Only devices on your tailnet can connect. Nothing opens to the internet.</p>
+        <p>Each device still signs in with its own key.</p>
+        <p>Switching needs Touch ID. It stops when the vault locks.</p>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">3f · Vault locked</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Stopped while the vault is locked.</div></div><span class="sw on dis"></span></div>
+        <div class="fr"><div class="k">Address</div><div class="v">Off</div></div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">3g · Port in use, before the first pairing</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Your iPhone and Macs reach this Mac directly.</div></div><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw on"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Another app uses port 8444.</span></div><span class="pb">Use Port 8445</span></div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">3h · Tailnet address changed</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Your iPhone and Macs reach this Mac directly.</div></div><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw on"></span></div>
+        <div class="fr"><div class="k">Address</div><div class="v mono" style="color:var(--label)">100.77.20.5</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+        <div class="fr"><div class="tn crit" style="flex:1"><svg><use href="#i-warn"/></svg><span>The address changed. Paired devices must pair again.</span></div><span class="pb">Pair Again…</span></div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Switch:</b> disabled in 3a, 3b, 3f. Turning it on or off runs the owner check first; the switch moves only after it.</li>
+    <li><b>3a</b> Get Tailscale… opens tailscale.com/download. <b>3b</b> Check Again re-reads <code>tailscale status --json</code>; the app also re-checks within 10 s on its own.</li>
+    <li><b>3c</b> hides Address, Port, and Node Words. The Devices list still shows every device with its real route.</li>
+    <li><b>3d</b> lasts until the front is bound (<code>bound</code> non-empty). Over 15 s it becomes 3b or 3g.</li>
+    <li><b>3g</b> only before the first pairing. After it, the line is "Another app uses port 8444. Quit it." with no button.</li>
+    <li><b>3h</b> when the bound IPv4 differs from the origin's host. Pair Again… opens the sheet of frame 2.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 4 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">4</span>Move approvals to this Mac</b>
+    <span>A hosted questions team exists and the route is on: the move is the one primary action.</span></div>
+  <div class="win" style="min-height:640px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b></div></div><div class="rows"><div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · Apassy relay</div></div></div><div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div><div class="r on"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">Tailnet on · 5 devices</div></div></div><div class="r"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div><div class="r"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line · Extension</div></div></div><div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Apassy 0.5.18</div></div></div></div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div><h1>Devices</h1><div class="s">Tailnet on · 5 devices</div></div></div>
+
+        <div class="gl">This Mac</div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Your iPhone and Macs reach this Mac directly.</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><svg style="width:15px;height:15px;color:var(--ter)"><use href="#i-touch"/></svg><span class="sw on"></span></div>
+          <div class="fr"><div class="k">Address</div><div class="v mono" style="color:var(--label)">100.101.7.12</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+          <div class="fr"><div class="k">Port</div><div class="v">8444</div></div>
+          <div class="fr"><div class="k">Node Words</div><div class="v words">harbor lemon quartz otter cedar mango</div><span class="hi"><svg><use href="#i-info"/></svg></span></div>
+          <div class="fr"><div class="att"><div class="ai" style="background:var(--accent)"><svg><use href="#i-relay"/></svg></div><div><div class="t1">Approvals go through Apassy relay</div><div class="t2">Move them here to keep them on your tailnet.</div></div></div><span class="pb pri">Move Approvals to This Mac…</span></div>
+        </div>
+
+        <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span><span>5</span></div>
+        <div class="grp">
+          <div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Asks for approvals</div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">iPhone · Approves runs</div></div><span class="route hosted">via Apassy relay</span><span class="when">Now</span><span class="pb">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-watch"/></svg></div><div class="kn"><div>Rafal's Apple Watch</div><div class="nt">Apple Watch · Sees requests</div></div><span class="route hosted">via Apassy relay</span><span class="when">9 min ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div><div class="nt">Mac · Syncs Personal</div></div><span class="route hosted">via Apassy relay</span><span class="when">2 min ago</span><span class="pb">Revoke…</span></div>
+          <div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (studio)</div><div class="nt">Mac · Syncs Personal</div></div><span class="route hosted">via Apassy relay</span><span class="when">1 h ago</span><span class="pb">Revoke…</span></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn">Add an iPhone or a Mac…</span></div>
+      </div></div>
+    </section>
+  </div>
+
+  <div class="pgrid three" style="margin-top:22px">
+    <div class="shc">
+      <div class="plabel">4b · The move sheet</div>
+      <h2>Move Approvals to This Mac</h2>
+      <p class="lead">Your iPhone pairs again, with this Mac.</p>
+      <div class="grp steps">
+        <div class="step done"><span class="n"><svg><use href="#i-ok"/></svg></span><div><div class="t1">Approvals team made here</div></div></div>
+        <div class="step now"><span class="n">2</span><div><div class="t1">Scan with Rafal's iPhone</div><div class="t2">Then check the words on both.</div></div></div>
+        <div class="step later"><span class="n">3</span><div><div class="t1">Remove from Apassy relay</div></div></div>
+      </div>
+      <div class="qrbox" style="margin-top:14px"><svg viewBox="-2 -2 33 33" class="qr s" role="img" aria-label="Pairing QR code (synthetic)"><rect x="-2" y="-2" width="33" height="33" fill="#fff"/><path d="M0 0h1v1h-1zM1 0h1v1h-1zM2 0h1v1h-1zM3 0h1v1h-1zM4 0h1v1h-1zM5 0h1v1h-1zM6 0h1v1h-1zM10 0h1v1h-1zM11 0h1v1h-1zM12 0h1v1h-1zM15 0h1v1h-1zM20 0h1v1h-1zM22 0h1v1h-1zM23 0h1v1h-1zM24 0h1v1h-1zM25 0h1v1h-1zM26 0h1v1h-1zM27 0h1v1h-1zM28 0h1v1h-1zM0 1h1v1h-1zM6 1h1v1h-1zM11 1h1v1h-1zM12 1h1v1h-1zM13 1h1v1h-1zM14 1h1v1h-1zM16 1h1v1h-1zM18 1h1v1h-1zM22 1h1v1h-1zM28 1h1v1h-1zM0 2h1v1h-1zM2 2h1v1h-1zM3 2h1v1h-1zM4 2h1v1h-1zM6 2h1v1h-1zM8 2h1v1h-1zM9 2h1v1h-1zM11 2h1v1h-1zM13 2h1v1h-1zM14 2h1v1h-1zM16 2h1v1h-1zM18 2h1v1h-1zM19 2h1v1h-1zM20 2h1v1h-1zM22 2h1v1h-1zM24 2h1v1h-1zM25 2h1v1h-1zM26 2h1v1h-1zM28 2h1v1h-1zM0 3h1v1h-1zM2 3h1v1h-1zM3 3h1v1h-1zM4 3h1v1h-1zM6 3h1v1h-1zM8 3h1v1h-1zM9 3h1v1h-1zM11 3h1v1h-1zM13 3h1v1h-1zM14 3h1v1h-1zM19 3h1v1h-1zM20 3h1v1h-1zM22 3h1v1h-1zM24 3h1v1h-1zM25 3h1v1h-1zM26 3h1v1h-1zM28 3h1v1h-1zM0 4h1v1h-1zM2 4h1v1h-1zM3 4h1v1h-1zM4 4h1v1h-1zM6 4h1v1h-1zM8 4h1v1h-1zM11 4h1v1h-1zM12 4h1v1h-1zM14 4h1v1h-1zM15 4h1v1h-1zM19 4h1v1h-1zM22 4h1v1h-1zM24 4h1v1h-1zM25 4h1v1h-1zM26 4h1v1h-1zM28 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM8 5h1v1h-1zM9 5h1v1h-1zM13 5h1v1h-1zM17 5h1v1h-1zM19 5h1v1h-1zM22 5h1v1h-1zM28 5h1v1h-1zM0 6h1v1h-1zM1 6h1v1h-1zM2 6h1v1h-1zM3 6h1v1h-1zM4 6h1v1h-1zM5 6h1v1h-1zM6 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h1v1h-1zM23 6h1v1h-1zM24 6h1v1h-1zM25 6h1v1h-1zM26 6h1v1h-1zM27 6h1v1h-1zM28 6h1v1h-1zM9 7h1v1h-1zM11 7h1v1h-1zM13 7h1v1h-1zM14 7h1v1h-1zM18 7h1v1h-1zM20 7h1v1h-1zM0 8h1v1h-1zM1 8h1v1h-1zM2 8h1v1h-1zM3 8h1v1h-1zM6 8h1v1h-1zM9 8h1v1h-1zM10 8h1v1h-1zM11 8h1v1h-1zM13 8h1v1h-1zM16 8h1v1h-1zM18 8h1v1h-1zM19 8h1v1h-1zM20 8h1v1h-1zM21 8h1v1h-1zM23 8h1v1h-1zM24 8h1v1h-1zM25 8h1v1h-1zM27 8h1v1h-1zM4 9h1v1h-1zM5 9h1v1h-1zM7 9h1v1h-1zM8 9h1v1h-1zM10 9h1v1h-1zM11 9h1v1h-1zM12 9h1v1h-1zM17 9h1v1h-1zM20 9h1v1h-1zM23 9h1v1h-1zM24 9h1v1h-1zM27 9h1v1h-1zM3 10h1v1h-1zM5 10h1v1h-1zM6 10h1v1h-1zM10 10h1v1h-1zM16 10h1v1h-1zM19 10h1v1h-1zM20 10h1v1h-1zM21 10h1v1h-1zM25 10h1v1h-1zM27 10h1v1h-1zM0 11h1v1h-1zM1 11h1v1h-1zM3 11h1v1h-1zM4 11h1v1h-1zM12 11h1v1h-1zM13 11h1v1h-1zM15 11h1v1h-1zM21 11h1v1h-1zM22 11h1v1h-1zM25 11h1v1h-1zM1 12h1v1h-1zM5 12h1v1h-1zM6 12h1v1h-1zM8 12h1v1h-1zM13 12h1v1h-1zM15 12h1v1h-1zM18 12h1v1h-1zM19 12h1v1h-1zM20 12h1v1h-1zM21 12h1v1h-1zM24 12h1v1h-1zM25 12h1v1h-1zM26 12h1v1h-1zM0 13h1v1h-1zM2 13h1v1h-1zM3 13h1v1h-1zM4 13h1v1h-1zM7 13h1v1h-1zM9 13h1v1h-1zM11 13h1v1h-1zM13 13h1v1h-1zM14 13h1v1h-1zM16 13h1v1h-1zM17 13h1v1h-1zM18 13h1v1h-1zM20 13h1v1h-1zM21 13h1v1h-1zM28 13h1v1h-1zM3 14h1v1h-1zM4 14h1v1h-1zM6 14h1v1h-1zM9 14h1v1h-1zM10 14h1v1h-1zM12 14h1v1h-1zM13 14h1v1h-1zM15 14h1v1h-1zM17 14h1v1h-1zM18 14h1v1h-1zM20 14h1v1h-1zM21 14h1v1h-1zM25 14h1v1h-1zM1 15h1v1h-1zM2 15h1v1h-1zM3 15h1v1h-1zM4 15h1v1h-1zM8 15h1v1h-1zM9 15h1v1h-1zM10 15h1v1h-1zM14 15h1v1h-1zM15 15h1v1h-1zM17 15h1v1h-1zM19 15h1v1h-1zM20 15h1v1h-1zM22 15h1v1h-1zM24 15h1v1h-1zM27 15h1v1h-1zM28 15h1v1h-1zM1 16h1v1h-1zM2 16h1v1h-1zM3 16h1v1h-1zM5 16h1v1h-1zM6 16h1v1h-1zM11 16h1v1h-1zM16 16h1v1h-1zM21 16h1v1h-1zM27 16h1v1h-1zM0 17h1v1h-1zM1 17h1v1h-1zM2 17h1v1h-1zM3 17h1v1h-1zM4 17h1v1h-1zM7 17h1v1h-1zM10 17h1v1h-1zM14 17h1v1h-1zM20 17h1v1h-1zM23 17h1v1h-1zM24 17h1v1h-1zM25 17h1v1h-1zM26 17h1v1h-1zM27 17h1v1h-1zM28 17h1v1h-1zM0 18h1v1h-1zM6 18h1v1h-1zM9 18h1v1h-1zM12 18h1v1h-1zM14 18h1v1h-1zM15 18h1v1h-1zM16 18h1v1h-1zM19 18h1v1h-1zM21 18h1v1h-1zM24 18h1v1h-1zM25 18h1v1h-1zM28 18h1v1h-1zM1 19h1v1h-1zM2 19h1v1h-1zM3 19h1v1h-1zM4 19h1v1h-1zM5 19h1v1h-1zM7 19h1v1h-1zM10 19h1v1h-1zM13 19h1v1h-1zM15 19h1v1h-1zM16 19h1v1h-1zM18 19h1v1h-1zM22 19h1v1h-1zM26 19h1v1h-1zM28 19h1v1h-1zM0 20h1v1h-1zM1 20h1v1h-1zM3 20h1v1h-1zM4 20h1v1h-1zM6 20h1v1h-1zM7 20h1v1h-1zM9 20h1v1h-1zM15 20h1v1h-1zM16 20h1v1h-1zM20 20h1v1h-1zM21 20h1v1h-1zM27 20h1v1h-1zM28 20h1v1h-1zM8 21h1v1h-1zM10 21h1v1h-1zM11 21h1v1h-1zM15 21h1v1h-1zM16 21h1v1h-1zM17 21h1v1h-1zM18 21h1v1h-1zM21 21h1v1h-1zM22 21h1v1h-1zM26 21h1v1h-1zM27 21h1v1h-1zM28 21h1v1h-1zM0 22h1v1h-1zM1 22h1v1h-1zM2 22h1v1h-1zM3 22h1v1h-1zM4 22h1v1h-1zM5 22h1v1h-1zM6 22h1v1h-1zM8 22h1v1h-1zM9 22h1v1h-1zM10 22h1v1h-1zM12 22h1v1h-1zM13 22h1v1h-1zM17 22h1v1h-1zM19 22h1v1h-1zM20 22h1v1h-1zM22 22h1v1h-1zM23 22h1v1h-1zM26 22h1v1h-1zM27 22h1v1h-1zM28 22h1v1h-1zM0 23h1v1h-1zM6 23h1v1h-1zM8 23h1v1h-1zM10 23h1v1h-1zM11 23h1v1h-1zM12 23h1v1h-1zM15 23h1v1h-1zM16 23h1v1h-1zM17 23h1v1h-1zM18 23h1v1h-1zM19 23h1v1h-1zM20 23h1v1h-1zM21 23h1v1h-1zM27 23h1v1h-1zM0 24h1v1h-1zM2 24h1v1h-1zM3 24h1v1h-1zM4 24h1v1h-1zM6 24h1v1h-1zM9 24h1v1h-1zM12 24h1v1h-1zM13 24h1v1h-1zM16 24h1v1h-1zM18 24h1v1h-1zM21 24h1v1h-1zM22 24h1v1h-1zM26 24h1v1h-1zM27 24h1v1h-1zM0 25h1v1h-1zM2 25h1v1h-1zM3 25h1v1h-1zM4 25h1v1h-1zM6 25h1v1h-1zM18 25h1v1h-1zM19 25h1v1h-1zM20 25h1v1h-1zM23 25h1v1h-1zM24 25h1v1h-1zM25 25h1v1h-1zM26 25h1v1h-1zM27 25h1v1h-1zM0 26h1v1h-1zM2 26h1v1h-1zM3 26h1v1h-1zM4 26h1v1h-1zM6 26h1v1h-1zM10 26h1v1h-1zM11 26h1v1h-1zM12 26h1v1h-1zM13 26h1v1h-1zM14 26h1v1h-1zM17 26h1v1h-1zM18 26h1v1h-1zM19 26h1v1h-1zM20 26h1v1h-1zM22 26h1v1h-1zM25 26h1v1h-1zM26 26h1v1h-1zM0 27h1v1h-1zM6 27h1v1h-1zM8 27h1v1h-1zM11 27h1v1h-1zM14 27h1v1h-1zM15 27h1v1h-1zM16 27h1v1h-1zM17 27h1v1h-1zM21 27h1v1h-1zM22 27h1v1h-1zM23 27h1v1h-1zM24 27h1v1h-1zM0 28h1v1h-1zM1 28h1v1h-1zM2 28h1v1h-1zM3 28h1v1h-1zM4 28h1v1h-1zM5 28h1v1h-1zM6 28h1v1h-1zM8 28h1v1h-1zM9 28h1v1h-1zM11 28h1v1h-1zM13 28h1v1h-1zM17 28h1v1h-1zM19 28h1v1h-1zM21 28h1v1h-1zM23 28h1v1h-1zM26 28h1v1h-1zM28 28h1v1h-1z" fill="#0e1820"/></svg><span class="route mac"><svg><use href="#i-tailnet"/></svg>via your Mac</span></div>
+      <div class="sbar"><span class="btn">Cancel</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">4c · Done</div>
+      <div class="alert" style="margin-top:12px">
+        <div class="bdone"><svg><use href="#i-ok"/></svg></div>
+        <h2>Approvals Moved</h2>
+        <p>Questions now go through this Mac.</p>
+      </div>
+      <div class="grp" style="margin-top:12px">
+        <div class="fr"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="kn">Rafal's iPhone</div><span class="route mac">via your Mac</span></div>
+        <div class="fr"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="kn">Removed from Apassy relay</div></div>
+      </div>
+      <div class="tn acc" style="margin:10px 4px 0"><svg><use href="#i-info"/></svg><span>Pair Rafal's Apple Watch again from the iPhone.</span></div>
+      <div class="sbar"><span class="btn pri">Done</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">4d · Old entry not removed</div>
+      <div class="alert" style="margin-top:12px">
+        <div class="aic" style="background:#ff9500"><svg><use href="#i-warn"/></svg></div>
+        <h2>Old Entry Still on Relay</h2>
+        <p>Approvals already use this Mac.</p>
+        <p style="color:var(--sec)">Apassy relay did not answer the removal.</p>
+      </div>
+      <div class="sbar"><span class="btn">Later</span><span class="btn pri">Try Again</span></div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Shows when</b> the vault has a hosted questions membership and the route is on. With the route off, the row is absent; the iPhone stays on the relay.</li>
+    <li><b>The move row</b> holds the only primary button; Add an iPhone or a Mac… turns bordered in this state.</li>
+    <li><b>4b</b> runs <code>Node::move_approvals</code>: step 1 at open, step 2 is the frame 2 flow (2b words, owner check), step 3 after the confirmed join.</li>
+    <li><b>Cancel</b> before the join deletes the new node team; the hosted team stays. After the join there is no cancel; step 3 runs.</li>
+    <li><b>4c</b> names each device that joined. The watch has its own key (ADR 0039), so it must pair again; the note says so only when a watch was paired.</li>
+    <li><b>4d</b> when <code>DELETE /v1/devices/{id}</code> fails. Later keeps the row "Old entry still on Apassy relay" with Try Again in the This Mac group.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 5 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">5</span>Revoke</b>
+    <span>Revoke… on a device row: the confirmation, then the list without it.</span></div>
+  <div class="pgrid three" style="grid-template-columns:1fr 1fr 1.45fr">
+    <div class="shc">
+      <div class="plabel">5a · An iPhone with a watch</div>
+      <h2>Revoke Rafal's iPhone?</h2>
+      <p class="lead">It can no longer see or answer questions.</p>
+      <div class="grp">
+        <div class="fr"><span class="chk"><svg><use href="#i-ok"/></svg></span><div class="kn">Also revoke Rafal's Apple Watch</div></div>
+      </div>
+      <div class="note">To use it again, pair it again.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des"><svg style="color:var(--red)"><use href="#i-touch"/></svg>Revoke</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">5b · Another Mac</div>
+      <h2>Revoke MacBook Pro?</h2>
+      <p class="lead">It stops syncing Personal and seeing approvals.</p>
+      <div class="note" style="margin-top:0">Its copy of the vault stays on that Mac.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des"><svg style="color:var(--red)"><use href="#i-touch"/></svg>Revoke</span></div>
+    </div>
+    <div class="pcard" style="padding-bottom:16px">
+      <div class="plabel">5c · After</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Hosts approvals</div></div><span class="when">Now</span></div>
+        <div class="fr"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div><div class="nt">Mac · Syncs Personal</div></div><span class="route hosted">via Apassy relay</span><span class="pb">Revoke…</span></div>
+        <div class="fr"><div class="dv"><svg><use href="#i-server"/></svg></div><div class="kn"><div>build-box</div><div class="nt">Linux node · Syncs Acme team</div></div><span class="route tail">Tailnet</span><span class="pb">Details…</span></div>
+      </div>
+      <div style="text-align:center;margin-top:18px"><span class="hud"><svg><use href="#i-ok"/></svg>Rafal's iPhone revoked</span></div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Revoke</b> is the destructive button (red text, Touch ID glyph); there is no blue button. Return does not press it.</li>
+    <li><b>Order:</b> the owner check, then <code>Node::revoke_device(team, id)</code> for node devices, or today's relay removal for hosted ones. The push handle goes with the device.</li>
+    <li><b>5a:</b> the checkbox shows only when the iPhone paired a watch (<code>~W</code> name); checked by default.</li>
+    <li><b>5c:</b> the row leaves at once; the HUD shows 2 s. A failed hosted removal keeps the row with "Not revoked. Try Again" in red under the name.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 6 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">6</span>Wi-Fi pairing notice</b>
+    <span>ADR 0028 stage 3: shown once, then a quiet line in Devices; removal two releases later.</span></div>
+  <div class="pgrid">
+    <div class="shc">
+      <div class="plabel">6a · Once, after the update · tailnet route on</div>
+      <div class="alert">
+        <div class="aic" style="background:rgb(48,160,200)"><svg><use href="#i-wifi"/></svg></div>
+        <h2>Wi-Fi Pairing Is Ending</h2>
+        <p>The iPhone app now reaches this Mac through your tailnet.</p>
+        <p>Wi-Fi pairing ends in two versions.</p>
+      </div>
+      <div class="sbar" style="justify-content:center"><span class="btn" style="min-width:120px;justify-content:center">OK</span><span class="btn pri" style="min-width:120px;justify-content:center">Open Devices</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">6b · Once, after the update · no tailnet route</div>
+      <div class="alert">
+        <div class="aic" style="background:rgb(48,160,200)"><svg><use href="#i-wifi"/></svg></div>
+        <h2>Wi-Fi Pairing Is Ending</h2>
+        <p>The iPhone app now reaches this Mac through Apassy relay.</p>
+        <p>Wi-Fi pairing ends in two versions.</p>
+      </div>
+      <div class="sbar" style="justify-content:center"><span class="btn" style="min-width:120px;justify-content:center">OK</span><span class="btn pri" style="min-width:120px;justify-content:center">Open Devices</span></div>
+    </div>
+    <div class="pcard" style="position:relative;min-height:300px">
+      <div class="plabel">6c · The group in Devices · this release (R1), help open</div>
+      <div class="gl" style="margin-top:12px">Wi-Fi Pairing</div>
+      <div class="grp">
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Wi-Fi pairing ends in two versions.</span></div><span class="hi open"><svg><use href="#i-info"/></svg></span></div>
+        <div class="fr"><div class="kn"><div>Listen on This Network</div></div><span class="sw on"></span></div>
+        <div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">Paired 12 Sep</div></div><span class="route wifi">Wi-Fi</span><span class="when">3 h ago</span><span class="pb">Remove…</span></div>
+        <div class="fr"><div class="k" style="color:var(--red)">Reset Pairing…</div><div class="v"></div></div>
+      </div>
+      <div class="hpop below" style="right:10px;top:96px">
+        <p><b>Wi-Fi Pairing</b></p>
+        <p>The iPhone app now uses your tailnet or Apassy relay.</p>
+        <p>Both work away from home. Wi-Fi works only on one network.</p>
+        <p>Paired iPhones keep working until the removal.</p>
+        <p>New Wi-Fi pairing is no longer possible.</p>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">6d · The group in Devices · next release (R2)</div>
+      <div class="gl" style="margin-top:12px">Wi-Fi Pairing</div>
+      <div class="grp">
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Wi-Fi pairing ends in the next version.</span></div><span class="hi"><svg><use href="#i-info"/></svg></span></div>
+        <div class="fr"><div class="kn"><div>Listen on This Network</div></div><span class="sw on"></span></div>
+        <div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">Paired 12 Sep</div></div><span class="route wifi">Wi-Fi</span><span class="when">3 h ago</span><span class="pb">Remove…</span></div>
+        <div class="fr"><div class="k" style="color:var(--red)">Reset Pairing…</div><div class="v"></div></div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>6a/6b</b> show once per Mac, at the first unlock after the update, only with a paired Wi-Fi iPhone. Either button dismisses for good (a vault-independent flag). Open Devices opens this section.</li>
+    <li><b>6a or 6b:</b> 6a when the route is on, else 6b. Both share the second line, which changes in R2 (6d).</li>
+    <li><b>No "Pair an iPhone"</b> and no pairing sheet in any state. "Allow the iPhone app on this network" is now "Listen on This Network"; it, Remove…, and Reset Pairing… keep today's behaviour.</li>
+    <li><b>No group</b> on a Mac without a paired Wi-Fi iPhone; when the last one is removed, the group goes and the listener stops.</li>
+    <li><b>R3</b> (W2) deletes the group, the flag, and this notice.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 7 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">7</span>First run · no Tailscale</b>
+    <span>Only this Mac. Never an empty pane: the list has a row and the add button.</span></div>
+  <div class="win" style="min-height:520px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b></div></div><div class="rows"><div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · Apassy relay</div></div></div><div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div><div class="r on"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">This Mac only</div></div></div><div class="r"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div><div class="r"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line · Extension</div></div></div><div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Apassy 0.5.18</div></div></div></div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div><h1>Devices</h1><div class="s">This Mac only</div></div></div>
+
+        <div class="gl">This Mac</div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Approvals go through Apassy relay.</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw dis"></span></div>
+          <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Tailscale is not installed.</span></div><span class="pb">Get Tailscale…</span></div>
+          <div class="fr"><div class="k">Notifications</div><div class="v">On</div></div>
+        </div>
+
+        <div class="gl">Devices<span>1</span></div>
+        <div class="grp">
+          <div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Asks for approvals</div></div><span class="when">Now</span></div>
+          <div class="fr"><div class="kn" style="color:var(--sec);font-size:12.5px">Add an iPhone to approve runs with Face ID.</div></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn pri">Add an iPhone or a Mac…</span></div>
+      </div></div>
+    </section>
+  </div>
+  <ul class="fnotes">
+    <li><b>Add</b> here goes through hosted Connect (ADR 0032): the frame 2 sheet with the "via Apassy relay" chip.</li>
+    <li><b>The hint row</b> shows only while the list has no other device. It is a row, not an empty-state block.</li>
+    <li><b>No Wi-Fi group:</b> no Wi-Fi iPhone is paired.</li>
+  </ul>
+</section>
+
+<div class="notes">
+  <h2>Texts to keep exactly</h2>
+  <table>
+    <tr><th>Place</th><th>Text</th><th>Note</th></tr>
+    <tr><td>Node switch</td><td>Reachable on Your Tailnet</td><td>Row label. Subline "Your iPhone and Macs reach this Mac directly." when on; "Approvals go through Apassy relay." when off or unavailable; "Stopped while the vault is locked." when locked.</td></tr>
+    <tr><td>Node rows</td><td>Address · Port · Node Words · Notifications</td><td>Address is the Tailscale IPv4 only; Copy copies the origin <code>https://100.101.7.12:8444</code>.</td></tr>
+    <tr><td>Node problems</td><td>Tailscale is not installed. / Tailscale is not connected. / Another app uses port 8444. / The address changed. Paired devices must pair again.</td><td>Buttons: Get Tailscale… / Check Again / Use Port 8445 / Pair Again….</td></tr>
+    <tr><td>Device sublines</td><td>&lt;Kind&gt; · &lt;Role&gt;[ · &lt;Role&gt;]</td><td>Kinds: Mac, iPhone, Apple Watch, Linux node. Roles: Hosts approvals, Asks for approvals, Approves runs, Sees requests, Syncs &lt;vault&gt;.</td></tr>
+    <tr><td>Route</td><td>via your Mac · via Apassy relay · Tailnet · Wi-Fi</td><td>Lowercase "via", as D9 writes it. Colors: green, grey, blue, orange.</td></tr>
+    <tr><td>Row buttons</td><td>Revoke… · Details… · Remove…</td><td>Revoke… for node and relay devices, Details… for a Linux node, Remove… for Wi-Fi iPhones (today's word).</td></tr>
+    <tr><td>Primary</td><td>Add an iPhone or a Mac… · Move Approvals to This Mac…</td><td>Only one is blue at a time (frame 4).</td></tr>
+    <tr><td>Add sheet</td><td>Add a Device / Scan with the Apassy app on the iPhone. / Expires In / On a Mac, paste the link instead.</td><td>Expired: "The link expired." + New Link.</td></tr>
+    <tr><td>Join check</td><td>&lt;Device&gt; Wants to Join / Confirm only if the iPhone shows these words.</td><td>"the Mac" for a Mac. Buttons Refuse, Confirm….</td></tr>
+    <tr><td>Added</td><td>&lt;Device&gt; Added / It approves runs through this Mac. / The iPhone needs Tailscale on to reach this Mac.</td><td>Last line only for a node device.</td></tr>
+    <tr><td>Move</td><td>Approvals go through Apassy relay / Move them here to keep them on your tailnet.</td><td>Sheet steps: Approvals team made here · Scan with &lt;iPhone&gt; · Remove from Apassy relay.</td></tr>
+    <tr><td>Move done</td><td>Approvals Moved / Questions now go through this Mac. / Pair &lt;watch&gt; again from the iPhone.</td><td>Failure: Old Entry Still on Relay / Approvals already use this Mac. / Apassy relay did not answer the removal.</td></tr>
+    <tr><td>Revoke</td><td>Revoke &lt;Device&gt;? / It can no longer see or answer questions. / To use it again, pair it again.</td><td>Mac: "It stops syncing &lt;vault&gt; and seeing approvals." + "Its copy of the vault stays on that Mac." HUD "&lt;Device&gt; revoked".</td></tr>
+    <tr><td>Wi-Fi notice (R1)</td><td>Wi-Fi Pairing Is Ending / The iPhone app now reaches this Mac through your tailnet. / Wi-Fi pairing ends in two versions.</td><td>Without the route: "…through Apassy relay." R2: "Wi-Fi pairing ends in the next version."</td></tr>
+    <tr><td>Wi-Fi group</td><td>Wi-Fi Pairing / Listen on This Network</td><td>Replaces the group "iPhone" and the toggle "Allow the iPhone app on this network".</td></tr>
+  </table>
+
+  <h2>Help behind ⓘ</h2>
+  <ul>
+    <li><b>Reachable on Your Tailnet</b> (frame 3e, open): over Tailscale; only tailnet devices connect, nothing opens to the internet; each device signs in with its own key; Touch ID to switch; stops when the vault locks.</li>
+    <li><b>Node Words</b>: "Six words from this Mac's certificate." "Your iPhone shows them in Settings → Devices." "Other words there: revoke that iPhone and pair again."</li>
+    <li><b>Devices</b> (the ⓘ by the group title): "via your Mac: straight to this Mac over your tailnet." "via Apassy relay: through apassy-relay.wyderka.cc, end-to-end encrypted." "Tailnet: your own Linux node." "Wi-Fi: the old pairing. It ends soon."</li>
+    <li><b>Wi-Fi Pairing</b> (frame 6c, open).</li>
+  </ul>
+
+  <h2>Choices made in this mockup</h2>
+  <ul>
+    <li>One <b>Devices</b> list for every device of every team, instead of today's "Other Macs" and "Relay" groups. The Wi-Fi iPhones stay in their own group until W2, because they are another pairing of the same phone.</li>
+    <li><b>Node words</b>: six words of <code>WORDS</code> from the pin (bytes 0–5 of SHA-256 of the DER), monospace, no separators. The join keeps today's two safety words.</li>
+    <li><b>Port</b> is shown, not edited. It changes only through 3g before the first pairing.</li>
+    <li>Revoke is a <b>button on each row</b> (as "Can see → Remove" in the cloud-agents mockup), not a menu.</li>
+    <li>The <b>Wi-Fi notice</b> is a once-only alert plus a permanent warning line in the group; no banner elsewhere in the app.</li>
+    <li>The watch checkbox in Revoke is on by default, since the watch is useless without its iPhone.</li>
+  </ul>
+
+  <h2>Open questions</h2>
+  <ul>
+    <li>Can the Mac revoke a Linux node, or only leave it? This mockup uses Details… (the L4 relay sheet) and no Revoke.</li>
+    <li>Does "Move Approvals" also move the other Macs that read this Mac's feed? This mockup moves only iPhones and the watch.</li>
+    <li>Version names in the notice: "two versions" or the version number (for example "Apassy 0.5.20")? This mockup uses words, as D9.</li>
+    <li>Does a watch revoke need the iPhone online? Here the Mac revokes the watch's device key directly.</li>
+  </ul>
+  <p class="note" style="margin:0">Owner rules applied: no empty pane, titles of 5 words or fewer, lines of 12 words or fewer, help behind ⓘ, title case for buttons and menus (sentence case for the checkbox, as macOS), one blue button per view.</p>
+</div>
+
+
+</div>
+
+</body>
+</html>
