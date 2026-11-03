@@ -551,6 +551,9 @@ pub(crate) struct ProductionUse {
     pub(crate) times: u64,
 }
 
+/// The scope of what waits on this Mac.
+static THIS_MAC: DeviceScope = DeviceScope::ThisMac;
+
 /// One item of "Needs attention", in the order of decision 3.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Attention {
@@ -567,12 +570,11 @@ pub(crate) enum Attention {
         env_name: String,
         rate: String,
     },
-    /// A remote agent with a denial.
-    RemoteDenied {
-        agent: String,
-        env: DeviceScope,
-        env_name: String,
-        denials: u64,
+    /// Questions and requests of the Decisions badge wait for the owner (the vault
+    /// build: the banner of the page names the first). The demo frames have none: the
+    /// mockup lists what waits under Decisions only.
+    Waiting {
+        count: usize,
     },
 }
 
@@ -591,14 +593,8 @@ impl Attention {
                 }
             ),
             Self::AsksOften { agent, .. } => format!("{agent} asks often"),
-            Self::RemoteDenied { agent, denials, .. } => format!(
-                "{agent} was denied {}",
-                if *denials == 1 {
-                    "once".to_owned()
-                } else {
-                    format!("{denials} times")
-                }
-            ),
+            Self::Waiting { count: 1 } => "1 decision waits for you".to_owned(),
+            Self::Waiting { count } => format!("{count} decisions wait for you"),
         }
     }
 
@@ -614,7 +610,7 @@ impl Attention {
             }
             Self::Production(found) => format!("{} · {}", found.agent, found.env_name),
             Self::AsksOften { env_name, rate, .. } => format!("{env_name} · {rate} of runs"),
-            Self::RemoteDenied { env_name, .. } => format!("{env_name} · Remote"),
+            Self::Waiting { .. } => "Answer in Decisions".to_owned(),
         }
     }
 
@@ -623,7 +619,7 @@ impl Attention {
         match self {
             Self::Silent { .. } => Severity::Off,
             Self::Production(_) => Severity::Critical,
-            Self::AsksOften { .. } | Self::RemoteDenied { .. } => Severity::Warning,
+            Self::AsksOften { .. } | Self::Waiting { .. } => Severity::Warning,
         }
     }
 
@@ -632,7 +628,8 @@ impl Attention {
         match self {
             Self::Silent { scope, .. } => scope,
             Self::Production(found) => &found.env,
-            Self::AsksOften { env, .. } | Self::RemoteDenied { env, .. } => env,
+            Self::AsksOften { env, .. } => env,
+            Self::Waiting { .. } => &THIS_MAC,
         }
     }
 }
@@ -1052,16 +1049,6 @@ impl BouncerData {
                 });
             }
         }
-        for agent in &agents {
-            if agent.remote && agent.not_allowed > 0 {
-                items.push(Attention::RemoteDenied {
-                    agent: agent.name.clone(),
-                    env: agent.env.clone(),
-                    env_name: agent.env_name.clone(),
-                    denials: agent.not_allowed,
-                });
-            }
-        }
         items
     }
 
@@ -1074,12 +1061,21 @@ impl BouncerData {
     }
 
     /// The newest runs of the agent `line`, newest first: the rows of Logs of its Mac with
-    /// its name.
-    pub(crate) fn runs_of<'a>(&'a self, line: &AgentLine, limit: usize) -> Vec<&'a LogEvent> {
+    /// its name. With counts (`line.runs`), only those of their 7 days, so the listed runs
+    /// never show more denials than "Denied"; a feed of v1 has no counts ("—") and lists
+    /// what it has.
+    pub(crate) fn runs_of<'a>(
+        &'a self,
+        line: &AgentLine,
+        limit: usize,
+        now: u64,
+    ) -> Vec<&'a LogEvent> {
+        let since = line.runs.map_or(0, |_| now.saturating_sub(WEEK));
         let mut runs: Vec<&LogEvent> = self
             .events
             .iter()
             .filter(|event| event.kind == LogKind::Run && event.env == line.env)
+            .filter(|event| event.at >= since)
             .filter(|event| event.agent.as_deref() == Some(line.name.as_str()))
             .collect();
         runs.sort_by_key(|event| std::cmp::Reverse(event.at));

@@ -119,10 +119,13 @@ impl AccessProblem {
         }
     }
 
-    /// The problem that keeps the switch from going on (frames 8a and 8b), while it is
-    /// off: Tailscale must be there first.
-    pub(crate) fn blocks_turning_on(&self) -> bool {
-        matches!(self, Self::NotInstalled | Self::NotConnected)
+    /// A problem of frames 8a–8d: the switch is off and disabled, and the button of the
+    /// problem is the way on. Nothing is reachable meanwhile: the node does not run.
+    pub(crate) fn disables_switch(&self) -> bool {
+        matches!(
+            self,
+            Self::NotInstalled | Self::NotConnected | Self::Policy { .. } | Self::PortTaken { .. }
+        )
     }
 }
 
@@ -140,14 +143,23 @@ pub(crate) struct AccessView {
 }
 
 impl AccessView {
-    /// The switch takes a click: it always goes off; it goes on only with Tailscale.
+    /// A problem of frames 8a–8d holds the switch (mockup frame 8: "switch disabled").
+    fn held(&self) -> bool {
+        self.problem
+            .as_ref()
+            .is_some_and(AccessProblem::disables_switch)
+    }
+
+    /// The switch takes a click: not while the first read runs, and not in a problem of
+    /// frames 8a–8d. Another problem (port 443 public, a failure) leaves it: on goes off.
     pub(crate) fn switch_enabled(&self) -> bool {
-        !self.reading
-            && (self.on
-                || !self
-                    .problem
-                    .as_ref()
-                    .is_some_and(AccessProblem::blocks_turning_on))
+        !self.reading && !self.held()
+    }
+
+    /// What the switch shows: off in a problem of frames 8a–8d, since the route does not
+    /// run then, else the route setting.
+    pub(crate) fn switch_on(&self) -> bool {
+        self.on && !self.held()
     }
 }
 
@@ -214,7 +226,8 @@ pub(crate) enum SectionEmpty {
     OtherMac { name: String, link: bool },
     /// 12a: a Mac of the vault that never reported.
     NeverReported,
-    /// The scope has a project and no agent of this Mac is in it.
+    /// The scope has a project and no agent of any Mac of the scope is in it: one block
+    /// for the page ([`AgentsView::empty`]), not one per Mac.
     NoneInProject(String),
 }
 
@@ -241,6 +254,8 @@ pub(crate) struct AgentsView {
     /// The connected agents in the scope: "8 agents".
     pub(crate) count: usize,
     pub(crate) access: Option<AccessView>,
+    /// No agent of the scope is in its project: one empty block under the sections.
+    pub(crate) empty: Option<SectionEmpty>,
 }
 
 impl AgentsView {
@@ -274,7 +289,7 @@ impl AgentsView {
                 let empty = (rows.is_empty() && disconnected.is_empty())
                     .then(|| section_empty(env, project, one))
                     .flatten();
-                EnvSection {
+                Some(EnvSection {
                     scope: env.scope.clone(),
                     name: env.name.clone(),
                     this_mac: env.is_this_mac(),
@@ -284,21 +299,36 @@ impl AgentsView {
                     rows,
                     disconnected,
                     empty,
-                }
+                })
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut sections: Vec<EnvSection> = sections.into_iter().flatten().collect();
+        let mut empty = None;
+        if let Some(project) = project {
+            // A project narrows the page to the Macs with agents in it; this Mac stays
+            // for its remote access block. With none anywhere, one block says so.
+            let has_agents =
+                |section: &EnvSection| !section.rows.is_empty() || !section.disconnected.is_empty();
+            if !sections.iter().any(has_agents) {
+                empty = Some(SectionEmpty::NoneInProject(project.to_owned()));
+            }
+            sections
+                .retain(|section| has_agents(section) || (section.this_mac && access.is_some()));
+        }
         Self {
             sections,
             count,
             access,
+            empty,
         }
     }
 }
 
 /// The empty state of an environment with no agent in the scope.
 fn section_empty(env: &Environment, project: Option<&str>, one: bool) -> Option<SectionEmpty> {
-    if let Some(project) = project {
-        return Some(SectionEmpty::NoneInProject(project.to_owned()));
+    if project.is_some() {
+        // The page says it once (AgentsView::empty).
+        return None;
     }
     if env.is_this_mac() {
         Some(SectionEmpty::ThisMac)
@@ -412,6 +442,14 @@ pub(crate) fn draw_page(ui: &mut Ui, view: &AgentsView, state: &State) -> Option
             .inner;
         if chosen.is_some() {
             action = chosen;
+        }
+    }
+    if let Some(empty) = &view.empty {
+        if !view.sections.is_empty() {
+            ui.add_space(10.0);
+        }
+        if let Some(chosen) = section_empty_block(ui, empty) {
+            action = Some(chosen);
         }
     }
     action
@@ -559,12 +597,13 @@ fn access_block(ui: &mut Ui, access: &AccessView, has_remote: bool) -> Option<Ac
                     });
                 },
                 |ui| {
-                    let mut on = access.on;
+                    let shown = access.switch_on();
+                    let mut on = shown;
                     let enabled = access.switch_enabled();
                     let response = ui
                         .add_enabled_ui(enabled, |ui| kit::toggle(ui, &mut on, "Remote Access"))
                         .inner;
-                    if response.changed() && on != access.on {
+                    if response.changed() && on != shown {
                         action = Some(Action::RemoteAccess(on));
                     }
                 },
@@ -980,7 +1019,7 @@ impl AgentPage {
         }
         let runs = line
             .map(|line| {
-                data.runs_of(line, RECENT_RUNS)
+                data.runs_of(line, RECENT_RUNS, now)
                     .into_iter()
                     .map(RunLine::of)
                     .collect()

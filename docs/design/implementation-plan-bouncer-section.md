@@ -93,7 +93,7 @@ Window: the last 7 × 24 h; per-day bars by local calendar day, today first. One
 | Median answer | median of `wait_ms` over `asked = 1 AND decided_by = 'owner'`; "—" when none |
 | Ask rate (agent) | asked / runs; orange and an attention item at ≥ 25 % with ≥ 10 runs |
 | Last active | newest `item_use.at`; "Active now" within 10 min; "Waits for you" with an open question |
-| Attention, in order | a Mac silent 24 h after reporting before; a production credential used; an agent that asks often; a remote agent with a denial |
+| Attention, in order | what waits for you (the vault build, with the banner); a Mac silent 24 h after reporting before; a production credential used; an agent that asks often. A remote agent with a denial is not an item (frame 1; owner 2026-11-03): its page shows the denials |
 
 Computation: `Vault::bouncer_stats(since, until, project) -> LocalStats` (new `src/vault/stats.rs`), one SQL pass over
 `decision_log` joined to `item_use`, grouped in Rust. The app keeps `BouncerCache`, recomputed when an activity change

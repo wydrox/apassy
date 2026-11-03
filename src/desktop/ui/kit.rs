@@ -2932,8 +2932,9 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
             let center = Pos2::new(rect.left() + dot / 2.0, rect.center().y);
             painter.circle_filled(center, dot / 2.0, tone.mark());
             let galley = fit(
+                // As the mockup's `.stt.live` and `.stt.wait`: the text in the dot's tone.
                 text(words.clone(), Font::Body).color(match tone {
-                    Tone::Warning => tone.text(),
+                    Tone::Warning | Tone::Good => tone.text(),
                     _ => LABEL,
                 }),
                 (rect.width() - dot - 6.0).max(10.0),
@@ -3031,12 +3032,14 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
                 paint_cloud_badge(&painter, avatar);
             }
             let left = avatar.right() + 9.0;
-            let cap = remote.then(|| galley(ui, medium("Remote", Font::Footnote)));
-            let cap_width = cap.as_ref().map_or(0.0, |cap| cap.size().x + 12.0 + 6.0);
-            let name_galley = fit(
-                text(label.clone(), Font::Body).color(LABEL),
-                (rect.right() - left - cap_width).max(10.0),
-            );
+            // The name gets the width first; "Remote" shows only where the whole name
+            // and the cap fit (the cloud badge still marks a remote agent).
+            let room = (rect.right() - left).max(10.0);
+            let whole = galley(ui, text(label.clone(), Font::Body)).size().x;
+            let cap = remote
+                .then(|| galley(ui, medium("Remote", Font::Footnote)))
+                .filter(|cap| whole + cap.size().x + 12.0 + 6.0 <= room);
+            let name_galley = fit(text(label.clone(), Font::Body).color(LABEL), room);
             let name_width = name_galley.size().x;
             painter.galley(
                 Pos2::new(left, rect.center().y - name_galley.size().y / 2.0),
@@ -3932,5 +3935,49 @@ mod app_logo_tests {
             }
             output.drop_without_applying_deltas();
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_cell_tests {
+    use super::*;
+
+    /// The texts that an agent cell of `width` paints.
+    fn painted(width: f32, label: &str) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let cell = Cell::Agent {
+            name: label.to_owned(),
+            remote: true,
+            label: label.to_owned(),
+        };
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(width, 30.0));
+                paint_cell(ui, rect, &cell, false);
+            });
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            output.drop_without_applying_deltas();
+        }
+        texts
+    }
+
+    /// Frame 6: the name of a remote agent gets the width first; "Remote" shows only
+    /// when the whole name and the cap fit.
+    #[test]
+    fn the_name_of_a_remote_agent_comes_before_its_cap() {
+        let wide = painted(400.0, "Grok Bot (new)");
+        assert!(wide.contains(&"Grok Bot (new)".to_owned()), "{wide:?}");
+        assert!(wide.contains(&"Remote".to_owned()), "{wide:?}");
+        let narrow = painted(150.0, "Grok Bot (new)");
+        assert!(narrow.contains(&"Grok Bot (new)".to_owned()), "{narrow:?}");
+        assert!(!narrow.contains(&"Remote".to_owned()), "{narrow:?}");
     }
 }
