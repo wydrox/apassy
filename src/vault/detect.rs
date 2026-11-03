@@ -39,11 +39,22 @@
 //! - A value without a provider becomes a Custom item. Its title comes from the
 //!   variable name ("Database Password"), or it is "Credential". Without a variable
 //!   name it has no variable: the vault then uses `APASSY_ITEM_<id>`.
+//! - Short-lived credentials (ADR 0037 stage 6, S6-14): an AWS access key id (`AKIA`)
+//!   with its 40-character secret access key in one paste (two `.env` lines, or the two
+//!   values alone) is one item with the fields `access_key_id` and `secret_access_key`,
+//!   the variable `AWS_ACCESS_KEY_ID`, and [`Detected::short_lived`] `aws_sts`. A
+//!   service-account key JSON with `client_email`, `private_key`, and `token_uri` is one
+//!   item with the field `key_json`, the variable `CLOUDSDK_AUTH_ACCESS_TOKEN`, and
+//!   `google_service_account`. A key id or a secret alone, a `ghr_` token, and a GitHub
+//!   App's id and key stay what they were: the owner fills the sheet.
 
 use crate::contracts::CredentialKind;
 
 use super::agents::{Environment, Reversibility, RiskLevel, Scope, checked_env_name};
 use super::providers::{self, Catalog, FactField, ItemFacts, Provider, Suggestion};
+use super::short_lived::{
+    ShortLivedKind, is_aws_access_key_id, is_aws_secret_access_key, is_service_account_key,
+};
 use super::suggestions::{DeclarationField, SuggestedDeclaration};
 use super::types::{Field, MAX_FIELD_NAME_BYTES, MAX_TITLE_BYTES, SecretValue};
 
@@ -125,6 +136,9 @@ pub struct Detected {
     pub sources: Sources,
     /// The line of a `.env` entry, from 1. `None` for a single value.
     pub line: Option<usize>,
+    /// The kind of short-lived credential that the vault makes the item a source of
+    /// (way C on). `None`: a static key.
+    pub short_lived: Option<ShortLivedKind>,
 }
 
 impl Detected {
@@ -205,19 +219,131 @@ pub fn detect_with(catalog: &Catalog, text: &str) -> Vec<Detected> {
     if !is_private_key(text)
         && let Some(lines) = env_lines(catalog, text)
     {
-        return lines
-            .iter()
-            .filter_map(|line| {
+        let pair = aws_pair_lines(&lines);
+        let mut found = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            if let Some((id, secret)) = pair {
+                // The pair is one item, at the place of its first line.
+                if index == id.min(secret) {
+                    found.extend(aws_pair(
+                        catalog,
+                        &lines[id].value,
+                        &lines[secret].value,
+                        Some(line.line),
+                    ));
+                }
+                if index == id || index == secret {
+                    continue;
+                }
+            }
+            found.extend(
                 one_value(
                     catalog,
                     &line.value,
                     Some(line.key.as_str()),
                     Some(line.line),
                 )
-            })
-            .collect();
+                .map(service_account_source),
+            );
+        }
+        return found;
     }
-    one_value(catalog, text, None, None).into_iter().collect()
+    if let Some((id, secret)) = two_aws_values(text)
+        && let Some(detected) = aws_pair(catalog, id, secret, None)
+    {
+        return vec![detected];
+    }
+    one_value(catalog, text, None, None)
+        .map(service_account_source)
+        .into_iter()
+        .collect()
+}
+
+// ---- Short-lived sources (S6-14) ----
+
+/// The `.env` lines of an AWS pair: the indexes of the key id line and of the secret
+/// line. Only one pair: two key ids or two secrets give none, so a paste of two
+/// accounts stays two keys and two secrets.
+fn aws_pair_lines(lines: &[dotenv::Line]) -> Option<(usize, usize)> {
+    let index = |names: &[&str], valid: fn(&str) -> bool| {
+        let matching: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                names.iter().any(|name| line.key.eq_ignore_ascii_case(name)) && valid(&line.value)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        (matching.len() == 1).then(|| matching[0])
+    };
+    let id = index(&["AWS_ACCESS_KEY_ID"], is_aws_access_key_id)?;
+    let secret = index(
+        &["AWS_SECRET_ACCESS_KEY", "AWS_SECRET_KEY"],
+        is_aws_secret_access_key,
+    )?;
+    Some((id, secret))
+}
+
+/// The two values of a raw paste of an AWS pair: exactly two words (separated by
+/// whitespace, a comma, or a colon), one an `AKIA` key id and the other a 40-character
+/// secret, in either order.
+fn two_aws_values(text: &str) -> Option<(&str, &str)> {
+    let words: Vec<&str> = text
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ':')
+        .filter(|word| !word.is_empty())
+        .collect();
+    match words.as_slice() {
+        [a, b] if is_aws_access_key_id(a) && is_aws_secret_access_key(b) => Some((a, b)),
+        [a, b] if is_aws_access_key_id(b) && is_aws_secret_access_key(a) => Some((b, a)),
+        _ => None,
+    }
+}
+
+/// One item of an AWS pair, a source of `aws_sts`: the detection of the key id (title,
+/// provider, hosts, declaration), with both fields and the variable of the contract.
+/// The variable delivers the secret field when way C is off.
+fn aws_pair(catalog: &Catalog, id: &str, secret: &str, line: Option<usize>) -> Option<Detected> {
+    if !is_aws_access_key_id(id) || !is_aws_secret_access_key(secret) {
+        return None;
+    }
+    let mut detected = plain_value(catalog, id, Some("AWS_ACCESS_KEY_ID"), line);
+    detected.kind = CredentialKind::ApiKey;
+    detected.env_name = ShortLivedKind::AwsSts
+        .detected_variable()
+        .map(str::to_owned);
+    detected.env_field = Some("secret_access_key".to_owned());
+    detected.fields = vec![
+        plain_field("access_key_id", id),
+        secret_field("secret_access_key", secret),
+    ];
+    detected.short_lived = Some(ShortLivedKind::AwsSts);
+    Some(detected)
+}
+
+/// A Google service-account key JSON as a source of `google_service_account`; any other
+/// detection as it is. The item keeps the title, the provider, the hosts, and the
+/// declaration of the detection.
+fn service_account_source(mut detected: Detected) -> Detected {
+    if detected.provider.as_deref() != Some("gcp") || detected.fields.len() != 1 {
+        return detected;
+    }
+    let field = &detected.fields[0];
+    if !field.secret || !is_service_account_key(field.value.expose()) {
+        return detected;
+    }
+    let value = field.value.clone();
+    detected.kind = CredentialKind::ApiKey;
+    detected.env_name = ShortLivedKind::GoogleServiceAccount
+        .detected_variable()
+        .map(str::to_owned);
+    detected.env_field = Some("key_json".to_owned());
+    detected.fields = vec![Field {
+        name: "key_json".to_owned(),
+        value,
+        secret: true,
+    }];
+    detected.short_lived = Some(ShortLivedKind::GoogleServiceAccount);
+    detected
 }
 
 /// The entries of a `.env` text, or `None` when the text is not one.
@@ -718,6 +844,7 @@ fn declared(suggestion: &Suggestion, production: bool) -> Detected {
             reversibility: reversibility_source,
         },
         line: None,
+        short_lived: None,
     }
 }
 
