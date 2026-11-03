@@ -18,8 +18,8 @@ use super::bouncer::{BouncerVerdict, DecisionContext, Learned, Thresholds, befor
 use super::patterns::{self, Place};
 use super::shell_risk::Analysis;
 use crate::vault::{
-    DecidedBy, DecisionEntry, Declaration, LoggedDecision, PATTERN_APPROVALS_NEEDED, PatternKey,
-    PatternState, RequestSource, Vault, VaultResult,
+    DecidedBy, DecisionEntry, DecisionMeta, Declaration, LoggedDecision, PATTERN_APPROVALS_NEEDED,
+    PatternKey, PatternState, RequestSource, Vault, VaultResult,
 };
 
 /// The pattern of one request.
@@ -320,7 +320,17 @@ pub fn record(
     entry: &DecisionEntry,
     pattern: Option<&RequestPattern>,
 ) -> VaultResult<u64> {
-    let id = vault.record_decision(entry)?;
+    record_with(vault, entry, &DecisionMeta::default(), pattern)
+}
+
+/// [`record`] with the request kind and the owner's answer time (schema 27).
+pub fn record_with(
+    vault: &mut Vault,
+    entry: &DecisionEntry,
+    meta: &DecisionMeta,
+    pattern: Option<&RequestPattern>,
+) -> VaultResult<u64> {
+    let id = vault.record_decision_with(entry, meta)?;
     if entry.owner_denied()
         && let Some(pattern) = pattern
     {

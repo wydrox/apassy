@@ -115,6 +115,20 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// How the decision log and the uses of a run name the device of an answer through the
+/// relay: "iPhone" (as an answer of the paired iPhone), "Apple Watch", or the name of the
+/// other Mac, cut to the 64 bytes of `item_use.answered_on`.
+pub(crate) fn answered_on_label(device: &TrustedDevice) -> String {
+    match device.kind {
+        TrustedDeviceKind::Iphone => "iPhone".to_owned(),
+        TrustedDeviceKind::Watch => "Apple Watch".to_owned(),
+        TrustedDeviceKind::Mac => match crate::vault::usage::clean(&device.name, 64) {
+            name if name.is_empty() => "another Mac".to_owned(),
+            name => name,
+        },
+    }
+}
+
 pub(super) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1771,7 +1785,11 @@ impl Shared {
         }
         // 8. The queue takes it.
         let kind = choice.kind();
+        // The decision log and the uses name the device that answered (schema 27).
+        self.queue
+            .note_answer_device(run.id, &answered_on_label(&device));
         let verdict = self.apply(active, &run, choice, proof, device, body.time);
+        self.queue.forget_answer_device(run.id);
         if matches!(verdict, Verdict::Settled { .. } | Verdict::Corrected) {
             let mut state = lock(&self.state);
             if let Some(asked) = state

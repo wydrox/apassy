@@ -108,9 +108,9 @@ use crate::vault::usage::{
     CUT_MARK, InteractionKind, MAX_COMMAND_SUMMARY_BYTES, NewItemUse, UseDecidedBy, UseOutcome,
 };
 use crate::vault::{
-    ActivityDecision, AgentSummary, DecisionEntry, Declaration, DeclarationSource,
-    DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel, RealOutcome, Vault,
-    VaultErrorKind,
+    ActivityDecision, AgentSummary, DecisionEntry, DecisionMeta, Declaration, DeclarationSource,
+    DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel, RealOutcome, RequestKind,
+    Vault, VaultErrorKind,
 };
 
 #[cfg(test)]
@@ -1043,7 +1043,7 @@ fn run_inner(
                     });
                 }
                 let user_request = request.user_request.unwrap_or_default();
-                let _ = vault.record_decision(
+                let _ = vault.record_decision_with(
                     &RuleDenial {
                         at: learning::now(),
                         agent_id: agent.id,
@@ -1056,6 +1056,7 @@ fn run_inner(
                         reason: &reason,
                     }
                     .entry(),
+                    &decision_meta(browser_fill.is_some(), None),
                 );
                 return WireResponse::failure(code, reason);
             }
@@ -1474,7 +1475,8 @@ fn run_inner(
             _ => Outcome::Automatic { by_pattern: false },
         };
         let entry = logged.entry(outcome, &risk_note);
-        decision_id = record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
+        let meta = decision_meta(browser_fill.is_some(), None);
+        decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());
         "allowed".clone_into(&mut debug_line.outcome);
         debug_line.millis = millis(started);
         log_decision(ctx, &items, debug_line.clone());
@@ -1560,6 +1562,8 @@ fn run_inner(
                 valid_answers: valid,
             },
         };
+        // The answer time of the decision log (schema 27) starts with the question.
+        let asked_at = Instant::now();
         // A call joins the waiting question only when it saw the same credentials.
         let settled = ctx.approvals.wait_for_evaluation_question(
             pending,
@@ -1603,6 +1607,7 @@ fn run_inner(
             attached,
             refusal_comment,
             classification,
+            answered_on: relay_device,
             ..
         } = match settled {
             Ok(settled) => settled,
@@ -1662,16 +1667,16 @@ fn run_inner(
             evaluation_choice = chosen_evaluation;
             classification_choice = classification;
         }
-        if checked_with == Some(CheckMethod::Companion) {
+        answered_on = answered_on_of(checked_with, relay_device);
+        if answered_on == ANSWERED_ON_IPHONE {
             logged_decided_by = OWNER_APPROVED_ON_IPHONE;
-            ANSWERED_ON_IPHONE.clone_into(&mut answered_on);
-        } else if checked_with.is_some() {
-            ANSWERED_ON_MAC.clone_into(&mut answered_on);
         }
-        // Every owner answer goes to the decision log. A denial blocks the pattern.
+        // Every owner answer goes to the decision log. A denial blocks the pattern. The
+        // vault keeps the answer time for an owner answer only (not a timeout).
         let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
         entry.at = learning::now();
-        decision_id = record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
+        let meta = decision_meta(browser_fill.is_some(), Some(millis(asked_at)));
+        decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());
         approval_text(outcome).clone_into(&mut debug_line.outcome);
         debug_line.answered_on.clone_from(&answered_on);
         debug_line.millis = millis(started);
@@ -2867,13 +2872,46 @@ fn record_decision_locked(
     ctx: &BrokerContext,
     checked: &Checked,
     entry: &DecisionEntry,
+    meta: &DecisionMeta,
     pattern: Option<&learning::RequestPattern>,
 ) -> Option<u64> {
     let mut guard = lock(&ctx.vault);
     guard
         .as_mut()
         .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
-        .and_then(|vault| learning::record(vault, entry, pattern).ok())
+        .and_then(|vault| learning::record_with(vault, entry, meta, pattern).ok())
+}
+
+/// Where the owner answered, as the uses, the answers, and the decision log file name it:
+/// "iPhone" for the paired iPhone and for an iPhone through the relay, the device that
+/// the questions worker named for another answer through the relay
+/// (`Settled::answered_on`), "this Mac" for an owner check here, and empty without one
+/// (a denial on this Mac, or no answer).
+pub(super) fn answered_on_of(method: Option<CheckMethod>, relay_device: Option<String>) -> String {
+    if method == Some(CheckMethod::Companion) || relay_device.as_deref() == Some(ANSWERED_ON_IPHONE)
+    {
+        ANSWERED_ON_IPHONE.to_owned()
+    } else if let Some(device) = relay_device {
+        device
+    } else if method.is_some() {
+        ANSWERED_ON_MAC.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// The schema 27 columns of a decision of this run: a browser fill or a run, and the
+/// milliseconds from the question to the owner's answer. The vault drops the time for
+/// an entry that the owner did not answer.
+fn decision_meta(browser_fill: bool, wait_ms: Option<u64>) -> DecisionMeta {
+    DecisionMeta {
+        request: if browser_fill {
+            RequestKind::BrowserFill
+        } else {
+            RequestKind::Run
+        },
+        wait_ms,
+    }
 }
 
 /// Append `line` to the decision log file, with the secret values of `items` masked in

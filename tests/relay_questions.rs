@@ -1966,6 +1966,79 @@ fn current_remote_kinds_settle_with_signed_comments_and_guarded_classification()
     }
 }
 
+/// Schema 27: an answer through the relay names its device for the decision log and the
+/// uses (`Settled::answered_on`): an iPhone is "iPhone", another Mac its name. An answer
+/// on this Mac names none (the broker then names "this Mac").
+#[test]
+fn an_answer_through_the_relay_names_its_device() {
+    for approve in [true, false] {
+        let world = world(true);
+        let phone = world.iphone();
+        let mut run = world.run(contract_answers());
+        for item in &mut run.question.items {
+            item.unconfirmed = false;
+        }
+        let waiting = world.ask(run, Duration::from_secs(60));
+        let opened = phone.next(&[]);
+        let choice = if approve {
+            Choice::Approve
+        } else {
+            Choice::Deny
+        };
+        let prepared = prepare_answer(&opened, PHONE_UUID, choice, now()).unwrap();
+        let signature = if approve {
+            answer_key().sign(prepared.text.as_bytes()).unwrap()
+        } else {
+            phone.sign(prepared.text.as_bytes())
+        };
+        send_answer(&phone.client, &opened, &prepared, &signature, &phone.keys).unwrap();
+        let ended = settled(waiting);
+        let outcome = if approve {
+            ApprovalOutcome::Approved
+        } else {
+            ApprovalOutcome::Denied
+        };
+        assert_eq!(ended.outcome, outcome);
+        assert_eq!(
+            ended.answered_on.as_deref(),
+            Some("iPhone"),
+            "approve {approve}"
+        );
+    }
+
+    let world = world(true);
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let b = world.mac_b();
+    let opened = b.next(&[]);
+    let deny = prepare_answer(&opened, &b.uuid, Choice::Deny, now()).unwrap();
+    send_answer(
+        &b.client,
+        &opened,
+        &deny,
+        &b.sign(deny.text.as_bytes()),
+        &b.keys,
+    )
+    .unwrap();
+    let ended = settled(waiting);
+    assert_eq!(ended.outcome, ApprovalOutcome::Denied);
+    assert_eq!(ended.answered_on.as_deref(), Some("Synthetic Mac mini"));
+
+    // A denial on this Mac: no device of the relay.
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let start = Instant::now();
+    let id = loop {
+        if let Some(run) = world.queue.pending().into_iter().next() {
+            break run.id;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "no run waits");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(world.queue.deny(id));
+    let ended = settled(waiting);
+    assert_eq!(ended.outcome, ApprovalOutcome::Denied);
+    assert_eq!(ended.answered_on, None);
+}
+
 /// Post as B without starting another lister: every questions GET belongs to A.
 fn post_question_from_b(world: &World) -> apassy::questions::client::Posted {
     let b = world.mac_b();
