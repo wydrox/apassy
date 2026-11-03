@@ -15,7 +15,10 @@
 // The demo build draws the pages from fixtures and uses part of this module.
 #![cfg_attr(not(feature = "vault"), allow(dead_code))]
 
-use eframe::egui::{self, Frame, Label, Margin, Ui};
+use eframe::egui::{
+    self, Frame, Label, Margin, Pos2, Rect, Sense, TextStyle, TextWrapMode, Ui, Vec2, WidgetInfo,
+    WidgetText, WidgetType,
+};
 
 use super::bouncer::{self, ActivityScope, BouncerData, LogEvent, LogKind, LogOutcome, LogSource};
 use super::kit::{self, Font, Icon, Style, Tone};
@@ -789,3 +792,124 @@ pub(crate) fn card_bar(
 #[cfg(test)]
 #[path = "decisions_bouncer_tests.rs"]
 mod tests;
+
+// ---- The rows of what waits (both builds: the demo draws its waiting rows with them). ----
+
+/// The color of the time left, as in the mockup (#c86a00).
+pub(crate) const TIMER: egui::Color32 = egui::Color32::from_rgb(200, 106, 0);
+
+/// The time left in the orange of the mockup, at weight 500.
+pub(crate) fn timer_text(value: impl Into<String>, font: Font) -> egui::RichText {
+    kit::text(value, font).variation(b"wght", 500.0)
+}
+
+/// The mark at the left of a row or a header: the round avatar of the agent that asks,
+/// or the tile of the credential of a suggestion.
+#[derive(Clone)]
+pub(crate) enum Mark {
+    Agent(String),
+    Tile(kit::Tile),
+}
+
+/// One row of the list.
+pub(crate) struct DecisionRow<'a> {
+    pub(crate) mark: &'a Mark,
+    pub(crate) remote: bool,
+    pub(crate) title: &'a str,
+    pub(crate) subtitle: &'a str,
+    pub(crate) production: bool,
+    /// The time left of a question, in orange.
+    pub(crate) left: Option<&'a str>,
+    pub(crate) selected: bool,
+}
+
+/// A row of the list as [`kit::list_row`], with the time left in orange at the right
+/// and the red dot of production before it.
+pub(crate) fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 48.0), Sense::click());
+    let name = format!(
+        "{}, {}{}{}",
+        row.title,
+        row.subtitle,
+        if row.production { ", production" } else { "" },
+        row.left
+            .map_or_else(String::new, |left| format!(", {left} left"))
+    );
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::SelectableLabel, true, row.selected, &name)
+    });
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    if row.selected {
+        painter.rect_filled(rect, 8, kit::SELECTION);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 8, egui::Color32::from_rgb(247, 247, 248));
+    }
+    if response.has_focus() {
+        kit::inner_focus_ring(painter, rect, 8);
+    }
+    // An agent has a round avatar of 28 points, a credential a tile of 32, as in the
+    // mockup.
+    let side = match row.mark {
+        Mark::Agent(_) => 28.0,
+        Mark::Tile(_) => 32.0,
+    };
+    let tile_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 8.0, rect.center().y - side / 2.0),
+        Vec2::splat(side),
+    );
+    match row.mark {
+        Mark::Agent(name) => kit::paint_avatar(ui, tile_rect, name),
+        Mark::Tile(tile) => kit::paint_tile(ui, tile_rect, tile),
+    }
+    if row.remote {
+        kit::paint_cloud_badge(painter, tile_rect);
+    }
+    let round = match row.mark {
+        Mark::Agent(_) => true,
+        Mark::Tile(tile) => tile.round,
+    };
+    kit::paint_tile_ring(painter, tile_rect, round, row.selected);
+    let (title_color, sub_color, time_color, dot) = if row.selected {
+        let white = egui::Color32::WHITE;
+        (white, egui::Color32::from_white_alpha(210), white, white)
+    } else {
+        (kit::LABEL, kit::SECONDARY, TIMER, kit::PRODUCTION)
+    };
+    let galley = |value: egui::RichText, max: f32| {
+        WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)
+    };
+    let mut right = rect.right() - 8.0;
+    if let Some(left) = row.left {
+        let time = galley(timer_text(left, Font::Callout).color(time_color), 60.0);
+        right -= time.size().x;
+        painter.galley(
+            Pos2::new(right, rect.center().y - time.size().y / 2.0),
+            time,
+            time_color,
+        );
+        right -= 6.0;
+    }
+    if row.production {
+        painter.circle_filled(Pos2::new(right - 3.5, rect.center().y), 3.5, dot);
+        right -= 13.0;
+    }
+    let left = tile_rect.right() + 10.0;
+    let text_width = (right - left).max(10.0);
+    let title = galley(kit::row_title(row.title).color(title_color), text_width);
+    let subtitle = galley(
+        kit::text(row.subtitle, Font::Callout).color(sub_color),
+        text_width,
+    );
+    let top = rect.center().y - (title.size().y + subtitle.size().y) / 2.0;
+    let title_height = title.size().y;
+    painter.galley(Pos2::new(left, top), title, title_color);
+    painter.galley(Pos2::new(left, top + title_height), subtitle, sub_color);
+    response
+}

@@ -2698,3 +2698,168 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
         waiter.join().unwrap().unwrap();
     }
 }
+
+/// Painted texts with their positions, of one shape.
+fn placed_texts(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
+    match shape {
+        egui::Shape::Text(text) => out.push((text.galley.text().to_owned(), text.pos)),
+        egui::Shape::Vec(nested) => nested.iter().for_each(|inner| placed_texts(inner, out)),
+        _ => {}
+    }
+}
+
+/// One context that keeps the state of egui between frames, so a click lands.
+struct Screen {
+    ctx: egui::Context,
+    size: Vec2,
+}
+
+impl Screen {
+    fn frame(
+        &self,
+        app: &mut DesktopApp,
+        events: Vec<egui::Event>,
+    ) -> (String, Vec<(String, Pos2)>) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
+            events,
+            ..Default::default()
+        };
+        let output = self.ctx.run_ui(input, |ui| draw(app, ui));
+        let (mut text, mut placed) = (String::new(), Vec::new());
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+            placed_texts(&clipped.shape, &mut placed);
+        }
+        output.drop_without_applying_deltas();
+        (text, placed)
+    }
+
+    /// Click the last painted text `needle`, then draw two more frames.
+    fn click(&self, app: &mut DesktopApp, needle: &str) -> String {
+        self.frame(app, Vec::new());
+        let (_, placed) = self.frame(app, Vec::new());
+        let at = placed
+            .iter()
+            .rev()
+            .find(|(text, _)| text == needle)
+            .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
+            .unwrap_or_else(|| panic!("{needle} is not on the screen"));
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.frame(app, vec![egui::Event::PointerMoved(at)]);
+        self.frame(app, vec![button(true)]);
+        self.frame(app, vec![button(false)]);
+        self.frame(app, Vec::new());
+        self.frame(app, Vec::new()).0
+    }
+}
+
+/// A click on a History row shows the "Why" of that past decision even while a question
+/// waits; a new question does not take its place. "1 Waiting" goes back to what waits.
+#[test]
+fn a_past_decision_opens_its_why_while_a_question_waits() {
+    use crate::broker::bouncer::Thresholds;
+    use crate::vault::{DecidedBy, DecisionEntry, LoggedDecision, RequestSource};
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault.record_decision(&DecisionEntry {
+                at: super::kit::now() - 600,
+                agent_id: 1,
+                agent_name: "Codex".to_owned(),
+                project_dir: "/synthetic/acme-billing".to_owned(),
+                cwd_rel: ".".to_owned(),
+                items: vec![item_id],
+                user_request: "Check the October payout.".to_owned(),
+                user_request_source: RequestSource::Host,
+                command: vec!["./report.sh".to_owned()],
+                purpose: "Report.".to_owned(),
+                env_names: vec!["GUARDED_KEY".to_owned()],
+                declarations: vec![None],
+                rule_flags: vec!["writes".to_owned()],
+                known_safe: false,
+                model_facts: vec![("task_match".to_owned(), 0.69)],
+                pattern: String::new(),
+                grant_asks: false,
+                asked: false,
+                decision: LoggedDecision::Allow,
+                decided_by: DecidedBy::Model,
+                remembered: false,
+                policy: Thresholds::default().policy_label(),
+                note: "The command fits the task.".to_owned(),
+                instruction: String::new(),
+            })
+        })
+        .expect("vault")
+        .expect("decision");
+    let queue = queue_of(&mut app, &dir);
+    let (first_waiter, first) = ask(
+        &app,
+        &queue,
+        1,
+        run(
+            "Claude Code",
+            question(vec![item(item_id, "Guarded key")], &[]),
+        ),
+    );
+    app.place = Place::Decisions;
+    let screen = Screen {
+        ctx: egui::Context::default(),
+        size: WIDE,
+    };
+    let (text, _) = screen.frame(&mut app, Vec::new());
+    assert_eq!(
+        decisions::selected(&app),
+        Some(first.id),
+        "what waits first"
+    );
+    assert!(text.contains("Codex · Guarded key"), "History: {text}");
+
+    let text = screen.click(&mut app, "Codex · Guarded key");
+    assert_eq!(decisions::selected_key(&app), None, "{text}");
+    assert!(decisions::selected_past(&app).is_some(), "{text}");
+    for expected in [
+        "Why",
+        "The command fits the task.",
+        "Asked you",
+        "From the prompt hook: \u{201c}Check the October payout.\u{201d}",
+        "Rule flags",
+        "fits the task 69%",
+        &decisions::waiting_label(1),
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains("Why you are asked"), "{text}");
+
+    // A new question does not take the place of the chosen decision.
+    let (second_waiter, second) = ask(
+        &app,
+        &queue,
+        2,
+        run("Codex", question(vec![item(item_id, "Guarded key")], &[])),
+    );
+    let (text, _) = screen.frame(&mut app, Vec::new());
+    let (text2, _) = screen.frame(&mut app, Vec::new());
+    assert!(decisions::selected_past(&app).is_some(), "{text}");
+    assert!(text2.contains("The command fits the task."), "{text2}");
+    assert!(text2.contains(&decisions::waiting_label(2)), "{text2}");
+
+    // The way back: what waits comes first again.
+    let text = screen.click(&mut app, &decisions::waiting_label(2));
+    assert_eq!(decisions::selected_past(&app), None, "{text}");
+    assert_eq!(decisions::selected(&app), Some(first.id), "{text}");
+    assert!(text.contains("Why you are asked"), "{text}");
+
+    for (id, waiter) in [(first.id, first_waiter), (second.id, second_waiter)] {
+        assert!(queue.deny(id));
+        waiter.join().expect("waiter").expect("an answer");
+    }
+}

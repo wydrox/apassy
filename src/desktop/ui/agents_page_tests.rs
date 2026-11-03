@@ -156,9 +156,41 @@ fn one_environment_shows_its_table_only() {
     let view = AgentsView::of(&frame_2(), &scope, None, NOW, 0);
     assert_eq!(view.count, 0);
     assert_eq!(
-        view.sections[0].empty,
+        view.empty,
         Some(SectionEmpty::NoneInProject("shop".to_owned()))
     );
+}
+
+/// Frame 11b: a project without agents on any Mac has one empty block, not one per
+/// Mac; this Mac keeps its header for the remote access block. A project with agents on
+/// one Mac leaves out the Macs without any.
+#[test]
+fn a_project_without_agents_has_one_empty_block() {
+    let mut scope = all();
+    scope.project = Some("billing-v2".to_owned());
+    let access = AccessView {
+        on: true,
+        address: None,
+        problem: None,
+        no_remote_agents: false,
+        reading: false,
+    };
+    let view = AgentsView::of(&frame_2(), &scope, Some(access.clone()), NOW, 0);
+    assert_eq!(
+        view.empty,
+        Some(SectionEmpty::NoneInProject("billing-v2".to_owned()))
+    );
+    assert_eq!(view.sections.len(), 1, "this Mac, for remote access");
+    assert!(view.sections[0].this_mac);
+    assert_eq!(view.sections[0].empty, None);
+    let view = AgentsView::of(&frame_2(), &scope, None, NOW, 0);
+    assert!(view.sections.is_empty());
+    assert!(view.empty.is_some());
+
+    scope.project = Some("acme-billing".to_owned());
+    let view = AgentsView::of(&frame_2(), &scope, Some(access), NOW, 0);
+    assert_eq!(view.empty, None);
+    assert!(view.sections.iter().all(|section| !section.rows.is_empty()));
 }
 
 #[test]
@@ -298,8 +330,24 @@ fn the_problems_of_remote_access_have_one_line_and_one_button() {
         alternative: None,
     };
     assert_eq!(on_10000.button(), None);
-    // A route that is on can always go off.
-    assert!(access(true, Some(d)).switch_enabled());
+    // Frame 8: in each of the four problems the switch is off and disabled, also while
+    // the route setting is on (8c, 8d); the problem's button is the way on.
+    for problem in [
+        AccessProblem::NotInstalled,
+        AccessProblem::NotConnected,
+        c.clone(),
+        d.clone(),
+    ] {
+        for on in [false, true] {
+            let view = access(on, Some(problem.clone()));
+            assert!(!view.switch_enabled(), "{problem:?} on={on}");
+            assert!(!view.switch_on(), "{problem:?} on={on}");
+            assert!(problem.button().is_some(), "{problem:?}");
+        }
+    }
+    // Another problem leaves the switch: a route that is on can go off.
+    let public = access(true, Some(AccessProblem::HttpsPublic));
+    assert!(public.switch_enabled() && public.switch_on());
     assert!(access(true, None).switch_enabled());
     // Before the first read the switch waits.
     let mut reading = access(false, None);
@@ -411,6 +459,39 @@ fn the_page_of_a_remote_agent_has_four_tiles_its_runs_and_what_it_sees() {
     assert!(!page.token_expired);
 }
 
+/// Recent runs keep to the 7 days of the tiles: a denial of 8 days ago is neither in
+/// "Denied" nor in the list.
+#[test]
+fn recent_runs_keep_to_the_week_of_the_tiles() {
+    let mut data = frame_2();
+    let o = office();
+    let run = |ago: u64, outcome: LogOutcome| LogEvent {
+        source: LogSource::Decision(ago),
+        at: NOW - ago,
+        env: o.scope.clone(),
+        env_name: o.name.clone(),
+        agent: Some("Grok Bot".to_owned()),
+        remote_agent: true,
+        kind: LogKind::Run,
+        credential: Some("GitHub token".to_owned()),
+        production: false,
+        project: String::new(),
+        outcome,
+        relay_run: None,
+        command: String::new(),
+    };
+    data.events = vec![
+        run(3_600, LogOutcome::DeniedByYou),
+        run(8 * 86_400, LogOutcome::DeniedByYou),
+    ];
+    let page = AgentPage::of(&data, &AgentRef::Local(3), None, NOW, 0).expect("page");
+    assert_eq!(
+        page.runs.len(),
+        1,
+        "the run of 8 days ago is out of the week"
+    );
+}
+
 #[test]
 fn a_new_remote_agent_sees_nothing_and_has_no_runs_yet() {
     // 13a: just connected, no credential, no run.
@@ -489,6 +570,7 @@ fn painted_text(draw: impl FnMut(&mut Ui)) -> String {
     for clipped in &output.shapes {
         collect(&clipped.shape, &mut text);
     }
+    output.drop_without_applying_deltas();
     text
 }
 

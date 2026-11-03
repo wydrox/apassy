@@ -957,6 +957,30 @@ pub(super) fn proxied_requests(relay_run: u64) -> Vec<super::bouncer::ProxyRow> 
 
 /// The Bouncer data of a frame at `now`. Synthetic names and numbers of the mockup.
 pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::BouncerData {
+    let mut data = frame_data(frame, now);
+    agree_denials(&mut data, now);
+    data
+}
+
+/// "Denied" of each agent counts at least the denied runs that its page lists: the
+/// counts and the runs come from the same 7 days ([`super::bouncer::BouncerData::runs_of`]).
+fn agree_denials(data: &mut super::bouncer::BouncerData, now: u64) {
+    let denied: Vec<u64> = data
+        .agents
+        .iter()
+        .map(|line| {
+            data.runs_of(line, usize::MAX, now)
+                .iter()
+                .filter(|event| event.outcome.denied())
+                .count() as u64
+        })
+        .collect();
+    for (line, denied) in data.agents.iter_mut().zip(denied) {
+        line.not_allowed = line.not_allowed.max(denied);
+    }
+}
+
+fn frame_data(frame: BouncerFrame, now: u64) -> super::bouncer::BouncerData {
     use super::bouncer::{
         AgentLine, BouncerData, DayBar, DeviceScope, EnvStats, Environment, ProductionUse,
     };
@@ -1214,7 +1238,11 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
         agent("Claude Code", &o, 142, 9, Some(120), "acme-billing"),
         agent("Claude Code", &s, 98, 4, Some(300), "shop"),
         agent("Codex", &o, 61, 7, Some(25 * 60), "acme-billing"),
-        agent("Codex", &s, 44, 13, Some(3_600), "shop"),
+        // Frame 4b: Denied 3.
+        AgentLine {
+            not_allowed: 3,
+            ..agent("Codex", &s, 44, 13, Some(3_600), "shop")
+        },
         agent(
             "Claude Code",
             &l,
@@ -1691,26 +1719,35 @@ pub(super) fn decisions_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(8, 2))
                     .show(ui, |ui| {
-                        for (key, title, subtitle) in [
+                        // Frame 5: the cloud badge of a remote agent and the time left at
+                        // the right. The red dot marks production only: httpbin test
+                        // token is Development.
+                        let mark = cards::Mark::Agent("Grok Bot".to_owned());
+                        for (key, title, subtitle, left, dot) in [
                             (
                                 DEMO_CONNECT_KEY,
                                 "Grok Bot wants to connect",
-                                "Mac mini (office) · 4:31",
+                                "Mac mini (office)",
+                                "4:31",
+                                false,
                             ),
                             (
                                 DEMO_CLOUD_KEY,
                                 "httpbin test token",
-                                "Grok Bot · Mac mini (office) · 4:02",
+                                "Grok Bot · Mac mini (office)",
+                                "4:02",
+                                false,
                             ),
                         ] {
-                            let row = kit::list_row(
+                            let row = cards::decision_row(
                                 ui,
-                                &kit::ListRow {
-                                    tile: kit::Tile::agent("Grok Bot"),
+                                &cards::DecisionRow {
+                                    mark: &mark,
+                                    remote: true,
                                     title,
                                     subtitle,
-                                    meta: None,
-                                    production: false,
+                                    production: dot,
+                                    left: Some(left),
                                     selected: selected == Some(key),
                                 },
                             );
@@ -1881,4 +1918,53 @@ fn demo_week(app: &DesktopApp, ui: &mut egui::Ui) {
             );
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frame 4: "Denied" of each agent page counts at least the denied runs it lists
+    /// (Grok Bot: 2, as the mockup), and frame 1 still lists the mockup's three items of
+    /// "Needs attention".
+    #[test]
+    fn each_agent_page_counts_the_denied_runs_that_it_lists() {
+        let now = 1_790_000_000;
+        for frame in BouncerFrame::ALL {
+            let data = bouncer_data(frame, now);
+            for line in &data.agents {
+                let listed = data
+                    .runs_of(line, usize::MAX, now)
+                    .iter()
+                    .filter(|event| event.outcome.denied())
+                    .count() as u64;
+                assert!(
+                    line.not_allowed >= listed,
+                    "{frame:?} {}: Denied {} < {listed} listed",
+                    line.name,
+                    line.not_allowed
+                );
+            }
+        }
+        let data = bouncer_data(BouncerFrame::AllEnvironments, now);
+        let grok = data
+            .agents
+            .iter()
+            .find(|line| line.name == "Grok Bot")
+            .expect("Grok Bot");
+        assert_eq!(grok.not_allowed, 2);
+        let titles: Vec<String> = data
+            .attention(&super::super::bouncer::ActivityScope::default(), now)
+            .iter()
+            .map(super::super::bouncer::Attention::title)
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "MacBook Pro not reporting",
+                "Stripe live used 3 times",
+                "Codex asks often",
+            ]
+        );
+    }
 }
