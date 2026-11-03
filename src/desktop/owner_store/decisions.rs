@@ -29,10 +29,10 @@ use crate::vault::agent_items::{
 use crate::vault::bouncer_scopes::EvaluationScope;
 use crate::vault::detect::Detected;
 use crate::vault::exceptions::{AgentException, ExceptionKind, MAX_AGENT_NOTE_BYTES};
-use crate::vault::overview::WEEK;
 pub use crate::vault::overview::{ActionUse, WeekCounts};
+use crate::vault::overview::{WEEK, projects_by_use};
 use crate::vault::usage::{InteractionKind, ItemUse};
-use crate::vault::{Environment, ItemSummary, Vault, VaultErrorKind};
+use crate::vault::{AgentSummary, Environment, ItemSummary, Vault, VaultErrorKind};
 
 /// How many uses of one agent the list reads for its count of the week.
 const LIST_USES: usize = 500;
@@ -81,7 +81,65 @@ pub struct AgentOverview {
     pub recent: Vec<RecentUse>,
 }
 
+/// One agent of this Mac with its use, for Decisions: its uses of the week, its
+/// projects, and its newest uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentActivity {
+    pub agent: AgentSummary,
+    pub uses_this_week: usize,
+    /// The project labels of its uses, the most used first.
+    pub projects: Vec<String>,
+    /// The newest uses, newest first.
+    pub recent: Vec<RecentUse>,
+}
+
 impl OwnerSession {
+    /// Each agent of this Mac with its use, for Decisions. It reads at most the newest
+    /// [`LIST_USES`] uses of each agent, as the list of Agents does, and keeps the
+    /// newest `recent` of them.
+    pub fn agents_activity(&self, recent: usize) -> ModelResult<Vec<AgentActivity>> {
+        let since = now().saturating_sub(WEEK);
+        let rows: Vec<(AgentSummary, Vec<ItemUse>)> = {
+            let vault = self.unlocked()?;
+            let mut rows = Vec::new();
+            for agent in vault.list_agents().map_err(map_err)? {
+                let uses = vault.agent_uses(agent.id, LIST_USES).map_err(map_err)?;
+                rows.push((agent, uses));
+            }
+            rows
+        };
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The vault lock is free again: `search` takes it.
+        let items: BTreeMap<u64, String> = self
+            .search("")?
+            .into_iter()
+            .map(|item| (item.id, item.name))
+            .collect();
+        Ok(rows
+            .into_iter()
+            .map(|(agent, uses)| AgentActivity {
+                uses_this_week: uses.iter().filter(|item_use| item_use.at >= since).count(),
+                projects: projects_by_use(
+                    uses.iter().map(|item_use| item_use.project_label.as_str()),
+                ),
+                recent: uses
+                    .iter()
+                    .take(recent)
+                    .map(|item_use| RecentUse {
+                        item_name: items.get(&item_use.item_id).map_or_else(
+                            || format!("Credential {}", item_use.item_id),
+                            Clone::clone,
+                        ),
+                        item_use: item_use.clone(),
+                    })
+                    .collect(),
+                agent,
+            })
+            .collect())
+    }
+
     /// Model-evaluation permissions for one credential. These expose no values.
     pub fn evaluation_scopes(&self, item_id: u64) -> ModelResult<Vec<EvaluationScope>> {
         self.unlocked()?.evaluation_scopes(item_id).map_err(map_err)
