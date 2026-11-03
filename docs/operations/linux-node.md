@@ -23,6 +23,18 @@ Every command takes `--data-dir DIR`. The default is `$XDG_DATA_HOME/apassy/node
 
 Exit codes: 0 success; 1 a check failed (`doctor`) or the node did not start; 2 usage; 3 the node is not running (`status`, `pair`); 4 the node or the network failed.
 
+## Install
+
+| Download (from `<relay>/dl/`, with `SHA256SUMS`) | For |
+| --- | --- |
+| `apassy-<version>-linux-x86_64.tar.gz`, `apassy-<version>-linux-aarch64.tar.gz` | Any Linux with glibc 2.31 or later (Debian 11, Ubuntu 20.04, and later) |
+| `apassy_<version>_amd64.deb`, `apassy_<version>_arm64.deb` | Debian and Ubuntu: `sudo apt install ./apassy_<version>_<arch>.deb` |
+
+- `curl -fsSL https://apassy-relay.wyderka.cc/install.sh | sh` checks the SHA-256 of the tarball for this machine against `SHA256SUMS` and installs `apassy` and `apassy-team` into `~/.local/bin` (`APASSY_INSTALL_DIR` changes it). It never runs as root unless `APASSY_INSTALL_AS_ROOT=1`.
+- The tarball holds `apassy`, `apassy-team` (a shell shim that runs `apassy team` from the same directory), `apassy-node.service` (the unit template), `LICENSE`, `NOTICE`, `README.md`, and `licenses/`.
+- The `.deb` installs `/usr/bin/apassy`, `/usr/bin/apassy-team`, `/usr/lib/systemd/user/apassy-node.service`, and `/usr/share/doc/apassy/`. It starts nothing: each user who runs a node runs `apassy up`.
+- Check a download: `sha256sum -c --ignore-missing SHA256SUMS`, and its build attestation: `gh attestation verify <file> --repo wydrox/apassy --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml` ([release](release.md), "Attestations and SBOMs").
+
 ## Set up
 
 1. Install Tailscale and sign in: `curl -fsSL https://tailscale.com/install.sh | sh`, then `sudo tailscale up`.

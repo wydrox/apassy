@@ -3,8 +3,10 @@
 The release policy of the whole product is in the root [AGENTS.md](../../AGENTS.md). Since ADR 0037
 the relay is a member of this workspace; these rules add what is particular to it.
 
-- The relay is the `relay` surface (server and edge Worker), and `apassy-team` is the `linux-cli`
-  surface, until ADR 0037 stage 3 replaces it with the Linux node.
+- The relay is the `relay` surface (server and edge Worker). The `linux-cli` surface is the Linux
+  node from 0.5.17 (ADR 0037 stage 3): `apassy` from `crates/apassy-app`, built
+  `--no-default-features --features node`, as `.tar.gz` and `.deb` for x86_64 and aarch64; its
+  version is this crate's. `apassy-team` stays one release as its alias.
 - Keep `crates/apassy-relay/Cargo.toml`, its entry in the workspace `Cargo.lock`, the edge Worker
   package and its lock metadata, both downloadable team CLIs, the relay image label, and public
   release metadata at the shared release version. Do not renumber pinned dependencies, schema
@@ -16,10 +18,10 @@ the relay is a member of this workspace; these rules add what is particular to i
   tag `image-*`). Do not build or test containers on the production VPS, and do not start local
   Docker, Colima, or Lima VMs. Docker development uses a devbox, with the user's explicit
   architecture and teardown rules.
-- Preserve both Darwin arm64 and Linux x86_64 downloads and their combined SHA256SUMS when deploying
-  the Worker. Stage generated release metadata from the verified CI artifacts before deploy; binaries
+- Preserve both Darwin arm64 and Linux x86_64 downloads, the four Linux node packages, and their
+  combined SHA256SUMS when deploying the Worker. Stage generated release metadata from the verified CI artifacts before deploy; binaries
   under `deploy/worker/public/dl/` are intentionally ignored by git.
-- Keep Linux downloadable CLIs compatible with glibc 2.31. The relay runtime image may use Trixie,
+- Keep Linux downloadable CLIs and the node packages compatible with glibc 2.31. The relay runtime image may use Trixie,
   but its CLI is not the portable Linux download.
 - Production values (server addresses, the VPS deployment, the health monitor) stay out of this
   public repository. Set Worker values at deploy time.
