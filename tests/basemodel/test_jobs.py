@@ -462,6 +462,56 @@ class Lifecycle(Manager):
         self.trainer.mode = "ok"
         self.assertEqual(self.manager.start_next()[1], second)
 
+    def test_at_most_two_uploads_stage_at_a_time(self):
+        uploads = []
+        for seed in (1, 2):
+            body, manifest = make_job(seed)
+            _existing, upload = self.manager.begin("owner-%d" % seed, sha(body), manifest)
+            uploads.append((upload, body))
+        body, manifest = make_job(3)
+        with self.assertRaises(jobs.JobError) as caught:
+            self.manager.begin("owner-3", sha(body), manifest)
+        self.assertEqual((caught.exception.status, caught.exception.code), (503, "busy"))
+        # A discarded and a committed upload free their places.
+        uploads[0][0].discard()
+        _existing, third = self.manager.begin("owner-3", sha(body), manifest)
+        upload, first_body = uploads[1]
+        upload.write(first_body)
+        self.assertTrue(self.manager.commit(upload)[0])
+        fourth_body, fourth_manifest = make_job(4)
+        _existing, fourth = self.manager.begin("owner-4", sha(fourth_body), fourth_manifest)
+        for open_upload in (third, fourth):
+            open_upload.discard()
+        self.assertEqual(self.manager._staging, {})
+
+    def test_an_upload_needs_disk_for_itself_and_the_uploads_that_stage(self):
+        disk = [None]
+        self.manager = self.new_manager(disk_free=lambda: disk[0], disk_headroom=100)
+        body, manifest = make_job(1)
+        size = len(body)
+        disk[0] = size + 99
+        with self.assertRaises(jobs.JobError) as caught:
+            self.manager.begin("owner-a", sha(body), manifest)
+        self.assertEqual((caught.exception.status, caught.exception.code), (503, "busy"))
+        self.assertNotIn("owner", caught.exception.message)
+        disk[0] = size + 100
+        _existing, first = self.manager.begin("owner-a", sha(body), manifest)
+        # The bytes of the upload that stages count: the same free disk is not enough twice.
+        other_body, other_manifest = make_job(2)
+        with self.assertRaises(jobs.JobError):
+            self.manager.begin("owner-b", sha(other_body), other_manifest)
+        disk[0] = size + len(other_body) + 99
+        with self.assertRaises(jobs.JobError):
+            self.manager.begin("owner-b", sha(other_body), other_manifest)
+        disk[0] = size + len(other_body) + 100
+        _existing, second = self.manager.begin("owner-b", sha(other_body), other_manifest)
+        for upload in (first, second):
+            upload.discard()
+        # Unknown free disk does not block an upload.
+        disk[0] = None
+        _existing, upload = self.manager.begin("owner-a", sha(body), manifest)
+        upload.discard()
+
     def test_a_job_cannot_read_another_jobs_folder(self):
         first, _ = self.submit(owner="owner-a", seed=1)
         second, _ = self.submit(owner="owner-b", seed=2)
