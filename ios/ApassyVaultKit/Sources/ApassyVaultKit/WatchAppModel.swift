@@ -84,6 +84,11 @@ public final class WatchAppModel {
     @ObservationIgnored private var connectGeneration = 0
     @ObservationIgnored private var started = false
     @ObservationIgnored private var opening = false
+    /// The scene went to the background: the replica opens again at the next `.active`. The real
+    /// order is background, inactive, active, so the previous phase cannot tell.
+    @ObservationIgnored private var reopenWhenActive = false
+    /// The open or the suspend of the replica that runs, in the order of the scene phases.
+    @ObservationIgnored private var lifecycleTask: Task<Void, Never>?
 
     /// - Parameters:
     ///   - service: the core, or nil when it did not start (`startupError` says why).
@@ -111,8 +116,9 @@ public final class WatchAppModel {
         }
     }
 
-    /// The live updates run: the requests show and the app is active.
-    public var isLive: Bool { screen == .requests && phase == .active }
+    /// The live updates run: the requests show and the app is not in the background. Wrist down
+    /// (inactive, Always On) keeps the running long poll; a wrist flick does not start another.
+    public var isLive: Bool { screen == .requests && phase != .background }
 
     /// The Macs that can ask, escaped.
     public var macs: [String] { (status?.macs ?? []).map(WatchRequestText.escaped) }
@@ -122,26 +128,57 @@ public final class WatchAppModel {
 
     // MARK: - The scene
 
-    public func scenePhaseChanged(_ phase: WatchScenePhase) async {
-        let previous = self.phase
+    /// The scene phase changed (`onChange`, synchronous). The background drops the requests and
+    /// cancels a signature at once; opening and suspending the replica run in order after it.
+    public func setScenePhase(_ phase: WatchScenePhase) {
+        guard phase != self.phase || !started else { return }
         self.phase = phase
+        let previous = lifecycleTask
         switch phase {
         case .active:
-            if !started {
-                started = true
-                await start()
-            } else if previous == .background, screen == .requests {
-                await open()
+            lifecycleTask = Task { [weak self] in
+                await previous?.value
+                await self?.becameActive()
             }
         case .inactive:
             // Wrist down (Always On): the screens redact themselves; nothing is dropped.
             break
         case .background:
+            reopenWhenActive = true
             requests.clearSensitive()
             path = []
             showsSettings = false
-            if screen == .requests, let service { try? await service.suspend() }
+            lifecycleTask = Task { [weak self] in
+                await previous?.value
+                await self?.suspendInBackground()
+            }
         }
+    }
+
+    /// `setScenePhase`, then wait for the open or the suspend that it started (tests, previews).
+    public func scenePhaseChanged(_ phase: WatchScenePhase) async {
+        setScenePhase(phase)
+        await lifecycleTask?.value
+    }
+
+    private func becameActive() async {
+        guard phase == .active else { return }
+        if !started {
+            started = true
+            reopenWhenActive = false
+            await start()
+        } else if reopenWhenActive {
+            reopenWhenActive = false
+            if screen == .requests { await open() }
+        } else if screen == .requests {
+            // A passcode may have changed while the app was inactive.
+            await requests.refreshKeyState()
+        }
+    }
+
+    private func suspendInBackground() async {
+        guard phase == .background, screen == .requests, let service else { return }
+        try? await service.suspend()
     }
 
     /// The first status after launch.
@@ -184,10 +221,20 @@ public final class WatchAppModel {
                 return
             }
             var status = try await service.status(answerKey: keys.publicKey(team: secret.team))
+            // The scene may have gone to the background during each call: stay closed then.
+            guard phase != .background else { return reopenLater() }
             if status.state == .locked {
                 if let vault = status.vault { try await service.select(vaultID: vault.id) }
                 try await service.unlock(passphrase: secret.passphrase)
+                guard phase != .background else {
+                    try? await service.suspend()
+                    return reopenLater()
+                }
                 status = try await service.status(answerKey: keys.publicKey(team: secret.team))
+            }
+            guard phase != .background else {
+                try? await service.suspend()
+                return reopenLater()
             }
             apply(status)
             guard screen == .requests else { return }
@@ -198,6 +245,8 @@ public final class WatchAppModel {
             screen = .unavailable(error.localizedDescription)
         }
     }
+
+    private func reopenLater() { reopenWhenActive = true }
 
     private func apply(_ status: WatchStatus) {
         self.status = status
@@ -292,8 +341,12 @@ public final class WatchAppModel {
         connectGeneration += 1
         let generation = connectGeneration
         screen = .connecting
-        connectTask?.cancel()
+        // An earlier connect, cancel, or removal ends first: the core sets a join only when its
+        // start returns, so nothing may overtake it.
+        let previous = connectTask
+        previous?.cancel()
         connectTask = Task { [weak self] in
+            await previous?.value
             await self?.connect(link: trimmed, team: team, wasRemoved: wasRemoved, generation: generation)
         }
         return nil
@@ -303,13 +356,14 @@ public final class WatchAppModel {
     func connectFinished() async { await connectTask?.value }
 
     private func connect(link: String, team: String, wasRemoved: Bool, generation: Int) async {
-        guard let service else { return }
+        guard let service, generation == connectGeneration else { return }
         do {
             if wasRemoved {
                 // The replica of the removed connection goes first.
                 try? await service.forget()
                 if let old = try? replica.load() { keys.delete(team: old.team) }
                 requests.reset()
+                guard generation == connectGeneration else { return }
             }
             if let old = try? replica.load(), old.team != team { keys.delete(team: old.team) }
             let answerKey = try keys.create(team: team)
@@ -363,23 +417,38 @@ public final class WatchAppModel {
     }
 
     /// Cancel on S3: the core gives the join up, and this watch forgets the new keys.
+    ///
+    /// A `watch_connect_start` that runs ends first: before it returns, the core has no join to
+    /// cancel, and a cancel then would leave the join live.
     public func cancelConnect() {
         connectGeneration += 1
-        connectTask?.cancel()
-        connectTask = nil
-        let team = (try? replica.load())?.team
-        if let team { keys.delete(team: team) }
-        replica.delete()
+        let generation = connectGeneration
+        let previous = connectTask
+        previous?.cancel()
         screen = .connect(nil)
-        guard let service else { return }
-        connectTask = Task { try? await service.connectCancel() }
+        connectTask = Task { [weak self] in
+            await previous?.value
+            await self?.endCancelledConnect(generation: generation)
+        }
+    }
+
+    private func endCancelledConnect(generation: Int) async {
+        if let service { try? await service.connectCancel() }
+        // A new code may have come in the meantime: its keys stay.
+        guard generation == connectGeneration else { return }
+        if let team = (try? replica.load())?.team { keys.delete(team: team) }
+        replica.delete()
     }
 
     /// Done on S5.
     public func finishConnecting() {
         guard case .connected = screen else { return }
         screen = .requests
-        connectTask = Task { [weak self] in await self?.refreshRequests() }
+        let previous = connectTask
+        connectTask = Task { [weak self] in
+            await previous?.value
+            await self?.refreshRequests()
+        }
     }
 
     // MARK: - Remove
@@ -388,10 +457,14 @@ public final class WatchAppModel {
     /// passphrase of this watch are deleted. The watch shows S1.
     public func forget() {
         connectGeneration += 1
-        connectTask?.cancel()
+        let previous = connectTask
+        previous?.cancel()
         showsSettings = false
         path = []
-        connectTask = Task { [weak self] in await self?.forgetLocally(problem: nil) }
+        connectTask = Task { [weak self] in
+            await previous?.value
+            await self?.forgetLocally(problem: nil)
+        }
     }
 
     /// The removal that runs, for tests.

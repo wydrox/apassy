@@ -14,8 +14,8 @@ final class URLSessionCoreTransport: Sendable {
     static let shared = URLSessionCoreTransport()
     private static let installed = Mutex(false)
 
-    /// The largest answer body. The answers of the watch calls are much smaller.
-    private static let maxBody = 8 * 1024 * 1024
+    /// The largest answer body: the limit of the core (2 MiB).
+    private static let maxBody = 2 * 1024 * 1024
 
     private let session: URLSession
     private let state = Mutex(State())
@@ -228,9 +228,10 @@ private final class Exchange: NSObject, URLSessionDataDelegate, @unchecked Senda
         done.signal()
     }
 
-    /// `connect` only when no byte of the request left this watch.
+    /// `connect` only when no byte of the request left this watch: the metrics say none was sent,
+    /// or, without metrics, the error comes before any connection. Any byte sent is `broken`.
     private static func classify(_ error: any Error, sentBytes: Int64?) -> String {
-        if sentBytes == 0 { return "connect" }
+        if let sentBytes { return sentBytes == 0 ? "connect" : "broken" }
         let ns = error as NSError
         guard ns.domain == NSURLErrorDomain else { return "broken" }
         switch ns.code {

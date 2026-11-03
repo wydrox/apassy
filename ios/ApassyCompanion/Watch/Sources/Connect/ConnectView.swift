@@ -40,6 +40,8 @@ struct ConnectView: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // The margins of watchOS: the text keeps clear of the rounded edges of the screen.
+            .scenePadding(.horizontal)
         }
         .navigationTitle("Apassy")
     }

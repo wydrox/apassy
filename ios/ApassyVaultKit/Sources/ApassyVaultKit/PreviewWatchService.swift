@@ -24,11 +24,18 @@ public actor PreviewWatchService: WatchService {
     private var posts: [(id: String, choice: AccessChoice, signature: Data?)] = []
     private var failures: [VaultError] = []
     private let settles: Bool
+    /// How long `watch_connect_start` and `unlock` take: the core sets the join, and opens the
+    /// replica, only when they return.
+    private let startDelay: Duration
+    private let unlockDelay: Duration
 
     public init(
         state: WatchStatus.State, vault: WatchVault? = WatchPreview.vault, macs: [String] = [WatchPreview.mac],
-        requests: [RelayAccessRequest] = [], connection: Connection = .waits, settles: Bool = true
+        requests: [RelayAccessRequest] = [], connection: Connection = .waits, settles: Bool = true,
+        startDelay: Duration = .zero, unlockDelay: Duration = .zero
     ) {
+        self.startDelay = startDelay
+        self.unlockDelay = unlockDelay
         self.state = state
         self.vault = state == .unpaired ? nil : vault
         self.macs = macs
@@ -52,13 +59,15 @@ public actor PreviewWatchService: WatchService {
         return WatchStatus(state: state, vault: state == .unpaired ? nil : vault, macs: state == .ready ? macs : [], own: own)
     }
 
-    public func connectStart(link: String, name: String, answerKey: Data, passphrase: String) throws
+    public func connectStart(link: String, name: String, answerKey: Data, passphrase: String) async throws
         -> WatchConnectInfo
     {
         guard state == .unpaired || state == .removed else {
             throw VaultError(.alreadyConnected, "This watch is connected to a vault already. Forget it first.")
         }
         if case .fails(let error) = connection { throw error }
+        // Not cancellable, as the relay call of the core: a cancel meanwhile finds no join.
+        await Self.pause(startDelay)
         state = .connecting
         return WatchConnectInfo(
             state: .waiting, words: Self.words, expiresAt: UInt64(Date.now.timeIntervalSince1970) + 600)
@@ -90,8 +99,9 @@ public actor PreviewWatchService: WatchService {
         guard vault?.id == vaultID else { throw VaultError(.notFound, "No such vault.") }
     }
 
-    public func unlock(passphrase: String) throws {
+    public func unlock(passphrase: String) async throws {
         guard state == .locked || state == .ready else { throw VaultError(.noVault, "No vault.") }
+        await Self.pause(unlockDelay)
         state = .ready
     }
 
@@ -137,6 +147,12 @@ public actor PreviewWatchService: WatchService {
     }
 
     public func accessRequestCancelPrepared() {}
+
+    /// A pause that a cancelled caller cannot shorten, as a blocking call of the core.
+    private static func pause(_ duration: Duration) async {
+        guard duration > .zero else { return }
+        await Task.detached { _ = try? await Task.sleep(for: duration) }.value
+    }
 
     /// No change comes by itself: the wait ends after a short time.
     public func wait(timeout: Int) async throws -> Bool {

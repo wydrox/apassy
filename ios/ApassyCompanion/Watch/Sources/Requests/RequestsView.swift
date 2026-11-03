@@ -10,9 +10,10 @@ struct RequestsView: View {
     private var requests: WatchRequestsModel { model.requests }
 
     var body: some View {
-        // A coarse timeline: "Until" becomes "Expired" within a minute; there is no countdown.
-        TimelineView(.everyMinute) { context in
-            content(at: context.date)
+        // Redraws at each expiry, so a row says "Expired" on time; there is no countdown. The
+        // timeline only triggers the redraw: the rows use the real time.
+        TimelineView(.explicit(requests.expiries)) { _ in
+            content(at: .now)
         }
         .navigationTitle("Requests")
         .toolbar {
@@ -59,6 +60,9 @@ struct RequestsView: View {
                     Label("No access requests waiting", systemImage: "checkmark.shield")
                 } description: {
                     Text("When an agent asks for a credential, the request appears here.")
+                    if let reason = requests.allowOffReason {
+                        Text(verbatim: reason)
+                    }
                 }
             }
         } else {

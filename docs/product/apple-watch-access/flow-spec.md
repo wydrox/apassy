@@ -1,6 +1,6 @@
 # Flow Spec: Apple Watch answers access requests
 
-Status: **Gate A — awaiting owner approval.** Mode: master-product **Build** (the flow does not exist).
+Status: **Gate A accepted by the owner on 2026-11-03** (buttons after the full facts). Mode: master-product **Build** (the flow does not exist).
 Sources: [ADR 0033](../../adr/0033-iphone-access-requests.md) §7 (the iPhone screen spec this adapts),
 [relay-access-request-v1](../../contracts/relay-access-request-v1.md), the iPhone
 `AccessRequestDetailView.swift`, and Apple's watchOS HIG pages (quoted where used, fetched 2026-11-03).

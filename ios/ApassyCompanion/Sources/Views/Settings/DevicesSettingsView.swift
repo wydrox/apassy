@@ -19,9 +19,7 @@ struct DevicesSettingsView: View {
                 QuestionsStateRow()
                 MacPairingRow()
                 if AppleWatchLink.shared.canAddWatch {
-                    NavigationLink {
-                        AddAppleWatchView()
-                    } label: {
+                    NavigationLink(value: SettingsView.Page.addAppleWatch) {
                         Label("Add Apple Watch", systemImage: "applewatch")
                     }
                 }

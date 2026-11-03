@@ -24,8 +24,9 @@ final class AppleWatchLink {
     private(set) var isWatchAppInstalled = false
     private(set) var isReachable = false
 
-    /// A watch with Apassy is paired with this iPhone: Add Apple Watch shows.
-    var canAddWatch: Bool { WCSession.isSupported() && isPaired && isWatchAppInstalled }
+    /// An Apple Watch is paired with this iPhone: Add Apple Watch shows. Without Apassy on the
+    /// watch, the page says how to install it and keeps the scan off.
+    var canAddWatch: Bool { WCSession.isSupported() && isPaired }
 
     @ObservationIgnored private let delegate = WatchSessionDelegate { state in
         Task { @MainActor in AppleWatchLink.shared.apply(state) }

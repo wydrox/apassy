@@ -7,6 +7,8 @@ struct ConnectedView: View {
     let vault: String
     /// The escaped names of the Macs.
     let macs: [String]
+    /// Why Allow once is off on this watch (an older Mac wrote no answer key), or nil.
+    let allowOff: String?
     let onDone: () -> Void
 
     var body: some View {
@@ -21,9 +23,18 @@ struct ConnectedView: View {
                 }
                 .accessibilityAddTraits(.isHeader)
                 Text(verbatim: scope)
-                Text("Allow once works while this watch is unlocked on your wrist. Run approvals stay on your iPhone and Mac.")
+                if let allowOff {
+                    Label {
+                        Text(verbatim: allowOff)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle")
+                    }
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                } else {
+                    Text("Allow once works while this watch is unlocked on your wrist. Run approvals stay on your iPhone and Mac.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Button(action: onDone) {
                     Text("Done")
                         .frame(maxWidth: .infinity)
@@ -32,7 +43,10 @@ struct ConnectedView: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // The margins of watchOS: the text keeps clear of the rounded edges of the screen.
+            .scenePadding(.horizontal)
         }
+        .defaultScrollAnchor(WatchLaunch.scrollAnchor)
     }
 
     private var scope: String {
@@ -42,5 +56,11 @@ struct ConnectedView: View {
 }
 
 #Preview {
-    ConnectedView(vault: WatchPreview.vault.name, macs: [WatchPreview.mac]) {}
+    ConnectedView(vault: WatchPreview.vault.name, macs: [WatchPreview.mac], allowOff: nil) {}
+}
+
+#Preview("Mac update needed") {
+    ConnectedView(
+        vault: WatchPreview.vault.name, macs: [WatchPreview.mac],
+        allowOff: "Update Apassy on your Mac to connect this watch.") {}
 }

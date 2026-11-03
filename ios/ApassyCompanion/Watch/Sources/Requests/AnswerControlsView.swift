@@ -21,6 +21,7 @@ struct AnswerControlsView: View {
                 ForEach(notes.indices, id: \.self) { index in
                     Text(verbatim: notes[index])
                         .font(.footnote)
+                        .privacySensitive()
                 }
                 buttons(allowOnce: allowOnce, enabled: !isLuminanceReduced)
                 if allowOnce { footnote }
@@ -37,12 +38,15 @@ struct AnswerControlsView: View {
                 }
             case .sent:
                 Text(verbatim: WatchRequestText.sent(card))
+                    .privacySensitive()
                 buttons(allowOnce: offersAllow, enabled: false)
             case .notConfirmed:
                 Text(verbatim: WatchRequestText.notConfirmed(card))
+                    .privacySensitive()
                 buttons(allowOnce: offersAllow, enabled: false)
             case .ended:
                 Text(verbatim: WatchRequestText.ended(card))
+                    .privacySensitive()
             case .expired:
                 Text(WatchRequestText.expired)
                 buttons(allowOnce: offersAllow, enabled: false)

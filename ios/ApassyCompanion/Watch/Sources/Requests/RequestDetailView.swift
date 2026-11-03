@@ -12,9 +12,11 @@ struct RequestDetailView: View {
     var body: some View {
         Group {
             if let request = requests.request(id) {
-                // Changes by itself only at the expiry and at the end of the wait for the Mac.
-                TimelineView(.explicit(requests.deadlines(for: id))) { context in
-                    detail(request, phase: requests.phase(for: id, at: context.date))
+                // Redraws by itself only at the expiry and at the end of the wait for the Mac. The
+                // timeline only triggers the redraw: its first date is the future expiry, so the
+                // phase always uses the real time.
+                TimelineView(.explicit(requests.deadlines(for: id))) { _ in
+                    detail(request, phase: requests.currentPhase(for: id))
                 }
             } else {
                 ContentUnavailableView {
@@ -41,7 +43,10 @@ struct RequestDetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // The margins of watchOS: the text keeps clear of the rounded edges of the screen.
+            .scenePadding(.horizontal)
         }
+        .defaultScrollAnchor(WatchLaunch.scrollAnchor)
     }
 }
 

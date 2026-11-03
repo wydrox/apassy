@@ -12,6 +12,8 @@ struct SettingsView: View {
         case devices
         case security
         case advanced
+        /// Devices > Add Apple Watch (ADR 0039).
+        case addAppleWatch
     }
 
     @Environment(RootModel.self) private var root
@@ -83,6 +85,7 @@ struct SettingsView: View {
                 case .devices: DevicesSettingsView(close: dismiss)
                 case .security: SecuritySettingsView(close: dismiss)
                 case .advanced: AdvancedSettingsView()
+                case .addAppleWatch: AddAppleWatchView()
                 }
             }
         }

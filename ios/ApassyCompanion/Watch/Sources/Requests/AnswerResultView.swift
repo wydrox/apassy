@@ -12,17 +12,21 @@ struct AnswerResultView: View {
     var body: some View {
         let lines = result.lines(mac: mac)
         VStack(alignment: .leading, spacing: 8) {
-            Label {
-                Text(verbatim: result.headline)
-                    .font(.headline)
-            } icon: {
-                Image(systemName: result.symbol)
+            // Redacted in Always On, with the facts; Done is not.
+            Group {
+                Label {
+                    Text(verbatim: result.headline)
+                        .font(.headline)
+                } icon: {
+                    Image(systemName: result.symbol)
+                }
+                .accessibilityAddTraits(.isHeader)
+                ForEach(lines.indices, id: \.self) { index in
+                    Text(verbatim: lines[index])
+                        .font(.footnote)
+                }
             }
-            .accessibilityAddTraits(.isHeader)
-            ForEach(lines.indices, id: \.self) { index in
-                Text(verbatim: lines[index])
-                    .font(.footnote)
-            }
+            .privacySensitive()
             Button(action: onDone) {
                 Text("Done")
                     .frame(maxWidth: .infinity)

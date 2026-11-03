@@ -3106,7 +3106,10 @@ fn receipt_answered_line(receipt: &crate::questions::access_request::Receipt) ->
     let device = receipt.device_name.as_ref()?;
     Some(
         if receipt.device_kind == Some(crate::questions::access_request::DeviceKind::Watch) {
-            format!("Answered on {device} (Apple Watch)")
+            format!(
+                "Answered on {}",
+                crate::questions::device_link::watch_label(device)
+            )
         } else {
             format!("Answered on {device}")
         },

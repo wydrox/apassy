@@ -12,19 +12,8 @@ public enum WatchRequestText {
     public static let unavailable = "This access request is no longer available"
     public static let notSpecified = "Not specified"
 
-    /// Agent and Mac text as plain text: a backslash doubled, and control and format characters
-    /// (bidirectional overrides among them) shown as `\u{…}`, so nothing can hide or reorder text.
-    public static func escaped(_ text: String) -> String {
-        text.unicodeScalars.map { scalar in
-            if scalar.value == 92 { return "\\\\" }
-            if CharacterSet.controlCharacters.contains(scalar)
-                || scalar.properties.generalCategory == .format
-            {
-                return "\\u{\(String(scalar.value, radix: 16))}"
-            }
-            return String(scalar)
-        }.joined()
-    }
+    /// Agent and Mac text as plain text (`AccessText.escaped`, as on the iPhone).
+    public static func escaped(_ text: String) -> String { AccessText.escaped(text) }
 
     /// "<agent> asks for <credential>".
     public static func title(_ card: RelayAccessCard) -> String {

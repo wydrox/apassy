@@ -943,7 +943,8 @@ impl DesktopApp {
                         Ok(()) => {
                             let text = match add.handoff.as_ref() {
                                 Some((_, _, name, true)) => format!(
-                                    "Connected. {name} (Apple Watch) can now allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access."
+                                    "Connected. {} can now allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access.",
+                                    crate::questions::device_link::watch_label(name)
                                 ),
                                 Some((_, _, name, false)) => format!(
                                     "Connected. {name} can now show requests and answer with Face ID. Turn on request notifications on the iPhone for push alerts."
@@ -2285,7 +2286,8 @@ impl DesktopApp {
                         call_error(error)
                     ),
                     Some(Ok(())) if watch => format!(
-                        "Added. {name} (Apple Watch) gets the access requests of this vault and can allow one once while it is unlocked on a wrist."
+                        "Added. {} gets the access requests of this vault and can allow one once while it is unlocked on a wrist.",
+                        crate::questions::device_link::watch_label(&name)
                     ),
                     Some(Ok(())) => format!(
                         "Added. {name} gets the questions of this vault and answers with Face ID once this vault syncs to it."
@@ -3564,7 +3566,9 @@ pub(crate) fn link_is_watch(device_name: &str) -> bool {
 /// "(Apple Watch)" after the name of a watch.
 pub(crate) fn link_device_label(device_name: &str) -> String {
     match split_linked_device_name(device_name) {
-        (name, Some((LinkedDeviceKind::Watch, _))) => format!("{name} (Apple Watch)"),
+        (name, Some((LinkedDeviceKind::Watch, _))) => {
+            crate::questions::device_link::watch_label(&name)
+        }
         (name, _) => name,
     }
 }

@@ -201,7 +201,7 @@ pub(crate) fn device_words(device: &TrustedDevice, this_mac: bool, push: Option<
 /// The name of a trusted device in a list: "<name> (Apple Watch)" for a watch (ADR 0039).
 pub(crate) fn device_label(device: &TrustedDevice) -> String {
     match device.kind {
-        TrustedDeviceKind::Watch => format!("{} (Apple Watch)", device.name),
+        TrustedDeviceKind::Watch => crate::questions::device_link::watch_label(&device.name),
         TrustedDeviceKind::Mac | TrustedDeviceKind::Iphone => device.name.clone(),
     }
 }

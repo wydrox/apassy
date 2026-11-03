@@ -299,6 +299,17 @@ pub fn split_linked_device_name(text: &str) -> (String, Option<(LinkedDeviceKind
     (text.trim().to_owned(), None)
 }
 
+/// The name of a watch for the screen: "<name> (Apple Watch)", or the name alone when it
+/// already says "Apple Watch" (watchOS can give the generic name), so that no screen
+/// shows "Apple Watch (Apple Watch)" (ADR 0039).
+pub fn watch_label(name: &str) -> String {
+    if name.to_lowercase().contains("apple watch") {
+        name.to_owned()
+    } else {
+        format!("{name} (Apple Watch)")
+    }
+}
+
 /// The name of a link for the screen: the name without an answer key of an iPhone or a
 /// watch.
 pub fn shown_link_name(text: &str) -> String {
@@ -495,5 +506,12 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_generic_watch_name_is_not_said_twice() {
+        assert_eq!(watch_label("Test Watch"), "Test Watch (Apple Watch)");
+        assert_eq!(watch_label("Apple Watch"), "Apple Watch");
+        assert_eq!(watch_label("Rafał’s Apple Watch"), "Rafał’s Apple Watch");
     }
 }

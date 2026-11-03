@@ -50,6 +50,9 @@ final class WristSigningAttempt: WatchSigningAttempt, @unchecked Sendable {
                 throw isEnded ? WatchKeyError.cancelled : WatchKeyError.notOnWrist
             }
             guard !isEnded else { throw WatchKeyError.cancelled }
+            // The check passed: the signature uses it and never shows a prompt of its own from the
+            // thread below. A context that no longer counts fails at once instead.
+            context.interactionNotAllowed = true
             // The signature can wait on the Secure Enclave, so it runs off the cooperative pool.
             return try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async { [self] in

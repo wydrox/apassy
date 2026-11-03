@@ -45,6 +45,8 @@ import Testing
         #expect(WatchConnectLink.defaultName(deviceName: "Work Watch Series") == "Work Watch Series")
         #expect(WatchConnectLink.defaultName(deviceName: "Work Watch Series X") == "Work Watch Series")
         #expect(WatchConnectLink.defaultName(deviceName: "") == "Apple Watch")
+        // A generic system name is kept.
+        #expect(WatchConnectLink.defaultName(deviceName: "Apple Watch") == "Apple Watch")
         #expect(WatchConnectLink.defaultName(deviceName: " \t ") == "Apple Watch")
         #expect(WatchConnectLink.defaultName(deviceName: "\u{7}Watch") == "Watch")
     }
@@ -99,6 +101,11 @@ import Testing
         #expect(WatchRequestText.escaped(#"a\b"#) == #"a\\b"#)
         #expect(WatchRequestText.escaped("\u{202E}gnp.exe") == #"\u{202e}gnp.exe"#)
         #expect(WatchRequestText.escaped("one\ntwo") == #"one\u{a}two"#)
+        // Line and paragraph separators break lines in a label: shown, never applied. The iPhone
+        // uses the same function.
+        #expect(AccessText.escaped("ok\u{2028}Allow") == #"ok\u{2028}Allow"#)
+        #expect(AccessText.escaped("ok\u{2029}Allow") == #"ok\u{2029}Allow"#)
+        #expect(WatchRequestText.escaped("a\u{2028}b") == AccessText.escaped("a\u{2028}b"))
         let card = request().card
         #expect(WatchRequestText.title(card) == "Claude Code asks for GitHub token")
         #expect(WatchRequestText.askedOn(card) == "Asked on Studio Mac · Personal")

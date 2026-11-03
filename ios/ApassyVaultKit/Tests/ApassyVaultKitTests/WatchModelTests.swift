@@ -77,6 +77,8 @@ import Testing
         #expect(model.screen == .words(PreviewWatchService.words))
         model.cancelConnect()
         #expect(model.screen == .connect(nil))
+        await model.connectFinished()
+        #expect(try await service.status(answerKey: nil).state == .unpaired)
         #expect(keys.publicKey(team: team) == nil)
         #expect(try replica.load() == nil)
     }
@@ -209,6 +211,108 @@ import Testing
         model.requests.setAllowOffReason("Update Apassy on your Mac to connect this watch.")
         #expect(model.requests.phase(for: id, at: .now)
             == .decide(allowOnce: false, notes: ["Update Apassy on your Mac to connect this watch."]))
+    }
+
+    // MARK: - Review fixes
+
+    /// The view computes the phase with the real time: an explicit timeline starts at its first
+    /// entry, the future expiry, which reads as expired.
+    @Test func anOpenRequestWithAFutureExpiryIsActionableAsTheViewEvaluatesIt() async throws {
+        let (model, _, _, id) = try connected()
+        await model.scenePhaseChanged(.active)
+        #expect(model.requests.currentPhase(for: id) == .decide(allowOnce: true, notes: []))
+        let firstEntry = try #require(model.requests.deadlines(for: id).first)
+        #expect(firstEntry > .now)
+        #expect(model.requests.phase(for: id, at: firstEntry) == .expired)
+        let row = try #require(model.requests.request(id))
+        #expect(WatchRequestText.rowStatus(row, at: .now).hasPrefix("Until "))
+    }
+
+    @Test func cancelDuringASlowStartCancelsTheJoin() async throws {
+        let service = PreviewWatchService(state: .unpaired, connection: .waits, startDelay: .milliseconds(150))
+        let keys = MemoryWatchAnswerKeys()
+        let replica = MemoryWatchReplicaStore()
+        let model = model(service, keys: keys, replica: replica)
+        await model.scenePhaseChanged(.active)
+        #expect(model.receiveLink(WatchPreview.link) == nil)
+        try await Task.sleep(for: .milliseconds(20))
+        model.cancelConnect()
+        #expect(model.screen == .connect(nil))
+        await model.connectFinished()
+        // The cancel came after the start returned: no join stays in the core.
+        #expect(try await service.status(answerKey: nil).state == .unpaired)
+        #expect(model.screen == .connect(nil))
+        #expect(keys.publicKey(team: team) == nil)
+        #expect(try replica.load() == nil)
+    }
+
+    @Test func theAppReopensAfterBackgroundInactiveActive() async throws {
+        let (model, service, _, id) = try connected()
+        await model.scenePhaseChanged(.active)
+        await model.scenePhaseChanged(.background)
+        #expect(model.requests.rows.isEmpty)
+        #expect(try await service.status(answerKey: nil).state == .locked)
+        await model.scenePhaseChanged(.inactive)
+        #expect(model.isLive)
+        await model.scenePhaseChanged(.active)
+        #expect(try await service.status(answerKey: nil).state == .ready)
+        #expect(model.requests.rows.map(\.id) == [id])
+    }
+
+    @Test func theBackgroundDuringAnUnlockKeepsTheReplicaClosed() async throws {
+        let keys = MemoryWatchAnswerKeys()
+        let key = try keys.create(team: team)
+        let now = UInt64(Date.now.timeIntervalSince1970)
+        let request = WatchPreview.request(answerKey: key, created: now - 10, expires: now + 290)
+        let service = PreviewWatchService(state: .locked, requests: [request], unlockDelay: .milliseconds(150))
+        let replica = MemoryWatchReplicaStore(WatchReplicaSecret(passphrase: "synthetic-passphrase-1", team: team))
+        let model = model(service, keys: keys, replica: replica)
+        model.setScenePhase(.active)
+        try await Task.sleep(for: .milliseconds(40))
+        await model.scenePhaseChanged(.background)
+        #expect(model.requests.rows.isEmpty)
+        #expect(try await service.status(answerKey: nil).state == .locked)
+        await model.scenePhaseChanged(.active)
+        #expect(model.requests.rows.map(\.id) == [request.id])
+    }
+
+    @Test func wristDownKeepsTheLongPollWithoutRestartingIt() async throws {
+        let (model, _, _, _) = try connected()
+        await model.scenePhaseChanged(.active)
+        #expect(model.isLive)
+        model.setScenePhase(.inactive)
+        #expect(model.isLive)
+        model.setScenePhase(.background)
+        #expect(!model.isLive)
+    }
+
+    @Test func denyOnAnotherRequestEndsAWristCheckThatRuns() async throws {
+        let keys = MemoryWatchAnswerKeys(checkTime: .milliseconds(300))
+        let key = try keys.create(team: team)
+        let now = UInt64(Date.now.timeIntervalSince1970)
+        let first = WatchPreview.request(requestID: "81", answerKey: key, created: now - 10, expires: now + 290)
+        let second = WatchPreview.request(requestID: "82", answerKey: key, created: now - 5, expires: now + 290)
+        let service = PreviewWatchService(state: .ready, requests: [first, second])
+        let replica = MemoryWatchReplicaStore(WatchReplicaSecret(passphrase: "synthetic-passphrase-1", team: team))
+        let model = model(service, keys: keys, replica: replica)
+        await model.scenePhaseChanged(.active)
+        model.requests.answer(first.id, choice: .allow_once)
+        #expect(model.requests.currentPhase(for: first.id) == .checkingWrist)
+        try await Task.sleep(for: .milliseconds(20))
+        model.requests.answer(second.id, choice: .deny)
+        #expect(model.requests.progress[first.id] == nil)
+        await model.requests.answerFinished()
+        let posts = await service.postedAnswers()
+        #expect(posts.map { $0.id } == [second.id])
+        #expect(posts.first?.choice == .deny)
+        #expect(keys.signatureCount == 0)
+    }
+
+    @Test func aWatchWithoutAPasscodeTurnsAllowOnceOff() async throws {
+        let (model, _, _, id) = try connected(keys: MemoryWatchAnswerKeys(canSign: false))
+        await model.scenePhaseChanged(.active)
+        #expect(model.requests.currentPhase(for: id)
+            == .decide(allowOnce: false, notes: ["Allow once needs this watch unlocked on your wrist."]))
     }
 
     @Test func everyPreviewStateBuilds() {

@@ -17,9 +17,11 @@ struct WatchRootView: View {
                     }
                 }
         }
-        // The replica opens when the app becomes active and suspends in the background; in the
-        // background a signature is cancelled and the requests are dropped.
-        .task(id: scenePhase) { await model.scenePhaseChanged(WatchScenePhase(scenePhase)) }
+        // The replica opens when the app becomes active and suspends in the background. The
+        // background cancels a signature and drops the requests at once, in the change itself.
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            model.setScenePhase(WatchScenePhase(phase))
+        }
     }
 
     @ViewBuilder
@@ -42,7 +44,9 @@ struct WatchRootView: View {
         case .words(let words):
             CheckWordsView(words: words) { model.cancelConnect() }
         case .connected(let vault, let macs):
-            ConnectedView(vault: vault, macs: macs) { model.finishConnecting() }
+            ConnectedView(vault: vault, macs: macs, allowOff: model.requests.allowOffReason) {
+                model.finishConnecting()
+            }
         case .requests:
             RequestsView(model: model)
         }

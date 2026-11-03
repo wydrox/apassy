@@ -1,13 +1,25 @@
 import ApassyVaultCore
 import ApassyVaultKit
 import Foundation
+import SwiftUI
 
 /// Makes the model of the app: the core over the data folder of the watch, or, in a Simulator or
 /// Debug build, the synthetic states of the launch arguments (ios/README.md):
 ///
 /// - `-ApassyWatchPreview <state>`: `WatchPreviewState`, synthetic data only.
 /// - `-ApassyWatchConnectLink <link>`: start a connection as if the iPhone had sent the code.
+/// - `-ApassyWatchScrollToEnd YES`: open the request and Connected screens at their end, for
+///   screenshots of the answers and results.
 enum WatchLaunch {
+    /// Where a long screen opens: its top, or (Debug and Simulator, `-ApassyWatchScrollToEnd`) its end.
+    static var scrollAnchor: UnitPoint? {
+        #if DEBUG || targetEnvironment(simulator)
+            UserDefaults.standard.bool(forKey: "ApassyWatchScrollToEnd") ? .bottom : nil
+        #else
+            nil
+        #endif
+    }
+
     @MainActor
     static func makeModel() -> WatchAppModel {
         #if DEBUG || targetEnvironment(simulator)

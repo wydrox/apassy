@@ -42,6 +42,11 @@ public final class WatchRequestsModel {
     public private(set) var allowOffReason: String?
     /// The requests whose answer key is the key of this watch.
     private var signable: Set<String> = []
+    /// A passcode is set (`WatchAnswerKeys.canSign`), read off the main actor in `refresh` and
+    /// `refreshKeyState`, never while a view draws.
+    private var canSign = false
+    /// The public keys of this watch by questions team, read with `canSign`.
+    private var publicKeys: [String: Data] = [:]
 
     @ObservationIgnored private let service: any WatchService
     @ObservationIgnored private let keys: any WatchAnswerKeys
@@ -66,6 +71,10 @@ public final class WatchRequestsModel {
 
     public func request(_ id: String) -> RelayAccessRequest? { rows.first { $0.id == id } }
 
+    /// The state of the Request screen now. A view uses this: the date of a timeline entry can be
+    /// in the future (an explicit timeline starts at its first date).
+    public func currentPhase(for id: String) -> WatchRequestPhase { phase(for: id, at: .now) }
+
     /// The state of the Request screen at `date`.
     public func phase(for id: String, at date: Date) -> WatchRequestPhase {
         let request = self.request(id)
@@ -76,7 +85,7 @@ public final class WatchRequestsModel {
     /// Why this watch cannot sign Allow once for `request`, or nil when it can.
     public func allowBlock(for request: RelayAccessRequest) -> String? {
         if let allowOffReason { return allowOffReason }
-        if !keys.canSign { return "Allow once needs this watch unlocked on your wrist." }
+        if !canSign { return "Allow once needs this watch unlocked on your wrist." }
         if request.answer_key == nil { return "Update Apassy on your Mac to connect this watch." }
         if !signable.contains(request.id) { return "Allow once is off: connect this watch again." }
         return nil
@@ -105,6 +114,38 @@ public final class WatchRequestsModel {
     /// The state of the row of this watch: Allow once is off for every request with `message`.
     func setAllowOffReason(_ message: String?) { allowOffReason = message }
 
+    // MARK: - The keys
+
+    private struct KeyState: Sendable {
+        let canSign: Bool
+        let publicKeys: [String: Data]
+    }
+
+    /// Read the key state again (the app became active: a passcode may have changed).
+    public func refreshKeyState() async {
+        let current = listGeneration
+        let state = await Self.readKeys(keys, teams: Set(rows.map { $0.card.team_id }))
+        guard current == listGeneration else { return }
+        apply(state)
+    }
+
+    private func apply(_ state: KeyState) {
+        canSign = state.canSign
+        publicKeys = state.publicKeys
+        signable = Set(rows.filter { WatchRequestRules.keyMatches($0, own: publicKeys[$0.card.team_id]) }.map(\.id))
+    }
+
+    /// The keychain and `LAContext` calls run off the main actor.
+    private nonisolated static func readKeys(_ keys: any WatchAnswerKeys, teams: Set<String>) async -> KeyState {
+        await Task.detached(priority: .userInitiated) {
+            var publicKeys: [String: Data] = [:]
+            for team in teams {
+                if let key = keys.publicKey(team: team) { publicKeys[team] = key }
+            }
+            return KeyState(canSign: keys.canSign, publicKeys: publicKeys)
+        }.value
+    }
+
     // MARK: - The list
 
     /// Read the list. A membership problem (the watch was removed, the replica is locked) is
@@ -121,16 +162,13 @@ public final class WatchRequestsModel {
                 return nil
             }
             let updated = snapshot.requests.sorted { $0.card.created_at > $1.card.created_at }
+            let keyState = await Self.readKeys(keys, teams: Set(updated.map { $0.card.team_id }))
+            guard current == listGeneration else { return nil }
             if let busyID, !updated.contains(where: { $0.id == busyID && $0.state == "open" && $0.receipt == nil }) {
                 cancelSigning()
             }
-            var mine: [String: Data] = [:]
-            signable = Set(updated.compactMap { row in
-                let team = row.card.team_id
-                if mine[team] == nil { mine[team] = keys.publicKey(team: team) }
-                return WatchRequestRules.keyMatches(row, own: mine[team]) ? row.id : nil
-            })
             rows = updated
+            apply(keyState)
             lastList = .now
             offlineSince = nil
             failure = nil
@@ -172,6 +210,7 @@ public final class WatchRequestsModel {
         listGeneration += 1
         rows = []
         signable = []
+        publicKeys = [:]
         loaded = false
         offlineSince = nil
         failure = nil
@@ -192,6 +231,10 @@ public final class WatchRequestsModel {
 
     /// Answer `id`. The task belongs to this model: it ends on the background, never with the view.
     public func answer(_ id: String, choice: AccessChoice) {
+        if let busyID, busyID != id, choice == .deny, progress[busyID] == .checkingWrist {
+            // Deny on another request: the wrist check of the first one ends; nothing of it was sent.
+            cancelSigning()
+        }
         guard busyID == nil, let request = self.request(id), canStart(request, choice: choice, at: .now) else { return }
         generation += 1
         let mine = generation
