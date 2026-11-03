@@ -117,14 +117,11 @@ identifier, so it needs no App Tracking Transparency prompt.
 6. **Stage 7 (Apassy Connect).** A Connect account adds Contact Info › Email (linked, App
    Functionality), and maybe Purchases if the plan state reaches the app. Update these answers in the
    same release that ships the account on the iPhone.
-7. **Privacy manifest.** The app has no `PrivacyInfo.xcprivacy` (checked 2026-11-03). App Store
-   Connect asks for one when an app or an SDK uses a "required reason API" (for example
-   `UserDefaults`, which the app uses, or file timestamps). It is a code change outside this unit: add
-   `ios/ApassyCompanion/Resources/PrivacyInfo.xcprivacy` (and one for the watch app and the AutoFill
-   extension) with `NSPrivacyTracking = false`, no tracking domains, the collected types of the table
-   above, and the API reasons (`CA92.1` for `UserDefaults` in the app's own container; `1C8F.1` for the
-   App Group defaults; `C617.1` or `3B52.1` for file timestamps if used). Upload a build and read the
-   email from App Store Connect: it names each missing reason.
+7. **Privacy manifest.** `ios/ApassyCompanion/Privacy/{App,AutoFill,Watch}/PrivacyInfo.xcprivacy`
+   (release/0.5.16) declare `NSPrivacyTracking = false` and, for the app and the watch, Device ID,
+   User ID and Other Data, each linked, not tracking, App Functionality: the same as the table above.
+   Keep the manifests and this table the same. After an upload, read the email from App Store
+   Connect: it names each missing API reason.
 
 ## 4. The label that App Store Connect will show
 
