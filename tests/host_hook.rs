@@ -501,12 +501,9 @@ fn a_task_notification_keeps_the_request_of_the_user() {
             "{state}"
         );
         assert!(!state.contains("task-notification"), "{state}");
-        // Finding 4 of the 0.5.16 review: the brain reads that an Agent SDK turn
-        // carries the request.
-        assert!(
-            state.contains(" Task provenance: Agent SDK turn."),
-            "{state}"
-        );
+        // Finding 4 of the 0.5.16 review: the provenance of an Agent SDK turn goes to the
+        // card and the log, not to the state of the brain (its states never had it).
+        assert!(!state.contains("Task provenance"), "{state}");
     }
     let reason = last_reason(&fx);
     assert!(
