@@ -484,6 +484,61 @@ fn agent_add_remote_asks_the_owner_and_answers_the_token_once_with_the_address()
     assert_eq!(agent.name, "Grok Bot 2");
 }
 
+/// Review 0.5.16: an open owner-check window (ADR 0030) covers other command-line
+/// requests, but `apassy agent add-remote` still asks the owner: its token works from
+/// the internet, and a session of the command line proves no owner at the Mac.
+#[test]
+fn agent_add_remote_asks_the_owner_inside_an_open_window() {
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    let mut fx = fixture();
+    let ctx = egui::Context::default();
+    let login = ask_cli(&mut fx.app, &ctx, None, Command::Login);
+    fx.app
+        .confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    let Data::Session { token: session, .. } = login.try_recv().expect("login").data else {
+        panic!("no session");
+    };
+    let session = session.expose().to_owned();
+    until(&ctx, &mut fx.app, "the node runs", |app| {
+        app.node.running_for.is_some()
+    });
+    let window = fx.app.owner_ui.session.owner_window.clone();
+    window.configure(OwnerFrequency::UntilLock);
+    window.observe(true);
+    window.seed(
+        fx.app.owner_ui.session.epoch().expect("epoch"),
+        CheckMethod::TouchId,
+        window.generation(),
+    );
+    let answer = ask_cli(
+        &mut fx.app,
+        &ctx,
+        Some(&session),
+        Command::AgentAddRemote {
+            name: "Grok Bot".to_owned(),
+            days: Some(30),
+        },
+    );
+    assert!(answer.try_recv().is_err(), "it waits for the owner check");
+    assert!(matches!(
+        fx.app.owner.check.as_ref().map(|dialog| &dialog.request),
+        Some(OwnerRequest::AddRemoteAgent { days: 30, .. })
+    ));
+    assert!(
+        fx.app.remote_agents().is_empty(),
+        "nothing before the check"
+    );
+    assert!(fx.backend.state.lock().unwrap().tokens.is_empty());
+    fx.app
+        .confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    let response = answer.try_recv().expect("the answer");
+    assert!(response.ok, "{response:?}");
+    assert!(matches!(response.data, Data::RemoteToken { .. }));
+    assert_eq!(fx.app.remote_agents().len(), 1);
+}
+
 /// The delay of the next frame that one comparison of the node asks for, after two
 /// empty frames that settle egui. `Duration::MAX`: no frame.
 fn asked_repaint(ctx: &egui::Context, app: &mut DesktopApp) -> Duration {

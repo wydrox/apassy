@@ -518,6 +518,14 @@ fn passkey_caller(origin: Option<&String>) -> &'static str {
 }
 
 impl OwnerAction {
+    /// True for an action that always takes a fresh local check: an open owner-check
+    /// window (ADR 0030) never covers it. `AddRemoteAgent` mints a bearer token that
+    /// works from the internet and goes back to the caller of the command line, whose
+    /// session proves no owner at the Mac (owner-cli-v1 §4, review 0.5.16).
+    pub fn needs_fresh_local_check(&self) -> bool {
+        matches!(self, Self::AddRemoteAgent { .. })
+    }
+
     /// Trusted heading: never interpolate website, agent, item, or request text.
     pub fn touch_id_title(&self) -> &'static str {
         match self {
@@ -1293,6 +1301,10 @@ impl OwnerGate {
                 heartbeat_age_ms = self.window.heartbeat_age_ms(),
                 "owner window reuse refused"
             );
+            return None;
+        }
+        if action.needs_fresh_local_check() {
+            tracing::info!(reason = "fresh_only", "owner window reuse refused");
             return None;
         }
         // ticket() synchronously probes the same lifecycle helper that observed
