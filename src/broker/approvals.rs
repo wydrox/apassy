@@ -1637,9 +1637,11 @@ mod tests {
             unconfirmed,
             ..Default::default()
         };
-        let mut question = QuestionInfo::default();
-        assert!(question.classifiable_item().is_none());
-        question.items = vec![item(7, false), item(8, true)];
+        assert!(QuestionInfo::default().classifiable_item().is_none());
+        let mut question = QuestionInfo {
+            items: vec![item(7, false), item(8, true)],
+            ..QuestionInfo::default()
+        };
         assert_eq!(question.classifiable_item().map(|i| i.item_id), Some(8));
         question.items = vec![item(7, true), item(8, true)];
         assert!(question.classifiable_item().is_none());

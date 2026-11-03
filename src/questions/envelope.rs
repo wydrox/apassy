@@ -1676,8 +1676,10 @@ mod tests {
             unconfirmed,
             always_ask: false,
         };
-        let mut question = QuestionInfo::default();
-        question.items = vec![item(1, false, false), item(2, false, true)];
+        let mut question = QuestionInfo {
+            items: vec![item(1, false, false), item(2, false, true)],
+            ..QuestionInfo::default()
+        };
         assert_eq!(
             allowed_answer_kinds(&question),
             [
