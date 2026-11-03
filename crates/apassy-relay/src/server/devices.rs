@@ -138,7 +138,39 @@ pub fn view(conn: &Connection, id: DeviceId, current: Option<DeviceId>) -> Relay
     .ok_or_else(|| RelayError::not_found("device"))
 }
 
+/// `POST /v1/auth/challenge` with no `Host`: the challenge names the first sign-in
+/// origin (`RelayConfig::sign_in_origins`).
 pub fn challenge(core: &Core, request: &ChallengeRequest, now: u64) -> RelayResult<Value> {
+    challenge_for(core, request, None, now)
+}
+
+/// The sign-in origin that a challenge names (docs/SPEC.md section 32.3): the one whose
+/// host and port are the request's `Host`, else the first. The hosted relay has one
+/// origin, so it always names `public_url`. Only the name in the answer depends on
+/// `Host`: `token` accepts a signature over any origin of the set.
+pub fn challenge_origin<'a>(origins: &[&'a str], host: Option<&str>) -> &'a str {
+    let host = host.map(|host| host.trim().to_ascii_lowercase());
+    host.as_deref()
+        .and_then(|host| {
+            origins.iter().copied().find(|origin| {
+                origin
+                    .strip_prefix("https://")
+                    .or_else(|| origin.strip_prefix("http://"))
+                    .is_some_and(|authority| authority == host)
+            })
+        })
+        .or_else(|| origins.first().copied())
+        .unwrap_or_default()
+}
+
+/// `POST /v1/auth/challenge`: a nonce for a live device of the team, and the origin to
+/// sign (`challenge_origin` of the request's `Host`).
+pub fn challenge_for(
+    core: &Core,
+    request: &ChallengeRequest,
+    host: Option<&str>,
+    now: u64,
+) -> RelayResult<Value> {
     if request.team_id != core.team || core.stopping() {
         return Err(RelayError::unauthenticated());
     }
@@ -179,7 +211,8 @@ pub fn challenge(core: &Core, request: &ChallengeRequest, now: u64) -> RelayResu
         if let Some(oldest) = oldest { state.nonces.remove(&oldest); state.compact(); }
         state.nonce_order.push_back(nonce.clone());
         state.nonces.insert(nonce.clone(), (id, expires_at));
-        json_value(&Challenge { nonce, expires_at, origin: core.config.public_url.clone() })
+        let origin = challenge_origin(&core.config.sign_in_origins(), host).to_string();
+        json_value(&Challenge { nonce, expires_at, origin })
     })
 }
 
@@ -207,7 +240,11 @@ pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value
         core.store.tx(|conn| {
             let member = device_member(conn, id)?;
             let stored: Vec<u8> = conn.query_row("SELECT public_key FROM device WHERE id = ?1", params![to_i(id.0)], |row| row.get(0)).map_err(db)?;
-            if stored != public || !device::verify(&public, &device::sign_in_message(&core.config.public_url, &core.team, &request.public_key, &request.nonce), &signature) {
+            // Any origin of the set (one on the hosted relay, docs/SPEC.md section 32.3).
+            let signed = core.config.sign_in_origins().iter().any(|origin| {
+                device::verify(&public, &device::sign_in_message(origin, &core.team, &request.public_key, &request.nonce), &signature)
+            });
+            if stored != public || !signed {
                 return Err(RelayError::unauthenticated());
             }
             let team: String = conn.query_row("SELECT name FROM team WHERE id = 1", [], |row| row.get(0)).map_err(db)?;
@@ -307,6 +344,8 @@ pub fn revoke(core: &Core, by: &MemberAuth, id: DeviceId, now: u64) -> RelayResu
         conn.execute("UPDATE device SET revoked_at = ?2 WHERE id = ?1", params![to_i(id.0), to_i(now)]).map_err(db)?;
         // A removed device gets no more pushes (docs/SPEC.md section 25.2).
         conn.execute("DELETE FROM push_token WHERE device_id = ?1", params![to_i(id.0)]).map_err(db)?;
+        // And no handle of the push gateway stays (push-gateway-v1 section 10).
+        conn.execute("DELETE FROM push_handle WHERE device_id = ?1", params![to_i(id.0)]).map_err(db)?;
         // Its feed goes, and its open actions expire (docs/SPEC.md section 27.6).
         crate::server::feed::drop_devices(core, conn, &[id], true, &member_actor(by.id.0), "device_revoked", now)?;
         conn.execute("UPDATE agent SET revoked_at = ?2 WHERE device_id = ?1 AND revoked_at IS NULL", params![to_i(id.0), to_i(now)]).map_err(db)?;
@@ -444,7 +483,10 @@ mod tests {
             data_dir: dir.path().join("data"),
             listen: "127.0.0.1:0".parse().unwrap(),
             public_listen: None,
+            tailnet_listen: None,
+            tailnet_agents: false,
             public_url: "https://relay.example.test".into(),
+            sign_in_origins: Vec::new(),
             edge: crate::config::EdgeMode::Required(SecretString::new("e".repeat(40))),
             master_key: SecretString::new("synthetic unit test vault key".into()),
             session_ttl_secs: 60,
@@ -466,6 +508,31 @@ mod tests {
         let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();
         let core = hub.for_token(owner.expose()).unwrap();
         (dir, core, owner)
+    }
+
+    #[test]
+    fn a_challenge_names_the_origin_of_its_host_else_the_first() {
+        let node = ["https://100.64.0.7:8444", "https://mac.example.ts.net:8443"];
+        assert_eq!(
+            challenge_origin(&node, Some("100.64.0.7:8444")),
+            "https://100.64.0.7:8444"
+        );
+        assert_eq!(
+            challenge_origin(&node, Some("Mac.Example.ts.net:8443")),
+            "https://mac.example.ts.net:8443"
+        );
+        // A port that is not the origin's, another host, or no Host: the first.
+        for host in [Some("100.64.0.7"), Some("127.0.0.1:49200"), Some(""), None] {
+            assert_eq!(challenge_origin(&node, host), node[0], "{host:?}");
+        }
+        assert_eq!(
+            challenge_origin(&["https://relay.example.test"], Some("127.0.0.1:8080")),
+            "https://relay.example.test"
+        );
+        assert_eq!(
+            challenge_origin(&["http://127.0.0.1:8080"], Some("127.0.0.1:8080")),
+            "http://127.0.0.1:8080"
+        );
     }
 
     #[test]

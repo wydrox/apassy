@@ -1252,6 +1252,7 @@ fn generated(name: &str, value: &str) -> Detected {
         reversibility: providers::DEFAULT_REVERSIBILITY,
         sources: Sources::DEFAULT,
         line: None,
+        short_lived: None,
     }
 }
 

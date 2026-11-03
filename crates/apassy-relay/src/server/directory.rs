@@ -6,8 +6,10 @@
 //! audit of the relay: operator actions, and refused requests that name no known team.
 //! Since version 1004 it also holds the OAuth state of an embedded node (docs/SPEC.md
 //! section 31): registered clients, connect requests, and refresh tokens, with codes and
-//! refresh tokens as hashes only. It holds no people, no items, and no runs: those are in
-//! the file of each team.
+//! refresh tokens as hashes only. Since version 1005 each team code has a kind:
+//! `operator` (`apassy-relay admin team-code`) or `node` (`apassy pair` on a node, ten
+//! minutes, docs/SPEC.md section 32). It holds no people, no items, and no runs: those are
+//! in the file of each team.
 
 use std::sync::Arc;
 
@@ -24,7 +26,7 @@ use crate::server::store::{Store, db, to_i, to_u};
 
 /// `PRAGMA user_version` of the directory. Far from the team versions, so one file is
 /// never taken for the other.
-pub const DIRECTORY_VERSION: i64 = 1004;
+pub const DIRECTORY_VERSION: i64 = 1005;
 
 const SCHEMA: &str = "
 CREATE TABLE team (
@@ -61,6 +63,23 @@ CREATE TABLE oauth_refresh (
   expires_at INTEGER NOT NULL, used_at INTEGER, revoked_at INTEGER);
 CREATE INDEX oauth_refresh_family ON oauth_refresh(family);
 CREATE INDEX oauth_refresh_agent ON oauth_refresh(team_id, agent_id);
+ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','node'));
+PRAGMA user_version = 1005;
+";
+
+/// Version 1004 to 1005 (docs/SPEC.md section 32.6): the kind of a team code, additive.
+/// Every existing code is `operator`. The same text as the last table line of `SCHEMA`,
+/// so a migrated file has the schema of a new one. A file that `downgrade_to_1004` took
+/// back has the column already: it stays (`migrate_1005`).
+const KIND_1005: &str = "
+ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','node'));
+";
+
+/// Version 1005 back to 1004 (`downgrade_to_1004`, docs/OPERATIONS.md section 25.3): the
+/// unused node codes go, so the image of 1004 cannot take one for an operator code; the
+/// column stays, and that image never reads it.
+const DOWNGRADE_1004: &str = "
+DELETE FROM team_code WHERE kind = 'node' AND used_at IS NULL;
 PRAGMA user_version = 1004;
 ";
 
@@ -116,6 +135,46 @@ pub const OPERATOR_ACTOR: &str = "operator";
 
 /// The longest life of a team code, in hours.
 pub const MAX_TEAM_CODE_HOURS: u64 = 720;
+
+/// The longest life of a node pairing code, in minutes (node-pairing-v1 section 6).
+pub const MAX_NODE_CODE_MINUTES: u64 = 10;
+
+/// The kind of a team code (`team_code.kind`, directory 1005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeKind {
+    /// Made by the operator (`apassy-relay admin team-code`): works on any relay.
+    Operator,
+    /// A node pairing code (`apassy pair`, node-pairing-v1 section 6): one use, at most
+    /// ten minutes, and only on a node (a relay with a tailnet listener).
+    Node,
+}
+
+impl CodeKind {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Node => "node",
+        }
+    }
+
+    fn from_text(text: &str) -> Option<Self> {
+        match text {
+            "operator" => Some(Self::Operator),
+            "node" => Some(Self::Node),
+            _ => None,
+        }
+    }
+}
+
+/// `migrate_1005` on a transaction: the column, when it is not there, and the version.
+fn migrate_1005(conn: &Connection) -> RelayResult<()> {
+    if !crate::server::store::has_column(conn, "team_code", "kind")? {
+        conn.execute_batch(KIND_1005).map_err(db)?;
+    }
+    conn.pragma_update(None, "user_version", DIRECTORY_VERSION)
+        .map_err(db)
+}
 
 /// The effective resource limits of one team.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -568,13 +627,13 @@ impl Directory {
         })
     }
 
-    /// Opens `relay.db` and checks its version. 1001, 1002, and 1003 move to 1004 in one
+    /// Opens `relay.db` and checks its version. 1001 to 1004 move to 1005 in one
     /// transaction; a failure leaves the file at its version.
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         match store.user_version()? {
             DIRECTORY_VERSION => {}
-            version @ (1001..=1003) => store.tx(|tx| {
+            version @ (1001..=1004) => store.tx(|tx| {
                 if version == 1001 {
                     tx.execute_batch("ALTER TABLE team ADD COLUMN limits TEXT;")
                         .map_err(db)?;
@@ -582,7 +641,10 @@ impl Directory {
                 if version <= 1002 {
                     tx.execute_batch(MIGRATE_1003).map_err(db)?;
                 }
-                tx.execute_batch(MIGRATE_1004).map_err(db)
+                if version <= 1003 {
+                    tx.execute_batch(MIGRATE_1004).map_err(db)?;
+                }
+                migrate_1005(tx)
             })?,
             _ => {
                 return Err(RelayError::internal(
@@ -597,10 +659,11 @@ impl Directory {
     }
 
     /// `apassy-relay downgrade-directory-1003` (docs/OPERATIONS.md section 24): with the
-    /// relay stopped (it takes `relay.lock`), a directory of version 1004 goes back to
-    /// 1003 in place, for an image before OAuth. The OAuth tables go: registered clients,
-    /// connect requests, and refresh tokens. An access token that was issued stays valid in
-    /// its team file until it ends (at most `oauth::ACCESS_TOKEN_SECS`), and no client can
+    /// relay stopped (it takes `relay.lock`), a directory of version 1004 or 1005 goes back
+    /// to 1003 in place, for an image before OAuth: first the step of `downgrade_to_1004`
+    /// (unused node codes go), then the OAuth tables go: registered clients, connect
+    /// requests, and refresh tokens. An access token that was issued stays valid in its
+    /// team file until it ends (at most `oauth::ACCESS_TOKEN_SECS`), and no client can
     /// refresh it. A file of version 1003 is left as it is. Returns the version before and
     /// after.
     pub fn downgrade_to_1003(config: &RelayConfig) -> RelayResult<(i64, i64)> {
@@ -608,11 +671,37 @@ impl Directory {
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         let from = store.user_version()?;
         match from {
+            1005 => store.tx(|tx| {
+                tx.execute_batch(DOWNGRADE_1004).map_err(db)?;
+                tx.execute_batch(DOWNGRADE_1003).map_err(db)
+            })?,
             1004 => store.tx(|tx| tx.execute_batch(DOWNGRADE_1003).map_err(db))?,
             1003 => {}
             _ => {
                 return Err(RelayError::internal(
-                    "relay.db is not a directory of version 1003 or 1004.",
+                    "relay.db is not a directory of version 1003, 1004, or 1005.",
+                ));
+            }
+        }
+        Ok((from, store.user_version()?))
+    }
+
+    /// `apassy-relay downgrade-directory-1004` (docs/OPERATIONS.md section 25.3): with the
+    /// relay stopped (it takes `relay.lock`), a directory of version 1005 goes back to 1004
+    /// in place, for the image before node pairing codes. The unused node codes go (the
+    /// image of 1004 would take one for an operator code); used ones stay as history, and
+    /// the `kind` column stays: that image never reads it, and the next open of 1005 keeps
+    /// it. A file of version 1004 is left as it is. Returns the version before and after.
+    pub fn downgrade_to_1004(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+        let _lock = crate::server::hub::lock_data_dir(config)?;
+        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let from = store.user_version()?;
+        match from {
+            1005 => store.tx(|tx| tx.execute_batch(DOWNGRADE_1004).map_err(db))?,
+            1004 => {}
+            _ => {
+                return Err(RelayError::internal(
+                    "relay.db is not a directory of version 1004 or 1005.",
                 ));
             }
         }
@@ -707,31 +796,58 @@ impl Directory {
         })
     }
 
-    /// A new one-time team code. Returns the code (shown once) and its expiry.
+    /// A new one-time team code of the operator. Returns the code (shown once) and its
+    /// expiry.
     pub fn new_team_code(&self, hours: u64, now: u64) -> RelayResult<(SecretString, u64)> {
         if !(1..=MAX_TEAM_CODE_HOURS).contains(&hours) {
             return Err(RelayError::invalid(format!(
                 "A team code lives 1 to {MAX_TEAM_CODE_HOURS} hours."
             )));
         }
+        self.insert_code(CodeKind::Operator, now + hours * 3600, now)
+    }
+
+    /// A new node pairing code (node-pairing-v1 section 6): a team code of kind `node`,
+    /// one use, for 1 to `MAX_NODE_CODE_MINUTES` minutes. It makes a team only on a node
+    /// (`Hub::create_team`). Returns the code (shown once) and its expiry. The row of the
+    /// relay audit is `node_code_created {code_id, expires_at}`.
+    pub fn new_node_code(&self, minutes: u64, now: u64) -> RelayResult<(SecretString, u64)> {
+        if !(1..=MAX_NODE_CODE_MINUTES).contains(&minutes) {
+            return Err(RelayError::invalid(format!(
+                "A node pairing code lives 1 to {MAX_NODE_CODE_MINUTES} minutes."
+            )));
+        }
+        self.insert_code(CodeKind::Node, now + minutes * 60, now)
+    }
+
+    fn insert_code(
+        &self,
+        kind: CodeKind,
+        expires_at: u64,
+        now: u64,
+    ) -> RelayResult<(SecretString, u64)> {
         let code = new_team_code()?;
-        let expires_at = now + hours * 3600;
         self.store.tx(|tx| {
             tx.execute(
-                "INSERT INTO team_code (code_hash, created_at, expires_at) VALUES (?1, ?2, ?3)",
+                "INSERT INTO team_code (code_hash, created_at, expires_at, kind) VALUES (?1, ?2, ?3, ?4)",
                 params![
                     token_hash(code.expose()).0.as_slice(),
                     to_i(now),
-                    to_i(expires_at)
+                    to_i(expires_at),
+                    kind.text()
                 ],
             )
             .map_err(db)?;
             let id = to_u(tx.last_insert_rowid());
+            let action = match kind {
+                CodeKind::Operator => "team_code_created",
+                CodeKind::Node => "node_code_created",
+            };
             self.audit.write_on(
                 tx,
                 now,
                 OPERATOR_ACTOR,
-                "team_code_created",
+                action,
                 None,
                 &serde_json::json!({"code_id": id, "expires_at": expires_at}),
             )?;
@@ -760,21 +876,24 @@ pub fn team_code_invalid() -> RelayError {
     )
 }
 
-/// The id of a live team code, inside a transaction. Refuses a wrong, used, or expired
-/// code. Check it before any work for a new team.
-pub fn find_team_code(conn: &Connection, code: &str, now: u64) -> RelayResult<u64> {
+/// The id and kind of a live team code, inside a transaction. Refuses a wrong, used, or
+/// expired code. Check it before any work for a new team. The caller refuses a `node`
+/// code on a relay that is not a node (`Hub::create_team`).
+pub fn find_team_code(conn: &Connection, code: &str, now: u64) -> RelayResult<(u64, CodeKind)> {
     if parse_token(code).is_none_or(|parsed| parsed.kind != TokenKind::TeamCode) {
         return Err(team_code_invalid());
     }
-    conn.query_row(
-        "SELECT id FROM team_code WHERE code_hash = ?1 AND used_at IS NULL AND expires_at > ?2",
-        params![token_hash(code).0.as_slice(), to_i(now)],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .map_err(db)?
-    .map(to_u)
-    .ok_or_else(team_code_invalid)
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, kind FROM team_code WHERE code_hash = ?1 AND used_at IS NULL AND expires_at > ?2",
+            params![token_hash(code).0.as_slice(), to_i(now)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db)?;
+    let (id, kind) = row.ok_or_else(team_code_invalid)?;
+    let kind = CodeKind::from_text(&kind).ok_or_else(team_code_invalid)?;
+    Ok((to_u(id), kind))
 }
 
 /// Marks a team code used for `team`, inside the transaction of `find_team_code`.
@@ -1291,7 +1410,7 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
-    fn directory_migrates_1002_to_1004_and_keeps_teams_as_operator() {
+    fn directory_migrates_1002_to_1005_and_keeps_teams_as_operator() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let store =
@@ -1314,7 +1433,7 @@ PRAGMA user_version = 1002;
         drop(store);
 
         let directory = Directory::open(&config).unwrap();
-        assert_eq!(directory.store.user_version().unwrap(), 1004);
+        assert_eq!(directory.store.user_version().unwrap(), 1005);
         let rows = directory.teams().unwrap();
         assert_eq!(rows.len(), 2);
         let first_row = directory.team(&first).unwrap().unwrap();
@@ -1453,15 +1572,15 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
-    fn new_directory_uses_1004_and_refuses_unknown_versions() {
+    fn new_directory_uses_1005_and_refuses_unknown_versions() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let directory = Directory::create(&config).unwrap();
         assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
-        assert_eq!(DIRECTORY_VERSION, 1004);
+        assert_eq!(DIRECTORY_VERSION, 1005);
         directory
             .store
-            .with(|conn| conn.pragma_update(None, "user_version", 1005).map_err(db))
+            .with(|conn| conn.pragma_update(None, "user_version", 1006).map_err(db))
             .unwrap();
         drop(directory);
         assert!(Directory::open(&config).is_err());
@@ -1470,7 +1589,7 @@ PRAGMA user_version = 1002;
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            1005
+            1006
         );
     }
 
@@ -1494,7 +1613,7 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
-    fn directory_moves_from_1003_to_1004_and_back() {
+    fn directory_moves_from_1003_to_1005_and_back() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let fresh = {
@@ -1520,7 +1639,7 @@ PRAGMA user_version = 1002;
             })
             .unwrap();
         // Down: the OAuth tables go, the team stays, and a second run changes nothing.
-        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1004, 1003));
+        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1005, 1003));
         assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1003, 1003));
         let down = schema_of(&config);
         assert!(
@@ -1531,7 +1650,7 @@ PRAGMA user_version = 1002;
         assert!(down.iter().any(|(name, _)| name == "connect_key"));
         // Up again at the next open, with the schema of a new file.
         let directory = Directory::open(&config).unwrap();
-        assert_eq!(directory.store.user_version().unwrap(), 1004);
+        assert_eq!(directory.store.user_version().unwrap(), 1005);
         assert_eq!(directory.teams().unwrap().len(), 1);
         drop(directory);
         assert_eq!(schema_of(&config), fresh);
@@ -1568,5 +1687,136 @@ PRAGMA user_version = 1002;
                 version
             );
         }
+    }
+
+    #[test]
+    fn directory_moves_from_1004_to_1005_and_back_and_keeps_the_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let fresh = {
+            Directory::create(&config).unwrap();
+            schema_of(&config)
+        };
+        let directory = Directory::open(&config).unwrap();
+        let now = 1_790_000_000;
+        let (operator, _) = directory.new_team_code(1, now).unwrap();
+        let (node, node_expires) = directory.new_node_code(10, now).unwrap();
+        assert_eq!(node_expires, now + 600);
+        let (used_node, _) = directory.new_node_code(1, now).unwrap();
+        let team = TeamId::parse("t_abcdefgh23").unwrap();
+        directory
+            .store
+            .tx(|tx| {
+                let (id, kind) = find_team_code(tx, used_node.expose(), now)?;
+                assert_eq!(kind, CodeKind::Node);
+                mark_team_code_used(tx, id, &team, now)
+            })
+            .unwrap();
+        directory
+            .store
+            .with(|conn| {
+                assert_eq!(
+                    find_team_code(conn, operator.expose(), now)?.1,
+                    CodeKind::Operator
+                );
+                assert_eq!(find_team_code(conn, node.expose(), now)?.1, CodeKind::Node);
+                // A node code ends after its minutes.
+                assert_eq!(
+                    find_team_code(conn, node.expose(), node_expires)
+                        .unwrap_err()
+                        .code,
+                    codes::INVITE_INVALID
+                );
+                Ok(())
+            })
+            .unwrap();
+        // The bounds of a node code: 1 to 10 minutes.
+        for minutes in [0, 11, 60] {
+            assert_eq!(
+                directory.new_node_code(minutes, now).unwrap_err().code,
+                codes::INVALID_REQUEST
+            );
+        }
+        let audit: Vec<String> = directory
+            .store
+            .with(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT action FROM audit ORDER BY id")
+                    .map_err(db)?;
+                let rows = statement.query_map([], |row| row.get(0)).map_err(db)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db)
+            })
+            .unwrap();
+        assert_eq!(
+            audit,
+            [
+                "team_code_created",
+                "node_code_created",
+                "node_code_created"
+            ]
+        );
+        drop(directory);
+        // Down: the unused node code goes; the operator code and the used node code stay.
+        assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1005, 1004));
+        assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1004, 1004));
+        let kinds: Vec<(String, bool)> =
+            Store::open_at(&config.directory_path(), &config.master_key)
+                .unwrap()
+                .with(|conn| {
+                    let mut statement = conn
+                        .prepare("SELECT kind, used_at IS NOT NULL FROM team_code ORDER BY id")
+                        .map_err(db)?;
+                    let rows = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map_err(db)?;
+                    rows.collect::<Result<Vec<_>, _>>().map_err(db)
+                })
+                .unwrap();
+        assert_eq!(
+            kinds,
+            [("operator".to_string(), false), ("node".to_string(), true)]
+        );
+        // Up again at the next open, with the schema of a new file.
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), 1005);
+        drop(directory);
+        assert_eq!(schema_of(&config), fresh);
+        // A file of another version is refused by the step to 1004, and stays.
+        Store::open_at(&config.directory_path(), &config.master_key)
+            .unwrap()
+            .with(|conn| conn.pragma_update(None, "user_version", 1003).map_err(db))
+            .unwrap();
+        assert!(Directory::downgrade_to_1004(&config).is_err());
+    }
+
+    #[test]
+    fn a_1004_file_moves_to_1005_with_operator_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let directory = Directory::create(&config).unwrap();
+        let (code, _) = directory.new_team_code(1, 100).unwrap();
+        // The directory of version 1004: no kind column.
+        directory
+            .store
+            .with(|conn| {
+                conn.execute_batch(
+                    "ALTER TABLE team_code DROP COLUMN kind; PRAGMA user_version = 1004;",
+                )
+                .map_err(db)
+            })
+            .unwrap();
+        drop(directory);
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
+        directory
+            .store
+            .with(|conn| {
+                assert_eq!(
+                    find_team_code(conn, code.expose(), 100)?.1,
+                    CodeKind::Operator
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 }

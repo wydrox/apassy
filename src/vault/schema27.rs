@@ -85,13 +85,14 @@ UPDATE vault_meta SET schema_version = 26 WHERE id = 1;
 PRAGMA user_version = 26;
 ";
 
-/// The way back from the current schema to schema 27: `schema29::downgrade_sql` (the
-/// host of the bouncer brain) and then `schema28::downgrade_sql` (the pinned trust of a
-/// membership).
+/// The way back from the current schema to schema 27: `schema32::downgrade_sql`
+/// (short-lived credentials), `schema29::downgrade_sql` (the host of the bouncer brain),
+/// and then `schema28::downgrade_sql` (the pinned trust of a membership).
 #[cfg(test)]
 pub(super) fn downgrade_to_27_sql() -> String {
     format!(
-        "{}{}",
+        "{}{}{}",
+        super::schema32::downgrade_sql(),
         super::schema29::downgrade_sql(),
         super::schema28::downgrade_sql()
     )
@@ -218,7 +219,7 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
-        // Schemas 29 and 28 (`schema29.rs`, `schema28.rs`) first.
+        // Schemas 32, 29, and 28 (`schema32.rs`, `schema29.rs`, `schema28.rs`) first.
         conn.execute_batch(&downgrade_to_27_sql()).unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
         assert_eq!(version(&conn), 26);
@@ -314,7 +315,7 @@ mod tests {
         drop(vault);
 
         let conn = raw(&path);
-        // Schemas 29 and 28 (`schema29.rs`, `schema28.rs`) first.
+        // Schemas 32, 29, and 28 (`schema32.rs`, `schema29.rs`, `schema28.rs`) first.
         conn.execute_batch(&downgrade_to_27_sql()).unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
         assert_eq!(version(&conn), 26);

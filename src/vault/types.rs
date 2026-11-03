@@ -19,8 +19,8 @@ pub const MAX_FIELD_NAME_BYTES: usize = 64;
 pub const MAX_FIELD_VALUE_BYTES: usize = 65_536;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
 pub const MAX_SEARCH_RESULTS: usize = 1000;
-/// The current vault schema: the newest step of the migration chain (`schema29.rs`).
-pub const SCHEMA_VERSION: i64 = 29;
+/// The current vault schema: the newest step of the migration chain (`schema32.rs`).
+pub const SCHEMA_VERSION: i64 = 32;
 /// Field names that only the passkey path writes (schema 17). Generic paths refuse,
 /// hide, and keep them.
 pub const PASSKEY_FIELD_PREFIX: &str = "passkey_";

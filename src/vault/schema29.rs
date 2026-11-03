@@ -35,7 +35,8 @@ pub(super) const BOUNCER_HOST_SCHEMA_VERSION: i64 = 29;
 /// The newest schema before this one in the migration chain.
 pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema28::NODE_TRUST_SCHEMA_VERSION;
 
-const _: () = assert!(SCHEMA_VERSION == BOUNCER_HOST_SCHEMA_VERSION);
+// Schema 32 (`schema32.rs`) follows this step.
+const _: () = assert!(BOUNCER_HOST_SCHEMA_VERSION < SCHEMA_VERSION);
 const _: () = assert!(PREVIOUS_SCHEMA_VERSION < BOUNCER_HOST_SCHEMA_VERSION);
 
 /// The table and the columns of schema 29. The DDL is the one of the plan.
@@ -165,6 +166,9 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
+        // Schema 32 (short-lived credentials, `schema32.rs`) first.
+        conn.execute_batch(&crate::vault::schema32::downgrade_sql())
+            .unwrap();
         conn.execute(
             "INSERT INTO model_candidate
                  (version, url, checkpoint, checkpoint_sha256, created_at, state, report)
@@ -187,8 +191,8 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), BOUNCER_HOST_SCHEMA_VERSION);
-        assert_eq!(meta_version(conn), BOUNCER_HOST_SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
+        assert_eq!(meta_version(conn), crate::vault::SCHEMA_VERSION);
         let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = conn
             .prepare("SELECT origin, job_host, job_id, uploaded_to FROM model_candidate")
             .unwrap()
@@ -246,7 +250,7 @@ mod tests {
         vault.unlock(PASS).unwrap();
         assert_eq!(
             version(vault.conn_ref().unwrap()),
-            BOUNCER_HOST_SCHEMA_VERSION
+            crate::vault::SCHEMA_VERSION
         );
     }
 
@@ -256,7 +260,7 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("new.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), BOUNCER_HOST_SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
         assert!(has_table(conn, "bouncer_host"));
         assert!(crate::vault::merge::LOCAL_TABLES.contains(&"bouncer_host"));
         assert!(!crate::vault::merge::SYNCED_TABLES.contains(&"bouncer_host"));

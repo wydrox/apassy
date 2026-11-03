@@ -26,9 +26,12 @@ const USAGE: &str = "Usage:
   apassy-relay migrate
   apassy-relay rollback-check
   apassy-relay downgrade-schema-6
+  apassy-relay downgrade-schema-7
   apassy-relay downgrade-directory-1003
+  apassy-relay downgrade-directory-1004
   apassy-relay snapshot-check
   apassy-relay admin team-code [--hours <n>]
+  apassy-relay admin node-code [--minutes <n>]
   apassy-relay admin teams
   apassy-relay admin readiness
   apassy-relay admin limits <team id> [--members <n>] [--items <n>] [--agents <n>]
@@ -56,12 +59,17 @@ The configuration is read from the environment:
 `rollback-check` reads relay.db and the team files read-only, with or without a running
 relay, and prints what a rollback to schema 5 would undo (docs/OPERATIONS.md 21.3). It
 exits 1 when any team is not clean.
-`downgrade-schema-6` runs with the relay stopped: every team file of schema 7 goes back
-to 6 in place, and each agent with an item list is revoked (docs/OPERATIONS.md 23.3). It
-exits 1 when any team failed.
-`downgrade-directory-1003` runs with the relay stopped: relay.db goes from 1004 back to
-1003 in place, and its OAuth clients, connect requests, and refresh tokens are dropped
-(docs/OPERATIONS.md 24.3).";
+`downgrade-schema-6` runs with the relay stopped: every team file of schema 7 or 8 goes
+back to 6 in place, and each agent with an item list is revoked (docs/OPERATIONS.md 23.3).
+It exits 1 when any team failed.
+`downgrade-schema-7` runs with the relay stopped: every team file of schema 8 goes back
+to 7 in place; the push handles stay for the next start of schema 8 (docs/OPERATIONS.md
+25.2). It exits 1 when any team failed.
+`downgrade-directory-1003` runs with the relay stopped: relay.db goes from 1004 or 1005
+back to 1003 in place, and its OAuth clients, connect requests, refresh tokens, and unused
+node pairing codes are dropped (docs/OPERATIONS.md 24.3).
+`downgrade-directory-1004` runs with the relay stopped: relay.db goes from 1005 back to
+1004 in place, and its unused node pairing codes are dropped (docs/OPERATIONS.md 25.3).";
 
 /// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
 /// before a deletion.
@@ -75,7 +83,9 @@ enum Command {
     Migrate,
     RollbackCheck,
     DowngradeSchema6,
+    DowngradeSchema7,
     DowngradeDirectory1003,
+    DowngradeDirectory1004,
     SnapshotCheck,
     Admin(Operator),
     Help,
@@ -122,6 +132,16 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                 None => 72,
             };
             Ok(Operator::TeamCode { hours })
+        }
+        "node-code" => {
+            let flags = parse_flags(rest, &["--minutes"])?;
+            let minutes = match &flags[0] {
+                Some(text) => text
+                    .parse::<u64>()
+                    .map_err(|_| "--minutes is a number.".to_string())?,
+                None => apassy_relay::server::directory::MAX_NODE_CODE_MINUTES,
+            };
+            Ok(Operator::NodeCode { minutes })
         }
         "teams" if rest.is_empty() => Ok(Operator::Teams),
         "readiness" if rest.is_empty() => Ok(Operator::Readiness),
@@ -258,7 +278,9 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "migrate" if args.len() == 1 => Ok(Command::Migrate),
         "rollback-check" if args.len() == 1 => Ok(Command::RollbackCheck),
         "downgrade-schema-6" if args.len() == 1 => Ok(Command::DowngradeSchema6),
+        "downgrade-schema-7" if args.len() == 1 => Ok(Command::DowngradeSchema7),
         "downgrade-directory-1003" if args.len() == 1 => Ok(Command::DowngradeDirectory1003),
+        "downgrade-directory-1004" if args.len() == 1 => Ok(Command::DowngradeDirectory1004),
         "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
@@ -410,6 +432,43 @@ fn main() -> ExitCode {
                         "apassy-relay: relay.db is at version {to}; the image of directory 1003 can open it."
                     );
                     ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error.message),
+            }
+        }
+        Command::DowngradeDirectory1004 => {
+            match apassy_relay::server::directory::Directory::downgrade_to_1004(&config) {
+                Ok((from, to)) => {
+                    println!("{}", serde_json::json!({"from": from, "to": to}));
+                    eprintln!(
+                        "apassy-relay: relay.db is at version {to}; the image of directory 1004 can open it."
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error.message),
+            }
+        }
+        Command::DowngradeSchema7 => {
+            match apassy_relay::server::rollback::downgrade_to_7(&config) {
+                Ok(teams) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&teams).unwrap_or_default()
+                    );
+                    let failed = teams.iter().filter(|team| team.error.is_some()).count();
+                    if failed == 0 {
+                        eprintln!(
+                            "apassy-relay: {} teams are at schema 7 or below; the image of schema 7 can open them.",
+                            teams.len()
+                        );
+                        ExitCode::SUCCESS
+                    } else {
+                        eprintln!(
+                            "apassy-relay: {failed} of {} teams could not go back to schema 7 (docs/OPERATIONS.md 25.2).",
+                            teams.len()
+                        );
+                        ExitCode::from(1)
+                    }
                 }
                 Err(error) => fail(&error.message),
             }
@@ -638,6 +697,25 @@ mod tests {
             Command::DowngradeDirectory1003
         ));
         assert!(parse(&args(&["downgrade-directory-1003", "--now"])).is_err());
+        assert!(matches!(
+            parse(&args(&["downgrade-schema-7"])).unwrap(),
+            Command::DowngradeSchema7
+        ));
+        assert!(parse(&args(&["downgrade-schema-7", "--now"])).is_err());
+        assert!(matches!(
+            parse(&args(&["downgrade-directory-1004"])).unwrap(),
+            Command::DowngradeDirectory1004
+        ));
+        assert!(parse(&args(&["downgrade-directory-1004", "--now"])).is_err());
+        assert_eq!(
+            parse_admin(&args(&["node-code"])).unwrap(),
+            Operator::NodeCode { minutes: 10 }
+        );
+        assert_eq!(
+            parse_admin(&args(&["node-code", "--minutes", "3"])).unwrap(),
+            Operator::NodeCode { minutes: 3 }
+        );
+        assert!(parse_admin(&args(&["node-code", "--minutes", "x"])).is_err());
         assert!(parse_admin(&args(&["rollback-check"])).is_err());
         for values in [
             vec!["delete"],

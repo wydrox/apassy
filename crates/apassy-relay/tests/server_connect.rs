@@ -1,7 +1,7 @@
 //! SPEC26 Connect teams: `POST /v1/connect` without a team code, one team per device
 //! key, the relay-wide daily cap, the `connect` limits (`plan_required` on a snapshot
 //! push), questions and device links in a Connect team, operator teams as before, the
-//! directory migration from 1002 to 1004, and the idle sweep.
+//! directory migration from 1002 to 1005, and the idle sweep.
 
 #[path = "common/relay.rs"]
 mod relay;
@@ -949,7 +949,7 @@ fn operator_teams_are_unchanged() {
 }
 
 #[test]
-fn the_directory_moves_from_1002_to_1004_and_keeps_its_teams() {
+fn the_directory_moves_from_1002_to_1005_and_keeps_its_teams() {
     let mut relay = start(UpstreamOptions::default());
     let (family_token, family_key) = relay.new_team_device("Family", "rafal");
     let family = team_of(&family_token);
@@ -974,6 +974,7 @@ fn the_directory_moves_from_1002_to_1004_and_keeps_its_teams() {
             config,
             "ALTER TABLE team DROP COLUMN kind;
              ALTER TABLE team DROP COLUMN suspend_reason;
+             ALTER TABLE team_code DROP COLUMN kind;
              DROP INDEX connect_key_created;
              DROP TABLE connect_key;
              DROP TABLE oauth_refresh;
@@ -982,14 +983,14 @@ fn the_directory_moves_from_1002_to_1004_and_keeps_its_teams() {
              PRAGMA user_version = 1002;",
         );
     });
-    // The restart above moved it to 1004 again.
+    // The restart above moved it to 1005 again.
     let conn = rusqlite::Connection::open(relay.config.directory_path()).unwrap();
     conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
         .unwrap();
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1004);
+    assert_eq!(version, 1005);
     let kinds: Vec<String> = conn
         .prepare("SELECT kind FROM team ORDER BY created_at")
         .unwrap()
