@@ -1133,11 +1133,23 @@ fn decisions_and_agents_draw_at_every_size_with_and_without_content() {
         .expect("open")
         .expect("exception");
     app.owner_ui.selected_agent = Some(agent.id);
+    // A new agent sees no credential: "Choose what it can see" comes first (frame 13a).
     check(
         &mut app,
         Place::Agents,
-        &["Codex", "Guarded key", "Always Ask", "Disconnect…"],
+        &["Codex", "Choose what it can see", "Choose Credentials…"],
     );
+    // Its exception and "Disconnect…" follow below: in view in the default window.
+    app.ui.sidebar_hidden = false;
+    app.ui.sidebar_float = false;
+    let (text, past) = frames(&mut app, DEFAULT, 3);
+    for needle in ["Guarded key", "Always Ask", "Disconnect…"] {
+        assert!(
+            text.contains(needle),
+            "{needle} in Agents at {DEFAULT:?}: {text}"
+        );
+    }
+    assert!(past.is_empty(), "past the edge: {past:?}");
     assert!(queue.deny(pending.id));
     waiter.join().expect("waiter").expect("an answer");
 }

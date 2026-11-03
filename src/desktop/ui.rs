@@ -1308,7 +1308,8 @@ mod tests {
                 ["Drawn team", "No items yet"],
             ),
             (Place::Overview, ["Overview", "No runs yet"]),
-            (Place::Decisions, ["Decisions", "All clear"]),
+            // A new vault: no decisions yet, no "All clear" (frame 9c).
+            (Place::Decisions, ["Decisions", "No decisions yet"]),
             (Place::Agents, ["Agents", "No agents yet"]),
             (Place::Logs, ["Logs", "No activity yet"]),
         ];
