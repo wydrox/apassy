@@ -270,6 +270,10 @@ targets:
         WKApplication: true
         WKCompanionAppBundleIdentifier: com.wydrox.apassy.companion
         ITSAppUsesNonExemptEncryption: false
+        # A node on the tailnet (node-pairing-v1): the watch reaches `https://<Tailscale IPv4>:8444`
+        # with the pinned certificate of the node (URLSessionCoreTransport), as the iPhone app.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_NAME: ApassyWatch
