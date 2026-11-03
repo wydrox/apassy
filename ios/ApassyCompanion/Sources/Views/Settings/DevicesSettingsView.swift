@@ -164,10 +164,10 @@ private struct SyncSettingsSections: View {
         } footer: {
             if vault.vault?.isICloud == true {
                 Text(
-                    "Personal sync through iCloud Drive is free. The iCloud file stays when you remove this local vault."
+                    "Sync through iCloud Drive is free. The iCloud file stays when you remove this local vault."
                 )
             } else if vault.vault?.isRelay == true {
-                Text("Team sync uses the Apassy relay.")
+                Text("This vault syncs through the Apassy relay. The relay keeps only an encrypted copy.")
             }
         }
     }
