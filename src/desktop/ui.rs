@@ -11,6 +11,8 @@ mod agent_onboarding;
 mod agent_setup;
 #[cfg(feature = "vault")]
 mod agents;
+#[cfg(all(test, feature = "vault"))]
+mod agents_remote_tests;
 #[cfg(feature = "vault")]
 mod browser_settings;
 #[cfg(all(test, feature = "vault"))]
