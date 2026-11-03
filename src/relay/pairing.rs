@@ -544,8 +544,8 @@ mod tests {
         let channel = PairingChannel::generate(&raw).unwrap();
         assert_eq!(channel.team_id(), Some(TEAM));
         let link = channel.link(&raw);
-        let (read, phone_channel) =
-            PairingChannel::parse(&format!(" {}\n", link.as_str())).unwrap();
+        let pasted = format!(" {}\n", link.as_str());
+        let (read, phone_channel) = PairingChannel::parse(&pasted).unwrap();
         assert_eq!(read, raw, "the original full link without handoff");
         assert_eq!(phone_channel.qid(), channel.qid());
         assert_eq!(phone_channel.team_id(), Some(TEAM));
@@ -573,7 +573,8 @@ mod tests {
         // A hosted link keeps today's AAD text.
         let hosted = format!("https://relay.example.test/link#{}", link_code());
         let channel = PairingChannel::generate(&hosted).unwrap();
-        let (read, _) = PairingChannel::parse(&channel.link(&hosted)).unwrap();
+        let hosted_link = channel.link(&hosted);
+        let (read, _) = PairingChannel::parse(&hosted_link).unwrap();
         assert_eq!(read, hosted);
     }
 
