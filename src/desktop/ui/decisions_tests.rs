@@ -531,11 +531,8 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
     let (mut app, item_id) = unlocked_app_with_item(&dir);
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
-    // The list says so in one line and shows the recent decisions; the detail says
-    // "All clear" over the week.
-    assert!(text.contains("Nothing waits for you."), "{text}");
-    assert!(text.contains("Recent decisions"), "{text}");
-    assert!(text.contains("All clear"), "{text}");
+    // A new vault: no decisions yet, and the totals of the week (frame 9c).
+    assert!(text.contains("No decisions yet"), "{text}");
     assert!(text.contains("This week"), "{text}");
     assert!(text.contains("by you · 0 automatic this week"), "{text}");
 
@@ -579,8 +576,8 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
     for absent in [
         "Requests",
         "Suggestions",
-        "Nothing waits for you.",
-        "Recent decisions",
+        "Nothing waits for you",
+        "No decisions yet",
     ] {
         assert!(!text.contains(absent), "{absent}: {text}");
     }

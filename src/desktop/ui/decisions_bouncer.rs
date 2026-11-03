@@ -227,6 +227,60 @@ pub(crate) enum HistoryAction {
     Select(u64),
 }
 
+/// "All | Asked You | Automatic | Denied" in the width of the list column: equal
+/// segments, the choice on a white thumb, each segment its own control for VoiceOver.
+/// Returns the new choice.
+fn filter_control(ui: &mut Ui, value: HistoryFilter) -> Option<HistoryFilter> {
+    use egui::{
+        Pos2, Rect, Sense, TextStyle, TextWrapMode, Vec2, WidgetInfo, WidgetText, WidgetType,
+    };
+    let count = HistoryFilter::ALL.len() as f32;
+    let segment = ((ui.available_width() - 4.0) / count).floor().max(24.0);
+    let height = 22.0;
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(segment * count + 4.0, height), Sense::hover());
+    ui.painter().rect_filled(rect, 7, kit::FILL);
+    let mut chosen = None;
+    for (index, filter) in HistoryFilter::ALL.iter().enumerate() {
+        let segment_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 2.0 + segment * index as f32, rect.top() + 2.0),
+            Vec2::new(segment, height - 4.0),
+        );
+        let response = ui.interact(
+            segment_rect,
+            ui.id().with(("history-filter", index)),
+            Sense::click(),
+        );
+        let selected = *filter == value;
+        response.widget_info(|| {
+            WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, filter.label())
+        });
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(segment_rect, 5, kit::SURFACE);
+        }
+        if response.has_focus() {
+            kit::inner_focus_ring(painter, segment_rect, 5);
+        }
+        let galley = WidgetText::from(kit::text(filter.label(), Font::Footnote).color(kit::LABEL))
+            .into_galley(
+                ui,
+                Some(TextWrapMode::Truncate),
+                segment - 4.0,
+                TextStyle::Body,
+            );
+        ui.painter().galley(
+            segment_rect.center() - galley.size() / 2.0,
+            galley,
+            kit::LABEL,
+        );
+        if response.clicked() && !selected {
+            chosen = Some(*filter);
+        }
+    }
+    chosen
+}
+
 /// The height of a row of History: three lines.
 const ROW_HEIGHT: f32 = 62.0;
 
@@ -268,20 +322,14 @@ pub(crate) fn draw_history(
     ui.add_space(4.0);
     Frame::NONE
         .inner_margin(Margin {
-            left: 12,
-            right: 12,
+            left: 8,
+            right: 8,
             top: 0,
             bottom: 4,
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let mut filter = state.filter;
-            let options: Vec<(HistoryFilter, &str)> = HistoryFilter::ALL
-                .iter()
-                .map(|filter| (*filter, filter.label()))
-                .collect();
-            kit::segmented(ui, "history-filter", &mut filter, &options);
-            if filter != state.filter {
+            if let Some(filter) = filter_control(ui, state.filter) {
                 action = Some(HistoryAction::Filter(filter));
             }
             ui.add_space(6.0);

@@ -398,7 +398,8 @@ fn a_new_vault_has_no_decisions_yet() {
         ] {
             assert!(text.contains(expected), "{expected} at {size:?}: {text}");
         }
-        for absent in ["All clear", "Environments", "Most active", "History"] {
+        // No filters and no lists of an empty week ("All Environments" is the scope bar).
+        for absent in ["All clear", "Most active", "Asked You", "No agent used"] {
             assert!(!text.contains(absent), "{absent} at {size:?}: {text}");
         }
         assert!(past.is_empty(), "past the edge at {size:?}: {past:?}");
