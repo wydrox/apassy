@@ -54,6 +54,8 @@ mod folder_sync;
 mod harden;
 mod host_coverage;
 mod host_hook;
+#[path = "isolation/linux_sandbox.rs"]
+mod isolation_linux;
 #[path = "isolation/product_profile.rs"]
 mod isolation_profile;
 mod item_history;
