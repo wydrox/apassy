@@ -4,3 +4,11 @@
   Content-Type: text/plain; charset=utf-8
   Cache-Control: no-cache
   X-Content-Type-Options: nosniff
+
+# The return pages of a Connect checkout and the invite page (ADR 0037 stage 7).
+# The done page has the checkout session id in its address and the invite page has
+# the invite code in its fragment: no Referer leaves them, and no cache keeps them.
+/connect/*
+  Referrer-Policy: no-referrer
+  Cache-Control: no-store
+  X-Robots-Tag: noindex
