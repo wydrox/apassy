@@ -8,9 +8,8 @@
 //! closely (row height, spacing, and the gaps between groups).
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, Frame, Label, Layout, Margin, Pos2, Rect, Response,
-    RichText, Sense, Shadow, Stroke, TextWrapMode, Ui, UiBuilder, Vec2, WidgetInfo, WidgetText,
-    WidgetType,
+    self, Align, CornerRadius, Frame, Label, Layout, Margin, Pos2, Rect, Response, RichText, Sense,
+    Shadow, Stroke, TextWrapMode, Ui, UiBuilder, Vec2, WidgetInfo, WidgetText, WidgetType,
 };
 
 use super::kit::{self, Font, Icon};
@@ -31,18 +30,6 @@ const PAD_Y: f32 = 7.0;
 const ROW_MIN: f32 = 38.0 - 2.0 * PAD_Y;
 /// The gap between a value and its button or chevron.
 const GAP: f32 = 10.0;
-
-/// The hairline between rows: rgba(0, 0, 0, 0.06) on white.
-const LINE: Color32 = Color32::from_rgb(240, 240, 240);
-/// The edge of a group: rgba(0, 0, 0, 0.08).
-const EDGE: Color32 = Color32::from_black_alpha(22);
-/// A gray button: rgba(0, 0, 0, 0.08) on white, and 0.12 under the pointer.
-const BUTTON: Color32 = Color32::from_rgb(235, 235, 235);
-const BUTTON_HOVER: Color32 = Color32::from_rgb(224, 224, 224);
-/// A menu value: rgba(0, 0, 0, 0.05) on white.
-const POP: Color32 = Color32::from_rgb(242, 242, 242);
-/// The links of the page, as in the mockup.
-pub(super) const LINK: Color32 = Color32::from_rgb(10, 108, 255);
 
 /// The page column: at most [`READING_WIDTH`] wide and centered, with no item spacing,
 /// so each gap of the page is explicit.
@@ -77,13 +64,13 @@ pub(super) struct Group<'u> {
 /// It adds no space around it.
 pub(super) fn group<R>(ui: &mut Ui, add: impl FnOnce(&mut Group<'_>) -> R) -> R {
     Frame::NONE
-        .fill(kit::SURFACE)
-        .stroke(Stroke::new(0.5, EDGE))
+        .fill(kit::palette().surface)
+        .stroke(Stroke::new(0.5, kit::palette().group_edge))
         .shadow(Shadow {
             offset: [0, 1],
             blur: 2,
             spread: 0,
-            color: Color32::from_black_alpha(8),
+            color: kit::palette().shadow.gamma_multiply_u8(8),
         })
         .corner_radius(CornerRadius::same(10))
         .show(ui, |ui| {
@@ -106,7 +93,7 @@ pub(super) fn group_label(ui: &mut Ui, title: &str, link: Option<(&str, &str)>) 
         ui.label(
             kit::text(title, Font::Callout)
                 .variation(b"wght", 600.0)
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
         );
         if let Some((label, name)) = link {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -127,9 +114,9 @@ fn text_link(ui: &mut Ui, label: &str, name: &str) -> Response {
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Link, enabled, name));
     if ui.is_rect_visible(rect) {
         let color = if response.is_pointer_button_down_on() {
-            kit::ACCENT_TEXT
+            kit::palette().accent_text
         } else {
-            LINK
+            kit::palette().link
         };
         ui.painter().galley(rect.min, galley, color);
         if response.has_focus() {
@@ -152,7 +139,7 @@ impl Group<'_> {
             self.ui.painter().hline(
                 (rect.left() + PAD_X)..=rect.right(),
                 y,
-                Stroke::new(width, LINE),
+                Stroke::new(width, kit::palette().detail_line),
             );
         }
         self.rows += 1;
@@ -193,7 +180,7 @@ impl Group<'_> {
     /// does not fit on the line goes under the label, left-aligned.
     pub(super) fn pair(&mut self, label: &str, value: impl Into<WidgetText>) {
         let value = value.into();
-        let label = kit::text(label, Font::Body).color(kit::LABEL);
+        let label = kit::text(label, Font::Body).color(kit::palette().label);
         let label_width = kit::galley(self.ui, label.clone()).size().x;
         let value_width = value
             .clone()
@@ -248,9 +235,9 @@ impl Group<'_> {
             .response;
         if response.hovered() || response.has_focus() {
             let fill = if response.is_pointer_button_down_on() {
-                kit::FILL_PRESSED
+                kit::palette().fill_pressed
             } else {
-                Color32::from_rgb(250, 250, 250)
+                kit::palette().detail_row_hover
             };
             let rect = response.rect.shrink2(Vec2::new(1.0, 1.0));
             self.ui
@@ -271,11 +258,14 @@ impl Group<'_> {
     /// A row that opens something: the label, the value in gray, and a chevron.
     pub(super) fn chevron(&mut self, label: &str, value: &str) -> Response {
         self.clickable_row(&format!("{label}, {value}"), |ui| {
-            ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+            ui.label(kit::text(label, Font::Body).color(kit::palette().label));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                kit::paint_icon_in(ui, Icon::ChevronRight, 10.0, kit::TERTIARY);
-                ui.add(Label::new(kit::text(value, Font::Body).color(kit::SECONDARY)).truncate());
+                kit::paint_icon_in(ui, Icon::ChevronRight, 10.0, kit::palette().tertiary);
+                ui.add(
+                    Label::new(kit::text(value, Font::Body).color(kit::palette().secondary))
+                        .truncate(),
+                );
             });
         })
     }
@@ -299,18 +289,22 @@ pub(super) fn pill_button(ui: &mut Ui, label: &str, name: &str) -> Response {
     }
     if ui.is_rect_visible(rect) {
         let fill = if response.is_pointer_button_down_on() {
-            kit::FILL_PRESSED
+            kit::palette().fill_pressed
         } else if response.hovered() {
-            BUTTON_HOVER
+            kit::palette().gray_button_hover
         } else {
-            BUTTON
+            kit::palette().gray_button
         };
         let painter = ui.painter();
         painter.rect_filled(rect, 6, fill);
         if response.has_focus() {
             kit::focus_ring(painter, rect, 6);
         }
-        let color = if enabled { kit::LABEL } else { kit::TERTIARY };
+        let color = if enabled {
+            kit::palette().label
+        } else {
+            kit::palette().tertiary
+        };
         painter.galley(rect.center() - galley.size() / 2.0, galley, color);
     }
     response
@@ -323,7 +317,7 @@ pub(super) fn mask(ui: &mut Ui) -> Response {
         kit::text(MASKED_VALUE, Font::Body)
             .size(15.0)
             .extra_letter_spacing(2.0)
-            .color(kit::LABEL),
+            .color(kit::palette().label),
     )
 }
 
@@ -370,9 +364,17 @@ fn pop_menu_styled<T: PartialEq + Clone>(
     }
     if ui.is_rect_visible(rect) {
         let (pressed, hovered, rest) = if bordered {
-            (kit::FILL_PRESSED, kit::FILL, kit::SURFACE)
+            (
+                kit::palette().fill_pressed,
+                kit::palette().fill,
+                kit::palette().surface,
+            )
         } else {
-            (BUTTON_HOVER, BUTTON, POP)
+            (
+                kit::palette().gray_button_hover,
+                kit::palette().gray_button,
+                kit::palette().menu_value,
+            )
         };
         let fill = if response.is_pointer_button_down_on() {
             pressed
@@ -387,7 +389,7 @@ fn pop_menu_styled<T: PartialEq + Clone>(
             painter.rect_stroke(
                 rect,
                 6,
-                Stroke::new(1.0, kit::BORDER),
+                Stroke::new(1.0, kit::palette().border),
                 egui::StrokeKind::Inside,
             );
         }
@@ -395,7 +397,7 @@ fn pop_menu_styled<T: PartialEq + Clone>(
             kit::focus_ring(painter, rect, 6);
         }
         let text_pos = Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0);
-        painter.galley(text_pos, galley, kit::LABEL);
+        painter.galley(text_pos, galley, kit::palette().label);
         // A chevron down, 6 points wide.
         let center = Pos2::new(rect.right() - 12.0, rect.center().y - 0.5);
         painter.line(
@@ -404,7 +406,7 @@ fn pop_menu_styled<T: PartialEq + Clone>(
                 center + Vec2::new(0.0, 1.8),
                 center + Vec2::new(3.5, -1.8),
             ],
-            Stroke::new(1.4, kit::SECONDARY),
+            Stroke::new(1.4, kit::palette().secondary),
         );
     }
     egui::Popup::menu(&response).show(|ui| {
@@ -452,10 +454,10 @@ pub(super) fn status_mark(ui: &mut Ui, mark: Mark) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
     if ui.is_rect_visible(rect) {
         let (color, icon) = match mark {
-            Mark::Allowed => (Color32::from_rgb(36, 161, 72), Icon::Check),
-            Mark::Owner => (LINK, Icon::Person),
-            Mark::Refused => (kit::PRODUCTION, Icon::Xmark),
-            Mark::TimedOut => (Color32::from_rgb(200, 106, 0), Icon::Clock),
+            Mark::Allowed => (kit::palette().mark_allowed, Icon::Check),
+            Mark::Owner => (kit::palette().link, Icon::Person),
+            Mark::Refused => (kit::palette().production, Icon::Xmark),
+            Mark::TimedOut => (kit::palette().countdown, Icon::Clock),
         };
         let painter = ui.painter();
         painter.circle_filled(rect.center(), 8.0, color);
@@ -463,7 +465,7 @@ pub(super) fn status_mark(ui: &mut Ui, mark: Mark) -> Response {
             painter,
             Rect::from_center_size(rect.center(), Vec2::splat(10.0)),
             icon,
-            Color32::WHITE,
+            kit::palette().on_accent,
         );
     }
     response
@@ -471,5 +473,5 @@ pub(super) fn status_mark(ui: &mut Ui, mark: Mark) -> Response {
 
 /// Text at 12 points in gray, as the second line of a row.
 pub(super) fn small(value: impl Into<String>) -> RichText {
-    kit::text(value, Font::Callout).color(kit::SECONDARY)
+    kit::text(value, Font::Callout).color(kit::palette().secondary)
 }

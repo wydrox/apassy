@@ -231,7 +231,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             login = push_button(ui, "Login").clicked();
-            ui.label(kit::text("Paste", Font::Body).color(kit::LABEL));
+            ui.label(kit::text("Paste", Font::Body).color(kit::palette().label));
             by_hand = push_button(ui, "Other…").clicked();
         });
         ui.add_space(3.0);
@@ -239,7 +239,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             ui,
             "Paste a key, a .env file, a database URL, or an otpauth:// link.",
             Font::Callout,
-            kit::SECONDARY,
+            kit::palette().secondary,
         );
         // 14 points to the field, as in the mockup. The body clips at its top, so 4 of
         // them are inside it: room for the edge and the focus ring of the field.
@@ -275,7 +275,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                         ui,
                         "Everything else is set automatically.",
                         Font::Callout,
-                        kit::SECONDARY,
+                        kit::palette().secondary,
                     );
                 });
             }
@@ -285,7 +285,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             ui,
             |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(kit::text("Folder", Font::Callout).color(kit::SECONDARY));
+                ui.label(kit::text("Folder", Font::Callout).color(kit::palette().secondary));
                 let mut folder = choices.folder.clone();
                 let menu = folder_menu(ui, &mut folder, &folder_choices, &folder_label);
                 ui.ctx().accesskit_node_builder(menu.id, |node| {
@@ -311,7 +311,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
         let inside = ui.min_rect().expand(SHEET_MARGIN - 1.0);
         ui.painter().set(
             backdrop,
-            egui::epaint::RectShape::filled(inside, SHEET_RADIUS - 1, kit::DETAIL),
+            egui::epaint::RectShape::filled(inside, SHEET_RADIUS - 1, kit::palette().detail),
         );
     });
     let ready = kept > 0;
@@ -366,8 +366,8 @@ fn paste_field(ui: &mut egui::Ui, value: &mut String, detected: &[Detected]) {
                 .id(id)
                 .char_limit(SECRET_VALUE_CAPACITY / 4)
                 .font(egui::FontId::monospace(PASTE_FONT))
-                .text_color(kit::LABEL)
-                .hint_text(kit::text("⌘V", Font::Mono).color(kit::TERTIARY))
+                .text_color(kit::palette().label)
+                .hint_text(kit::text("⌘V", Font::Mono).color(kit::palette().tertiary))
                 .frame(field_frame(ui))
                 .min_size(egui::Vec2::new(width, PASTE_HEIGHT))
                 .desired_rows(4)
@@ -405,11 +405,11 @@ fn paste_field(ui: &mut egui::Ui, value: &mut String, detected: &[Detected]) {
             ui,
             RichText::new(masked_paste(detected))
                 .font(egui::FontId::monospace(PASTE_FONT))
-                .color(kit::LABEL),
+                .color(kit::palette().label),
         );
         painter
             .with_clip_rect(inner.intersect(painter.clip_rect()))
-            .galley(inner.min, galley, kit::LABEL);
+            .galley(inner.min, galley, kit::palette().label);
         if response.has_focus() {
             kit::focus_ring(painter, rect, 6);
         }
@@ -419,10 +419,10 @@ fn paste_field(ui: &mut egui::Ui, value: &mut String, detected: &[Detected]) {
 /// The white field of the mockup: a hairline edge, 6 points round, 7 by 9 points inside.
 fn field_frame(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::NONE
-        .fill(kit::SURFACE)
+        .fill(kit::palette().surface)
         .stroke(egui::Stroke::new(
             1.0 / ui.ctx().pixels_per_point(),
-            egui::Color32::from_black_alpha(46),
+            kit::palette().field_edge,
         ))
         .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(9, 7))
@@ -500,7 +500,7 @@ fn examples(ui: &mut egui::Ui, value: &mut String) -> bool {
         ui,
         |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(kit::text("Examples:", Font::Footnote).color(kit::TERTIARY));
+            ui.label(kit::text("Examples:", Font::Footnote).color(kit::palette().tertiary));
             for (label, example) in EXAMPLES {
                 if chip(ui, label, &format!("Paste the {label} example")).clicked() {
                     use zeroize::Zeroize;
@@ -529,15 +529,19 @@ fn chip(ui: &mut egui::Ui, label: &str, name: &str) -> egui::Response {
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
     if ui.is_rect_visible(rect) {
         let fill = if response.is_pointer_button_down_on() {
-            kit::FILL_PRESSED
+            kit::palette().fill_pressed
         } else if response.hovered() {
-            kit::FILL_HOVER
+            kit::palette().fill_hover
         } else {
-            kit::FILL
+            kit::palette().fill
         };
         let painter = ui.painter();
         painter.rect_filled(rect, 5, fill);
-        painter.galley(rect.center() - galley.size() / 2.0, galley, kit::SECONDARY);
+        painter.galley(
+            rect.center() - galley.size() / 2.0,
+            galley,
+            kit::palette().secondary,
+        );
         if response.has_focus() {
             kit::focus_ring(painter, rect, 5);
         }
@@ -554,9 +558,9 @@ fn link(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if ui.is_rect_visible(rect) {
         let color = if response.hovered() {
-            kit::ACCENT
+            kit::palette().accent
         } else {
-            kit::ACCENT_TEXT
+            kit::palette().accent_text
         };
         let painter = ui.painter();
         painter.galley(rect.center() - galley.size() / 2.0, galley, color);
@@ -576,11 +580,11 @@ fn push_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
     if ui.is_rect_visible(rect) {
         let fill = if response.is_pointer_button_down_on() {
-            kit::FILL_PRESSED
+            kit::palette().fill_pressed
         } else if response.hovered() {
-            kit::WINDOW
+            kit::palette().window
         } else {
-            kit::SURFACE
+            kit::palette().surface
         };
         let painter = ui.painter();
         painter.rect(
@@ -589,11 +593,15 @@ fn push_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
             fill,
             egui::Stroke::new(
                 1.0 / ui.ctx().pixels_per_point(),
-                egui::Color32::from_black_alpha(52),
+                kit::palette().button_edge,
             ),
             egui::StrokeKind::Inside,
         );
-        painter.galley(rect.center() - galley.size() / 2.0, galley, kit::LABEL);
+        painter.galley(
+            rect.center() - galley.size() / 2.0,
+            galley,
+            kit::palette().label,
+        );
         if response.has_focus() {
             kit::focus_ring(painter, rect, 7);
         }
@@ -612,16 +620,16 @@ pub(super) fn folder_menu(
 ) -> egui::Response {
     let label = kit::text(selected, Font::Callout)
         .size(12.5)
-        .color(kit::LABEL);
+        .color(kit::palette().label);
     let width = (kit::galley(ui, label.clone()).size().x + 34.0).clamp(90.0, 240.0);
     let response = ui
         .scope(|ui| {
             let widgets = &mut ui.style_mut().visuals.widgets;
             for (state, fill) in [
-                (&mut widgets.inactive, kit::FILL),
-                (&mut widgets.hovered, kit::FILL_HOVER),
-                (&mut widgets.active, kit::FILL_PRESSED),
-                (&mut widgets.open, kit::FILL_HOVER),
+                (&mut widgets.inactive, kit::palette().fill),
+                (&mut widgets.hovered, kit::palette().fill_hover),
+                (&mut widgets.active, kit::palette().fill_pressed),
+                (&mut widgets.open, kit::palette().fill_hover),
             ] {
                 state.weak_bg_fill = fill;
                 state.bg_fill = fill;
@@ -642,7 +650,7 @@ pub(super) fn folder_menu(
                             center + egui::Vec2::new(0.0, 1.6),
                             center + egui::Vec2::new(3.2, -1.6),
                         ],
-                        egui::Stroke::new(1.4, kit::SECONDARY),
+                        egui::Stroke::new(1.4, kit::palette().secondary),
                     );
                 })
                 .show_ui(ui, |ui| {
@@ -676,11 +684,8 @@ fn rows(ui: &mut egui::Ui, detected: &[Detected], choices: &mut Choices) {
     let several = detected.len() > 1;
     let hairline = 1.0 / ui.ctx().pixels_per_point();
     egui::Frame::NONE
-        .fill(kit::SURFACE)
-        .stroke(egui::Stroke::new(
-            hairline,
-            egui::Color32::from_black_alpha(26),
-        ))
+        .fill(kit::palette().surface)
+        .stroke(egui::Stroke::new(hairline, kit::palette().card_edge))
         .corner_radius(10)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -695,7 +700,7 @@ fn rows(ui: &mut egui::Ui, detected: &[Detected], choices: &mut Choices) {
                     ui.painter().hline(
                         left..=ui.max_rect().right(),
                         y,
-                        egui::Stroke::new(hairline, kit::SEPARATOR),
+                        egui::Stroke::new(hairline, kit::palette().separator),
                     );
                 }
                 egui::Frame::NONE
@@ -740,12 +745,14 @@ fn title_field(ui: &mut egui::Ui, title: &mut String, index: usize) {
     let background = ui.painter().add(egui::Shape::Noop);
     let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap_width: f32| {
         let mut job = egui::text::LayoutJob::default();
-        kit::row_title(text.as_str()).color(kit::LABEL).append_to(
-            &mut job,
-            ui.style(),
-            egui::FontSelection::Default,
-            egui::Align::Center,
-        );
+        kit::row_title(text.as_str())
+            .color(kit::palette().label)
+            .append_to(
+                &mut job,
+                ui.style(),
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
         ui.fonts_mut(|fonts| fonts.layout_job(job))
     };
     let field = ui.add(
@@ -762,7 +769,7 @@ fn title_field(ui: &mut egui::Ui, title: &mut String, index: usize) {
             egui::epaint::RectShape::filled(
                 field.rect.expand2(egui::Vec2::new(4.0, 1.0)),
                 4,
-                kit::FILL,
+                kit::palette().fill,
             ),
         );
     }
@@ -776,7 +783,7 @@ fn title_field(ui: &mut egui::Ui, title: &mut String, index: usize) {
 fn summary(ui: &egui::Ui, found: &Detected) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let mut append = |text: RichText| {
-        text.color(kit::SECONDARY).append_to(
+        text.color(kit::palette().secondary).append_to(
             &mut job,
             ui.style(),
             egui::FontSelection::Default,
@@ -807,18 +814,18 @@ fn checkbox(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if checked {
-            painter.rect_filled(rect, 3, kit::ACCENT);
+            painter.rect_filled(rect, 3, kit::palette().accent);
             let point = |x: f32, y: f32| rect.min + egui::Vec2::new(x, y);
             painter.line(
                 vec![point(3.5, 7.2), point(6.0, 9.8), point(10.5, 4.2)],
-                egui::Stroke::new(1.8, egui::Color32::WHITE),
+                egui::Stroke::new(1.8, kit::palette().on_accent),
             );
         } else {
             painter.rect(
                 rect,
                 3,
-                kit::SURFACE,
-                egui::Stroke::new(1.0, kit::BORDER),
+                kit::palette().surface,
+                egui::Stroke::new(1.0, kit::palette().border),
                 egui::StrokeKind::Inside,
             );
         }
@@ -833,7 +840,7 @@ fn checkbox(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
 /// as in the mockup.
 fn row_tile(found: &Detected, title: &str) -> kit::Tile {
     if found.provider.is_none() && found.kind == CredentialKind::Custom {
-        return kit::Tile::icon(egui::Color32::from_rgb(142, 142, 147), kit::Icon::Key);
+        return kit::Tile::icon(kit::fixed::GRAY, kit::Icon::Key);
     }
     super::credential_tile(found.kind, &provider_label(found), title)
 }

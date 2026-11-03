@@ -5,7 +5,7 @@
 //! here. The QR code is drawn from its modules. The link is never a text on the screen
 //! and never on the pasteboard, because an agent can read the pasteboard.
 
-use eframe::egui::{self, Color32, Key, Rect, Response, Sense, Ui, Vec2, WidgetInfo, WidgetType};
+use eframe::egui::{self, Key, Rect, Response, Sense, Ui, Vec2, WidgetInfo, WidgetType};
 
 use super::kit::{self, Font, Style, Tone};
 use super::settings::rows;
@@ -209,7 +209,7 @@ fn pairing_section(app: &mut DesktopApp, ui: &mut Ui) {
                 rows::one_line(
                     ui,
                     rows::label_text("Code works for").into(),
-                    Some(kit::text(countdown(left), Font::Mono).color(kit::SECONDARY)),
+                    Some(kit::text(countdown(left), Font::Mono).color(kit::palette().secondary)),
                     |ui| {
                         let button = kit::small_button(ui, "Cancel", Style::Bordered);
                         if started {
@@ -233,7 +233,7 @@ fn pairing_section(app: &mut DesktopApp, ui: &mut Ui) {
                         "\"{device_name}\" wants to pair. Type the 6-digit code that the iPhone shows."
                     ),
                     Font::Body,
-                    kit::LABEL,
+                    kit::palette().label,
                 );
                 if *wrong_codes > 0 {
                     kit::tone_note(
@@ -327,7 +327,7 @@ pub(super) fn draw_qr(ui: &mut Ui, qr: &QrModules, size: f32, label: &str) -> Re
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Image, true, label));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        painter.rect_filled(rect, 0, Color32::WHITE);
+        painter.rect_filled(rect, 0, kit::fixed::QR_LIGHT);
         for y in 0..qr.width() {
             let top = rect.top() + (y + QUIET_ZONE) as f32 * unit;
             let mut x = 0;
@@ -345,7 +345,7 @@ pub(super) fn draw_qr(ui: &mut Ui, qr: &QrModules, size: f32, label: &str) -> Re
                     egui::pos2(left, top),
                     Vec2::new((x - start) as f32 * unit, unit),
                 );
-                painter.rect_filled(run, 0, Color32::BLACK);
+                painter.rect_filled(run, 0, kit::fixed::QR_DARK);
             }
         }
     }

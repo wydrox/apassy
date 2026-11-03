@@ -26,9 +26,6 @@ const GAP: f32 = 10.0;
 /// The space above a group label.
 const LABEL_TOP: f32 = 18.0;
 
-/// The hairline between two rows.
-const SEPARATOR: Color32 = Color32::from_rgb(235, 235, 237);
-
 /// The label of a group: 12 points, semibold, secondary.
 pub(crate) fn group_label(ui: &mut Ui, title: &str) {
     ui.add_space(LABEL_TOP);
@@ -43,7 +40,7 @@ pub(crate) fn group_label(ui: &mut Ui, title: &str) {
                 Label::new(
                     kit::text(title, Font::Callout)
                         .variation(b"wght", 600.0)
-                        .color(kit::SECONDARY),
+                        .color(kit::palette().secondary),
                 )
                 .selectable(false),
             );
@@ -53,7 +50,7 @@ pub(crate) fn group_label(ui: &mut Ui, title: &str) {
 
 /// A short footnote under a group: 12 points, secondary.
 pub(crate) fn footnote(ui: &mut Ui, text: impl Into<String>) {
-    footnote_colored(ui, text, kit::SECONDARY);
+    footnote_colored(ui, text, kit::palette().secondary);
 }
 
 /// A footnote in a status color.
@@ -98,13 +95,13 @@ pub(crate) fn group<R>(
         None => ui.add_space(LABEL_TOP),
     }
     Frame::NONE
-        .fill(kit::SURFACE)
-        .stroke(Stroke::new(0.5, Color32::from_black_alpha(22)))
+        .fill(kit::palette().surface)
+        .stroke(Stroke::new(0.5, kit::palette().group_edge))
         .shadow(Shadow {
             offset: [0, 1],
             blur: 2,
             spread: 0,
-            color: Color32::from_black_alpha(10),
+            color: kit::palette().shadow.gamma_multiply_u8(10),
         })
         .corner_radius(CornerRadius::same(10))
         .show(ui, |ui| {
@@ -122,7 +119,10 @@ impl Group<'_> {
             let (rect, _) = self
                 .ui
                 .allocate_exact_size(Vec2::new(width, 0.0), Sense::hover());
-            let stroke = Stroke::new(1.0 / self.ui.ctx().pixels_per_point(), SEPARATOR);
+            let stroke = Stroke::new(
+                1.0 / self.ui.ctx().pixels_per_point(),
+                kit::palette().settings_line,
+            );
             self.ui
                 .painter()
                 .hline((rect.left() + PAD_X)..=rect.right(), rect.top(), stroke);
@@ -259,9 +259,9 @@ impl Group<'_> {
             .response;
         if response.hovered() || response.has_focus() {
             let fill = if response.is_pointer_button_down_on() {
-                kit::FILL_PRESSED
+                kit::palette().fill_pressed
             } else {
-                Color32::from_rgb(246, 246, 248)
+                kit::palette().row_hover
             };
             let rect = response.rect.shrink2(Vec2::new(4.0, 1.0));
             self.ui
@@ -282,7 +282,7 @@ impl Group<'_> {
     /// A row that is a link in the accent color, as "Open a Synced Vault…".
     pub(crate) fn link(&mut self, label: &str) -> Response {
         self.clickable_row(label, |ui| {
-            ui.label(kit::text(label, Font::Body).color(kit::ACCENT_TEXT));
+            ui.label(kit::text(label, Font::Body).color(kit::palette().accent_text));
         })
     }
 
@@ -305,17 +305,17 @@ impl Group<'_> {
 
 /// The text of a row label.
 pub(crate) fn label_text(label: &str) -> RichText {
-    kit::text(label, Font::Body).color(kit::LABEL)
+    kit::text(label, Font::Body).color(kit::palette().label)
 }
 
 /// A value on the right of a row: 13 points, secondary.
 pub(crate) fn value(text: impl Into<String>) -> RichText {
-    kit::text(text, Font::Body).color(kit::SECONDARY)
+    kit::text(text, Font::Body).color(kit::palette().secondary)
 }
 
 /// A note in a row: 12 points, secondary.
 pub(crate) fn note(text: &str) -> RichText {
-    kit::text(text, Font::Callout).color(kit::SECONDARY)
+    kit::text(text, Font::Callout).color(kit::palette().secondary)
 }
 
 /// The content of a one-line row (see [`Group::line`]), for a custom row.

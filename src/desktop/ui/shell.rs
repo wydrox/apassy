@@ -45,12 +45,16 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .resizable(false)
         .exact_size(columns.sidebar_width())
         .show_separator_line(false)
-        .frame(Frame::NONE.fill(kit::SIDEBAR).inner_margin(Margin {
-            left: side_margin(columns.sidebar),
-            right: side_margin(columns.sidebar),
-            top: 0,
-            bottom: 10,
-        }))
+        .frame(
+            Frame::NONE
+                .fill(kit::palette().sidebar)
+                .inner_margin(Margin {
+                    left: side_margin(columns.sidebar),
+                    right: side_margin(columns.sidebar),
+                    top: 0,
+                    bottom: 10,
+                }),
+        )
         .show(ui, |ui| {
             super::sidebar::draw(app, ui, &pending, columns.sidebar)
         })
@@ -62,7 +66,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             .resizable(false)
             .exact_size(columns.list_width)
             .show_separator_line(false)
-            .frame(Frame::NONE.fill(kit::LIST))
+            .frame(Frame::NONE.fill(kit::palette().list))
             .show(ui, |ui| list_column(app, ui, &pending))
             .response
             .rect
@@ -71,7 +75,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         column_edge(ui, rect);
     }
     egui::CentralPanel::default()
-        .frame(Frame::NONE.fill(kit::DETAIL))
+        .frame(Frame::NONE.fill(kit::palette().detail))
         .show(ui, |ui| {
             if wide {
                 wide_pane(app, ui, &pending, columns.list_width);
@@ -101,7 +105,7 @@ fn column_edge(ui: &egui::Ui, rect: egui::Rect) {
     ui.painter().vline(
         x,
         rect.y_range(),
-        egui::Stroke::new(width, kit::COLUMN_EDGE),
+        egui::Stroke::new(width, kit::palette().column_edge),
     );
 }
 
@@ -182,7 +186,7 @@ fn agents_in_columns(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending,
     let full = ui.max_rect();
     let list = Rect::from_min_max(full.min, Pos2::new(full.left() + width, full.bottom()));
     let detail = Rect::from_min_max(Pos2::new(list.right(), full.top()), full.max);
-    ui.painter().rect_filled(list, 0, kit::LIST);
+    ui.painter().rect_filled(list, 0, kit::palette().list);
     let mut list_ui = ui.new_child(
         UiBuilder::new()
             .id_salt("agents-list-column")
@@ -378,7 +382,7 @@ fn approval_banner(
         ui.add(
             egui::Label::new(
                 kit::text(super::decisions::shell_words(&run.command), kit::Font::Mono)
-                    .color(kit::LABEL),
+                    .color(kit::palette().label),
             )
             .truncate(),
         );

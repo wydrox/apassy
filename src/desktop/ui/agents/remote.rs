@@ -147,7 +147,7 @@ pub(in crate::desktop::ui) fn draw_agent(app: &DesktopApp, ui: &mut egui::Ui, se
         group_label(ui, "Note for the bouncer");
         kit::section(ui, None, None, |s| {
             s.row(|ui| {
-                ui.add(Label::new(kit::text(&note, Font::Body).color(kit::LABEL)).wrap());
+                ui.add(Label::new(kit::text(&note, Font::Body).color(kit::palette().label)).wrap());
             });
         });
     }
@@ -247,7 +247,8 @@ fn exceptions_group(ui: &mut egui::Ui, agent: &FeedAgent, titles: &BTreeMap<Stri
                     kit::tile(ui, &kit::Tile::icon(Tone::Neutral.mark(), Icon::Key), 20.0);
                     ui.add(
                         Label::new(
-                            kit::text(format!("{words}: {name}"), Font::Body).color(kit::LABEL),
+                            kit::text(format!("{words}: {name}"), Font::Body)
+                                .color(kit::palette().label),
                         )
                         .truncate(),
                     );

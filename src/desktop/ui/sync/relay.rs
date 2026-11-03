@@ -3071,11 +3071,11 @@ impl DesktopApp {
 
 /// The safety words in a large font, with the sentence of the screen.
 pub(super) fn safety_lines(ui: &mut egui::Ui, before: &str, words: &str, after: &str) {
-    kit::paragraph(ui, before, Font::Body, kit::LABEL);
+    kit::paragraph(ui, before, Font::Body, kit::palette().label);
     ui.add_space(4.0);
-    ui.label(kit::text(words, Font::Title).color(kit::LABEL));
+    ui.label(kit::text(words, Font::Title).color(kit::palette().label));
     ui.add_space(4.0);
-    kit::paragraph(ui, after, Font::Callout, kit::SECONDARY);
+    kit::paragraph(ui, after, Font::Callout, kit::palette().secondary);
 }
 
 /// What a Mac that joins shows while it waits: the words, the download.
@@ -3422,7 +3422,8 @@ pub(super) fn add_mac_sheet(
                 ui.add_space(10.0);
             }
             if !iphone {
-                let heading = ui.label(kit::text("Link", Font::Headline).color(kit::LABEL));
+                let heading =
+                    ui.label(kit::text("Link", Font::Headline).color(kit::palette().label));
                 kit::code_block(ui, link, 1).labelled_by(heading.id);
             }
             ui.horizontal(|ui| {
@@ -3451,7 +3452,7 @@ pub(super) fn add_mac_sheet(
                         device.name
                     ),
                     Font::Body,
-                    kit::LABEL,
+                    kit::palette().label,
                 );
                 ui.horizontal(|ui| {
                     remove_older = kit::button(ui, "Remove", Style::Bordered).clicked();
@@ -3515,9 +3516,9 @@ pub(super) fn add_mac_sheet(
                         // The kind is visible before Touch ID (ADR 0039 §2).
                         ui.label(
                             kit::text(watch_confirm_title(&shown), Font::Headline)
-                                .color(kit::LABEL),
+                                .color(kit::palette().label),
                         );
-                        kit::paragraph(ui, WATCH_CONFIRM_LINE, Font::Body, kit::LABEL);
+                        kit::paragraph(ui, WATCH_CONFIRM_LINE, Font::Body, kit::palette().label);
                         ui.add_space(4.0);
                     }
                     safety_lines(
@@ -3548,7 +3549,7 @@ pub(super) fn add_mac_sheet(
                             shown_link_name(&pending.device_name)
                         ),
                         Font::Body,
-                        kit::LABEL,
+                        kit::palette().label,
                     );
                     if kit::small_button(ui, "Refuse", Style::Bordered).clicked() {
                         refuse = Some(pending.id);
@@ -3685,7 +3686,7 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                                 ui.add(
                                     Label::new(
                                         kit::text(link_device_label(&device.name), Font::Body)
-                                            .color(kit::LABEL),
+                                            .color(kit::palette().label),
                                     )
                                     .wrap(),
                                 );
@@ -3698,8 +3699,10 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                                 |at| format!("Last seen {}", ago(at)),
                             );
                             ui.add(
-                                Label::new(kit::text(seen, Font::Footnote).color(kit::SECONDARY))
-                                    .wrap(),
+                                Label::new(
+                                    kit::text(seen, Font::Footnote).color(kit::palette().secondary),
+                                )
+                                .wrap(),
                             );
                             if !device.current
                                 && !removed
@@ -3898,7 +3901,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui,
         "On the Mac that has the vault, open Settings > Vault > Sync, select “Add a device…”, and copy the link. Paste it here. Both Macs then show the same two words.",
         Font::Callout,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     ui.add_space(14.0);
     let mut connect = false;
@@ -3965,7 +3968,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(view) => join_progress(ui, view),
     }
     if let Some(error) = app.sync.relay.join_error.clone() {
-        kit::paragraph(ui, error, Font::Callout, kit::SECONDARY);
+        kit::paragraph(ui, error, Font::Callout, kit::palette().secondary);
     }
     ui.add_space(8.0);
     match &view {

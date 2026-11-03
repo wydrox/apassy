@@ -544,14 +544,7 @@ pub(super) fn sidebar_switcher(app: &mut DesktopApp, ui: &mut egui::Ui) {
 /// Mac, the name of a synced vault does not. So a vault looks the same each time and on
 /// each Mac, and two vaults rarely share a color.
 fn tile_color(name: &str) -> egui::Color32 {
-    const COLORS: [egui::Color32; 6] = [
-        egui::Color32::from_rgb(0, 122, 255),
-        egui::Color32::from_rgb(52, 170, 90),
-        egui::Color32::from_rgb(255, 149, 0),
-        egui::Color32::from_rgb(88, 86, 214),
-        egui::Color32::from_rgb(255, 59, 48),
-        egui::Color32::from_rgb(48, 176, 199),
-    ];
+    const COLORS: [egui::Color32; 6] = kit::fixed::VAULTS;
     let sum = name.bytes().fold(0usize, |sum, byte| {
         sum.wrapping_mul(31).wrapping_add(byte as usize)
     });
@@ -652,7 +645,7 @@ pub(super) fn welcome_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
             };
             let detail = (!present)
                 .then(|| kit::text("Missing", Font::Footnote).color(Tone::Warning.text()));
-            let gray = egui::Color32::from_rgb(99, 99, 104);
+            let gray = kit::fixed::VAULT_FILE;
             if s.nav(
                 Some((Icon::Lock, gray)),
                 &entry.name,

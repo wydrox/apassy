@@ -63,10 +63,10 @@ impl ConnectHost {
 
     fn color(self) -> Color32 {
         match self {
-            Self::Claude => Color32::from_rgb(217, 119, 87),
-            Self::Codex => Color32::from_rgb(16, 163, 127),
-            Self::T3 => Color32::from_rgb(110, 90, 230),
-            Self::Other => Color32::from_rgb(142, 142, 147),
+            Self::Claude => kit::fixed::CLAUDE,
+            Self::Codex => kit::fixed::CODEX,
+            Self::T3 => kit::fixed::T3_CODE,
+            Self::Other => kit::fixed::GRAY,
         }
     }
 
@@ -284,15 +284,15 @@ fn host_row(ui: &mut egui::Ui, host: ConnectHost, selected: bool) {
         ui.add_space(4.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(kit::medium(host.name(), Font::Body).color(kit::LABEL));
+            ui.label(kit::medium(host.name(), Font::Body).color(kit::palette().label));
             ui.add(
-                Label::new(kit::text(host.detail(), Font::Callout).color(kit::SECONDARY))
+                Label::new(kit::text(host.detail(), Font::Callout).color(kit::palette().secondary))
                     .truncate(),
             );
         });
         if selected {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                kit::paint_icon_in(ui, kit::Icon::Check, 14.0, kit::ACCENT);
+                kit::paint_icon_in(ui, kit::Icon::Check, 14.0, kit::palette().accent);
             });
         }
     });
