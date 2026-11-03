@@ -63,6 +63,8 @@ mod owner_check_view;
 #[cfg(all(test, feature = "vault"))]
 mod owner_tests;
 #[cfg(feature = "vault")]
+mod scope_bar;
+#[cfg(feature = "vault")]
 mod settings;
 /// Settings as a view of the window (ADR 0026 §3).
 mod settings_view;
@@ -242,6 +244,9 @@ pub(crate) fn default_vault_path() -> std::path::PathBuf {
 pub(crate) struct UiState {
     /// The sheet over the window, if any.
     pub(crate) sheet: Option<Sheet>,
+    /// The scope of Agents and Decisions ("Showing … in …").
+    #[cfg(feature = "vault")]
+    pub(crate) activity_scope: crate::desktop::remote_feeds::ActivityScope,
     /// The sheet closes when the owner check for its action ends with success. The
     /// value is the status sequence number at the time of the request.
     #[cfg(feature = "vault")]
