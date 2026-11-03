@@ -29,6 +29,10 @@ public actor PreviewVaultService: VaultService {
     var unlocked: Bool
     private var join: JoinInfo?
     private var joinPolls = 0
+    /// The pin of the link of the join that waits: a node (contract node-pairing-v1).
+    private var joinPin: String?
+    /// Test support: the next `joinStart` fails with this error (a node that does not answer).
+    var nextJoinError: VaultError?
     var items: [UInt64: Stored] = [:]
     var nextID: UInt64 = 100
     private var status: SyncStatus
@@ -351,13 +355,40 @@ public actor PreviewVaultService: VaultService {
         guard link.contains("apassy_lnk_") else {
             throw VaultError(.linkInvalid, "This is not a device link of the Apassy relay.")
         }
+        if let error = nextJoinError {
+            nextJoinError = nil
+            throw error
+        }
         joinPolls = 0
         questionsState.attachAnswerKey = answerKey
+        // A pinned link names a node; its pin and name stay with the entry. Nothing is sent.
+        let (node, pin) = Self.node(of: link)
+        joinPin = pin
         let info = JoinInfo(
             state: .waiting, team: "Personal", words: ["amber", "marble"],
-            expiresAt: Int64(Date().timeIntervalSince1970) + 600)
+            expiresAt: Int64(Date().timeIntervalSince1970) + 600, node: node)
         join = info
         return info
+    }
+
+    /// Test support: make the next `joinStart` fail with `error`.
+    public func failNextJoin(_ error: VaultError) { nextJoinError = error }
+
+    /// The node and the pin of a device link with `&pin=` (node-pairing-v1 section 5), as the
+    /// core reads them, without its checks: synthetic links only.
+    static func node(of link: String) -> (NodeInfo?, String?) {
+        let parts = link.split(separator: "#", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let origin = parts[0].components(separatedBy: "/link").first else { return (nil, nil) }
+        var pin: String?
+        var name: String?
+        for pair in parts[1].split(separator: "&").dropFirst() {
+            let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            guard kv.count == 2 else { continue }
+            if kv[0] == "pin" { pin = kv[1] }
+            if kv[0] == "name" { name = kv[1].removingPercentEncoding }
+        }
+        guard let pin else { return (nil, nil) }
+        return (NodeInfo(origin: origin, name: name), pin)
     }
 
     public func joinPoll() async throws -> JoinInfo {
@@ -375,10 +406,14 @@ public actor PreviewVaultService: VaultService {
         guard passphrase == Self.passphrase else {
             throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
         }
+        let node = join?.node
         join = nil
         let vault = VaultEntry(
-            id: "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c", name: "Personal", relayURL: "https://apassy-relay.wyderka.cc",
-            teamID: "t_7k2m5q4x3c", deviceID: 3, addedAt: Int64(Date().timeIntervalSince1970))
+            id: "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c", name: "Personal",
+            relayURL: node?.origin ?? "https://apassy-relay.wyderka.cc",
+            teamID: "t_7k2m5q4x3c", deviceID: 3, addedAt: Int64(Date().timeIntervalSince1970),
+            pin: node == nil ? nil : joinPin, nodeName: node?.name)
+        joinPin = nil
         vaults = [vault]
         selected = vault.id
         unlocked = true

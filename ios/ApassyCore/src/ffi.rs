@@ -53,7 +53,7 @@ impl HttpTransport for NativeTransport {
         } else {
             // SAFETY: `length` bytes before the NUL byte, as just measured.
             let text = unsafe { std::slice::from_raw_parts(answer.cast::<u8>(), length) };
-            crate::transport::parse_answer(text)
+            crate::transport::parse_answer(text, request.pin.is_some())
         };
         // SAFETY: the answer can hold a token: erase its bytes, then free it with the C
         // allocator that made it. Nothing borrows it any more.
@@ -349,6 +349,7 @@ mod tests {
             )],
             body,
             timeout: std::time::Duration::from_secs(30),
+            pin: None,
         }
     }
 

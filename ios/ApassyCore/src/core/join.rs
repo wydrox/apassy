@@ -344,6 +344,12 @@ impl Core {
             added_at: now() as i64,
             pin: report.link.pin.clone(),
             alt: report.link.alt.clone(),
+            // The name of a pinned link, for "via your Mac": a label, never an authority.
+            node_name: report
+                .link
+                .pin
+                .as_ref()
+                .and_then(|_| joining.node_name.clone()),
         };
         {
             let mut list = guard(&self.list);

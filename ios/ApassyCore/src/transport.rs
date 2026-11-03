@@ -23,6 +23,9 @@ struct RequestWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     body_b64u: Option<&'a str>,
     timeout_ms: u64,
+    /// The pin of a pinned origin (node-pairing-v1 section 4). Absent: system trust.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin: Option<&'a str>,
 }
 
 /// A string of the answer in an erasing buffer.
@@ -47,7 +50,8 @@ struct AnswerWire {
 }
 
 /// The request as NUL-terminated JSON: `{"id", "method", "url", "headers": [[name,
-/// value], …], "body_b64u" (absent without a body), "timeout_ms"}`.
+/// value], …], "body_b64u" (absent without a body), "timeout_ms", "pin" (absent for
+/// system trust)}`.
 pub(crate) fn request_json(request: &ExternalRequest<'_>) -> Option<Zeroizing<Vec<u8>>> {
     let body = request.body.map(|body| Zeroizing::new(encode_b64u(body)));
     let wire = RequestWire {
@@ -63,13 +67,16 @@ pub(crate) fn request_json(request: &ExternalRequest<'_>) -> Option<Zeroizing<Ve
         timeout_ms: u64::try_from(request.timeout.as_millis())
             .unwrap_or(u64::MAX)
             .max(1),
+        pin: request.pin.as_deref(),
     };
     exact_json(&wire)
 }
 
 /// The answer of the host: `{"status", "headers", "body_b64u"}` or `{"error":
-/// "connect" | "broken" | "protocol"}`. Text that is not such an answer is `Protocol`.
-pub(crate) fn parse_answer(text: &[u8]) -> Result<ExternalAnswer, HttpError> {
+/// "connect" | "broken" | "protocol" | "pin_mismatch"}`. Text that is not such an answer
+/// is `Protocol`. `pin_mismatch` counts only for a pinned request: for another one it is
+/// `Broken`, as any unknown text.
+pub(crate) fn parse_answer(text: &[u8], pinned: bool) -> Result<ExternalAnswer, HttpError> {
     if text.len() > MAX_ANSWER_TEXT {
         return Err(HttpError::Protocol);
     }
@@ -78,6 +85,7 @@ pub(crate) fn parse_answer(text: &[u8]) -> Result<ExternalAnswer, HttpError> {
         return Err(match error.as_str() {
             "connect" => HttpError::Connect,
             "protocol" => HttpError::Protocol,
+            "pin_mismatch" if pinned => HttpError::PinMismatch,
             _ => HttpError::Broken,
         });
     }
@@ -161,6 +169,7 @@ mod tests {
             ],
             body: Some(&b"{\"code\":\"synthetic\"}"[..]),
             timeout: Duration::from_secs(55),
+            pin: None,
         };
         let json = request_json(&request).unwrap();
         assert_eq!(json.last(), Some(&0));
@@ -185,17 +194,30 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&json[..json.len() - 1]).unwrap();
         assert!(value.get("body_b64u").is_none());
         assert_eq!(value["timeout_ms"], 1);
+        assert!(value.get("pin").is_none(), "system trust names no pin");
+
+        // A pinned origin (unit N6): the request names its pin.
+        let pinned = ExternalRequest {
+            pin: Some("u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE".to_owned()),
+            url: "https://100.64.0.7:8444/v1/questions".to_owned(),
+            body: None,
+            ..without
+        };
+        let json = request_json(&pinned).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json[..json.len() - 1]).unwrap();
+        assert_eq!(value["pin"], "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE");
+        assert_eq!(value["url"], "https://100.64.0.7:8444/v1/questions");
     }
 
     #[test]
     fn an_answer_or_an_error_of_the_host_reads() {
         let body = encode_b64u(b"{\"ok\":true}");
         let text = format!(r#"{{"status":200,"headers":[["ETag","\"3\""]],"body_b64u":"{body}"}}"#);
-        let answer = parse_answer(text.as_bytes()).unwrap();
+        let answer = parse_answer(text.as_bytes(), false).unwrap();
         assert_eq!(answer.status, 200);
         assert_eq!(answer.headers, [("ETag".to_owned(), "\"3\"".to_owned())]);
         assert_eq!(answer.body.as_slice(), b"{\"ok\":true}");
-        let empty = parse_answer(br#"{"status":204}"#).unwrap();
+        let empty = parse_answer(br#"{"status":204}"#, false).unwrap();
         assert!(empty.body.is_empty() && empty.headers.is_empty());
         for (text, error) in [
             (r#"{"error":"connect"}"#, HttpError::Connect),
@@ -209,10 +231,24 @@ mod tests {
             ),
             (r#"{"status":70000}"#, HttpError::Protocol),
             ("not json", HttpError::Protocol),
+            // A pin mismatch of a request without a pin is no pin mismatch.
+            (r#"{"error":"pin_mismatch"}"#, HttpError::Broken),
         ] {
-            assert_eq!(parse_answer(text.as_bytes()).err(), Some(error), "{text}");
+            assert_eq!(
+                parse_answer(text.as_bytes(), false).err(),
+                Some(error),
+                "{text}"
+            );
         }
+        assert_eq!(
+            parse_answer(br#"{"error":"pin_mismatch"}"#, true).err(),
+            Some(HttpError::PinMismatch)
+        );
+        assert_eq!(
+            parse_answer(br#"{"error":"connect"}"#, true).err(),
+            Some(HttpError::Connect)
+        );
         let large = vec![b' '; MAX_ANSWER_TEXT + 1];
-        assert_eq!(parse_answer(&large).err(), Some(HttpError::Protocol));
+        assert_eq!(parse_answer(&large, false).err(), Some(HttpError::Protocol));
     }
 }

@@ -30,12 +30,18 @@ public struct PreviewQuestions: Sendable {
         /// The core holds its context: it was unlocked in this session, and no lock or suspend
         /// came since.
         var open = true
+        /// The questions team is on this node (a pinned origin).
+        var node: NodeInfo? = nil
+        /// The code of the last failed relay call of this vault (`QuestionsVault.error`).
+        var error: String? = nil
 
         var status: QuestionsStatus {
             QuestionsStatus(
                 enabled: true, teamID: team, relayDeviceID: 4,
                 deviceUUID: answerKey == nil ? nil : "7a2d1f3b-4c5e-4f60-9a1b-2c3d4e5f6a7b", answerKey: answerKey,
-                hasKey: true, registered: registered, removed: removed)
+                hasKey: true, registered: registered, removed: removed,
+                // The core names the origin only; the name is in the vault entry.
+                node: node.map { NodeInfo(origin: $0.origin) })
         }
     }
 
@@ -63,6 +69,10 @@ public struct PreviewQuestions: Sendable {
     var ownOpen = false
     /// The vault IDs of each `questionsUnlock`, in order.
     var unlocks: [String] = []
+    /// The questions team of the selected vault is on this node (a pinned origin).
+    var node: NodeInfo?
+    /// The node of the selected vault does not answer (Tailscale is off on this iPhone).
+    var nodeUnreachable = false
 
     public init() {}
 }
@@ -141,19 +151,30 @@ extension PreviewVaultService {
     ///     passphrase of the preview.
     public func addQuestionsVault(
         id: String, name: String, team: String, questions: [RemoteQuestion] = [], answerKey: Data? = nil,
-        registered: Bool = true, removed: Bool = false, onPhone: Bool = false, open: Bool = true
+        registered: Bool = true, removed: Bool = false, onPhone: Bool = false, open: Bool = true,
+        node: NodeInfo? = nil, error: String? = nil
     ) {
         questionsState.others.removeAll { $0.id == id }
         questionsState.others.append(
             .init(
                 id: id, name: name, team: team, questions: questions, answerKey: answerKey, registered: registered,
-                removed: removed, open: open))
+                removed: removed, open: open, node: node, error: error))
         if onPhone, !vaults.contains(where: { $0.id == id }) {
             vaults.append(
                 VaultEntry(
-                    id: id, name: name, relayURL: "https://relay.apassy.example", teamID: team, deviceID: 4,
-                    addedAt: 1_791_000_100))
+                    id: id, name: name, relayURL: node?.origin ?? "https://relay.apassy.example", teamID: team,
+                    deviceID: 4, addedAt: 1_791_000_100,
+                    pin: node == nil ? nil : "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE", nodeName: node?.name))
         }
+    }
+
+    /// The questions team of the selected vault is on `node` (nil: the hosted relay). With
+    /// `unreachable`, the node does not answer: the list of the selected vault alone fails with
+    /// `relay_unreachable`, as the core's when every vault failed; with other vaults, the vault
+    /// has that error.
+    public func setQuestionsNode(_ node: NodeInfo?, unreachable: Bool = false) {
+        questionsState.node = node
+        questionsState.nodeUnreachable = node != nil && unreachable
     }
 
     /// The vault IDs of each `questionsUnlock`, in order.
@@ -279,7 +300,8 @@ extension PreviewVaultService {
             deviceUUID: questionsState.answerKey == nil ? nil : "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
             answerKey: questionsState.answerKey, hasKey: questionsState.enabled,
             registered: questionsState.enabled && questionsState.registered,
-            removed: questionsState.enabled && questionsState.removed)
+            removed: questionsState.enabled && questionsState.removed,
+            node: questionsState.enabled ? questionsState.node : nil)
     }
 
     private func requireQuestions() throws {
@@ -331,7 +353,14 @@ extension PreviewVaultService {
         if unlocked { questionsState.ownOpen = true }
         let openOthers = questionsState.others.filter(\.open)
         guard ownContext || !openOthers.isEmpty else { throw VaultError(.locked, "The vault is locked.") }
-        let own = ownContext && questionsState.enabled && !questionsState.removed ? questionsState.questions : []
+        // A node that does not answer: the call fails when no other vault answered (the core's
+        // rule), else that vault has the error and no question.
+        let ownUnreachable = questionsState.enabled && questionsState.nodeUnreachable
+        if ownUnreachable, openOthers.allSatisfy({ $0.error != nil }) {
+            throw VaultError(.relayUnreachable, "The relay cannot be reached. Check the connection.")
+        }
+        let own = ownContext && questionsState.enabled && !questionsState.removed && !ownUnreachable
+            ? questionsState.questions : []
         if let selected { observeHistory(own, vaultID: selected) }
         for other in openOthers where !other.removed { observeHistory(other.questions, vaultID: other.id) }
         if !questionsState.reportVaultScope && questionsState.others.isEmpty {
@@ -341,12 +370,15 @@ extension PreviewVaultService {
         let (id, name) = (selected?.id ?? "", selected?.name ?? "This vault")
         var vaults: [QuestionsVault] = []
         if questionsState.enabled, ownContext {
-            vaults.append(QuestionsVault(vaultID: id, vaultName: name, status: questionsStatus))
+            vaults.append(
+                QuestionsVault(
+                    vaultID: id, vaultName: name, status: questionsStatus,
+                    error: ownUnreachable ? VaultError.Code.relayUnreachable.rawValue : nil))
         }
         var questions = Self.tagged(own, id, name)
         for other in openOthers {
-            vaults.append(QuestionsVault(vaultID: other.id, vaultName: other.name, status: other.status))
-            if !other.removed { questions += Self.tagged(other.questions, other.id, other.name) }
+            vaults.append(QuestionsVault(vaultID: other.id, vaultName: other.name, status: other.status, error: other.error))
+            if !other.removed, other.error == nil { questions += Self.tagged(other.questions, other.id, other.name) }
         }
         return QuestionsList(status: questionsStatus, questions: questions, vaults: vaults)
     }

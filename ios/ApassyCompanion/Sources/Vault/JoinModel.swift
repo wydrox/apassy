@@ -6,6 +6,11 @@ import Observation
 /// Adding a vault of the Mac to this iPhone through the relay (contract ios-core-v1, 5.2): the
 /// instructions, the scan of the QR code, the name of this iPhone, the two safety words while the
 /// Mac confirms, the passphrase, and the offer of Face ID.
+///
+/// A link of a node (contract node-pairing-v1: the relay inside the Mac app, on the tailnet, with
+/// `&pin=` in its fragment) goes the same way; the core checks the pin. The screens then say "via
+/// your Mac" with the node's name of the link, and a node that does not answer asks for Tailscale
+/// on this iPhone.
 @MainActor
 @Observable
 final class JoinModel {
@@ -38,6 +43,8 @@ final class JoinModel {
     /// The answer to a wrong passphrase. The owner tries again.
     private(set) var passphraseMessage: String?
     private(set) var isWorking = false
+    /// The node of the link once the core read it (`JoinInfo.node`); nil for a hosted relay.
+    private(set) var node: NodeInfo?
     let biometry: Biometry
 
     @ObservationIgnored private let service: any VaultService
@@ -110,12 +117,44 @@ final class JoinModel {
             scanNote = error.localizedDescription
             return
         }
+        if VaultText.isNodePairingLink(trimmed) {
+            scanNote = Self.nodePairingNote
+            return
+        }
         guard let link = VaultText.joinLink(from: text) else {
             scanNote = "This is not the code of “Add a device…”. On your Mac, open Apassy > Settings > Vault > Sync."
             return
         }
         scanNote = nil
+        node = nil
         step = .name(link: link)
+    }
+
+    /// A node pairing code (`/pair#`) makes a team on a Linux node for a Mac; an iPhone joins with
+    /// the Mac's device link.
+    static let nodePairingNote =
+        "This code connects a Mac to a node. On your Mac, add this iPhone with “Add an iPhone or a Mac…”, then scan that code."
+
+    // MARK: Via your Mac
+
+    /// The route word of the waiting and the last screen: "via your Mac" for a node, nil for a
+    /// hosted relay.
+    var routeText: String? { node == nil ? nil : DeviceRoute.viaYourMac(name: nil).text }
+
+    /// The line about the node: "Through Tailscale to <name>.", nil for a hosted relay.
+    var nodeLine: String? { node.flatMap { DeviceRoute.viaYourMac(name: $0.name).detail } }
+
+    /// The line of the last screen: how the vault syncs from now on.
+    func syncLine(for vault: VaultEntry) -> String {
+        guard vault.isNode || node != nil else { return "Apassy syncs it with your Mac through the relay." }
+        let name = vault.nodeName ?? node?.name
+        return name.map { "Apassy syncs it with \($0) over Tailscale. Keep Tailscale on to sync." }
+            ?? "Apassy syncs it with your Mac over Tailscale. Keep Tailscale on to sync."
+    }
+
+    /// What to do when a node of the link does not answer: Tailscale on this iPhone.
+    private func tailscaleNote() -> String {
+        "Turn on Tailscale on this iPhone to reach \(node?.name ?? "your Mac"), then try again."
     }
 
     // MARK: The name
@@ -149,7 +188,12 @@ final class JoinModel {
             let join = try await service.joinStart(
                 link: link, deviceName: trimmedDeviceName, answerKey: try? answerKey?(VaultText.linkTeam(link)))
             settings.deviceName = trimmedDeviceName
+            node = join.node
             show(join)
+        } catch let error as VaultError where error.code == .relayUnreachable && VaultText.isPinnedLink(link) {
+            // The node of the link did not answer: most often Tailscale is off on this iPhone.
+            stopPolling()
+            step = .failed(title: "Your Mac does not answer", message: tailscaleNote())
         } catch {
             fail(error)
         }
@@ -197,7 +241,7 @@ final class JoinModel {
                 }
                 step = .waiting(join)
             } catch let error as VaultError where error.code == .relayUnreachable || error.code == .rateLimited {
-                waitNote = error.message
+                waitNote = error.code == .relayUnreachable && node != nil ? tailscaleNote() : error.message
                 if now().timeIntervalSince1970 > TimeInterval(current.expiresAt) + 5 {
                     pollTask = nil
                     step = .failed(
@@ -298,6 +342,7 @@ final class JoinModel {
         stopPolling()
         scanNote = nil
         waitNote = nil
+        node = nil
         step = .scan
     }
 
@@ -307,6 +352,7 @@ final class JoinModel {
         let title: String
         switch (error as? VaultError)?.code {
         case .linkInvalid?: title = "This code does not work"
+        case .pinMismatch?: title = "The certificate does not match"
         case .joinRefused?: title = "The Mac did not add this iPhone"
         case .safetyMismatch?: title = "The words do not match"
         case .relayUnreachable?: title = "The relay does not answer"

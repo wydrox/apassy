@@ -1,7 +1,8 @@
-#if os(watchOS)
 import ApassyCoreFFI
 import ApassyVaultKit
+import CryptoKit
 import Foundation
+import Security
 import Synchronization
 
 /// The relay HTTP of the core on the Apple Watch (ADR 0039 section 5): watchOS gives this app no
@@ -10,6 +11,12 @@ import Synchronization
 /// The session is ephemeral: no cookie, no cache, no credential storage. Redirects are not
 /// followed. Each `send` blocks the calling thread of the core until the answer, the deadline of
 /// the request, or `cancel`. The request holds the bearer; no copy of it stays after `send`.
+///
+/// A request to a pinned origin (a node on the tailnet, contract node-pairing-v1 section 4)
+/// carries the pin: it goes through a second session with TLS 1.3 only, and its task accepts
+/// only the leaf certificate with that pin, never the system trust store. Another certificate
+/// answers `pin_mismatch` before any request byte. Only the watch installs the transport; the
+/// type builds everywhere so that the macOS tests reach it.
 final class URLSessionCoreTransport: Sendable {
     static let shared = URLSessionCoreTransport()
     private static let installed = Mutex(false)
@@ -18,6 +25,8 @@ final class URLSessionCoreTransport: Sendable {
     private static let maxBody = 2 * 1024 * 1024
 
     private let session: URLSession
+    /// The session of the pinned requests: TLS 1.3 at least, as the core's own pinned client.
+    private let pinnedSession: URLSession
     private let state = Mutex(State())
 
     private struct Running {
@@ -31,7 +40,12 @@ final class URLSessionCoreTransport: Sendable {
         var cancelled: Set<UInt64> = []
     }
 
-    private init() {
+    init() {
+        session = URLSession(configuration: Self.configuration(minimumTLS: .TLSv12))
+        pinnedSession = URLSession(configuration: Self.configuration(minimumTLS: .TLSv13))
+    }
+
+    static func configuration(minimumTLS: tls_protocol_version_t) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -41,12 +55,14 @@ final class URLSessionCoreTransport: Sendable {
         configuration.urlCredentialStorage = nil
         configuration.waitsForConnectivity = false
         configuration.allowsCellularAccess = true
-        configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+        configuration.connectionProxyDictionary = [:]
+        configuration.tlsMinimumSupportedProtocolVersion = minimumTLS
         // Each request has its own deadline (`timeout_ms`); this only bounds a stuck one.
         configuration.timeoutIntervalForResource = 120
-        session = URLSession(configuration: configuration)
+        return configuration
     }
 
+    #if os(watchOS)
     /// Install the transport once, before the first `apassy_core_new`.
     static func install() {
         let first = installed.withLock { (done: inout Bool) -> Bool in
@@ -67,6 +83,7 @@ final class URLSessionCoreTransport: Sendable {
         guard let context else { return }
         Unmanaged<URLSessionCoreTransport>.fromOpaque(context).takeUnretainedValue().cancel(id)
     }
+    #endif
 
     // MARK: - One request
 
@@ -77,16 +94,23 @@ final class URLSessionCoreTransport: Sendable {
         var headers: [[String]]
         var body_b64u: String?
         var timeout_ms: UInt64
+        /// The pin of a pinned origin (node-pairing-v1 section 4); absent for system trust.
+        var pin: String?
     }
 
     /// The headers that URLSession writes itself.
     private static let reserved: Set<String> = ["host", "content-length", "connection", "transfer-encoding"]
 
-    private func perform(_ json: String) -> String {
+    /// One request of the core: its JSON in, the answer JSON out (contract ios-core-v1 section 2.1).
+    func perform(_ json: String) -> String {
         // A request that cannot be read was not sent: nothing reached the relay.
         guard let request = try? JSONDecoder().decode(Request.self, from: Data(json.utf8)),
             let url = URL(string: request.url), url.scheme == "https" || url.scheme == "http"
         else { return Answer.failure("connect") }
+        // A pinned request is https with a pin of the contract's form, or it is not sent.
+        if let pin = request.pin, url.scheme != "https" || !CorePin.isValid(pin) {
+            return Answer.failure("connect")
+        }
         let seconds = Double(min(max(request.timeout_ms, 1), 600_000)) / 1000
         var urlRequest = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: seconds)
         urlRequest.httpMethod = request.method
@@ -100,8 +124,8 @@ final class URLSessionCoreTransport: Sendable {
             guard let data = Base64URL.decode(body) else { return Answer.failure("connect") }
             urlRequest.httpBody = data
         }
-        let exchange = Exchange(limit: Self.maxBody)
-        let task = session.dataTask(with: urlRequest)
+        let exchange = Exchange(limit: Self.maxBody, pin: request.pin)
+        let task = (request.pin == nil ? session : pinnedSession).dataTask(with: urlRequest)
         task.delegate = exchange
         let started = state.withLock { (state: inout State) -> Bool in
             if state.cancelled.remove(request.id) != nil { return false }
@@ -146,19 +170,77 @@ private enum Answer {
     }
 }
 
+/// The pin of a node certificate (contract node-pairing-v1 section 4): `b64u(SHA-256(DER))` of the
+/// leaf, 43 characters. The format of `PinnedTLS.pinText` and of the core.
+enum CorePin {
+    static func isValid(_ text: String) -> Bool {
+        text.utf8.count == 43 && Base64URL.decode(text)?.count == 32
+            && text.utf8.allSatisfy { byte in
+                (0x30...0x39).contains(byte) || (0x41...0x5A).contains(byte) || (0x61...0x7A).contains(byte)
+                    || byte == 0x2D || byte == 0x5F
+            }
+    }
+
+    static func text(ofCertificate der: Data) -> String {
+        Base64URL.encode(Data(SHA256.hash(data: der)))
+    }
+
+    /// Whether the leaf of `trust` has the pin `pin`. The texts are compared in the same time for
+    /// any input of the same length; a later certificate of the chain never counts.
+    static func leafMatches(_ trust: SecTrust, pin: String) -> Bool {
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leaf = chain.first else {
+            return false
+        }
+        let seen = Array(text(ofCertificate: SecCertificateCopyData(leaf) as Data).utf8)
+        let wanted = Array(pin.utf8)
+        guard seen.count == wanted.count else { return false }
+        var difference: UInt8 = 0
+        for index in seen.indices { difference |= seen[index] ^ wanted[index] }
+        return difference == 0
+    }
+}
+
 /// The delegate of one task: it keeps the answer, caps the body, refuses redirects, and counts the
 /// bytes sent, so that a failure before the first byte is `connect` (the request did not reach the
-/// relay) and any later one is `broken` (it may have landed).
+/// relay) and any later one is `broken` (it may have landed). With a pin it answers the server
+/// trust challenge by the pin alone: another leaf is `pin_mismatch`.
 private final class Exchange: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     let done = DispatchSemaphore(value: 0)
     private let limit: Int
+    private let pin: String?
     private let lock = NSLock()
     private var response: HTTPURLResponse?
     private var body = Data()
     private var failure: String?
     private var sentBytes: Int64?
 
-    init(limit: Int) { self.limit = limit }
+    init(limit: Int, pin: String?) {
+        self.limit = limit
+        self.pin = pin
+    }
+
+    /// The server trust of this task. Without a pin: the system's handling, as before. With a pin:
+    /// only the pinned leaf, and never the default handling or another kind of challenge.
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard let pin else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        let space = challenge.protectionSpace
+        guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust, let trust = space.serverTrust else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        guard CorePin.leafMatches(trust, pin: pin) else {
+            lock.withLock { failure = "pin_mismatch" }
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
 
     /// The request was cancelled or passed its deadline: it answers `broken`.
     func end() {
@@ -248,4 +330,3 @@ private final class Exchange: NSObject, URLSessionDataDelegate, @unchecked Senda
         }
     }
 }
-#endif

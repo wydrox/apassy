@@ -470,6 +470,17 @@ struct StatusOut {
     registered: bool,
     /// The owner removed this iPhone on a Mac: it needs a new `join_attach`.
     removed: bool,
+    /// The questions team is on a node (a pinned origin, node-pairing-v1): its origin, for
+    /// "via your Mac". Absent for a hosted relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<NodeOut>,
+}
+
+/// The node of a questions team, as the app shows it.
+#[derive(Serialize)]
+struct NodeOut {
+    /// The origin that this iPhone stores and signs: `https://<Tailscale IPv4>:<port>`.
+    origin: String,
 }
 
 impl StatusOut {
@@ -483,6 +494,7 @@ impl StatusOut {
             has_key: false,
             registered: false,
             removed: false,
+            node: None,
         }
     }
 
@@ -500,6 +512,7 @@ impl StatusOut {
             has_key: keys.key.is_some(),
             registered: keys.own.is_some(),
             removed: keys.is_removed(),
+            node: keys.node_origin.clone().map(|origin| NodeOut { origin }),
         }
     }
 }
@@ -879,6 +892,8 @@ pub(super) struct Keys {
     removed: bool,
     /// The team is a notifications-only team (plan §A7): it carries no relay sync.
     questions_only: bool,
+    /// The origin of the team when it is on a node (the membership has a pin).
+    node_origin: Option<String>,
 }
 
 impl Keys {
@@ -1097,6 +1112,10 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
         key: question_key(vault)?,
         team_id: membership.team_id.clone(),
         device_id: membership.device_id,
+        node_origin: membership
+            .pin
+            .as_ref()
+            .map(|_| membership.relay_url.clone()),
         questions_only: membership
             .purposes
             .iter()

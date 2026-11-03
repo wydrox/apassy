@@ -143,16 +143,17 @@ fn an_iphone_joins_a_pinned_node_and_keeps_the_pin_in_its_entry() {
         "link_invalid"
     );
 
-    // The pinned link joins: the same words on both, the owner confirms on the Mac.
+    // The pinned link joins: the same words on both, the owner confirms on the Mac. The
+    // link carries the node's name (node-pairing-v1 section 7): it changes no word.
+    let named = format!("{}&name=Mac%20mini", code.link.as_str());
     let join = call(
         &phone,
-        json!({"op": "join_start", "link": code.link.as_str(), "device_name": "Synthetic iPhone 18"}),
+        json!({"op": "join_start", "link": named, "device_name": "Synthetic iPhone 18"}),
     );
     assert_eq!(join["state"], "waiting");
-    // The app shows "via your Mac": the join names the node origin. A link without a
-    // name has none.
+    // The app shows "via your Mac": the join names the node origin and its name.
     assert_eq!(join["node"]["origin"], json!(origin));
-    assert!(join["node"].get("name").is_none(), "{join}");
+    assert_eq!(join["node"]["name"], "Mac mini", "{join}");
     let links = mac.pending_links(&mac_vault, Some(&code)).unwrap();
     assert_eq!(links.len(), 1);
     let words: Vec<String> = join["words"]
@@ -171,6 +172,8 @@ fn an_iphone_joins_a_pinned_node_and_keeps_the_pin_in_its_entry() {
         "the origin is the stored value"
     );
     assert_eq!(vault["pin"], json!(pin.text()));
+    // The name stays with the entry for Settings > Devices (unit N6).
+    assert_eq!(vault["node_name"], "Mac mini");
     let id = vault["id"].as_str().unwrap().to_owned();
 
     // The entry in phone.json has the pin; the list version stays 1.
@@ -186,6 +189,7 @@ fn an_iphone_joins_a_pinned_node_and_keeps_the_pin_in_its_entry() {
         .clone();
     assert_eq!(entry["pin"], json!(pin.text()));
     assert_eq!(entry["relay_url"], json!(origin));
+    assert_eq!(entry["node_name"], "Mac mini");
     let items = call(&phone, json!({"op": "items"}))["items"].clone();
     assert_eq!(items[0]["title"], "Alpha");
 
@@ -210,6 +214,14 @@ fn an_iphone_joins_a_pinned_node_and_keeps_the_pin_in_its_entry() {
         .collect();
     titles.sort();
     assert_eq!(titles, ["Alpha", "From the phone"]);
-    // No request byte to the relay carried the pin.
+    // No request byte to the relay carried the pin or the name.
     assert!(!relay.log().iter().any(|line| line.contains("pin=")));
+    assert!(!relay.log().iter().any(|line| line.contains("name=Mac")));
+
+    // The questions team of the vault is its sync team on the node: its status names the
+    // node origin, for "via your Mac" in Settings > Devices (unit N6).
+    let list = call(&phone, json!({"op": "questions_list"}));
+    assert_eq!(list["status"]["enabled"], true, "{list}");
+    assert_eq!(list["status"]["node"]["origin"], json!(origin), "{list}");
+    assert_eq!(list["vaults"][0]["status"]["node"]["origin"], json!(origin));
 }
