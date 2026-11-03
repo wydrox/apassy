@@ -28,6 +28,7 @@
 //!   of the process.
 //! - `public_addr.rs`: [`is_public_ip`], shared with the relay proxy.
 //! - `base_env.rs`: the base URL variables, shared with the relay.
+//! - `ws.rs`: the WebSocket frame relay (ADR 0011 stage 5).
 
 pub mod base_env;
 mod ca;
@@ -37,6 +38,7 @@ mod listener;
 mod network;
 mod public_addr;
 mod swap;
+mod ws;
 
 pub use ca::Alpn;
 pub use engine::{Auth, CoreOptions, EventSink, ProxyCore, UpstreamPolicy};

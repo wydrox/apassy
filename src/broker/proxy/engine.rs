@@ -32,7 +32,8 @@ use super::http1::{
     parse_request_head, parse_response_head, request_body,
 };
 use super::public_addr::is_public_ip;
-use super::swap::{Refusal, SwapSecret, swap_request};
+use super::swap::{Refusal, SwapSecret, Swapped, swap_request};
+use super::ws;
 use super::{OtherHosts, ProxyEvent, ProxyOutcome, ProxySecret};
 use crate::broker::access_once::Admission;
 use crate::broker::http::TlsClient;
@@ -768,12 +769,14 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
             );
             return;
         }
-        if request.header("upgrade").is_some() {
+        let websocket = request.header("upgrade").is_some();
+        if websocket && !ws::is_websocket(&request) {
             refuse(
                 client,
                 501,
                 "Not Implemented",
-                "The run proxy does not support a protocol upgrade (WebSocket) yet.".to_owned(),
+                "The run proxy supports only the WebSocket upgrade (GET with Upgrade: websocket)."
+                    .to_owned(),
             );
             return;
         }
@@ -784,6 +787,15 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
                 return;
             }
         };
+        if websocket && body != BodyLen::None {
+            refuse(
+                client,
+                400,
+                "Bad Request",
+                "A WebSocket upgrade has no body.".to_owned(),
+            );
+            return;
+        }
         if proxy.access.as_ref().is_some_and(|a| !a.covers(host, port)) {
             respond(
                 &mut client.inner,
@@ -795,13 +807,37 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
             proxy.record(ProxyEvent::new(host, port, ProxyOutcome::Refused));
             return;
         }
-        let swapped = match swap_request(&request, host, port, &secrets) {
+        // A WebSocket handshake goes through the same rules, without its offer of
+        // extensions (D11): the frames stay uncompressed, so the relay can check them.
+        let swapped = if websocket {
+            swap_request(&ws::handshake_request(&request), host, port, &secrets)
+        } else {
+            swap_request(&request, host, port, &secrets)
+        };
+        let swapped = match swapped {
             Ok(swapped) => swapped,
             Err(refusal) => {
                 refuse(client, 403, "Forbidden", proxy.refusal_text(&refusal, host));
                 return;
             }
         };
+        if websocket {
+            // A new connection to the service carries the WebSocket. After it the
+            // connection of the program ends.
+            drop(service.take());
+            let names: Vec<&str> = proxy
+                .secrets
+                .iter()
+                .map(|secret| secret.name.as_str())
+                .collect();
+            let frames = ws::Secrets {
+                placeholders: &placeholders,
+                pairs: &pairs,
+                names: &names,
+            };
+            websocket_session(proxy, client, host, port, &swapped, event, &frames);
+            return;
+        }
         if request
             .header("expect")
             .is_some_and(|value| value.eq_ignore_ascii_case("100-continue"))
@@ -969,6 +1005,199 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
             return;
         }
     }
+}
+
+/// Sends the swapped head to the service, inside the scoped access consent when
+/// the run has one. `None`: the consent ended before delivery, nothing was sent.
+fn send_head(
+    proxy: &ProxyCore,
+    upstream: &mut Conn<ServiceSide>,
+    head: &[u8],
+    host: &str,
+    port: u16,
+) -> Option<io::Result<()>> {
+    let mut send = || {
+        upstream
+            .inner
+            .write_all(head)
+            .and_then(|()| upstream.inner.flush())
+    };
+    match &proxy.access {
+        Some(access) => access.deliver(host, port, send),
+        None => Some(send()),
+    }
+}
+
+/// A WebSocket to a host of the run (ADR 0011 stage 5, D11). The handshake was
+/// swapped already; this sends it on a new verified connection, checks the answer,
+/// and after `101` relays the frames ([`ws::relay`]) until the WebSocket ends.
+/// Another answer goes to the program as for any request, and the connection ends.
+fn websocket_session(
+    proxy: &ProxyCore,
+    client: &mut Conn<ClientSide>,
+    host: &str,
+    port: u16,
+    swapped: &Swapped,
+    event: ProxyEvent,
+    secrets: &ws::Secrets<'_>,
+) {
+    let Ok((mut upstream, _tracked)) = open_service(proxy, host, port) else {
+        respond(
+            &mut client.inner,
+            502,
+            "Bad Gateway",
+            "Apassy could not open a verified connection to the service.",
+            "",
+        );
+        proxy.record(event.with_reason(
+            ProxyOutcome::Failed,
+            "The connection or the certificate check of the service failed. No value was sent.",
+        ));
+        return;
+    };
+    match send_head(proxy, &mut upstream, &swapped.head, host, port) {
+        Some(Ok(())) => {}
+        Some(Err(_)) => {
+            respond(
+                &mut client.inner,
+                502,
+                "Bad Gateway",
+                "The service closed the connection.",
+                "",
+            );
+            proxy.record(
+                event.with_reason(ProxyOutcome::Failed, "The service closed the connection."),
+            );
+            return;
+        }
+        None => {
+            let reason = "The scoped access consent expired or was revoked before delivery. No value was sent.";
+            respond(&mut client.inner, 403, "Forbidden", reason, "");
+            proxy.record(event.with_reason(ProxyOutcome::Refused, reason));
+            return;
+        }
+    }
+    let failed = |client: &mut Conn<ClientSide>, event: ProxyEvent, reason: &str| {
+        respond(&mut client.inner, 502, "Bad Gateway", reason, "");
+        proxy.record(event.with_reason(ProxyOutcome::Failed, reason));
+    };
+    // Interim answers (1xx other than 101) go to the program. The final answer follows.
+    let mut head_replaced = false;
+    let (raw, response) = loop {
+        let Ok(Some(mut raw)) = upstream.read_head() else {
+            failed(client, event, "The service closed the connection.");
+            return;
+        };
+        head_replaced |= Replacer::replace_all(secrets.pairs, &mut raw);
+        let Ok(parsed) = parse_response_head(&raw, "GET") else {
+            failed(client, event, "The service answer is not valid HTTP/1.1.");
+            return;
+        };
+        if (100..200).contains(&parsed.status) && !parsed.upgrade {
+            if client.inner.write_all(&raw).is_err() {
+                return;
+            }
+            continue;
+        }
+        break (raw, parsed);
+    };
+    let mut event = event;
+    event.status = Some(response.status);
+    event.secrets = swapped
+        .used
+        .iter()
+        .map(|index| proxy.name(*index).to_owned())
+        .collect();
+    event.outcome = if event.secrets.is_empty() {
+        ProxyOutcome::Passed
+    } else {
+        ProxyOutcome::Swapped
+    };
+    if head_replaced {
+        event.reason =
+            Some("The answer had a real value. The program got the placeholder.".to_owned());
+    }
+    if !response.upgrade {
+        // The service did not take the WebSocket (401, 400, ...): its answer goes
+        // to the program with placeholders, and the connection ends.
+        if client.inner.write_all(&raw).is_err() {
+            return;
+        }
+        let mut replacer = Replacer::new(secrets.pairs);
+        // The connection ends after this answer, also when its body breaks off.
+        let _ = copy_response_body(
+            &mut upstream,
+            &mut client.inner,
+            response.body,
+            &mut replacer,
+        );
+        let _ = client.inner.flush();
+        if replacer.replaced {
+            event.reason =
+                Some("The answer had a real value. The program got the placeholder.".to_owned());
+        }
+        proxy.record(event);
+        return;
+    }
+    if let Err(reason) = ws::check_accept(&raw) {
+        failed(client, event, reason);
+        return;
+    }
+    if client
+        .inner
+        .write_all(&raw)
+        .and_then(|()| client.inner.flush())
+        .is_err()
+    {
+        return;
+    }
+    drop(raw);
+    let handshake = event.clone();
+    proxy.record(event);
+
+    // Bytes that came after the heads, and the TLS bytes of the program that the
+    // handshake of the run authority did not use, come first.
+    let early_client = client.take_buffered();
+    let (mut service, early_server) = upstream.into_parts();
+    let early_server = Zeroizing::new(early_server);
+    let StreamOwned {
+        conn: client_conn,
+        sock: client_sock,
+    } = &mut client.inner;
+    let client_raw = std::mem::take(&mut client_sock.first);
+    let tick = ws::Limits::default().tick;
+    let _ = client_sock.inner.set_read_timeout(Some(tick));
+    let _ = service.sock.set_read_timeout(Some(tick));
+    let client_end = ws::TlsEndpoint::new(&mut **client_conn, &client_sock.inner, client_raw);
+    let StreamOwned {
+        conn: service_conn,
+        sock: service_sock,
+    } = &mut service;
+    let service_end = ws::TlsEndpoint::new(&mut **service_conn, service_sock, Vec::new());
+    let report = |report: ws::Report| match report {
+        ws::Report::Refused(reason) => {
+            proxy.record(handshake.clone().with_reason(ProxyOutcome::Refused, reason));
+        }
+        ws::Report::Failed(reason) => {
+            proxy.record(handshake.clone().with_reason(ProxyOutcome::Failed, reason));
+        }
+        ws::Report::Replaced => {
+            let mut note = handshake.clone();
+            note.reason = Some(
+                "A WebSocket frame had a real value. The program got the placeholder.".to_owned(),
+            );
+            proxy.record(note);
+        }
+    };
+    ws::relay(
+        &client_end,
+        &service_end,
+        &early_client,
+        &early_server,
+        secrets,
+        ws::Limits::default(),
+        &report,
+    );
 }
 
 #[cfg(test)]
