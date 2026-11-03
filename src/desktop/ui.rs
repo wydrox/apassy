@@ -40,6 +40,9 @@ mod decisions_tests;
 mod demo;
 #[cfg(feature = "vault")]
 mod detail_rows;
+/// Find duplicates and merge them (`src/vault/dedup.rs`).
+#[cfg(feature = "vault")]
+mod duplicates;
 #[cfg(feature = "vault")]
 pub(crate) mod files;
 /// First credential actions, with optional agent setup.
@@ -290,6 +293,9 @@ pub(crate) struct UiState {
     /// The note that the owner edits on an agent page.
     #[cfg(feature = "vault")]
     pub(crate) agents: agents::State,
+    /// The groups of the "Find duplicates" sheet. Titles and labels, no value.
+    #[cfg(feature = "vault")]
+    pub(crate) duplicates: duplicates::State,
     /// The name field of the New Folder and Rename sheets.
     #[cfg(feature = "vault")]
     pub(crate) folder_name: String,
@@ -463,6 +469,9 @@ pub(crate) enum Sheet {
     /// Import from 1Password.
     #[cfg(feature = "vault")]
     Import,
+    /// Find duplicates and merge them.
+    #[cfg(feature = "vault")]
+    Duplicates,
     /// Remove every paired iPhone and make a new certificate (ADR 0020).
     #[cfg(feature = "vault")]
     ResetCompanion,
@@ -739,6 +748,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 app.place = crate::desktop::Place::CREDENTIALS;
             }
             app.import.forget();
+            app.ui.duplicates = Default::default();
             #[cfg(target_os = "macos")]
             super::native_menu::process(app, &ctx);
             start::draw(app, ui);
@@ -788,6 +798,10 @@ pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
             forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
         }
         Some(Sheet::Import) => app.import.forget(),
+        Some(Sheet::Duplicates) => {
+            app.ui.duplicates = Default::default();
+            app.import.forget();
+        }
         _ => {}
     }
     #[cfg(not(feature = "vault"))]

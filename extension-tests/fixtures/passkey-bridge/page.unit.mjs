@@ -7,11 +7,12 @@
 //   node --test fixtures/passkey-bridge/*.unit.mjs        (from extension-tests/)
 
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { test } from "node:test";
 import { verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
+import { isoCBOR } from "@simplewebauthn/server/helpers";
 import { flush, loadBackground, loadPage, senderFor } from "./mock-chrome.mjs";
-import { createSyntheticAuthenticator, fail, ok } from "./synthetic-authenticator.mjs";
+import { createSyntheticAuthenticator, fail, ok, syntheticPrf } from "./synthetic-authenticator.mjs";
 
 const ORIGIN = "https://login.example.com";
 const RP_ID = "example.com";
@@ -186,7 +187,27 @@ const BROWSER_CASES = {
   "a password next to publicKey": () => ({ publicKey: { challenge: new Uint8Array(32) }, password: {} }),
   "conditional mediation": () => ({ mediation: "conditional", publicKey: { challenge: new Uint8Array(randomBytes(32)) } }),
   "immediate mediation": () => ({ mediation: "immediate", publicKey: { challenge: new Uint8Array(randomBytes(32)) } }),
-  "a prf extension": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { prf: { eval: { first: new Uint8Array(32) } } } } }),
+  "a prf input of 1025 bytes": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { prf: { eval: { first: new Uint8Array(1025) } } } } }),
+  "a prf input that is not a buffer": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { prf: { eval: { first: "salt" } } } } }),
+  "prf evalByCredential without an allow list": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { prf: { evalByCredential: { AQID: { first: new Uint8Array(32) } } } } } }),
+  "prf evalByCredential of a credential outside the allow list": () => ({ publicKey: {
+    challenge: new Uint8Array(randomBytes(32)), allowCredentials: [{ type: "public-key", id: new Uint8Array([1, 2, 3]) }],
+    extensions: { prf: { evalByCredential: { BAUG: { first: new Uint8Array(32) } } } },
+  } }),
+  "257 prf evalByCredential entries": () => ({ publicKey: {
+    challenge: new Uint8Array(randomBytes(32)), allowCredentials: [{ type: "public-key", id: new Uint8Array([1, 2, 3]) }],
+    extensions: { prf: { evalByCredential: Object.fromEntries(Array.from({ length: 257 }, (_, i) => [b64u([i & 0xff, i >> 8, 7]), { first: new Uint8Array(32) }])) } },
+  } }),
+  "a largeBlob support member": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { largeBlob: { support: "required" } } } }),
+  "a largeBlob read and write": () => ({ publicKey: {
+    challenge: new Uint8Array(randomBytes(32)), allowCredentials: [{ type: "public-key", id: new Uint8Array([1, 2, 3]) }],
+    extensions: { largeBlob: { read: true, write: new Uint8Array(4) } },
+  } }),
+  "a largeBlob write without exactly one allowed credential": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { largeBlob: { write: new Uint8Array(4) } } } }),
+  "a largeBlob write above 64 KiB": () => ({ publicKey: {
+    challenge: new Uint8Array(randomBytes(32)), allowCredentials: [{ type: "public-key", id: new Uint8Array([1, 2, 3]) }],
+    extensions: { largeBlob: { write: new Uint8Array(64 * 1024 + 1) } },
+  } }),
   "an appid extension": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { appid: "https://example.com" } } }),
   "a challenge that is not a buffer": () => ({ publicKey: { challenge: "abc" } }),
   "a shared buffer": () => ({ publicKey: { challenge: new Uint8Array(new SharedArrayBuffer(32)) } }),
@@ -379,7 +400,7 @@ test("the bridge passes only options and its own browser gesture provenance", as
 
 test("an oversized or malformed request event is ignored by the bridge", async () => {
   const p = pipeline();
-  p.page.window.dispatchEvent(new CustomEvent("apassy-passkey-request", { detail: "x".repeat(70_000) }));
+  p.page.window.dispatchEvent(new CustomEvent("apassy-passkey-request", { detail: "x".repeat(140_000) }));
   p.page.window.dispatchEvent(new CustomEvent("apassy-passkey-request", { detail: "{not json" }));
   p.page.window.dispatchEvent(new CustomEvent("apassy-passkey-request", { detail: JSON.stringify({ rid: "short", op: "get", options: {} }) }));
   await flush();
@@ -396,4 +417,184 @@ test("synthetic page event without browser user activation is refused", async ()
   }) }));
   await flush();
   assert.equal(p.bg.natives.length, 0, "a page-supplied gesture cannot reach the native host");
+});
+
+// --- sign-in extensions: prf and largeBlob ---------------------------------------------
+
+const prfOf = (authenticator, credential, input) =>
+  syntheticPrf(Buffer.from(authenticator.credentials.get(bytesOf(credential.rawId).toString("base64")).prfKey, "base64"), input);
+const getWire = (p) => p.bg.natives.at(-1).sent.find((wire) => wire.cmd === "passkey_get");
+
+async function signIn(p, credential, extensions, extra = {}) {
+  const challenge = new Uint8Array(randomBytes(32));
+  const assertion = await p.credentials.get({ publicKey: {
+    challenge, rpId: RP_ID, allowCredentials: [{ type: "public-key", id: credential.rawId }], userVerification: "required",
+    extensions, ...extra,
+  } });
+  return { assertion, challenge };
+}
+
+test("get with prf eval: the inputs reach the app, the results are ArrayBuffers, toJSON is base64url, the assertion verifies", async () => {
+  const p = pipeline();
+  const { credential, publicKey } = await register(p);
+  const registration = await verifyRegistrationResponse({
+    response: credential.toJSON(), expectedChallenge: b64u(publicKey.challenge), expectedOrigin: ORIGIN, expectedRPID: RP_ID,
+  });
+  const first = new Uint8Array(randomBytes(32));
+  const second = new Uint8Array(randomBytes(48));
+  const { assertion, challenge } = await signIn(p, credential, { prf: { eval: { first, second: second.buffer } } });
+  const wire = getWire(p);
+  assert.deepEqual(wire.prf, { eval: { first: Buffer.from(first).toString("base64"), second: Buffer.from(second).toString("base64") } });
+  assert.equal(wire.large_blob, undefined);
+
+  const results = assertion.getClientExtensionResults();
+  assert.deepEqual(Object.keys(results), ["prf"]);
+  assert.ok(results.prf.results.first instanceof ArrayBuffer);
+  assert.ok(results.prf.results.second instanceof ArrayBuffer);
+  assert.deepEqual(bytesOf(results.prf.results.first), prfOf(p.authenticator, credential, first));
+  assert.deepEqual(bytesOf(results.prf.results.second), prfOf(p.authenticator, credential, second));
+  // A new copy each time: the page cannot change the next one.
+  new Uint8Array(results.prf.results.first)[0] ^= 0xff;
+  assert.deepEqual(bytesOf(assertion.getClientExtensionResults().prf.results.first), prfOf(p.authenticator, credential, first));
+  assert.deepEqual(assertion.toJSON().clientExtensionResults, { prf: { results: {
+    first: b64u(prfOf(p.authenticator, credential, first)), second: b64u(prfOf(p.authenticator, credential, second)),
+  } } });
+
+  const authentication = await verifyAuthenticationResponse({
+    response: assertion.toJSON(), expectedChallenge: b64u(challenge), expectedOrigin: ORIGIN, expectedRPID: RP_ID,
+    credential: registration.registrationInfo.credential, requireUserVerification: true,
+  });
+  assert.equal(authentication.verified, true);
+  assert.equal(p.page.calls.length, 0);
+});
+
+test("get with prf evalByCredential: the inputs of the chosen credential win over eval", async () => {
+  const p = pipeline();
+  const { credential } = await register(p);
+  const mine = new Uint8Array(randomBytes(32));
+  const all = new Uint8Array(randomBytes(32));
+  const { assertion } = await signIn(p, credential, { prf: { eval: { first: all }, evalByCredential: { [credential.id]: { first: mine } } } });
+  assert.deepEqual(getWire(p).prf, {
+    eval: { first: Buffer.from(all).toString("base64") },
+    eval_by_credential: { [credential.id]: { first: Buffer.from(mine).toString("base64") } },
+  });
+  const results = assertion.getClientExtensionResults();
+  assert.deepEqual(bytesOf(results.prf.results.first), prfOf(p.authenticator, credential, mine));
+  assert.equal(results.prf.results.second, undefined);
+});
+
+test("get with prf, and an app without PRF outputs: no prf member, as for a client without the extension", async () => {
+  const p = pipeline({ scenario: (wire, app) => {
+    const answer = app(wire);
+    if (answer.data && answer.data.prf) delete answer.data.prf;
+    return answer;
+  } });
+  const { credential } = await register(p);
+  const { assertion } = await signIn(p, credential, { prf: { eval: { first: new Uint8Array(32) } } });
+  assert.deepEqual(assertion.getClientExtensionResults(), {});
+  assert.deepEqual(assertion.toJSON().clientExtensionResults, {});
+});
+
+test("largeBlob: a write, then a read gives the blob; a read without a blob gives {}", async () => {
+  const p = pipeline();
+  const { credential } = await register(p);
+  const empty = await signIn(p, credential, { largeBlob: { read: true } });
+  assert.deepEqual(getWire(p).large_blob, { read: true });
+  assert.deepEqual(empty.assertion.getClientExtensionResults(), { largeBlob: {} });
+
+  const blob = new Uint8Array(randomBytes(40 * 1024));
+  const written = await signIn(p, credential, { largeBlob: { write: blob } });
+  assert.deepEqual(getWire(p).large_blob, { write: Buffer.from(blob).toString("base64") });
+  assert.deepEqual(written.assertion.getClientExtensionResults(), { largeBlob: { written: true } });
+  assert.deepEqual(written.assertion.toJSON().clientExtensionResults, { largeBlob: { written: true } });
+
+  const read = await signIn(p, credential, { largeBlob: { read: true } });
+  const results = read.assertion.getClientExtensionResults();
+  assert.ok(results.largeBlob.blob instanceof ArrayBuffer);
+  assert.deepEqual(bytesOf(results.largeBlob.blob), Buffer.from(blob));
+  assert.deepEqual(read.assertion.toJSON().clientExtensionResults, { largeBlob: { blob: b64u(blob) } });
+  assert.equal(p.page.calls.length, 0);
+});
+
+test("empty prf inputs reach the app as empty values and give results (WebAuthn sets no minimum)", async () => {
+  const p = pipeline();
+  const { credential } = await register(p);
+  const empty = new Uint8Array(0);
+  const { assertion } = await signIn(p, credential, { prf: { eval: { first: empty, second: new ArrayBuffer(0) } } });
+  assert.deepEqual(getWire(p).prf, { eval: { first: "", second: "" } });
+  const results = assertion.getClientExtensionResults();
+  assert.deepEqual(bytesOf(results.prf.results.first), prfOf(p.authenticator, credential, empty));
+  assert.deepEqual(bytesOf(results.prf.results.second), prfOf(p.authenticator, credential, empty));
+});
+
+test("an empty largeBlob write goes to Apassy, which answers written: false", async () => {
+  const p = pipeline();
+  const { credential } = await register(p);
+  const { assertion } = await signIn(p, credential, { largeBlob: { write: new Uint8Array(0) } });
+  assert.deepEqual(getWire(p).large_blob, { write: "" });
+  assert.deepEqual(assertion.getClientExtensionResults(), { largeBlob: { written: false } });
+  assert.deepEqual(assertion.toJSON().clientExtensionResults, { largeBlob: { written: false } });
+  assert.equal(p.page.calls.length, 0);
+  const read = await signIn(p, credential, { largeBlob: { read: true } });
+  assert.deepEqual(read.assertion.getClientExtensionResults(), { largeBlob: {} }, "nothing was stored");
+});
+
+test("largeBlob read of false asks for nothing and is served", async () => {
+  const p = pipeline();
+  const { credential } = await register(p);
+  const { assertion } = await signIn(p, credential, { largeBlob: { read: false } });
+  assert.equal(getWire(p).large_blob, undefined);
+  assert.deepEqual(assertion.getClientExtensionResults(), {});
+});
+
+test("a largeBlob write too large for the host goes to the browser before the app", async () => {
+  const p = pipeline();
+  const { credential } = await register(p);
+  const natives = p.bg.natives.length;
+  const result = await p.credentials.get({ publicKey: {
+    challenge: new Uint8Array(randomBytes(32)), allowCredentials: [{ type: "public-key", id: credential.rawId }],
+    extensions: { largeBlob: { write: new Uint8Array(60 * 1024) } },
+  } });
+  assert.equal(result, "browser-get");
+  await flush();
+  assert.equal(p.bg.natives.length, natives, "no native port for the request");
+});
+
+test("create with prf or largeBlob stays with the browser (no PRF at registration)", async () => {
+  const p = pipeline();
+  assert.equal(await p.credentials.create({ publicKey: creationOptions({ extensions: { prf: {} } }) }), "browser-create");
+  assert.equal(await p.credentials.create({ publicKey: creationOptions({ extensions: { largeBlob: { support: "preferred" } } }) }), "browser-create");
+  await flush();
+  assert.equal(p.bg.natives.length, 0);
+  const { credential } = await register(p, { extensions: { credProps: true } });
+  assert.deepEqual(credential.getClientExtensionResults(), { credProps: { rk: true } });
+  assert.deepEqual(credential.toJSON().clientExtensionResults, { credProps: { rk: true } });
+});
+
+test("an EdDSA assertion (another algorithm than ES256) reaches the page and verifies", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const credentialId = randomBytes(16);
+  const userHandle = randomBytes(16);
+  const p = pipeline({ scenario: (wire) => {
+    if (wire.cmd !== "passkey_get") return undefined;
+    const data = Buffer.concat([createHash("sha256").update(RP_ID).digest(), Buffer.from([0x1d, 0, 0, 0, 1])]);
+    const clientDataHash = createHash("sha256").update(Buffer.from(wire.client_data_json, "base64")).digest();
+    return ok({
+      type: "passkey", rid: wire.rid, credential_id: credentialId.toString("base64"), user_handle: userHandle.toString("base64"),
+      authenticator_data: data.toString("base64"), signature: sign(null, Buffer.concat([data, clientDataHash]), privateKey).toString("base64"),
+      algorithm: -8, client_data_json: wire.client_data_json,
+    });
+  } });
+  const challenge = new Uint8Array(randomBytes(32));
+  const assertion = await p.credentials.get({ publicKey: {
+    challenge, rpId: RP_ID, allowCredentials: [{ type: "public-key", id: new Uint8Array(credentialId) }],
+  } });
+  assert.equal(assertion.response.signature.byteLength, 64);
+  const x = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url");
+  const coseKey = isoCBOR.encode(new Map([[1, 1], [3, -8], [-1, 6], [-2, new Uint8Array(x)]]));
+  const authentication = await verifyAuthenticationResponse({
+    response: assertion.toJSON(), expectedChallenge: b64u(challenge), expectedOrigin: ORIGIN, expectedRPID: RP_ID,
+    credential: { id: b64u(credentialId), publicKey: coseKey, counter: 0 }, requireUserVerification: true,
+  });
+  assert.equal(authentication.verified, true);
 });

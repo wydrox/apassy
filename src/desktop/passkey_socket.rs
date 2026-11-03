@@ -47,8 +47,10 @@ use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
 use super::DesktopApp;
-use super::browser::PasskeyDone;
-use super::owner_check::{OwnerRequest, PasskeyAccount, PasskeyRequest, page_text};
+use super::browser::{PasskeyDone, blob_written};
+use super::owner_check::{
+    OwnerRequest, PasskeyAccount, PasskeyRequest, PasskeyRequestExtensions, page_text,
+};
 use super::owner_cli::bring_to_front;
 use super::owner_socket::PeerGone;
 use super::owner_store::{SYSTEM_FILL_ORIGIN, SystemLogin};
@@ -69,8 +71,9 @@ const CODESIGN: &str = "/usr/bin/codesign";
 const EXTENSION_IDENTIFIER: &str = "com.wydrox.apassy.autofill";
 const TEAM: &str = "7S3F9767BM";
 const EXTENSION_FROM_BUNDLE: &str = "Contents/PlugIns/ApassyAutoFill.appex";
-/// The longest line of the bridge: a request of 64 KiB and its envelope.
-pub(crate) const MAX_LINE_BYTES: usize = 72 * 1024;
+/// The longest line of the bridge: a request frame of 128 KiB (a large blob write of
+/// 64 KiB in base64) and its envelope.
+pub(crate) const MAX_LINE_BYTES: usize = 136 * 1024;
 /// The bridge gives up on a request after 180 s. The dialog closes a little before.
 const REQUEST_TIME: Duration = Duration::from_secs(175);
 /// After a bridge fails, the app waits this long before it starts one again.
@@ -203,7 +206,37 @@ struct AssertArgs {
     rp_id: String,
     credential_id: String,
     client_data_hash: String,
+    #[serde(default)]
+    prf: Option<PrfArgs>,
+    #[serde(default)]
+    large_blob: Option<LargeBlobArgs>,
 }
+
+/// The PRF inputs of an assertion, as the iPhone core takes them: WebAuthn inputs of 0
+/// to 1024 bytes (what macOS gives the extension; WebAuthn sets no minimum), or with
+/// `hashed` salts of 32 bytes.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrfArgs {
+    first: String,
+    #[serde(default)]
+    second: Option<String>,
+    #[serde(default)]
+    hashed: bool,
+}
+
+/// `{"read": true}` or `{"write": <the uncompressed blob>}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LargeBlobArgs {
+    #[serde(default)]
+    read: bool,
+    #[serde(default)]
+    write: Option<String>,
+}
+
+/// The longest WebAuthn PRF input, in bytes.
+const MAX_PRF_INPUT_BYTES: usize = 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -477,6 +510,93 @@ fn native_code(code: &str) -> &str {
 
 fn error_body(code: &str, message: &str) -> Value {
     json!({ "ok": false, "error": { "code": code, "message": message } })
+}
+
+/// The answer of `passkey_assert`, in the shape of the iPhone core (standard base64).
+/// The PRF outputs and a read blob are in erasing buffers until the line is written.
+#[derive(Serialize)]
+struct PlatformAssertion {
+    credential_id: String,
+    user_handle: String,
+    authenticator_data: String,
+    signature: String,
+    algorithm: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prf: Option<PlatformPrf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    large_blob: Option<PlatformLargeBlob>,
+}
+
+#[derive(Serialize)]
+struct PlatformPrf {
+    #[serde(serialize_with = "secret_text")]
+    first: Zeroizing<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "optional_secret_text"
+    )]
+    second: Option<Zeroizing<String>>,
+}
+
+/// `{"data": …}` for a read of a stored blob, `{"written": bool}` for a write.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum PlatformLargeBlob {
+    Data {
+        #[serde(serialize_with = "secret_text")]
+        data: Zeroizing<String>,
+    },
+    Written {
+        written: bool,
+    },
+}
+
+fn secret_text<S: serde::Serializer>(
+    value: &Zeroizing<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(value)
+}
+
+fn optional_secret_text<S: serde::Serializer>(
+    value: &Option<Zeroizing<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(text) => serializer.serialize_str(text),
+        None => serializer.serialize_none(),
+    }
+}
+
+impl From<&crate::vault::PasskeyAssertion> for PlatformAssertion {
+    fn from(assertion: &crate::vault::PasskeyAssertion) -> Self {
+        use crate::vault::LargeBlobResult;
+        let prf = assertion.prf.as_ref().map(|output| PlatformPrf {
+            first: Zeroizing::new(webauthn::encode_bytes(&*output.first)),
+            second: output
+                .second
+                .as_ref()
+                .map(|second| Zeroizing::new(webauthn::encode_bytes(&**second))),
+        });
+        let large_blob = match &assertion.large_blob {
+            Some(LargeBlobResult::Read(Some(blob))) => Some(PlatformLargeBlob::Data {
+                data: Zeroizing::new(webauthn::encode_bytes(blob)),
+            }),
+            Some(LargeBlobResult::Read(None)) | None => None,
+            Some(LargeBlobResult::Written(written)) => {
+                Some(PlatformLargeBlob::Written { written: *written })
+            }
+        };
+        Self {
+            credential_id: webauthn::encode_bytes(&assertion.credential_id),
+            user_handle: webauthn::encode_bytes(&assertion.user_handle),
+            authenticator_data: webauthn::encode_bytes(&assertion.authenticator_data),
+            signature: webauthn::encode_bytes(&assertion.signature),
+            algorithm: assertion.algorithm,
+            prf,
+            large_blob,
+        }
+    }
 }
 
 // ---- The bridge program. ----
@@ -792,6 +912,34 @@ fn ids_in(ids: &[String]) -> Result<Vec<Vec<u8>>, Refusal> {
     webauthn::decode_ids(ids).map_err(|_| bad("A credential ID is not valid."))
 }
 
+fn prf_in(prf: &PrfArgs) -> Result<crate::vault::PasskeyPrfInput, Refusal> {
+    let (min, max) = if prf.hashed {
+        (32, 32)
+    } else {
+        (0, MAX_PRF_INPUT_BYTES)
+    };
+    Ok(crate::vault::PasskeyPrfInput {
+        first: bytes_in(&prf.first, min, max, "PRF input")?,
+        second: prf
+            .second
+            .as_deref()
+            .map(|second| bytes_in(second, min, max, "PRF input"))
+            .transpose()?,
+        hashed: prf.hashed,
+    })
+}
+
+/// An empty write or a write of more than 64 KiB is not refused here: the vault answers
+/// `written: false` and stores nothing.
+fn large_blob_in(blob: &LargeBlobArgs) -> Result<crate::vault::LargeBlobOp, Refusal> {
+    match (blob.read, &blob.write) {
+        (true, None) => Ok(crate::vault::LargeBlobOp::Read),
+        (false, Some(text)) => bytes_in(text, 0, MAX_LINE_BYTES, "large blob")
+            .map(|blob| crate::vault::LargeBlobOp::Write(Zeroizing::new(blob))),
+        _ => Err(bad("The large blob request needs read or write.")),
+    }
+}
+
 impl DesktopApp {
     /// Find the bridge of this build. The window calls this once; tests never do.
     pub(crate) fn find_credential_bridge(&mut self) {
@@ -969,6 +1117,11 @@ impl DesktopApp {
             "credential ID",
         )?;
         let client_data_hash = hash_in(&args.client_data_hash)?;
+        let extensions = PasskeyRequestExtensions {
+            prf: args.prf.as_ref().map(prf_in).transpose()?,
+            prf_by_credential: Vec::new(),
+            large_blob: args.large_blob.as_ref().map(large_blob_in).transpose()?,
+        };
         let info = self
             .owner_ui
             .session
@@ -995,6 +1148,7 @@ impl DesktopApp {
                 credential_id: info.credential_id,
             }],
             chosen: 0,
+            extensions,
         })
     }
 
@@ -1104,16 +1258,14 @@ impl DesktopApp {
             return self.answer_system_fill(ticket, filled);
         }
         let result = self.browser.passkey.take();
+        let stored = matches!(
+            &result,
+            Some(Ok(PasskeyDone::Signed(assertion))) if blob_written(assertion)
+        );
         let (delivered, created) = match result {
-            Some(Ok(PasskeyDone::Signed(assertion))) => (
-                ticket.ok(&json!({
-                    "credential_id": webauthn::encode_bytes(&assertion.credential_id),
-                    "user_handle": webauthn::encode_bytes(&assertion.user_handle),
-                    "authenticator_data": webauthn::encode_bytes(&assertion.authenticator_data),
-                    "signature": webauthn::encode_bytes(&assertion.signature),
-                })),
-                false,
-            ),
+            Some(Ok(PasskeyDone::Signed(assertion))) => {
+                (ticket.ok(&PlatformAssertion::from(&assertion)), false)
+            }
             Some(Ok(PasskeyDone::Created(created))) => (
                 ticket.ok(&json!({
                     "id": created.item_id,
@@ -1138,6 +1290,10 @@ impl DesktopApp {
         match (delivered, created) {
             (true, false) => self.set_ok("You are signed in with a passkey from Apassy."),
             (true, true) => self.set_ok("The new passkey is saved in Apassy."),
+            // The write is in the vault before the answer goes: say so.
+            (false, false) if stored => self.set_err(
+                "macOS stopped waiting. Nothing was signed in. The data that was sent is stored with the passkey.",
+            ),
             (false, false) => self.set_err("macOS stopped waiting. Nothing was signed in."),
             (false, true) => self.set_err(
                 "The new passkey is saved in Apassy, but macOS stopped waiting for it. Remove it in Apassy, or add the passkey again.",

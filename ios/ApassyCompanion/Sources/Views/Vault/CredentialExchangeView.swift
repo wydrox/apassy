@@ -41,6 +41,19 @@ struct CredentialExchangeView: View {
                 Section {
                     Label(text, systemImage: "checkmark.circle")
                 }
+                if model.duplicateGroups > 0 {
+                    Section {
+                        NavigationLink {
+                            DuplicatesView(vault: model.vault)
+                        } label: {
+                            Label("Review duplicates (\(model.duplicateGroups))", systemImage: "square.on.square")
+                        }
+                    } footer: {
+                        Text("Some items of the vault hold the same credential. Merge them, or keep them as they are.")
+                    }
+                    // Count again when the owner comes back from the duplicates.
+                    .onAppear { Task { await model.refreshDuplicates() } }
+                }
                 Section {
                     Button("Done") { close() }
                 }
@@ -77,7 +90,7 @@ struct CredentialExchangeView: View {
     private var importStart: some View {
         if model.state == .importWaiting {
             Section {
-                Text("Another app sent its logins, one-time passwords, and passkeys to Apassy. They go into this vault and sync with it.")
+                Text("Another app sent its logins, passkeys, one-time passwords, and other items to Apassy. They go into this vault and sync with it.")
                 Button("Import", systemImage: "square.and.arrow.down") {
                     Task { await model.importNow() }
                 }
@@ -86,7 +99,7 @@ struct CredentialExchangeView: View {
                     dismiss()
                 }
             } footer: {
-                Text("Apassy keeps logins with a password or a passkey, and their one-time passwords. It counts what it cannot keep, such as cards, and passkeys that use extension data.")
+                Text("Apassy keeps logins, passkeys with their extension data, and one-time passwords. Cards, Wi-Fi networks, documents, addresses, notes, and custom fields become items of the kind Other, with their numbers and secrets hidden. API keys and SSH keys keep their kinds. A passkey for a login that is in the vault already goes on that login.")
             }
         } else {
             Section {

@@ -105,9 +105,14 @@ pub enum Category {
     /// Another category that can hold a secret, such as an email account or a
     /// software license. It becomes a custom secret.
     Other,
-    /// A personal or financial category, such as a credit card or a passport. Apassy
-    /// does not import it.
+    /// A personal or financial category, such as a credit card or a passport. It
+    /// becomes a custom secret in which every value is hidden but a few plain ones
+    /// (the card type, the issuing country or state, the document type, the bank
+    /// name, the expiry). It is not selected first.
     Personal,
+    /// A 1Password document: a file. Apassy does not store files, so it does not
+    /// import it.
+    Document,
     /// A row of the CSV export. The CSV export has no category.
     CsvRow,
 }
@@ -506,6 +511,15 @@ impl Parts {
         Some(self.parts.remove(index))
     }
 
+    /// Hide every value that matches none of `visible`. A hidden value stays hidden.
+    fn hide_all_but(&mut self, visible: &[&str]) {
+        for part in &mut self.parts {
+            if !part.matches(visible) {
+                part.hidden = true;
+            }
+        }
+    }
+
     /// The first hidden value. A one-time password comes last.
     fn take_first_secret(&mut self) -> Option<Part> {
         let index = self
@@ -621,6 +635,28 @@ impl ItemBuilder {
         }
         out.push(IMPORT_TAG.to_owned());
         self.tags = out;
+    }
+
+    /// Add a tag of the import, such as the category tag "card", before the tag
+    /// `1password`. When the list is full, the last tag from 1Password makes room.
+    fn add_tag(&mut self, tag: &str) {
+        if self.tags.iter().any(|known| known == tag) {
+            return;
+        }
+        let at = self
+            .tags
+            .iter()
+            .position(|known| known == IMPORT_TAG)
+            .unwrap_or(self.tags.len());
+        if self.tags.len() >= MAX_TAGS && at > 0 {
+            self.tags.remove(at - 1);
+            self.warn(format!(
+                "The item has {MAX_TAGS} tags. Apassy leaves out the last one to add “{tag}”."
+            ));
+            self.tags.insert(at - 1, tag.to_owned());
+        } else {
+            self.tags.insert(at, tag.to_owned());
+        }
     }
 
     /// The notes of the 1Password item. They stay notes, and they are searchable.

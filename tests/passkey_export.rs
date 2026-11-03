@@ -66,6 +66,8 @@ fn import(key: &[u8], credential_id: Vec<u8>) -> PasskeyImport {
         pkcs8: Zeroizing::new(key.to_vec()),
         title: "Imported".to_owned(),
         attach: None,
+        prf: None,
+        large_blob: None,
     }
 }
 
@@ -349,4 +351,103 @@ fn of_two_ordinary_items_with_one_credential_the_lower_id_is_canonical() {
     assert_eq!(listed[0].item_id, second);
     let export = a.export_passkey(second).unwrap();
     assert!(signs_with(&a, second, &[7; 20], &public_point(&export)));
+}
+
+/// The algorithm, the PRF secrets, and a written large blob leave with the export, and
+/// an import of the export into another vault gives the same signatures, PRF outputs,
+/// and blob. The extension data syncs to another copy of the vault as well.
+#[test]
+fn export_keeps_the_algorithm_prf_secrets_and_large_blob() {
+    use apassy::vault::passkey::ES384;
+    use apassy::vault::{
+        LargeBlobOp, LargeBlobResult, PasskeyAssertionExtensions, PasskeyPrfInput,
+        PasskeyPrfSecrets,
+    };
+    use ring::signature::{ECDSA_P384_SHA384_ASN1, ECDSA_P384_SHA384_ASN1_SIGNING};
+    let dir = TempDir::new().unwrap();
+    let mut a = vault(&dir, "a.db");
+    let rng = SystemRandom::new();
+    let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, &rng).unwrap();
+    let mut with_prf = import(document.as_ref(), vec![8; 20]);
+    with_prf.prf = Some(PasskeyPrfSecrets {
+        with_uv: Zeroizing::new([0x11; 32]),
+        without_uv: Zeroizing::new([0x33; 32]),
+    });
+    let id = a.import_passkey(with_prf).unwrap();
+    let blob = b"synthetic blob written by a relying party".repeat(20);
+    let extensions = PasskeyAssertionExtensions {
+        prf: Some(PasskeyPrfInput {
+            first: b"salt input".to_vec(),
+            second: None,
+            hashed: false,
+        }),
+        large_blob: Some(LargeBlobOp::Write(Zeroizing::new(blob.clone()))),
+    };
+    let written = a
+        .assert_passkey(id, RP, &[8; 20], &HASH, &extensions)
+        .unwrap();
+    assert_eq!(written.large_blob, Some(LargeBlobResult::Written(true)));
+    let prf_before = written.prf.clone().expect("PRF output");
+
+    let export = a.export_passkey(id).unwrap();
+    assert_eq!(export.algorithm, ES384);
+    let prf = export.prf.as_ref().expect("PRF secrets");
+    assert_eq!(*prf.with_uv, [0x11; 32]);
+    assert_eq!(*prf.without_uv, [0x33; 32]);
+    let stored = export.large_blob.as_ref().expect("large blob");
+    assert_eq!(stored.uncompressed_size, blob.len() as u64);
+    assert!(stored.data.len() < blob.len(), "the blob is compressed");
+    // Debug shows no key, no secret, and no blob byte.
+    let text = format!("{export:?}");
+    assert!(text.contains("[redacted]"), "{text}");
+    assert!(
+        !text.contains("17, 17") && !text.contains("51, 51"),
+        "{text}"
+    );
+    let data_bytes = format!("{:?}", stored.data.as_slice());
+    assert!(
+        !text.contains(&data_bytes[1..data_bytes.len() - 1]),
+        "{text}"
+    );
+
+    // Into another vault, with everything the export had.
+    let mut b = vault(&dir, "b.db");
+    let mut again = import(&export.pkcs8, vec![8; 20]);
+    again.prf = export.prf;
+    again.large_blob = export.large_blob;
+    let moved = b.import_passkey(again).unwrap();
+    let read = PasskeyAssertionExtensions {
+        large_blob: Some(LargeBlobOp::Read),
+        ..extensions.clone()
+    };
+    let assertion = b.assert_passkey(moved, RP, &[8; 20], &HASH, &read).unwrap();
+    assert_eq!(assertion.algorithm, ES384);
+    assert_eq!(assertion.prf.as_ref(), Some(&prf_before));
+    match &assertion.large_blob {
+        Some(LargeBlobResult::Read(Some(read))) => assert_eq!(read.as_slice(), blob.as_slice()),
+        other => panic!("no blob: {other:?}"),
+    }
+    let public = EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, document.as_ref(), &rng)
+        .unwrap()
+        .public_key()
+        .as_ref()
+        .to_vec();
+    let mut message = assertion.authenticator_data.clone();
+    message.extend_from_slice(&HASH);
+    UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, &public)
+        .verify(&message, &assertion.signature)
+        .expect("the moved key signs");
+
+    // A copy of vault a has the same extension data after a sync.
+    let seed = dir.path().join("seed.apassy");
+    a.write_sync_copy(&seed, "Mac A").unwrap();
+    let (mut c, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("c.db"), PASS).unwrap();
+    c.unlock(PASS).unwrap();
+    let on_c = c.passkeys(RP, &[]).unwrap()[0].item_id;
+    let assertion = c.assert_passkey(on_c, RP, &[8; 20], &HASH, &read).unwrap();
+    assert_eq!(assertion.prf.as_ref(), Some(&prf_before));
+    assert!(matches!(
+        &assertion.large_blob,
+        Some(LargeBlobResult::Read(Some(read))) if read.as_slice() == blob.as_slice()
+    ));
 }

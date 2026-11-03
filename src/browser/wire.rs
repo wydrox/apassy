@@ -196,6 +196,64 @@ pub const MAX_PASSKEY_NAME_BYTES: usize = 256;
 pub const MAX_ALGORITHMS: usize = 16;
 /// The longest label of a one-time code detail, in bytes.
 pub const MAX_FIELD_BYTES: usize = 128;
+/// The most entries of `prf.eval_by_credential` in a `passkey_get`.
+pub const MAX_PRF_CREDENTIALS: usize = 256;
+/// The longest PRF input (`first`, `second`), in bytes. WebAuthn sets no minimum: an
+/// empty input (the empty text) is valid.
+pub const MAX_PRF_INPUT_BYTES: usize = 1024;
+/// The longest largeBlob write, uncompressed, in bytes. The whole request is still at
+/// most [`MAX_REQUEST_BYTES`], so a write above about 47 KiB does not fit.
+pub const MAX_LARGE_BLOB_BYTES: usize = 65_536;
+
+/// The two PRF inputs of one evaluation (WebAuthn `AuthenticationExtensionsPRFValues`),
+/// as raw WebAuthn inputs. The app makes the salts.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PasskeyPrfValues {
+    pub first: Vec<u8>,
+    pub second: Option<Vec<u8>>,
+}
+
+/// The PRF extension of a `passkey_get`: `eval` for any credential, and
+/// `eval_by_credential` (credential ID, values), which wins for its credential.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PasskeyPrfRequest {
+    pub eval: Option<PasskeyPrfValues>,
+    pub eval_by_credential: Vec<(Vec<u8>, PasskeyPrfValues)>,
+}
+
+/// The largeBlob extension of a `passkey_get`: a read, or a write of these bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub enum PasskeyLargeBlobRequest {
+    Read,
+    Write(Vec<u8>),
+}
+
+impl std::fmt::Debug for PasskeyPrfValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasskeyPrfValues")
+            .field("first", &self.first.len())
+            .field("second", &self.second.as_ref().map(Vec::len))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for PasskeyPrfRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasskeyPrfRequest")
+            .field("eval", &self.eval)
+            .field("eval_by_credential", &self.eval_by_credential.len())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for PasskeyLargeBlobRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read => f.write_str("Read"),
+            Self::Write(blob) => f.debug_tuple("Write").field(&blob.len()).finish(),
+        }
+    }
+}
 
 /// A checked `passkey_get`. The strings are as the extension sent them, after strict
 /// syntax checks; the app checks the client data with
@@ -212,6 +270,10 @@ pub struct PasskeyGetRequest {
     /// Standard base64 credential IDs that the page allows. Empty: any passkey of
     /// `rp_id`.
     pub allowed: Vec<String>,
+    /// The PRF extension, decoded and checked.
+    pub prf: Option<PasskeyPrfRequest>,
+    /// The largeBlob extension, decoded and checked.
+    pub large_blob: Option<PasskeyLargeBlobRequest>,
 }
 
 /// A checked `passkey_create`. `Debug` shows no client data, no user handle, and no
@@ -242,6 +304,14 @@ impl std::fmt::Debug for PasskeyGetRequest {
             .field("origin", &self.origin)
             .field("rp_id", &self.rp_id)
             .field("allowed", &self.allowed.len())
+            .field("prf", &self.prf.is_some())
+            .field(
+                "large_blob",
+                &self.large_blob.as_ref().map(|blob| match blob {
+                    PasskeyLargeBlobRequest::Read => "read",
+                    PasskeyLargeBlobRequest::Write(_) => "write",
+                }),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -672,19 +742,124 @@ struct PasskeyGetPacket {
     rp_id: String,
     client_data_json: String,
     allowed: Vec<String>,
+    #[serde(default)]
+    prf: Option<PrfPacket>,
+    #[serde(default)]
+    large_blob: Option<LargeBlobPacket>,
+}
+
+/// `prf` of a `passkey_get`: WebAuthn `eval` and `evalByCredential`. The keys of
+/// `eval_by_credential` are credential IDs in base64url without padding, as WebAuthn
+/// has them.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrfPacket {
+    #[serde(default)]
+    eval: Option<PrfValuesPacket>,
+    #[serde(default)]
+    eval_by_credential: Option<std::collections::BTreeMap<String, PrfValuesPacket>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrfValuesPacket {
+    first: String,
+    #[serde(default)]
+    second: Option<String>,
+}
+
+/// `large_blob` of a `passkey_get`: `{"read": true}` or `{"write": <bytes>}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LargeBlobPacket {
+    #[serde(default)]
+    read: bool,
+    #[serde(default)]
+    write: Option<String>,
+}
+
+fn bad_extension(message: &str) -> WireError {
+    WireError::new("bad_request", message)
+}
+
+impl PrfValuesPacket {
+    fn values(&self) -> Result<PasskeyPrfValues, WireError> {
+        let one = |text: &str| super::webauthn::decode_bytes(text, 0, MAX_PRF_INPUT_BYTES);
+        Ok(PasskeyPrfValues {
+            first: one(&self.first)?,
+            second: self.second.as_deref().map(one).transpose()?,
+        })
+    }
+}
+
+impl PrfPacket {
+    /// WebAuthn rules: each key of `eval_by_credential` is a credential ID of `allowed`,
+    /// so a non-empty `eval_by_credential` needs a non-empty `allowed`.
+    fn request(&self, allowed: &[Vec<u8>]) -> Result<PasskeyPrfRequest, WireError> {
+        let eval = self
+            .eval
+            .as_ref()
+            .map(PrfValuesPacket::values)
+            .transpose()?;
+        let by_credential = self.eval_by_credential.as_ref();
+        if by_credential.is_some_and(|map| map.len() > MAX_PRF_CREDENTIALS) {
+            return Err(bad_extension("The PRF request names too many passkeys."));
+        }
+        let mut eval_by_credential = Vec::new();
+        for (id, values) in by_credential.into_iter().flatten() {
+            let id = super::webauthn::decode_url_id(id)?;
+            if !allowed.contains(&id) {
+                return Err(bad_extension(
+                    "A PRF input names a passkey that the request does not allow.",
+                ));
+            }
+            eval_by_credential.push((id, values.values()?));
+        }
+        Ok(PasskeyPrfRequest {
+            eval,
+            eval_by_credential,
+        })
+    }
+}
+
+impl LargeBlobPacket {
+    /// WebAuthn rules: a write names exactly one allowed credential.
+    fn request(&self, allowed: usize) -> Result<PasskeyLargeBlobRequest, WireError> {
+        match (self.read, &self.write) {
+            (true, None) => Ok(PasskeyLargeBlobRequest::Read),
+            (false, Some(_)) if allowed != 1 => Err(bad_extension(
+                "A large blob write needs exactly one allowed passkey.",
+            )),
+            (false, Some(text)) => super::webauthn::decode_bytes(text, 0, MAX_LARGE_BLOB_BYTES)
+                .map(PasskeyLargeBlobRequest::Write),
+            _ => Err(bad_extension("The large blob request needs read or write.")),
+        }
+    }
 }
 
 impl PasskeyGetPacket {
     fn command(self) -> Result<Command, WireError> {
         check_version(self.v)?;
         check_passkey_common(&self.rid, &self.origin, &self.rp_id, &self.client_data_json)?;
-        super::webauthn::decode_ids(&self.allowed)?;
+        let allowed = super::webauthn::decode_ids(&self.allowed)?;
+        let prf = self
+            .prf
+            .as_ref()
+            .map(|prf| prf.request(&allowed))
+            .transpose()?;
+        let large_blob = self
+            .large_blob
+            .as_ref()
+            .map(|blob| blob.request(allowed.len()))
+            .transpose()?;
         Ok(Command::PasskeyGet(PasskeyGetRequest {
             rid: self.rid,
             origin: self.origin,
             rp_id: self.rp_id,
             client_data_json: self.client_data_json,
             allowed: self.allowed,
+            prf,
+            large_blob,
         }))
     }
 }
@@ -930,6 +1105,16 @@ pub enum Data {
         signature: String,
         /// The same bytes as the request.
         client_data_json: String,
+        /// The COSE algorithm of the passkey: -7, -35, -8, or -257.
+        algorithm: i64,
+        /// The PRF outputs, when the request had PRF inputs and the passkey has PRF
+        /// secrets.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prf: Option<PasskeyPrfResults>,
+        /// The largeBlob result: the blob of a read (no entry without a stored blob), or
+        /// the result of a write.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        large_blob: Option<PasskeyLargeBlobResult>,
     },
     /// The answer of `passkey_create`. Byte fields are standard base64 with padding.
     PasskeyCreated {
@@ -1039,6 +1224,23 @@ impl std::fmt::Debug for Data {
                 .finish_non_exhaustive(),
         }
     }
+}
+
+/// The PRF outputs of `passkey_get`, standard base64 of 32 bytes each: secret values.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PasskeyPrfResults {
+    pub first: SecretText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second: Option<SecretText>,
+}
+
+/// The largeBlob result of `passkey_get`: `{"data": …}` or `{"written": bool}`. The
+/// data is standard base64 of the uncompressed blob.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PasskeyLargeBlobResult {
+    Data { data: SecretText },
+    Written { written: bool },
 }
 
 /// The state of the vault for the extension.

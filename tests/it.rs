@@ -44,6 +44,7 @@ mod companion_store;
 mod contracts;
 mod corrections;
 mod declaration_suggestions;
+mod dedup;
 mod desktop_model;
 mod detect;
 mod eval_harness;
