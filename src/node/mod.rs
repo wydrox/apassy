@@ -908,7 +908,7 @@ impl Node {
     /// down keeps the node: the front follows the addresses. Only the node that it checked
     /// is stopped. Returns true when it stopped the node.
     pub fn maintain(&self) -> bool {
-        let Some((serial, port, public_url, funnel_on, tailnet)) =
+        let Some((serial, port, public_url, funnel_on, on_tailnet)) =
             lock(&self.running).as_ref().map(|running| {
                 (
                     running.serial,
@@ -936,7 +936,7 @@ impl Node {
                 .is_ok_and(|state| state.funnel_port != funnel::PortUse::Ours);
             stop |= name_changed || route_gone;
         }
-        if let Some((origin, tailnet_port)) = tailnet
+        if let Some((origin, tailnet_port)) = on_tailnet
             && !self.test_loopback
             && let Ok(here) = tailnet::find(self.cli.as_ref())
         {
@@ -1011,15 +1011,17 @@ impl Node {
             warnings.push("The name of this Mac is in public certificate logs while the route is on. The Mac must stay awake and the vault unlocked for each run.".to_owned());
         }
         warnings.extend(lock(&self.notes).tailnet_notes.iter().cloned());
+        let keychain_fallback = lock(&self.notes).keychain_fallback;
+        let tailnet = self.tailnet_status(vault);
         NodeStatus {
             tailscale,
             route_on,
             running,
             url,
             port,
-            keychain_fallback: lock(&self.notes).keychain_fallback,
+            keychain_fallback,
             warnings,
-            tailnet: self.tailnet_status(vault),
+            tailnet,
         }
     }
 
@@ -1138,7 +1140,7 @@ impl Node {
     /// Turn the tailnet route on or off. The caller passed the owner check for on
     /// (`OwnerRequest::SetTailnetRoute`, unit N7); off takes reach away and needs none. A
     /// running node starts again with the new route: the desktop starts it at its next
-    /// comparison ([`crate::desktop`] calls `node_changed`).
+    /// comparison (the desktop calls `node_changed`).
     pub fn set_tailnet(&self, vault: &SharedVault, on: bool) -> Result<(), NodeError> {
         {
             let mut guard = lock(vault);
