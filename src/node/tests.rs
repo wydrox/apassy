@@ -628,7 +628,6 @@ impl Fixture {
         self.running();
         let connected = self.connect("cr_grok", "client_grok", Some("Grok Bot"));
         assert_eq!(connected.name, "Grok Bot");
-        assert!(!connected.reconnected);
         self.with_vault(|vault| {
             for item in [self.items.httpbin, self.items.stripe] {
                 vault
@@ -945,7 +944,6 @@ fn an_allowed_connect_makes_a_remote_agent_with_no_item_and_decides_on_the_relay
     assert_eq!(super::connect_name(&connect), "Grok Bot");
     let connected = fx.node.allow_connect(&fx.vault, "cr_1").unwrap();
     assert_eq!(connected.name, "Grok Bot");
-    assert!(!connected.reconnected);
     // The relay agent: no item, no token now, and the request allowed for it.
     let relay = fx.relay_of(connected.agent_id);
     {
@@ -1031,8 +1029,11 @@ fn an_allowed_connect_makes_a_remote_agent_with_no_item_and_decides_on_the_relay
     assert_eq!(values, [HTTPBIN_VALUE]);
 }
 
+/// A client id is public: a second connect of the same client (or of anyone who sends its
+/// id) never takes over the agent that exists. It makes a new agent with no credential,
+/// and the old one stays until the owner disconnects it (security review finding 1b).
 #[test]
-fn the_same_client_reconnects_to_its_agent_and_a_taken_name_gets_a_number() {
+fn a_second_connect_of_the_same_client_makes_a_second_agent_with_no_credentials() {
     let fx = fixture();
     fx.running();
     let first = fx.connect("cr_1", "client_grok", Some("Grok Bot"));
@@ -1041,42 +1042,96 @@ fn the_same_client_reconnects_to_its_agent_and_a_taken_name_gets_a_number() {
             .add_agent_exception(first.agent_id, fx.items.httpbin, ExceptionKind::Only)
             .unwrap();
     });
-    // The same client again: the same agent, with the credential it had.
+    fx.node.sync_catalog().unwrap();
+    let first_relay = fx.relay_of(first.agent_id);
+    // The same client again: a second agent, a second relay agent, no credential.
     let again = fx.connect("cr_2", "client_grok", Some("Grok Bot"));
-    assert!(again.reconnected);
-    assert_eq!(again.agent_id, first.agent_id);
-    assert_eq!(again.name, "Grok Bot");
-    assert_eq!(fx.state().agents.len(), 1, "no second relay agent");
+    assert_ne!(again.agent_id, first.agent_id);
+    assert_eq!(again.name, "Grok Bot 2");
+    let again_relay = fx.relay_of(again.agent_id);
+    assert_ne!(again_relay, first_relay);
+    {
+        let state = fx.state();
+        assert_eq!(state.agents.len(), 2, "a second relay agent");
+        let (_, items, revoked) = state.agents.get(&again_relay.0).cloned().unwrap();
+        assert!(items.is_empty() && !revoked);
+        let (_, items, revoked) = state.agents.get(&first_relay.0).cloned().unwrap();
+        assert_eq!(items.len(), 1, "the old agent keeps its credential");
+        assert!(!revoked, "the old agent stays");
+        assert_eq!(state.tokens.get(&again_relay.0), Some(&TokenIssue::Later));
+        assert_eq!(
+            state.decided.last(),
+            Some(&(
+                "cr_2".to_owned(),
+                ConnectDecision::Allow {
+                    team: NodeTeamId(TEAM.to_owned()),
+                    agent: again_relay,
+                }
+            )),
+            "the request is allowed for the new agent, never for the old one"
+        );
+    }
+    let agents = fx.with_vault(|vault| vault.cloud_agents().unwrap());
+    let items_of = |id: u64| {
+        agents
+            .iter()
+            .find(|agent| agent.agent_id == id)
+            .map(|agent| agent.items.clone())
+    };
+    assert_eq!(items_of(first.agent_id), Some(vec![fx.items.httpbin]));
     assert_eq!(
-        fx.with_vault(|vault| vault.cloud_agents().unwrap())[0].items,
-        [fx.items.httpbin]
+        items_of(again.agent_id),
+        Some(Vec::new()),
+        "a new agent starts with nothing"
     );
-    assert_eq!(
-        fx.state().decided.last().map(|(id, _)| id.as_str()),
-        Some("cr_2")
+    fx.with_vault(|vault| {
+        assert_eq!(
+            vault.cloud_agent_link(again.agent_id).unwrap(),
+            Some((Some("client_grok".to_owned()), ConnectedWith::OAuth))
+        );
+        assert!(
+            !vault
+                .agent_view(again.agent_id)
+                .unwrap()
+                .visible(fx.items.httpbin)
+        );
+    });
+    let rows = fx.activity();
+    let row = rows
+        .iter()
+        .find(|(operation, _, reason)| {
+            operation == ACTIVITY_CONNECTED && reason.contains("Grok Bot 2")
+        })
+        .expect("the connected row of the new agent");
+    assert!(row.2.contains("sees no credential"), "{}", row.2);
+    assert!(
+        !rows
+            .iter()
+            .any(|(_, _, reason)| reason.contains("connected again")),
+        "{rows:?}"
     );
-    // Another client with the same name: "Grok Bot 2". No name: "MCP client".
-    let second = fx.connect("cr_3", "client_other", Some("Grok Bot"));
-    assert!(!second.reconnected);
-    assert_ne!(second.agent_id, first.agent_id);
-    assert_eq!(second.name, "Grok Bot 2");
+    // Another client with the same name: "Grok Bot 3". No name: "MCP client".
+    let other = fx.connect("cr_3", "client_other", Some("Grok Bot"));
+    assert_eq!(other.name, "Grok Bot 3");
     let unnamed = fx.connect("cr_4", "client_third", None);
     assert_eq!(unnamed.name, "MCP client");
-    // A client whose agent was disconnected gets a new agent.
+    // The owner disconnects the old agent: the second one stays, and the name is free.
     fx.node.revoke_agent(&fx.vault, first.agent_id).unwrap();
     let fresh = fx.connect("cr_5", "client_grok", Some("Grok Bot"));
-    assert!(!fresh.reconnected);
-    assert_ne!(fresh.agent_id, first.agent_id);
     assert_eq!(
         fresh.name, "Grok Bot",
         "the old agent no longer holds the name"
     );
+    let agents = fx.with_vault(|vault| vault.cloud_agents().unwrap());
     assert!(
-        fx.with_vault(|vault| vault.cloud_agents().unwrap())
+        agents.iter().any(|agent| agent.agent_id == again.agent_id),
+        "the second agent stays"
+    );
+    assert!(
+        agents
             .iter()
             .find(|agent| agent.agent_id == fresh.agent_id)
-            .is_some_and(|agent| agent.items.is_empty()),
-        "a new agent starts with nothing"
+            .is_some_and(|agent| agent.items.is_empty())
     );
 }
 

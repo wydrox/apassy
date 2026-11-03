@@ -581,6 +581,13 @@ final class QuestionsModel {
             reason: Self.faceIDReason(agent: card.run.agent, answer: offered.label))
     }
 
+    /// The warning line of a connect request: the owner allows only the request whose code the
+    /// browser page shows. A client id is public, so a request that someone else started can show
+    /// the same client name with another code.
+    static func connectCodeWarning(code: String) -> String {
+        "Allow only if the page in your browser shows this code: \(code)."
+    }
+
     /// The text of the Face ID prompt of a connect request: the client and the Mac, with control
     /// characters and `"` removed, at most 40 characters each.
     static func connectFaceIDReason(client: String, mac: String) -> String {

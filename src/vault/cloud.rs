@@ -681,8 +681,9 @@ impl Vault {
         Ok(out)
     }
 
-    /// The active cloud agent that connected with the OAuth client `client_id`, if any:
-    /// the same client connects again to that agent.
+    /// The newest active cloud agent that connected with the OAuth client `client_id`, if
+    /// any. A connect never reuses it: each allowed connect makes a new agent, so one
+    /// client can have several.
     pub fn cloud_agent_for_client(&self, client_id: &str) -> VaultResult<Option<u64>> {
         let id: Option<i64> = self
             .conn_ref()?

@@ -26,8 +26,10 @@
 //!   them off its thread, except [`Node::pending_connects`], which reads memory only.
 //! - Remote agents connect by themselves with the MCP authorization flow (plan "Bouncer
 //!   section" decision 4): an allowed connect request makes a relay agent with no item
-//!   and a vault agent of kind `cloud` with its OAuth client (`connected_with = oauth`),
-//!   and the same client connects again to the same agent. The command-line fallback
+//!   and a vault agent of kind `cloud` with its OAuth client (`connected_with = oauth`).
+//!   Every allowed connect makes a new agent, also for a client that has one: a client id
+//!   is public, so a connect never takes over an agent and its credentials; the old agent
+//!   stays until the owner disconnects it. The command-line fallback
 //!   [`Node::add_remote_agent`] (`apassy agents add-remote`) makes one with a token.
 //!   Neither sees a credential until the owner chooses some.
 //!
@@ -259,14 +261,14 @@ impl RouteProblem {
     }
 }
 
-/// A remote agent that the owner just connected (an allowed connect request).
+/// A remote agent that the owner just connected (an allowed connect request): always a
+/// new agent with no credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectedAgent {
     /// The vault agent.
     pub agent_id: u64,
+    /// The name it got: the client name, or with a number when it was taken ("Grok Bot 2").
     pub name: String,
-    /// The same OAuth client connected again to the agent it had.
-    pub reconnected: bool,
 }
 
 /// A remote agent of the command line that was just made. The token is here once.
@@ -882,11 +884,13 @@ impl Node {
     }
 
     /// Allow the connect request `id`: with `device`, the name of the iPhone whose Face
-    /// ID answer the questions lane verified; `None` for this Mac. A client that has a
-    /// live agent of this vault connects again to it (its credentials stay). Else a new
-    /// relay agent with no item, then a vault agent of kind `cloud` with `see_all = 0`,
-    /// the OAuth client, and `connected_with = oauth`, then the decision on the relay; a
-    /// save that fails revokes the relay agent and denies the request. Errors:
+    /// ID answer the questions lane verified; `None` for this Mac. Always a new relay
+    /// agent with no item, then a vault agent of kind `cloud` with `see_all = 0`, the
+    /// OAuth client, and `connected_with = oauth`, then the decision on the relay; a save
+    /// that fails revokes the relay agent and denies the request. A client that already
+    /// has a live agent gets a second one ("Grok Bot 2"), with no credential: a client id
+    /// is public, so an allow never connects a request to an agent that exists, and the
+    /// old agent stays until the owner disconnects it. Errors:
     /// `connect_not_pending` (decided, ended, or unknown), `node_stopped`,
     /// `vault_locked`, `team_limit` (20 remote agents), `agent_not_saved` (the vault did
     /// not take the agent: the relay agent is revoked and the request denied).
@@ -920,37 +924,6 @@ impl Node {
             || "Allowed with Touch ID on this Mac.".to_owned(),
             |device| format!("Allowed with Face ID on {}.", cut(device, MAX_NAME_BYTES)),
         );
-        // The same client with a live agent of this vault: connect it to that agent.
-        if let Some((agent_id, relay, name)) = Self::live_agent_of(&shared, &connect.client_id) {
-            shared
-                .with_node(|node| {
-                    node.decide_connect(
-                        id,
-                        ConnectDecision::Allow {
-                            team: shared.team.clone(),
-                            agent: NodeAgentId(relay),
-                        },
-                    )
-                })
-                .unwrap_or_else(|| Err(error("node_stopped", "Remote access is not running.")))?;
-            self.note_connect_end(id, ConnectEnd::Allowed);
-            Self::record(
-                &shared,
-                Some(agent_id),
-                &name,
-                ACTIVITY_CONNECTED,
-                ActivityDecision::Allow,
-                format!(
-                    "{by} {name} connected again with the MCP authorization flow (code {}). It keeps the credentials it had.",
-                    cut(&connect.code, 16)
-                ),
-            );
-            return Ok(ConnectedAgent {
-                agent_id,
-                name,
-                reconnected: true,
-            });
-        }
         let made = shared.add_agent(
             &connect_name(&connect),
             TokenIssue::Later,
@@ -1000,49 +973,7 @@ impl Node {
                 cut(&connect.code, 16)
             ),
         );
-        Ok(ConnectedAgent {
-            agent_id,
-            name,
-            reconnected: false,
-        })
-    }
-
-    /// The live remote agent of this vault that connected with the OAuth client
-    /// `client_id`, if the node still knows it: (vault agent, node agent, name). A vault
-    /// agent whose node agent is revoked or gone is revoked in the vault too.
-    fn live_agent_of(shared: &host::Shared, client_id: &str) -> Option<(u64, u64, String)> {
-        let (agent_id, relay, name) = shared.in_vault(|vault| {
-            let agent_id = vault.cloud_agent_for_client(client_id).ok().flatten()?;
-            vault
-                .cloud_agents()
-                .ok()?
-                .into_iter()
-                .find(|agent| agent.agent_id == agent_id)
-                .map(|agent| (agent_id, agent.relay_agent_id, agent.name))
-        })??;
-        let access =
-            shared.with_node(|node| node.agent_access(&shared.team, NodeAgentId(relay)))?;
-        match access {
-            Ok(access) if !access.revoked => Some((agent_id, relay, name)),
-            Ok(_) => {
-                shared.in_vault(|vault| {
-                    if vault.revoke_agent(agent_id).is_ok() {
-                        let _ = vault.forget_cloud_agent(agent_id);
-                    }
-                });
-                None
-            }
-            Err(failure) if failure.code == "not_found" => {
-                shared.in_vault(|vault| {
-                    if vault.revoke_agent(agent_id).is_ok() {
-                        let _ = vault.forget_cloud_agent(agent_id);
-                    }
-                });
-                None
-            }
-            // A node without the report: trust the vault.
-            Err(_) => Some((agent_id, relay, name)),
-        }
+        Ok(ConnectedAgent { agent_id, name })
     }
 
     /// Deny the connect request `id`: the browser page says "You denied the

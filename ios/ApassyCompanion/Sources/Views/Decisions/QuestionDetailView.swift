@@ -223,7 +223,7 @@ struct ConnectRequestDetail: View {
                 }
                 .accessibilityIdentifier("connect.code")
             } footer: {
-                Label("Deny unless you just added Apassy to \(connect.clientName).", systemImage: "exclamationmark.triangle")
+                Label(QuestionsModel.connectCodeWarning(code: connect.code), systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
             }
             Section {

@@ -1447,7 +1447,7 @@ impl OwnerRequest {
             Self::AllowConnect {
                 client_name, code, ..
             } => format!(
-                "Connect {} to this Mac? Allow only if the page of the agent shows the code {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you.",
+                "Connect {} to this Mac as a new agent? Allow only if the page in your browser shows this code: {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you.",
                 page_text(client_name),
                 page_text(code)
             ),
@@ -3057,5 +3057,32 @@ impl DesktopApp {
         }
         // A local fine-tune stops with the app (goal item B9).
         self.learning.stop_training();
+    }
+}
+
+#[cfg(test)]
+mod connect_prompt_tests {
+    use super::OwnerRequest;
+
+    /// The owner compares the code of the browser page with this one: the prompt names
+    /// the page in the browser, not "the agent", and says that the connect makes a new
+    /// agent (security review finding 1d).
+    #[test]
+    fn the_allow_connect_prompt_asks_to_compare_the_code_of_the_browser_page() {
+        let request = OwnerRequest::AllowConnect {
+            id: "cr_1".to_owned(),
+            client_name: "Grok Bot".to_owned(),
+            code: "K7Q-4MD".to_owned(),
+        };
+        let text = request.describe();
+        assert!(
+            text.contains("Allow only if the page in your browser shows this code: K7Q-4MD."),
+            "{text}"
+        );
+        assert!(
+            text.starts_with("Connect Grok Bot to this Mac as a new agent?"),
+            "{text}"
+        );
+        assert!(!text.contains("page of the agent"), "{text}");
     }
 }

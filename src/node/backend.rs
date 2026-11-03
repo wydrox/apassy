@@ -199,8 +199,8 @@ pub struct CreatedAgent {
 pub struct PendingConnect {
     /// The id of the request, for `decide_connect`. Not a secret.
     pub id: String,
-    /// The client that registered with the node (RFC 7591). The same client id with a
-    /// live agent of the vault reconnects to that agent.
+    /// The client that registered with the node (RFC 7591). It is public: an allowed
+    /// connect always makes a new agent, also for a client id that has one.
     pub client_id: String,
     /// The name the client gave: cleaned, at most 64 bytes. `None`: the app says
     /// "MCP client".

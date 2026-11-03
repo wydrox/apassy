@@ -1,9 +1,9 @@
 //! The MCP authorization flow of an embedded node (docs/SPEC.md section 31): metadata,
 //! registration, the connect request and its page, the code with PKCE, refresh
-//! rotation, family revocation, the limits, the failed-auth limiter, `WWW-Authenticate`
-//! on `/mcp`, the hosted relay without OAuth, and the directory 1003 ↔ 1004. Each node
-//! listens on free loopback ports and keeps its data in a temporary directory.
-//! Synthetic names and values only.
+//! rotation, family revocation, a second request of a client, the limits, the failed-auth
+//! limiter, `WWW-Authenticate` on `/mcp`, the hosted relay without OAuth, and the
+//! directory 1003 ↔ 1004. Each node listens on free loopback ports and keeps its data in
+//! a temporary directory. Synthetic names and values only.
 
 #[path = "common/relay.rs"]
 mod relay;
@@ -924,7 +924,7 @@ fn registration_is_checked_and_limited() {
 }
 
 #[test]
-fn open_connect_requests_are_limited_per_node_and_per_client() {
+fn open_connect_requests_are_limited_per_node() {
     let node = Node::start();
     let clients: Vec<String> = (0..4)
         .map(|i| node.register(Some(&format!("Client {i}")), REDIRECT))
@@ -932,20 +932,24 @@ fn open_connect_requests_are_limited_per_node_and_per_client() {
     let first = node.authorize(&clients[0]);
     // The same request again (a reload): its page.
     assert_eq!(node.authorize(&clients[0]), first);
-    // Another request of the same client waits behind it.
-    let answer = node.authorize_raw(&clients[0], &[("state", "other")]);
-    assert_eq!(answer.status, 429);
-    assert!(
-        answer
-            .text
-            .contains("Client 0 already waits for an answer.")
-    );
-    assert_page_headers(&answer);
     node.authorize(&clients[1]);
     node.authorize(&clients[2]);
     let answer = node.authorize_raw(&clients[3], &[]);
     assert_eq!(answer.status, 429);
     assert!(answer.text.contains("Too many connection requests wait."));
+    assert!(
+        answer
+            .text
+            .contains("Deny requests on your Mac that you did not start, then connect again."),
+        "{}",
+        answer.text
+    );
+    assert_page_headers(&answer);
+    assert_eq!(node.node().pending_connects().unwrap().len(), 3);
+    // A client that waits replaces its own request, also at the limit of the node.
+    let answer = node.authorize_raw(&clients[0], &[("state", "other")]);
+    assert_eq!(answer.status, 303, "{}", answer.text);
+    assert_ne!(answer.header("location"), Some(first.as_str()));
     assert_eq!(node.node().pending_connects().unwrap().len(), 3);
     // An answer frees a seat.
     let pending = node.node().pending_connects().unwrap();
@@ -953,6 +957,76 @@ fn open_connect_requests_are_limited_per_node_and_per_client() {
         .decide_connect(&pending[0].id, ConnectDecision::Deny)
         .unwrap();
     node.authorize(&clients[3]);
+}
+
+/// A client id is public. Someone who keeps a request of the client open must never make
+/// the owner allow it for the client's own browser: a new authorize of the client ends the
+/// waiting request and opens one with its own page and code, never a 429 page without a
+/// code (security review finding 1a).
+#[test]
+fn a_new_authorize_of_the_same_client_ends_the_waiting_request_and_shows_its_own_code() {
+    let node = Node::start();
+    let client_id = node.register(Some("Grok Bot"), REDIRECT);
+    // The stranger's request: the public client id, another state.
+    let stranger = node.authorize_raw(&client_id, &[("state", "stranger")]);
+    assert_eq!(stranger.status, 303, "{}", stranger.text);
+    let stranger_wait = stranger.header("location").expect("location").to_string();
+    let stranger_request = node.pending_one();
+    // The client's own browser.
+    let wait = node.authorize(&client_id);
+    assert_ne!(wait, stranger_wait);
+    let request = node.pending_one();
+    assert_ne!(request.id, stranger_request.id);
+    let page = get(&node.public(), &wait);
+    assert_eq!(page.status, 200, "{}", page.text);
+    assert!(page.text.contains(&request.code), "{}", page.text);
+    assert!(
+        page.text
+            .contains("Deny requests on your Mac that you did not start, then connect again."),
+        "{}",
+        page.text
+    );
+    // The stranger's request ended: its page says so, and the owner cannot allow it.
+    let old = get(&node.public(), &stranger_wait);
+    assert_eq!(old.status, 200);
+    assert!(old.text.contains("The request ended."), "{}", old.text);
+    let agent = node.later_agent("Grok Bot");
+    let error = node
+        .node()
+        .decide_connect(
+            &stranger_request.id,
+            ConnectDecision::Allow {
+                team: node.team.clone(),
+                agent,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "connect_not_pending");
+    // The owner allows the request whose code the browser shows: the code goes to it.
+    node.node()
+        .decide_connect(
+            &request.id,
+            ConnectDecision::Allow {
+                team: node.team.clone(),
+                agent,
+            },
+        )
+        .unwrap();
+    let code = node.code_from(&wait);
+    let answer = node.token_code(&client_id, &code, VERIFIER);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    // The stranger's page never gets a code.
+    let old = get(&node.public(), &stranger_wait);
+    assert!(old.header("location").is_none());
+    assert!(old.text.contains("The request ended."), "{}", old.text);
+    let replaced: i64 = directory(&node.config)
+        .query_row(
+            "SELECT count(*) FROM audit WHERE action = 'connect_replaced'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(replaced, 1);
 }
 
 #[test]

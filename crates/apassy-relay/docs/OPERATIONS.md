@@ -1475,8 +1475,8 @@ version. Codes and refresh tokens are kept as SHA-256 hashes only.
 - The relay log at the start: no error about `relay.db`.
 - `admin teams`: every team `"open": true`, as before.
 - On a node: relay audit rows of the actor `oauth` (`oauth_client_registered`,
-  `connect_requested`, `connect_allowed`, `connect_denied`, `oauth_code_redeemed`,
-  `oauth_family_revoked`) and team audit rows `agent_token_issued` and
+  `connect_requested`, `connect_replaced`, `connect_allowed`, `connect_denied`,
+  `oauth_code_redeemed`, `oauth_family_revoked`) and team audit rows `agent_token_issued` and
   `agent_token_dropped`. A run of `oauth_family_revoked` with `code_reused` or
   `refresh_reused` means that someone else used a client's code or token.
 

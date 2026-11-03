@@ -122,7 +122,8 @@ reuse revokes the family. Redirect URIs: `https://…`, or `http://localhost|127
 exact match otherwise; ≤ 512 bytes. `resource`, when sent, must equal `<origin>/mcp`. One live access token per agent.
 
 **Limits on the public listener.** Registrations 10 per 10 min and 100 stored clients (unused clients pruned after
-7 days). Open connect requests ≤ 3 per node and 1 per client. Bad codes and refresh tokens count in the failed-auth
+7 days). Open connect requests ≤ 3 per node and 1 per client: a new authorize of a client with other parameters ends its
+waiting request and opens one with its own code. Bad codes and refresh tokens count in the failed-auth
 limiter. Funnel forwards no client identity, so every limit is per node.
 
 **The page.** No script, form, cookie, or button: nothing on it can authorize. Headers: `Content-Security-Policy:
@@ -142,7 +143,9 @@ The authorize handler wakes `wait_pending`; the host loop polls `pending_connect
 `OwnerRequest::AllowConnect`, "Connect <name> to this Mac"), `Node::deny_connect(id)`. Allow: relay agent with no items
 → vault `add_cloud_agent` (kind `cloud`, `see_all = 0`, `client_id`, `connected_with = oauth`) → `decide_connect(Allow)`;
 if the vault save fails, the relay agent is revoked and the request denied. Name = `client_name`, or "MCP client"; a
-taken name becomes "Grok Bot 2". The same `client_id` with a live agent reconnects to that agent. Activity rows:
+taken name becomes "Grok Bot 2". Every allowed connect makes a new agent with no credential, also for a `client_id`
+that has a live agent: a client id is public, so a reconnect would hand whoever sent it the agent and its credentials
+(security review of 0.5.16, finding 1). The old agent stays until the owner disconnects it. Activity rows:
 `remote agent connected`, `agent disconnected`, `remote access on`, `remote access off`. The host writes `cloud_run` rows.
 
 **CLI fallback.** `apassy agents add-remote <name> [--days 90]` (owner check): creates the agent
@@ -201,7 +204,7 @@ on your Mac". CHANGELOG upgrade notes: vault 26 and 27, relay 7 and directory 10
 | L0 Land the stack | top-level agent | merge `main` into #86 and #89; merge #92 into #85; mark #85, #86, #89 ready; merge in that order | ready runs green (macOS groups) |
 | U1b Relay OAuth and connects | #86 head → `feat/cloud-agents-oauth` | `crates/apassy-relay/src/server/{oauth.rs, connect.rs, http.rs, auth.rs, directory.rs, mcp.rs}`, `src/embedded.rs`, `src/config.rs`, `src/node/backend.rs`, `tests/oauth.rs`, relay `SPEC.md`, `OPERATIONS.md`, `cloud-agents-v1.md` | metadata; register → authorize → wait → allow → 303 → token → `/mcp` 200; wrong verifier and reused code → `invalid_grant` and family revoked; refresh rotates, reuse revokes; deny and expiry pages; limits; headers; `WWW-Authenticate`; hosted config → 404; directory 1003 ↔ 1004 |
 | U3a Stats, schema 27, feed v2 | `main` after #89 → `feat/bouncer-stats` | `src/vault/{schema27.rs, stats.rs}`, `learning.rs`, `cloud.rs`, `src/broker/run.rs` (`wait_ms`, request kind, `answered_on` for relay answers), `src/questions/{feed,feed_reader}.rs`, `ios/ApassyCore/src/core/feed.rs`, `relay-feed-v1.md`, `tests/relay_feed.rs` | 26 ↔ 27; stats of a fixture vault equal hand-computed numbers; v2 within limits, `fit` keeps `days`; both readers accept 1 and 2, refuse 3; a relay answer gives `answered_on` = the iPhone |
-| U2b Node connect | `main` after U1b, U3a → `feat/cloud-agents-connect` | `src/node/{mod,host}.rs`, `src/vault/cloud.rs`, `src/desktop/{node,owner_check,owner_socket}.rs`, `src/cli/**`, `owner-cli-v1.md`, `deploy/plugins/apassy-cloud/**`, store draft, trust model | allow makes a cloud agent with no items and decides on the relay; reconnect; "Grok Bot 2"; deny; expiry; disconnect revokes relay, family, vault; activity and `cloud_run` rows; CLI token once with the owner check |
+| U2b Node connect | `main` after U1b, U3a → `feat/cloud-agents-connect` | `src/node/{mod,host}.rs`, `src/vault/cloud.rs`, `src/desktop/{node,owner_check,owner_socket}.rs`, `src/cli/**`, `owner-cli-v1.md`, `deploy/plugins/apassy-cloud/**`, store draft, trust model | allow makes a cloud agent with no items and decides on the relay; a second connect of a client is a second agent (no reconnect); "Grok Bot 2"; deny; expiry; disconnect revokes relay, family, vault; activity and `cloud_run` rows; CLI token once with the owner check |
 | U3b-1 Navigation, Overview, Logs | `main` after U3a → `feat/bouncer-section` | `src/desktop/mod.rs`, `ui/{shell,sidebar,columns,scope_bar,kit,demo}.rs`, `ui/{overview,logs}.rs`, `remote_feeds.rs`, `keyboard_tests.rs`, `README.md` | ⌘2–⌘5; wide pane; never-reported Mac and one-Mac menu; Overview equals the stats fixture; Logs filters and expansion; empty states 9a, 9d, 10b, 11b, 14; no vault query per frame |
 | U3b-2 Agents, agent page, Decisions | `main` after U2b, U3b-1 → `feat/bouncer-agents` | `ui/agents.rs`, `ui/agents/remote.rs`, `ui/{decisions,decisions_activity}.rs`, `ui/agent_onboarding.rs`, `owner_store/**` | tables per environment; states 8a–8d; agent pages; Choose Credentials… changes relay items; Disconnect… both kinds; connect card through the owner check; cloud run card; history filters; empty states 9b, 9c, 10a, 11a, 12, 13 |
 | U2c Connect on the iPhone | `main` after U2b → `feat/connect-on-iphone` | `relay-questions-v1.md`, `src/questions/{envelope,worker}.rs`, `ios/ApassyCore/src/core/questions*.rs`, the Swift questions view | run cards stay v1; a connect card is posted, answered, settled once; an old reader shows the update text for it only |

@@ -6,10 +6,13 @@
 //! `WWW-Authenticate: Bearer resource_metadata=…`; it reads the metadata (RFC 9728, RFC
 //! 8414), registers (RFC 7591), and opens `/oauth/authorize` in a browser. That makes a
 //! connect request with a match code and sends the browser to `/oauth/wait/<id>`, a page
-//! with no script, form, cookie, or button: nothing on it can authorize. The owner allows
-//! the request in the app (`RunningNode::decide_connect`), which names the agent of the
-//! personal team; the next refresh of the page sends the browser back to the client with
-//! a one-time code. `POST /oauth/token` trades the code (with its PKCE verifier) for an
+//! with no script, form, cookie, or button: nothing on it can authorize. A second
+//! authorize of the same client with other parameters ends its waiting request and opens a
+//! new one with its own code: a client id is public, so a request that someone else keeps
+//! open never stands in for this browser's. The owner allows the request in the app
+//! (`RunningNode::decide_connect`), which names the agent of the personal team (always a
+//! new one, made for this request); the next refresh of the page sends the browser back
+//! to the client with a one-time code. `POST /oauth/token` trades the code (with its PKCE verifier) for an
 //! access token, which is the relay agent token of that agent (so `/mcp` auth does not
 //! change), and a refresh token.
 //!
@@ -538,6 +541,11 @@ fn request_id_ok(id: &str) -> bool {
 
 // ---- The page ----
 
+/// The line of the waiting and the busy page: requests that someone else started can wait
+/// on the Mac, and only the owner can end them.
+pub const DENY_OTHERS: &str =
+    "Deny requests on your Mac that you did not start, then connect again.";
+
 /// The text of the connect page. Every field is plain text, escaped when written.
 struct Page {
     title: String,
@@ -557,6 +565,7 @@ impl Page {
                 format!(
                     "Check that the app shows the same code. Apassy must be open and unlocked on the Mac. The request ends in {minutes} {unit}."
                 ),
+                DENY_OTHERS.to_string(),
             ],
         }
     }
@@ -597,15 +606,7 @@ impl Page {
         Self {
             title: "Too many connection requests wait.".to_string(),
             code: None,
-            lines: vec!["Answer them on the Mac, or try again in 5 minutes.".to_string()],
-        }
-    }
-
-    fn client_waits(client: &str) -> Self {
-        Self {
-            title: format!("{client} already waits for an answer."),
-            code: None,
-            lines: vec!["Answer it on the Mac, or try again in 5 minutes.".to_string()],
+            lines: vec![DENY_OTHERS.to_string()],
         }
     }
 
@@ -1056,7 +1057,6 @@ impl Flow<'_> {
         if state.is_some_and(|state| state.len() > MAX_STATE) {
             return Ok(back("invalid_request", "The state is at most 512 bytes."));
         }
-        let name = shown_name(client.name.as_deref());
         let id = random_hex::<16>()?;
         let match_code = new_match_code()?;
         let now = self.now;
@@ -1064,7 +1064,6 @@ impl Flow<'_> {
         enum Opened {
             New,
             Same(String),
-            ClientWaits,
             Busy,
         }
         let opened = self.hub.directory.store.tx(|tx| {
@@ -1087,7 +1086,24 @@ impl Flow<'_> {
                 {
                     return Ok(Opened::Same(open));
                 }
-                return Ok(Opened::ClientWaits);
+                // Another request of the same client: the waiting one ends, and this one
+                // gets its own page and code. A client id is public, so a waiting request
+                // that someone else started must never stand in for this browser's: the
+                // owner compares the code that this page shows.
+                tx.execute(
+                    "UPDATE connect_request SET status = 'expired' \
+                     WHERE client_id = ?1 AND status = 'pending'",
+                    params![client_id],
+                )
+                .map_err(db)?;
+                self.hub.directory.audit.write_on(
+                    tx,
+                    now,
+                    OAUTH_ACTOR,
+                    "connect_replaced",
+                    None,
+                    &json!({"client_id": client_id}),
+                )?;
             }
             let open: i64 = tx
                 .query_row(
@@ -1140,7 +1156,6 @@ impl Flow<'_> {
             Opened::Same(open) => Reply::Redirect {
                 location: format!("{}{open}", paths::WAIT_PREFIX),
             },
-            Opened::ClientWaits => Reply::page(429, Page::client_waits(&name)),
             Opened::Busy => Reply::page(429, Page::busy()),
         })
     }
@@ -2000,7 +2015,6 @@ mod tests {
             Page::connected(),
             Page::invalid(),
             Page::busy(),
-            Page::client_waits("x"),
             Page::broken(),
         ] {
             let html = page.html().to_ascii_lowercase();
@@ -2015,5 +2029,12 @@ mod tests {
         assert!(html.contains("&lt;b&gt;Grok&lt;/b&gt; wants to connect to Mac"));
         assert!(html.contains("K7Q-4MD"));
         assert!(html.contains("ends in 5 minutes"));
+        // The waiting and the busy page tell the owner to deny what they did not start.
+        let line = "Deny requests on your Mac that you did not start, then connect again.";
+        assert_eq!(DENY_OTHERS, line);
+        assert!(html.contains(line), "{html}");
+        let busy = Page::busy().html();
+        assert!(busy.contains("Too many connection requests wait."));
+        assert!(busy.contains(line), "{busy}");
     }
 }

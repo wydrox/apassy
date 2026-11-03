@@ -138,6 +138,13 @@ struct ConnectRequestsTests {
         #expect(QuestionsModel.connectFaceIDReason(client: long, mac: "M").contains(String(repeating: "x", count: 40) + "\""))
     }
 
+    @Test("the card tells the owner to allow only when the browser page shows the same code")
+    func codeWarning() {
+        #expect(
+            QuestionsModel.connectCodeWarning(code: "K7Q-4MD")
+                == "Allow only if the page in your browser shows this code: K7Q-4MD.")
+    }
+
     // MARK: ADR 0028 stage 1
 
     @Test("one quiet line for each vault whose requests do not come through the relay")

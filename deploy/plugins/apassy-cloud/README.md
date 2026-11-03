@@ -40,10 +40,11 @@ The agent appears in **Bouncer** → **Agents** with a **Remote** cap and no cre
 Credentials…** on its page to pick the items it may use. Every run of a remote agent still asks you, on
 the Mac or the iPhone.
 
-The request ends after 5 minutes without an answer: press Authorize again. The same agent (the same
-OAuth client) connects again to the same Apassy agent and keeps its credentials; another client with
-the same name becomes "Grok Bot 2". To stop an agent, click **Disconnect…** on its page: its next call
-fails with 401, and it must connect and be allowed again.
+The request ends after 5 minutes without an answer: press Authorize again. Allow only a request whose
+code the browser page shows, and deny any request that you did not start. Each allowed connect makes a
+new Apassy agent with no credentials, also for an agent that connected before: the second one is
+"Grok Bot 2". Disconnect the old one when you no longer need it. To stop an agent, click
+**Disconnect…** on its page: its next call fails with 401, and it must connect and be allowed again.
 
 ### Grok Bot
 

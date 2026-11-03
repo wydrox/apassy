@@ -498,10 +498,6 @@ impl DesktopApp {
             return;
         }
         match node.allow_connect(&self.owner_ui.session.shared_vault(), id) {
-            Ok(agent) if agent.reconnected => self.set_ok(format!(
-                "{} is connected to this Mac again. It keeps the credentials it had.",
-                agent.name
-            )),
             Ok(agent) => self.set_ok(format!(
                 "{} is connected to this Mac. It sees no credential until you choose some in Agents.",
                 agent.name

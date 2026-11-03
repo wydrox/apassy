@@ -82,7 +82,10 @@ registration (RFC 7591). The relay side is in its `docs/SPEC.md` section 31. The
    client secret.
 4. It opens `GET /oauth/authorize?response_type=code&client_id=…&redirect_uri=…&state=…&code_challenge=…
    &code_challenge_method=S256` in the user's browser (`scope=apassy` and `resource=<public URL>/mcp` are
-   optional). The node makes a connect request and sends the browser to `/oauth/wait/<id>`.
+   optional). The node makes a connect request and sends the browser to `/oauth/wait/<id>`. A client
+   has one waiting request: a new `authorize` of it with other parameters ends the waiting one (its
+   page says "The request ended.") and makes a new one with its own page and code. A client id is
+   public, so a request that someone else keeps open never stands in for this browser's.
 5. The page says "<client> wants to connect to <Mac>", shows a match code such as `K7Q-4MD`, and reloads
    every 3 seconds. It has no button: the owner allows the request in Apassy on the Mac (Decisions, with
    Touch ID) or on the iPhone, where the same code shows. Apassy must be open and unlocked; the request
@@ -97,7 +100,10 @@ registration (RFC 7591). The relay side is in its `docs/SPEC.md` section 31. The
    `token_expired`, the client sends `grant_type=refresh_token` with `refresh_token` and `client_id`: a
    new access token and a new refresh token. The old refresh token is used up.
 
-A new agent has no credential. It appears in Apassy → Agents; the owner chooses what it may use.
+A new agent has no credential. It appears in Apassy → Agents; the owner chooses what it may use. Every
+allowed connect makes a new agent, also for a client that already has one: a second connect of Grok Bot
+is "Grok Bot 2", with no credential. A connect never takes over an agent that exists; the old agent
+stays until the owner disconnects it.
 
 ### 4.2 Rules
 
@@ -110,8 +116,9 @@ A new agent has no credential. It appears in Apassy → Agents; the owner choose
 - `POST /oauth/revoke` (RFC 7009) with the refresh or the access token ends the connection. It answers 200
   always.
 - Limits of the node, not of a caller (Funnel forwards no client identity): 10 registrations in 10
-  minutes and 100 stored clients (429, `Retry-After: 600`); 3 connect requests waiting at once, 1 of each
-  client (429 page).
+  minutes and 100 stored clients (429, `Retry-After: 600`); 3 connect requests waiting at once (429 page
+  "Too many connection requests wait. Deny requests on your Mac that you did not start, then connect
+  again."); 1 of each client, and a new one replaces it (step 4).
 - The node stores only hashes of codes and refresh tokens, and of the access token.
 - A missing, unknown, revoked, or replaced token on `POST /mcp`: HTTP 401 `unauthenticated`. An expired
   token: HTTP 401 `token_expired`. Both have `WWW-Authenticate` as in step 1, with `error="invalid_token"`.
@@ -482,8 +489,9 @@ The per-user steps for Grok Bot and Cursor are in the plugin
 
 - **With the authorization flow (the default).** Add the MCP server by its URL,
   `https://<Mac>.<tailnet>.ts.net:8443/mcp`, with no header. Press Authorize (or the client's word for
-  it). The browser shows a code; allow the request on the Mac or the iPhone when it shows the same code.
-  Then choose the agent's credentials in Apassy → Agents.
+  it). The browser shows a code; allow the request on the Mac or the iPhone only when it shows the same
+  code, and deny any request that you did not start. Then choose the agent's credentials in Apassy →
+  Agents. Each allowed connect is a new agent: disconnect the old one when the client connects again.
 - **With the CLI token (the fallback).** For a client without the flow: `apassy agents add-remote <name>`
   prints the MCP URL and the header `Authorization: Bearer apassy_tagt_…`, once.
 
