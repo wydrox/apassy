@@ -77,7 +77,8 @@ import Testing
         #expect(questions.first?.askerName == DemoVault.macName)
         #expect(questions.first?.state == .open)
         let open = try await demo.service.accessRequestsList().requests.filter { $0.state == "open" }
-        #expect(open.map(\.id) == [DemoVault.accessRequestID])
+        // `id` is the identity of the row; the request ID is in the card.
+        #expect(open.map(\.card.request_id) == [DemoVault.accessRequestID])
         #expect(open.first?.card.asker.name == DemoVault.macName)
         // The row holds the demo answer key, so Allow once can sign.
         #expect(open.first?.answer_key == Base64URL.encode(demo.answerKey.publicKey))

@@ -111,7 +111,7 @@ private final class Prompts: Sendable {
         #expect(demo.vault.activeItems.contains { $0.hasPasskey })
         #expect(!demo.vault.folders.isEmpty)
         #expect(demo.questions.questions.contains { $0.qid == DemoVault.runQuestionID })
-        #expect(demo.questions.access.requests.contains { $0.id == DemoVault.accessRequestID && $0.state == "open" })
+        #expect(demo.questions.access.requests.contains { $0.card.request_id == DemoVault.accessRequestID && $0.state == "open" })
         #expect(world.calls.isEmpty)
     }
 
@@ -144,7 +144,7 @@ private final class Prompts: Sendable {
         let world = FailingWorld()
         let demo = await session(world: world, prompts: prompts)
         await started(demo)
-        let request = try #require(demo.questions.access.requests.first { $0.id == DemoVault.accessRequestID })
+        let request = try #require(demo.questions.access.requests.first { $0.card.request_id == DemoVault.accessRequestID })
         #expect(demo.questions.access.canAllow(request))
         await demo.questions.access.answer(request, choice: .allow_once)
         // The reason text of a real Allow Once (`AccessRequestsModel.answer`).
@@ -162,7 +162,7 @@ private final class Prompts: Sendable {
         prompts.set(allow: false)
         let demo = await session(prompts: prompts)
         await started(demo)
-        let request = try #require(demo.questions.access.requests.first { $0.id == DemoVault.accessRequestID })
+        let request = try #require(demo.questions.access.requests.first { $0.card.request_id == DemoVault.accessRequestID })
         await demo.questions.access.answer(request, choice: .allow_once)
         #expect(await demo.demo.service.accessPosts().isEmpty)
         #expect(demo.questions.access.actionable(request))
@@ -172,7 +172,7 @@ private final class Prompts: Sendable {
         let prompts = Prompts()
         let demo = await session(prompts: prompts)
         await started(demo)
-        let request = try #require(demo.questions.access.requests.first { $0.id == DemoVault.accessRequestID })
+        let request = try #require(demo.questions.access.requests.first { $0.card.request_id == DemoVault.accessRequestID })
         await demo.questions.access.answer(request, choice: .deny)
         #expect(prompts.reasons.isEmpty)
         let settled = demo.questions.access.requests.first { $0.id == request.id }
@@ -280,7 +280,7 @@ private final class Prompts: Sendable {
         await started(demo)
         let first = try #require(demo.vault.activeItems.first)
         await demo.vault.setArchived(first, true)
-        let request = try #require(demo.questions.access.requests.first { $0.id == DemoVault.accessRequestID })
+        let request = try #require(demo.questions.access.requests.first { $0.card.request_id == DemoVault.accessRequestID })
         await demo.questions.access.answer(request, choice: .deny)
         await demo.vault.lock()
 
