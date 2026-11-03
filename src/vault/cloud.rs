@@ -65,7 +65,24 @@ pub struct CloudNodeSetting {
     pub port: Option<u16>,
     /// The public route (Tailscale Funnel) is on.
     pub route_on: bool,
+    /// The tailnet route of the node is on (schema 28, plan unit N4): the devices of the
+    /// vault reach the node over the tailnet, behind the TLS front.
+    pub tailnet_on: bool,
+    /// The port of the node origin on the tailnet; `None` is 8444
+    /// (`crate::net::tls_front::DEFAULT_PORT`).
+    pub tailnet_port: Option<u16>,
+    /// The last node origin that the node served, `https://<Tailscale IPv4>:<port>`: a
+    /// start with another origin knows that every device must pair again.
+    pub node_origin: Option<String>,
+    /// The push gateway of the node; `None` is the default gateway
+    /// (`crate::node::tailnet::DEFAULT_PUSH_GATEWAY`).
+    pub push_gateway: Option<String>,
 }
+
+/// The lowest port of the node origin: no port of the system range.
+pub const TAILNET_PORT_MIN: u16 = 1024;
+/// The longest stored node origin or push gateway, in bytes.
+const MAX_NODE_URL_BYTES: usize = 300;
 
 /// How a cloud agent connected (schema 27, `cloud_agent.connected_with`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -434,25 +451,95 @@ impl Vault {
 
     /// The node settings. A vault made from a synced copy has no row: the defaults.
     pub fn cloud_node_setting(&self) -> VaultResult<CloudNodeSetting> {
-        let row: Option<(Option<String>, Option<i64>, i64)> = self
+        type Row = (
+            Option<String>,
+            Option<i64>,
+            i64,
+            i64,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        );
+        let row: Option<Row> = self
             .conn_ref()?
             .query_row(
-                "SELECT team_id, port, route_on FROM cloud_node WHERE id = 1",
+                "SELECT team_id, port, route_on, tailnet_on, tailnet_port, node_origin,
+                        push_gateway
+                 FROM cloud_node WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
             )
             .optional()
             .map_err(storage)?;
-        let Some((team_id, port, route_on)) = row else {
+        let Some((team_id, port, route_on, tailnet_on, tailnet_port, node_origin, push_gateway)) =
+            row
+        else {
             return Ok(CloudNodeSetting::default());
+        };
+        let port_of = |port: Option<i64>| {
+            port.map(|port| u16::try_from(port).map_err(storage))
+                .transpose()
         };
         Ok(CloudNodeSetting {
             team_id,
-            port: port
-                .map(|port| u16::try_from(port).map_err(storage))
-                .transpose()?,
+            port: port_of(port)?,
             route_on: route_on == 1,
+            tailnet_on: tailnet_on == 1,
+            tailnet_port: port_of(tailnet_port)?,
+            node_origin,
+            push_gateway,
         })
+    }
+
+    /// Turn the tailnet route of the node on or off. The caller passed the owner check
+    /// for turning it on (plan unit N7, `OwnerRequest::SetTailnetRoute`).
+    pub fn set_cloud_tailnet_on(&mut self, on: bool) -> VaultResult<()> {
+        self.update_cloud_node("tailnet_on", i64::from(on))
+    }
+
+    /// Store the port of the node origin, [`TAILNET_PORT_MIN`] to 65535, or the default
+    /// (`None`). 443 and the Funnel ports (8443, 10000) are refused (`InvalidInput`): 443
+    /// serves other programs through Tailscale Serve, and Funnel has the others. A new
+    /// port changes the node origin: every device pairs again.
+    pub fn set_cloud_tailnet_port(&mut self, port: Option<u16>) -> VaultResult<()> {
+        if let Some(port) = port
+            && (port < TAILNET_PORT_MIN || matches!(port, 443 | 8443 | 10000))
+        {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        self.update_cloud_node("tailnet_port", port.map(i64::from))
+    }
+
+    /// Store the node origin that the node serves now (`https://<host>:<port>`, no path),
+    /// or forget it.
+    pub fn set_cloud_node_origin(&mut self, origin: Option<&str>) -> VaultResult<()> {
+        if let Some(origin) = origin
+            && !valid_node_url(origin)
+        {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        self.update_cloud_node("node_origin", origin)
+    }
+
+    /// Store the push gateway of the node (`https://<host>[:port]`, no path), or the
+    /// default (`None`).
+    pub fn set_cloud_push_gateway(&mut self, gateway: Option<&str>) -> VaultResult<()> {
+        if let Some(gateway) = gateway
+            && !valid_node_url(gateway)
+        {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        self.update_cloud_node("push_gateway", gateway)
     }
 
     /// Store the node team of this vault, or forget it (`None`).
@@ -546,6 +633,21 @@ impl Vault {
         .map_err(storage)?;
         tx.commit().map_err(storage)
     }
+}
+
+/// An origin of the node settings: `https://`, a host of lowercase letters, digits,
+/// dots, hyphens, colons, and brackets, an optional port, and nothing else.
+fn valid_node_url(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix("https://") else {
+        return false;
+    };
+    text.len() <= MAX_NODE_URL_BYTES
+        && !rest.is_empty()
+        && rest.bytes().all(|b| {
+            b.is_ascii_lowercase()
+                || b.is_ascii_digit()
+                || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+        })
 }
 
 /// The OAuth link of the cloud agents and the cloud runs (schema 27).
@@ -744,7 +846,8 @@ pub(super) fn prepare_restored(tx: &rusqlite::Transaction<'_>) -> VaultResult<()
     tx.execute("DELETE FROM cloud_agent", []).map_err(storage)?;
     tx.execute("DELETE FROM cloud_run", []).map_err(storage)?;
     tx.execute(
-        "UPDATE cloud_node SET team_id = NULL, route_on = 0 WHERE id = 1",
+        "UPDATE cloud_node SET team_id = NULL, route_on = 0, tailnet_on = 0, node_origin = NULL
+         WHERE id = 1",
         [],
     )
     .map_err(storage)?;
@@ -850,6 +953,7 @@ mod tests {
                 team_id: Some("t_abcdefgh23".to_owned()),
                 port: Some(49200),
                 route_on: true,
+                ..CloudNodeSetting::default()
             }
         );
         assert_eq!(vault.reset_cloud_node().unwrap(), 1);
@@ -862,6 +966,61 @@ mod tests {
         );
         assert!(vault.set_cloud_node_port(1024).is_err());
         assert!(vault.set_cloud_node_team(Some("bad team")).is_err());
+    }
+
+    #[test]
+    fn the_tailnet_route_settings_round_trip_and_bad_values_are_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut vault, _) = vault_with_items(&dir, 1);
+        let setting = vault.cloud_node_setting().unwrap();
+        assert!(!setting.tailnet_on);
+        assert_eq!(
+            (
+                setting.tailnet_port,
+                setting.node_origin,
+                setting.push_gateway
+            ),
+            (None, None, None)
+        );
+        vault.set_cloud_tailnet_on(true).unwrap();
+        vault.set_cloud_tailnet_port(Some(8450)).unwrap();
+        vault
+            .set_cloud_node_origin(Some("https://100.64.0.7:8450"))
+            .unwrap();
+        vault
+            .set_cloud_push_gateway(Some("https://push.example.test"))
+            .unwrap();
+        let setting = vault.cloud_node_setting().unwrap();
+        assert!(setting.tailnet_on);
+        assert_eq!(setting.tailnet_port, Some(8450));
+        assert_eq!(
+            setting.node_origin.as_deref(),
+            Some("https://100.64.0.7:8450")
+        );
+        assert_eq!(
+            setting.push_gateway.as_deref(),
+            Some("https://push.example.test")
+        );
+        for port in [80, 443, 8443, 10000] {
+            assert!(vault.set_cloud_tailnet_port(Some(port)).is_err(), "{port}");
+        }
+        for origin in [
+            "http://100.64.0.7:8444",
+            "https://100.64.0.7:8444/x",
+            "https://",
+        ] {
+            assert!(
+                vault.set_cloud_node_origin(Some(origin)).is_err(),
+                "{origin}"
+            );
+        }
+        vault.set_cloud_tailnet_port(None).unwrap();
+        vault.set_cloud_push_gateway(None).unwrap();
+        let setting = vault.cloud_node_setting().unwrap();
+        assert_eq!((setting.tailnet_port, setting.push_gateway), (None, None));
+        // A lost node key resets the agents; the tailnet route stays as the owner set it.
+        vault.reset_cloud_node().unwrap();
+        assert!(vault.cloud_node_setting().unwrap().tailnet_on);
     }
 
     #[test]

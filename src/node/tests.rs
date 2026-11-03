@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use super::backend::{
     AuditRow, CatalogItem, CreatedAgent, NewCloudAgent, NodeAgentId, NodeBackend, NodeConfig,
-    NodeError, NodeRunId, NodeSecret, NodeTeamId, PendingItem, PendingRun, RunState, RunStatus,
-    RunningNode, Suggestion, SyncReport, TokenIssue,
+    NodeDevice, NodeError, NodeRunId, NodeSecret, NodeTailnet, NodeTeamId, PendingItem, PendingRun,
+    RunState, RunStatus, RunningNode, Suggestion, SyncReport, TokenIssue,
 };
 use super::funnel::tests::{FakeCli, serve_443_only};
 use super::master_key::tests::FakeKeys;
@@ -113,6 +113,17 @@ pub(crate) struct FakeState {
     pub(crate) released: Vec<(NodeRunId, Vec<String>)>,
     pub(crate) denied: Vec<(NodeRunId, String)>,
     pub(crate) audit: Vec<AuditRow>,
+    /// The tailnet route of the last start (`start_on_tailnet`), and the stand-in of the
+    /// relay's tailnet listener.
+    pub(crate) tailnet: Option<NodeTailnet>,
+    pub(crate) tailnet_listener: Option<std::net::TcpListener>,
+    /// The teams of devices (`create_device_team`) and their live devices.
+    pub(crate) device_teams: BTreeMap<String, Vec<NodeDevice>>,
+    pub(crate) revoked_devices: Vec<(String, u64)>,
+    /// What the relay's stop looks at: the address of the front and the node origin.
+    pub(crate) watch_at_stop: Option<(SocketAddr, String)>,
+    /// What it saw: the front still took connections, and the local route was still set.
+    pub(crate) seen_at_stop: Option<(bool, bool)>,
 }
 
 /// Starts [`FakeNode`]s that share one state, so a test sees what the node got.
@@ -175,9 +186,29 @@ impl NodeBackend for FakeBackend {
         state.public_listen = config.public_listen;
         // A restart ends every session and drops every pending run, as the relay does.
         state.pending.clear();
+        state.tailnet = None;
+        state.tailnet_listener = None;
         Ok(Box::new(FakeNode {
             state: Arc::clone(&self.state),
         }))
+    }
+
+    fn start_on_tailnet(
+        &self,
+        config: NodeConfig,
+        tailnet: Option<NodeTailnet>,
+    ) -> Result<Box<dyn RunningNode>, NodeError> {
+        let node = self.start(config)?;
+        if let Some(tailnet) = tailnet {
+            assert!(tailnet.tailnet_listen.ip().is_loopback());
+            assert!(!tailnet.tailnet_agents, "the Mac node serves devices only");
+            let listener =
+                std::net::TcpListener::bind(tailnet.tailnet_listen).expect("tailnet listener");
+            let mut state = self.state.lock().unwrap();
+            state.tailnet = Some(tailnet);
+            state.tailnet_listener = Some(listener);
+        }
+        Ok(node)
     }
 }
 
@@ -391,8 +422,83 @@ impl RunningNode for FakeNode {
             .collect())
     }
 
+    fn tailnet_addr(&self) -> Option<SocketAddr> {
+        let state = self.state.lock().unwrap();
+        state.tailnet.as_ref()?;
+        state
+            .tailnet_listener
+            .as_ref()
+            .and_then(|listener| listener.local_addr().ok())
+    }
+
+    fn create_device_team(
+        &self,
+        _name: &str,
+        device_name: &str,
+        public_key_b64u: &str,
+    ) -> Result<(NodeTeamId, u64), NodeError> {
+        assert_eq!(public_key_b64u.len(), 87, "a P-256 point, b64u");
+        let mut state = self.state.lock().unwrap();
+        let letters = b"abcdefgh";
+        let team = format!(
+            "t_devteamaa{}",
+            char::from(letters[state.device_teams.len() % letters.len()])
+        );
+        state.device_teams.insert(
+            team.clone(),
+            vec![NodeDevice {
+                id: 1,
+                name: device_name.to_owned(),
+                member_id: 1,
+                member_name: "owner".to_owned(),
+                role: "owner".to_owned(),
+                key_holder: true,
+                created_at: fake_now(),
+                last_seen_at: None,
+                push: false,
+            }],
+        );
+        state.teams.push(team.clone());
+        Ok((NodeTeamId(team), 1))
+    }
+
+    fn devices(&self, team: &NodeTeamId) -> Result<Vec<NodeDevice>, NodeError> {
+        self.state
+            .lock()
+            .unwrap()
+            .device_teams
+            .get(&team.0)
+            .cloned()
+            .ok_or_else(|| NodeError::new("not_found", "No team."))
+    }
+
+    fn revoke_device(&self, team: &NodeTeamId, device: u64) -> Result<(), NodeError> {
+        let mut state = self.state.lock().unwrap();
+        let devices = state
+            .device_teams
+            .get_mut(&team.0)
+            .ok_or_else(|| NodeError::new("not_found", "No team."))?;
+        let before = devices.len();
+        devices.retain(|known| known.id != device);
+        if devices.len() == before {
+            return Err(NodeError::new("not_found", "No device."));
+        }
+        state.revoked_devices.push((team.0.clone(), device));
+        Ok(())
+    }
+
     fn stop(self: Box<Self>) {
         let mut state = self.state.lock().unwrap();
+        if let Some((front, origin)) = state.watch_at_stop.clone() {
+            let listening =
+                std::net::TcpStream::connect_timeout(&front, Duration::from_millis(500)).is_ok();
+            let routed = crate::sync::RelayUrl::parse(&origin)
+                .ok()
+                .and_then(|url| crate::sync::relay_http::local_route_for_test(&url))
+                .is_some();
+            state.seen_at_stop = Some((listening, routed));
+        }
+        state.tailnet_listener = None;
         state.stopped = true;
         let ended: Vec<u64> = state
             .runs

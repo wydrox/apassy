@@ -321,6 +321,72 @@ pub fn adopt_questions_team(
     keep_questions_membership(vault, membership, device_name)
 }
 
+/// Keep the questions team of the vault on the Mac's own node (plan S2–S3, unit N4,
+/// decision D6): `membership` is the first device of this Mac in a new team of devices
+/// on the node (`RunningNode::create_device_team`), with the node origin, the pin, and the
+/// alternatives of the node (`crate::node::questions_team::new_node_team`). Then as
+/// [`adopt_questions_team`]: the team becomes the questions team of the vault, the vault
+/// gets its question key, and this Mac registers. No relay call. `InvalidRelayAddress`:
+/// the membership has no pin (a node team is always pinned). `AlreadyEnabled`: the vault
+/// has a questions membership (a hosted one moves with [`move_questions_to_node`]) or
+/// another questions team.
+pub fn adopt_node_team(
+    vault: &mut Vault,
+    membership: &RelayMembership,
+    device_name: &str,
+) -> Result<TrustedDevice, SyncError> {
+    if membership.pin.is_none() {
+        return Err(SyncError::InvalidRelayAddress);
+    }
+    adopt_questions_team(vault, membership, device_name)
+}
+
+/// "Move approvals to this Mac" (ADR 0037, Migration; plan S2–S3 D6), the vault step
+/// after a device joined the node team: the questions of the vault go through `node`
+/// (this Mac's device in the team of devices on its node) instead of the membership of
+/// `hosted_team`. The hosted membership loses the purpose `questions` (a
+/// notifications-only one goes with its key; relay sync never changes), the node team
+/// becomes the questions team of the vault, and this Mac registers with the key of
+/// `node`. On a failure the hosted questions stay as they were.
+///
+/// Returns the hosted membership as it was, for the relay calls that take its devices
+/// off the hosted relay (best effort, by the caller, only for a notifications-only team).
+/// `NotEnabled`: the questions of the vault are not on `hosted_team` any more.
+/// `InvalidRelayAddress`: `node` has no pin.
+pub fn move_questions_to_node(
+    vault: &mut Vault,
+    node: &RelayMembership,
+    hosted_team: &str,
+    device_name: &str,
+) -> Result<RelayMembership, SyncError> {
+    if vault.is_locked() {
+        return Err(SyncError::Vault(VaultErrorKind::Locked));
+    }
+    if node.pin.is_none() || node.team_id == hosted_team {
+        return Err(SyncError::InvalidRelayAddress);
+    }
+    let hosted = questions_membership(vault)?
+        .filter(|membership| membership.team_id == hosted_team)
+        .ok_or(SyncError::NotEnabled)?;
+    if vault.trusted_key_removed(&node.public_key)? {
+        return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
+    }
+    disable_questions(vault)?;
+    match keep_questions_membership(vault, node, device_name) {
+        Ok(_) => Ok(hosted),
+        Err(error) => {
+            // The hosted questions come back as they were.
+            let _ = if questions_only(&hosted) {
+                vault.add_relay_membership(&hosted)
+            } else {
+                vault.set_membership_purposes(&hosted.team_id, &hosted.purposes)
+            };
+            let _ = vault.set_questions_team(&hosted.team_id);
+            Err(error)
+        }
+    }
+}
+
 /// A Mac joins the questions team of the vault (a second Mac of an iCloud Drive vault):
 /// `membership` is its new key in that team, from a device link that a Mac in the team
 /// confirmed after its owner check. The caller checked the owner on this Mac for

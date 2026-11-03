@@ -6,6 +6,11 @@
 //!   row before 28. A membership with a pin connects to its relay only with that pin.
 //! - `relay_membership.alt`: the alternative destinations of a node relay, a JSON list of
 //!   `host:port` texts in the order to try them (at most four). `NULL` for none.
+//! - `cloud_node.tailnet_on`, `tailnet_port`, `node_origin`, `push_gateway` (plan unit
+//!   N4): the tailnet route of the Mac's node. Off by default; the port `NULL` is 8444;
+//!   the origin is the last node origin that the node served (`https://<Tailscale
+//!   IPv4>:<port>`), so a changed origin is seen; the gateway `NULL` is the default push
+//!   gateway. `cloud_node` is a local table too.
 //!
 //! Only a new pairing of the team sets them (`Vault::set_membership_trust`). The table is
 //! local ([`super::merge::LOCAL_TABLES`]): a pushed copy carries none of its rows, so the
@@ -40,10 +45,21 @@ const SCHEMA_V28_SQL: &str = "
 ALTER TABLE relay_membership ADD COLUMN pin TEXT CHECK (pin IS NULL OR length(pin) = 43);
 ALTER TABLE relay_membership ADD COLUMN alt TEXT
     CHECK (alt IS NULL OR length(alt) BETWEEN 2 AND 1100);
+ALTER TABLE cloud_node ADD COLUMN tailnet_on INTEGER NOT NULL DEFAULT 0
+    CHECK (tailnet_on IN (0, 1));
+ALTER TABLE cloud_node ADD COLUMN tailnet_port INTEGER
+    CHECK (tailnet_port IS NULL OR tailnet_port BETWEEN 1024 AND 65535);
+ALTER TABLE cloud_node ADD COLUMN node_origin TEXT
+    CHECK (node_origin IS NULL OR length(node_origin) BETWEEN 12 AND 300);
+ALTER TABLE cloud_node ADD COLUMN push_gateway TEXT
+    CHECK (push_gateway IS NULL OR length(push_gateway) BETWEEN 9 AND 300);
 ";
 
 /// What `verify_expected_columns_in` reads for schema 28 and later.
-pub(super) const COLUMNS: [&str; 1] = ["SELECT pin, alt FROM relay_membership LIMIT 0"];
+pub(super) const COLUMNS: [&str; 2] = [
+    "SELECT pin, alt FROM relay_membership LIMIT 0",
+    "SELECT tailnet_on, tailnet_port, node_origin, push_gateway FROM cloud_node LIMIT 0",
+];
 
 /// The version marks of `version` in `vault_meta` and in the header.
 fn marks_sql(version: i64) -> String {
@@ -71,6 +87,10 @@ pub(super) fn add_schema_v28(tx: &Transaction<'_>) -> VaultResult<()> {
 #[cfg(test)]
 pub(super) fn downgrade_sql() -> String {
     let mut sql = "
+ALTER TABLE cloud_node DROP COLUMN push_gateway;
+ALTER TABLE cloud_node DROP COLUMN node_origin;
+ALTER TABLE cloud_node DROP COLUMN tailnet_port;
+ALTER TABLE cloud_node DROP COLUMN tailnet_on;
 ALTER TABLE relay_membership DROP COLUMN alt;
 ALTER TABLE relay_membership DROP COLUMN pin;
 "

@@ -385,6 +385,12 @@ pub fn clear_local_route(origin: &str) {
         .remove(origin.as_str());
 }
 
+/// The local route of `url`, for the tests of the node (`crate::node::tailnet`).
+#[cfg(test)]
+pub(crate) fn local_route_for_test(url: &RelayUrl) -> Option<SocketAddr> {
+    local_route(url)
+}
+
 /// The local route of `url`, when the node of this Mac set one.
 fn local_route(url: &RelayUrl) -> Option<SocketAddr> {
     local_routes()
