@@ -49,6 +49,12 @@ struct QuestionsStateRow: View {
 
     var body: some View {
         LabeledContent("Questions through the relay", value: state)
+        // ADR 0037 D14: the free approvals through the hosted relay end. Text only (3.1).
+        if root.questions?.phase == .ready {
+            Text(FreeRelayNotice.questions)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var state: String {
@@ -113,6 +119,11 @@ private struct SyncSettingsSections: View {
         Section {
             if vault.vault?.syncs == true {
                 LabeledContent("Sync service", value: vault.vault?.isICloud == true ? "iCloud Drive" : "Apassy relay")
+                if let notice = FreeRelayNotice.relaySyncLine(for: vault.vault) {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 LabeledContent("Sync") {
                     Text(vault.syncStatus?.message ?? "Not synced yet")
                         .multilineTextAlignment(.trailing)

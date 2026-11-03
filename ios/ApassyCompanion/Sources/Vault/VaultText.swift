@@ -109,3 +109,42 @@ enum VaultText {
         return groups.joined(separator: " ") + (id.count > 6 ? "…" : "")
     }
 }
+
+/// The notice of ADR 0037 D14 (plan s7 unit N1) in Settings > Devices: the free approvals
+/// and the free relay sync on the hosted relay end with `endVersion`. Text only: App Review
+/// guideline 3.1 allows no price, no button, and no link to a checkout or a pricing page, so
+/// the choice is made in Apassy on the Mac.
+enum FreeRelayNotice {
+    /// The release that ends the free paths. The same as `FREE_RELAY_PATHS_END_VERSION` in
+    /// `src/relay/membership.rs`; a Rust test reads this line.
+    static let endVersion = "0.5.18"
+    /// The hosted relay, `DEFAULT_RELAY_URL` of the core.
+    static let hostedHost = "apassy-relay.wyderka.cc"
+
+    /// Under "Questions through the relay" while the questions are connected.
+    static let questions =
+        "Free approvals through apassy-relay.wyderka.cc end with Apassy \(endVersion). Your Mac can keep them free over Tailscale, or use Apassy Connect. Choose in Apassy on your Mac."
+
+    /// Under "Sync service" while the vault syncs through the hosted relay.
+    static let relaySync =
+        "Relay sync on apassy-relay.wyderka.cc is free until Apassy \(endVersion). Then the hosted store is part of Apassy Connect; your own Mac or Linux node can be the sync home (free). Choose in Apassy on your Mac."
+
+    /// Whether `url` is the hosted relay. A relay that the owner runs is never the hosted one.
+    static func isHosted(_ url: String?) -> Bool {
+        guard let text = url?.trimmingCharacters(in: .whitespaces),
+            let parts = URLComponents(string: text),
+            parts.scheme?.lowercased() == "https",
+            parts.host?.lowercased() == hostedHost,
+            parts.port == nil || parts.port == 443,
+            parts.path.isEmpty || parts.path == "/",
+            parts.query == nil, parts.user == nil
+        else { return false }
+        return true
+    }
+
+    /// The line under "Sync service" for a vault, or nil.
+    static func relaySyncLine(for vault: VaultEntry?) -> String? {
+        guard let vault, vault.isRelay, isHosted(vault.relayURL) else { return nil }
+        return relaySync
+    }
+}
