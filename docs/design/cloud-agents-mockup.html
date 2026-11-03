@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apassy · Cloud agents mockup</title>
+<!--
+  Mockup for work unit U3 of implementation-plan-0037-cloud-agents.md (decision 6).
+  Static frames for the owner's approval before any UI code. Synthetic data only.
+  The visual language is copied from app-v2-mockup.html. Light appearance only: the app
+  (kit::apply_theme sets ThemePreference::Light) and app-v2-mockup.html have no dark one.
+  One self-contained file: inline CSS and SVG, no script, no font file, no network request.
+-->
+<style>
+:root{
+  --bg:#ffffff;--side:#ececef;--detail:#f6f6f7;--group:#ffffff;
+  --line:rgba(0,0,0,.09);--line2:rgba(0,0,0,.06);
+  --label:rgba(0,0,0,.88);--sec:rgba(0,0,0,.52);--ter:rgba(0,0,0,.30);
+  --fill:rgba(0,0,0,.05);--fill2:rgba(0,0,0,.08);--fill3:rgba(0,0,0,.12);
+  --accent:#0a6cff;--accent-press:#005ee0;--sel:#0a6cff;--link:#0066d6;
+  --red:#e0352b;--orange:#c86a00;--green:#24a148;
+  --t-warn:#a65200;--t-crit:#c81e1e;--t-good:#1d8036;--t-acc:#0066d6;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;color:var(--label);-webkit-font-smoothing:antialiased;background:#cfd0d5}
+svg{display:block}
+
+/* ---- The page of frames. ---- */
+.page{min-width:1260px;padding:36px 40px 70px}
+.intro{max-width:1180px;margin:0 auto 34px}
+.intro h1{font-size:22px;font-weight:700;margin:0 0 6px;letter-spacing:-.01em}
+.intro p{margin:0 0 6px;color:rgba(0,0,0,.62);max-width:860px}
+.intro ol{margin:10px 0 0;padding-left:20px;color:rgba(0,0,0,.62);columns:2;column-gap:40px;max-width:900px}
+.frame{max-width:1180px;margin:0 auto 52px}
+.flabel{margin:0 0 12px 4px}
+.flabel b{font-size:14px;font-weight:700;color:#232327}
+.flabel span{display:block;font-size:12px;color:rgba(0,0,0,.55);margin-top:2px;max-width:900px}
+.fnum{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#232327;color:#fff;font-size:11px;font-weight:700;margin-right:8px;vertical-align:1px}
+
+/* ---- The window, as in app-v2-mockup.html. ---- */
+.win{display:flex;width:100%;min-height:660px;background:var(--bg);border-radius:12px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 22px 70px rgba(0,0,0,.28);position:relative}
+.win.fixed{height:900px}
+.win.fixed .dscroll{overflow:hidden}
+.side{width:216px;flex:none;background:var(--side);border-right:.5px solid var(--line);display:flex;flex-direction:column}
+.side .chrome{height:52px;flex:none;display:flex;align-items:center;padding:0 18px;gap:8px}
+.lights{display:flex;gap:8px}.lights i{width:12px;height:12px;border-radius:50%;display:block;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.15)}
+.sidetoggle{margin-left:auto;width:28px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--sec)}
+.sidetoggle svg{width:17px;height:17px}
+.side .scroll{flex:1;padding:0 10px 10px}
+.sh{font-size:11px;font-weight:600;color:var(--sec);padding:12px 8px 4px}
+.si{display:flex;align-items:center;gap:7px;width:100%;height:28px;border-radius:6px;padding:0 8px}
+.si.on{background:rgba(0,0,0,.09)}
+.si svg{width:15px;height:15px;flex:none;color:var(--accent)}
+.si .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.si .cnt{color:var(--sec);font-size:12px;font-variant-numeric:tabular-nums}
+.si .bdg{font-size:11px;font-weight:600;border-radius:9px;padding:0 6px;min-width:18px;text-align:center;background:var(--red);color:#fff}
+.si.l1{padding-left:22px}
+.sq{width:13px;height:13px;border-radius:3.5px;flex:none;margin:0 1px;display:grid;place-items:center;color:#fff;font-size:8.5px;font-weight:700;line-height:1}
+.side .foot{padding:8px 10px 10px;border-top:.5px solid var(--line)}
+.me{display:flex;align-items:center;gap:8px;padding:4px 6px}
+.me .av{width:22px;height:22px;border-radius:50%;background:linear-gradient(#ffa43a,#ff8a00);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:600;flex:none}
+.me .t{flex:1;line-height:1.2}.me .t small{display:block;color:var(--sec);font-size:11px}
+.ib{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--sec);flex:none}
+.ib.on{background:var(--fill2);color:var(--accent)}
+.ib svg{width:16px;height:16px}
+.listcol{width:300px;flex:none;border-right:.5px solid var(--line);display:flex;flex-direction:column;background:var(--bg)}
+.tb{height:52px;flex:none;display:flex;align-items:center;padding:0 10px 0 16px;gap:6px}
+.tb .ttl{flex:1;min-width:0;line-height:1.2}
+.tb .ttl b{font-size:13px;font-weight:700;display:block}
+.tb .ttl small{font-size:11px;color:var(--sec)}
+.rows{flex:1;padding:4px 8px 12px}
+.gh{font-size:11px;font-weight:600;color:var(--sec);padding:10px 8px 4px;display:flex}
+.gh span{margin-left:auto;font-weight:400}
+.r{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;min-height:48px}
+.r.on{background:var(--sel);color:#fff}
+.r.on .sub,.r.on .meta{color:rgba(255,255,255,.82)}
+.r .tx{flex:1;min-width:0}
+.r .ttl2{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .meta{display:flex;align-items:center;gap:6px;color:var(--sec);font-size:12px;flex:none;font-variant-numeric:tabular-nums}
+.dotp{width:7px;height:7px;border-radius:50%;background:var(--red);flex:none}
+.r.on .dotp{background:#fff}
+.tm{color:var(--orange);font-weight:500;font-variant-numeric:tabular-nums}
+.r.on .tm{color:#fff}
+.tile{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px;flex:none;letter-spacing:-.02em;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12)}
+.tile svg{width:16px;height:16px}
+.tile.xl{width:44px;height:44px;border-radius:10px}.tile.xl svg{width:22px;height:22px}
+.tile.s{width:20px;height:20px;border-radius:5px;font-size:10px}.tile.s svg{width:11px;height:11px}
+.ava{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px;flex:none;position:relative}
+.ava.l{width:56px;height:56px;font-size:22px}
+.ava .cl{position:absolute;right:-3px;bottom:-3px;width:15px;height:15px;border-radius:50%;background:#fff;color:var(--sec);display:grid;place-items:center;box-shadow:0 0 0 .5px rgba(0,0,0,.15)}
+.ava .cl svg{width:10px;height:10px}
+.ava.l .cl{width:22px;height:22px;right:-2px;bottom:-2px}.ava.l .cl svg{width:14px;height:14px}
+.r.on .ava .cl{color:var(--sel)}
+.detail{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.detail .tb{justify-content:flex-end;padding:0 12px;gap:4px}
+.dscroll{flex:1}
+.dpad{max-width:640px;margin:0 auto;padding:0 28px 34px}
+.hdr{display:flex;align-items:center;gap:14px;margin:6px 0 22px}
+.hdr h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-.01em;line-height:1.2}
+.hdr .s{color:var(--sec);margin-top:2px}
+.shdr{display:flex;align-items:center;gap:12px;margin:12px 0 4px}
+.shdr h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-.01em;line-height:1.2}
+.shdr .s{color:var(--sec);margin-top:2px}
+.cap{font-size:11px;font-weight:500;border-radius:5px;padding:1px 6px;background:var(--fill2);color:var(--sec);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.cap.red{background:rgba(224,53,43,.1);color:#c42b22}
+.cap.live{background:rgba(36,161,72,.12);color:var(--t-good)}
+.cap.live::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--green)}
+.gl{font-size:12px;font-weight:600;color:var(--sec);margin:18px 2px 6px;display:flex;align-items:center}
+.gl span{margin-left:auto;font-weight:400}
+.grp{background:var(--group);border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.08),0 .5px 1.5px rgba(0,0,0,.05)}
+.fr{display:flex;align-items:center;gap:10px;min-height:38px;padding:7px 12px;position:relative}
+.fr+.fr::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.fr.top{align-items:flex-start}
+.fr .k{flex:none;min-width:110px;color:var(--label)}
+.fr .v{flex:1;min-width:0;text-align:right;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fr .v.l{text-align:left;color:var(--label);white-space:normal}
+.fr .kn{flex:1;min-width:0}
+.fr .kn .nt{font-size:12px;color:var(--sec);margin-top:2px;line-height:1.4}
+.fr .chev{color:var(--ter);font-size:15px;margin-left:-4px}
+.fr.off{color:var(--ter)}
+.fr.off .kn .nt{color:var(--ter)}
+.fr.off .tile{opacity:.45}
+.lnk{color:var(--link)}
+.mono{font-family:var(--mono);font-size:12px}
+.secret{font-size:15px;letter-spacing:2px;color:var(--label)}
+.pb{border:0;border-radius:6px;height:24px;padding:0 10px;background:var(--fill2);font-size:12.5px;font-weight:500;flex:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit;color:var(--label)}
+.pb svg{width:13px;height:13px;color:var(--sec)}
+.pb.des{color:var(--red)}
+.pb.pri{background:var(--accent);color:#fff}
+.sw{width:32px;height:19px;border-radius:10px;background:var(--fill3);position:relative;flex:none;border:0;padding:0}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 .5px 2px rgba(0,0,0,.3)}
+.sw.on{background:var(--green)}.sw.on::after{left:15px}
+.sw.dis{opacity:.4}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px;vertical-align:0}
+.dot.warn{background:#ff9500}.dot.crit{background:#ff3b30}.dot.off{background:#a0a0a6}
+.tn{font-size:12px;line-height:1.4;display:flex;gap:6px;align-items:flex-start}
+.tn svg{width:13px;height:13px;flex:none;margin-top:1.5px}
+.tn.warn{color:var(--t-warn)}.tn.crit{color:var(--t-crit)}.tn.good{color:var(--t-good)}.tn.acc{color:var(--t-acc)}
+.np p{margin:0 0 5px;font-size:12px;color:var(--sec);line-height:1.4}.np p:last-child{margin:0}
+.act{display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0}
+.act .tx{flex:1;min-width:0;text-align:left}
+.act .a1{color:var(--label)}.act .a2{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act .when{font-size:12px;color:var(--ter);flex:none}
+.st{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;flex:none;margin-top:1px}
+.st svg{width:10px;height:10px;color:#fff}
+.st.ok{background:var(--green)}.st.you{background:var(--accent)}.st.no{background:var(--red)}
+.cmd{font-family:var(--mono);font-size:12px;background:#f2f2f4;border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-all;color:var(--label);flex:1;text-align:left}
+.note{font-size:12px;color:var(--sec);margin:6px 4px 0;line-height:1.4}
+.meta-foot{text-align:center;font-size:11px;color:var(--ter);margin-top:22px;line-height:1.45}
+.abar{flex:none;border-top:.5px solid var(--line);background:rgba(246,246,247,.92);padding:10px 16px;display:flex;align-items:center;gap:8px}
+.abar .cap2{flex:1;font-size:11.5px;color:var(--sec);min-width:0}
+.btn{border:0;border-radius:7px;height:28px;padding:0 14px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.16),0 .5px 1px rgba(0,0,0,.08);font-weight:500;white-space:nowrap;flex:none;font-family:inherit;font-size:13px;color:var(--label);display:inline-flex;align-items:center;gap:6px}
+.btn svg{width:14px;height:14px;color:var(--sec)}
+.btn.pri{background:var(--accent);color:#fff;box-shadow:0 .5px 1px rgba(0,0,0,.2)}
+.btn.des{color:var(--red)}
+.field{width:100%;border:0;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.18) inset;padding:5px 9px;display:block;font:inherit;color:inherit}
+.field.focus{outline:3px solid rgba(10,108,255,.35);outline-offset:0}
+.veil{position:absolute;inset:0;background:rgba(0,0,0,.12);display:flex;align-items:flex-start;justify-content:center;z-index:40}
+.sheet{margin-top:52px;width:540px;max-width:calc(100% - 40px);background:#f6f6f7;border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 24px 60px rgba(0,0,0,.3);padding:20px}
+.sheet h2{font-size:13px;font-weight:700;margin:0 0 2px}
+.sheet .lead{color:var(--sec);font-size:12px;margin:0 0 14px}
+.sheet .gl:first-of-type{margin-top:4px}
+.sheet .sbar{display:flex;gap:8px;justify-content:flex-end;margin-top:18px;align-items:center}
+.sheet .sbar .left{margin-right:auto;font-size:12px;color:var(--sec);display:flex;align-items:center;gap:6px}
+.sheet .sbar .left svg{width:13px;height:13px}
+.pick{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pick div.o{background:#fff;border-radius:10px;padding:10px 12px;box-shadow:0 0 0 .5px rgba(0,0,0,.1);display:flex;gap:10px;align-items:center}
+.pick div.o.on{box-shadow:0 0 0 2px var(--accent)}
+.pick b{display:block;font-weight:600}.pick small{color:var(--sec);font-size:11.5px}
+.seg{display:inline-flex;background:var(--fill2);border-radius:7px;padding:2px;gap:2px;flex:none}
+.seg span{padding:2px 12px;border-radius:5px;font-size:12.5px;color:var(--label)}
+.seg span.on{background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.12);font-weight:500}
+.chk{width:15px;height:15px;border-radius:4px;flex:none;background:#fff;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.3),0 .5px 1px rgba(0,0,0,.08);display:grid;place-items:center}
+.chk.on{background:var(--accent);box-shadow:none}
+.chk.on svg{width:11px;height:11px;color:#fff}
+.chk.dis{background:rgba(0,0,0,.04);box-shadow:inset 0 0 0 .5px rgba(0,0,0,.14)}
+ol.steps{margin:0;padding:10px 14px 10px 32px;line-height:1.5}
+ol.steps li{margin:3px 0;padding-left:2px}
+ol.steps .mono{background:#f2f2f4;border-radius:4px;padding:1px 5px;white-space:nowrap}
+.pgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.pcard{background:var(--detail);border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18);padding:14px 22px 20px}
+.pcard .plabel{font-size:12px;font-weight:600;color:#232327;margin:0 0 2px}
+.pcard .plabel small{display:block;font-weight:400;color:rgba(0,0,0,.5)}
+.btnrow{display:flex;gap:8px;margin-top:2px}
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="intro">
+  <h1>Apassy · Settings → Cloud agents</h1>
+  <p>Mockup for work unit U3 (implementation-plan-0037-cloud-agents.md, decision 6). The owner approves it before the UI unit writes code. All names, items, tokens, and addresses are synthetic.</p>
+  <p>Light appearance only: the Mac app is light only (<span class="mono">kit::apply_theme</span> sets <span class="mono">ThemePreference::Light</span>), and app-v2-mockup.html has no dark appearance.</p>
+  <ol>
+    <li>Cloud agents, public route off</li>
+    <li>Cloud agents, public route on</li>
+    <li>Sheet: Add a cloud agent</li>
+    <li>Sheet: the one-time token and the setup</li>
+    <li>Problem states of Tailscale and Funnel</li>
+    <li>Decisions: the question for a cloud run</li>
+  </ol>
+</div>
+
+<!-- ============================================================ 1 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">1</span>Settings → Cloud agents · public route off</b>
+    <span>New section of Settings, after Devices. Tailscale is connected. The switch is off, and there is no cloud agent yet.</span></div>
+  <div class="win">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9.5 5v14"/><path d="M5.5 8.5h2M5.5 11h2"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></svg><span class="lbl">All credentials</span><span class="cnt">6</span></div>
+        <div class="si l1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg><span class="lbl">Work</span><span class="cnt">4</span></div>
+        <div class="si l1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg><span class="lbl">Infra</span><span class="cnt">2</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Agents</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Settings</b><small>Personal</small></div></div>
+      <div class="rows">
+        <div class="r"><div class="tile" style="background:#007aff"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · iCloud Drive</div></div></div>
+        <div class="r"><div class="tile" style="background:#5856d6"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div>
+        <div class="r"><div class="tile" style="background:#30a0c8"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">1 iPhone · Relay on</div></div></div>
+        <div class="r on"><div class="tile" style="background:#24a148"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></div><div class="tx"><div class="ttl2">Cloud agents</div><div class="sub">Public route off</div></div></div>
+        <div class="r"><div class="tile" style="background:#af52de"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l7 2.5v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Running</div></div></div>
+        <div class="r"><div class="tile" style="background:#636366"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M7.5 9.5l3 2.5-3 2.5M12.5 14.5h4"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line installed</div></div></div>
+        <div class="r"><div class="tile" style="background:#8e8e93"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Version 0.5.14</div></div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="shdr"><div class="tile xl" style="background:#24a148"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></div><div><h1>Cloud agents</h1><div class="s">Public route off</div></div></div>
+
+        <div class="gl">Tailscale</div>
+        <div class="grp">
+          <div class="fr"><div class="k">This Mac</div><div class="v">rafals-mac-mini</div></div>
+          <div class="fr"><div class="k">Tailscale</div><div class="v"><span class="dot"></span>Connected</div></div>
+        </div>
+        <div class="note">Cloud agents reach this Mac through Tailscale Funnel. No Apassy server is between them and this Mac.</div>
+
+        <div class="gl">Public route</div>
+        <div class="grp">
+          <div class="fr top"><div class="kn"><div>Public route (Tailscale Funnel)</div><div class="nt">Off. Cloud agents cannot reach this Mac.</div></div><span class="sw"></span></div>
+          <div class="fr"><div class="np">
+            <p>When it is on, the internet can reach only two paths on this Mac: the MCP endpoint and the proxy. Nothing else is public.</p>
+            <p>Credential values stay on this Mac. A cloud agent gets placeholders and a base URL, never a value.</p>
+            <p>This Mac must be unlocked and awake for each run.</p>
+          </div></div>
+        </div>
+        <div class="note">Turning the route on or off needs Touch ID.</div>
+
+        <div class="gl">Cloud agents</div>
+        <div class="grp">
+          <div class="fr"><div class="v l" style="color:var(--sec)">No cloud agents yet.</div></div>
+          <div class="fr"><div class="kn lnk">Add a cloud agent…</div></div>
+        </div>
+        <div class="note">Each cloud agent gets its own token and sees only the items that you pick. It can connect when the public route is on.</div>
+      </div></div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">2</span>Settings → Cloud agents · public route on</b>
+    <span>The route is on. The address has a Copy button. "Grok Bot" has a live session. Recent cloud activity shows the last 20 relay audit rows, without values.</span></div>
+  <div class="win">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9.5 5v14"/><path d="M5.5 8.5h2M5.5 11h2"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></svg><span class="lbl">All credentials</span><span class="cnt">6</span></div>
+        <div class="si l1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg><span class="lbl">Work</span><span class="cnt">4</span></div>
+        <div class="si l1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg><span class="lbl">Infra</span><span class="cnt">2</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Agents</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></svg><span class="lbl">Agents</span><span class="cnt">4</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Settings</b><small>Personal</small></div></div>
+      <div class="rows">
+        <div class="r"><div class="tile" style="background:#007aff"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · iCloud Drive</div></div></div>
+        <div class="r"><div class="tile" style="background:#5856d6"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div>
+        <div class="r"><div class="tile" style="background:#30a0c8"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">1 iPhone · Relay on</div></div></div>
+        <div class="r on"><div class="tile" style="background:#24a148"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></div><div class="tx"><div class="ttl2">Cloud agents</div><div class="sub">Public route on · 1 agent</div></div></div>
+        <div class="r"><div class="tile" style="background:#af52de"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l7 2.5v5.5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9V6z"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Running</div></div></div>
+        <div class="r"><div class="tile" style="background:#636366"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M7.5 9.5l3 2.5-3 2.5M12.5 14.5h4"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line installed</div></div></div>
+        <div class="r"><div class="tile" style="background:#8e8e93"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Version 0.5.14</div></div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="shdr"><div class="tile xl" style="background:#24a148"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></div><div><h1>Cloud agents</h1><div class="s">Public route on · 1 agent · 1 live session</div></div></div>
+
+        <div class="gl">Tailscale</div>
+        <div class="grp">
+          <div class="fr"><div class="k">This Mac</div><div class="v">rafals-mac-mini</div></div>
+          <div class="fr"><div class="k">Tailscale</div><div class="v"><span class="dot"></span>Connected</div></div>
+        </div>
+        <div class="note">Cloud agents reach this Mac through Tailscale Funnel. No Apassy server is between them and this Mac.</div>
+
+        <div class="gl">Public route</div>
+        <div class="grp">
+          <div class="fr top"><div class="kn"><div>Public route (Tailscale Funnel)</div><div class="nt">On. Cloud agents with a token can reach this Mac.</div></div><span class="sw on"></span></div>
+          <div class="fr"><div class="k" style="min-width:90px">MCP address</div><div class="v mono" style="color:var(--label)">https://rafals-mac-mini.tail71fdd0.ts.net:8443/mcp</div><span class="pb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg>Copy</span></div>
+          <div class="fr"><div class="k">Port</div><div class="v">8443</div></div>
+          <div class="fr"><div class="tn warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4M12 17h.01"/></svg><span>The public route puts the name rafals-mac-mini.tail71fdd0.ts.net in public certificate logs. Anyone can see that the name exists. Turning the route off does not remove the name from the logs.</span></div></div>
+          <div class="fr"><div class="np">
+            <p>Only the MCP endpoint and the proxy are public. Credential values stay on this Mac.</p>
+            <p>This Mac must be unlocked and awake for each run.</p>
+          </div></div>
+        </div>
+        <div class="note">Apassy does not change your other Tailscale Serve settings. Turning the route off needs Touch ID.</div>
+
+        <div class="gl">Cloud agents</div>
+        <div class="grp">
+          <div class="fr top" style="padding-top:9px;padding-bottom:9px">
+            <div class="ava" style="background:#1d1d1f">G<span class="cl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></span></div>
+            <div class="kn"><div style="display:flex;align-items:center;gap:8px">Grok Bot <span class="cap live">Live session · 8 min left</span></div><div class="nt">1 item · Expires in 90 days · Last used 2 min ago</div></div>
+            <span class="pb des" style="margin-top:3px">Revoke…</span>
+          </div>
+          <div class="fr"><div class="kn lnk">Add a cloud agent…</div></div>
+        </div>
+        <div class="note">Revoke stops the token and ends its live session at once. It needs Touch ID.</div>
+
+        <div class="gl">Recent cloud activity<span>Last 20</span></div>
+        <div class="grp">
+          <div class="fr"><div class="act"><span class="st you"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.5" r="3.6"/><path d="M5 20c1.2-3.8 3.8-5.5 7-5.5s5.8 1.7 7 5.5"/></svg></span><div class="tx"><div class="a1">Grok Bot asked to run <span class="mono">curl …</span></div><div class="a2">You allowed on this Mac · 1 request to httpbin.org</div></div><span class="when">2 min ago</span></div></div>
+          <div class="fr"><div class="act"><span class="st no"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10M17 7L7 17"/></svg></span><div class="tx"><div class="a1">Grok Bot asked to run <span class="mono">curl …</span></div><div class="a2">You denied on iPhone · no request</div></div><span class="when">25 min ago</span></div></div>
+          <div class="fr"><div class="act"><span class="st no"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10M17 7L7 17"/></svg></span><div class="tx"><div class="a1">A request with an unknown token was refused</div><div class="a2">Public route · <span class="mono">/mcp</span> · 401</div></div><span class="when">1 h ago</span></div></div>
+        </div>
+        <div class="note">Values never show here. Commands show variable names only.</div>
+      </div></div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================ 3 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">3</span>Sheet · Add a cloud agent</b>
+    <span>Opens from "Add a cloud agent…". A new cloud agent sees no item until the owner picks one. Items without placeholder hosts cannot be picked.</span></div>
+  <div class="win fixed">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></svg><span class="lbl">All credentials</span><span class="cnt">6</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Agents</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Settings</b><small>Personal</small></div></div>
+      <div class="rows">
+        <div class="r"><div class="tile" style="background:#007aff"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · iCloud Drive</div></div></div>
+        <div class="r"><div class="tile" style="background:#5856d6"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div>
+        <div class="r"><div class="tile" style="background:#30a0c8"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">1 iPhone · Relay on</div></div></div>
+        <div class="r on"><div class="tile" style="background:#24a148"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></div><div class="tx"><div class="ttl2">Cloud agents</div><div class="sub">Public route on</div></div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="shdr"><div class="tile xl" style="background:#24a148"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></div><div><h1>Cloud agents</h1><div class="s">Public route on</div></div></div>
+        <div class="gl">Tailscale</div>
+        <div class="grp"><div class="fr"><div class="k">This Mac</div><div class="v">rafals-mac-mini</div></div><div class="fr"><div class="k">Tailscale</div><div class="v"><span class="dot"></span>Connected</div></div></div>
+        <div class="gl">Public route</div>
+        <div class="grp"><div class="fr"><div class="kn">Public route (Tailscale Funnel)</div><span class="sw on"></span></div></div>
+      </div></div>
+    </section>
+    <div class="veil"><div class="sheet">
+      <h2>Add a cloud agent</h2>
+      <p class="lead">The agent gets its own token. It sees only the items that you pick, and never their values.</p>
+
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:60px">Name</div><input class="field focus" type="text" value="Grok Bot" readonly></div>
+      </div>
+
+      <div class="gl">Kind</div>
+      <div class="pick">
+        <div class="o on"><div class="ava" style="background:#1d1d1f">G</div><div><b>Grok Bot</b><small>xAI. MCP server by URL and header</small></div></div>
+        <div class="o"><div class="ava" style="background:#8e8e93">O</div><div><b>Other MCP client</b><small>Any client that sends a bearer token</small></div></div>
+      </div>
+
+      <div class="gl">Items<span>1 selected</span></div>
+      <div class="grp">
+        <div class="fr"><span class="chk on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><div class="tile s" style="background:#8e8e93"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></svg></div><div class="kn"><div>httpbin test token</div><div class="nt"><span class="mono">HTTPBIN_TOKEN</span> · httpbin.org</div></div><span class="cap">Development</span></div>
+        <div class="fr"><span class="chk"></span><div class="tile s" style="background:#635bff">S</div><div class="kn"><div>Stripe test</div><div class="nt"><span class="mono">STRIPE_SECRET_KEY</span> · api.stripe.com</div></div><span class="cap">Development</span></div>
+        <div class="fr"><span class="chk"></span><div class="tile s" style="background:#635bff">S</div><div class="kn"><div>Stripe live</div><div class="nt"><span class="mono">STRIPE_SECRET_KEY</span> · api.stripe.com</div></div><span class="cap red">Production</span></div>
+        <div class="fr off"><span class="chk dis"></span><div class="tile s" style="background:#336791"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6"/></svg></div><div class="kn"><div>Billing database</div><div class="nt">Cannot be shared: no placeholder hosts</div></div></div>
+        <div class="fr off"><span class="chk dis"></span><div class="tile s" style="background:#4b4f58"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M7.5 9.5l3 2.5-3 2.5"/></svg></div><div class="kn"><div>Build server</div><div class="nt">Cannot be shared: no placeholder hosts</div></div></div>
+      </div>
+      <div class="note">A cloud agent can use only an item with a variable and placeholder hosts. The proxy on this Mac puts the value only into requests to those hosts. To add hosts, open the item and select Edit.</div>
+
+      <div class="gl">Token</div>
+      <div class="grp">
+        <div class="fr"><div class="k">Token lifetime</div><div class="v"></div><span class="seg"><span>30 days</span><span class="on">90 days</span><span>365 days</span></span></div>
+      </div>
+      <div class="note">The token expires on Feb 1, 2027. To renew it, revoke the agent and add it again.</div>
+
+      <div class="sbar"><span class="left"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg>Touch ID</span><span class="btn">Cancel</span><span class="btn pri">Add</span></div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">4</span>Sheet · the one-time token and the setup</b>
+    <span>Shows after "Add". The token shows only here, masked; Copy uses the secret clipboard (cleared after a short time). "Copy setup for Grok Bot" copies the address, the header with the token, and the steps.</span></div>
+  <div class="win fixed" style="height:760px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></svg><span class="lbl">All credentials</span><span class="cnt">6</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Agents</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></svg><span class="lbl">Agents</span><span class="cnt">4</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Settings</b><small>Personal</small></div></div>
+      <div class="rows">
+        <div class="r"><div class="tile" style="background:#007aff"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · iCloud Drive</div></div></div>
+        <div class="r"><div class="tile" style="background:#5856d6"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div>
+        <div class="r"><div class="tile" style="background:#30a0c8"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">1 iPhone · Relay on</div></div></div>
+        <div class="r on"><div class="tile" style="background:#24a148"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></div><div class="tx"><div class="ttl2">Cloud agents</div><div class="sub">Public route on · 1 agent</div></div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="shdr"><div class="tile xl" style="background:#24a148"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></div><div><h1>Cloud agents</h1><div class="s">Public route on · 1 agent</div></div></div>
+        <div class="gl">Tailscale</div>
+        <div class="grp"><div class="fr"><div class="k">This Mac</div><div class="v">rafals-mac-mini</div></div><div class="fr"><div class="k">Tailscale</div><div class="v"><span class="dot"></span>Connected</div></div></div>
+      </div></div>
+    </section>
+    <div class="veil"><div class="sheet">
+      <h2>Grok Bot is added</h2>
+      <p class="lead">Copy this now. Apassy shows it once.</p>
+
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:60px">Token</div><div class="v mono" style="text-align:left;color:var(--label)">apassy_tagt_<span class="secret" style="font-size:12px;letter-spacing:1.5px">••••••••••••••••••••••••</span></div><span class="pb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg>Copy</span></div>
+      </div>
+      <div class="note">When you close this sheet, Apassy cannot show the token again. If you lose it, revoke the agent and add it again.</div>
+
+      <div class="gl">Set up Grok Bot</div>
+      <div class="grp">
+        <ol class="steps">
+          <li>In Grok Bot, ask the Bot to add a custom MCP server.</li>
+          <li>URL: <span class="mono">https://rafals-mac-mini.tail71fdd0.ts.net:8443/mcp</span></li>
+          <li>Header: <span class="mono">Authorization: Bearer &lt;token&gt;</span>. Use the token above.</li>
+          <li>Ask the Bot to list its Apassy items. It shows 1 item.</li>
+        </ol>
+        <div class="fr" style="border-top:.5px solid var(--line2)"><div class="kn"><div class="nt" style="margin:0">The setup text has the token in it. Paste it only into Grok Bot.</div></div><span class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg>Copy setup for Grok Bot</span></div>
+      </div>
+      <div class="note">Each run of Grok Bot waits for your answer on this Mac or your iPhone.</div>
+
+      <div class="sbar"><span class="left">Expires Feb 1, 2027</span><span class="btn pri">Done</span></div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============================================================ 5 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">5</span>Problem states</b>
+    <span>The Tailscale and Public route groups of Settings → Cloud agents when the route cannot work. The switch is off and cannot be turned on until the problem is gone.</span></div>
+  <div class="pgrid">
+
+    <div class="pcard">
+      <div class="plabel">5a · Tailscale is not installed</div>
+      <div class="gl">Tailscale</div>
+      <div class="grp">
+        <div class="fr"><div class="k">This Mac</div><div class="v">—</div></div>
+        <div class="fr"><div class="k">Tailscale</div><div class="v"><span class="dot warn"></span>Not installed</div></div>
+        <div class="fr"><div class="np"><p>Install Tailscale and sign in. Cloud agents reach this Mac through Tailscale Funnel.</p></div></div>
+        <div class="fr"><div class="kn lnk">Get Tailscale…</div></div>
+      </div>
+      <div class="gl">Public route</div>
+      <div class="grp"><div class="fr top"><div class="kn"><div>Public route (Tailscale Funnel)</div><div class="nt">Off. It needs Tailscale.</div></div><span class="sw dis"></span></div></div>
+    </div>
+
+    <div class="pcard">
+      <div class="plabel">5b · Tailscale is not connected</div>
+      <div class="gl">Tailscale</div>
+      <div class="grp">
+        <div class="fr"><div class="k">This Mac</div><div class="v">rafals-mac-mini</div></div>
+        <div class="fr"><div class="k">Tailscale</div><div class="v"><span class="dot warn"></span>Not connected</div></div>
+        <div class="fr"><div class="np"><p>Tailscale is not connected. Open Tailscale and connect this Mac. Until then, cloud agents cannot reach this Mac.</p></div></div>
+        <div class="fr"><div class="kn"></div><span class="pb">Check again</span></div>
+      </div>
+      <div class="gl">Public route</div>
+      <div class="grp"><div class="fr top"><div class="kn"><div>Public route (Tailscale Funnel)</div><div class="nt">Off. It needs a connected Tailscale.</div></div><span class="sw dis"></span></div></div>
+    </div>
+
+    <div class="pcard">
+      <div class="plabel">5c · The tailnet policy does not allow Funnel</div>
+      <div class="gl">Tailscale</div>
+      <div class="grp">
+        <div class="fr"><div class="k">This Mac</div><div class="v">rafals-mac-mini</div></div>
+        <div class="fr"><div class="k">Tailscale</div><div class="v"><span class="dot"></span>Connected</div></div>
+      </div>
+      <div class="gl">Public route</div>
+      <div class="grp">
+        <div class="fr top"><div class="kn"><div>Public route (Tailscale Funnel)</div><div class="nt">Off.</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn crit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4M12 17h.01"/></svg><span>Your tailnet policy does not allow Funnel for this Mac. An admin of the tailnet must allow it in the admin console.</span></div></div>
+        <div class="fr"><div class="cmd">Tailscale says: Funnel is not enabled on your tailnet.
+To enable, visit: https://login.tailscale.com/f/funnel?node=nEXAMPLE1CNTRL</div></div>
+        <div class="fr"><div class="kn lnk">Open the Tailscale admin console…</div><span class="pb">Check again</span></div>
+      </div>
+    </div>
+
+    <div class="pcard">
+      <div class="plabel">5d · Port 8443 is used by another program</div>
+      <div class="gl">Tailscale</div>
+      <div class="grp">
+        <div class="fr"><div class="k">This Mac</div><div class="v">rafals-mac-mini</div></div>
+        <div class="fr"><div class="k">Tailscale</div><div class="v"><span class="dot"></span>Connected</div></div>
+      </div>
+      <div class="gl">Public route</div>
+      <div class="grp">
+        <div class="fr top"><div class="kn"><div>Public route (Tailscale Funnel)</div><div class="nt">Off.</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4M12 17h.01"/></svg><span>Port 8443 is used by another program. Tailscale Serve sends it to <span class="mono">http://127.0.0.1:3000</span>. Apassy does not change it.</span></div></div>
+        <div class="fr"><div class="np"><p>Funnel allows only ports 443, 8443, and 10000. Apassy never uses 443. With port 10000, the address is <span class="mono">…ts.net:10000/mcp</span>. Give the new address to each cloud agent.</p></div></div>
+        <div class="fr"><div class="kn"></div><span class="pb">Check again</span><span class="pb pri">Use port 10000</span></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">6</span>Decisions · the question for a cloud run</b>
+    <span>As a run question on the Mac, also sent to the iPhone. The request of the agent is marked "from the cloud agent, not verified". Only Allow once and Deny: nothing is remembered for a cloud agent.</span></div>
+  <div class="win">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9.5 5v14"/><path d="M5.5 8.5h2M5.5 11h2"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></svg><span class="lbl">All credentials</span><span class="cnt">6</span></div>
+        <div class="si l1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg><span class="lbl">Work</span><span class="cnt">4</span></div>
+        <div class="si l1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg><span class="lbl">Infra</span><span class="cnt">2</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Agents</div>
+        <div class="si on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></svg><span class="lbl">Agents</span><span class="cnt">4</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><span class="ib"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Decisions</b><small>7 by you · 128 automatic this week</small></div></div>
+      <div class="rows">
+        <div class="gh">Waiting<span>2</span></div>
+        <div class="r on"><div class="ava" style="background:#1d1d1f">G<span class="cl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></span></div><div class="tx"><div class="ttl2">httpbin test token</div><div class="sub">Grok Bot (cloud) · No project</div></div><div class="meta"><span class="tm">4:52</span></div></div>
+        <div class="r"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Stripe live</div><div class="sub">Claude Code · acme-billing</div></div><div class="meta"><span class="dotp"></span><span class="tm">3:10</span></div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="ava l" style="background:#1d1d1f">G<span class="cl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></svg></span></div><div><h1>A cloud agent wants to run a command.</h1><div class="s">No project · <span class="tm">4:52</span> left to answer</div></div></div>
+        <div class="note" style="margin:-12px 0 6px;font-size:13px">Grok Bot (cloud) wants to use httpbin test token</div>
+        <div class="tn acc" style="margin:0 0 14px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><span>Grok Bot runs on the internet, not on this Mac. Apassy cannot check what you asked it.</span></div>
+
+        <div class="grp">
+          <div class="fr"><div class="k">Credential</div><div class="v" style="display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--label)"><div class="tile s" style="background:#8e8e93"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></svg></div>httpbin test token<span class="cap">Development</span></div></div>
+          <div class="fr"><div class="k">Agent</div><div class="v">Grok Bot (cloud)</div></div>
+          <div class="fr"><div class="k">Action</div><div class="v">Read</div></div>
+          <div class="fr"><div class="k">Project</div><div class="v">No project</div></div>
+          <div class="fr"><div class="k">Sends to</div><div class="v">httpbin.org</div></div>
+        </div>
+
+        <div class="gl">Purpose</div>
+        <div class="grp"><div class="fr"><div class="v l">Check that the httpbin token works.</div></div></div>
+
+        <div class="gl">What the agent says you asked</div>
+        <div class="grp"><div class="fr"><div style="flex:1;min-width:0">
+          <div>"Test my httpbin token with curl."</div>
+          <div class="tn warn" style="margin-top:4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4M12 17h.01"/></svg><span>From the cloud agent, not verified.</span></div>
+        </div></div></div>
+
+        <div class="gl">Command</div>
+        <div class="grp"><div class="fr"><div class="cmd">curl -H "Authorization: Bearer $HTTPBIN_TOKEN" $APASSY_BASE_HTTPBIN_TOKEN/bearer</div></div></div>
+
+        <div class="gl">Why you are asked</div>
+        <div class="grp"><div class="fr"><div class="v l">Every run of a cloud agent asks you. The bouncer does not allow it alone, and no answer is remembered.</div></div></div>
+
+        <div class="meta-foot">If you allow, Grok Bot gets a placeholder and a base URL for 10 minutes, never the value.<br>The proxy on this Mac adds the value only to requests to httpbin.org. An allow needs Touch ID or the passphrase now.</div>
+      </div></div>
+      <div class="abar"><span class="btn des">Deny</span><div class="cap2">Nothing is remembered for a cloud agent. Also on your iPhone.</div><span class="btn pri">Allow once</span></div>
+    </section>
+  </div>
+</section>
+
+</div>
+</body>
+</html>
