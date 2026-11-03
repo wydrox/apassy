@@ -10,6 +10,9 @@
 # item (docs/operations/chrome-web-store.md).
 #
 # Usage: scripts/build-extension-zip.sh
+#
+# It runs on macOS and Linux. The extension-package workflow builds it twice on Linux,
+# compares the SHA-256, and attests the zip (docs/operations/release.md).
 
 set -euo pipefail
 
@@ -17,13 +20,13 @@ cd "$(dirname "$0")/.."
 
 fail() { echo "error: $*" >&2; exit 1; }
 
-for tool in zip unzip plutil python3; do
+for tool in zip unzip python3; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
 done
 
 VERSION="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
 [ -n "$VERSION" ] || fail "cannot read the package version from Cargo.toml"
-EXT_VERSION="$(plutil -extract version raw -o - extension/manifest.json)"
+EXT_VERSION="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' extension/manifest.json)"
 [ "$EXT_VERSION" = "$VERSION" ] \
   || fail "extension/manifest.json has version $EXT_VERSION, Cargo.toml has $VERSION"
 
@@ -48,7 +51,10 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
-# The same bytes for the same files: a fixed time and a sorted list.
+# The same bytes for the same files: fixed modes (not the umask of the checkout), a fixed
+# time, and a sorted list.
+find "$STAGE" -type d -exec chmod 755 {} +
+find "$STAGE" -type f -exec chmod 644 {} +
 find "$STAGE" -exec touch -h -t 202001010000 {} +
 OUT_DIR="target/dist"
 mkdir -p "$OUT_DIR"
@@ -93,5 +99,5 @@ PACKAGE="$OUT_DIR/apassy-extension-$VERSION.zip"
 mv "$OUT" "$PACKAGE"
 OUT="$PACKAGE"
 echo "Package: $OUT ($(wc -c <"$OUT" | tr -d ' ') bytes)"
-echo "SHA-256: $(shasum -a 256 "$OUT" | cut -d' ' -f1)"
+echo "SHA-256: $(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OUT")"
 unzip -Z1 "$OUT" | sed 's/^/  /'
