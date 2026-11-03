@@ -120,10 +120,7 @@ impl<'a> Object<'a> {
     /// a JSON string of digits only (some OAuth servers send `"3600"`). No sign, fraction,
     /// or exponent.
     pub(crate) fn uint(&self, name: &str) -> Option<u64> {
-        let digits = match self.get(name)? {
-            Raw::Other(raw) => raw,
-            Raw::Text(raw) => raw,
-        };
+        let (Raw::Other(digits) | Raw::Text(digits)) = self.get(name)?;
         if digits.is_empty() || digits.len() > 19 || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }

@@ -1453,4 +1453,195 @@ mod tests {
         });
         assert!(github.check().is_err());
     }
+
+    /// The no-secret scan over the three kinds of unit C2 (contract sections 2 rule 6
+    /// and 11): what the agent's side gets of a lease (its variables and values) and
+    /// every `Debug` and error text hold no long-lived value, no bootstrap token, and no
+    /// JWT; the long-lived key never goes over the wire.
+    #[test]
+    fn no_long_lived_secret_in_any_lease_or_error() {
+        use serde_json::json;
+
+        use crate::lease::jwt::tests::pkcs1_pem;
+        use crate::lease::testing::{Reply, Seen, deadline, endpoints, fake};
+
+        const BOOTSTRAP: &str = "ya29.FakeBootstrapTokenThatNeverLeaves0002";
+        const CLIENT_SECRET: &str = "synthetic-oauth-client-secret-scan-0002";
+        const REFRESH: &str = "synthetic-refresh-token-long-lived-scan-0002";
+        const ROTATED: &str = "synthetic-refresh-token-rotated-scan-0003";
+        let pem = pkcs1_pem();
+        let mut long_lived: Vec<String> = pem
+            .lines()
+            .filter(|line| !line.starts_with("-----") && line.len() >= 16)
+            .map(str::to_owned)
+            .collect();
+        long_lived.extend([CLIENT_SECRET, REFRESH, ROTATED].map(str::to_owned));
+        let pkcs8 = crate::lease::jwt::tests::pkcs8_pem();
+        long_lived.extend(
+            pkcs8
+                .lines()
+                .filter(|line| !line.starts_with("-----") && line.len() >= 16)
+                .map(str::to_owned),
+        );
+        let field = |name: &str, value: &str, secret: bool| Field {
+            name: name.to_owned(),
+            value: SecretValue::new(value.to_owned()),
+            secret,
+        };
+        let settings = |kind: LeaseKind, text: &str| {
+            ShortLivedSettings::parse_checked(kind, text).expect("settings")
+        };
+        let key_json = json!({
+            "type": "service_account",
+            "private_key": pkcs8,
+            "client_email": "scan@synthetic-project.iam.gserviceaccount.com",
+            "token_uri": "https://oauth2.googleapis.com/token"
+        })
+        .to_string();
+        let sources = [
+            LeaseSource {
+                env_name: "GITHUB_TOKEN".to_owned(),
+                fields: vec![
+                    field("app_id", "123456", false),
+                    field("installation_id", "7654321", false),
+                    field("private_key", &pem, true),
+                ],
+                settings: settings(LeaseKind::GithubApp, "{}"),
+            },
+            LeaseSource {
+                env_name: "CLOUDSDK_AUTH_ACCESS_TOKEN".to_owned(),
+                fields: vec![field("key_json", &key_json, true)],
+                settings: settings(LeaseKind::GoogleServiceAccount, "{}"),
+            },
+            LeaseSource {
+                env_name: "EXAMPLE_ACCESS_TOKEN".to_owned(),
+                fields: vec![
+                    field("client_id", "synthetic-client-id", false),
+                    field("client_secret", CLIENT_SECRET, true),
+                    field("refresh_token", REFRESH, true),
+                ],
+                settings: settings(
+                    LeaseKind::OauthRefresh,
+                    r#"{"token_url":"https://auth.example.test/token","client_auth":"basic","revoke_url":"https://auth.example.test/revoke"}"#,
+                ),
+            },
+        ];
+        // Each provider echoes every secret it was sent in its error bodies.
+        let echo = |seen: &Seen| -> String { String::from_utf8_lossy(&seen.raw).into_owned() };
+        let scope = RunScope {
+            run_label: "7".to_owned(),
+            ttl_wanted: 900,
+        };
+        let mut texts = Vec::new();
+        for source in &sources {
+            let kind = source.kind();
+            // A lease: one call, or two for Google.
+            let calls = if kind == LeaseKind::GoogleServiceAccount {
+                2
+            } else {
+                1
+            };
+            let (destination, server) = fake(calls, move |index, _: &Seen| match (kind, index) {
+                (LeaseKind::GithubApp, _) => Reply::json(
+                    201,
+                    &json!({"token": "ghs_ScanInstallationToken00000000000001", "expires_at": "2026-11-03T11:00:00Z"}),
+                ),
+                (LeaseKind::GoogleServiceAccount, 0) => {
+                    Reply::json(200, &json!({"access_token": BOOTSTRAP, "expires_in": 3599}))
+                }
+                (LeaseKind::GoogleServiceAccount, _) => Reply::json(
+                    200,
+                    &json!({"accessToken": "ya29.ScanShortLivedToken0001", "expireTime": "2026-11-03T10:15:00Z"}),
+                ),
+                _ => Reply::json(
+                    200,
+                    &json!({"access_token": "scan-access-token-0001", "refresh_token": ROTATED}),
+                ),
+            });
+            let lease = acquire_at(
+                source,
+                &scope,
+                &endpoints(destination),
+                None,
+                deadline(),
+                1_793_700_000,
+            )
+            .expect("lease");
+            let seen = server.join().expect("fake provider");
+            assert_eq!(seen.len(), calls);
+            for request in &seen {
+                // The private key and the client secret in the clear never go out;
+                // the refresh token goes only to the token endpoint, in the form.
+                for secret in long_lived.iter().filter(|secret| {
+                    !(kind == LeaseKind::OauthRefresh
+                        && (secret.as_str() == REFRESH || secret.as_str() == CLIENT_SECRET))
+                }) {
+                    scan::assert_no_secret(&request.raw, secret);
+                }
+                if kind == LeaseKind::GoogleServiceAccount
+                    && request.path.contains("generateAccessToken")
+                {
+                    assert_eq!(request.bearer(), Some(BOOTSTRAP));
+                }
+            }
+            let mut agent_side = String::new();
+            for secret in &lease.secrets {
+                agent_side.push_str(&format!("{}={}\n", secret.name, secret.value.expose()));
+            }
+            for plain in &lease.plain {
+                agent_side.push_str(&format!("{}={}\n", plain.name, plain.text));
+            }
+            texts.push(agent_side);
+            texts.push(format!("{lease:?} {source:?}"));
+            for secret in &lease.secrets {
+                assert!(!format!("{lease:?}").contains(secret.value.expose()));
+            }
+            if kind == LeaseKind::OauthRefresh {
+                assert_eq!(
+                    lease
+                        .update_field
+                        .as_ref()
+                        .map(|update| update.value.expose()),
+                    Some(ROTATED),
+                    "the rotation is for the caller, not the agent's side"
+                );
+            }
+            // An error whose body echoes the request.
+            let (destination, server) =
+                fake(1, move |_, seen: &Seen| Reply::text(400, &echo(seen)));
+            let error = acquire_at(
+                source,
+                &scope,
+                &endpoints(destination),
+                None,
+                deadline(),
+                1_793_700_000,
+            )
+            .unwrap_err();
+            server.join().expect("fake provider");
+            texts.push(format!("{error} {error:?}"));
+            // A revocation that fails with an echoing body.
+            if lease.revoke.is_some() {
+                let (destination, server) =
+                    fake(1, move |_, seen: &Seen| Reply::text(500, &echo(seen)));
+                let error = revoke_at(
+                    &lease,
+                    Some(source),
+                    &endpoints(destination),
+                    None,
+                    deadline(),
+                )
+                .unwrap_err();
+                server.join().expect("fake provider");
+                assert_eq!(error.code, LeaseCode::LeaseRevokeFailed);
+                texts.push(format!("{error} {error:?}"));
+            }
+        }
+        for text in &texts {
+            for secret in &long_lived {
+                scan::assert_no_secret(text, secret);
+            }
+            scan::assert_no_secret(text, BOOTSTRAP);
+        }
+    }
 }

@@ -80,7 +80,10 @@ impl ServiceAccountKey {
     /// ignored. The reason of a refusal names a member, never a value.
     pub fn read(text: &str) -> Result<Self, &'static str> {
         let object = Object::parse(text).ok_or("it is not one JSON object with distinct keys.")?;
-        if object.text("type").as_deref().map(String::as_str) != Some("service_account") {
+        if object
+            .text("type")
+            .is_none_or(|kind| kind.as_str() != "service_account")
+        {
             return Err("its type is not service_account.");
         }
         let client_email = object

@@ -1038,7 +1038,9 @@ mod tests {
         ];
         for settings in &refused {
             let why = parse(&settings.to_string()).unwrap_err();
-            assert!(!why.contains("arn:aws"), "the reason holds no value: {why}");
+            for value in ["123456789012", "not json", "eu-central", "EU-", "S3", "xxxx"] {
+                assert!(!why.contains(value), "the reason holds no value: {why}");
+            }
         }
         assert!(parse(r#"{"region":"eu-central-1","region":"us-east-1"}"#).is_err());
         assert!(parse(r#"["arn"]"#).is_err());
