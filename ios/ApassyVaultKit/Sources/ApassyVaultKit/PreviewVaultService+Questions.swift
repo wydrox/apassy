@@ -69,6 +69,20 @@ public struct PreviewQuestions: Sendable {
 
 extension PreviewVaultService {
     /// The question of the contract's test vectors (section 7.1), open for five minutes.
+    /// A synthetic connect request (card v2 `kind = connect`): Grok Bot asks to connect to the Mac.
+    public static func sampleConnectQuestion(qid: String = "Y29ubmVjdC1yZXF1ZXN0LTE", now: Date = Date())
+        -> RemoteQuestion
+    {
+        let at = Int64(now.timeIntervalSince1970)
+        let connect = ConnectRequestCard(
+            askerDevice: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", createdAt: at, id: "cr_7Hq2xN",
+            clientName: "Grok Bot", macName: "Mac mini (office)", code: "K7Q-4MD", expiresAt: at + 271,
+            digest: "414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc")
+        return RemoteQuestion(
+            qid: qid, state: .open, askerName: "Mac mini (office)", createdAt: at, expiresAt: at + 271,
+            connect: connect)
+    }
+
     public static func sampleQuestion(qid: String = "oKGio6SlpqeoqaqrrK2urw", now: Date = Date()) -> RemoteQuestion {
         let at = Int64(now.timeIntervalSince1970)
         let card = QuestionCard(
@@ -389,7 +403,7 @@ extension PreviewVaultService {
             }
         let text = [
             "apassy-question-answer-v1", status.deviceUUID ?? "", status.teamID ?? "", qid, line,
-            question.card?.digest ?? "", String(time),
+            question.card?.digest ?? question.connect?.digest ?? "", String(time),
         ].joined(separator: "\n")
         return PreparedAnswer(time: time, answerString: text, needsFaceID: answer.needsFaceID)
     }

@@ -141,7 +141,11 @@ public struct RemoteQuestion: Codable, Sendable, Equatable, Identifiable {
     public var expiresAt: Int64
     /// Why the card cannot be shown ("Sync this vault to read this question." …), or nil.
     public var problem: String?
+    /// The card of a run (card v1).
     public var card: QuestionCard?
+    /// The card of a connect request (card v2 `kind = connect`): a remote agent asks to connect
+    /// to the asking Mac. A question has a `card` or a `connect`, never both.
+    public var connect: ConnectRequestCard?
     public var settle: QuestionSettle?
     /// The kind of the answer this iPhone sent, while the core remembers it.
     public var answered: AnswerKind?
@@ -155,7 +159,7 @@ public struct RemoteQuestion: Codable, Sendable, Equatable, Identifiable {
     public init(
         qid: String, state: State, askerName: String, createdAt: Int64, expiresAt: Int64, problem: String? = nil,
         card: QuestionCard? = nil, settle: QuestionSettle? = nil, answered: AnswerKind? = nil,
-        vaultID: String? = nil, vaultName: String? = nil
+        vaultID: String? = nil, vaultName: String? = nil, connect: ConnectRequestCard? = nil
     ) {
         self.qid = qid
         self.state = state
@@ -164,6 +168,7 @@ public struct RemoteQuestion: Codable, Sendable, Equatable, Identifiable {
         self.expiresAt = expiresAt
         self.problem = problem
         self.card = card
+        self.connect = connect
         self.settle = settle
         self.answered = answered
         self.vaultID = vaultID
@@ -171,7 +176,7 @@ public struct RemoteQuestion: Codable, Sendable, Equatable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case qid, state, problem, card, settle, answered
+        case qid, state, problem, card, connect, settle, answered
         case askerName = "asker_name"
         case createdAt = "created_at"
         case expiresAt = "expires_at"
@@ -200,6 +205,44 @@ public struct QuestionCard: Codable, Sendable, Equatable {
         case run, question, digest
         case askerDevice = "asker_device"
         case createdAt = "created_at"
+    }
+}
+
+/// The card of a connect request (contract relay-questions-v1, section 7.4): the client name
+/// that the remote agent registered, the Mac it connects to, and the match code that its browser
+/// page shows. The core opened and checked it; the texts are for display.
+public struct ConnectRequestCard: Codable, Sendable, Equatable {
+    public var askerDevice: String
+    public var createdAt: Int64
+    /// The connect request ID of the Mac's node.
+    public var id: String
+    public var clientName: String
+    public var macName: String
+    public var code: String
+    public var expiresAt: Int64
+    public var digest: String
+
+    public init(
+        askerDevice: String, createdAt: Int64, id: String, clientName: String, macName: String, code: String,
+        expiresAt: Int64, digest: String
+    ) {
+        self.askerDevice = askerDevice
+        self.createdAt = createdAt
+        self.id = id
+        self.clientName = clientName
+        self.macName = macName
+        self.code = code
+        self.expiresAt = expiresAt
+        self.digest = digest
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, code, digest
+        case askerDevice = "asker_device"
+        case createdAt = "created_at"
+        case clientName = "client_name"
+        case macName = "mac_name"
+        case expiresAt = "expires_at"
     }
 }
 
@@ -373,6 +416,8 @@ public enum AnswerKind: String, Codable, Sendable, CaseIterable {
     case neverForAgent = "never_for_agent"
     case alwaysAskForAgent = "always_ask_for_agent"
     case disconnect
+    /// Allow a connect request (card v2 `kind = connect`). Its Deny is `deny`.
+    case allowConnect = "allow_connect"
 }
 
 /// The environment of a correction.
@@ -417,7 +462,8 @@ public struct RemoteAnswer: Sendable, Equatable, Hashable {
     /// section 5.3). The others take authority away: the core signs them without Face ID.
     public var needsFaceID: Bool {
         switch kind {
-        case .approve, .approveAsDevelopment, .approveAsProduction, .approveOnce, .approveInProject, .allowProduction: true
+        case .approve, .approveAsDevelopment, .approveAsProduction, .approveOnce, .approveInProject, .allowProduction,
+            .allowConnect: true
         case .correctEnvironment: environment == .development
         case .deny, .denyWithComment, .neverForAgent, .alwaysAskForAgent, .disconnect: false
         }

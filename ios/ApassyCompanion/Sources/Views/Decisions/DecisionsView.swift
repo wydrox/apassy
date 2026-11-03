@@ -207,7 +207,11 @@ struct DecisionsView: View {
                     switch decision.source {
                     case .question(let question):
                         if let questions {
-                            RequestsWaitingRow(model: questions, question: question, now: now)
+                            if let connect = question.connect {
+                                ConnectRequestRow(model: questions, question: question, connect: connect, now: now)
+                            } else {
+                                RequestsWaitingRow(model: questions, question: question, now: now)
+                            }
                         }
                     case .run(let run):
                         if let session {
