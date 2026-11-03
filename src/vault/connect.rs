@@ -376,6 +376,8 @@ mod tests {
                     super::super::MembershipPurpose::Questions,
                 ]),
                 created_at: 0,
+                pin: None,
+                alt: Vec::new(),
             })
             .unwrap();
         refused(&mut member, REPLICA_ID);

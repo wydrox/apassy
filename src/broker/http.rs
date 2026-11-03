@@ -19,6 +19,11 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use zeroize::Zeroizing;
 
+/// The pin of a node certificate (contract node-pairing-v1 section 4): the one type of
+/// `src/net/pin.rs`, which the TLS front and the companion use too. Its comparison is
+/// constant-time ([`Pin::matches`]).
+pub use crate::net::pin::{PIN_TEXT_CHARS, Pin, parse as parse_pin};
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest response that the client reads, headers and chunk framing included.
@@ -181,6 +186,100 @@ impl TlsClient {
         Ok(Self {
             config: Arc::new(config),
         })
+    }
+
+    /// Trust only the leaf certificate whose SHA-256 is `pin` (contract node-pairing-v1
+    /// section 4): TLS 1.3 only, ALPN `http/1.1`. The names, the dates, the issuer, and
+    /// every further certificate of the chain are ignored; nothing falls back to the
+    /// system trust store. The handshake signature is still checked with the key of the
+    /// pinned leaf, so only the holder of its private key passes.
+    pub fn pinned(pin: &Pin) -> io::Result<Self> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = PinnedVerifier {
+            pin: *pin,
+            algorithms: provider.signature_verification_algorithms,
+        };
+        let mut config = ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(io::Error::other)?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(Self {
+            config: Arc::new(config),
+        })
+    }
+}
+
+/// The certificate check of [`TlsClient::pinned`].
+struct PinnedVerifier {
+    pin: Pin,
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl std::fmt::Debug for PinnedVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedVerifier")
+            .field("pin", &self.pin)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The error of a leaf that is not the pinned one. `relay_http` tells it from other
+/// TLS failures ([`is_pin_mismatch`]).
+fn pin_mismatch() -> rustls::Error {
+    rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)
+}
+
+/// Whether `err`, from a TLS handshake of a [`TlsClient::pinned`] client, is a leaf
+/// certificate that is not the pinned one.
+pub(crate) fn is_pin_mismatch(err: &io::Error) -> bool {
+    err.get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        .is_some_and(|inner| *inner == pin_mismatch())
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        // Only the leaf counts: a later certificate of the chain that matches does not.
+        if self.pin.matches(end_entity.as_ref()) {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(pin_mismatch())
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        // The client offers TLS 1.3 only; a TLS 1.2 signature never counts.
+        Err(rustls::Error::General(
+            "a pinned node uses TLS 1.3 only".to_owned(),
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
     }
 }
 
@@ -1689,6 +1788,49 @@ pub(crate) mod test_support {
     pub(crate) struct TestTls {
         pub(crate) config: Arc<rustls::ServerConfig>,
         pub(crate) client: TlsClient,
+        /// The DER of the leaf certificate that `config` presents.
+        pub(crate) leaf: rustls::pki_types::CertificateDer<'static>,
+        /// The DER of the test root that signed the leaf.
+        pub(crate) root: rustls::pki_types::CertificateDer<'static>,
+        /// The same leaf and key, presented with the root as a second certificate of
+        /// the chain.
+        pub(crate) chain_config: Arc<rustls::ServerConfig>,
+    }
+
+    /// A self-signed P-256 certificate for `127.0.0.1` and `localhost` (the form of a
+    /// node certificate, contract node-pairing-v1 section 4) and a server that presents
+    /// it with the protocol `versions` and ALPN `http/1.1`. Returns the server settings
+    /// and the DER of the certificate.
+    pub(crate) fn self_signed_tls(
+        versions: &[&'static rustls::SupportedProtocolVersion],
+    ) -> (
+        Arc<rustls::ServerConfig>,
+        rustls::pki_types::CertificateDer<'static>,
+    ) {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let mut params =
+            CertificateParams::new(vec!["127.0.0.1".to_owned(), "localhost".to_owned()])
+                .expect("params");
+        let mut name = DistinguishedName::new();
+        name.push(DnType::CommonName, "Apassy node Synthetic Test");
+        params.distinguished_name = name;
+        let key = KeyPair::generate().expect("node key");
+        let cert = params.self_signed(&key).expect("node certificate");
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(versions)
+        .expect("versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.der().clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+        )
+        .expect("server config");
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        (Arc::new(config), cert.der().clone())
     }
 
     pub(crate) fn test_tls() -> TestTls {
@@ -1724,21 +1866,28 @@ pub(crate) mod test_support {
         validity(&mut leaf);
         let leaf_key = KeyPair::generate().expect("leaf key");
         let leaf_cert = leaf.signed_by(&leaf_key, &issuer).expect("leaf cert");
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("versions")
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![leaf_cert.der().clone()],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
-        )
-        .expect("server config");
+        let server = |chain: Vec<rustls::pki_types::CertificateDer<'static>>| {
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(
+                chain,
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+            )
+            .expect("server config")
+        };
+        let config = server(vec![leaf_cert.der().clone()]);
+        let chain_config = server(vec![leaf_cert.der().clone(), root_cert.der().clone()]);
         TestTls {
             config: Arc::new(config),
             client: TlsClient::with_extra_roots(vec![root_cert.der().clone()])
                 .expect("TLS client with test root"),
+            leaf: leaf_cert.der().clone(),
+            root: root_cert.der().clone(),
+            chain_config: Arc::new(chain_config),
         }
     }
 }
@@ -3845,5 +3994,198 @@ mod tests {
         assert_eq!(failure, HttpFailure::Protocol);
         assert!(!format!("{failure:?}").contains(SYNTHETIC_SECRET));
         server.join().expect("server");
+    }
+
+    // ---- Pinned trust (contract node-pairing-v1 section 4). ----
+
+    const CONTRACT_PIN: &str = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE";
+    const OK_ANSWER: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+
+    /// One POST to `127.0.0.1` at the port of `listener` with the client `tls`, served
+    /// by `config`. Returns the result and what the server saw.
+    fn pinned_post(
+        config: Arc<rustls::ServerConfig>,
+        tls: &TlsClient,
+    ) -> (Result<HttpResponse, HttpFailure>, ServerSeen) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = DestinationUrl::Https {
+            host: "127.0.0.1".to_owned(),
+            port: listener.local_addr().expect("addr").port(),
+        };
+        let (_release, held) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            serve_one_tls_request(listener, config, Some(OK_ANSWER.to_vec()), held)
+        });
+        let result = post_json_with(
+            &destination,
+            "/v1/auth/challenge",
+            br#"{"synthetic-pinned-marker":true}"#,
+            Some("synthetic-pinned-bearer"),
+            Duration::from_secs(5),
+            Some(tls),
+            resolve_to_this_computer,
+        );
+        (result, server.join().expect("server"))
+    }
+
+    fn assert_refused_before_a_request_byte(
+        (result, seen): (Result<HttpResponse, HttpFailure>, ServerSeen),
+        what: &str,
+    ) {
+        assert_eq!(result.unwrap_err(), HttpFailure::Tls, "{what}");
+        assert!(seen.plaintext.is_empty(), "{what}: no request byte arrived");
+        assert!(!seen.raw.is_empty(), "{what}: the client hello arrived");
+        for secret in [
+            b"synthetic-pinned-bearer".as_slice(),
+            b"synthetic-pinned-marker",
+        ] {
+            assert!(!contains(&seen.raw, secret), "{what}: nothing in clear");
+        }
+    }
+
+    #[test]
+    fn a_pin_is_the_canonical_b64u_of_the_leaf_sha256() {
+        let der = include_bytes!("../../tests/fixtures/node-pairing-v1/node-cert.der");
+        let pin = Pin::of_certificate(der);
+        assert_eq!(pin.text(), CONTRACT_PIN);
+        assert_eq!(parse_pin(CONTRACT_PIN), Some(pin));
+        assert_eq!(pin.text().len(), PIN_TEXT_CHARS);
+        assert!(pin.matches(der));
+        assert!(!pin.matches(&der[1..]));
+        assert_eq!(format!("{pin}"), CONTRACT_PIN);
+        // 42 characters, padding bits set, padding, and another alphabet are refused.
+        assert_eq!(parse_pin(&CONTRACT_PIN[..42]), None);
+        assert_eq!(parse_pin(&format!("{}F", &CONTRACT_PIN[..42])), None);
+        assert_eq!(parse_pin(&format!("{CONTRACT_PIN}=")), None);
+        assert_eq!(parse_pin(&CONTRACT_PIN.replace('_', "/")), None);
+        assert_eq!(parse_pin(""), None);
+    }
+
+    #[test]
+    fn a_pinned_client_accepts_the_pinned_self_signed_leaf_over_tls13() {
+        let (config, der) = test_support::self_signed_tls(&[&rustls::version::TLS13]);
+        let tls = TlsClient::pinned(&Pin::of_certificate(&der)).expect("pinned client");
+        let (result, seen) = pinned_post(config, &tls);
+        let response = result.expect("the pinned leaf passes");
+        assert_eq!(response.status, 200);
+        assert!(contains(
+            &seen.plaintext,
+            b"POST /v1/auth/challenge HTTP/1.1"
+        ));
+    }
+
+    #[test]
+    fn a_pinned_client_refuses_another_certificate_before_any_request_byte() {
+        let (config, _) = test_support::self_signed_tls(&[&rustls::version::TLS13]);
+        let (_, other) = test_support::self_signed_tls(&[&rustls::version::TLS13]);
+        let tls = TlsClient::pinned(&Pin::of_certificate(&other)).expect("pinned client");
+        assert_refused_before_a_request_byte(pinned_post(config, &tls), "another pin");
+    }
+
+    #[test]
+    fn a_pinned_client_never_falls_back_to_system_trust() {
+        // A certificate that the client of the test root trusts, and that a system
+        // client accepts: a pinned client with another pin still refuses it.
+        let pki = test_tls();
+        let (_, other) = test_support::self_signed_tls(&[&rustls::version::TLS13]);
+        let tls = TlsClient::pinned(&Pin::of_certificate(&other)).expect("pinned client");
+        assert_refused_before_a_request_byte(
+            pinned_post(Arc::clone(&pki.config), &tls),
+            "a trusted certificate with another pin",
+        );
+        // The system client is unchanged: it takes the same server by name.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let (_release, held) = mpsc::channel();
+        let config = Arc::clone(&pki.config);
+        let server = std::thread::spawn(move || {
+            serve_one_tls_request(listener, config, Some(OK_ANSWER.to_vec()), held)
+        });
+        let response = post_json_with(
+            &destination,
+            "/v1/score",
+            b"{}",
+            None,
+            Duration::from_secs(5),
+            Some(&pki.client),
+            resolve_to_this_computer,
+        )
+        .expect("system trust as before");
+        assert_eq!(response.status, 200);
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn only_the_leaf_counts_in_a_chain() {
+        let pki = test_tls();
+        // The root is the second certificate of the chain: its pin does not pass.
+        let root_pin = TlsClient::pinned(&Pin::of_certificate(&pki.root)).expect("pinned");
+        assert_refused_before_a_request_byte(
+            pinned_post(Arc::clone(&pki.chain_config), &root_pin),
+            "the pin of a later certificate",
+        );
+        // The pin of the leaf passes; the issuer and the root in the chain are ignored.
+        let leaf_pin = TlsClient::pinned(&Pin::of_certificate(&pki.leaf)).expect("pinned");
+        let (result, _) = pinned_post(Arc::clone(&pki.chain_config), &leaf_pin);
+        assert_eq!(result.expect("the leaf passes").status, 200);
+    }
+
+    #[test]
+    fn a_pinned_client_refuses_tls12() {
+        let (config, der) = test_support::self_signed_tls(&[&rustls::version::TLS12]);
+        let tls = TlsClient::pinned(&Pin::of_certificate(&der)).expect("pinned client");
+        assert_refused_before_a_request_byte(pinned_post(config, &tls), "TLS 1.2");
+    }
+
+    #[test]
+    fn a_pinned_client_offers_http11_alpn() {
+        let (config, der) = test_support::self_signed_tls(&[&rustls::version::TLS13]);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = DestinationUrl::Https {
+            host: "127.0.0.1".to_owned(),
+            port: listener.local_addr().expect("addr").port(),
+        };
+        let server = std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().expect("accept");
+            tcp.set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("timeout");
+            let conn = rustls::ServerConnection::new(config).expect("server connection");
+            let mut tls = StreamOwned::new(conn, tcp);
+            let _ = read_request(&mut tls);
+            let alpn = tls.conn.alpn_protocol().map(<[u8]>::to_vec);
+            let version = tls.conn.protocol_version();
+            let _ = tls.write_all(OK_ANSWER);
+            let _ = tls.flush();
+            tls.conn.send_close_notify();
+            let _ = tls.conn.complete_io(&mut tls.sock);
+            (alpn, version)
+        });
+        let tls = TlsClient::pinned(&Pin::of_certificate(&der)).expect("pinned client");
+        let response = post_json_with(
+            &destination,
+            "/v1/score",
+            b"{}",
+            None,
+            Duration::from_secs(5),
+            Some(&tls),
+            resolve_to_this_computer,
+        )
+        .expect("pinned exchange");
+        assert_eq!(response.status, 200);
+        let (alpn, version) = server.join().expect("server");
+        assert_eq!(alpn.as_deref(), Some(b"http/1.1".as_slice()));
+        assert_eq!(version, Some(rustls::ProtocolVersion::TLSv1_3));
+    }
+
+    #[test]
+    fn a_pin_mismatch_is_told_from_other_tls_failures() {
+        let mismatch = io::Error::new(io::ErrorKind::InvalidData, pin_mismatch());
+        assert!(is_pin_mismatch(&mismatch));
+        let other = io::Error::new(
+            io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired),
+        );
+        assert!(!is_pin_mismatch(&other));
+        assert!(!is_pin_mismatch(&io::Error::from(io::ErrorKind::TimedOut)));
     }
 }

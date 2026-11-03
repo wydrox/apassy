@@ -85,16 +85,29 @@ UPDATE vault_meta SET schema_version = 26 WHERE id = 1;
 PRAGMA user_version = 26;
 ";
 
+/// The way back from the current schema to schema 27: `schema34::downgrade_sql` (the
+/// account key source of relay memberships), `schema32::downgrade_sql` (short-lived
+/// credentials), `schema29::downgrade_sql` (the host of the bouncer brain), and then
+/// `schema28::downgrade_sql` (the pinned trust of a membership).
+#[cfg(test)]
+pub(super) fn downgrade_to_27_sql() -> String {
+    format!(
+        "{}{}{}{}",
+        super::schema34::downgrade_sql(),
+        super::schema32::downgrade_sql(),
+        super::schema29::downgrade_sql(),
+        super::schema28::downgrade_sql()
+    )
+}
+
 /// The way back from the current schema to schema 25, which the fixtures of schema 25
-/// and earlier start with: `schema32::downgrade_sql` (short-lived credentials),
-/// `schema29::downgrade_sql` (the host of the bouncer brain), [`DOWNGRADE_TO_26_SQL`],
-/// and then `schema26::DOWNGRADE_TO_25_SQL`.
+/// and earlier start with: [`downgrade_to_27_sql`], [`DOWNGRADE_TO_26_SQL`], and then
+/// `schema26::DOWNGRADE_TO_25_SQL`.
 #[cfg(test)]
 pub(super) fn downgrade_to_25_sql() -> String {
     format!(
-        "{}{}{DOWNGRADE_TO_26_SQL}{}",
-        super::schema32::downgrade_sql(),
-        super::schema29::downgrade_sql(),
+        "{}{DOWNGRADE_TO_26_SQL}{}",
+        downgrade_to_27_sql(),
         super::schema26::DOWNGRADE_TO_25_SQL
     )
 }
@@ -208,12 +221,8 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
-        // Schema 32 (short-lived credentials, `schema32.rs`) and 29 (the host of the
-        // bouncer brain, `schema29.rs`) first.
-        conn.execute_batch(&crate::vault::schema32::downgrade_sql())
-            .unwrap();
-        conn.execute_batch(&crate::vault::schema29::downgrade_sql())
-            .unwrap();
+        // Schemas 32, 29, and 28 (`schema32.rs`, `schema29.rs`, `schema28.rs`) first.
+        conn.execute_batch(&downgrade_to_27_sql()).unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
         assert_eq!(version(&conn), 26);
         assert!(!has_table(&conn, "cloud_run"));
@@ -308,12 +317,8 @@ mod tests {
         drop(vault);
 
         let conn = raw(&path);
-        // Schema 32 (short-lived credentials, `schema32.rs`) and 29 (the host of the
-        // bouncer brain, `schema29.rs`) first.
-        conn.execute_batch(&crate::vault::schema32::downgrade_sql())
-            .unwrap();
-        conn.execute_batch(&crate::vault::schema29::downgrade_sql())
-            .unwrap();
+        // Schemas 32, 29, and 28 (`schema32.rs`, `schema29.rs`, `schema28.rs`) first.
+        conn.execute_batch(&downgrade_to_27_sql()).unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
         assert_eq!(version(&conn), 26);
         assert_eq!(meta_version(&conn), 26);
@@ -381,7 +386,7 @@ mod tests {
         assert!(!crate::vault::merge::is_mergeable_schema(
             crate::vault::SCHEMA_VERSION + 1
         ));
-        // Schema 29 (`schema29.rs`) follows 27.
+        // Schemas 28 and 29 (`schema28.rs`, `schema29.rs`) follow 27.
         const { assert!(STATS_SCHEMA_VERSION < crate::vault::SCHEMA_VERSION) };
     }
 

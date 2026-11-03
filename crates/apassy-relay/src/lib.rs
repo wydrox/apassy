@@ -11,7 +11,9 @@
 //! decision per run, used by the relay and by the owner's host), `sync_head` (the
 //! signed head of a vault snapshot, docs/SPEC.md section 24), `embedded` (the Mac's own
 //! node behind `apassy::node::backend`, docs/SPEC.md section 30).
-//! Track modules: `server` (track server), `proxy` (track proxy), `cli` (track client).
+//! Track modules: `server` (track server), `proxy` (track proxy), `cli` (track client),
+//! `node` (the node without a window: `apassy serve`, `up`, `pair`, `status`, `doctor`,
+//! and `team`, plan S2-S3 D8).
 #![forbid(unsafe_code)]
 
 pub mod api;
@@ -27,6 +29,7 @@ pub mod session;
 pub mod sync_head;
 
 pub mod cli;
+pub mod node;
 pub mod proxy;
 pub mod server;
 

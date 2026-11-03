@@ -625,6 +625,8 @@ impl DesktopApp {
                 key_pkcs8,
                 purposes: BTreeSet::from([MembershipPurpose::Questions]),
                 created_at: 0,
+                pin: member.url().pin().map(|pin| pin.text()),
+                alt: member.url().alternative_list(),
             },
             _ => {
                 std::thread::spawn(move || joined.cancel());

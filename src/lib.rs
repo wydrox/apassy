@@ -5,6 +5,11 @@
 pub mod agent;
 /// The browser extension (ADR 0021): wire, site match, and the native messaging host.
 pub mod browser;
+/// The Apassy Connect account of this Mac (ADR 0037 stage 7, contract
+/// connect-account-v1): the account device key in the Keychain, sign-in, device links,
+/// recovery, and the entitlement token. It needs the vault.
+#[cfg(feature = "vault")]
+pub mod connect;
 /// The `apassy` owner command line (ADR 0017).
 #[cfg(feature = "desktop")]
 pub mod cli;
@@ -55,6 +60,12 @@ pub mod isolation;
 /// Import from 1Password (1PUX and CSV exports). It needs the vault types.
 #[cfg(feature = "vault")]
 pub mod import;
+
+/// Short-lived credentials, "way C" (ADR 0037 stage 6, contract private-sharing-v1):
+/// the lease providers, AWS SigV4, and the no-secret scan of the tests. It needs the
+/// vault (`ring`, the broker's HTTP client, the field types).
+#[cfg(feature = "vault")]
+pub mod lease;
 
 /// Time-based one-time passwords shared by the desktop and iPhone vaults.
 #[cfg(feature = "vault")]

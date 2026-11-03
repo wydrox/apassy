@@ -74,15 +74,22 @@ pub(super) enum Route {
     Unavailable,
 }
 
-/// The route of a team on `relay_url`. `stored`: a handle of this vault is kept;
-/// `explicit_gateway`: the app named a gateway (a test or a self-hosted build).
-pub(super) fn route(relay_url: &str, kind: Kind, stored: bool, explicit_gateway: bool) -> Route {
+/// The route of a team on `relay_url`. `pinned`: the origin is pinned, so it is a node
+/// (node-pairing-v1); `stored`: a handle of this vault is kept; `explicit_gateway`: the app
+/// named a gateway (a test or a self-hosted build).
+pub(super) fn route(
+    relay_url: &str,
+    kind: Kind,
+    pinned: bool,
+    stored: bool,
+    explicit_gateway: bool,
+) -> Route {
     let hosted = relay_url == DEFAULT_RELAY_URL;
     match kind {
         Kind::Watch if hosted => Route::Unavailable,
         Kind::Watch => Route::Handle,
         Kind::Iphone if hosted => Route::Token,
-        Kind::Iphone if stored => Route::Handle,
+        Kind::Iphone if pinned || stored => Route::Handle,
         // A relay on this computer is a development or test relay: it keeps the token
         // route unless a gateway was named.
         Kind::Iphone if relay_url.starts_with("http://") && !explicit_gateway => Route::Token,
@@ -289,32 +296,22 @@ mod tests {
     #[test]
     fn the_route_follows_the_relay_and_the_kind() {
         let node = "https://mac.tailnet-1234.ts.net:8444";
+        let local = "http://127.0.0.1:4000";
+        use Kind::{Iphone, Watch};
+        let hosted = DEFAULT_RELAY_URL;
+        assert_eq!(route(hosted, Iphone, false, false, false), Route::Token);
+        assert_eq!(route(hosted, Iphone, false, true, true), Route::Token);
+        assert_eq!(route(node, Iphone, true, false, false), Route::Handle);
+        assert_eq!(route(node, Iphone, false, false, false), Route::Handle);
+        assert_eq!(route(local, Iphone, false, false, false), Route::Token);
+        assert_eq!(route(local, Iphone, true, false, false), Route::Handle);
+        assert_eq!(route(local, Iphone, false, false, true), Route::Handle);
+        assert_eq!(route(local, Iphone, false, true, false), Route::Handle);
         assert_eq!(
-            route(DEFAULT_RELAY_URL, Kind::Iphone, false, false),
-            Route::Token
-        );
-        assert_eq!(
-            route(DEFAULT_RELAY_URL, Kind::Iphone, true, true),
-            Route::Token
-        );
-        assert_eq!(route(node, Kind::Iphone, false, false), Route::Handle);
-        assert_eq!(
-            route("http://127.0.0.1:4000", Kind::Iphone, false, false),
-            Route::Token
-        );
-        assert_eq!(
-            route("http://127.0.0.1:4000", Kind::Iphone, false, true),
-            Route::Handle
-        );
-        assert_eq!(
-            route("http://127.0.0.1:4000", Kind::Iphone, true, false),
-            Route::Handle
-        );
-        assert_eq!(
-            route(DEFAULT_RELAY_URL, Kind::Watch, false, false),
+            route(hosted, Watch, false, false, false),
             Route::Unavailable
         );
-        assert_eq!(route(node, Kind::Watch, false, false), Route::Handle);
+        assert_eq!(route(node, Watch, true, false, false), Route::Handle);
     }
 
     #[test]

@@ -42,7 +42,8 @@ pub(super) const SHORT_LIVED_SCHEMA_VERSION: i64 = 32;
 /// The newest schema before this one in the migration chain.
 pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema29::BOUNCER_HOST_SCHEMA_VERSION;
 
-const _: () = assert!(SCHEMA_VERSION == SHORT_LIVED_SCHEMA_VERSION);
+// Schema 34 (`schema34.rs`) follows this step.
+const _: () = assert!(SHORT_LIVED_SCHEMA_VERSION < SCHEMA_VERSION);
 const _: () = assert!(PREVIOUS_SCHEMA_VERSION < SHORT_LIVED_SCHEMA_VERSION);
 
 /// The child tables of a credential added in schema 32.
@@ -226,6 +227,9 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
+        // Schema 34 (the account key source of relay memberships, `schema34.rs`) first.
+        conn.execute_batch(&crate::vault::schema34::downgrade_sql())
+            .unwrap();
         conn.execute_batch(&downgrade_sql()).unwrap();
         assert_eq!(version(&conn), PREVIOUS_SCHEMA_VERSION);
         assert!(!has_table(&conn, "short_lived"));
@@ -287,7 +291,7 @@ mod tests {
         vault.unlock(PASS).unwrap();
         assert_eq!(
             version(vault.conn_ref().unwrap()),
-            SHORT_LIVED_SCHEMA_VERSION
+            crate::vault::SCHEMA_VERSION
         );
     }
 
@@ -297,7 +301,7 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("new.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), SHORT_LIVED_SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
         for table in CHILD_TABLES_V32 {
             assert!(has_table(conn, table), "{table}");
             assert!(merge::SYNCED_TABLES.contains(&table), "{table}");

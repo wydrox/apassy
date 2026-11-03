@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
 
 use apassy::sync::{
-    DEFAULT_RELAY_URL, JoinedDevice, PendingJoin, RelayConfig, RelayDownload, RelaySync,
+    DEFAULT_RELAY_URL, JoinedDevice, PendingJoin, RelayConfig, RelayDownload, RelaySync, RelayUrl,
     link_code_team,
 };
 
@@ -24,7 +24,11 @@ pub struct Joining {
     pending: Option<PendingJoin>,
     joined: Option<JoinedDevice>,
     download: Option<RelayDownload>,
-    relay_url: String,
+    /// The relay of the link, with the pin and the alternatives of a node.
+    url: RelayUrl,
+    /// The display name of a pinned node from its link (node-pairing-v1 section 7): a
+    /// label, never an authority.
+    node_name: Option<String>,
     team_id: String,
     team: String,
     words: Vec<String>,
@@ -38,6 +42,20 @@ pub struct JoinOut {
     pub team: String,
     pub words: Vec<String>,
     pub expires_at: u64,
+    /// A pinned node (node-pairing-v1): its origin and its display name, for "via your
+    /// Mac". Absent for a hosted relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<JoinNode>,
+}
+
+/// The node of a pinned link, as the app shows it.
+#[derive(Debug, Serialize)]
+pub struct JoinNode {
+    /// The origin that the iPhone stores and signs.
+    pub origin: String,
+    /// The node's display name from the link, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Joining {
@@ -51,6 +69,10 @@ impl Joining {
             team: self.team.clone(),
             words: self.words.clone(),
             expires_at: self.expires_at,
+            node: self.url.pin().map(|_| JoinNode {
+                origin: self.url.as_str().to_owned(),
+                name: self.node_name.clone(),
+            }),
         }
     }
 
@@ -160,12 +182,14 @@ impl Core {
     fn join_start(&self, link: &str, device_name: &str) -> CoreResult<JoinOut> {
         self.end_join();
         let joins = self.joins.load(Ordering::SeqCst);
-        let (url, code) = PendingJoin::parse_link(link, DEFAULT_RELAY_URL)?;
-        let team_id = link_code_team(&code).unwrap_or_default().to_owned();
+        let paired = PendingJoin::parse_paired(link, DEFAULT_RELAY_URL)?;
+        let url = paired.url()?;
+        let team_id = link_code_team(&paired.code).unwrap_or_default().to_owned();
         let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name)
             .map_err(|error| join_error(error.into()))?;
         let joining = Joining {
-            relay_url: url.as_str().to_owned(),
+            url,
+            node_name: paired.name.clone(),
             team_id,
             team: pending.team.clone(),
             words: pending
@@ -268,12 +292,16 @@ impl Core {
         let temp_state = format!("new-{token}");
         let sync_dir = self.paths.data_dir.join("sync");
         let temp_state_file = sync_dir.join(format!("{temp_state}.json"));
-        let relay = RelaySync::new(RelayConfig::in_data_dir(
-            &self.paths.data_dir,
-            &temp_file,
-            &joining.relay_url,
-            &temp_state,
-        ));
+        // A node: the pin and the alternatives of the link stay with the sync of the vault.
+        let relay = RelaySync::new(
+            RelayConfig::in_data_dir(
+                &self.paths.data_dir,
+                &temp_file,
+                joining.url.as_str(),
+                &temp_state,
+            )
+            .with_url_trust(&joining.url),
+        );
         let (vault, report) = relay.adopt(joined, download, passphrase)?;
         let id = report.identity.vault_id.clone();
         drop(vault);
@@ -314,6 +342,8 @@ impl Core {
             team_id: Some(report.link.team_id.clone()),
             device_id: Some(report.link.device_id),
             added_at: now() as i64,
+            pin: report.link.pin.clone(),
+            alt: report.link.alt.clone(),
         };
         {
             let mut list = guard(&self.list);

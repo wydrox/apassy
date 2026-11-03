@@ -232,7 +232,9 @@ impl State {
             .get(vault_id)
             .is_some_and(|handle| handle.team_id == member.team_id());
         let explicit = self.push.as_ref().is_some_and(|push| push.explicit_gateway);
-        push_gateway::route(member.relay_url(), kind, stored, explicit)
+        // A pinned origin is a node (node-pairing-v1).
+        let pinned = member.url().pin().is_some();
+        push_gateway::route(member.relay_url(), kind, pinned, stored, explicit)
     }
 
     /// The context of `vault_id` while it still has the device `member`: a drop or a new
@@ -1103,13 +1105,11 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
     Ok(Some((membership, keys)))
 }
 
+/// The device of `membership`, with the pin and the alternatives of a node relay that
+/// the membership keeps (node-pairing-v1 section 9): it never connects to a pinned
+/// node without its pin.
 fn member_of(membership: &RelayMembership) -> CoreResult<RelayMember> {
-    Ok(RelayMember::new(
-        &membership.relay_url,
-        &membership.team_id,
-        membership.device_id,
-        membership.key_pkcs8.clone(),
-    )?)
+    Ok(RelayMember::from_membership(membership)?)
 }
 
 fn settle_out(settle: envelope::Settle) -> SettleOut {
@@ -2732,8 +2732,8 @@ impl Core {
 
     /// Give the team of `vault_id` this device's push: the token on the hosted relay, a
     /// handle of the gateway on a node. The token goes to a node never: only to the
-    /// gateway, and to a relay that has no handle route (404, a relay before team schema
-    /// 8, which is no node).
+    /// gateway, and to an unpinned relay that has no handle route (404, a relay before team
+    /// schema 8, which is no node). A pinned origin is a node: never a token.
     fn put_push(
         &self,
         vault_id: &str,
@@ -2745,7 +2745,9 @@ impl Core {
             push_gateway::Route::Token => Self::put_token(member, token),
             push_gateway::Route::Unavailable => Err(no_push_here()),
             push_gateway::Route::Handle => match self.put_handle(vault_id, member, token) {
-                Err(HandleFailure::NoRoute) if token.kind == push_gateway::Kind::Iphone => {
+                Err(HandleFailure::NoRoute)
+                    if token.kind == push_gateway::Kind::Iphone && member.url().pin().is_none() =>
+                {
                     Self::put_token(member, token)
                 }
                 Err(HandleFailure::NoRoute) => Err(no_push_here()),
@@ -2838,6 +2840,10 @@ impl Core {
         }
         match member.call("DELETE", "/v1/push/handle", None, Duration::ZERO) {
             Ok(_) => Ok(()),
+            // A node never held a token.
+            Err(RelayCallError::Relay { status: 404, .. }) if member.url().pin().is_some() => {
+                Ok(())
+            }
             Err(RelayCallError::Relay { status: 404, .. }) => Self::delete_token(member),
             Err(RelayCallError::Relay { status: 409, code }) if code == "push_unavailable" => {
                 Ok(())
@@ -3217,6 +3223,8 @@ impl Core {
                     key_pkcs8,
                     purposes: BTreeSet::from([MembershipPurpose::Questions]),
                     created_at: 0,
+                    pin: member.url().pin().map(|pin| pin.text()),
+                    alt: member.url().alternative_list(),
                 };
                 if let Some(handoff) = &handoff {
                     let answer_key = attaching

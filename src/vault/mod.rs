@@ -46,8 +46,10 @@ mod schema24;
 mod schema25;
 mod schema26;
 mod schema27;
+mod schema28;
 mod schema29;
 mod schema32;
+mod schema34;
 mod short_lived;
 pub mod stats;
 pub use connect::PendingConnect;
@@ -1163,7 +1165,9 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | schema25::PASSKEY_EXTENSIONS_SCHEMA_VERSION
         | schema26::CLOUD_SCHEMA_VERSION
         | schema27::STATS_SCHEMA_VERSION
+        | schema28::NODE_TRUST_SCHEMA_VERSION
         | schema29::BOUNCER_HOST_SCHEMA_VERSION
+        | schema32::SHORT_LIVED_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1346,6 +1350,11 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
+    let v28: &[&str] = if version >= schema28::NODE_TRUST_SCHEMA_VERSION {
+        &schema28::COLUMNS
+    } else {
+        &[]
+    };
     let v29: &[&str] = if version >= schema29::BOUNCER_HOST_SCHEMA_VERSION {
         &schema29::COLUMNS
     } else {
@@ -1353,6 +1362,11 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     };
     let v32: &[&str] = if version >= schema32::SHORT_LIVED_SCHEMA_VERSION {
         &schema32::COLUMNS
+    } else {
+        &[]
+    };
+    let v34: &[&str] = if version >= schema34::ACCOUNT_KEY_SCHEMA_VERSION {
+        &schema34::COLUMNS
     } else {
         &[]
     };
@@ -1381,8 +1395,10 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v23)
         .chain(v26)
         .chain(v27)
+        .chain(v28)
         .chain(v29)
         .chain(v32)
+        .chain(v34)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1499,11 +1515,17 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < schema27::STATS_SCHEMA_VERSION {
         schema27::add_schema_v27(&tx)?;
     }
+    if from < schema28::NODE_TRUST_SCHEMA_VERSION {
+        schema28::add_schema_v28(&tx)?;
+    }
     if from < schema29::BOUNCER_HOST_SCHEMA_VERSION {
         schema29::add_schema_v29(&tx)?;
     }
     if from < schema32::SHORT_LIVED_SCHEMA_VERSION {
         schema32::add_schema_v32(&tx)?;
+    }
+    if from < schema34::ACCOUNT_KEY_SCHEMA_VERSION {
+        schema34::add_schema_v34(&tx)?;
     }
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -1567,8 +1589,10 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     schema25::add_schema_v25(&tx)?;
     schema26::add_schema_v26(&tx)?;
     schema27::add_schema_v27(&tx)?;
+    schema28::add_schema_v28(&tx)?;
     schema29::add_schema_v29(&tx)?;
     schema32::add_schema_v32(&tx)?;
+    schema34::add_schema_v34(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

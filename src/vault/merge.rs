@@ -175,12 +175,15 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
 /// only local tables and a local column (the cloud agents of the node, `schema26.rs`):
 /// a copy has none of their rows. Schema 27 adds local columns and a local table (the
 /// figures of the Bouncer section, `schema27.rs`): a copy has none of their rows either.
-/// Schema 29 adds only a local table and columns of local tables (the host of the
-/// bouncer brain, `schema29.rs`): a copy has none of their rows either. Schema 32 adds
-/// two synced child tables of a credential (short-lived credentials and member keys,
-/// `schema32.rs`): a copy of an earlier schema has none of their rows, so its records
-/// keep the rows of this vault ([`keep_local_v32`]).
-pub(super) const UPGRADABLE_SCHEMA: i64 = super::schema32::PREVIOUS_SCHEMA_VERSION;
+/// Schema 28 adds only columns of a local table (the pin and the alternatives of a relay
+/// membership, `schema28.rs`): a copy has none of its rows either. Schema 29 adds only a
+/// local table and columns of local tables (the host of the bouncer brain,
+/// `schema29.rs`): a copy has none of their rows either. Schema 32 adds two synced child
+/// tables of a credential (short-lived credentials and member keys, `schema32.rs`): a
+/// copy of an earlier schema has none of their rows, so its records keep the rows of this
+/// vault ([`keep_local_v32`]). Schema 34 adds only a column of a local table (the account
+/// key source of relay memberships, `schema34.rs`): a copy has none of its rows either.
+pub(super) const UPGRADABLE_SCHEMA: i64 = super::schema34::PREVIOUS_SCHEMA_VERSION;
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
@@ -188,22 +191,25 @@ pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERS
 
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
 // Schemas 20 through 23 add local state only, schema 24 only widens a `CHECK` of a
-// synced table, schema 25 only adds values of reserved item fields, schemas 26, 27 and
-// 29 add local state only, and [`keep_local_v32`] covers 32; future synced schemas
-// require another merge step.
-const _: () = assert!(SCHEMA_VERSION == super::schema32::SHORT_LIVED_SCHEMA_VERSION);
-const _: () = assert!(super::schema29::PREVIOUS_SCHEMA_VERSION == OLDEST_UPGRADABLE_SCHEMA + 11);
+// synced table, schema 25 only adds values of reserved item fields, schemas 26, 27, 28,
+// 29, and 34 add local state only, and [`keep_local_v32`] covers 32; future synced
+// schemas require another merge step.
+const _: () = assert!(SCHEMA_VERSION == super::schema34::ACCOUNT_KEY_SCHEMA_VERSION);
+const _: () =
+    assert!(super::schema29::PREVIOUS_SCHEMA_VERSION == super::schema28::NODE_TRUST_SCHEMA_VERSION);
+const _: () = assert!(super::schema29::PREVIOUS_SCHEMA_VERSION == OLDEST_UPGRADABLE_SCHEMA + 12);
 
-/// The steps of the chain after the contiguous run of 16 to 27, in order. Numbers between
+/// The steps of the chain after the contiguous run of 16 to 28, in order. Numbers between
 /// them belong to no build (other plans hold them). A step that lands in a gap is added
 /// here with its own module.
-const LATER_SCHEMAS: [i64; 2] = [
+const LATER_SCHEMAS: [i64; 3] = [
     super::schema29::BOUNCER_HOST_SCHEMA_VERSION,
     super::schema32::SHORT_LIVED_SCHEMA_VERSION,
+    super::schema34::ACCOUNT_KEY_SCHEMA_VERSION,
 ];
 // The schema before this one is the last of the later steps before it.
-const _: () = assert!(LATER_SCHEMAS[0] == UPGRADABLE_SCHEMA);
-const _: () = assert!(LATER_SCHEMAS[1] == SCHEMA_VERSION);
+const _: () = assert!(LATER_SCHEMAS[1] == UPGRADABLE_SCHEMA);
+const _: () = assert!(LATER_SCHEMAS[2] == SCHEMA_VERSION);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
 /// one of the earlier schemas that it upgrades. A number between two steps of the chain

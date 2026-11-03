@@ -18,9 +18,9 @@ use zeroize::Zeroizing;
 
 use super::{ApiError, JoinedDevice, Request, Session, call, json_request};
 use crate::sync::relay_crypto::DeviceKey;
-use crate::sync::relay_http::{Cancel, RelayUrl};
+use crate::sync::relay_http::{Cancel, RelayUrl, TlsTrust};
 use crate::sync::{SyncError, relay_crypto::valid_team_id};
-use crate::vault::VaultErrorKind;
+use crate::vault::{RelayMembership, VaultErrorKind};
 
 /// Why a call of [`RelayMember::call`] failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,14 +66,41 @@ impl RelayMember {
         device_id: u64,
         key_pkcs8: Zeroizing<Vec<u8>>,
     ) -> Result<Self, SyncError> {
+        Self::with_url(RelayUrl::parse(relay_url)?, team_id, device_id, key_pkcs8)
+    }
+
+    /// [`Self::new`] for an address with its trust: a pinned node connects only with
+    /// its pin and its alternatives (contract node-pairing-v1 section 4).
+    pub fn with_url(
+        url: RelayUrl,
+        team_id: &str,
+        device_id: u64,
+        key_pkcs8: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, SyncError> {
         if !valid_team_id(team_id) || device_id == 0 {
             return Err(SyncError::Damaged);
         }
-        let url = RelayUrl::parse(relay_url)?;
         let key = DeviceKey::from_pkcs8(key_pkcs8)?;
         Ok(Self {
             session: Arc::new(Session::new(url, team_id, key, Some(device_id))),
         })
+    }
+
+    /// The device of the relay membership `membership` of a vault, with the pin and the
+    /// alternatives that the membership keeps (vault schema 28). A stored pin that is
+    /// not a pin is `InvalidRelayAddress`: a pinned membership never connects without it.
+    pub fn from_membership(membership: &RelayMembership) -> Result<Self, SyncError> {
+        Self::with_url(
+            membership_relay_url(membership)?,
+            &membership.team_id,
+            membership.device_id,
+            membership.key_pkcs8.clone(),
+        )
+    }
+
+    /// The relay address with its trust and alternatives.
+    pub fn url(&self) -> &RelayUrl {
+        &self.session.url
     }
 
     /// The team on the relay.
@@ -215,4 +242,11 @@ impl JoinedDevice {
     pub fn key_pkcs8(&self) -> Option<Zeroizing<Vec<u8>>> {
         self.session.key.pkcs8().cloned()
     }
+}
+
+/// The address of the relay membership `membership`: its origin with its pin and its
+/// alternatives when it keeps them (vault schema 28).
+pub fn membership_relay_url(membership: &RelayMembership) -> Result<RelayUrl, SyncError> {
+    let trust = TlsTrust::from_pin_text(membership.pin.as_deref())?;
+    RelayUrl::parse_with_trust(&membership.relay_url, trust)?.alternatives(&membership.alt)
 }

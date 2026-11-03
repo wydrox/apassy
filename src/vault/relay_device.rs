@@ -15,6 +15,14 @@
 //! The private key is the PKCS#8 document of `ring`. It lives in a [`Zeroizing`]
 //! buffer while Apassy holds it. A restore keeps the row: a backup is the owner's own
 //! file. An adopted copy has no row, also when the source is a raw vault file.
+//!
+//! Schema 34 (`schema34.rs`, plan s7 unit M1): a vault store of Apassy Connect is a row
+//! with `key_source = 'account'` ([`Vault::set_account_relay_device`]). It holds no
+//! private key: [`RelayDevice::key_pkcs8`] is empty, [`RelayDevice::uses_account_key`]
+//! is true, and the account device key of this Mac (`crate::connect::AccountSigner`,
+//! one Keychain item outside every vault) signs its sign-ins and heads. The row keeps the
+//! public key of that account key, so a sync can check that the Keychain still holds the
+//! same key before it signs.
 
 use std::fmt;
 
@@ -81,14 +89,30 @@ impl fmt::Debug for RelayDevice {
 }
 
 impl RelayDevice {
+    /// The shape of a row: a valid key of its own, or no key for an account row.
     fn is_valid(&self) -> bool {
-        valid_relay_identity(
-            &self.relay_url,
-            &self.team_id,
-            self.device_id,
-            &self.public_key,
-            &self.key_pkcs8,
-        )
+        if self.uses_account_key() {
+            valid_account_identity(
+                &self.relay_url,
+                &self.team_id,
+                self.device_id,
+                &self.public_key,
+            )
+        } else {
+            valid_relay_identity(
+                &self.relay_url,
+                &self.team_id,
+                self.device_id,
+                &self.public_key,
+                &self.key_pkcs8,
+            )
+        }
+    }
+
+    /// True for a vault store of Apassy Connect (schema 34): no private key here; the
+    /// account device key of this Mac signs. See the module documentation.
+    pub fn uses_account_key(&self) -> bool {
+        self.key_pkcs8.is_empty()
     }
 }
 
@@ -113,6 +137,18 @@ pub(super) fn valid_relay_identity(
         && public_key[0] == 0x04
         && !key_pkcs8.is_empty()
         && key_pkcs8.len() <= MAX_KEY_BYTES
+}
+
+/// The shape of an account row (schema 34): [`valid_relay_identity`] without a private
+/// key.
+pub(super) fn valid_account_identity(
+    relay_url: &str,
+    team_id: &str,
+    device_id: u64,
+    public_key: &[u8],
+) -> bool {
+    // Any non-empty placeholder passes the key-length part of the shared check.
+    valid_relay_identity(relay_url, team_id, device_id, public_key, &[0])
 }
 
 /// A relay team ID: `t_` and 10 lowercase letters or digits.
@@ -164,7 +200,9 @@ fn drop_sync(tx: &Transaction<'_>, membership: &RelayMembership) -> VaultResult<
 
 impl Vault {
     /// The relay identity of this vault, or `None` when relay sync is off: the relay
-    /// membership with the purpose `sync`. The vault must be unlocked.
+    /// membership with the purpose `sync`. The vault must be unlocked. For a vault store
+    /// of Apassy Connect the key is empty ([`RelayDevice::uses_account_key`]): sign with
+    /// the account device key, after checking that its public key is `public_key`.
     pub fn relay_device(&self) -> VaultResult<Option<RelayDevice>> {
         let Some(membership) = sync_membership(self.conn_ref()?)? else {
             return Ok(None);
@@ -187,46 +225,115 @@ impl Vault {
     /// Store the relay identity of this vault: the membership of its team gets the
     /// purpose `sync` and this address, device number, and key (one key pair per team).
     /// It replaces an earlier identity: another team loses the purpose `sync`, and its
-    /// row goes when it has no other purpose. The time is now; `device.created_at` is
-    /// ignored. A value of a bad shape is `InvalidInput`.
+    /// row goes when it has no other purpose. The pin and the alternatives of the row
+    /// (schema 28) stay while the address stays, and go with another address. The time
+    /// is now; `device.created_at` is ignored. A value of a bad shape, or no private key
+    /// (an account row is [`Vault::set_account_relay_device`]), is `InvalidInput`.
     pub fn set_relay_device(&mut self, device: &RelayDevice) -> VaultResult<()> {
-        if !device.is_valid() {
+        if device.key_pkcs8.is_empty() || !device.is_valid() {
             return Err(err(VaultErrorKind::InvalidInput));
         }
-        let device_id =
-            i64::try_from(device.device_id).map_err(|_| err(VaultErrorKind::InvalidInput))?;
+        self.store_sync_identity(
+            &device.relay_url,
+            &device.team_id,
+            device.device_id,
+            &device.public_key,
+            &device.key_pkcs8,
+        )
+    }
+
+    /// Store a vault store of Apassy Connect as the relay identity of this vault
+    /// (schema 34): the membership of `team_id` with the purpose `sync`, the device
+    /// number `device_id` in the store, the public key of the account device key of this
+    /// Mac, and no private key (`key_source = 'account'`). It replaces an earlier
+    /// identity as [`Vault::set_relay_device`] does.
+    ///
+    /// - `InvalidInput`: a value of a bad shape.
+    /// - `AlreadyExists`: the team has a membership with another purpose than `sync`
+    ///   (its own key signs for that purpose, and an account row would drop it).
+    pub fn set_account_relay_device(
+        &mut self,
+        relay_url: &str,
+        team_id: &str,
+        device_id: u64,
+        public_key: &[u8],
+    ) -> VaultResult<()> {
+        if !valid_account_identity(relay_url, team_id, device_id, public_key) {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        if let Some(existing) = load_memberships(self.conn_ref()?, Some(team_id))?.pop()
+            && existing
+                .purposes
+                .iter()
+                .any(|purpose| *purpose != MembershipPurpose::Sync)
+        {
+            return Err(err(VaultErrorKind::AlreadyExists));
+        }
+        self.store_sync_identity(relay_url, team_id, device_id, public_key, &[])
+    }
+
+    /// The write of [`Vault::set_relay_device`] and [`Vault::set_account_relay_device`]:
+    /// an empty `key_pkcs8` is an account row.
+    fn store_sync_identity(
+        &mut self,
+        relay_url: &str,
+        team_id: &str,
+        device_id: u64,
+        public_key: &[u8],
+        key_pkcs8: &[u8],
+    ) -> VaultResult<()> {
+        let device_id = i64::try_from(device_id).map_err(|_| err(VaultErrorKind::InvalidInput))?;
+        let key_source = if key_pkcs8.is_empty() {
+            super::schema34::KEY_SOURCE_ACCOUNT
+        } else {
+            super::schema34::KEY_SOURCE_VAULT
+        };
         let now = to_sql_time(now_unix())?;
         let conn = self.conn_mut()?;
         let tx = storage(conn.transaction_with_behavior(TransactionBehavior::Immediate))?;
         if let Some(old) = sync_membership(&tx)?
-            && old.team_id != device.team_id
+            && old.team_id != team_id
         {
             drop_sync(&tx, &old)?;
         }
-        let mut purposes = load_memberships(&tx, Some(&device.team_id))?
+        let mut purposes = load_memberships(&tx, Some(team_id))?
             .pop()
             .map(|membership| membership.purposes)
             .unwrap_or_default();
         purposes.insert(MembershipPurpose::Sync);
         storage(tx.execute(
             "INSERT INTO relay_membership
-                 (team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 (team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at,
+                  key_source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(team_id) DO UPDATE SET relay_url = excluded.relay_url,
                  device_id = excluded.device_id, public_key = excluded.public_key,
                  key_pkcs8 = excluded.key_pkcs8, purposes = excluded.purposes,
-                 created_at = excluded.created_at",
+                 created_at = excluded.created_at, key_source = excluded.key_source,
+                 pin = CASE WHEN relay_url = excluded.relay_url THEN pin END,
+                 alt = CASE WHEN relay_url = excluded.relay_url THEN alt END",
             rusqlite::params![
-                device.team_id,
-                device.relay_url,
+                team_id,
+                relay_url,
                 device_id,
-                device.public_key,
-                device.key_pkcs8.as_slice(),
+                public_key,
+                key_pkcs8,
                 purposes_json(&purposes),
                 now,
+                key_source,
             ],
         ))?;
         storage(tx.commit())
+    }
+
+    /// Remove every membership that signs with the account device key (schema 34): this
+    /// Mac left its Connect account, was revoked, or forgot the account. The memberships
+    /// with their own keys stay. Returns how many rows went.
+    pub fn remove_account_memberships(&mut self) -> VaultResult<usize> {
+        storage(self.conn_ref()?.execute(
+            "DELETE FROM relay_membership WHERE key_source = ?1",
+            [super::schema34::KEY_SOURCE_ACCOUNT],
+        ))
     }
 
     /// Remove the relay identity (relay sync off): the membership loses the purpose
@@ -368,5 +475,100 @@ mod tests {
         assert!(vault.remove_relay_device().unwrap());
         assert!(vault.relay_membership("t_0000000001").unwrap().is_none());
         assert_eq!(vault.relay_memberships().unwrap().len(), 1);
+    }
+
+    /// A vault store of Apassy Connect (schema 34): the row has the public key of the
+    /// account key and no private key, the sync purpose moves as for any row, and leaving
+    /// the account removes only the account rows.
+    #[test]
+    fn an_account_row_holds_no_private_key_and_goes_with_the_account() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("a.db"), "synthetic-relay-pass").unwrap();
+        vault.unlock("synthetic-relay-pass").unwrap();
+        let questions = RelayDevice {
+            team_id: "t_0000000002".to_owned(),
+            ..device()
+        };
+        vault.set_relay_device(&questions).unwrap();
+        vault
+            .set_membership_purposes(
+                "t_0000000002",
+                &BTreeSet::from([MembershipPurpose::Questions]),
+            )
+            .unwrap();
+        let account_key = device().public_key;
+        vault
+            .set_account_relay_device(
+                "https://connect.example.test",
+                "t_7k2m5q4x3c",
+                1,
+                &account_key,
+            )
+            .unwrap();
+        let read = vault.relay_device().unwrap().expect("row");
+        assert!(read.uses_account_key());
+        assert!(read.key_pkcs8.is_empty());
+        assert_eq!(read.public_key, account_key);
+        assert_eq!(read.relay_url, "https://connect.example.test");
+        let membership = vault.relay_membership("t_7k2m5q4x3c").unwrap().unwrap();
+        assert!(membership.uses_account_key());
+        assert!(
+            !vault
+                .relay_membership("t_0000000002")
+                .unwrap()
+                .unwrap()
+                .uses_account_key()
+        );
+        // An account row never takes a team whose own key signs for another purpose.
+        assert_eq!(
+            vault
+                .set_account_relay_device(
+                    "https://connect.example.test",
+                    "t_0000000002",
+                    1,
+                    &account_key
+                )
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::AlreadyExists
+        );
+        // A bad shape is refused, and an empty key never goes through the vault path.
+        assert_eq!(
+            vault
+                .set_account_relay_device("", "t_7k2m5q4x3c", 1, &account_key)
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::InvalidInput
+        );
+        assert_eq!(
+            vault
+                .set_account_relay_device(
+                    "https://connect.example.test",
+                    "t_7k2m5q4x3c",
+                    1,
+                    &[4; 33]
+                )
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::InvalidInput
+        );
+        // Leaving the account: the account row goes, the questions row stays.
+        assert_eq!(vault.remove_account_memberships().unwrap(), 1);
+        assert!(vault.relay_device().unwrap().is_none());
+        assert_eq!(vault.relay_memberships().unwrap().len(), 1);
+        assert_eq!(vault.remove_account_memberships().unwrap(), 0);
+        // A vault key on the same team again turns the row back into a vault row.
+        vault
+            .set_account_relay_device(
+                "https://connect.example.test",
+                "t_7k2m5q4x3c",
+                1,
+                &account_key,
+            )
+            .unwrap();
+        vault.set_relay_device(&device()).unwrap();
+        let back = vault.relay_device().unwrap().unwrap();
+        assert!(!back.uses_account_key());
+        assert_eq!(vault.remove_account_memberships().unwrap(), 0);
     }
 }

@@ -33,7 +33,7 @@ use super::verify_expected_columns_in;
 /// The schema version of the bouncer brain host.
 pub(super) const BOUNCER_HOST_SCHEMA_VERSION: i64 = 29;
 /// The newest schema before this one in the migration chain.
-pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema27::STATS_SCHEMA_VERSION;
+pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema28::NODE_TRUST_SCHEMA_VERSION;
 
 // Schema 32 (`schema32.rs`) follows this step.
 const _: () = assert!(BOUNCER_HOST_SCHEMA_VERSION < SCHEMA_VERSION);
@@ -166,7 +166,10 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
-        // Schema 32 (short-lived credentials, `schema32.rs`) first.
+        // Schema 34 (the account key source, `schema34.rs`) and 32 (short-lived
+        // credentials, `schema32.rs`) first.
+        conn.execute_batch(&crate::vault::schema34::downgrade_sql())
+            .unwrap();
         conn.execute_batch(&crate::vault::schema32::downgrade_sql())
             .unwrap();
         conn.execute(
@@ -272,6 +275,9 @@ mod tests {
         }
         assert!(!crate::vault::merge::is_mergeable_schema(
             BOUNCER_HOST_SCHEMA_VERSION + 1
+        ));
+        assert!(!crate::vault::merge::is_mergeable_schema(
+            SCHEMA_VERSION + 1
         ));
     }
 }
