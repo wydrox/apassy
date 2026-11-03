@@ -48,7 +48,9 @@ public final class WatchNotificationsModel {
         self.permission = permission
         self.keys = keys
         self.defaults = defaults
-        enabled = defaults.bool(forKey: Self.enabledKey)
+        // A local: under @Observable, reading self.enabled before status is set does not compile.
+        let enabled = defaults.bool(forKey: Self.enabledKey)
+        self.enabled = enabled
         status = enabled ? .registering : .off
     }
 
