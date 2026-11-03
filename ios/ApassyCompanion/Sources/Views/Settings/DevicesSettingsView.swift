@@ -1,3 +1,4 @@
+import ApassyVaultDemo
 import ApassyVaultKit
 import SwiftUI
 
@@ -18,7 +19,11 @@ struct DevicesSettingsView: View {
             Section {
                 QuestionsStateRow()
                 MacPairingRow()
-                if AppleWatchLink.shared.canAddWatch {
+                if root.isDemo {
+                    // The demo pairs nothing: no Mac, no watch, no relay.
+                    Button("Pair with a Mac", systemImage: "qrcode.viewfinder") { root.showNotAvailableInDemo() }
+                    Button("Add Apple Watch", systemImage: "applewatch") { root.showNotAvailableInDemo() }
+                } else if AppleWatchLink.shared.canAddWatch {
                     NavigationLink(value: SettingsView.Page.addAppleWatch) {
                         Label("Add Apple Watch", systemImage: "applewatch")
                     }
@@ -33,13 +38,15 @@ struct DevicesSettingsView: View {
                 Text("Approve agent runs")
             } footer: {
                 Text(
-                    "Questions through the relay reach this iPhone on any network. Runs from the Mac on Wi-Fi show while this iPhone and the Mac are on the same network. Both show in Decisions."
+                    root.isDemo
+                        ? "In the demo, the questions come from “\(DemoVault.macName)”, a Mac of sample data. Pairing, the relay, and the Apple Watch are not available in the demo."
+                        : "Questions through the relay reach this iPhone on any network. Runs from the Mac on Wi-Fi show while this iPhone and the Mac are on the same network. Both show in Decisions."
                 )
             }
         }
         .navigationTitle("Devices")
         .navigationBarTitleDisplayMode(.inline)
-        .task { AppleWatchLink.shared.activate() }
+        .task { if !root.isDemo { AppleWatchLink.shared.activate() } }
     }
 }
 

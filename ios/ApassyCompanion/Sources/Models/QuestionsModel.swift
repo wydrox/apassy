@@ -207,7 +207,7 @@ final class QuestionsModel {
     @ObservationIgnored private let service: any VaultService
     @ObservationIgnored private let signers: any AnswerSigners
     @ObservationIgnored private weak var push: (any PushPermission)?
-    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let defaults: any SettingsStore
     /// Keeps the name of a connection for the next one.
     @ObservationIgnored private let onDeviceName: @MainActor (String) -> Void
     @ObservationIgnored private let now: @MainActor () -> Date
@@ -246,7 +246,7 @@ final class QuestionsModel {
 
     init(
         service: any VaultService, signers: any AnswerSigners, push: (any PushPermission)?, deviceName: String,
-        defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
+        defaults: any SettingsStore = UserDefaults.standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
             "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."
@@ -279,7 +279,7 @@ final class QuestionsModel {
     /// One answer key for every team: the tests with one vault.
     convenience init(
         service: any VaultService, signer: any AnswerSigner, push: (any PushPermission)?, deviceName: String,
-        defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
+        defaults: any SettingsStore = UserDefaults.standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
             "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."

@@ -77,6 +77,7 @@ struct VaultTabView: View {
                     }
                 }
             }
+            .demoBanner(root)
             .environment(vault)
             .environment(ui)
             .environment(root)
@@ -109,9 +110,8 @@ struct VaultTabView: View {
         .onChange(of: root.exchange?.state, initial: true) { _, _ in
             presentWaitingImport()
         }
-        #if targetEnvironment(simulator)
-            .task { openFromLaunchArgument() }
-        #endif
+        // `-ApassyOpen`: in the Simulator, and in the demo of every build (screenshots).
+        .task { if LaunchRoutes.enabled(isDemo: root.isDemo) { openFromLaunchArgument() } }
         // On the tabs, not on Decisions: Settings Agent Access shares the seeded state.
         #if DEBUG && targetEnvironment(simulator)
             .decisionsPreviewSeed(root.questions)
@@ -149,72 +149,86 @@ struct VaultTabView: View {
         return Decisions.badge(questions: root.questions?.questions ?? [], session: session, now: Date())
     }
 
-    #if targetEnvironment(simulator)
-        /// A development aid of the Simulator, to reach a screen without taps:
-        /// `-ApassyOpen vault|items|all|watchtower|folder:<uuid or name>|decisions|approvals|questions|agents|settings[:<group>]|generator|search:<text>|new:<kind>|newcredential|edit:<id>|item:<id>[:reveal|:large|:options]`.
-        /// `items` (`all`), `watchtower`, and `folder` open on the Vault tab, where they are now;
-        /// `approvals` is the old name of `decisions`.
-        private func openFromLaunchArgument() {
-            guard let route = UserDefaults.standard.string(forKey: "ApassyOpen") else { return }
-            let parts = route.split(separator: ":").map(String.init)
-            switch parts.first {
-            case "vault": ui.tab = .vault
-            case "items", "all":
-                ui.tab = .vault
-                ui.homePath = [.allCredentials]
-            case "watchtower":
-                ui.tab = .vault
-                ui.homePath = [.watchtower]
-            case "folder":
-                ui.tab = .vault
-                let wanted = parts.dropFirst().joined(separator: ":")
-                Task { await openFolder(wanted) }
-            case "newcredential": ui.sheet = .newCredential(folder: nil)
-            case "decisions", "approvals": ui.tab = .decisions
-            case "questions": ui.tab = .decisions
-            case "agents": ui.sheet = .agentAccess
-            case "settings": ui.sheet = .settings
-            case "generator": ui.sheet = .generator
-            case "search":
-                ui.tab = .search
-                ui.searchText = parts.dropFirst().joined(separator: ":")
-            case "new":
-                ui.sheet = .new(ItemKind(rawValue: parts.count > 1 ? parts[1] : "login") ?? .login)
-            case "item":
-                guard parts.count > 1, let id = UInt64(parts[1]) else { return }
+    /// A development aid of the Simulator, and of the demo in every build (screenshots), to reach
+    /// a screen without taps:
+    /// `-ApassyOpen vault|items|all|watchtower|folder:<uuid or name>|decisions|approvals|questions|agents|settings[:<group>]|generator|search:<text>|new:<kind>|newcredential|edit:<id>|item:<id>[:reveal|:large|:options]`.
+    /// `items` (`all`), `watchtower`, and `folder` open on the Vault tab, where they are now;
+    /// `approvals` is the old name of `decisions`. `:reveal`, `:large`, and `:options` work in the
+    /// Simulator only.
+    private func openFromLaunchArgument() {
+        guard let route = UserDefaults.standard.string(forKey: "ApassyOpen") else { return }
+        let parts = route.split(separator: ":").map(String.init)
+        switch parts.first {
+        case "vault": ui.tab = .vault
+        case "items", "all":
+            ui.tab = .vault
+            ui.homePath = [.allCredentials]
+        case "watchtower":
+            ui.tab = .vault
+            ui.homePath = [.watchtower]
+        case "folder":
+            ui.tab = .vault
+            let wanted = parts.dropFirst().joined(separator: ":")
+            Task { await openFolder(wanted) }
+        case "newcredential": ui.sheet = .newCredential(folder: nil)
+        case "decisions", "approvals": ui.tab = .decisions
+        case "questions": ui.tab = .decisions
+        case "agents": ui.sheet = .agentAccess
+        case "settings": ui.sheet = .settings
+        case "generator": ui.sheet = .generator
+        case "search":
+            ui.tab = .search
+            ui.searchText = parts.dropFirst().joined(separator: ":")
+        case "new":
+            ui.sheet = .new(ItemKind(rawValue: parts.count > 1 ? parts[1] : "login") ?? .login)
+        case "item":
+            guard parts.count > 1, let id = UInt64(parts[1]) else { return }
+            #if targetEnvironment(simulator)
                 ui.demoReveal = parts.count > 2 && parts[2] == "reveal"
                 ui.demoLargeType = parts.count > 2 && parts[2] == "large"
                 ui.demoOptions = parts.count > 2 && parts[2] == "options"
-                ui.homePath = [.item(id)]
-            case "edit":
-                guard parts.count > 1, let id = UInt64(parts[1]) else { return }
-                Task {
-                    if let detail = try? await vault.service.item(id: id) { ui.sheet = .edit(detail) }
-                }
-            default: break
+            #endif
+            ui.homePath = [.item(id)]
+        case "edit":
+            guard parts.count > 1, let id = UInt64(parts[1]) else { return }
+            Task {
+                if let detail = try? await vault.service.item(id: id) { ui.sheet = .edit(detail) }
             }
+        default: break
         }
+    }
 
-        /// Push the folders from the top level down to a folder, by its UUID or its name, once the
-        /// folders are read.
-        private func openFolder(_ wanted: String) async {
-            for _ in 0..<50 where vault.folders.isEmpty {
-                try? await Task.sleep(for: .milliseconds(100))
-            }
-            let tree = vault.folderTree
-            guard
-                let target = tree.folder(wanted)
-                    ?? tree.folders.first(where: { $0.name.caseInsensitiveCompare(wanted) == .orderedSame })
-            else { return }
-            var chain: [VaultRoute] = []
-            var at: Folder? = target
-            while let folder = at, chain.count <= Folder.maxDepth {
-                chain.insert(.folder(folder.uuid), at: 0)
-                at = tree.folder(folder.parent)
-            }
-            ui.homePath = chain
+    /// Push the folders from the top level down to a folder, by its UUID or its name, once the
+    /// folders are read.
+    private func openFolder(_ wanted: String) async {
+        for _ in 0..<50 where vault.folders.isEmpty {
+            try? await Task.sleep(for: .milliseconds(100))
         }
-    #endif
+        let tree = vault.folderTree
+        guard
+            let target = tree.folder(wanted)
+                ?? tree.folders.first(where: { $0.name.caseInsensitiveCompare(wanted) == .orderedSame })
+        else { return }
+        var chain: [VaultRoute] = []
+        var at: Folder? = target
+        while let folder = at, chain.count <= Folder.maxDepth {
+            chain.insert(.folder(folder.uuid), at: 0)
+            at = tree.folder(folder.parent)
+        }
+        ui.homePath = chain
+    }
+}
+
+/// Where `-ApassyOpen` works: in the Simulator, and in the demo of any build. A store build with
+/// real vaults ignores it.
+enum LaunchRoutes {
+    static func enabled(isDemo: Bool) -> Bool {
+        #if targetEnvironment(simulator)
+            true
+        #else
+            isDemo
+        #endif
+    }
 }
 
 // MARK: - Items

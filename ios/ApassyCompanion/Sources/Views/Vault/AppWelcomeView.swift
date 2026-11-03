@@ -1,7 +1,7 @@
 import ApassyVaultKit
 import SwiftUI
 
-/// No vault and no pairing yet: add the vault of the Mac, or only approve agent runs.
+/// No vault and no pairing yet: add the vault of the Mac, only approve agent runs, or try the demo.
 struct AppWelcomeView: View {
     @Environment(RootModel.self) private var root
 
@@ -54,6 +54,15 @@ struct AppWelcomeView: View {
                 Text("Only approve agent runs").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glass)
+            // Try the app without a Mac: a vault of sample data in memory (`AppShell`).
+            Button {
+                root.tryDemo()
+            } label: {
+                Label("Try the Demo", systemImage: "theatermasks").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glass)
+            .accessibilityHint("Opens a vault of sample data. Nothing is saved.")
+            .accessibilityIdentifier("welcome.tryDemo")
         }
         #if targetEnvironment(simulator)
             // A development aid: `-ApassyJoinLink <link>` goes on into the join flow.

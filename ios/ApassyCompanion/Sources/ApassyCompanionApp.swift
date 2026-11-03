@@ -13,19 +13,20 @@ import SwiftUI
 @main
 struct ApassyCompanionApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var root = RootModel()
+    @State private var shell = AppShell()
 
     var body: some Scene {
         WindowGroup {
-            RootView(root: root)
+            AppShellView(shell: shell)
         }
     }
 }
 
 /// The welcome, the join flow, the companion alone, or the vault: its lock screen or its tabs.
+/// The scene phase, the credential exchange, and the end of the Face ID window are handled by
+/// `AppShellView`, for both roots.
 struct RootView: View {
     let root: RootModel
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -69,23 +70,10 @@ struct RootView: View {
                 }
             }
         }
+        .demoBanner(root)
         .environment(root)
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataWillBecomeUnavailableNotification)) { _ in
-            FaceIDWindow.app.end()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
-            FaceIDWindow.app.end()
-        }
         .onChange(of: root.companionIsPaired) { _, paired in
             if paired { root.companionPairingFinished() }
-        }
-        // Another app exports to Apassy (Apple's credential exchange).
-        .onContinueUserActivity(ASCredentialExchangeActivity) { activity in
-            root.receiveCredentialExchange(activity)
-        }
-        .onChange(of: scenePhase, initial: true) { _, phase in
-            PrivacyCover.shared.setPhase(AppPhase(phase))
-            root.scenePhaseChanged(AppPhase(phase))
         }
         // The passphrase prompt of the owner check shows in a window of its own, above sheets.
         .onChange(of: root.vault?.gate.prompt?.id, initial: true) {
