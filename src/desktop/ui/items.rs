@@ -16,6 +16,7 @@
 //! stricter change does not (ADR 0025 §3b, §3f).
 
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 use eframe::egui::{self, Align, Label, Layout, Pos2, Rect, RichText, Sense, Vec2};
 
@@ -55,8 +56,9 @@ pub(crate) enum Filter {
     /// Archived versions retained after concurrent sync changes.
     Conflicts,
     Archived,
-    /// Look-alike credentials (see [`look_alike_groups`]), each set next to each other.
-    /// Archived credentials stay hidden, as in [`Filter::All`].
+    /// The duplicates of "Find duplicates" (`Vault::duplicate_groups`: the same website
+    /// and username, or the same secret values), each set next to each other. Archived
+    /// credentials stay hidden, as in [`Filter::All`].
     Duplicates,
 }
 
@@ -111,6 +113,20 @@ fn look_alike_groups<'a>(
     }
     groups.retain(|group| group.len() > 1);
     groups
+}
+
+/// The duplicate sets restricted to `ids`, in their order: a set needs two members
+/// among `ids`.
+fn sets_among(sets: &[Vec<u64>], ids: &[u64]) -> Vec<Vec<u64>> {
+    sets.iter()
+        .map(|set| {
+            set.iter()
+                .copied()
+                .filter(|id| ids.contains(id))
+                .collect::<Vec<u64>>()
+        })
+        .filter(|set| set.len() > 1)
+        .collect()
 }
 
 /// The host of a website or a host field: `https://odealo-admin.vercel.app/login`
@@ -205,6 +221,22 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let archived = session.archived().unwrap_or_default();
     let conflicts = session.conflict_copies().unwrap_or_default();
     let vault_empty = all.is_empty();
+    // The duplicate sets of the vault, read again only when an item, an archive mark,
+    // or the vault session changes.
+    let duplicate_sets: Vec<Vec<u64>> = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        session.epoch().hash(&mut hasher);
+        for item in &all {
+            (item.id, item.revision).hash(&mut hasher);
+        }
+        for id in archived.keys() {
+            id.hash(&mut hasher);
+        }
+        app.ui
+            .duplicate_list
+            .groups(session, hasher.finish())
+            .to_vec()
+    };
     let in_place: Vec<OwnerSummary> = all
         .into_iter()
         .filter(|item| tree.contains(&place, item.id))
@@ -256,15 +288,15 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         columns::list_note(ui, "No items");
         return;
     }
-    let duplicates: usize = look_alike_groups(
-        in_place
-            .iter()
-            .filter(|item| !archived.contains_key(&item.id))
-            .map(|item| (item.id, item.kind, item.name.as_str())),
-    )
-    .iter()
-    .map(Vec::len)
-    .sum();
+    let active_here: Vec<u64> = in_place
+        .iter()
+        .filter(|item| !archived.contains_key(&item.id))
+        .map(|item| item.id)
+        .collect();
+    let duplicates: usize = sets_among(&duplicate_sets, &active_here)
+        .iter()
+        .map(Vec::len)
+        .sum();
     columns::list_inset(ui, |ui| {
         toolbar(app, ui, duplicates);
         // A plain click selects one row: the bar is for a choice of several. ⇧⌘M also
@@ -345,8 +377,28 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             alike_folder.insert(*id, differ.then_some(label));
         }
     }
+    // The duplicate sets among the listed credentials. Their rows tell themselves apart
+    // as look-alikes do.
+    let listed_ids: Vec<u64> = items.iter().map(|item| item.id).collect();
+    let duplicate_groups = sets_among(&duplicate_sets, &listed_ids);
     if filter == Filter::Duplicates {
-        items.retain(|item| alike_folder.contains_key(&item.id));
+        for group in &duplicate_groups {
+            let labels: Vec<String> = group
+                .iter()
+                .map(|id| tree.path_label(tree.folder_of(*id)))
+                .collect();
+            let differ = labels.iter().any(|label| label != &labels[0]);
+            for (id, label) in group.iter().zip(labels) {
+                alike_folder
+                    .entry(*id)
+                    .or_insert_with(|| differ.then_some(label));
+            }
+        }
+        items.retain(|item| {
+            duplicate_groups
+                .iter()
+                .any(|group| group.contains(&item.id))
+        });
     }
     let hidden_archived =
         if matches!(filter, Filter::Archived | Filter::Duplicates) || !query.is_empty() {
@@ -392,8 +444,8 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     };
     let grouped = !matches!(filter, Filter::Conflicts | Filter::Duplicates);
     let groups: Vec<columns::Group<ListedItem>> = if filter == Filter::Duplicates {
-        // One group for each set of look-alikes, named without the tag.
-        alike_groups
+        // One group for each set of duplicates, named without the tag.
+        duplicate_groups
             .iter()
             .map(|group| {
                 let rows: Vec<&OwnerSummary> = group
@@ -597,9 +649,10 @@ fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
 /// The search field. ⌘F puts the focus in it. The list has no filter or order menus,
 /// as in the mockup: the rows group by folder. A list of archived credentials or of
 /// conflict copies (from "Show archived" and from the review of conflicting changes)
-/// says so under the field, with "Show All" to go back. With `duplicates` look-alike
-/// credentials, "Possible duplicates (N)" under the field lists only them. It is a
-/// filter, not a notice: it goes away when no look-alike is left.
+/// says so under the field, with "Show All" to go back. With `duplicates` credentials
+/// that "Find duplicates" also finds, "Possible duplicates (N)" under the field lists
+/// only them, with "Merge…" to open that sheet. It is a filter, not a notice: it goes
+/// away when no duplicate is left.
 fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, duplicates: usize) {
     let field = kit::search_field(ui, &mut app.search, "credential-search", "Search")
         .on_hover_text("Search by name, username, website, host, project, service, or notes  ⌘F");
@@ -620,7 +673,9 @@ fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, duplicates: usize) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if kit::small_button(ui, &duplicates_label, Style::Link)
-                .on_hover_text("Show credentials with the same kind and name")
+                .on_hover_text(
+                    "Show credentials with the same website and username, or the same secret",
+                )
                 .clicked()
             {
                 app.search.clear();
@@ -638,6 +693,14 @@ fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, duplicates: usize) {
                 app.ui.credential_filter.label()
             };
             ui.label(kit::text(label, Font::Footnote).color(kit::SECONDARY));
+            if app.ui.credential_filter == Filter::Duplicates
+                && duplicates > 0
+                && kit::small_button(ui, "Merge…", Style::Link)
+                    .on_hover_text("Merge each set into one credential")
+                    .clicked()
+            {
+                super::duplicates::open(app);
+            }
             if kit::small_button(ui, "Show All", Style::Link).clicked() {
                 app.ui.credential_filter = Filter::All;
             }

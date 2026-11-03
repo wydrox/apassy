@@ -68,6 +68,32 @@ impl State {
     }
 }
 
+/// The duplicate sets of the open vault, as member IDs, for the "Possible duplicates"
+/// filter of the credential list. The list draws each frame, so the sets are read again
+/// only when `key` changes: the caller hashes the vault session, each item with its
+/// revision, and the archived items. One definition for the list and the sheet.
+#[derive(Default)]
+pub(crate) struct ListCache {
+    key: Option<u64>,
+    groups: Vec<Vec<u64>>,
+}
+
+impl ListCache {
+    pub(crate) fn groups(&mut self, session: &OwnerSession, key: u64) -> &[Vec<u64>] {
+        if self.key != Some(key) {
+            self.groups = session
+                .with_vault(|vault| vault.duplicate_groups())
+                .and_then(Result::ok)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|group| group.items.into_iter().map(|item| item.id).collect())
+                .collect();
+            self.key = Some(key);
+        }
+        &self.groups
+    }
+}
+
 /// Whether the open vault has duplicates, for the result of an import.
 pub(crate) fn any(session: &OwnerSession) -> bool {
     session

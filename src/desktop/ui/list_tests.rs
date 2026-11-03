@@ -352,15 +352,48 @@ fn look_alike_rows_tell_themselves_apart() {
     assert!(window.has_line("API key · No folder"), "{}", window.text);
 }
 
-/// "Possible duplicates (N)" shows only with look-alikes. It lists only them, each set
-/// next to each other even across folders, and "Show All" goes back.
+/// A credential with its own secret, for the duplicate filter.
+fn add_with_secret(
+    app: &mut DesktopApp,
+    name: &str,
+    kind: CredentialKind,
+    username: &str,
+    website: &str,
+    folder: Option<&str>,
+    secret: &str,
+) -> u64 {
+    let mut secrets = SecretForm::default();
+    secrets.token = secret.to_owned();
+    secrets.password = secret.to_owned();
+    app.owner_ui
+        .session
+        .add_in_folder(
+            &ItemDraft {
+                name: name.to_owned(),
+                kind,
+                username: username.to_owned(),
+                website: website.to_owned(),
+                ..ItemDraft::default()
+            },
+            &secrets,
+            folder,
+        )
+        .expect("add synthetic credential")
+        .id
+}
+
+/// "Possible duplicates (N)" lists what "Find duplicates" finds: logins with the same
+/// website and username, and other credentials with the same secret, each set next to
+/// each other even across folders. A same name alone is not a duplicate. "Merge…" opens
+/// the Find duplicates sheet, and "Show All" goes back.
 #[test]
-fn the_duplicates_filter_lists_look_alikes_together() {
+fn the_duplicates_filter_lists_what_find_duplicates_finds() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = unlocked(&dir);
     let work = folders::create(&mut app, None, "Work").expect("folder");
     let key = CredentialKind::ApiKey;
-    add(&mut app, "Zeta key", key, "", "", None);
+    let login = CredentialKind::Login;
+    add_with_secret(&mut app, "Zeta key", key, "", "", None, "SYNTH-zeta");
     app.place = Place::CREDENTIALS;
     let mut window = Window::new();
     window.idle(&mut app);
@@ -370,43 +403,81 @@ fn the_duplicates_filter_lists_look_alikes_together() {
         window.text
     );
 
-    add(&mut app, "Synthetic key", key, "", "", Some(&work.uuid));
-    add(&mut app, "Synthetic key [1P abc]", key, "", "", None);
-    let login = CredentialKind::Login;
-    add(&mut app, "Bravo", login, "me@x.io", "", None);
-    add(&mut app, "bravo [1P z]", login, "me@x.io", "", None);
-    // The same name, another kind: not a look-alike.
-    add(&mut app, "Zeta key", login, "me@x.io", "", None);
-    window.idle(&mut app);
-    // By folder, the top level comes first: the tagged copy is above the other.
-    assert!(
-        window.top_of("Synthetic key [1P abc]") < window.top_of("Synthetic key"),
-        "{}",
-        window.text
+    // The same secret, other names: one set across folders.
+    let shared = "SYNTH-shared-token";
+    add_with_secret(
+        &mut app,
+        "Synthetic key",
+        key,
+        "",
+        "",
+        Some(&work.uuid),
+        shared,
     );
+    add_with_secret(&mut app, "Copy of key", key, "", "", None, shared);
+    // The same website and username (case and www do not count): one set.
+    add_with_secret(
+        &mut app,
+        "Bravo",
+        login,
+        "me@x.io",
+        "https://bravo.example/",
+        None,
+        "SYNTH-b1",
+    );
+    add_with_secret(
+        &mut app,
+        "Bravo import",
+        login,
+        "ME@x.io",
+        "https://www.bravo.example/login",
+        None,
+        "SYNTH-b2",
+    );
+    // Another username on that site, and a same name of another kind: no duplicate.
+    add_with_secret(
+        &mut app,
+        "Bravo other",
+        login,
+        "other@x.io",
+        "https://bravo.example/",
+        None,
+        "SYNTH-b3",
+    );
+    add_with_secret(
+        &mut app,
+        "Zeta key",
+        login,
+        "me@x.io",
+        "https://zeta.example/",
+        None,
+        "SYNTH-z",
+    );
+    window.idle(&mut app);
 
     window.click(&mut app, "Possible duplicates (4)");
     assert_eq!(app.ui.credential_filter, Filter::Duplicates);
     assert!(window.text.contains("Show All"), "{}", window.text);
+    assert!(window.text.contains("Merge…"), "{}", window.text);
     assert!(!window.text.contains("Zeta key"), "{}", window.text);
-    for expected in ["Bravo", "bravo [1P z]", "Synthetic key [1P abc]"] {
+    assert!(!window.text.contains("Bravo other"), "{}", window.text);
+    for expected in ["Synthetic key", "Copy of key", "Bravo", "Bravo import"] {
         assert!(
             window.text.contains(expected),
             "{expected}: {}",
             window.text
         );
     }
-    // One set, one group: the untagged name comes first.
-    assert!(
-        window.top_of("Synthetic key") < window.top_of("Synthetic key [1P abc]"),
-        "{}",
-        window.text
-    );
-    assert!(
-        window.top_of("bravo [1P z]") < window.top_of("Synthetic key"),
-        "{}",
-        window.text
-    );
+    // The two keys are in other folders: their rows name the folder.
+    assert!(window.has_line("API key · Work"), "{}", window.text);
+    assert!(window.has_line("API key · No folder"), "{}", window.text);
+    // No secret on the screen.
+    assert!(!window.text.contains("SYNTH-"), "{}", window.text);
+
+    window.click(&mut app, "Merge…");
+    assert_eq!(app.ui.sheet, Some(Sheet::Duplicates));
+    app.ui.sheet = None;
+    window.idle(&mut app);
 
     window.click(&mut app, "Show All");
     assert_eq!(app.ui.credential_filter, Filter::All);

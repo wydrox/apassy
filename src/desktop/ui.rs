@@ -296,6 +296,9 @@ pub(crate) struct UiState {
     /// The groups of the "Find duplicates" sheet. Titles and labels, no value.
     #[cfg(feature = "vault")]
     pub(crate) duplicates: duplicates::State,
+    /// The duplicate sets of the credential list (IDs only), read again on a change.
+    #[cfg(feature = "vault")]
+    pub(crate) duplicate_list: duplicates::ListCache,
     /// The name field of the New Folder and Rename sheets.
     #[cfg(feature = "vault")]
     pub(crate) folder_name: String,
@@ -749,6 +752,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
             app.import.forget();
             app.ui.duplicates = Default::default();
+            app.ui.duplicate_list = Default::default();
             #[cfg(target_os = "macos")]
             super::native_menu::process(app, &ctx);
             start::draw(app, ui);
