@@ -47,6 +47,13 @@ the shared marketing version. Before upload, read App Store Connect and choose a
 valid higher build number; a build-number increment alone does not replace the
 marketing-version bump. Keep the iOS 26 deployment target and required toolchain.
 
+The iPhone and watch app declare `ITSAppUsesNonExemptEncryption = YES`. Until
+`project.yml` has an `ITSEncryptionExportComplianceCode`, a processed build stays in
+"Missing Compliance" and no tester gets it: attach the app's encryption declaration
+to the build through the App Store Connect API
+([export-compliance.md](../store/app-store/export-compliance.md) section 2.2) before
+you check the TestFlight group. A build in "Missing Compliance" is not delivered.
+
 Read back all six destinations after delivery: the signed macOS download and
 `latest.json` (including hashes/source), processed TestFlight marketing version and
 build in the intended group, public extension listing/package, public Linux binary
