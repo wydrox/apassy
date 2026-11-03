@@ -105,6 +105,9 @@ struct QuestionRoute: Equatable, Identifiable {
     let route: DeviceRoute
 
     var id: String { vault.vaultID }
+
+    /// "Node words: …" for a team on a node, to compare with the Mac. Nil for a hosted team.
+    var nodeWordsLine: String? { DeviceRoute.nodeWordsLine(vault.status.node) }
 }
 
 /// Questions through the relay on this iPhone (contract relay-questions-v1, section 13): the list

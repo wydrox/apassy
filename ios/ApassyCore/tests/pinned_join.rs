@@ -154,6 +154,9 @@ fn an_iphone_joins_a_pinned_node_and_keeps_the_pin_in_its_entry() {
     // The app shows "via your Mac": the join names the node origin and its name.
     assert_eq!(join["node"]["origin"], json!(origin));
     assert_eq!(join["node"]["name"], "Mac mini", "{join}");
+    // ... and the six node words of the pin (node-pairing-v1 section 4a), the words that
+    // the Mac shows for the same pin.
+    assert_eq!(join["node"]["node_words"], json!(pin.words()), "{join}");
     let links = mac.pending_links(&mac_vault, Some(&code)).unwrap();
     assert_eq!(links.len(), 1);
     let words: Vec<String> = join["words"]
@@ -224,4 +227,13 @@ fn an_iphone_joins_a_pinned_node_and_keeps_the_pin_in_its_entry() {
     assert_eq!(list["status"]["enabled"], true, "{list}");
     assert_eq!(list["status"]["node"]["origin"], json!(origin), "{list}");
     assert_eq!(list["vaults"][0]["status"]["node"]["origin"], json!(origin));
+    assert_eq!(
+        list["status"]["node"]["node_words"],
+        json!(pin.words()),
+        "{list}"
+    );
+    assert_eq!(
+        list["vaults"][0]["status"]["node"]["node_words"],
+        json!(pin.words())
+    );
 }

@@ -144,6 +144,9 @@ final class JoinModel {
     /// The line about the node: "Through Tailscale to <name>.", nil for a hosted relay.
     var nodeLine: String? { node.flatMap { DeviceRoute.viaYourMac(name: $0.name).detail } }
 
+    /// The node words of the link's node, to compare with the Mac, nil for a hosted relay.
+    var nodeWordsLine: String? { DeviceRoute.nodeWordsLine(node) }
+
     /// The line of the last screen: how the vault syncs from now on.
     func syncLine(for vault: VaultEntry) -> String {
         guard vault.isNode || node != nil else { return "Apassy syncs it with your Mac through the relay." }

@@ -481,6 +481,10 @@ struct StatusOut {
 struct NodeOut {
     /// The origin that this iPhone stores and signs: `https://<Tailscale IPv4>:<port>`.
     origin: String,
+    /// The six node words of the pin (node-pairing-v1 section 4a), for a visual check.
+    /// Absent when the stored pin text is not a canonical pin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_words: Option<String>,
 }
 
 impl StatusOut {
@@ -512,7 +516,10 @@ impl StatusOut {
             has_key: keys.key.is_some(),
             registered: keys.own.is_some(),
             removed: keys.is_removed(),
-            node: keys.node_origin.clone().map(|origin| NodeOut { origin }),
+            node: keys.node_origin.clone().map(|origin| NodeOut {
+                origin,
+                node_words: keys.node_words.clone(),
+            }),
         }
     }
 }
@@ -894,6 +901,8 @@ pub(super) struct Keys {
     questions_only: bool,
     /// The origin of the team when it is on a node (the membership has a pin).
     node_origin: Option<String>,
+    /// The node words of the pin of that membership (`apassy::net::pin::Pin::words`).
+    node_words: Option<String>,
 }
 
 impl Keys {
@@ -1116,6 +1125,11 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
             .pin
             .as_ref()
             .map(|_| membership.relay_url.clone()),
+        node_words: membership
+            .pin
+            .as_deref()
+            .and_then(apassy::net::pin::parse)
+            .map(|pin| pin.words()),
         questions_only: membership
             .purposes
             .iter()
@@ -3367,6 +3381,8 @@ mod tests {
             devices: Vec::new(),
             own: None,
             removed: false,
+            node_origin: None,
+            node_words: None,
             questions_only: true,
         };
         {
@@ -3440,6 +3456,8 @@ mod tests {
             devices: vec![asker],
             own: None,
             removed: false,
+            node_origin: None,
+            node_words: None,
             questions_only: true,
         };
         (keys, key)

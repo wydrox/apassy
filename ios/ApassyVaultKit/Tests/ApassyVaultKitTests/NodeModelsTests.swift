@@ -9,6 +9,9 @@ import Testing
 @Suite("Node models")
 struct NodeModelsTests {
     static let pin = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE"
+    /// The node words of that pin (node-pairing-v1 section 4a and section 12): the core computes
+    /// them; the Rust tests `pin_words_*` check the same string.
+    static let nodeWords = "noodle monkey dinner sled guitar garden"
 
     @Test("an entry of a node keeps its pin, alternatives, and name; an older entry has none")
     func vaultEntry() throws {
@@ -45,6 +48,21 @@ struct NodeModelsTests {
         #expect(try JSONDecoder().decode(JoinInfo.self, from: Data(hosted.utf8)).node == nil)
     }
 
+    @Test("the node words of the contract vector (node-pairing-v1 section 4a) read from the join and the status")
+    func nodeWordsRead() throws {
+        let pinned = #"{"state":"waiting","team":"Personal","words":["amber","marble"],"expires_at":1791200600,"node":{"origin":"https://100.64.0.7:8444","name":"Mac mini","node_words":"noodle monkey dinner sled guitar garden"}}"#
+        let join = try JSONDecoder().decode(JoinInfo.self, from: Data(pinned.utf8))
+        #expect(join.node?.nodeWords == Self.nodeWords)
+        #expect(join.node == NodeInfo(origin: "https://100.64.0.7:8444", name: "Mac mini", nodeWords: Self.nodeWords))
+        let status = #"{"enabled":true,"has_key":true,"node":{"origin":"https://100.64.0.7:8444","node_words":"noodle monkey dinner sled guitar garden"}}"#
+        let read = try JSONDecoder().decode(QuestionsStatus.self, from: Data(status.utf8))
+        #expect(read.node?.nodeWords == Self.nodeWords)
+        #expect(try JSONDecoder().decode(QuestionsStatus.self, from: try JSONEncoder().encode(read)) == read)
+        // An older core sends none: the words are nil, not an error.
+        let old = #"{"enabled":true,"has_key":true,"node":{"origin":"https://100.64.0.7:8444"}}"#
+        #expect(try JSONDecoder().decode(QuestionsStatus.self, from: Data(old.utf8)).node?.nodeWords == nil)
+    }
+
     @Test("a questions status of a team on a node names the origin; another status has no node")
     func statusNode() throws {
         let node = #"{"enabled":true,"team_id":"t_7k2m5q4x3c","relay_device_id":3,"device_uuid":null,"answer_key":null,"has_key":true,"registered":false,"removed":false,"node":{"origin":"https://100.64.0.7:8444"}}"#
@@ -71,7 +89,7 @@ struct NodeModelsTests {
     func previewNode() {
         let code = "apassy_lnk_t_7k2m5q4x3c_" + String(repeating: "0123456789abcdef", count: 4)
         let (node, pin) = PreviewVaultService.node(of: "https://100.64.0.7:8444/link#\(code)&pin=\(Self.pin)&name=Mac%20mini")
-        #expect(node == NodeInfo(origin: "https://100.64.0.7:8444", name: "Mac mini"))
+        #expect(node == NodeInfo(origin: "https://100.64.0.7:8444", name: "Mac mini", nodeWords: Self.nodeWords))
         #expect(pin == Self.pin)
         let (hosted, none) = PreviewVaultService.node(of: "https://apassy-relay.wyderka.cc/link#\(code)")
         #expect(hosted == nil && none == nil)

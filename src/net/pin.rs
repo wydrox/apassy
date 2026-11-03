@@ -29,6 +29,20 @@ impl Pin {
         &self.0
     }
 
+    /// The pin as six words for a visual check ("node words", contract node-pairing-v1
+    /// section 4a): `WORDS[pin[0]]` to `WORDS[pin[5]]` of the relay-sync-v1 list (section
+    /// 16), lowercase, one space between them. The pin is the SHA-256 of the certificate,
+    /// so the words change with the certificate. They are a check for a person, never the
+    /// trust: the client compares the whole pin. The Mac and the iPhone core call this one
+    /// function, so they show the same words.
+    pub fn words(&self) -> String {
+        self.0[..6]
+            .iter()
+            .map(|byte| crate::sync::WORDS[usize::from(*byte)])
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The text form, `b64u` without padding.
     pub fn text(&self) -> String {
         encode_url(&self.0)
@@ -88,6 +102,27 @@ mod tests {
     /// (`ios/ApassyCompanionKit/Tests/ApassyCompanionKitTests/Vectors.swift`,
     /// `pinOf3000`, checked against `PinnedTLS.pinText`).
     const PIN_OF_3000: &str = "5PYNCqbX89O2pklLHIYbmfZJxvnsUauvIBsg8pcyfJU";
+
+    /// The node words of the node-pairing-v1 fixture certificate (contract section 4a, test
+    /// vector). The iPhone core and the Swift model test check the same string.
+    const NODE_CERT_WORDS: &str = "noodle monkey dinner sled guitar garden";
+
+    #[test]
+    fn pin_words_of_the_node_pairing_fixture_are_the_contract_vector() {
+        let der = include_bytes!("../../tests/fixtures/node-pairing-v1/node-cert.der");
+        let pin = Pin::of_certificate(der);
+        assert_eq!(
+            pin.as_bytes()[..6],
+            [0xbb, 0xb4, 0x62, 0xef, 0x89, 0x7f],
+            "the first six bytes of the pin"
+        );
+        assert_eq!(pin.words(), NODE_CERT_WORDS);
+        assert_eq!(
+            crate::node::tailnet::pin_words(&pin),
+            NODE_CERT_WORDS,
+            "the Mac's function is the same"
+        );
+    }
 
     #[test]
     fn the_pin_of_the_fixture_der_is_the_swift_vector() {

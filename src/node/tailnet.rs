@@ -219,17 +219,11 @@ fn test_limits() -> FrontLimits {
 }
 
 /// The pin as six words for a visual check (Settings > Devices on the Mac and on the
-/// iPhone): `WORDS[pin[0]]` to `WORDS[pin[5]]` of the relay-sync-v1 list (section 16),
-/// one space between them. The pin is the SHA-256 of the certificate, so the words
-/// change with the certificate. They are a check for a person, never the trust: the
-/// client compares the whole pin.
+/// iPhone): `Pin::words`, the one definition of node-pairing-v1 section 4a, shared with
+/// the iPhone core. A check for a person, never the trust: the client compares the
+/// whole pin.
 pub fn pin_words(pin: &Pin) -> String {
-    let bytes = pin.as_bytes();
-    bytes[..6]
-        .iter()
-        .map(|byte| crate::sync::relay_crypto::WORDS[usize::from(*byte)])
-        .collect::<Vec<_>>()
-        .join(" ")
+    pin.words()
 }
 
 /// The node certificate of `node_dir` (`front/`), made at the first start. A certificate

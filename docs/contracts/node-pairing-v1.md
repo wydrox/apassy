@@ -53,6 +53,16 @@ Out of scope: Tailscale Serve certificates (ADR 0037 D4, an option for later), t
 - The watch (ADR 0039 §5) uses URLSession: a request to a pinned origin carries the pin, and the transport accepts only the pinned leaf (`PinnedTLSDelegate`).
 - A pin changes only with a new node certificate. A device that meets another certificate says "This node's certificate changed. Pair again." and does not connect. A new pairing (a new link) replaces the stored pin; nothing else does.
 
+### 4a. Node words
+
+The **node words** are six words that a person compares between the Mac and the iPhone to see that both mean the same node certificate (Settings › Devices on the Mac, "via your Mac" on the iPhone). They are a visual check, never the trust: a client compares the whole pin (section 4).
+
+- Input: the 32 bytes of the pin, that is `SHA-256(DER of the leaf certificate)` before base64url (so the decoded 43-character pin text gives the same bytes).
+- Words: for `i` = 0 to 5, `WORDS[pin[i]]`, where `pin[i]` is the byte at index `i` (0 to 255) and `WORDS` is the list of relay-sync-v1 section 16 (256 words, index order, all lowercase ASCII). Bytes 6 to 31 are not used.
+- Text: the six words in this order, lowercase, joined with one ASCII space (`0x20`), without a leading or trailing space and without any other separator.
+- Source: Rust `Pin::words` in `src/net/pin.rs` (`apassy::net::pin::Pin`), used by the Mac (`node::tailnet::pin_words`) and by the iPhone core (field `node_words`, [ios-core-v1](ios-core-v1.md) section 5.2 and the questions `node` info). The Swift app shows the field and never computes the words.
+- Vector: the certificate of section 12 has the pin bytes `bb b4 62 ef 89 7f …`, which are the word indexes 187, 180, 98, 239, 137, 127, and the node words `noodle monkey dinner sled guitar garden`.
+
 ## 5. Link grammar
 
 ABNF (RFC 5234). The text is ASCII; `name` carries UTF-8 through percent-encoding.
@@ -167,6 +177,7 @@ These values are synthetic. `contracts::node_pairing_v1_fixtures_match_the_contr
 | Certificate | `tests/fixtures/node-pairing-v1/node-cert.der` (297 bytes, P-256, `CN=Apassy node Test Mac`) |
 | SHA-256 of the certificate (hex) | `bbb462ef897fc4c066ef85e76435a9382e99e29ea7e1a52ac169ac57a7e2acb1` |
 | Pin | `u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE` |
+| Node words (section 4a) | `noodle monkey dinner sled guitar garden` |
 | Origin | `https://100.64.0.7:8444` |
 | Link code | `apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab` (relay-sync-v1 §15) |
 | Team code | `apassy_tcd_cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` |
