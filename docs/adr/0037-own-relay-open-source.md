@@ -4,6 +4,7 @@ Date: 2026-11-02.
 Status: ACCEPTED by the owner on 2026-11-02 (all decisions D1 to D14, in the table at the end). TEE
 features are an enterprise track that comes later. Progress (2026-11-03): stages 0 and 1 shipped in 0.5.14 (#66): the relay is the crate `crates/apassy-relay`, and the hosted relay serves no team vaults. The cloud slice of stage 2 is in the draft PRs #85, #86, #87, #89 and #92. Stages 3 to 8 have not started.
 Cloud slice first (owner, 2026-11-03): [docs/design/implementation-plan-0037-cloud-agents.md](../design/implementation-plan-0037-cloud-agents.md).
+Stage 7 plan (2026-11-03): [docs/design/implementation-plan-s7-connect.md](../design/implementation-plan-s7-connect.md); contracts [connect-account-v1](../contracts/connect-account-v1.md), [connect-billing-v1](../contracts/connect-billing-v1.md), [connect-tunnel-v1](../contracts/connect-tunnel-v1.md) (proposed).
 When accepted, it replaces the hosted parts of ADR 0016 §5, ADR 0019 (a multi-tenant relay that the
 operator runs for teams), the default relay address of ADR 0022, and Connect creation on an
 Apassy-run server (ADR 0032). It keeps every wire contract and the device identity of ADR 0019.
