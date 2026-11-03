@@ -224,6 +224,7 @@ dependencies = [
  "getrandom 0.4.3",
  "httparse",
  "psl",
+ "qrcode",
  "rcgen",
  "ring",
  "rusqlite",
