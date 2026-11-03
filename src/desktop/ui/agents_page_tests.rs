@@ -484,7 +484,9 @@ fn painted_text(draw: impl FnMut(&mut Ui)) -> String {
         ..Default::default()
     };
     let mut draw = draw;
-    let output = ctx.run_ui(input, |ui| draw(ui));
+    let mut output = ctx.run_ui(input, |ui| draw(ui));
+    // The font atlas of a new context is a texture delta that nothing applies here.
+    output.textures_delta.clear();
     let mut text = String::new();
     for clipped in &output.shapes {
         collect(&clipped.shape, &mut text);
