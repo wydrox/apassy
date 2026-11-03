@@ -2521,8 +2521,13 @@ const PREVIOUS_VERSION: i64 = 28;
 const BEFORE_28_VERSION: i64 = 27;
 
 /// What a file of schema 28 has and a file of schema 27 has not: the pin and the
-/// alternatives of a relay membership (contract node-pairing-v1 section 9).
+/// alternatives of a relay membership (contract node-pairing-v1 section 9), and the
+/// tailnet route of the node (plan unit N4).
 const SCHEMA28_ONLY: &str = "
+ALTER TABLE cloud_node DROP COLUMN push_gateway;
+ALTER TABLE cloud_node DROP COLUMN node_origin;
+ALTER TABLE cloud_node DROP COLUMN tailnet_port;
+ALTER TABLE cloud_node DROP COLUMN tailnet_on;
 ALTER TABLE relay_membership DROP COLUMN alt;
 ALTER TABLE relay_membership DROP COLUMN pin;
 ";

@@ -920,7 +920,11 @@ fn set_schema(path: &Path, version: i64) {
     if version < 28 {
         // Schema 28: the pinned trust of a relay membership (`src/vault/schema28.rs`).
         conn.execute_batch(
-            "ALTER TABLE relay_membership DROP COLUMN alt;
+            "ALTER TABLE cloud_node DROP COLUMN push_gateway;
+             ALTER TABLE cloud_node DROP COLUMN node_origin;
+             ALTER TABLE cloud_node DROP COLUMN tailnet_port;
+             ALTER TABLE cloud_node DROP COLUMN tailnet_on;
+             ALTER TABLE relay_membership DROP COLUMN alt;
              ALTER TABLE relay_membership DROP COLUMN pin;",
         )
         .unwrap();

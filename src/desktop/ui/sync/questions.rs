@@ -32,6 +32,19 @@
 //!
 //! The team code and a pasted link stay in memory only from "Turn On…" or "Join…" to the
 //! relay call. A lock, another sync sheet, and the end of the try erase them.
+//!
+//! **The node path** (ADR 0037 stage 2; plan S2–S3, unit N4, decision D6): while the
+//! Mac's node runs on the tailnet (`Node::node_origin`), "Get approvals on your iPhone"
+//! makes the questions team on the node instead of a Connect team on the hosted relay
+//! ([`DesktopApp::questions_turn_on`] asks the owner check with the node origin, then
+//! `Node::ensure_questions_team`), and "Add an iPhone or a Mac…" shows the pinned device
+//! link of the node: the node origin, the pin, the alternatives, and the node name
+//! ([`DesktopApp::questions_node_advertise`]). "Move approvals to this Mac"
+//! ([`DesktopApp::questions_move_to_node`]) makes a team on the node while the questions
+//! still go through the hosted relay, opens the same sheet with the node team's client,
+//! and after the confirmation of a device in it moves the questions there and takes the
+//! old devices off the hosted relay (`Node::finish_move`). Without Tailscale the hosted
+//! Connect path stays (ADR 0037 D14, until stage 7).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -46,6 +59,7 @@ use super::relay::call_error;
 use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::desktop::DesktopApp;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
+use crate::node::{MoveDone, MoveStart};
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::relay::membership::{
     FREE_RELAY_PATHS_END_VERSION, QuestionsAvailability, adopt_questions_team, disable_questions,
@@ -133,9 +147,40 @@ struct Creating {
     connect: bool,
 }
 
+/// What a call of the Mac's node for the questions gave.
+enum NodeDone {
+    /// The questions team of the vault is on the node.
+    Team,
+    /// A move started: the node team waits for a device.
+    MoveStarted(MoveStart),
+    /// The move ended.
+    Moved(MoveDone),
+}
+
+/// A call of the Mac's node for the questions of the vault `vault`, on its own thread.
+struct NodeCall {
+    vault: String,
+    task: Task<Result<NodeDone, String>>,
+}
+
+/// "Move approvals to this Mac" between its start and the confirmation of a device in the
+/// node team: the client of this Mac's device in that team, the address that its links
+/// name, and the node name. Debug shows no key.
+struct NodeMove {
+    vault: String,
+    team_id: String,
+    client: QuestionsClient,
+    url: RelayUrl,
+    name: String,
+}
+
 /// The state of "Send questions through the relay" in the window.
 #[derive(Default)]
 pub(crate) struct QuestionsUi {
+    /// A call of the Mac's node: the questions team, or a step of a move.
+    node_call: Option<NodeCall>,
+    /// A move that waits for a device in the node team.
+    node_move: Option<NodeMove>,
     pending: Option<NewTeam>,
     creating: Option<Creating>,
     /// Why the last try of the team sheet failed.
@@ -164,6 +209,8 @@ impl QuestionsUi {
     pub(crate) fn forget_codes(&mut self) {
         self.pending = None;
         self.join_request = None;
+        // The key of a move goes from the window; the node drops its own at a stop.
+        self.node_move = None;
         self.join_words = None;
         if let Some(joining) = self.joining.take() {
             cancel_join(joining);
@@ -259,6 +306,7 @@ impl DesktopApp {
     /// team of the vault, or the sheet of a notifications-only team. Nothing changes
     /// before the check passes.
     pub(crate) fn questions_turn_on(&mut self, ctx: Option<&egui::Context>) {
+        let node_origin = self.questions_node_origin();
         let state = self.owner_ui.session.with_vault(|vault| {
             if vault.is_locked() {
                 return None;
@@ -297,7 +345,220 @@ impl DesktopApp {
                     },
                     ctx,
                 ),
+            // The Mac's node on the tailnet carries them: no hosted team.
+            Some((QuestionsAvailability::NeedsTeam, _)) if node_origin.is_some() => self.ask_owner(
+                OwnerRequest::EnableRelayQuestions {
+                    relay_url: node_origin.unwrap_or_default(),
+                    team_id: None,
+                },
+                ctx,
+            ),
             Some(_) => self.questions_open_team_sheet(ctx),
+        }
+    }
+
+    /// The node origin of the Mac's node while it runs on the tailnet: the questions can
+    /// go there (plan S2–S3, D6). `None`: the hosted Connect path.
+    pub(crate) fn questions_node_origin(&self) -> Option<String> {
+        self.cloud_node().and_then(|node| node.node_origin())
+    }
+
+    /// Whether "Move approvals to this Mac" can run for the open vault: the node runs on
+    /// the tailnet and the questions go through another relay.
+    pub(crate) fn questions_can_move(&self) -> bool {
+        let Some(origin) = self.questions_node_origin() else {
+            return false;
+        };
+        self.owner_ui
+            .session
+            .with_vault(|vault| questions_membership(vault).ok().flatten())
+            .flatten()
+            .is_some_and(|membership| !crate::node::questions_team::on_node(&membership, &origin))
+    }
+
+    /// "Move approvals to this Mac": the owner check with the node origin, then a team on
+    /// the node and the pairing sheet ([`Self::questions_enable_with`]). Nothing changes
+    /// before the check passes.
+    pub(crate) fn questions_move_to_node(&mut self, ctx: Option<&egui::Context>) {
+        if !self.questions_can_move() {
+            return self.set_err(
+                "Turn on “Reachable on your tailnet” first. The approvals of this vault then move to this Mac.",
+            );
+        }
+        let origin = self.questions_node_origin().unwrap_or_default();
+        self.ask_owner(
+            OwnerRequest::EnableRelayQuestions {
+                relay_url: origin,
+                team_id: None,
+            },
+            ctx,
+        );
+    }
+
+    /// The address and the node name that a device link of the questions team of the open
+    /// vault `id` names: the pinned node origin with its alternatives (node-pairing-v1
+    /// section 6). `None` for a hosted team: today's link.
+    pub(crate) fn questions_node_advertise(&self, id: &str) -> Option<(RelayUrl, String)> {
+        if self.vault_list.current.as_deref() != Some(id) {
+            return None;
+        }
+        let membership = self
+            .owner_ui
+            .session
+            .with_vault(|vault| questions_membership(vault).ok().flatten())
+            .flatten()?;
+        membership.pin.as_ref()?;
+        let url = crate::sync::membership_relay_url(&membership).ok()?;
+        Some((url, device_name()))
+    }
+
+    /// The client of a move of the vault `id` and what its links name, while it waits for
+    /// a device.
+    pub(crate) fn questions_move_client(
+        &self,
+        id: &str,
+    ) -> Option<(QuestionsClient, RelayUrl, String)> {
+        self.sync
+            .relay
+            .questions
+            .node_move
+            .as_ref()
+            .filter(|moving| moving.vault == id)
+            .map(|moving| {
+                (
+                    moving.client.clone(),
+                    moving.url.clone(),
+                    moving.name.clone(),
+                )
+            })
+    }
+
+    /// A device joined the team `team_id` of the vault `id` (its confirmation wrote its
+    /// row): when it is the node team of a move, the move ends now, on its own thread.
+    pub(crate) fn questions_device_joined(&mut self, id: &str, team_id: &str) {
+        let matches = self
+            .sync
+            .relay
+            .questions
+            .node_move
+            .as_ref()
+            .is_some_and(|moving| moving.vault == id && moving.team_id == team_id);
+        if !matches || self.sync.relay.questions.node_call.is_some() {
+            return;
+        }
+        let Some(node) = self.cloud_node() else {
+            return;
+        };
+        let vault = self.owner_ui.session.shared_vault();
+        let task = Task::spawn(self.sync.relay.questions.repaint.clone(), move || {
+            node.finish_move(&vault, &device_name())
+                .map(NodeDone::Moved)
+                .map_err(|error| error.message)
+        });
+        self.sync.relay.questions.node_call = Some(NodeCall {
+            vault: id.to_owned(),
+            task,
+        });
+    }
+
+    /// After the owner check with the node origin: the questions team on the node, or the
+    /// first step of a move when the questions go through another relay, on its own
+    /// thread.
+    fn questions_node_start(&mut self) {
+        let Some(id) = self.vault_list.current.clone() else {
+            return self.set_err("Open a vault of the list first.");
+        };
+        let Some(node) = self.cloud_node() else {
+            return self.set_err("This build has no node. Nothing changed.");
+        };
+        if self.sync.relay.questions.node_call.is_some() {
+            return;
+        }
+        let elsewhere = self.questions_can_move();
+        let vault = self.owner_ui.session.shared_vault();
+        let task = Task::spawn(self.sync.relay.questions.repaint.clone(), move || {
+            let device = device_name();
+            let done = if elsewhere {
+                node.move_approvals(&vault, &device)
+                    .map(NodeDone::MoveStarted)
+            } else {
+                node.ensure_questions_team(&vault, &device)
+                    .map(|_| NodeDone::Team)
+            };
+            done.map_err(|error| error.message)
+        });
+        self.sync.relay.questions.node_call = Some(NodeCall { vault: id, task });
+    }
+
+    /// The answer of a call of the node.
+    fn questions_node_poll(&mut self, ctx: &egui::Context) {
+        let done = match self
+            .sync
+            .relay
+            .questions
+            .node_call
+            .as_ref()
+            .map(|call| call.task.poll())
+        {
+            Some(TaskPoll::Waiting) => {
+                ctx.request_repaint_after(Duration::from_millis(200));
+                return;
+            }
+            Some(TaskPoll::Done(result)) => Some(result),
+            Some(TaskPoll::Lost) => None,
+            None => return,
+        };
+        let Some(call) = self.sync.relay.questions.node_call.take() else {
+            return;
+        };
+        let open = self.vault_list.current.as_deref() == Some(call.vault.as_str());
+        match done {
+            Some(Ok(NodeDone::Team)) => {
+                self.wake_questions();
+                self.set_ok("Approvals now go through this Mac on your tailnet. Scan the pairing code with Apassy on your iPhone.");
+                if open {
+                    self.questions_add_iphone(Some(ctx));
+                }
+            }
+            Some(Ok(NodeDone::MoveStarted(start))) if open => {
+                self.sync.relay.questions.node_move = Some(NodeMove {
+                    vault: call.vault.clone(),
+                    team_id: start.team_id.clone(),
+                    client: start.client,
+                    url: start.url,
+                    name: start.name,
+                });
+                self.set_note("Scan the pairing code with Apassy on your iPhone. The approvals move to this Mac when you confirm it here.");
+                self.sync_open_sheet(SyncSheet::AddIphone { id: call.vault }, Some(ctx));
+            }
+            Some(Ok(NodeDone::MoveStarted(_))) => {
+                if let Some(node) = self.cloud_node() {
+                    node.cancel_move();
+                }
+                self.set_err("The open vault changed. The approvals stay where they are.");
+            }
+            Some(Ok(NodeDone::Moved(done))) => {
+                self.sync.relay.questions.node_move = None;
+                self.wake_questions();
+                let questions = &mut self.sync.relay.questions;
+                questions.push.clear();
+                questions.push_team = None;
+                questions.devices_read = None;
+                if done.hosted_removed {
+                    self.set_ok("Approvals now go through this Mac on your tailnet. The old devices left the Apassy relay.");
+                } else {
+                    self.set_ok("Approvals now go through this Mac on your tailnet.");
+                }
+            }
+            Some(Err(text)) => {
+                self.sync.relay.questions.node_move = None;
+                self.sync.relay.questions.error = Some(text.clone());
+                self.set_err(format!("Nothing changed. {text}"));
+            }
+            None => {
+                self.sync.relay.questions.node_move = None;
+                self.set_err("The node did not answer. Nothing changed.");
+            }
         }
     }
 
@@ -424,6 +685,12 @@ impl DesktopApp {
                 self.sync.relay.questions.join_request = None;
                 return self.set_err("Unlock the vault first. Nothing changed.");
             }
+        }
+        // The Mac's node on the tailnet: its team of devices, or a move to it.
+        if team_id.is_none() && self.questions_node_origin().as_deref() == Some(relay_url.as_str())
+        {
+            self.sync.relay.questions.pending = None;
+            return self.questions_node_start();
         }
         let join = self
             .sync
@@ -748,6 +1015,7 @@ impl DesktopApp {
     pub(crate) fn questions_poll(&mut self, ctx: &egui::Context) {
         self.sync.relay.questions.repaint = Some(ctx.clone());
         self.questions_join_poll(ctx);
+        self.questions_node_poll(ctx);
         let removed = match self
             .sync
             .relay

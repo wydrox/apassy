@@ -1213,7 +1213,9 @@ mod tests {
                 created_at: 0,
             })
             .expect("row");
-        let config = RelayConfig::in_data_dir(dir, &vault_path, &url, "relay");
+        // As the app builds it from the vault list (`relay_of`).
+        let link = crate::vaults::RelayLink::new(&url, "t_7k2m5q4x3c", 2);
+        let config = RelayConfig::for_link(dir, &vault_path, &link, "relay").expect("config");
         std::fs::create_dir_all(&config.work_dir).expect("sync dir");
         let state = serde_json::json!({
             "format": 3,

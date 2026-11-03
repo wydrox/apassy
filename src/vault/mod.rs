@@ -103,7 +103,7 @@ pub use candidate::{
 pub use cloud::{
     CLOUD_PORT_MAX, CLOUD_PORT_MIN, CLOUD_TOKEN_DAYS, CloudAgent, CloudNodeSetting, CloudRun,
     ConnectedWith, DEFAULT_CLOUD_TOKEN_DAYS, MAX_CLIENT_ID_BYTES, MAX_CLOUD_AGENT_ITEMS,
-    NewCloudRun,
+    NewCloudRun, TAILNET_PORT_MIN,
 };
 pub use companion::{
     AddDeviceError, CompanionCertificate, CompanionDevice, CompanionDeviceKeys, CompanionSetting,

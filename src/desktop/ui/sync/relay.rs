@@ -746,13 +746,15 @@ impl DesktopApp {
     }
 
     /// The relay sync of the listed vault `id`, when it syncs through the relay. Each
-    /// call gives a clone of one value per vault and configuration.
+    /// call gives a clone of one value per vault and configuration. A link of a node
+    /// keeps its pin and alternatives (`RelayConfig::for_link`); a stored pin that is not
+    /// a pin gives no relay sync, never system trust.
     pub(crate) fn relay_of(&self, id: &str) -> Option<RelaySync> {
         let entry = self.vault_list.registry.get(id)?;
         let link = entry.sync_relay()?;
         let state = entry.sync_state()?;
         let config =
-            RelayConfig::in_data_dir(&self.vault_list.data_dir, &entry.path, &link.url, state);
+            RelayConfig::for_link(&self.vault_list.data_dir, &entry.path, link, state).ok()?;
         let mut cache = lock(&self.sync.relay.cache);
         if let Some(sync) = cache.get(id).filter(|sync| *sync.config() == config) {
             return Some(sync.clone());
@@ -1559,12 +1561,16 @@ impl DesktopApp {
         if entry.sync.is_some() {
             self.sync_disable(id);
         }
-        let relay = RelaySync::new(RelayConfig::in_data_dir(
-            &self.vault_list.data_dir,
-            &entry.path,
-            &staged.config().url,
-            &entry.id,
-        ));
+        // The trust of the staged relay (a pinned node) goes with it.
+        let relay = RelaySync::new(
+            RelayConfig::in_data_dir(
+                &self.vault_list.data_dir,
+                &entry.path,
+                &staged.config().url,
+                &entry.id,
+            )
+            .with_trust(staged.config().trust, &staged.config().alt),
+        );
         let moved = {
             let op = self.sync.worker.op_lock();
             let _op = lock(&op);
@@ -2030,13 +2036,27 @@ impl DesktopApp {
         }
     }
 
-    /// A new link for an iPhone of the notifications-only team of the vault `id`.
+    /// A new link for an iPhone of the notifications-only team of the vault `id`, or of
+    /// the node team of a move ("Move approvals to this Mac"). A team on the Mac's node
+    /// gives the pinned link: the node origin, the pin, the alternatives, and the node
+    /// name (node-pairing-v1 section 6); the pairing channel appends the handoff.
     fn relay_add_iphone_start(&mut self, id: &str) {
-        let client = self.questions_team_client(id);
+        let (client, advertise) = match self.questions_move_client(id) {
+            Some((client, url, name)) => (Ok(client), Some((url, name))),
+            None => (
+                self.questions_team_client(id),
+                self.questions_node_advertise(id),
+            ),
+        };
         let via = client.as_ref().ok().cloned();
         self.sync.relay.add = Some(AddMac::new(id, client.err(), via.clone()));
         if let Some(client) = via {
-            self.relay_spawn(id, Job::NewLink, move || Reply::Link(client.create_link()));
+            self.relay_spawn(id, Job::NewLink, move || {
+                Reply::Link(client.create_link().and_then(|code| match &advertise {
+                    Some((url, name)) => code.for_origin(url, Some(name.as_str())),
+                    None => Ok(code),
+                }))
+            });
         }
     }
 
@@ -2252,6 +2272,17 @@ impl DesktopApp {
                 // own owner check.
                 let iphone = self.relay_register_linked(id, link, device.id);
                 if matches!(&iphone, Some(Ok(()))) {
+                    // A device in the node team of a move: the approvals move now.
+                    let team = self
+                        .sync
+                        .relay
+                        .add
+                        .as_ref()
+                        .and_then(|add| add.via.as_ref())
+                        .map(|client| client.team_id().to_owned());
+                    if let Some(team) = team {
+                        self.questions_device_joined(id, &team);
+                    }
                     let channel = self
                         .sync
                         .relay
