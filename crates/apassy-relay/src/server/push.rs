@@ -337,7 +337,7 @@ impl Push {
     /// in the gateway mode.
     pub fn topic(&self) -> Option<&str> {
         match &self.mode {
-            Mode::Worker { topic } => Some(topic),
+            Mode::Worker { topic } => Some(topic.as_str()),
             Mode::Off | Mode::Gateway { .. } => None,
         }
     }
@@ -350,7 +350,7 @@ impl Push {
     /// The gateways that a device may name; empty outside the gateway mode.
     pub fn gateways(&self) -> &[String] {
         match &self.mode {
-            Mode::Gateway { gateways } => gateways,
+            Mode::Gateway { gateways } => gateways.as_slice(),
             Mode::Off | Mode::Worker { .. } => &[],
         }
     }
