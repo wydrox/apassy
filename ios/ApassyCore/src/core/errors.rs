@@ -194,6 +194,12 @@ impl From<RelayRefusal> for CoreError {
                 "rate_limited",
                 "The relay takes no more changes this hour. Apassy tries again later.",
             ),
+            // `403 plan_required` (no vault copy on this relay): an existing code, so the
+            // iPhone contract gets no new one.
+            RelayRefusal::PlanRequired => Self::new(
+                "not_allowed",
+                "The relay does not keep a copy of this vault yet.",
+            ),
             RelayRefusal::RateLimited => Self::new(
                 "rate_limited",
                 "The relay asks Apassy to wait. Apassy tries again later.",

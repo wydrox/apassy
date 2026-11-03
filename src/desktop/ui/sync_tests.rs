@@ -3966,3 +3966,39 @@ fn the_iphone_notice_names_the_same_release() {
         "the iPhone notice names another release than FREE_RELAY_PATHS_END_VERSION"
     );
 }
+
+#[test]
+fn the_new_relay_copy_step_has_no_code_field_for_the_hosted_relay() {
+    use super::sync::relay::{codeless_copy_words, needs_team_code};
+    use crate::relay::membership::FREE_RELAY_PATHS_END_VERSION;
+
+    // The hosted relay, typed or left empty: no team code, unless the owner chose
+    // "Relay with a team code".
+    for url in ["", "  ", crate::sync::DEFAULT_RELAY_URL] {
+        assert!(!needs_team_code(url, false), "{url:?}");
+        assert!(needs_team_code(url, true), "{url:?}");
+    }
+    // A relay that the owner runs keeps the team code: its operator decides.
+    for url in [
+        "https://relay.example.test",
+        "https://relay.example.test:8443",
+        "http://127.0.0.1:8080",
+    ] {
+        assert!(needs_team_code(url, false), "{url}");
+    }
+    let words = codeless_copy_words();
+    assert!(words.contains("No team code needed."), "{words}");
+    assert!(
+        words.contains("Relay sync is free until Apassy Connect starts"),
+        "{words}"
+    );
+    assert!(words.contains(FREE_RELAY_PATHS_END_VERSION), "{words}");
+    assert!(
+        words.contains("Mac or Linux node can be the sync home (free)"),
+        "{words}"
+    );
+    // Plans section 5: relay sync is not the paid feature, and no price shows.
+    for banned in ["paid", "€", "EUR", "a month", "for teams", "team code from"] {
+        assert!(!words.contains(banned), "{banned}: {words}");
+    }
+}

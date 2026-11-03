@@ -202,6 +202,9 @@ struct TurnedOn {
     /// The vault took the passphrase of the relay copy: on success, and on a failure
     /// after the passphrase opened the copy.
     rekeyed: bool,
+    /// The text of a Connect refusal of a relay copy without a code (capacity, a saved
+    /// key, another Mac's team); `result` then holds a stand-in error.
+    refused: Option<String>,
 }
 
 /// The answer of a relay call of the owner.
@@ -434,6 +437,9 @@ pub(crate) struct RelayUi {
     /// The team code field, masked. Erased after each try, when its sheet closes, and at
     /// a lock.
     pub(crate) team_code: String,
+    /// "Relay with a team code" on the hosted relay (plan s7 unit S0): the team code
+    /// field instead of a relay copy without a code.
+    pub(crate) with_code: bool,
     /// The name of this Mac on the relay.
     pub(crate) device_input: String,
     /// The pasted link from the other Mac.
@@ -634,6 +640,27 @@ pub(crate) fn relay_sync_notice(relay_url: &str) -> Option<String> {
             crate::relay::membership::FREE_RELAY_PATHS_END_VERSION
         )
     })
+}
+
+/// Whether "New relay copy" asks for a team code (plan s7 unit S0): on the hosted relay
+/// (an empty address is the hosted one) only when the owner chose "Relay with a team
+/// code"; on a relay that the owner runs always, since its operator decides whether
+/// Connect teams get relay sync.
+pub(crate) fn needs_team_code(url_input: &str, with_code: bool) -> bool {
+    let url = match url_input.trim() {
+        "" => DEFAULT_RELAY_URL,
+        typed => typed,
+    };
+    with_code || !crate::relay::membership::on_hosted_relay(url)
+}
+
+/// The words of "New relay copy" without a team code (plans section 4.1): what Apassy
+/// does, and that the free relay sync ends with Apassy Connect, by version (N1).
+pub(crate) fn codeless_copy_words() -> String {
+    format!(
+        "No team code needed. Apassy makes a key for this Mac, keeps it in the vault, and uploads the encrypted copy. Relay sync is free until Apassy Connect starts with Apassy {}; then the hosted store is part of Apassy Connect, and your own Mac or Linux node can be the sync home (free).",
+        crate::relay::membership::FREE_RELAY_PATHS_END_VERSION
+    )
 }
 
 /// The text of a failed relay call of an owner action.
@@ -1228,6 +1255,7 @@ impl DesktopApp {
             device,
             typed,
             rekeyed,
+            refused,
         } = turned_on;
         let name = name.as_str();
         // The merge with the passphrase of the copy ended.
@@ -1300,7 +1328,15 @@ impl DesktopApp {
                 });
             }
             Err(error) => {
-                let text = format!("{}{took}", enable_error(error, name, before.is_some()));
+                let stays = if before.is_some() {
+                    "Folder sync stays on."
+                } else {
+                    "Sync stays off."
+                };
+                let text = match refused {
+                    Some(refused) => format!("{refused} {stays}"),
+                    None => format!("{}{took}", enable_error(error, name, before.is_some())),
+                };
                 if joined {
                     self.sync.relay.join_error = Some(text.clone());
                 }
@@ -1327,6 +1363,7 @@ impl DesktopApp {
         match sheet {
             SyncSheet::RelaySetup { .. } => {
                 relay.mode = SetupMode::NewCopy;
+                relay.with_code = false;
                 relay.join_error = None;
                 self.relay_fill_fields();
             }
@@ -1506,6 +1543,63 @@ impl DesktopApp {
                 device: None,
                 typed: false,
                 rekeyed: false,
+                refused: None,
+            }))
+        });
+        Ok(())
+    }
+
+    /// Turn on relay sync for the open, unlocked vault `id` without a team code (plans
+    /// section 4.1): `RelaySync::create_team_codeless` on its own thread, which takes the
+    /// vault's Connect team (its questions team, or a new one with the purpose `sync`)
+    /// and pushes version 1. As [`Self::relay_enable_new`] otherwise.
+    pub(crate) fn relay_enable_codeless(
+        &mut self,
+        id: &str,
+        url: &str,
+        device: &str,
+    ) -> Result<(), String> {
+        let entry = self.relay_target(id)?;
+        let url = match url.trim() {
+            "" => DEFAULT_RELAY_URL.to_owned(),
+            typed => RelayUrl::parse(typed)
+                .map_err(|error| sentence(&error.to_string()))?
+                .as_str()
+                .to_owned(),
+        };
+        let device = match device.trim() {
+            "" => device_name(),
+            typed => typed.to_owned(),
+        };
+        if self.relay_changing(id) {
+            return Ok(());
+        }
+        let relay = self.relay_staged(&entry, &url);
+        let before = entry.sync.clone();
+        let slot = self.relay_slot();
+        let name = entry.name;
+        let job = relay.clone();
+        self.relay_spawn_with(id, Job::TurnOn, Some(relay.clone()), move || {
+            use crate::relay::connect::ConnectError;
+            let (result, refused) =
+                match relay.create_team_codeless_shared(&slot, same_file(&relay), &name, &device) {
+                    Ok(report) => (Ok(report), None),
+                    Err(ConnectError::Sync(error)) => (Err(error), None),
+                    Err(other) => (
+                        Err(SyncError::Relay(RelayRefusal::Error)),
+                        Some(other.to_string()),
+                    ),
+                };
+            Reply::TurnedOn(Box::new(TurnedOn {
+                relay: job,
+                name,
+                joined: false,
+                before,
+                result,
+                device: None,
+                typed: false,
+                rekeyed: false,
+                refused,
             }))
         });
         Ok(())
@@ -1676,6 +1770,7 @@ impl DesktopApp {
                 result,
                 typed,
                 rekeyed,
+                refused: None,
             }))
         });
         Ok(())
@@ -3120,7 +3215,8 @@ pub(super) fn link_fields(app: &mut DesktopApp, s: &mut kit::Section<'_>, focus:
     link.lost_focus() && link.ctx.input(|input| input.key_pressed(egui::Key::Enter))
 }
 
-/// "Apassy relay" in Settings > Vault > Sync: a new relay copy with a team code, or a
+/// "Apassy relay" in Settings > Vault > Sync: a new relay copy (without a team code on
+/// the hosted relay, plan s7 unit S0; with one on a relay that needs it), or a
 /// link from a Mac that syncs this vault through the relay already.
 pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) -> bool {
     app.relay_join_step(Some(ctx));
@@ -3180,22 +3276,32 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
             }
             (_, Some(view)) => join_progress(ui, view),
             (SetupMode::NewCopy, None) => {
-                kit::section(
-                    ui,
-                    None,
-                    Some(
-                        "The operator of the relay gives you a team code. It works once. Apassy makes a key for this Mac and keeps it in the vault.",
-                    ),
-                    |s| {
-                        s.field("Relay address", |ui| {
-                            kit::text_input(
-                                ui,
-                                &mut app.sync.relay.url_input,
-                                "sync-relay-url",
-                                DEFAULT_RELAY_URL,
-                            )
-                        });
-                        // A one-time secret: masked, and erased after each try.
+                // The hosted relay needs no team code (plan s7 unit S0).
+                let hosted = !needs_team_code(&app.sync.relay.url_input, false);
+                let code = needs_team_code(&app.sync.relay.url_input, app.sync.relay.with_code);
+                let words = if code {
+                    "The operator of the relay gives you a team code. It works once. Apassy makes a key for this Mac and keeps it in the vault.".to_owned()
+                } else {
+                    codeless_copy_words()
+                };
+                kit::section(ui, None, Some(words.as_str()), |s| {
+                    s.field("Relay address", |ui| {
+                        kit::text_input(
+                            ui,
+                            &mut app.sync.relay.url_input,
+                            "sync-relay-url",
+                            DEFAULT_RELAY_URL,
+                        )
+                    });
+                    if hosted {
+                        s.toggle(
+                            "Relay with a team code",
+                            Some("For a team code from the operator of the relay."),
+                            &mut app.sync.relay.with_code,
+                        );
+                    }
+                    // A one-time secret: masked, and erased after each try.
+                    if code {
                         s.field("Team code", |ui| {
                             secure_input(
                                 ui,
@@ -3205,16 +3311,16 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                                 "apassy_tcd_…",
                             )
                         });
-                        s.field("Name of this Mac", |ui| {
-                            kit::text_input(
-                                ui,
-                                &mut app.sync.relay.device_input,
-                                "sync-relay-device",
-                                "MacBook Pro",
-                            )
-                        });
-                    },
-                );
+                    }
+                    s.field("Name of this Mac", |ui| {
+                        kit::text_input(
+                            ui,
+                            &mut app.sync.relay.device_input,
+                            "sync-relay-device",
+                            "MacBook Pro",
+                        )
+                    });
+                });
             }
             (SetupMode::Join, None) => {
                 kit::section(
@@ -3276,6 +3382,15 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
         forget_secret_field(ctx, super::SYNC_PASSPHRASE_FIELD);
         // The answer of the relay closes the sheet, or asks again.
         app.relay_join_passphrase(passphrase.into_zeroizing());
+    } else if turn_on && !needs_team_code(&app.sync.relay.url_input, app.sync.relay.with_code) {
+        let (url, device) = (
+            app.sync.relay.url_input.clone(),
+            app.sync.relay.device_input.clone(),
+        );
+        // The answer of the relay closes the sheet ([`Job::TurnOn`]).
+        if let Err(text) = app.relay_enable_codeless(&entry.id, &url, &device) {
+            app.set_err(text);
+        }
     } else if turn_on {
         let (url, device) = (
             app.sync.relay.url_input.clone(),

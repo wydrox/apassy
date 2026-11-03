@@ -670,7 +670,11 @@ fn a_connect_team_gets_the_configured_sync_bytes() {
     assert_eq!(info["limits"]["sync_bytes"], 67_108_864);
     // The rest of the preset is as before: one member, no items, no agents.
     assert_eq!(
-        (&info["limits"]["members"], &info["limits"]["items"], &info["limits"]["agents"]),
+        (
+            &info["limits"]["members"],
+            &info["limits"]["items"],
+            &info["limits"]["agents"]
+        ),
         (&json!(1), &json!(0), &json!(0))
     );
     // The first push of a vault passes, and the head names version 1.
@@ -690,7 +694,10 @@ fn a_connect_team_gets_the_configured_sync_bytes() {
     assert_eq!(team_info(&restarted, &late)["limits"]["sync_bytes"], 0);
     let refused = push_first(&restarted, &late, &late_mac, &body);
     assert_eq!((refused.status, refused.code()), (403, "plan_required"));
-    assert_eq!(team_info(&restarted, &team)["limits"]["sync_bytes"], 67_108_864);
+    assert_eq!(
+        team_info(&restarted, &team)["limits"]["sync_bytes"],
+        67_108_864
+    );
 }
 
 #[test]

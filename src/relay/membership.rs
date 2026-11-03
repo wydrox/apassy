@@ -200,6 +200,31 @@ pub fn existing_questions_team(vault: &Vault) -> VaultResult<Option<String>> {
         .map(|(team, _)| team))
 }
 
+/// The questions membership of this Mac that relay sync on `url` uses instead of a new
+/// team (plans section 4.1): a vault that asks through a Connect team (or another
+/// questions team) on the same relay pushes its copy into that team, and the membership
+/// then has both purposes (`Vault::set_relay_device` adds `sync`). `None`: this Mac has
+/// no questions membership with its own key on that relay. `AlreadyExists`: the owner
+/// removed this Mac's key, so relay sync with it would be refused too.
+pub fn questions_team_for_sync(
+    vault: &Vault,
+    url: &RelayUrl,
+) -> Result<Option<RelayMembership>, SyncError> {
+    let Some(membership) = questions_membership(vault)? else {
+        return Ok(None);
+    };
+    let same_relay =
+        RelayUrl::parse(&membership.relay_url).is_ok_and(|own| own.as_str() == url.as_str());
+    // An account key (schema 34) has no private key here: Connect accounts sync their way.
+    if !same_relay || membership.key_pkcs8.is_empty() {
+        return Ok(None);
+    }
+    if vault.trusted_key_removed(&membership.public_key)? {
+        return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
+    }
+    Ok(Some(membership))
+}
+
 /// Whether the key of this Mac in `membership` is the key of a removed device: the owner
 /// removed this Mac from the questions.
 pub fn this_device_removed(vault: &Vault, membership: &RelayMembership) -> VaultResult<bool> {

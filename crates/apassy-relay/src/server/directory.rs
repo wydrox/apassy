@@ -1459,10 +1459,7 @@ PRAGMA user_version = 1002;
             synced
         );
         // Room for the sync heads, only with vault sync: 11 + 16 MiB.
-        assert_eq!(
-            synced.file_bytes(TeamKind::Connect),
-            Some(27 * 1_048_576)
-        );
+        assert_eq!(synced.file_bytes(TeamKind::Connect), Some(27 * 1_048_576));
         // Both are presets of a relay with the setting; a raised team is not.
         assert!(synced.is_connect_preset(67_108_864));
         assert!(TeamLimits::connect().is_connect_preset(67_108_864));
