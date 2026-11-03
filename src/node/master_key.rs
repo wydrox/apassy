@@ -206,7 +206,7 @@ fn read_key_file(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, NodeError> {
         .open(path)
         .map_err(|_| node_error("key_failed", "The node key file cannot be read."))?;
     let mut key = Zeroizing::new(Vec::with_capacity(KEY_BYTES + 1));
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(KEY_BYTES as u64 + 1)
         .read_to_end(&mut key)
         .map_err(|_| node_error("key_failed", "The node key file cannot be read."))?;
