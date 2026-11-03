@@ -3,6 +3,7 @@
 Date: 2026-11-02.
 Status: ACCEPTED by the owner on 2026-11-02 (all decisions D1 to D14, in the table at the end). TEE
 features are an enterprise track that comes later. Not implemented.
+Cloud slice first (owner, 2026-11-03): [docs/design/implementation-plan-0037-cloud-agents.md](../design/implementation-plan-0037-cloud-agents.md).
 When accepted, it replaces the hosted parts of ADR 0016 §5, ADR 0019 (a multi-tenant relay that the
 operator runs for teams), the default relay address of ADR 0022, and Connect creation on an
 Apassy-run server (ADR 0032). It keeps every wire contract and the device identity of ADR 0019.
