@@ -192,8 +192,7 @@ impl DesktopApp {
         ctx.request_repaint_after(SYNC_INTERVAL);
         self.sync_connects(&node);
         // What runs decides, not what the window started: the node can stop by itself
-        // (the route went off, the tailnet name changed), and `apassy agent add-remote` starts
-        // it from Settings.
+        // (the route went off, the tailnet name changed).
         let (wanted, allowed) = self.node_wanted(&node);
         let serves = node.serves();
         if serves.is_some() && serves != allowed {
