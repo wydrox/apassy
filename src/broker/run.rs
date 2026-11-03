@@ -41,6 +41,10 @@
 //!       default-source classifications (ADR 0031). Default sources need 80% task
 //!       match even for known safe commands and reads. Calibration cannot lower it.
 //!       Low confidence asks. Evaluation scopes are retained data, not routing gates.
+//!       A credential that the owner labeled development or local is judged with the
+//!       development defaults for its default risk and reversibility
+//!       ([`DeclarationSources::judged`], ADR 0031 of 2026-11-03), so that default
+//!       risk is no default source.
 //! 7. A question waits for the owner (at most one per agent; the same request again
 //!    joins it while the state that step 8 checks is the same, else it asks again). It
 //!    names the answers that can take effect. "Allow ACTION in PROJECT"
@@ -2366,8 +2370,9 @@ fn check_inner(
             includes_code,
             standing,
             always_ask,
-            weak_source: sources.environment == DeclarationSource::Default
-                || sources.risk == DeclarationSource::Default,
+            // ADR 0031, 2026-11-03: a default risk of a credential that the owner
+            // labeled development follows the label, so it is no weak source.
+            weak_source: sources.weak(declaration.as_ref()),
             production: is_production && !unconfirmed,
             unconfirmed,
             foreign_project: declaration
@@ -2415,7 +2420,8 @@ struct Collected<'a> {
     known_hosts: &'a mut Vec<String>,
 }
 
-/// Add the variable, the declaration, the provider hosts, and the authorization of one
+/// Add the variable, the declaration as the bouncer judges it
+/// ([`DeclarationSources::judged`]), the provider hosts, and the authorization of one
 /// item. `authorization` comes without its binding and provider; this fills them in.
 fn push_item(
     vault: &Vault,
@@ -2424,7 +2430,15 @@ fn push_item(
     mut authorization: ItemAuthorization,
     out: &mut Collected<'_>,
 ) -> Result<(), (&'static str, String)> {
-    out.declarations.push(authorization.declaration.clone());
+    // The bouncer judges a development label with the development defaults (ADR 0031,
+    // 2026-11-03), also for a label from before 0.5.16. The authorization keeps the
+    // stored values, so the recheck compares what the vault has.
+    out.declarations.push(
+        authorization
+            .declaration
+            .as_ref()
+            .map(|declaration| authorization.sources.judged(declaration)),
+    );
     // Goal item B4: only the stored provider name. The broker does not run the
     // detection. An unknown provider has no hosts, as an item without a provider.
     let provider = vault.declaration_provider(item_id).map_err(|_| {
