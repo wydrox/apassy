@@ -34,7 +34,9 @@ use super::control::{ControllerParts, PairingController};
 use super::crypto::certificate_pin;
 use super::handler::{self, Shared};
 use super::http::{self, ReadFailure, Response, Timed};
-use super::limits::{Connections, DEVICE_PER_MINUTE, RateLimiter, UNSIGNED_PER_MINUTE};
+use super::limits::{
+    Connections, DEVICE_PER_MINUTE, RateLimiter, UNSIGNED_PER_MINUTE, companion_connections,
+};
 use super::pairing::{Clock, Pairing};
 use super::wire::MAX_DEVICE_NAME_CHARS;
 use crate::broker::SharedVault;
@@ -295,7 +297,7 @@ pub fn start(options: CompanionOptions) -> io::Result<CompanionHandle> {
     shared.devices = RateLimiter::new(options.budgets.device_per_minute);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let connections = Connections::new();
+    let connections = companion_connections();
     let controller = PairingController::new(ControllerParts {
         pairing,
         vault: options.vault,

@@ -21,6 +21,11 @@ pub mod broker;
 /// The iPhone companion, Mac side (ADR 0020). It needs the vault.
 #[cfg(feature = "vault")]
 pub mod companion;
+/// The TLS front of the node and the tailnet addresses (ADR 0037 D4). The Wi-Fi
+/// companion shares its TLS configuration, limits, and pin. It needs the vault
+/// (rustls, ring, rcgen).
+#[cfg(feature = "vault")]
+pub mod net;
 /// Sync of a vault through a folder (ADR 0014). It needs the vault.
 #[cfg(feature = "vault")]
 pub mod sync;
