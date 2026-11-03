@@ -18,6 +18,7 @@ pub mod decide;
 mod evaluation_binding;
 pub mod exec;
 pub mod finetune;
+pub mod heads_place;
 pub mod http;
 pub mod learning;
 pub mod model_server;
