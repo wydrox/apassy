@@ -73,9 +73,15 @@ What the app does:
 | Rust probe | rustls `=0.23.46` (ring, std, tls12), ring `=0.17.14`, Rust 1.97.0 | the vault core's versions |
 | iOS | 26.0 | the app's deployment target |
 
-The desktop spike (plan s4, T0) had not pushed a pin when this was written. It should source
-`ios/Spikes/TailnetSpike/pins.env`, or the two spikes should agree on one file before T1 (plan
-s8 T1: "if the s4 plan already owns a libtailscale build ... T1 adds the iOS slices").
+The desktop spike (plan s4 T0, branch `s4/t0-tailnet-spike` at `ae2397fc`,
+`crates/apassy-tailnet/pins.env`) has the same three values: Go 1.27.3, libtailscale `ac7ed43a`,
+tailscale.com v1.104.1. Only the delivery differs. The desktop spike installs Go from the
+go.dev tarball by SHA-256 and vendors the libtailscale files (with SHA-256 of each) into
+`crates/apassy-tailnet/go/`. This spike uses `GOTOOLCHAIN` and a clone at the commit. Its own
+Go file there (`apassy.go`) also calls `logtail.Disable` (section 8, item 1). For T1 (plan s8:
+"if the s4 plan already owns a libtailscale build ... T1 adds the iOS slices"): keep one pins
+file and one Go directory, the desktop one, and add the iOS slices and this spike's hooks that
+T3 still needs (the no-logs call, the traceback level, a dial with a deadline).
 
 tailscale.com `v1.104.5` is the newest patch release. The bulletins after v1.104.1 that the
 spike saw (TS-2026-016, TS-2026-017) are about Serve, which the node does not use. T1 decides on
