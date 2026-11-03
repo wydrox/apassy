@@ -169,24 +169,18 @@ pub struct CloudRequest<'a> {
 pub struct CloudContext {
     /// The run of the node, for the log.
     pub relay_run: u64,
-    /// The folder that the agent named in its own environment, for the card. It is not
-    /// a folder of this Mac.
+    /// The folder that the agent named in its own environment. It is not a folder of
+    /// this Mac, has no function on a cloud run, and the card does not show it: it is
+    /// text of the agent that could pose as a label of Apassy.
     pub agent_cwd: Option<String>,
     /// True when the node stops: a waiting question ends as invalidated.
     pub stop: Arc<AtomicBool>,
 }
 
 impl CloudContext {
+    /// The folder line of the card: a fixed label, never `agent_cwd`.
     fn card_cwd(&self) -> String {
-        match self.agent_cwd.as_deref().map(str::trim) {
-            Some(cwd) if !cwd.is_empty() => {
-                format!(
-                    "{} (of the cloud agent, not on this Mac)",
-                    cut_text(cwd, 200)
-                )
-            }
-            _ => "(the cloud agent, not on this Mac)".to_owned(),
-        }
+        "(the cloud agent, not on this Mac)".to_owned()
     }
 
     fn stopped(&self) -> bool {
@@ -296,18 +290,6 @@ fn authenticate_cloud(
             "The broker cannot read the vault.",
         )),
     }
-}
-
-/// `text` cut to at most `max` bytes at a character boundary.
-fn cut_text(text: &str, max: usize) -> &str {
-    if text.len() <= max {
-        return text;
-    }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 /// A run request from the wire. Borrowed from the parsed request.
