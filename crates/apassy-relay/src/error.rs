@@ -78,8 +78,13 @@ pub mod codes {
     pub const QUESTION_SETTLED: &str = "question_settled";
     /// An answer or a settle after `expires_at`.
     pub const QUESTION_EXPIRED: &str = "question_expired";
-    /// `PUT /v1/push/token` on a relay without push.
+    /// `PUT /v1/push/token` on a relay without push, or `PUT /v1/push/handle` on a relay
+    /// without a push gateway.
     pub const PUSH_UNAVAILABLE: &str = "push_unavailable";
+    /// `PUT /v1/push/handle` with a gateway that is not one of the node's
+    /// (push-gateway-v1 section 10), so a device cannot make the node call an arbitrary
+    /// address.
+    pub const PUSH_GATEWAY_REFUSED: &str = "push_gateway_refused";
     // Connect teams (docs/SPEC.md section 26).
     /// A snapshot push to a team whose `sync_bytes` is 0: vault sync through the relay
     /// is not in the team's plan.
@@ -151,7 +156,8 @@ pub fn status_of(code: &str) -> u16 {
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
-        | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED | ACTION_EXPIRED => 409,
+        | PUSH_GATEWAY_REFUSED | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED
+        | ACTION_EXPIRED => 409,
         TEAM_VAULTS_RETIRED => 410,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
@@ -254,6 +260,7 @@ mod tests {
             codes::QUESTION_SETTLED,
             codes::QUESTION_EXPIRED,
             codes::PUSH_UNAVAILABLE,
+            codes::PUSH_GATEWAY_REFUSED,
             codes::CONNECT_KEY_USED,
             codes::SEQ_NOT_NEWER,
             codes::ACTION_SETTLED,

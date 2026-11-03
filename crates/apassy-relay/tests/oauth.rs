@@ -206,6 +206,10 @@ impl Node {
             master_key: SecretString::new(MASTER_KEY.to_string()),
             public_url: PUBLIC_URL.to_string(),
             public_listen: Some(loopback()),
+            node_origin: None,
+            tailnet_listen: None,
+            tailnet_agents: false,
+            push_gateway: None,
         })
         .expect("config");
         config.oauth = Some(oauth);
@@ -1210,6 +1214,10 @@ fn the_hosted_relay_has_no_oauth_paths() {
         master_key: SecretString::new(MASTER_KEY.to_string()),
         public_url: PUBLIC_URL.to_string(),
         public_listen: Some(loopback()),
+        node_origin: None,
+        tailnet_listen: None,
+        tailnet_agents: false,
+        push_gateway: None,
     })
     .unwrap();
     config.oauth = None;

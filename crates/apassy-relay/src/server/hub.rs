@@ -362,7 +362,7 @@ pub struct Hub {
     /// Snapshot transfers of every team in flight.
     sync_transfers: Arc<AtomicUsize>,
     /// The push trigger, shared by every team.
-    push: Arc<crate::server::push::Push>,
+    pub(crate) push: Arc<crate::server::push::Push>,
     /// The Connect teams of each client prefix today, in memory only (section 26).
     connect_prefixes: connect::PrefixLimiter,
     connect_recovery: Mutex<HashMap<String, ([u8; 32], u64)>>,
@@ -731,6 +731,70 @@ impl Hub {
         drop(owner_token);
         self.register(id.clone(), store, limits, TeamKind::Operator)?;
         Ok(id)
+    }
+
+    /// A team of devices of a node, made in process (docs/SPEC.md section 32.4): the
+    /// bootstrap of `POST /v1/teams` without a team code. The owner member
+    /// (`PERSONAL_OWNER`) and its first device `device_name` with the P-256 public key
+    /// `public_key` (base64url, 65 bytes), which holds the keys; no member token. The team
+    /// has the default limits of an operator team. The directory's `team_created` row has
+    /// `kind: "device"`. Returns the team and the device. The device signs in with the
+    /// node origin like any other device.
+    pub fn create_device_team(
+        &self,
+        name: &str,
+        device_name: &str,
+        public_key: &str,
+        now: u64,
+    ) -> RelayResult<(TeamId, DeviceId)> {
+        let name = checked_team_name(name)?.to_string();
+        let device_name = admin::checked_label(device_name, "device name")?;
+        let public_key = crate::device::decode_public_key(public_key)
+            .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
+        let new = make_team_file_with_device(
+            &self.config,
+            &name,
+            PERSONAL_OWNER,
+            now,
+            Some((&device_name, &public_key)),
+        )?;
+        let added = self.directory.store.tx(|tx| {
+            directory::insert_team(tx, &new.id, &name, &new.file_key, false, now)?;
+            self.directory.audit.write_on(
+                tx,
+                now,
+                RELAY_ACTOR,
+                "team_created",
+                None,
+                &json!({"team_id": new.id, "kind": "device"}),
+            )
+        });
+        if let Err(error) = added {
+            // The team row did not commit: its file has no key anywhere.
+            let id = new.id.clone();
+            drop(new);
+            let _ = remove_team_file(&self.config, &id);
+            return Err(error);
+        }
+        let NewTeam {
+            id,
+            owner_id,
+            store,
+            owner_token,
+            ..
+        } = new;
+        drop(owner_token);
+        let device_id = store.with(|conn| {
+            conn.query_row(
+                "SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL",
+                params![to_i(owner_id.0)],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|id| DeviceId(to_u(id)))
+            .map_err(db)
+        })?;
+        self.register(id.clone(), store, TeamLimits::default(), TeamKind::Operator)?;
+        Ok((id, device_id))
     }
 
     /// An existence-independent, bounded recovery challenge for a device key.

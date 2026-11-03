@@ -13,7 +13,10 @@
 //! and the proxy, and each listener of a node counts failed authentications
 //! (`AuthFailures`, docs/SPEC.md section 30). With `RelayConfig::oauth` (an embedded node)
 //! both listeners also serve the MCP authorization flow (`oauth`, docs/SPEC.md section
-//! 31), and a 401 of `POST /mcp` carries `WWW-Authenticate`.
+//! 31), and a 401 of `POST /mcp` carries `WWW-Authenticate`. A node on the tailnet has a
+//! third listener (`Scope::Tailnet`, docs/SPEC.md section 32) that its TLS front forwards
+//! to: the device routes, and on the Linux node the team routes too; never the OAuth
+//! flow, `/v1/connect`, or anything else (404).
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -42,7 +45,7 @@ use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{
-    Core, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, sync,
+    Core, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, push, sync,
 };
 use crate::session::SessionSource;
 
@@ -72,6 +75,51 @@ pub enum Scope {
     /// `POST /mcp` and `/p/` only: the listener of an embedded node that Tailscale
     /// Funnel reaches. Every other request, `/healthz` included, is 404 `not_found`.
     Public,
+    /// The listener that the TLS front of a node forwards to (docs/SPEC.md section 32.1):
+    /// `/healthz` and the device routes (`DEVICE_EXACT`, `DEVICE_UNDER`); with `agents`
+    /// (the Linux node) also the team routes (`TEAM_EXACT`, `TEAM_UNDER`, `/mcp`, `/p/`).
+    /// Never the OAuth flow, `/v1/connect`, or any other path: 404 `not_found`, before
+    /// any other check. No header of the front is trusted.
+    Tailnet { agents: bool },
+}
+
+/// The device paths of the tailnet scope that are served exactly.
+const DEVICE_EXACT: [&str; 6] = [
+    paths::HEALTH,
+    paths::JOIN,
+    paths::TEAMS,
+    paths::ME,
+    paths::LEAVE,
+    paths::INVITES,
+];
+/// The device paths of the tailnet scope that are served with every path below them.
+const DEVICE_UNDER: [&str; 8] = [
+    "/v1/auth",
+    paths::DEVICES,
+    paths::JOINS,
+    paths::MEMBERS,
+    paths::SYNC,
+    paths::QUESTIONS,
+    "/v1/push",
+    paths::FEED,
+];
+/// The team paths of the tailnet scope of the Linux node, served exactly.
+const TEAM_EXACT: [&str; 3] = [paths::ACCESS, paths::AUDIT, paths::MCP];
+/// The team paths of the tailnet scope of the Linux node, with every path below them.
+const TEAM_UNDER: [&str; 7] = [
+    paths::COLLECTIONS,
+    paths::ITEMS,
+    paths::GRANTS,
+    "/v1/agents",
+    paths::APPROVALS,
+    paths::RUNS,
+    "/v1/host",
+];
+
+/// `path` is `prefix` or below it (`prefix/...`).
+fn is_under(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 impl Scope {
@@ -82,7 +130,21 @@ impl Scope {
             Self::Public => {
                 (method == "POST" && path == paths::MCP) || path.starts_with(paths::PROXY_PREFIX)
             }
+            Self::Tailnet { agents } => {
+                DEVICE_EXACT.contains(&path)
+                    || DEVICE_UNDER.iter().any(|prefix| is_under(path, prefix))
+                    || (agents
+                        && (TEAM_EXACT.contains(&path)
+                            || TEAM_UNDER.iter().any(|prefix| is_under(path, prefix))
+                            || path.starts_with(paths::PROXY_PREFIX)))
+            }
         }
+    }
+
+    /// The MCP authorization flow is served on this listener (with `RelayConfig::oauth`):
+    /// on the node and public listeners, never on the tailnet listener.
+    pub fn serves_oauth(self) -> bool {
+        !matches!(self, Self::Tailnet { .. })
     }
 
     /// The kind of the audit row of a listener at its limit.
@@ -90,6 +152,7 @@ impl Scope {
         match self {
             Self::Node => "auth_limit_node",
             Self::Public => "auth_limit_public",
+            Self::Tailnet { .. } => "auth_limit_tailnet",
         }
     }
 
@@ -97,6 +160,7 @@ impl Scope {
         match self {
             Self::Node => "node",
             Self::Public => "public",
+            Self::Tailnet { .. } => "tailnet",
         }
     }
 }
@@ -216,6 +280,8 @@ pub enum Endpoint {
     Settle(Qid),
     PushTokenPut,
     PushTokenDelete,
+    PushHandlePut,
+    PushHandleDelete,
     FeedPut,
     FeedList,
     FeedDelete,
@@ -413,6 +479,13 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
             &[
                 ("PUT", Need::Member, PushTokenPut),
                 ("DELETE", Need::Member, PushTokenDelete),
+            ],
+        ),
+        ["v1", "push", "handle"] => pick(
+            method,
+            &[
+                ("PUT", Need::Member, PushHandlePut),
+                ("DELETE", Need::Member, PushHandleDelete),
             ],
         ),
         ["v1", "feed"] => pick(
@@ -972,11 +1045,13 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (url.clone(), String::new()),
     };
-    // The MCP authorization flow, on a relay that has it (an embedded node).
+    // The MCP authorization flow, on a relay that has it (an embedded node), and never on
+    // its tailnet listener.
     let oauth_route = hub
         .config
         .oauth
         .as_ref()
+        .filter(|_| listener.scope.serves_oauth())
         .and_then(|_| oauth::route(&method, &path));
     // The public listener knows two routes and the flow. Anything else is not there,
     // before any other check.
@@ -1113,7 +1188,12 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         let prefix = hub.config.edge.secret().and_then(|secret| {
             connect::verified_prefix(secret.expose(), prefix.as_deref(), mac.as_deref())
         });
-        let result = dispatch_edge(hub, endpoint, &body, prefix, now);
+        // A challenge names the sign-in origin of the request's `Host` (a node has more
+        // than one, docs/SPEC.md section 32.3).
+        let host = (endpoint == Endpoint::Challenge)
+            .then(|| header_value(&request, "Host"))
+            .flatten();
+        let result = dispatch_edge(hub, endpoint, &body, prefix, host.as_deref(), now);
         let recovery = endpoint == Endpoint::ConnectChallenge
             || (endpoint == Endpoint::Connect
                 && serde_json::from_slice::<api::ConnectCreate>(&body)
@@ -1156,6 +1236,20 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         respond_error(request, &error);
         return;
     }
+    // The sealed summary of a question (push-gateway-v1 section 12): only a node in the
+    // gateway mode reads it, and checks its form (400) before the token; the hosted relay
+    // ignores the header.
+    let summary = if endpoint == Endpoint::QuestionPost && hub.push.is_gateway() {
+        match push::checked_summary(header_value(&request, push::SUMMARY_HEADER).as_deref()) {
+            Ok(summary) => summary,
+            Err(error) => {
+                respond_error(request, &error);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     // A push answers a malformed request (400) before it reads the token (section 24.3).
     let push = if endpoint == Endpoint::SyncPush {
         match PushRequest::from_headers(|name| header_value(&request, name)) {
@@ -1278,6 +1372,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             | Endpoint::AnswerPost(_)
             | Endpoint::Settle(_)
             | Endpoint::PushTokenPut
+            | Endpoint::PushHandlePut
             | Endpoint::FeedPut
             | Endpoint::FeedActionPost
             | Endpoint::FeedActionSettle(_)
@@ -1296,6 +1391,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         principal.as_ref(),
         &query,
         &body,
+        summary.as_deref(),
         hold,
         now,
     ) {
@@ -1431,6 +1527,7 @@ fn dispatch_edge(
     endpoint: Endpoint,
     body: &[u8],
     prefix: Option<&str>,
+    host: Option<&str>,
     now: u64,
 ) -> RelayResult<Value> {
     match endpoint {
@@ -1472,7 +1569,7 @@ fn dispatch_edge(
             let core = hub
                 .team(&request.team_id)
                 .ok_or_else(RelayError::unauthenticated)?;
-            devices::challenge(&core, &request, now)
+            devices::challenge_for(&core, &request, host, now)
         }
         Endpoint::Token => {
             let request: TokenRequest = parse_body(body)?;
@@ -1833,13 +1930,16 @@ fn wait_of(query: &str) -> RelayResult<u64> {
 }
 
 /// Runs one endpoint. The principal has passed `auth::allow` for its need. `hold`: a
-/// question long poll may wait.
+/// question long poll may wait. `summary`: the checked sealed summary of a question post
+/// (a node in the gateway mode only).
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     core: &Core,
     endpoint: Endpoint,
     principal: Option<&Principal>,
     query: &str,
     body: &[u8],
+    summary: Option<&str>,
     hold: bool,
     now: u64,
 ) -> RelayResult<Value> {
@@ -1961,9 +2061,13 @@ fn dispatch(
             now,
         )?),
         SyncReceipt => sync::receipt(core, member_of(principal)?, &parse_body(body)?, now),
-        QuestionPost => {
-            questions::post(core, device_member_of(principal)?, &parse_body(body)?, now)
-        }
+        QuestionPost => questions::post_with_summary(
+            core,
+            device_member_of(principal)?,
+            &parse_body(body)?,
+            summary,
+            now,
+        ),
         QuestionList => {
             let since = number(query, "since")?.unwrap_or(0);
             let wait = wait_of(query)?;
@@ -2005,6 +2109,10 @@ fn dispatch(
             questions::push_token_put(core, device_member_of(principal)?, &parse_body(body)?, now)
         }
         PushTokenDelete => questions::push_token_delete(core, device_member_of(principal)?, now),
+        PushHandlePut => {
+            push::handle_put(core, device_member_of(principal)?, &parse_body(body)?, now)
+        }
+        PushHandleDelete => push::handle_delete(core, device_member_of(principal)?, now),
         FeedPut => feed::put(core, device_member_of(principal)?, &parse_body(body)?, now),
         FeedDelete => feed::delete(core, device_member_of(principal)?, now),
         FeedList => {
@@ -2290,6 +2398,14 @@ mod tests {
             (Need::Member, Endpoint::PushTokenPut)
         );
         assert_eq!(
+            route("PUT", "/v1/push/handle").unwrap(),
+            (Need::Member, Endpoint::PushHandlePut)
+        );
+        assert_eq!(
+            route("DELETE", "/v1/push/handle").unwrap(),
+            (Need::Member, Endpoint::PushHandleDelete)
+        );
+        assert_eq!(
             route("DELETE", "/v1/push/token").unwrap(),
             (Need::Member, Endpoint::PushTokenDelete)
         );
@@ -2304,6 +2420,8 @@ mod tests {
             ("GET", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/settle"),
             ("DELETE", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers"),
             ("GET", "/v1/push/token"),
+            ("GET", "/v1/push/handle"),
+            ("POST", "/v1/push/handle"),
         ] {
             assert_eq!(
                 route(method, path).unwrap_err().code,
@@ -2455,6 +2573,90 @@ mod tests {
             assert!(!Scope::Public.serves(method, path), "{method} {path}");
             assert!(Scope::Node.serves(method, path), "{method} {path}");
         }
+    }
+
+    #[test]
+    fn the_tailnet_scope_serves_the_device_routes_and_with_agents_the_team_routes() {
+        let devices = Scope::Tailnet { agents: false };
+        let linux = Scope::Tailnet { agents: true };
+        for (method, path) in [
+            ("GET", "/healthz"),
+            ("POST", "/v1/auth/challenge"),
+            ("POST", "/v1/auth/token"),
+            ("GET", "/v1/devices"),
+            ("POST", "/v1/devices/links"),
+            ("POST", "/v1/devices/link"),
+            ("POST", "/v1/devices/link/cancel"),
+            ("POST", "/v1/devices/links/3/confirm"),
+            ("DELETE", "/v1/devices/3"),
+            ("POST", "/v1/join"),
+            ("GET", "/v1/joins"),
+            ("POST", "/v1/joins/3/confirm"),
+            ("POST", "/v1/invites"),
+            ("POST", "/v1/teams"),
+            ("GET", "/v1/me"),
+            ("POST", "/v1/leave"),
+            ("GET", "/v1/members"),
+            ("PUT", "/v1/members/3/role"),
+            ("DELETE", "/v1/sync"),
+            ("GET", "/v1/sync/head"),
+            ("PUT", "/v1/sync/snapshot"),
+            ("POST", "/v1/questions"),
+            ("GET", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers"),
+            ("PUT", "/v1/push/handle"),
+            ("PUT", "/v1/push/token"),
+            ("PUT", "/v1/feed"),
+            ("GET", "/v1/feed/actions"),
+        ] {
+            assert!(devices.serves(method, path), "{method} {path}");
+            assert!(linux.serves(method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            ("POST", "/mcp"),
+            ("GET", "/p/apassy_ses_x/api.example.com/v1"),
+            ("POST", "/v1/runs"),
+            ("GET", "/v1/runs/7"),
+            ("GET", "/v1/access"),
+            ("GET", "/v1/host/requests"),
+            ("POST", "/v1/host/requests/7/release"),
+            ("POST", "/v1/collections"),
+            ("PUT", "/v1/collections/3/policy"),
+            ("POST", "/v1/items"),
+            ("DELETE", "/v1/items/3"),
+            ("POST", "/v1/grants"),
+            ("POST", "/v1/agents"),
+            ("GET", "/v1/approvals"),
+            ("GET", "/v1/audit"),
+        ] {
+            assert!(!devices.serves(method, path), "{method} {path}");
+            assert!(linux.serves(method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            ("POST", "/v1/connect"),
+            ("POST", "/v1/connect/challenge"),
+            ("GET", "/.well-known/oauth-authorization-server"),
+            ("GET", "/.well-known/oauth-protected-resource"),
+            ("POST", "/oauth/register"),
+            ("GET", "/oauth/authorize"),
+            ("POST", "/oauth/token"),
+            ("GET", "/"),
+            ("GET", "/v1/mex"),
+            ("GET", "/v1/devicesx"),
+            ("GET", "/v1/questionsx"),
+            ("GET", "/v1/runsx"),
+            ("GET", "/mcp/x"),
+            ("GET", "/v1/feedx"),
+            ("GET", "/v1/me/x"),
+            ("GET", "/healthz/x"),
+            ("GET", "/px/"),
+        ] {
+            assert!(!devices.serves(method, path), "{method} {path}");
+            assert!(!linux.serves(method, path), "{method} {path}");
+        }
+        assert!(!devices.serves_oauth() && !linux.serves_oauth());
+        assert!(Scope::Node.serves_oauth() && Scope::Public.serves_oauth());
+        assert_eq!(linux.name(), "tailnet");
+        assert_eq!(devices.limit_kind(), "auth_limit_tailnet");
     }
 
     #[test]
