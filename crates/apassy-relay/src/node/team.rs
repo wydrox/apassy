@@ -12,3 +12,20 @@ pub const DEPRECATION_ENV: &str = "APASSY_TEAM_DEPRECATION";
 pub fn run(args: Vec<String>) -> i32 {
     crate::cli::main_as(crate::cli::Program::NodeTeam, args)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_packaged_shim_prints_the_same_deprecation_line() {
+        let shim = include_str!("../../../../packaging/linux/apassy-team");
+        assert!(
+            shim.contains(&format!("'{}'", super::DEPRECATION_LINE)),
+            "{shim}"
+        );
+        assert!(
+            shim.contains(&format!("\"${{{}:-}}\" = 1", super::DEPRECATION_ENV)),
+            "{shim}"
+        );
+        assert!(shim.contains("exec \"$here/apassy\" team \"$@\""), "{shim}");
+    }
+}

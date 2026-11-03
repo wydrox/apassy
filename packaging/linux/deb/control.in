@@ -1,0 +1,17 @@
+Package: apassy
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Apassy <https://github.com/wydrox/apassy/issues>
+Installed-Size: @INSTALLED_SIZE@
+Depends: @DEPENDS@
+Suggests: tailscale, systemd
+Section: utils
+Priority: optional
+Homepage: https://github.com/wydrox/apassy
+Description: Apassy node without a window
+ The Apassy node runs on a Linux machine of your tailnet: the relay of the
+ questions, the feed, the access requests, and relay sync of your devices,
+ and a team host for `apassy team`. The Mac and the iPhone reach it over
+ Tailscale behind a pinned certificate. Nothing listens on 0.0.0.0.
+ .
+ After the installation, run `apassy up` as your own user (not as root).

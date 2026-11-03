@@ -26,14 +26,50 @@ function fixture(t: TestContext, os = 'Darwin', arch = 'arm64', version = 'apass
   return {dir, installed, marker, run: () => execute('/bin/sh',[installer], {env:{...process.env,
     HOME:dir, PATH:`${bin}:${process.env.PATH}`, APASSY_INSTALL_AS_ROOT:'1', APASSY_INSTALL_DIR:target, APASSY_RELAY_URL:`file://${dir}`}})};
 }
-for (const [os,arch] of [['Darwin','x86_64'],['Linux','aarch64']]) {
+for (const [os,arch] of [['Darwin','x86_64']]) {
   test(`unsupported ${os}/${arch} fails before any download`,async t => {
     const f = fixture(t,os,arch);
-    await assert.rejects(f.run(), (e: Error & {stderr?:string}) => /Supported platforms: macOS arm64 and Linux x86_64/.test(e.stderr ?? ''));
+    await assert.rejects(f.run(), (e: Error & {stderr?:string}) => /Supported platforms: macOS arm64, Linux x86_64, and Linux aarch64/.test(e.stderr ?? ''));
     assert.equal(existsSync(f.marker),false);
     assert.equal(readFileSync(f.installed,'utf8'),'old-binary');
   });
 }
+
+// The Linux node (plan S2-S3, L3): apassy-<version>-linux-<arch>.tar.gz with `apassy` and
+// the `apassy-team` shim. `extra` adds an entry next to the package directory.
+async function nodeFixture(t: TestContext, arch: string, nodeArch: string, extra = false) {
+  const f = fixture(t, 'Linux', arch);
+  const top = `apassy-0.5.8-linux-${nodeArch}`;
+  const tree = join(f.dir, 'tree');
+  mkdirSync(join(tree, top), {recursive:true});
+  writeFileSync(join(tree, top, 'apassy'), `#!/bin/sh\nif [ "$1" = team ]; then shift; echo "apassy-team 0.5.8 $*"; else echo 'apassy 0.5.8'; fi\n`, {mode:0o755});
+  writeFileSync(join(tree, top, 'apassy-team'), readFileSync(fileURLToPath(new URL('../../../../../packaging/linux/apassy-team', import.meta.url))), {mode:0o755});
+  const names = [top];
+  if (extra) { writeFileSync(join(tree, 'outside'), 'x'); names.push('outside'); }
+  const tarball = join(f.dir, 'dl', `${top}.tar.gz`);
+  await execute('tar', ['-czf', tarball, '-C', tree, ...names]);
+  const blob = readFileSync(tarball);
+  writeFileSync(join(f.dir,'dl','SHA256SUMS'), `${createHash('sha256').update(blob).digest('hex')}  ${top}.tar.gz\n`);
+  return f;
+}
+for (const [arch, nodeArch] of [['x86_64','x86_64'],['aarch64','aarch64']]) {
+  test(`Linux ${arch} installs the node and the apassy-team shim from the tarball`, async t => {
+    const f = await nodeFixture(t, arch, nodeArch);
+    const output = await f.run();
+    assert.match(output.stdout, /apassy 0\.5\.8/);
+    assert.match(output.stderr, /Next: apassy up/);
+    const target = join(f.dir, 'target');
+    const team = await execute(join(target, 'apassy-team'), ['me']);
+    assert.equal(team.stdout, 'apassy-team 0.5.8 me\n');
+    assert.match(readFileSync(join(target, 'apassy'), 'utf8'), /apassy 0\.5\.8/);
+  });
+}
+test('a Linux tarball with an entry outside its directory is refused', async t => {
+  const f = await nodeFixture(t, 'x86_64', 'x86_64', true);
+  await assert.rejects(f.run(), /entries outside/);
+  assert.equal(readFileSync(f.installed, 'utf8'), 'old-binary');
+  assert.equal(existsSync(join(f.dir, 'target', 'apassy')), false);
+});
 test('staged version validation preserves the installed binary on failure',async t => {
   const f = fixture(t,'Darwin','arm64','wrong-program');
   await assert.rejects(f.run(), /staged executable/);
