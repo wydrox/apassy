@@ -1704,7 +1704,7 @@ fn write_oauth(request: Request, reply: oauth::Reply, close: bool) {
     let page_headers = || {
         oauth::PAGE_HEADERS
             .iter()
-            .filter_map(|(name, value)| header(name, value))
+            .filter_map(|&(name, value)| header(name, value))
             .collect::<Vec<_>>()
     };
     let response = match reply {
@@ -1721,7 +1721,7 @@ fn write_oauth(request: Request, reply: oauth::Reply, close: bool) {
                 .with_chunked_threshold(usize::MAX);
             for extra in [
                 header("Pragma", "no-cache"),
-                retry_after.and_then(|secs| header("Retry-After", &secs.to_string())),
+                retry_after.and_then(|secs| header("Retry-After", secs.to_string().as_str())),
                 close.then(|| header("Connection", "close")).flatten(),
             ]
             .into_iter()
@@ -1744,7 +1744,7 @@ fn write_oauth(request: Request, reply: oauth::Reply, close: bool) {
                 .chain(header("Content-Type", "text/html; charset=utf-8"))
                 .chain(
                     refresh
-                        .then(|| header("Refresh", &oauth::PAGE_REFRESH_SECS.to_string()))
+                        .then(|| header("Refresh", oauth::PAGE_REFRESH_SECS.to_string().as_str()))
                         .flatten(),
                 )
             {
@@ -1758,7 +1758,7 @@ fn write_oauth(request: Request, reply: oauth::Reply, close: bool) {
                 .with_chunked_threshold(usize::MAX);
             for extra in page_headers()
                 .into_iter()
-                .chain(header("Location", &location))
+                .chain(header("Location", location.as_str()))
             {
                 response.add_header(extra);
             }

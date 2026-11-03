@@ -3,8 +3,9 @@
 //!
 //! The node is an ordinary relay with `RelayConfig::embedded`: no edge, every listener
 //! on the loopback, a public listener for `POST /mcp`, `/p/`, and the MCP authorization
-//! flow (`server::oauth`, docs/SPEC.md section 31) that Tailscale Funnel reaches. Each vault has one personal team (`Hub::create_personal_team`) with one
-//! collection, `CATALOG_COLLECTION`, whose items hold metadata only
+//! flow (`server::oauth`, docs/SPEC.md section 31) that Tailscale Funnel reaches. Each
+//! vault has one personal team (`Hub::create_personal_team`) with one collection,
+//! `CATALOG_COLLECTION`, whose items hold metadata only
 //! (`hostkeys::VALUE_ON_HOST`). The app is the host, in the same process: it acts as the
 //! team's owner member without a token, and it releases a run with the values from the
 //! vault (`host::release_values`). Nothing secret is written to the node's directory.
