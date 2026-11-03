@@ -7,7 +7,7 @@
 //! crate implements them (`apassy_relay::embedded::EmbeddedRelay`); the app crate passes
 //! that implementation in. Tests use a fake backend.
 //!
-//! [`Node`] is the service of the desktop and of Settings > Cloud agents. It owns the
+//! [`Node`] is the service of the desktop and of Bouncer > Agents. It owns the
 //! running node, its host thread (`host`), and the Funnel route (`funnel`):
 //!
 //! - [`Node::start`] (for an unlocked vault with the route on, also before any remote
@@ -205,7 +205,7 @@ impl NodeOptions {
     }
 }
 
-/// The node as Settings > Cloud agents shows it.
+/// The node as the remote access block of Bouncer > Agents shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeStatus {
     pub tailscale: Tailscale,
@@ -434,7 +434,7 @@ impl Node {
         if !setting.route_on {
             return Err(error(
                 "route_off",
-                "The public route is off in Settings > Cloud agents.",
+                "Remote access is off (Bouncer > Agents).",
             ));
         }
         let port = match setting.port {
@@ -735,7 +735,7 @@ impl Node {
             .map(|shared| format!("{}/mcp", shared.public_url))
     }
 
-    /// The node for Settings > Cloud agents. It runs the Tailscale command line.
+    /// The node for the remote access block. It runs the Tailscale command line.
     pub fn status(&self, vault: &SharedVault) -> NodeStatus {
         let tailscale = self.funnel.status();
         let (route_on, port) = {

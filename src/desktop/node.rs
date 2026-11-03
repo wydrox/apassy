@@ -119,7 +119,7 @@ impl NodeFlows {
 }
 
 impl DesktopApp {
-    /// The node service, for Settings > Cloud agents. `None`: this build has no node.
+    /// The node service, for Bouncer > Agents. `None`: this build has no node.
     pub fn cloud_node(&self) -> Option<Arc<Node>> {
         self.node.node.clone()
     }
@@ -192,7 +192,7 @@ impl DesktopApp {
         ctx.request_repaint_after(SYNC_INTERVAL);
         self.sync_connects(&node);
         // What runs decides, not what the window started: the node can stop by itself
-        // (the route went off, the tailnet name changed), and "Add a cloud agent" starts
+        // (the route went off, the tailnet name changed), and `apassy agent add-remote` starts
         // it from Settings.
         let (wanted, allowed) = self.node_wanted(&node);
         let serves = node.serves();
