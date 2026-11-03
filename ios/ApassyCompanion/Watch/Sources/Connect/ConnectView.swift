@@ -8,6 +8,8 @@ struct ConnectView: View {
     let problem: WatchConnectProblem?
     /// A Mac removed this watch.
     let removed: Bool
+    /// "See a Sample": a synthetic request answered in memory (`WatchSampleView`).
+    var onSample: (() -> Void)? = nil
 
     var body: some View {
         ScrollView {
@@ -37,6 +39,10 @@ struct ConnectView: View {
                 Text("This watch answers access requests only. Your passwords stay on your Mac and iPhone.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                if let onSample {
+                    Button("See a Sample", systemImage: "theatermasks", action: onSample)
+                        .accessibilityHint("Shows a sample access request. Nothing is sent.")
+                }
             }
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)

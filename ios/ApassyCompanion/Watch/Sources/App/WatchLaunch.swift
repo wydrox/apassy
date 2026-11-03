@@ -1,4 +1,5 @@
 import ApassyVaultCore
+import ApassyVaultDemo
 import ApassyVaultKit
 import Foundation
 import SwiftUI
@@ -10,7 +11,11 @@ import SwiftUI
 /// - `-ApassyWatchConnectLink <link>`: start a connection as if the iPhone had sent the code.
 /// - `-ApassyWatchScrollToEnd YES`: open the request and Connected screens at their end, for
 ///   screenshots of the answers and results.
+/// - `-ApassyDemo` (every build): the sample of "See a Sample" (`DemoWatch`), in memory only.
 enum WatchLaunch {
+    /// `-ApassyDemo`: the watch shows the sample, and talks to no iPhone and no core.
+    static var isDemo: Bool { ProcessInfo.processInfo.arguments.contains("-ApassyDemo") }
+
     /// Where a long screen opens: its top, or (Debug and Simulator, `-ApassyWatchScrollToEnd`) its end.
     static var scrollAnchor: UnitPoint? {
         #if DEBUG || targetEnvironment(simulator)
@@ -22,6 +27,7 @@ enum WatchLaunch {
 
     @MainActor
     static func makeModel() -> WatchAppModel {
+        if isDemo { return DemoWatch.model() }
         #if DEBUG || targetEnvironment(simulator)
             if let value = UserDefaults.standard.string(forKey: "ApassyWatchPreview"),
                 let state = WatchPreviewState(rawValue: value)
