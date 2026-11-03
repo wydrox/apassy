@@ -24,8 +24,8 @@ use std::fmt;
 use super::SharedVault;
 use super::approvals::{OwnerAction, OwnerProof};
 use super::bouncer::{
-    BouncerClient, BouncerRequest, BouncerVerdict, DecisionContext, Learned, ShadowPin, Thresholds,
-    decide_learned, decide_routed,
+    BouncerClient, BouncerVerdict, DecisionContext, Learned, ShadowPin, Thresholds, decide_learned,
+    decide_routed,
 };
 use super::decide::lock;
 use super::learning;
@@ -35,23 +35,6 @@ use crate::vault::{
     Declaration, ModelActivation, OwnerLabel, RealOutcome, ShadowAnswer, ShadowEntry,
     THIS_MAC_HOST, Vault, VaultError, VaultErrorKind, normalize_url,
 };
-
-/// Environment variable with the address of a separate candidate server, before schema 29.
-pub const CANDIDATE_URL_ENV: &str = "APASSY_CANDIDATE_URL";
-/// The address of a separate candidate server, before schema 29. The broker no longer
-/// asks it: the candidate answers in the request of the active model.
-pub const DEFAULT_CANDIDATE_URL: &str = "http://127.0.0.1:8775";
-
-/// The address that a new candidate row keeps in its old `url` column:
-/// `APASSY_CANDIDATE_URL`, or the default. The broker does not read it (plan 0035 unit
-/// F); unit G removes it with the 8775 server.
-pub fn candidate_url() -> String {
-    std::env::var(CANDIDATE_URL_ENV)
-        .ok()
-        .map(|url| url.trim().to_owned())
-        .filter(|url| !url.is_empty())
-        .unwrap_or_else(|| DEFAULT_CANDIDATE_URL.to_owned())
-}
 
 /// The host key of `client` for `model_candidate.uploaded_to`: [`THIS_MAC_HOST`] for the
 /// bouncer brain on this Mac, else the `https://` address of the remote host.

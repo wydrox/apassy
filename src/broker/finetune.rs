@@ -663,12 +663,11 @@ fn log_tail(path: &Path) -> String {
 
 /// Run the gate, the trainer, and the registration. `power` gives the power source.
 /// The broker calls it again every `limits.power_every` during the training. `stop`
-/// stops the trainer. `candidate_url` is the loopback address where the owner serves
-/// the candidate.
+/// stops the trainer. The candidate starts in shadow mode on no host: it answers once
+/// `heads_place::place` has put its head set on the bouncer brain (plan 0035 unit G).
 pub fn train(
     vault: &SharedVault,
     trainer: &Trainer,
-    candidate_url: &str,
     limits: Limits,
     power: &dyn Fn() -> Power,
     stop: &AtomicBool,
@@ -806,7 +805,9 @@ pub fn train(
             .register_candidate(
                 &NewCandidate {
                     version: result.version,
-                    url: candidate_url.to_owned(),
+                    // The 8775 candidate server is gone (plan 0035 unit F): the
+                    // candidate answers in the request of the active model.
+                    url: String::new(),
                     checkpoint: result.checkpoint.display().to_string(),
                     checkpoint_sha256: result.sha256,
                     report,

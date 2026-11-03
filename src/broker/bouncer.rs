@@ -274,6 +274,19 @@ impl std::fmt::Debug for Remote {
     }
 }
 
+/// Why a head set call ([`BouncerClient::put_heads`], [`BouncerClient::delete_heads`])
+/// got no answer. None of these values contains the bearer.
+#[derive(Debug)]
+pub enum HeadsCallFailure {
+    /// No bearer: a remote host without its credential, or a bouncer brain on this Mac
+    /// without a key. Nothing was sent.
+    NoKey,
+    /// The head hash is not 64 lowercase hex characters. Nothing was sent.
+    BadHash,
+    /// The transport failed, or the head file could not be read.
+    Transfer(http::TransferFailure),
+}
+
 /// Why one attempt sent no request or got no answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SendFailure {
@@ -596,6 +609,70 @@ impl BouncerClient {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// The bearer of a route that writes: the credential of a remote host, else the key
+    /// of this client (`APASSY_BOUNCER_KEY`, or the key of this start of Apassy).
+    fn write_bearer(&self, deadline: Instant) -> Option<Zeroizing<String>> {
+        match &self.remote {
+            Some(remote) => remote.credential.bearer(deadline),
+            None => self.api_key.as_ref().map(|key| Zeroizing::new(key.clone())),
+        }
+    }
+
+    fn tls(&self) -> Option<&TlsClient> {
+        self.remote.as_ref().map(|remote| remote.tls.as_ref())
+    }
+
+    /// Upload one head set: `PUT /v1/heads/<sha256>` with the head file `file` and its
+    /// `manifest.json` bytes (contract bouncer-brain-v1 section 5, [`http::put_file`]).
+    /// The answer is the response of the server; a 401 of a remote host ends its
+    /// credential, as for a decision. Only plan 0035 unit G (`heads_place`) calls it.
+    pub fn put_heads(
+        &self,
+        sha256: &str,
+        file: &std::path::Path,
+        manifest: &[u8],
+    ) -> Result<http::HttpResponse, HeadsCallFailure> {
+        if !is_heads_hash(sha256) {
+            return Err(HeadsCallFailure::BadHash);
+        }
+        let bearer = self
+            .write_bearer(Instant::now() + self.timeout)
+            .ok_or(HeadsCallFailure::NoKey)?;
+        let response = http::put_file(
+            &self.destination,
+            &format!("/v1/heads/{sha256}"),
+            &bearer,
+            file,
+            manifest,
+            self.tls(),
+        )
+        .map_err(HeadsCallFailure::Transfer)?;
+        self.note_status(response.status);
+        Ok(response)
+    }
+
+    /// Delete one head set: `DELETE /v1/heads/<sha256>` (contract bouncer-brain-v1
+    /// section 6), within the time limit of one attempt.
+    pub fn delete_heads(&self, sha256: &str) -> Result<http::HttpResponse, HeadsCallFailure> {
+        if !is_heads_hash(sha256) {
+            return Err(HeadsCallFailure::BadHash);
+        }
+        let deadline = Instant::now() + self.timeout;
+        let bearer = self.write_bearer(deadline).ok_or(HeadsCallFailure::NoKey)?;
+        let response = http::request_json(
+            http::Method::Delete,
+            &self.destination,
+            &format!("/v1/heads/{sha256}"),
+            &bearer,
+            None,
+            deadline,
+            self.tls(),
+        )
+        .map_err(|failure| HeadsCallFailure::Transfer(failure.into()))?;
+        self.note_status(response.status);
+        Ok(response)
     }
 
     pub fn evaluate(&self, request: &BouncerRequest) -> BouncerVerdict {

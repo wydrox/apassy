@@ -38,13 +38,18 @@ pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> 
             "When the training gate is open, you can train a candidate brain on this computer. It decides in shadow mode, with no effect. This card then shows its agreement with your decisions. You promote it by hand after 100 shadow decisions with 95% agreement and no allowed denial.".to_owned(),
         ];
     };
-    let port = candidate
-        .url
-        .rsplit(':')
-        .next()
-        .filter(|port| port.chars().all(|c| c.is_ascii_digit()))
-        .unwrap_or("8775");
-    vec![
+    let refusal = match (&candidate.refusal, &candidate.placement) {
+        (None, None) => "You can promote it.".to_owned(),
+        (gate, placement) => format!(
+            "It cannot be promoted yet. {}",
+            [gate.as_deref(), placement.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    };
+    let mut lines = vec![
         format!(
             "Candidate {}: {} shadow decisions, agreement {}.",
             candidate.model_version,
@@ -54,22 +59,21 @@ pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> 
                 .map_or_else(|| "none yet".to_owned(), |a| format!("{:.0}%", a * 100.0))
         ),
         format!(
-            "Denials that the candidate would allow: {}. {}",
+            "Denials that the candidate would allow: {}. {refusal}",
             candidate.allowed_owner_denials,
-            match &candidate.refusal {
-                None => "You can promote it.".to_owned(),
-                Some(reason) => format!("It cannot be promoted yet. {reason}"),
-            }
         ),
         format!(
             "Requests in shadow mode: {}. No answer from the candidate: {}. Same outcome as the active brain: {}.",
             candidate.requests, candidate.no_answer, candidate.same_as_active
         ),
-        format!(
-            "The candidate answers at {}. Start its server: APASSY_BASE_MODEL=\"{}\" LAYA_PORT={port} tools/basemodel/start.sh",
-            candidate.url, candidate.checkpoint
-        ),
-    ]
+    ];
+    if candidate.placement.is_none() {
+        lines.push(format!(
+            "Its head set is on {}, where it answers in the requests of the active brain.",
+            crate::broker::heads_place::host_label(&candidate.host)
+        ));
+    }
+    lines
 }
 
 /// What the candidate card shows. It comes from `vault::ShadowSummary`.
@@ -77,26 +81,32 @@ pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> 
 pub(crate) struct CandidateView {
     pub id: u64,
     pub model_version: String,
-    pub url: String,
-    pub checkpoint: String,
+    /// The host key of the bouncer brain (`shadow::hosting_key`).
+    pub host: String,
     pub shadow_decisions: u32,
     pub agreement: Option<f64>,
     pub allowed_owner_denials: u32,
     pub requests: u32,
     pub no_answer: u32,
     pub same_as_active: u32,
-    /// Why the shadow gate refuses a promotion. `None`: the owner can promote.
+    /// Why the shadow gate refuses a promotion. `None`: the gate passes.
     pub refusal: Option<String>,
+    /// Why the head set cannot answer yet: it is not on the host of the bouncer brain
+    /// (`shadow::placement_refusal`). `None`: it is there.
+    pub placement: Option<String>,
 }
 
 impl CandidateView {
-    fn new(record: &crate::vault::CandidateRecord, summary: &crate::vault::ShadowSummary) -> Self {
+    fn new(
+        record: &crate::vault::CandidateRecord,
+        summary: &crate::vault::ShadowSummary,
+        host: &str,
+    ) -> Self {
         let agreement = &summary.agreement;
         Self {
             id: record.id,
             model_version: record.version.clone(),
-            url: record.url.clone(),
-            checkpoint: record.checkpoint.clone(),
+            host: host.to_owned(),
             shadow_decisions: agreement.shadow_decisions,
             agreement: agreement.agreement(),
             allowed_owner_denials: agreement.allowed_owner_denials,
@@ -104,12 +114,14 @@ impl CandidateView {
             no_answer: summary.no_answer,
             same_as_active: summary.same_as_active,
             refusal: crate::broker::shadow::promotion_refusal(agreement),
+            placement: crate::broker::shadow::placement_refusal(record, host),
         }
     }
 
-    /// The Promote button is on only when the shadow gate passes.
+    /// The Promote button is on only when the shadow gate passes and the head set is on
+    /// the host of the bouncer brain.
     pub(crate) fn can_promote(&self) -> bool {
-        self.refusal.is_none()
+        self.refusal.is_none() && self.placement.is_none()
     }
 }
 
@@ -154,11 +166,12 @@ pub(crate) fn active_lines(active: Option<&crate::vault::ModelActivation>) -> Ve
             "Active brain: the default model (APASSY_BOUNCER_URL). You did not promote a brain."
                 .to_owned(),
         ],
+        // The address of an old row (a separate candidate server) is no longer used: the
+        // head set answers on the host of the bouncer brain (plan 0035 unit F).
         Some(activation) if activation.action == ActivationAction::Promote => vec![
             format!(
-                "Active brain: {} at {}, promoted {}.",
+                "Active brain: {}, promoted {}.",
                 activation.version,
-                activation.url,
                 format_utc(activation.at)
             ),
             format!(
@@ -170,9 +183,9 @@ pub(crate) fn active_lines(active: Option<&crate::vault::ModelActivation>) -> Ve
             "Active brain: {}{}, after a rollback on {}.",
             model_label(&activation.version),
             if activation.is_default() {
-                " (APASSY_BOUNCER_URL)".to_owned()
+                " (APASSY_BOUNCER_URL)"
             } else {
-                format!(" at {}", activation.url)
+                ""
             },
             format_utc(activation.at)
         )],
@@ -195,6 +208,8 @@ mod vault_view {
     use crate::broker::finetune::{
         self, Limits, Power, Trainer, TrainingError, TrainingGate, TrainingReport,
     };
+    use crate::broker::heads_place::{self, Placed};
+    use crate::broker::model_server::{ModelGate, ModelServer, StartMode};
     use crate::broker::{learning, shadow};
     use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
     use crate::vault::{
@@ -219,9 +234,17 @@ mod vault_view {
     /// The view reads the power source again after this time.
     const POWER_REFRESH: Duration = Duration::from_secs(30);
 
-    /// A local fine-tune on a worker thread (goal item B9).
+    /// A finished training and the upload of its head set (plan 0035 unit G).
+    /// `placement` is `None` when nothing was trained or the app has no model server.
+    pub(crate) struct TrainingOutcome {
+        training: Result<TrainingReport, TrainingError>,
+        placement: Option<Result<Placed, String>>,
+    }
+
+    /// A local fine-tune on a worker thread (goal item B9), then the upload of its head
+    /// set to the bouncer brain.
     pub(crate) struct TrainingRun {
-        task: Task<Result<TrainingReport, TrainingError>>,
+        task: Task<TrainingOutcome>,
         started: Instant,
         stop: Arc<AtomicBool>,
     }
@@ -231,6 +254,15 @@ mod vault_view {
             f.debug_struct("TrainingRun")
                 .field("started", &self.started)
                 .finish_non_exhaustive()
+        }
+    }
+
+    /// An upload of head sets on a worker thread (plan 0035 unit G).
+    pub(crate) struct PlacingRun(Task<Result<Vec<Placed>, String>>);
+
+    impl std::fmt::Debug for PlacingRun {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("PlacingRun")
         }
     }
 
@@ -246,6 +278,8 @@ mod vault_view {
         pub(crate) training: Option<TrainingRun>,
         /// The power source at the last check, and the time of the check.
         pub(crate) power: Option<(Power, Instant)>,
+        /// The upload of the active and shadow head sets that the owner started.
+        pub(crate) placing: Option<PlacingRun>,
     }
 
     impl LearningUiState {
@@ -272,6 +306,13 @@ mod vault_view {
         active: Option<ModelActivation>,
         /// Owner decisions and owner denials, for the training gate.
         owner_counts: (u32, u32),
+        /// The host key of the bouncer brain (`shadow::hosting_key`).
+        host: String,
+        /// The active head set or the shadow candidate is not on that host yet.
+        unplaced: bool,
+        /// The head set of the promoted model is not on that host: every run at the
+        /// model step asks the owner until it is.
+        active_unplaced: bool,
     }
 
     impl Loaded {
@@ -296,6 +337,9 @@ mod vault_view {
         let vault = guard.as_ref().filter(|vault| !vault.is_locked())?;
         let since = (now / DAY).saturating_sub(DAYS_SHOWN - 1) * DAY;
         let result = (|| {
+            let host = shadow::hosting_key(vault)?;
+            let missing = heads_place::missing_on(vault, &host)?;
+            let shadow_id = vault.shadow_candidate()?.map(|record| record.id);
             Ok(Loaded {
                 days: vault.ask_rate_by_day(since)?,
                 automatic: if lists {
@@ -331,11 +375,15 @@ mod vault_view {
                     Some(record) => Some(CandidateView::new(
                         &record,
                         &vault.shadow_summary(record.id)?,
+                        &host,
                     )),
                     None => None,
                 },
                 active: vault.active_model()?,
                 owner_counts: vault.owner_decision_counts()?,
+                unplaced: !missing.is_empty(),
+                active_unplaced: missing.iter().any(|record| Some(record.id) != shadow_id),
+                host,
             })
         })();
         Some(result.map_err(|_: crate::vault::VaultError| {
@@ -346,6 +394,7 @@ mod vault_view {
     pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let now = learning::now();
         poll_training(app);
+        poll_placing(app);
         let loaded = match load(app, now, true) {
             None => {
                 kit::note(ui, "Unlock the vault to see learning.");
@@ -404,6 +453,7 @@ mod vault_view {
     pub(crate) fn settings_panel(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let now = learning::now();
         poll_training(app);
+        poll_placing(app);
         let loaded = match load(app, now, false) {
             None => return,
             Some(Err(message)) => {
@@ -505,6 +555,11 @@ mod vault_view {
         let mut stop = false;
         let mut promote = None;
         let mut rollback = None;
+        let mut upload = false;
+        let placing = app.learning.placing.is_some();
+        let busy = placing || running.is_some();
+        let no_key = app.model_server.as_deref().and_then(no_upload_key);
+        let has_server = app.model_server.is_some();
         kit::section(
             ui,
             Some("Candidate brain"),
@@ -516,17 +571,41 @@ mod vault_view {
                     for line in candidate_lines(loaded.candidate.as_ref()) {
                         kit::note(ui, line);
                     }
-                    if let Some(candidate) = &loaded.candidate {
-                        let clicked = ui
-                            .add_enabled_ui(candidate.can_promote(), |ui| {
-                                kit::small_button(ui, "Promote", Style::Prominent)
-                            })
-                            .inner
-                            .clicked();
-                        if clicked {
-                            promote = Some((candidate.id, candidate.model_version.clone()));
-                        }
+                    if loaded.unplaced
+                        && let Some(reason) = no_key
+                    {
+                        kit::tone_note(ui, reason, Tone::Warning);
                     }
+                    if placing {
+                        kit::note(
+                            ui,
+                            format!(
+                                "Apassy uploads the head sets to {}.",
+                                heads_place::host_label(&loaded.host)
+                            ),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        if let Some(candidate) = &loaded.candidate {
+                            let clicked = ui
+                                .add_enabled_ui(candidate.can_promote(), |ui| {
+                                    kit::small_button(ui, "Promote", Style::Prominent)
+                                })
+                                .inner
+                                .clicked();
+                            if clicked {
+                                promote = Some((candidate.id, candidate.model_version.clone()));
+                            }
+                        }
+                        if loaded.unplaced && has_server {
+                            upload = ui
+                                .add_enabled_ui(!busy && no_key.is_none(), |ui| {
+                                    kit::small_button(ui, "Upload the head sets", Style::Bordered)
+                                })
+                                .inner
+                                .clicked();
+                        }
+                    });
                 });
                 s.row(|ui| {
                     for line in training_lines(&gate, running) {
@@ -547,6 +626,16 @@ mod vault_view {
                     for line in active_lines(loaded.active.as_ref()) {
                         kit::paragraph(ui, line, Font::Callout, kit::LABEL);
                     }
+                    if loaded.active_unplaced {
+                        kit::tone_note(
+                            ui,
+                            format!(
+                                "Its head set is not on {} yet, so every run at the model step asks you until Apassy uploads it.",
+                                heads_place::host_label(&loaded.host)
+                            ),
+                            Tone::Warning,
+                        );
+                    }
                     if let Some(active) = &loaded.active
                         && active.action == ActivationAction::Promote
                         && kit::small_button(
@@ -561,7 +650,7 @@ mod vault_view {
                 });
             },
         );
-        if running.is_some() {
+        if busy {
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
         let ctx = ui.ctx().clone();
@@ -570,6 +659,9 @@ mod vault_view {
         }
         if train {
             start_training(app, &ctx);
+        }
+        if upload {
+            start_placing(app, &ctx);
         }
         if let Some((candidate_id, version)) = promote {
             // Goal item B9: a promotion changes the active policy. It needs the owner
@@ -594,7 +686,37 @@ mod vault_view {
         }
     }
 
+    /// Why a bouncer brain on this Mac takes no head set from Apassy: it runs outside
+    /// Apassy ("External") and `APASSY_BOUNCER_KEY` is not set, so Apassy has no key that
+    /// the server knows (plan 0035 unit G). `None` for a remote host and for a server
+    /// that Apassy starts with the key of this start.
+    fn no_upload_key(server: &ModelServer) -> Option<&'static str> {
+        let key = std::env::var("APASSY_BOUNCER_KEY").unwrap_or_default();
+        (!server.is_remote() && server.settings().start == StartMode::External && key.is_empty())
+            .then_some(heads_place::NO_KEY_THIS_MAC)
+    }
+
+    /// Run `place` against the bouncer brain of `server` now: a server on this Mac starts
+    /// first when its mode allows it; a remote host gets its readiness check.
+    fn with_brain<T>(
+        server: &ModelServer,
+        place: impl FnOnce(&crate::broker::bouncer::BouncerClient) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if let Some(reason) = no_upload_key(server) {
+            return Err(reason.to_owned());
+        }
+        server
+            .before_model()
+            .map_err(|reason| format!("The bouncer brain is not ready ({reason})."))?;
+        let client = server
+            .client()
+            .map_err(|reason| format!("The bouncer brain has no address ({reason})."))?;
+        place(&client)
+    }
+
     /// Start a training on a worker thread. The broker checks the gate again first.
+    /// After it, the same thread uploads the head set to the bouncer brain, so the
+    /// candidate answers in shadow mode there.
     fn start_training(app: &mut DesktopApp, ctx: &egui::Context) {
         if app.learning.training.is_some() {
             return;
@@ -609,16 +731,26 @@ mod vault_view {
         let vault = app.owner_ui.session.shared_vault();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
-        let url = shadow::candidate_url();
+        let server = app.model_server.clone();
         let task = Task::spawn(Some(ctx.clone()), move || {
-            finetune::train(
+            let training = finetune::train(
                 &vault,
                 &trainer,
-                &url,
                 Limits::default(),
                 &finetune::power_now,
                 &flag,
-            )
+            );
+            let placement = match (&training, server) {
+                (Ok(report), Some(server)) => Some(with_brain(&server, |client| {
+                    heads_place::place(&vault, report.candidate.id, client)
+                        .map_err(|error| error.message())
+                })),
+                _ => None,
+            };
+            TrainingOutcome {
+                training,
+                placement,
+            }
         });
         app.learning.training = Some(TrainingRun {
             task,
@@ -628,25 +760,78 @@ mod vault_view {
         app.set_ok("The training started. It stops after one hour at the latest.");
     }
 
-    /// Take the result of a finished training.
+    /// Take the result of a finished training and of its upload.
     fn poll_training(app: &mut DesktopApp) {
         let Some(run) = &app.learning.training else {
             return;
         };
-        let result = match run.task.poll() {
+        let outcome = match run.task.poll() {
             TaskPoll::Waiting => return,
-            TaskPoll::Done(result) => result,
-            TaskPoll::Lost => Err(TrainingError::Failed(
-                "The training thread ended without a result.".to_owned(),
-            )),
+            TaskPoll::Done(outcome) => outcome,
+            TaskPoll::Lost => TrainingOutcome {
+                training: Err(TrainingError::Failed(
+                    "The training thread ended without a result.".to_owned(),
+                )),
+                placement: None,
+            },
         };
         app.learning.training = None;
-        match result {
-            Ok(report) => app.set_ok(format!(
-                "The candidate {} is in shadow mode. The training took {:.0} s. Start its server, then it answers in parallel with no effect.",
+        match (outcome.training, outcome.placement) {
+            (Ok(report), Some(Ok(placed))) => app.set_ok(format!(
+                "The candidate {} is in shadow mode on {}. The training took {:.0} s. It answers in the requests of the active brain, with no effect.",
+                report.candidate.version,
+                heads_place::host_label(&placed.host),
+                report.seconds
+            )),
+            (Ok(report), Some(Err(message))) => app.set_err(format!(
+                "The candidate {} is in shadow mode, but its head set is not on the bouncer brain, so it gives no shadow answers yet. {message}",
+                report.candidate.version
+            )),
+            (Ok(report), None) => app.set_ok(format!(
+                "The candidate {} is in shadow mode. The training took {:.0} s. Upload its head set on the Candidate brain card.",
                 report.candidate.version, report.seconds
             )),
-            Err(error) => app.set_err(error.message()),
+            (Err(error), _) => app.set_err(error.message()),
+        }
+    }
+
+    /// Upload the active and the shadow head sets to the bouncer brain now, on a worker
+    /// thread (plan 0035 unit G).
+    fn start_placing(app: &mut DesktopApp, ctx: &egui::Context) {
+        if app.learning.placing.is_some() {
+            return;
+        }
+        let Some(server) = app.model_server.clone() else {
+            return;
+        };
+        let vault = app.owner_ui.session.shared_vault();
+        app.learning.placing = Some(PlacingRun(Task::spawn(Some(ctx.clone()), move || {
+            with_brain(&server, |client| {
+                heads_place::place_all(&vault, client).map_err(|error| error.message())
+            })
+        })));
+    }
+
+    /// Take the result of an upload that the owner started.
+    fn poll_placing(app: &mut DesktopApp) {
+        let Some(PlacingRun(task)) = &app.learning.placing else {
+            return;
+        };
+        let result = match task.poll() {
+            TaskPoll::Waiting => return,
+            TaskPoll::Done(result) => result,
+            TaskPoll::Lost => Err("The upload thread ended without a result.".to_owned()),
+        };
+        app.learning.placing = None;
+        match result {
+            Ok(placed) => app.set_ok(match placed.first() {
+                None => "No head set needed an upload.".to_owned(),
+                Some(first) => format!(
+                    "The head sets are on {}.",
+                    heads_place::host_label(&first.host)
+                ),
+            }),
+            Err(message) => app.set_err(message),
         }
     }
 
@@ -1424,8 +1609,7 @@ mod tests {
         CandidateView {
             id: 1,
             model_version: "laya-local-1".to_owned(),
-            url: "http://127.0.0.1:8775".to_owned(),
-            checkpoint: "/models/candidate.safetensors".to_owned(),
+            host: crate::vault::THIS_MAC_HOST.to_owned(),
             shadow_decisions,
             agreement: agreement.agreement(),
             allowed_owner_denials,
@@ -1433,6 +1617,7 @@ mod tests {
             no_answer: 2,
             same_as_active: 7,
             refusal: crate::broker::shadow::promotion_refusal(&agreement),
+            placement: None,
         }
     }
 
@@ -1449,15 +1634,82 @@ mod tests {
         );
         assert!(some[1].ends_with("You can promote it."));
         assert!(some[2].contains("Requests in shadow mode: 130. No answer from the candidate: 2."));
-        assert!(some[3].contains(
-            "APASSY_BASE_MODEL=\"/models/candidate.safetensors\" LAYA_PORT=8775 tools/basemodel/start.sh"
-        ));
+        assert_eq!(
+            some[3],
+            "Its head set is on the bouncer brain on this Mac, where it answers in the requests of the active brain."
+        );
         // The Promote button stays off below each threshold of ADR 0010.
         for (decisions, agreed, denials) in [(99, 99, 0), (100, 94, 0), (120, 119, 1)] {
             let blocked = view(decisions, agreed, denials);
             assert!(!blocked.can_promote(), "{decisions} {agreed} {denials}");
             assert!(candidate_lines(Some(&blocked))[1].contains("It cannot be promoted yet."));
         }
+    }
+
+    /// Plan 0035 unit G: while the head set is not on the host, the card shows why
+    /// instead of "You can promote it", and the Promote button stays off.
+    #[test]
+    fn the_candidate_card_shows_the_placement_refusal_until_the_upload() {
+        let host = "https://brain.synthetic.ts.net";
+        let mut waiting = view(120, 115, 0);
+        waiting.host = host.to_owned();
+        waiting.placement = Some(format!(
+            "Its head set is not on the bouncer brain server {host} yet, so it gives no shadow answers there. Apassy uploads it first."
+        ));
+        assert!(!waiting.can_promote());
+        let lines = candidate_lines(Some(&waiting));
+        assert_eq!(
+            lines[1],
+            format!(
+                "Denials that the candidate would allow: 0. It cannot be promoted yet. Its head set is not on the bouncer brain server {host} yet, so it gives no shadow answers there. Apassy uploads it first."
+            )
+        );
+        assert!(!lines.iter().any(|line| line.contains("You can promote it")));
+        assert_eq!(lines.len(), 3, "no line says where it answers: {lines:?}");
+        // The shadow gate and the placement both fail: both reasons, gate first.
+        let mut both = view(99, 99, 0);
+        both.placement = waiting.placement.clone();
+        let line = &candidate_lines(Some(&both))[1];
+        assert!(
+            line.contains(
+                "It has 99 of 100 owner decisions in shadow mode. Its head set is not on"
+            ),
+            "{line}"
+        );
+    }
+
+    /// A promotion without an address names no empty "at" (plan 0035 unit G).
+    #[test]
+    fn a_promotion_without_an_address_names_no_empty_at() {
+        use crate::vault::{ActivationAction, ModelActivation};
+        let promotion = ModelActivation {
+            id: 2,
+            at: 1_790_000_000,
+            action: ActivationAction::Promote,
+            version: "apassy-local-v1+0badc0de".to_owned(),
+            url: String::new(),
+            candidate_id: Some(1),
+            previous_version: String::new(),
+            previous_url: String::new(),
+            report: "{}".to_owned(),
+            heads_sha256: Some("0badc0de".repeat(8)),
+        };
+        let line = &active_lines(Some(&promotion))[0];
+        assert!(
+            line.starts_with("Active brain: apassy-local-v1+0badc0de, promoted "),
+            "{line}"
+        );
+        assert!(!line.contains(" at "), "{line}");
+        let rollback = ModelActivation {
+            action: ActivationAction::Rollback,
+            ..promotion
+        };
+        let line = &active_lines(Some(&rollback))[0];
+        assert!(
+            line.starts_with("Active brain: apassy-local-v1+0badc0de, after a rollback on "),
+            "{line}"
+        );
+        assert!(!line.contains(" at "), "{line}");
     }
 
     #[test]
@@ -1865,7 +2117,7 @@ mod tests {
         assert_eq!(promotion.version, version);
         let text = draw_view(&mut app);
         assert!(
-            text.contains("Active brain: apassy-local-v1+0badc0de at http://127.0.0.1:8775"),
+            text.contains("Active brain: apassy-local-v1+0badc0de, promoted "),
             "{text}"
         );
         assert!(text.contains("Roll back to the default model"), "{text}");
