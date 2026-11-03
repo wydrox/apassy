@@ -201,7 +201,7 @@ impl PairedLink {
         if kind == LinkKind::Pair && handoff.is_some() {
             return Err(LinkRefusal::HandoffOnPair);
         }
-        let (origin_host, origin_port) = parse_origin(origin, pin.is_some())?;
+        let (origin, origin_host, origin_port) = parse_origin(origin, pin.is_some())?;
         let pin = match pin {
             Some(text) => Some(parse_pin(text).ok_or(LinkRefusal::BadPin)?),
             None => None,
@@ -222,7 +222,7 @@ impl PairedLink {
             .to_owned();
         Ok(Self {
             kind,
-            origin: origin.to_owned(),
+            origin,
             code: Zeroizing::new(code.to_owned()),
             pin,
             alt,
@@ -280,33 +280,34 @@ impl PairedLink {
     }
 }
 
-/// Section 3. A pinned origin is `https://host:port` with an explicit port other than
-/// 443. Any origin is also a relay address of this app (`RelayUrl::parse`), in its
-/// canonical text.
-fn parse_origin(origin: &str, pinned: bool) -> Result<(String, u16), LinkRefusal> {
-    let rest = match origin.strip_prefix("https://") {
-        Some(rest) => rest,
-        None if pinned => return Err(LinkRefusal::BadOrigin),
-        None => origin
-            .strip_prefix("http://")
-            .ok_or(LinkRefusal::BadOrigin)?,
-    };
+/// The origin of a link: its canonical text, and for a pinned origin its host (without
+/// brackets) and port. A pinned origin is section 3: `https://host:port` with an explicit
+/// port other than 443, a canonical host, and the canonical text of `RelayUrl::parse`. A
+/// hosted origin keeps today's rule (section 5 rule 4): any relay address of this app.
+fn parse_origin(origin: &str, pinned: bool) -> Result<(String, String, u16), LinkRefusal> {
+    let url = RelayUrl::parse(origin).map_err(|_| LinkRefusal::BadOrigin)?;
+    if !pinned {
+        return Ok((url.as_str().to_owned(), String::new(), 0));
+    }
+    let rest = origin
+        .strip_prefix("https://")
+        .ok_or(LinkRefusal::BadOrigin)?;
     if rest.contains('/') || rest.contains('@') {
         return Err(LinkRefusal::BadOrigin);
     }
     let (host, port) = split_host_port(rest).ok_or(LinkRefusal::BadOrigin)?;
-    if pinned && (port.is_none() || port == Some(443)) {
-        return Err(LinkRefusal::BadOrigin);
-    }
-    let url = RelayUrl::parse(origin).map_err(|_| LinkRefusal::BadOrigin)?;
-    if url.as_str() != origin && !(port == Some(443) && !pinned) {
+    let port = match port {
+        Some(port) if port != 443 => port,
+        _ => return Err(LinkRefusal::BadOrigin),
+    };
+    if url.as_str() != origin {
         return Err(LinkRefusal::BadOrigin);
     }
     let bare = host
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_owned();
-    Ok((bare, port.unwrap_or(443)))
+    Ok((url.as_str().to_owned(), bare, port))
 }
 
 /// Whether the host of an alternative is a loopback, an unspecified, or a link-local
@@ -811,6 +812,59 @@ mod tests {
         );
         assert_eq!(encode_node_name("build-box"), "build-box");
         assert_eq!(encode_node_name(NAME), NAME_ENCODED);
+    }
+
+    /// The Mac's own device links name the node origin, never the loopback destination
+    /// of its node (section 6, `LinkCode::for_origin`): the code stays, the pin, the
+    /// alternatives, and the name come with the advertised address.
+    #[test]
+    fn a_link_code_for_the_advertised_origin_carries_the_pin() {
+        use crate::sync::LinkCode;
+
+        let local = LinkCode {
+            code: Zeroizing::new(LINK_CODE.to_owned()),
+            link: Zeroizing::new(format!("http://127.0.0.1:49999/link#{LINK_CODE}")),
+            expires_at: 1_790_000_600,
+        };
+        let advertised = RelayUrl::parse_with_trust(ORIGIN, TlsTrust::Pinned(pin()))
+            .unwrap()
+            .alternatives(&["apassy-mini.tail0123.ts.net".to_owned()])
+            .unwrap();
+        let code = local.for_origin(&advertised, Some(NAME)).unwrap();
+        assert_eq!(code.code.as_str(), LINK_CODE);
+        assert_eq!(code.expires_at, local.expires_at);
+        assert!(!code.link.contains("127.0.0.1"), "{}", code.link.as_str());
+        let read = PairedLink::parse(&code.link).unwrap();
+        assert_eq!(read.origin, ORIGIN);
+        assert_eq!(read.pin, Some(pin()));
+        assert_eq!(read.alt, ["apassy-mini.tail0123.ts.net:8444"]);
+        assert_eq!(read.name.as_deref(), Some(NAME));
+        // A hosted address gives today's link text, without a name.
+        let hosted = RelayUrl::parse("https://apassy-relay.wyderka.cc").unwrap();
+        let code = local.for_origin(&hosted, Some(NAME)).unwrap();
+        assert_eq!(
+            code.link.as_str(),
+            format!("https://apassy-relay.wyderka.cc/link#{LINK_CODE}")
+        );
+    }
+
+    /// A hosted link keeps today's rule for its origin (section 5 rule 4): any relay
+    /// address of this app, also a one-label loopback name; the stored origin is its
+    /// canonical text.
+    #[test]
+    fn a_hosted_link_keeps_the_origins_of_today() {
+        let local = PairedLink::parse(&format!("http://localhost:8787/link#{LINK_CODE}")).unwrap();
+        assert_eq!(local.origin, "http://localhost:8787");
+        assert_eq!(local.trust(), TlsTrust::System);
+        let explicit =
+            PairedLink::parse(&format!("https://relay.example.test:443/link#{LINK_CODE}")).unwrap();
+        assert_eq!(explicit.origin, "https://relay.example.test");
+        // The same origin with a pin needs the form of section 3.
+        assert_eq!(
+            PairedLink::parse(&format!("http://localhost:8787/link#{LINK_CODE}&pin={PIN}"))
+                .unwrap_err(),
+            LinkRefusal::BadOrigin
+        );
     }
 
     /// `PendingJoin::parse_link`, the reader of the Mac and of the iPhone core, takes the

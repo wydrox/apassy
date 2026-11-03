@@ -19,6 +19,11 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use zeroize::Zeroizing;
 
+/// The pin of a node certificate (contract node-pairing-v1 section 4): the one type of
+/// `src/net/pin.rs`, which the TLS front and the companion use too. Its comparison is
+/// constant-time ([`Pin::matches`]).
+pub use crate::net::pin::{PIN_TEXT_CHARS, Pin, parse as parse_pin};
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest response that the client reads, headers and chunk framing included.
@@ -206,11 +211,6 @@ impl TlsClient {
         })
     }
 }
-
-/// The pin of a node certificate (contract node-pairing-v1 section 4): the one type of
-/// `src/net/pin.rs`, which the TLS front and the companion use too. Its comparison is
-/// constant-time ([`Pin::matches`]).
-pub use crate::net::pin::{PIN_TEXT_CHARS, Pin, parse as parse_pin};
 
 /// The certificate check of [`TlsClient::pinned`].
 struct PinnedVerifier {

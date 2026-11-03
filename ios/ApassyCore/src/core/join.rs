@@ -26,6 +26,9 @@ pub struct Joining {
     download: Option<RelayDownload>,
     /// The relay of the link, with the pin and the alternatives of a node.
     url: RelayUrl,
+    /// The display name of a pinned node from its link (node-pairing-v1 section 7): a
+    /// label, never an authority.
+    node_name: Option<String>,
     team_id: String,
     team: String,
     words: Vec<String>,
@@ -39,6 +42,20 @@ pub struct JoinOut {
     pub team: String,
     pub words: Vec<String>,
     pub expires_at: u64,
+    /// A pinned node (node-pairing-v1): its origin and its display name, for "via your
+    /// Mac". Absent for a hosted relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<JoinNode>,
+}
+
+/// The node of a pinned link, as the app shows it.
+#[derive(Debug, Serialize)]
+pub struct JoinNode {
+    /// The origin that the iPhone stores and signs.
+    pub origin: String,
+    /// The node's display name from the link, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Joining {
@@ -52,6 +69,10 @@ impl Joining {
             team: self.team.clone(),
             words: self.words.clone(),
             expires_at: self.expires_at,
+            node: self.url.pin().map(|_| JoinNode {
+                origin: self.url.as_str().to_owned(),
+                name: self.node_name.clone(),
+            }),
         }
     }
 
@@ -161,12 +182,14 @@ impl Core {
     fn join_start(&self, link: &str, device_name: &str) -> CoreResult<JoinOut> {
         self.end_join();
         let joins = self.joins.load(Ordering::SeqCst);
-        let (url, code) = PendingJoin::parse_link(link, DEFAULT_RELAY_URL)?;
-        let team_id = link_code_team(&code).unwrap_or_default().to_owned();
+        let paired = PendingJoin::parse_paired(link, DEFAULT_RELAY_URL)?;
+        let url = paired.url()?;
+        let team_id = link_code_team(&paired.code).unwrap_or_default().to_owned();
         let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name)
             .map_err(|error| join_error(error.into()))?;
         let joining = Joining {
             url,
+            node_name: paired.name.clone(),
             team_id,
             team: pending.team.clone(),
             words: pending
