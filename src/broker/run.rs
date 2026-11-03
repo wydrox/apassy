@@ -1106,6 +1106,7 @@ fn run_inner(
             source: CLOUD_REQUEST_SOURCE.to_owned(),
             agent_text: None,
             flags: Vec::new(),
+            provenance: None,
         },
         None => ctx.prompts.resolve(
             checked.agent.id,
@@ -1274,6 +1275,7 @@ fn run_inner(
         purpose: request.purpose.trim().to_owned(),
         env_names: checked.env_names.clone(),
         instruction: String::new(),
+        task_provenance: resolved.provenance.unwrap_or_default().to_owned(),
     };
     // Shadow mode (ADR 0010): for a request that reaches the model step, the candidate
     // answers on its own thread. Its answer goes only to the vault. The decision below

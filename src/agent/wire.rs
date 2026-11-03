@@ -258,6 +258,10 @@ pub enum Action {
         transcript_path: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         truncated: bool,
+        /// The `source` of the host hook input: `user` (the composer) or `sdk` (an Agent
+        /// SDK turn). Absent for a host that sends none. The broker refuses any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     /// ADR 0025 §6: run one command (no secret in its environment) or read one file, and
     /// save the output as a new credential. Exactly one of `command` and `file`. The
@@ -521,12 +525,20 @@ mod tests {
         let Action::SubmitUserRequest {
             transcript_path,
             truncated,
+            source,
             ..
         } = &request.action
         else {
             panic!("wrong action");
         };
-        assert!(transcript_path.is_none() && !truncated);
+        assert!(transcript_path.is_none() && !truncated && source.is_none());
+        // An Agent SDK turn names its source.
+        let sdk = r#"{"v":0,"token":"t","action":{"kind":"submit_user_request","host":"claude-code","cwd":"/p","prompt":"p","source":"sdk"}}"#;
+        let sdk: WireRequest = serde_json::from_str(sdk).expect("valid request");
+        assert!(matches!(
+            &sdk.action,
+            Action::SubmitUserRequest { source: Some(source), .. } if source == "sdk"
+        ));
         // An older request without a host session stays valid.
         let old = r#"{"v":0,"token":"t","action":{"kind":"list_access"}}"#;
         let old: WireRequest = serde_json::from_str(old).expect("valid request");

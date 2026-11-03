@@ -501,10 +501,15 @@ fn a_task_notification_keeps_the_request_of_the_user() {
             "{state}"
         );
         assert!(!state.contains("task-notification"), "{state}");
+        // Finding 4 of the 0.5.16 review: the brain reads that an Agent SDK turn
+        // carries the request.
+        assert!(state.contains(" Task provenance: Agent SDK turn."), "{state}");
     }
     let reason = last_reason(&fx);
     assert!(
-        reason.contains("User request from the Claude Code hook, verified in the host transcript"),
+        reason.contains(
+            "User request from the Claude Code hook (Agent SDK turn), verified in the host transcript"
+        ),
         "{reason}"
     );
 }
