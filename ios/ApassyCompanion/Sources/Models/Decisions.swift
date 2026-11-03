@@ -37,7 +37,8 @@ struct WaitingDecision: Identifiable, Equatable {
     /// The agent, as the owner knows it ("Claude Code").
     var agent: String {
         switch source {
-        case .question(let question): AgentName.display(question.card?.run.agent ?? question.askerName)
+        case .question(let question):
+            AgentName.display(question.connect?.clientName ?? question.card?.run.agent ?? question.askerName)
         case .run(let run): AgentName.display(run.agent)
         }
     }
@@ -57,9 +58,10 @@ struct WaitingDecision: Identifiable, Equatable {
     var subtitle: String {
         switch source {
         case .question(let question):
-            [agent, question.card?.question.project?.label].compactMap { $0 }.joined(separator: " · ")
+            if let connect = question.connect { return connect.macName }
+            return [agent, question.card?.question.project?.label].compactMap { $0 }.joined(separator: " · ")
         case .run(let run):
-            [agent, run.cwd?.split(separator: "/").last.map(String.init)].compactMap { $0 }
+            return [agent, run.cwd?.split(separator: "/").last.map(String.init)].compactMap { $0 }
                 .joined(separator: " · ")
         }
     }
@@ -178,6 +180,41 @@ enum Decisions {
     }
 }
 
+// MARK: Wi-Fi only (ADR 0028 stage 1)
+
+extension Decisions {
+    /// The one quiet line in Requests for a vault whose requests do not come through the relay.
+    static func wifiOnlyLine(vault name: String) -> String {
+        "Requests from \(name) reach this iPhone only on the same Wi-Fi as the Mac. Turn on relay questions on the Mac."
+    }
+
+    /// The vaults of `entries` (in their order, each once) whose requests do not come through the
+    /// relay: the selected vault when `selectedOff` (it is open and has no questions team), and the
+    /// vaults of `withoutQuestions` (they said so when they opened in this launch).
+    static func wifiOnlyVaults(
+        entries: [(id: String, name: String)], selected: String?, selectedOff: Bool, withoutQuestions: Set<String>
+    ) -> [String] {
+        entries.filter { entry in
+            (selectedOff && entry.id == selected) || withoutQuestions.contains(entry.id)
+        }.map(\.name)
+    }
+}
+
+extension SessionModel.ConnectionState {
+    /// The state of the Mac on Wi-Fi in Settings › Devices, the only place it shows (ADR 0028
+    /// stage 1): Requests never says that a Mac on Wi-Fi is unavailable.
+    var wifiText: String {
+        switch self {
+        case .connected: "Connected"
+        case .connecting: "Connecting"
+        case .unreachable: "Not on this Wi-Fi"
+        case .localNetworkDenied: "Local Network is off"
+        case .pinMismatch: "Not verified"
+        case .problem: "Unavailable"
+        }
+    }
+}
+
 /// Drops the taps on an answer bar that come right after a decision appears or changes: a finger
 /// that was on its way to the screen before (a row, a notification, "I have read the new version")
 /// must not answer the new one.
@@ -215,8 +252,10 @@ extension RemoteQuestion {
         [vaultName, askerName].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
-    /// The credential of the row: the first item, and how many more.
+    /// The credential of the row: the first item, and how many more. A connect request: "Grok Bot
+    /// wants to connect".
     var credentialTitle: String {
+        if let connect { return "\(connect.clientName) wants to connect" }
         guard let items = card?.question.items, let first = items.first else { return "A question" }
         return items.count > 1 ? "\(first.name) +\(items.count - 1)" : first.name
     }

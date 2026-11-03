@@ -472,6 +472,225 @@ pub fn parse_card(plaintext: &[u8], relay_qid: &str) -> Result<Card, CardRefusal
     Ok(parsed)
 }
 
+// ---- The connect card, card v2 (section 7.4). ----
+
+/// The tag of the connect digest (section 8.1).
+const CONNECT_DIGEST_TAG: &str = "apassy-connect-question-v1";
+/// The answer kind and `<choice>` of "Allow" on a connect card.
+pub const ALLOW_CONNECT: &str = "allow_connect";
+const MAX_CONNECT_ID_BYTES: usize = 64;
+const MAX_CLIENT_NAME_BYTES: usize = 64;
+const MAX_MAC_NAME_BYTES: usize = 64;
+const MAX_CODE_BYTES: usize = 16;
+
+/// The connect request of a connect card: a remote agent asks to connect to a Mac.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connect {
+    pub id: String,
+    pub client_name: String,
+    pub mac_name: String,
+    pub code: String,
+    pub expires_at: u64,
+}
+
+/// A connect card that passed the checks 2 and 3 of section 7.4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectCard {
+    pub qid: String,
+    pub asker: Asker,
+    pub created_at: u64,
+    pub connect: Connect,
+    pub digest: String,
+}
+
+/// A card of either kind: a run (card v1) or a connect request (card v2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnyCard {
+    Run(Card),
+    Connect(ConnectCard),
+}
+
+/// A text of a connect card: not empty, within `max` bytes, without a control or a format
+/// character (category Cf).
+fn connect_text(text: &str, max: usize) -> bool {
+    !text.is_empty() && text.len() <= max && shown(text, usize::MAX) == text
+}
+
+/// The connect digest of section 8.1, as 64 lowercase hex characters.
+pub fn connect_digest(asker_device: &str, connect: &Connect) -> String {
+    let mut hash = Context::new(&SHA256);
+    put_text(&mut hash, CONNECT_DIGEST_TAG);
+    put_text(&mut hash, asker_device);
+    put_text(&mut hash, &connect.id);
+    put_text(&mut hash, &connect.client_name);
+    put_text(&mut hash, &connect.mac_name);
+    put_text(&mut hash, &connect.code);
+    hash.update(&connect.expires_at.to_be_bytes());
+    hex(hash.finish().as_ref())
+}
+
+/// Parse a connect card plaintext and check it: exactly the fields of section 7.4, `v`
+/// 2, `kind` `connect`, the forms, the `qid` of the relay record, and the digest. A card
+/// v2 of another kind, or with other fields, is "update".
+pub fn parse_connect_card(plaintext: &[u8], relay_qid: &str) -> Result<ConnectCard, CardRefusal> {
+    if plaintext.len() > MAX_CARD_BYTES {
+        return Err(CardRefusal::Unreadable);
+    }
+    let value: Value = serde_json::from_slice(plaintext).map_err(|_| CardRefusal::Unreadable)?;
+    if value.get("v").and_then(Value::as_u64) != Some(2)
+        || value.get("kind").and_then(Value::as_str) != Some("connect")
+    {
+        return Err(CardRefusal::Update);
+    }
+    let card = exact(
+        &value,
+        &[
+            "v",
+            "kind",
+            "qid",
+            "asker",
+            "created_at",
+            "connect",
+            "digest",
+        ],
+    )?;
+    let asker = exact(&card["asker"], &["device", "name"])?;
+    let connect = exact(
+        &card["connect"],
+        &["id", "client_name", "mac_name", "code", "expires_at"],
+    )?;
+    let parsed = ConnectCard {
+        qid: text(card, "qid")?,
+        asker: Asker {
+            device: text(asker, "device")?,
+            name: text(asker, "name")?,
+        },
+        created_at: number(card, "created_at")?,
+        connect: Connect {
+            id: text(connect, "id")?,
+            client_name: text(connect, "client_name")?,
+            mac_name: text(connect, "mac_name")?,
+            code: text(connect, "code")?,
+            expires_at: number(connect, "expires_at")?,
+        },
+        digest: text(card, "digest")?,
+    };
+    let id_ok = !parsed.connect.id.is_empty()
+        && parsed.connect.id.len() <= MAX_CONNECT_ID_BYTES
+        && parsed
+            .connect
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    let checks = parsed.qid == relay_qid
+        && valid_qid(&parsed.qid)
+        && valid_device_uuid(&parsed.asker.device)
+        && !parsed.asker.name.is_empty()
+        && parsed.asker.name.len() <= MAX_ASKER_NAME_BYTES
+        && id_ok
+        && connect_text(&parsed.connect.client_name, MAX_CLIENT_NAME_BYTES)
+        && connect_text(&parsed.connect.mac_name, MAX_MAC_NAME_BYTES)
+        && connect_text(&parsed.connect.code, MAX_CODE_BYTES)
+        && valid_digest(&parsed.digest)
+        && connect_digest(&parsed.asker.device, &parsed.connect) == parsed.digest;
+    if !checks {
+        return Err(CardRefusal::Unreadable);
+    }
+    Ok(parsed)
+}
+
+/// Parse a card of either kind: `v` 2 is a connect card (section 7.4), anything else is
+/// read as a run card ([`parse_card`], card v1, unchanged).
+pub fn parse_any_card(plaintext: &[u8], relay_qid: &str) -> Result<AnyCard, CardRefusal> {
+    let v2 = plaintext.len() <= MAX_CARD_BYTES
+        && serde_json::from_slice::<Value>(plaintext)
+            .is_ok_and(|value| value.get("v").and_then(Value::as_u64) == Some(2));
+    if v2 {
+        parse_connect_card(plaintext, relay_qid).map(AnyCard::Connect)
+    } else {
+        parse_card(plaintext, relay_qid).map(AnyCard::Run)
+    }
+}
+
+/// An answer to a connect card: Allow (the Face ID answer key signs it) or Deny (the relay
+/// key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectChoice {
+    Allow,
+    Deny,
+}
+
+impl ConnectChoice {
+    /// The choice of the request `kind`: `allow_connect` or `deny`.
+    pub fn parse(kind: &str) -> Option<Self> {
+        match kind {
+            ALLOW_CONNECT => Some(Self::Allow),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Allow => ALLOW_CONNECT,
+            Self::Deny => "deny",
+        }
+    }
+
+    /// Allow gives authority, as "Allow once" of a run: Face ID for this answer.
+    pub fn needs_face_id(self) -> bool {
+        self == Self::Allow
+    }
+}
+
+/// The answer string of a connect answer (section 9.3): the `<choice>` is the kind.
+pub fn connect_answer_string(
+    by: &str,
+    team: &str,
+    qid: &str,
+    choice: ConnectChoice,
+    digest: &str,
+    time: u64,
+) -> Option<String> {
+    let fields = [by, team, qid, digest];
+    if fields
+        .iter()
+        .any(|field| field.is_empty() || field.chars().any(char::is_control))
+    {
+        return None;
+    }
+    Some(format!(
+        "{ANSWER_TAG}\n{by}\n{team}\n{qid}\n{}\n{digest}\n{time}",
+        choice.kind()
+    ))
+}
+
+/// The answer plaintext of a connect answer: an answer v1 with no extra field.
+pub fn connect_answer_plaintext(
+    qid: &str,
+    by: &str,
+    choice: ConnectChoice,
+    digest: &str,
+    time: u64,
+    signature: &str,
+) -> Vec<u8> {
+    serde_json::to_vec(&AnswerWire {
+        v: 1,
+        qid,
+        by,
+        kind: choice.kind(),
+        comment: None,
+        action: None,
+        project_key: None,
+        item_id: None,
+        environment: None,
+        digest,
+        time,
+        signature,
+    })
+    .unwrap_or_default()
+}
+
 // ---- The question digest v2 (section 8). ----
 
 fn put_len(hash: &mut Context, len: usize) {
@@ -938,7 +1157,7 @@ pub fn shown(text: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! The test vectors of contract relay-questions-v1, section 20.
 
     use super::*;
@@ -1419,6 +1638,190 @@ mod tests {
             project_key: "/tmp/a\nb".into(),
         };
         assert_eq!(control.line(), None);
+    }
+
+    const CONNECT_CARD: &str = r#"{"v":2,"kind":"connect","qid":"oKGio6SlpqeoqaqrrK2urw","asker":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"Synthetic Mac mini"},"created_at":1790000000,"connect":{"id":"cr_7Hq2xN","client_name":"Grok Bot","mac_name":"Synthetic Mac mini","code":"482 913","expires_at":1790000300},"digest":"414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc"}"#;
+    const CONNECT_DIGEST: &str = "414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc";
+
+    #[test]
+    fn the_connect_card_matches_the_vectors_of_section_20_6() {
+        assert_eq!(CONNECT_CARD.len(), 368);
+        let card = parse_connect_card(CONNECT_CARD.as_bytes(), QID).unwrap();
+        assert_eq!(card.digest, CONNECT_DIGEST);
+        assert_eq!(card.connect.client_name, "Grok Bot");
+        assert_eq!(card.connect.mac_name, "Synthetic Mac mini");
+        assert_eq!(card.connect.code, "482 913");
+        assert_eq!(card.connect.id, "cr_7Hq2xN");
+        assert_eq!(card.connect.expires_at, 1_790_000_300);
+        assert_eq!(
+            connect_digest("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &card.connect),
+            CONNECT_DIGEST
+        );
+        let text = connect_answer_string(
+            ANSWERING,
+            TEAM,
+            QID,
+            ConnectChoice::Allow,
+            CONNECT_DIGEST,
+            1_790_000_030,
+        )
+        .unwrap();
+        assert_eq!(text.len(), 188);
+        let mut hash = Context::new(&SHA256);
+        hash.update(text.as_bytes());
+        assert_eq!(
+            hex(hash.finish().as_ref()),
+            "a6755a68599b6123e763c54368ac45de0930e8b5f48629ad190b9387682879c9"
+        );
+        assert!(ConnectChoice::Allow.needs_face_id());
+        assert!(!ConnectChoice::Deny.needs_face_id());
+        assert_eq!(
+            ConnectChoice::parse("allow_connect"),
+            Some(ConnectChoice::Allow)
+        );
+        assert_eq!(ConnectChoice::parse("deny"), Some(ConnectChoice::Deny));
+        for kind in ["approve_once", "approve", "allow_once", "deny_with_comment"] {
+            assert_eq!(ConnectChoice::parse(kind), None, "{kind}");
+        }
+        let plaintext = connect_answer_plaintext(
+            QID,
+            ANSWERING,
+            ConnectChoice::Allow,
+            CONNECT_DIGEST,
+            1_790_000_030,
+            "c2ln",
+        );
+        assert_eq!(
+            String::from_utf8(plaintext).unwrap(),
+            format!(
+                r#"{{"v":1,"qid":"{QID}","by":"{ANSWERING}","kind":"allow_connect","digest":"{CONNECT_DIGEST}","time":1790000030,"signature":"c2ln"}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn an_old_reader_shows_update_for_a_connect_card_only() {
+        // `parse_card` is the reader of every app before card v2: a run card still reads,
+        // a connect card is "Update Apassy to read this question".
+        assert!(parse_card(CARD.as_bytes(), QID).is_ok());
+        assert_eq!(
+            parse_card(CONNECT_CARD.as_bytes(), QID),
+            Err(CardRefusal::Update)
+        );
+        assert!(matches!(
+            parse_any_card(CARD.as_bytes(), QID),
+            Ok(AnyCard::Run(_))
+        ));
+        assert!(matches!(
+            parse_any_card(CONNECT_CARD.as_bytes(), QID),
+            Ok(AnyCard::Connect(_))
+        ));
+        // A later version or kind is "update" for this reader too.
+        let v3 = CONNECT_CARD.replace(r#""v":2"#, r#""v":3"#);
+        assert_eq!(parse_any_card(v3.as_bytes(), QID), Err(CardRefusal::Update));
+        let other = CONNECT_CARD.replace(r#""kind":"connect""#, r#""kind":"browser""#);
+        assert_eq!(
+            parse_any_card(other.as_bytes(), QID),
+            Err(CardRefusal::Update)
+        );
+        let extra = CONNECT_CARD.replace(r#""created_at""#, r#""extra":1,"created_at""#);
+        assert_eq!(
+            parse_any_card(extra.as_bytes(), QID),
+            Err(CardRefusal::Update)
+        );
+    }
+
+    #[test]
+    fn a_connect_card_with_a_changed_field_or_bad_form_is_refused() {
+        for (from, to) in [
+            (
+                r#""client_name":"Grok Bot""#,
+                r#""client_name":"Grok Bot 2""#,
+            ),
+            (r#""code":"482 913""#, r#""code":"482 914""#),
+            (
+                r#""mac_name":"Synthetic Mac mini""#,
+                r#""mac_name":"Other Mac""#,
+            ),
+            (r#""expires_at":1790000300"#, r#""expires_at":1790000301"#),
+            (r#""id":"cr_7Hq2xN""#, r#""id":"cr_7Hq2xM""#),
+        ] {
+            let changed = CONNECT_CARD.replacen(from, to, 1);
+            assert_ne!(changed, CONNECT_CARD);
+            assert_eq!(
+                parse_connect_card(changed.as_bytes(), QID),
+                Err(CardRefusal::Unreadable),
+                "{to}"
+            );
+        }
+        assert_eq!(
+            parse_connect_card(CONNECT_CARD.as_bytes(), "AAECAwQFBgcICQoLDA0ODw"),
+            Err(CardRefusal::Unreadable),
+            "another qid"
+        );
+        // A control or format character in a name never shows: the card is refused.
+        let mut connect = Connect {
+            id: "cr_7Hq2xN".into(),
+            client_name: "Grok\u{202E}toB".into(),
+            mac_name: "Synthetic Mac mini".into(),
+            code: "482 913".into(),
+            expires_at: 1_790_000_300,
+        };
+        let sealed_digest = connect_digest("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect);
+        let bidi = CONNECT_CARD
+            .replace("Grok Bot", "Grok\\u202etoB")
+            .replace(CONNECT_DIGEST, &sealed_digest);
+        assert_eq!(
+            parse_connect_card(bidi.as_bytes(), QID),
+            Err(CardRefusal::Unreadable)
+        );
+        connect.client_name = "Grok Bot".into();
+        assert_eq!(
+            connect_digest("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect),
+            CONNECT_DIGEST
+        );
+    }
+
+    #[test]
+    fn the_mac_and_the_iphone_agree_on_the_connect_card() {
+        use apassy::questions::envelope::{CardConnect, ConnectCard as MacCard};
+        let wire = CardConnect {
+            id: "cr_7Hq2xN".into(),
+            client_name: "Grok Bot".into(),
+            mac_name: "Synthetic Mac mini".into(),
+            code: "482 913".into(),
+            expires_at: 1_790_000_300,
+        };
+        let mac = MacCard::new(
+            QID,
+            "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+            "Synthetic Mac mini",
+            1_790_000_000,
+            &wire,
+        );
+        let bytes = mac.to_plaintext().unwrap();
+        assert_eq!(std::str::from_utf8(&bytes).unwrap(), CONNECT_CARD);
+        let phone = parse_connect_card(&bytes, QID).unwrap();
+        assert_eq!(phone.digest, mac.digest);
+        let mac_string = apassy::questions::envelope::connect_answer_string(
+            ANSWERING,
+            TEAM,
+            QID,
+            apassy::questions::envelope::ConnectChoice::Deny,
+            &mac.digest,
+            1_790_000_030,
+        );
+        assert_eq!(
+            mac_string,
+            connect_answer_string(
+                ANSWERING,
+                TEAM,
+                QID,
+                ConnectChoice::Deny,
+                &phone.digest,
+                1_790_000_030
+            )
+        );
     }
 
     #[test]

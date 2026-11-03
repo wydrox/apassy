@@ -140,3 +140,82 @@ struct RequestsWaitingRow: View {
         if let value { AccessibilityNotification.Announcement(value).post() }
     }
 }
+
+/// A connect request in Waiting (card v2 `kind = connect`): "<name> wants to connect", the Mac,
+/// the code, the time left, and Deny / Allow. Allow asks for Face ID, as "Allow once" of a run.
+struct ConnectRequestRow: View {
+    let model: QuestionsModel
+    let question: RemoteQuestion
+    let connect: ConnectRequestCard
+    let now: Date
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @State private var tapGuard = AnswerGuard()
+
+    private var delivery: QuestionsModel.Delivery? { model.delivery(for: question) }
+    private var isSending: Bool { delivery == .sending }
+    private var status: String? {
+        if isSending { return "Sending answer…" }
+        return model.outcome(for: question)?.text ?? model.deliveryText(for: question)
+    }
+    private var hasReceipt: Bool {
+        if isSending { return true }
+        if case .sent = delivery { return true }
+        return model.receiptQuestions.contains { $0.requestIdentity == question.requestIdentity }
+            && model.outcome(for: question) != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            RequestsRowLink(route: .question(question.requestIdentity)) {
+                RequestsRowSummary(
+                    title: question.credentialTitle, requester: nil, project: nil,
+                    vault: question.vaultName ?? "Not reported", device: connect.macName
+                ) {
+                    LabeledContent("Code") {
+                        Text(connect.code).font(.body.monospaced()).tracking(2)
+                    }
+                    .font(.subheadline)
+                    if !hasReceipt {
+                        Text("\(Decisions.clock(question.secondsLeft(now: now))) left")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if hasReceipt {
+                if isSending {
+                    ProgressView("Sending answer…")
+                } else if let status {
+                    Label(status, systemImage: "clock").font(.subheadline.weight(.medium))
+                }
+                Button("Done") { model.dismissReceipt(for: question) }
+                    .buttonStyle(.bordered).frame(minHeight: 44).disabled(isSending)
+            } else {
+                if case .failed(let message) = delivery {
+                    Text(message).font(.footnote).foregroundStyle(.secondary)
+                }
+                let enabled = model.canAnswerConnect(question, now: now)
+                let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading)) : AnyLayout(HStackLayout())
+                layout {
+                    Button("Deny", role: .destructive) { answer(allow: false) }
+                        .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .accessibilityLabel("Deny \(connect.clientName)")
+                    Button { answer(allow: true) } label: { Label("Allow", systemImage: "faceid") }
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .accessibilityLabel("Allow \(connect.clientName) with Face ID")
+                }
+                .disabled(!enabled)
+            }
+        }
+        .padding(.vertical, 4)
+        .onAppear { tapGuard.arm(now: .now) }
+        .onChange(of: question.connect) { _, _ in tapGuard.arm(now: .now) }
+        .accessibilityIdentifier("connect.request.\(connect.id)")
+    }
+
+    private func answer(allow: Bool) {
+        guard tapGuard.accepts(now: .now), model.canAnswerConnect(question, now: .now) else { return }
+        Task { await model.answerConnect(allow: allow, for: question) }
+    }
+}

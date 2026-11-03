@@ -63,14 +63,27 @@ struct QuestionsStateRow: View {
     }
 }
 
-/// The Mac that this iPhone approves runs for on the local network (the companion).
+/// The Mac that this iPhone approves runs for on the local network (the companion): "<Mac> on
+/// Wi-Fi" with its state. This is the only place that shows the Wi-Fi state (ADR 0028 stage 1).
 struct MacPairingRow: View {
     @Environment(RootModel.self) private var root
 
     var body: some View {
         switch root.companion.phase {
         case .paired(let session):
-            LabeledContent("Paired with", value: session.macName)
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent("\(session.macName) on Wi-Fi", value: session.state.wifiText)
+                if session.state != .connected, let fetchedAt = session.fetchedAt {
+                    Text("Last updated \(fetchedAt.formatted(date: .omitted, time: .shortened))")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("devices.macOnWiFi")
+            if session.state != .connected {
+                Button("Retry \(session.macName) on Wi-Fi") { Task { await session.refresh() } }
+                    .frame(minHeight: 44)
+            }
         default:
             LabeledContent("Mac on Wi-Fi", value: "Not paired")
         }

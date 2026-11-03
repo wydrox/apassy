@@ -207,7 +207,11 @@ struct DecisionsView: View {
                     switch decision.source {
                     case .question(let question):
                         if let questions {
-                            RequestsWaitingRow(model: questions, question: question, now: now)
+                            if let connect = question.connect {
+                                ConnectRequestRow(model: questions, question: question, connect: connect, now: now)
+                            } else {
+                                RequestsWaitingRow(model: questions, question: question, now: now)
+                            }
                         }
                     case .run(let run):
                         if let session {
@@ -263,16 +267,7 @@ struct DecisionsView: View {
                     }
                 }
             }
-            if let session, session.state != .connected {
-                Section {
-                    Label("\(session.macName) is unavailable", systemImage: "wifi.exclamationmark")
-                    if let fetchedAt = session.fetchedAt {
-                        Text("Last updated \(fetchedAt.formatted(date: .omitted, time: .shortened))")
-                            .font(.footnote).foregroundStyle(.secondary)
-                    }
-                    Button("Retry") { Task { await session.refresh() } }.frame(minHeight: 44)
-                }
-            }
+            // ADR 0028 stage 1: the state of the Mac on Wi-Fi shows only in Settings › Devices.
             if let questions, let error = questions.refreshError, !waiting.isEmpty {
                 Section {
                     Label("Couldn’t refresh", systemImage: "exclamationmark.triangle")
@@ -361,6 +356,15 @@ struct DecisionsView: View {
             }
             if let pending = questions.notificationsPendingText {
                 Section { Text(pending).font(.footnote).foregroundStyle(.secondary) }
+            }
+            // ADR 0028 stage 1: one quiet line for each vault whose requests do not come through
+            // the relay. Runs and access requests of the Mac on Wi-Fi still show above.
+            ForEach(questions.wifiOnlyVaultNames, id: \.self) { name in
+                Section {
+                    Text(Decisions.wifiOnlyLine(vault: name))
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("requests.wifiOnly")
+                }
             }
             ForEach(questions.contexts.filter { $0.error != nil }) { vault in
                 Section {

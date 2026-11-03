@@ -50,6 +50,10 @@ use super::client::{
     AnswerReceipt, AnswerRecord, MAX_WAIT, QuestionList, QuestionRecord, QuestionsClient,
     QuestionsError,
 };
+use super::connect::{
+    ConnectAnswer, ConnectApplied, ConnectEnd, ConnectLane, ConnectPostError, PendingConnectCard,
+    is_connect_record,
+};
 use super::envelope::{
     AnswerBody, Card, CardError, Choice, MAX_CARD_BYTES, RemoteEnvironment, Sealed, SettleBody,
     SettleOutcome, TO_APPROVERS, TO_MEMBER, VERSION, answer_aad, card_aad, new_qid, settle_aad,
@@ -243,6 +247,11 @@ pub struct QuestionsView {
     pub feed_seq: Option<u64>,
     /// A problem of the feed for Settings > Devices, in words.
     pub feed_problem: Option<String>,
+    /// The connect requests of this Mac on the relay (card v2 `kind = connect`), by the
+    /// connect request ID of the node, with their `qid`.
+    pub connect_posted: BTreeMap<String, String>,
+    /// The connect requests that stay on this Mac, with the reason.
+    pub connect_local_only: BTreeMap<String, String>,
 }
 
 /// A question of another device of the vault, opened and checked (section 13): it shows
@@ -342,6 +351,11 @@ impl Remote {
                     }
                 }
                 Err(Unreadable::Expired) => {
+                    self.open.remove(&qid);
+                }
+                // A connect card (card v2) of another Mac: only iPhones answer it, so this
+                // Mac leaves it out, with no problem in the view.
+                Err(Unreadable::Update) if is_connect_record(&pending.record, team_id, keys) => {
                     self.open.remove(&qid);
                 }
                 Err(reason) => {
@@ -596,6 +610,9 @@ pub(super) struct Shared {
     /// What the reader shows of them, apart from the view: the window reads it each frame
     /// without a copy of every feed.
     pub(super) other_macs: Mutex<OtherMacs>,
+    /// The connect requests of the node and the handler of their answers
+    /// (`super::connect`).
+    pub(super) connects: Mutex<ConnectLane>,
 }
 
 /// The questions waiter of the app. It stops when dropped.
@@ -638,6 +655,7 @@ impl QuestionsWorker {
             feed_on: AtomicBool::new(true),
             feed_reader: Mutex::new(FeedReader::default()),
             other_macs: Mutex::new(OtherMacs::default()),
+            connects: Mutex::new(ConnectLane::default()),
         });
         let mut threads = Vec::new();
         for (name, body) in [
@@ -651,6 +669,7 @@ impl QuestionsWorker {
             ("apassy-feed-publish", feed_publisher as fn(&Shared)),
             ("apassy-feed-actions", feed_actions as fn(&Shared)),
             ("apassy-feed-read", feed_reading as fn(&Shared)),
+            ("apassy-connect-cards", super::connect::run as fn(&Shared)),
         ] {
             let worker = Arc::clone(&shared);
             if let Ok(handle) = std::thread::Builder::new()
@@ -729,6 +748,37 @@ impl QuestionsWorker {
     /// with [`RemoteAnswering::send`] on a thread of its own.
     pub fn answering(&self, id: u64) -> Result<RemoteAnswering, AnswerError> {
         self.shared.answering(&self.shared, id)
+    }
+
+    /// Ask the iPhones of the vault about the connect request `connect` of the node: the
+    /// lane seals it as a connect card (card v2) and posts it while the questions are on
+    /// and the vault is unlocked. Without them it stays on this Mac (the view says why
+    /// in [`QuestionsView::connect_local_only`]). The same ID again is ignored. It never
+    /// calls the relay on the caller's thread.
+    pub fn post_connect(&self, connect: PendingConnectCard) -> Result<(), ConnectPostError> {
+        lock(&self.shared.connects).post(connect)?;
+        self.shared.wake();
+        Ok(())
+    }
+
+    /// The connect request `id` ended on this Mac (allowed or denied with Touch ID, expired,
+    /// or dropped by the node): the lane settles its question once, so the iPhones show
+    /// "Allowed on <Mac>" or "Expired". An unknown ID, or one that an iPhone already
+    /// decided, is ignored.
+    pub fn end_connect(&self, id: &str, end: ConnectEnd) {
+        lock(&self.shared.connects).end(id, end);
+        self.shared.wake();
+    }
+
+    /// Run `handler` for each answer of an iPhone to a connect card that passed every
+    /// check (contract section 12.7), once per connect request, on the lane's thread, with
+    /// no lock of the worker held. It decides the connect request on the node and says
+    /// whether it did ([`ConnectApplied`]); the lane then settles the question.
+    pub fn set_on_connect_answer(
+        &self,
+        handler: impl Fn(&ConnectAnswer) -> ConnectApplied + Send + Sync + 'static,
+    ) {
+        lock(&self.shared.connects).handler = Some(Arc::new(handler));
     }
 
     /// Put a remote question in the view as the lister does, for a test of the window.
