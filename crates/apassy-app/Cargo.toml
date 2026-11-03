@@ -15,9 +15,11 @@ apassy = { path = "../..", features = ["desktop", "vault"] }
 # The embedded node behind `apassy::node::backend` (crates/apassy-relay/src/embedded.rs).
 apassy-relay = { path = "../apassy-relay" }
 eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
-# Key-memory review F6: the core-dump limit of the desktop process.
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "process"] }
 tracing = "=0.1.44"
+
+[dev-dependencies]
+# The unit test reads the core limit that `apassy::harden` set (src/main.rs).
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "process"] }
 
 # Another name than the root `apassy` target, so the two do not overwrite each other
 # in target/. scripts/build-app.sh copies it into the bundle as Contents/MacOS/apassy.

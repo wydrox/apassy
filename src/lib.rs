@@ -13,6 +13,8 @@ pub mod contracts;
 pub mod csv;
 /// The bouncer decision log file for debugging (`apassy decisions log`).
 pub mod decision_log;
+/// Process hardening: no core dumps, not dumpable on Linux (ADR 0011 stage 6).
+pub mod harden;
 
 /// Local agent broker (ADR 0004). It needs the vault.
 #[cfg(feature = "vault")]

@@ -491,6 +491,31 @@ Result:
   host feature that runs them fails. No SBPL allowance for this was verified.
   The measured Claude Code run did not break.
 
+### Hardening (ADR 0011 stage 6)
+
+Every Apassy binary that holds a secret value or a token calls
+`apassy::harden::harden_process()` as the first statement of `main` (the test
+`harden::every_secret_handling_binary_hardens_the_process_first` fails when one
+does not, and `harden::every_binary_is_hardened_or_listed_as_without_secrets`
+fails when a new binary is in neither list):
+
+| Platform | What the call does |
+| --- | --- |
+| macOS and Linux | Sets the core file size limit, soft and hard, to 0 (`setrlimit(RLIMIT_CORE)`). A core file would contain the vault memory. A hard limit of 0 cannot be raised by a parent shell or a later call, and child processes (agent commands with secrets) inherit it. |
+| Linux | `prctl(PR_SET_DUMPABLE, 0)`. A process that is not dumpable has its `/proc/<pid>/environ`, `mem`, and `ptrace` closed to the same user. |
+| macOS | The hardened runtime is already on for every binary: `scripts/build-app.sh` signs with `--options runtime`, the entitlements are an empty dict, and the script fails when a binary lacks the runtime flag or has `get-task-allow` (or another forbidden entitlement). |
+
+Covered binaries: `apassy` and `apassy-app` (the app), `apassy-mcp`,
+`apassy-hook` (a failure is a warning, because the hook always exits with 0),
+`apassy-sandbox`, `apassy-browser-host`, `apassy-relay`, and `apassy-team`.
+Not covered: `apassy-dev-reporting`, `apassy-eval`, and `apassy-packs`, which use
+synthetic data only.
+
+Limit: the dumpable attribute resets to 1 when a process runs `execve`, so a
+child that is a new program is dumpable again. The core limit stays 0. A
+process of the same user on macOS can still try to attach to a process that
+does not have the hardened runtime; the Apassy binaries all have it.
+
 ### Real Claude Code session (goal I3)
 
 A headless Claude Code 2.1.280 session ran inside the profile. The Bash sandbox

@@ -6,6 +6,8 @@
 //! other local processes can read process arguments.
 
 fn main() {
+    // ADR 0011 stage 6: first, before anything reads a secret.
+    apassy::harden::harden_process_or_exit("apassy-mcp");
     let mut args = std::env::args().skip(1);
     if let Some(arg) = args.next() {
         if arg == "--version" {
