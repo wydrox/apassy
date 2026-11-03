@@ -111,7 +111,9 @@ stays until the owner disconnects it.
 
 ### 4.2 Rules
 
-- A code lives 300 seconds and works once. A wrong verifier, client, or redirect URI uses it up. A second
+- A code lives 300 seconds and works once. It goes to whichever browser loads the page first, so a leaked
+  authorize URL can burn it: a denial of service only, since PKCE makes it useless without the client's
+  verifier. A wrong verifier, client, or redirect URI uses it up. A second
   use of a code, or of a refresh token that was already used, is `invalid_grant` and ends the connection:
   its refresh token and its access token stop working, and the client must start at step 4 again.
 - The access token lives 24 hours. The refresh token lives 90 days from its last use. One access token

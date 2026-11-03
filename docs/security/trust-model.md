@@ -61,6 +61,21 @@ allows it on the Mac (Touch ID) or the iPhone (Face ID) after comparing the code
 | The cloud agent's vendor (xAI, …) | The token; for a ready run, the session key, placeholders, and base URLs, until the session ends (at most 600 s) | Its runs, and the API answers with the placeholders back in them | A value. The node puts a placeholder back where the API echoes the value |
 | The node's store at rest (`<data dir>/node`, SQLCipher under a Keychain key) | Team and item metadata (names, variables, hosts, declarations), agent token hashes, run rows (masked command, purpose, user request), the audit | — | It never holds a value or an item key: the value stays in the vault and goes into a session only in memory |
 
+Known limits of the connect flow. Each is a denial of service only: none gives a token, an agent, or a
+credential.
+
+- A leaked authorize URL (or the address of its waiting page) can burn the code. Its holder opens the
+  same request; after the owner's Allow, the code goes to whichever browser loads the page first. Without
+  the client's PKCE verifier it gives no token, but the client's own browser then gets no code, and a
+  redemption with a wrong verifier uses the code up and revokes its family. The same URL with other
+  parameters ends the client's waiting request, since a new request of a client replaces it. The client
+  connects again; the owner allows only a request whose code its own browser shows.
+- A stranger can hold the 3 open connect requests of the node until the owner denies them, or they end
+  after 300 s.
+- A stranger who sends 20 bad codes or refresh tokens with the public id of a client holds that client's
+  token requests at 429 for the rest of each 60 s window. Its access token keeps working until it ends.
+- A flood of registrations can drop a client that registered and was not allowed yet; it registers again.
+
 The owner decides every cloud run in this release, on the Mac or the iPhone, one question of an agent
 at a time. A remote agent starts with no credential. A node has at most 20 agents that are not
 revoked, also those of the flow without a live token. The node trusts the app process: code that runs
