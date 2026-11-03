@@ -179,7 +179,10 @@ impl CloudContext {
     fn card_cwd(&self) -> String {
         match self.agent_cwd.as_deref().map(str::trim) {
             Some(cwd) if !cwd.is_empty() => {
-                format!("{} (of the cloud agent, not on this Mac)", cut_text(cwd, 200))
+                format!(
+                    "{} (of the cloud agent, not on this Mac)",
+                    cut_text(cwd, 200)
+                )
             }
             _ => "(the cloud agent, not on this Mac)".to_owned(),
         }
@@ -912,7 +915,14 @@ pub(super) fn fill_browser(
     request: &RunRequest<'_>,
     fill: &super::browser_fill::Fill,
 ) -> WireResponse {
-    run_inner(ctx, Caller::Token(token), request, false, Some(fill), &mut None)
+    run_inner(
+        ctx,
+        Caller::Token(token),
+        request,
+        false,
+        Some(fill),
+        &mut None,
+    )
 }
 
 /// Decide a run of the cloud agent `agent_id` (the vault id of the agent) for the
@@ -1427,10 +1437,7 @@ fn run_inner(
             id: 0,
             agent: checked.agent.name.clone(),
             command: request.command.to_vec(),
-            cwd: cloud.map_or_else(
-                || checked.cwd.display().to_string(),
-                CloudContext::card_cwd,
-            ),
+            cwd: cloud.map_or_else(|| checked.cwd.display().to_string(), CloudContext::card_cwd),
             env_names: checked.env_names.clone(),
             purpose: browser_fill.map_or_else(
                 || request.purpose.trim().to_owned(),

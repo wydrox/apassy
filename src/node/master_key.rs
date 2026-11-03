@@ -190,10 +190,18 @@ fn read_key_file(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, NodeError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(node_error("key_failed", "The node key file cannot be read.")),
+        Err(_) => {
+            return Err(node_error(
+                "key_failed",
+                "The node key file cannot be read.",
+            ));
+        }
     };
     if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err(node_error("key_failed", "The node key file is not a plain file."));
+        return Err(node_error(
+            "key_failed",
+            "The node key file is not a plain file.",
+        ));
     }
     if meta.mode() & 0o077 != 0 {
         return Err(node_error(
@@ -318,9 +326,10 @@ fn store_error(error: &KeyStoreError) -> NodeError {
             "key_failed",
             "The Keychain is not available for the node key.",
         ),
-        KeyStoreError::Failed(text) => {
-            node_error("key_failed", format!("The node key is not available: {text}"))
-        }
+        KeyStoreError::Failed(text) => node_error(
+            "key_failed",
+            format!("The node key is not available: {text}"),
+        ),
     }
 }
 

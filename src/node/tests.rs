@@ -144,7 +144,13 @@ impl FakeState {
         });
     }
 
-    fn settle(&mut self, run: NodeRunId, status: RunStatus, code: Option<&str>, note: &str) -> RunState {
+    fn settle(
+        &mut self,
+        run: NodeRunId,
+        status: RunStatus,
+        code: Option<&str>,
+        note: &str,
+    ) -> RunState {
         self.pending.retain(|pending| pending.run_id != run);
         let state = RunState {
             run_id: run,
@@ -201,7 +207,11 @@ impl RunningNode for FakeNode {
         }
     }
 
-    fn sync_items(&self, _team: &NodeTeamId, items: &[CatalogItem]) -> Result<SyncReport, NodeError> {
+    fn sync_items(
+        &self,
+        _team: &NodeTeamId,
+        items: &[CatalogItem],
+    ) -> Result<SyncReport, NodeError> {
         let mut state = self.state.lock().unwrap();
         let mut report = SyncReport::default();
         let wanted: Vec<&str> = items.iter().map(|item| item.uid.as_str()).collect();
@@ -228,7 +238,11 @@ impl RunningNode for FakeNode {
         Ok(report)
     }
 
-    fn create_agent(&self, _team: &NodeTeamId, agent: &NewCloudAgent) -> Result<CreatedAgent, NodeError> {
+    fn create_agent(
+        &self,
+        _team: &NodeTeamId,
+        agent: &NewCloudAgent,
+    ) -> Result<CreatedAgent, NodeError> {
         let mut state = self.state.lock().unwrap();
         let id = state.agents.len() as u64 + 1;
         state
@@ -241,7 +255,12 @@ impl RunningNode for FakeNode {
         })
     }
 
-    fn set_agent_items(&self, _team: &NodeTeamId, agent: NodeAgentId, items: &[String]) -> Result<(), NodeError> {
+    fn set_agent_items(
+        &self,
+        _team: &NodeTeamId,
+        agent: NodeAgentId,
+        items: &[String],
+    ) -> Result<(), NodeError> {
         let mut state = self.state.lock().unwrap();
         let entry = state
             .agents
@@ -265,12 +284,21 @@ impl RunningNode for FakeNode {
             .map(|run| run.run_id)
             .collect();
         for run in runs {
-            state.settle(run, RunStatus::Denied, Some("approval_invalidated"), "Revoked.");
+            state.settle(
+                run,
+                RunStatus::Denied,
+                Some("approval_invalidated"),
+                "Revoked.",
+            );
         }
         Ok(())
     }
 
-    fn wait_pending(&self, _team: &NodeTeamId, timeout: Duration) -> Result<Vec<PendingRun>, NodeError> {
+    fn wait_pending(
+        &self,
+        _team: &NodeTeamId,
+        timeout: Duration,
+    ) -> Result<Vec<PendingRun>, NodeError> {
         let end = Instant::now() + timeout;
         loop {
             {
@@ -291,21 +319,39 @@ impl RunningNode for FakeNode {
         reason: Option<&str>,
     ) -> Result<RunState, NodeError> {
         let mut state = self.state.lock().unwrap();
-        let Some(pending) = state.pending.iter().find(|pending| pending.run_id == run).cloned() else {
+        let Some(pending) = state
+            .pending
+            .iter()
+            .find(|pending| pending.run_id == run)
+            .cloned()
+        else {
             return Err(NodeError::new("run_not_pending", "Not pending."));
         };
         if values.len() != pending.items.len() {
-            return Ok(state.settle(run, RunStatus::Denied, Some("release_invalid"), "Bad count."));
+            return Ok(state.settle(
+                run,
+                RunStatus::Denied,
+                Some("release_invalid"),
+                "Bad count.",
+            ));
         }
         state.released.push((
             run,
-            values.iter().map(|value| value.expose().to_owned()).collect(),
+            values
+                .iter()
+                .map(|value| value.expose().to_owned())
+                .collect(),
         ));
         state.audit("run_released", Some(run), "{}".to_owned());
         Ok(state.settle(run, RunStatus::Ready, None, reason.unwrap_or_default()))
     }
 
-    fn deny(&self, _team: &NodeTeamId, run: NodeRunId, reason: &str) -> Result<RunState, NodeError> {
+    fn deny(
+        &self,
+        _team: &NodeTeamId,
+        run: NodeRunId,
+        reason: &str,
+    ) -> Result<RunState, NodeError> {
         let mut state = self.state.lock().unwrap();
         if !state.pending.iter().any(|pending| pending.run_id == run) {
             return Err(NodeError::new("run_not_pending", "Not pending."));
@@ -500,7 +546,10 @@ impl Fixture {
 
     fn approve(&self, question: Question) {
         let proof = OwnerGate::new(Arc::clone(&self.vault), None)
-            .authorize(OwnerAction::ApproveRun(question), OwnerCheck::passphrase(PASS))
+            .authorize(
+                OwnerAction::ApproveRun(question),
+                OwnerCheck::passphrase(PASS),
+            )
             .unwrap();
         self.broker.approvals.approve(proof).unwrap();
     }
@@ -557,7 +606,10 @@ fn start_turns_the_route_on_and_a_lock_stops_the_node_and_turns_funnel_off() {
     );
     let status = fx.node.status(&fx.vault);
     assert!(status.running && status.route_on);
-    assert_eq!(status.url.as_deref(), Some("https://mac.example-tailnet.ts.net:8443/mcp"));
+    assert_eq!(
+        status.url.as_deref(),
+        Some("https://mac.example-tailnet.ts.net:8443/mcp")
+    );
     assert!(!status.keychain_fallback);
     let agents = fx.node.agents(&fx.vault).unwrap();
     assert_eq!(agents.len(), 1);
@@ -583,7 +635,11 @@ fn start_turns_the_route_on_and_a_lock_stops_the_node_and_turns_funnel_off() {
     fx.with_vault(|vault| vault.unlock(PASS).unwrap());
     fx.node.start(&fx.vault, fx.broker.clone()).unwrap();
     assert_eq!(fx.state().starts, 2);
-    assert_eq!(fx.state().teams.len(), 1, "the team is opened again, not made");
+    assert_eq!(
+        fx.state().teams.len(),
+        1,
+        "the team is opened again, not made"
+    );
     fx.node.set_route(&fx.vault, false).unwrap();
     assert!(!fx.node.is_running());
     assert_eq!(fx.with_vault(|vault| Node::wanted(vault)), None);
@@ -594,7 +650,12 @@ fn a_cloud_run_always_asks_remembers_nothing_and_releases_the_values_in_item_ord
     let fx = fixture();
     let (_, relay) = fx.running_with_agent();
     // The order of the run: httpbin first, then Stripe.
-    fx.push_run(1, relay, &[fx.items.httpbin, fx.items.stripe], "Check my httpbin token.");
+    fx.push_run(
+        1,
+        relay,
+        &[fx.items.httpbin, fx.items.stripe],
+        "Check my httpbin token.",
+    );
     let question = fx.question();
     assert_eq!(question.question.reason, ReasonKind::CloudAgent);
     assert_eq!(question.question.valid_answers, [AnswerKind::Once]);
@@ -603,12 +664,18 @@ fn a_cloud_run_always_asks_remembers_nothing_and_releases_the_values_in_item_ord
     assert_eq!(question.user_request, "Check my httpbin token.");
     assert!(question.cwd.contains("not on this Mac"), "{}", question.cwd);
     assert_eq!(question.remember, None);
-    assert_eq!(question.env_names, ["SYNTH_HTTPBIN_TOKEN", "SYNTH_STRIPE_KEY"]);
+    assert_eq!(
+        question.env_names,
+        ["SYNTH_HTTPBIN_TOKEN", "SYNTH_STRIPE_KEY"]
+    );
     assert!(!format!("{question:?}").contains(HTTPBIN_VALUE));
     fx.approve(question);
 
     let values = until("the release", || {
-        fx.state().released.first().map(|(_, values)| values.clone())
+        fx.state()
+            .released
+            .first()
+            .map(|(_, values)| values.clone())
     });
     assert_eq!(values, [HTTPBIN_VALUE, STRIPE_VALUE]);
     let rows = until("the decision row", || {
@@ -619,7 +686,10 @@ fn a_cloud_run_always_asks_remembers_nothing_and_releases_the_values_in_item_ord
             })
             .then_some(rows)
     });
-    assert!(rows.iter().all(|(_, _, reason)| !reason.contains(HTTPBIN_VALUE)));
+    assert!(
+        rows.iter()
+            .all(|(_, _, reason)| !reason.contains(HTTPBIN_VALUE))
+    );
     // Nothing is remembered: no answer and no pattern.
     fx.with_vault(|vault| {
         assert!(vault.answers_for_item(fx.items.httpbin).unwrap().is_empty());
@@ -648,7 +718,11 @@ fn a_cloud_run_always_asks_remembers_nothing_and_releases_the_values_in_item_ord
             .find(|(operation, _, _)| operation == "cloud session end")
     });
     assert!(summary.2.contains("2 requests"), "{}", summary.2);
-    assert!(summary.2.contains("1 forwarded, 1 refused"), "{}", summary.2);
+    assert!(
+        summary.2.contains("1 forwarded, 1 refused"),
+        "{}",
+        summary.2
+    );
 }
 
 #[test]
@@ -663,16 +737,25 @@ fn a_denial_denies_with_the_reason_and_the_injection_flag_is_on_the_card() {
     );
     let question = fx.question();
     assert_eq!(question.question.reason, ReasonKind::CloudAgent);
-    assert!(question.risk.contains("injection_phrase"), "{}", question.risk);
-    assert!(fx.broker.approvals.deny_with_comment(question.id, "not now"));
+    assert!(
+        question.risk.contains("injection_phrase"),
+        "{}",
+        question.risk
+    );
+    assert!(
+        fx.broker
+            .approvals
+            .deny_with_comment(question.id, "not now")
+    );
     let (_, reason) = until("the denial", || fx.state().denied.first().cloned());
     assert!(reason.contains("The owner refused: not now"), "{reason}");
     assert!(fx.state().released.is_empty());
     let rows = fx.activity();
     assert!(
-        rows.iter()
-            .any(|(operation, decision, _)| operation.starts_with("cloud run")
-                && *decision == ActivityDecision::Deny),
+        rows.iter().any(
+            |(operation, decision, _)| operation.starts_with("cloud run")
+                && *decision == ActivityDecision::Deny
+        ),
         "{rows:?}"
     );
 }
@@ -691,6 +774,9 @@ fn a_run_outside_the_open_vault_is_denied_without_a_question() {
     // A revoked agent is denied too, and the node revokes it.
     let agent = fx.with_vault(|vault| vault.cloud_agents().unwrap()[0].agent_id);
     fx.node.revoke_agent(&fx.vault, agent).unwrap();
-    assert!(fx.state().agents.get(&relay.0).unwrap().2, "revoked in the node");
+    assert!(
+        fx.state().agents.get(&relay.0).unwrap().2,
+        "revoked in the node"
+    );
     assert!(fx.with_vault(|vault| vault.pending_cloud_revocations().unwrap().is_empty()));
 }

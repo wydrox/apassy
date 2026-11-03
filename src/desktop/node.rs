@@ -39,7 +39,8 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 /// How often a running node checks its route (tailnet name, Funnel handler).
 const MAINTAIN_INTERVAL: Duration = Duration::from_secs(60);
 /// The note when a close keeps the app open.
-pub(crate) const KEPT_OPEN: &str = "Apassy stays open for your cloud agents: the window is in the Dock. Quit Apassy to stop them.";
+pub(crate) const KEPT_OPEN: &str =
+    "Apassy stays open for your cloud agents: the window is in the Dock. Quit Apassy to stop them.";
 
 /// A start of the node on a worker thread.
 struct Starting {
@@ -93,7 +94,10 @@ impl DesktopApp {
 
     /// True while the node runs.
     pub(crate) fn node_running(&self) -> bool {
-        self.node.node.as_ref().is_some_and(|node| node.is_running())
+        self.node
+            .node
+            .as_ref()
+            .is_some_and(|node| node.is_running())
     }
 
     /// The owner changed something of the cloud agents (the route, an agent): compare

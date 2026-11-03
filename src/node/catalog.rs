@@ -53,7 +53,10 @@ pub struct Checked {
 }
 
 fn storage(_: crate::vault::VaultError) -> NodeError {
-    NodeError::new("vault_error", "The vault cannot be read for the cloud catalog.")
+    NodeError::new(
+        "vault_error",
+        "The vault cannot be read for the cloud catalog.",
+    )
 }
 
 /// The name of an item for the node: no control character, at most 64 bytes.
@@ -232,7 +235,12 @@ mod tests {
 
         // An agent that sees the two placeholder items and the value-mode item.
         let agent = vault
-            .add_cloud_agent("Grok Bot", &[items.stripe, items.httpbin, items.plain], 5, 4_000_000_000)
+            .add_cloud_agent(
+                "Grok Bot",
+                &[items.stripe, items.httpbin, items.plain],
+                5,
+                4_000_000_000,
+            )
             .unwrap();
         let first = build(&mut vault, node.as_ref(), &mut checked, &[]).unwrap();
         assert_eq!(first.items.len(), 2);
@@ -244,7 +252,10 @@ mod tests {
         assert_eq!(first.agents[0].0, NodeAgentId(5));
         assert_eq!(first.agents[0].1.len(), 2);
         assert!(first.items.iter().all(|item| item.uid.len() == 32));
-        assert!(!format!("{first:?}").contains("SYNTH-"), "no value in the mirror");
+        assert!(
+            !format!("{first:?}").contains("SYNTH-"),
+            "no value in the mirror"
+        );
         let report = node.sync_items(&team, &first.items).unwrap();
         assert_eq!((report.added, report.unchanged), (2, 0));
 

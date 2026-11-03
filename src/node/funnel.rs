@@ -141,7 +141,9 @@ pub enum PortUse {
     /// The node: one handler `/` to the loopback target of the app.
     Ours,
     /// Something else, such as another program's handler.
-    Other { target: String },
+    Other {
+        target: String,
+    },
 }
 
 /// The state of `tailscale serve` that the app needs.
@@ -182,14 +184,19 @@ impl FunnelError {
         match self {
             Self::NoTailscale => "Install Tailscale and sign in.".to_owned(),
             Self::NotConnected(state) => format!("Tailscale is not connected ({state})."),
-            Self::PortTaken { target, alternative } => format!(
+            Self::PortTaken {
+                target,
+                alternative,
+            } => format!(
                 "Port {FUNNEL_PORT} of Tailscale Serve already serves {target}. Apassy does not change it. Remove that handler, or move it to port {alternative}."
             ),
             Self::HttpsPublic => format!(
                 "Port {NEVER_PORT} of this Mac is public through Tailscale Funnel. Apassy adds no route while it is: check `tailscale serve status`."
             ),
             Self::Policy { message, link } => match link {
-                Some(link) => format!("The tailnet policy does not allow Funnel: {message} Allow it at {link}"),
+                Some(link) => format!(
+                    "The tailnet policy does not allow Funnel: {message} Allow it at {link}"
+                ),
                 None => format!("The tailnet policy does not allow Funnel: {message}"),
             },
             Self::Unreadable(why) => format!("Apassy cannot read the Tailscale Serve state: {why}"),
@@ -329,7 +336,9 @@ pub fn parse_serve_status(json: &str, own_target: &str) -> Result<ServeState, Fu
             .get("TCP")
             .and_then(Value::as_object)
             .and_then(|map| map.get(&FUNNEL_PORT.to_string()));
-        if let Some(forward) = tcp.and_then(|port| port.get("TCPForward")).and_then(Value::as_str)
+        if let Some(forward) = tcp
+            .and_then(|port| port.get("TCPForward"))
+            .and_then(Value::as_str)
         {
             uses.push(PortUse::Other {
                 target: format!("a TCP forward to {}", clean(forward, 120)),
@@ -506,9 +515,8 @@ impl Funnel {
             .ok_or(FunnelError::NoTailscale)?;
         if !output.success {
             let text = format!("{}\n{}", output.stderr, output.stdout);
-            return Err(parse_refusal(&text).unwrap_or_else(|| {
-                FunnelError::Failed(clean(&text, MAX_MESSAGE_BYTES))
-            }));
+            return Err(parse_refusal(&text)
+                .unwrap_or_else(|| FunnelError::Failed(clean(&text, MAX_MESSAGE_BYTES))));
         }
         let after = self.serve_state(port)?;
         if after.funnel_port != PortUse::Ours || !after.funnel_port_public {
@@ -668,7 +676,10 @@ pub(crate) mod tests {
             parse_status(r#"{"BackendState":"Running","Self":{"DNSName":""}}"#),
             Tailscale::NotConnected { .. }
         ));
-        assert!(matches!(parse_status("not json"), Tailscale::NotConnected { .. }));
+        assert!(matches!(
+            parse_status("not json"),
+            Tailscale::NotConnected { .. }
+        ));
         let missing = Funnel::new(Arc::new(FakeCli {
             installed: false,
             ..FakeCli::connected(String::new())
@@ -716,7 +727,10 @@ pub(crate) mod tests {
             parse_serve_status(tcp, &own).unwrap().funnel_port,
             PortUse::Other { .. }
         ));
-        let foreground = format!(r#"{{"Foreground":{{"s1":{}}}}}"#, serve_with_8443(&own, true));
+        let foreground = format!(
+            r#"{{"Foreground":{{"s1":{}}}}}"#,
+            serve_with_8443(&own, true)
+        );
         assert!(matches!(
             parse_serve_status(&foreground, &own).unwrap().funnel_port,
             PortUse::Other { .. }
@@ -804,7 +818,11 @@ pub(crate) mod tests {
         *cli.refusal.lock().unwrap() = Some(POLICY_REFUSAL.to_owned());
         let refused = funnel.enable(49200, None).unwrap_err();
         assert!(matches!(refused, FunnelError::Policy { link: Some(_), .. }));
-        assert!(refused.message().contains("https://login.tailscale.com/f/funnel"));
+        assert!(
+            refused
+                .message()
+                .contains("https://login.tailscale.com/f/funnel")
+        );
         // 443 public: nothing is added.
         *cli.refusal.lock().unwrap() = None;
         *cli.serve.lock().unwrap() = format!(

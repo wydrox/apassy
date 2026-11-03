@@ -163,6 +163,6 @@ mod tests {
             version(vault.conn_ref().unwrap()),
             crate::vault::SCHEMA_VERSION
         );
-        assert!(PASSKEY_EXTENSIONS_SCHEMA_VERSION < crate::vault::SCHEMA_VERSION);
+        const { assert!(PASSKEY_EXTENSIONS_SCHEMA_VERSION < crate::vault::SCHEMA_VERSION) };
     }
 }

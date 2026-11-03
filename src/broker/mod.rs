@@ -42,8 +42,7 @@ use crate::vault::Vault;
 pub type SharedVault = Arc<Mutex<Option<Vault>>>;
 
 pub use run::{
-    CLOUD_REQUEST_SOURCE, CloudApproval, CloudContext, CloudDecision, CloudRequest,
-    evaluate_cloud,
+    CLOUD_REQUEST_SOURCE, CloudApproval, CloudContext, CloudDecision, CloudRequest, evaluate_cloud,
 };
 pub use server::{
     BrokerHandle, BrokerOptions, start, start_with, start_with_model_server, start_with_tls,

@@ -487,8 +487,9 @@ fn decide(shared: &Shared, run: &PendingRun) {
             record,
             items,
         } => {
-            let _ =
-                shared.with_node(|node| node.deny(&shared.team, run.run_id, cut(&reason, MAX_REASON_BYTES)));
+            let _ = shared.with_node(|node| {
+                node.deny(&shared.team, run.run_id, cut(&reason, MAX_REASON_BYTES))
+            });
             if let Some(row) = record {
                 shared.with_vault(|vault| {
                     let _ = vault.record_activity_for_items(
@@ -538,7 +539,11 @@ fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
     };
     if items.iter().collect::<BTreeSet<_>>().len() != items.len() {
         let reason = "This run names an item twice.";
-        return deny(reason, Some(refused_row(run, Some(agent_id), reason)), items);
+        return deny(
+            reason,
+            Some(refused_row(run, Some(agent_id), reason)),
+            items,
+        );
     }
 
     // 2. The broker: the owner decides.

@@ -93,7 +93,9 @@ mod tests {
 
     use super::*;
     use crate::contracts::CredentialKind;
-    use crate::vault::{Field, ItemDraft, OPEN_EXISTING, SecretValue, Vault, apply_key, close_conn};
+    use crate::vault::{
+        Field, ItemDraft, OPEN_EXISTING, SecretValue, Vault, apply_key, close_conn,
+    };
 
     const PASS: &str = "synthetic-schema26-pass";
 
@@ -244,7 +246,10 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         assert_eq!(version(vault.conn_ref().unwrap()), CLOUD_SCHEMA_VERSION);
-        assert_eq!(vault.authenticate_agent(token.expose()).unwrap().id, local.id);
+        assert_eq!(
+            vault.authenticate_agent(token.expose()).unwrap().id,
+            local.id
+        );
         assert!(vault.cloud_agents().unwrap().is_empty());
         assert_eq!(vault.cloud_node_setting().unwrap().team_id, None);
     }
@@ -265,9 +270,14 @@ mod tests {
         assert_eq!(meta_version(conn), CLOUD_SCHEMA_VERSION);
         assert!(has_table(conn, "cloud_node"));
         for version in [16, 24, 25, CLOUD_SCHEMA_VERSION] {
-            assert!(crate::vault::merge::is_mergeable_schema(version), "{version}");
+            assert!(
+                crate::vault::merge::is_mergeable_schema(version),
+                "{version}"
+            );
         }
-        assert!(!crate::vault::merge::is_mergeable_schema(CLOUD_SCHEMA_VERSION + 1));
+        assert!(!crate::vault::merge::is_mergeable_schema(
+            CLOUD_SCHEMA_VERSION + 1
+        ));
         assert_eq!(CLOUD_SCHEMA_VERSION, crate::vault::SCHEMA_VERSION);
     }
 
@@ -280,7 +290,10 @@ mod tests {
         assert_eq!(version(conn), CLOUD_SCHEMA_VERSION);
         for table in ["cloud_agent", "cloud_item", "cloud_node"] {
             assert!(has_table(conn, table), "{table}");
-            assert!(crate::vault::merge::LOCAL_TABLES.contains(&table), "{table}");
+            assert!(
+                crate::vault::merge::LOCAL_TABLES.contains(&table),
+                "{table}"
+            );
         }
     }
 }

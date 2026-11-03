@@ -601,7 +601,10 @@ mod tests {
         assert!(vault.cloud_agent_summary(second).is_err());
         assert!(vault.cloud_agents().unwrap().is_empty());
         let setting = vault.cloud_node_setting().unwrap();
-        assert_eq!((setting.team_id, setting.port, setting.route_on), (None, Some(49200), false));
+        assert_eq!(
+            (setting.team_id, setting.port, setting.route_on),
+            (None, Some(49200), false)
+        );
         assert!(vault.set_cloud_node_port(1024).is_err());
         assert!(vault.set_cloud_node_team(Some("bad team")).is_err());
     }
@@ -613,8 +616,12 @@ mod tests {
         let first = vault.cloud_item_uids(&items).unwrap();
         assert_eq!(first.len(), 2);
         assert_ne!(first[0], first[1]);
-        assert!(first.iter().all(|uid| uid.len() == 32
-            && uid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))));
+        assert!(first.iter().all(|uid| {
+            uid.len() == 32
+                && uid
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }));
         let again = vault.cloud_item_uids(&[items[1], items[0]]).unwrap();
         assert_eq!(again, [first[1].clone(), first[0].clone()]);
         assert_eq!(vault.cloud_item_for_uid(&first[1]).unwrap(), Some(items[1]));

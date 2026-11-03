@@ -117,12 +117,19 @@ fn frame(ctx: &egui::Context, app: &mut DesktopApp, close: bool) -> Vec<Viewport
 
 /// The route went off, and the Serve state of the fake is the owner's 443 handler only.
 fn route_turned_off(cli: &FakeCli) -> bool {
-    cli.calls().iter().any(|call| call == "funnel --https=8443 off")
+    cli.calls()
+        .iter()
+        .any(|call| call == "funnel --https=8443 off")
         && *cli.serve.lock().unwrap() == serve_443_only()
 }
 
 /// Run frames until `done` holds.
-fn until(ctx: &egui::Context, app: &mut DesktopApp, what: &str, done: impl Fn(&DesktopApp) -> bool) {
+fn until(
+    ctx: &egui::Context,
+    app: &mut DesktopApp,
+    what: &str,
+    done: impl Fn(&DesktopApp) -> bool,
+) {
     let end = Instant::now() + Duration::from_secs(20);
     while !done(app) {
         assert!(Instant::now() < end, "timed out: {what}");
@@ -138,15 +145,24 @@ fn the_node_follows_the_vault_and_a_close_keeps_the_app_open_while_it_runs() {
     let mut fx = fixture();
     let ctx = egui::Context::default();
     let epoch = fx.app.owner_ui.session.epoch().expect("unlocked");
-    until(&ctx, &mut fx.app, "the window takes the running node", |app| {
-        app.node.running_for == Some(epoch)
-    });
+    until(
+        &ctx,
+        &mut fx.app,
+        "the window takes the running node",
+        |app| app.node.running_for == Some(epoch),
+    );
     assert!(fx.app.node_running());
 
     // A close while it runs: cancelled, and the window is minimized.
     let commands = frame(&ctx, &mut fx.app, true);
-    assert!(commands.contains(&ViewportCommand::CancelClose), "{commands:?}");
-    assert!(commands.contains(&ViewportCommand::Minimized(true)), "{commands:?}");
+    assert!(
+        commands.contains(&ViewportCommand::CancelClose),
+        "{commands:?}"
+    );
+    assert!(
+        commands.contains(&ViewportCommand::Minimized(true)),
+        "{commands:?}"
+    );
     assert_eq!(fx.app.status_text, KEPT_OPEN);
 
     // A lock stops it at once, and the route goes off. (A route check of the window may
@@ -159,7 +175,10 @@ fn the_node_follows_the_vault_and_a_close_keeps_the_app_open_while_it_runs() {
     assert_eq!(fx.app.node.running_for, None);
     // Now a close quits: nothing cancels it.
     let commands = frame(&ctx, &mut fx.app, true);
-    assert!(!commands.contains(&ViewportCommand::CancelClose), "{commands:?}");
+    assert!(
+        !commands.contains(&ViewportCommand::CancelClose),
+        "{commands:?}"
+    );
 
     // An unlock starts it again for the new session.
     fx.app.owner_ui.session.unlock(PASS).expect("unlock");

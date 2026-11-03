@@ -316,7 +316,10 @@ impl Node {
         if self.stops_waiting.load(Ordering::SeqCst) == 0 {
             Ok(())
         } else {
-            Err(error("node_stopped", "The node was stopped while it started."))
+            Err(error(
+                "node_stopped",
+                "The node was stopped while it started.",
+            ))
         }
     }
 
@@ -586,7 +589,9 @@ impl Node {
         drop(notes);
         if let Some(shared) = self.shared() {
             for (item, why) in &lock(&shared.catalog).skipped {
-                warnings.push(format!("Item {item} is not offered to cloud agents: {why}."));
+                warnings.push(format!(
+                    "Item {item} is not offered to cloud agents: {why}."
+                ));
             }
         }
         if route_on {
@@ -713,11 +718,7 @@ impl Node {
             let relay = vault
                 .cloud_agents()
                 .ok()
-                .and_then(|agents| {
-                    agents
-                        .into_iter()
-                        .find(|agent| agent.agent_id == agent_id)
-                })
+                .and_then(|agents| agents.into_iter().find(|agent| agent.agent_id == agent_id))
                 .map(|agent| agent.relay_agent_id)
                 .ok_or_else(|| error("not_found", "No such cloud agent."))?;
             vault
@@ -728,9 +729,10 @@ impl Node {
         // Only the node of this vault session knows the agent; else the revocation waits
         // in the vault for the node of this vault (`pending_cloud_revocations`).
         if let Some(shared) = shared.filter(|shared| shared.epoch() == epoch) {
-            let revoked = shared
-                .with_node(|node| node.revoke_agent(&shared.team, NodeAgentId(relay_agent)));
-            if matches!(revoked, Some(Ok(()))) || matches!(&revoked, Some(Err(e)) if e.code == "not_found")
+            let revoked =
+                shared.with_node(|node| node.revoke_agent(&shared.team, NodeAgentId(relay_agent)));
+            if matches!(revoked, Some(Ok(())))
+                || matches!(&revoked, Some(Err(e)) if e.code == "not_found")
             {
                 let mut guard = lock(vault);
                 if let Some(vault) = guard
