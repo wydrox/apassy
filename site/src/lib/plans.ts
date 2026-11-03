@@ -63,7 +63,7 @@ export const PLANS: Plan[] = [
   {
     id: "family",
     name: "Connect Family",
-    for: `Up to ${FAMILY_INCLUDED_PEOPLE} people in one price`,
+    for: `A family of ${FAMILY_INCLUDED_PEOPLE} people. Each further person costs extra.`,
     per: `for ${FAMILY_INCLUDED_PEOPLE} people`,
     price: {
       month: 500,
