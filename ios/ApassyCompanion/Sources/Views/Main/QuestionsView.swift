@@ -136,12 +136,17 @@ struct RequestsNotificationSettings: View {
     let model: QuestionsModel
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(RootModel.self) private var root: RootModel?
 
     var body: some View {
         Section {
             Toggle("Request Notifications", isOn: Binding(
                 get: { model.notificationsOn },
-                set: { enabled in Task { await model.setNotifications(enabled) } }))
+                set: { enabled in
+                    // The demo registers no push and asks iOS for nothing.
+                    if root?.isDemo == true { root?.showNotAvailableInDemo(); return }
+                    Task { await model.setNotifications(enabled) }
+                }))
             Text(model.notificationSettingsMessage)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
