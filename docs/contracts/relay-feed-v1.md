@@ -3,6 +3,8 @@
 Date: 2026-10-14.
 Status: proposed, for section D of the [stage 5 plan](../design/stage5-plan.md) ("The Mac feed"). The owner chose the relay feed (option b) on 2026-10-14, so that the Agents tab of the iPhone shows real data. The app side (the publisher `src/questions/feed.rs` and the action handler), the iPhone side (`ios/ApassyCore` calls `feed_*`, the Agents tab), and the relay side (`apassy-relay`, team schema 6, `docs/SPEC.md` section 27) implement it. A change to this document changes every side, one pull request on each; a change to a tag, to an AAD, to the action string, or to a check bumps its version. The app implements the client itself and does not depend on the relay crate (FSL license).
 
+Changed 2026-11-03 (feed v2, release 0.5.16): a Mac publishes feeds of `v: 2` with the figures of the Bouncer section: the state of its remote access, the runs per day, the median answer time, remote agents, and the runs per day of each agent (section 7.5). Both readers take `v` 1 and 2 and refuse any other `v` (sections 7.4, 14). A feed of v1 is byte for byte as before. The relay does not change: it never reads a plaintext. An iPhone or a Mac older than 0.5.16 shows "Update Apassy to see the agents of <Mac>" for a Mac of 0.5.16 until it is updated; all components ship together.
+
 Changed 2026-11-03: a Mac is also a reader. It reads the feeds of the other Macs of the vault with the checks of section 7.4, read-only: it sends no action. A Mac publishes while the vault has another live device in the team, an iPhone or another Mac, and the setting is "Show agents on my other devices" (sections 1 to 3, 7.4, 8, 10.4, 10.5, 10.10, 14.2, 15, 16). The relay and the iPhone do not change: a Mac reads with the routes and limits of a device of the member.
 
 Changed 2026-10-14: v2 actions sign the names that the owner saw, a new iPhone sends nothing else, and a new Mac takes no v1 action that gives authority back (sections 7.1, 9.2 to 9.6, 14, 15, 17.6). This changes the Mac and the iPhone only; the relay never reads a plaintext, and its routes, bodies, and limits stay.
@@ -152,7 +154,7 @@ Top level:
 
 | Field | Type | Rule |
 | --- | --- | --- |
-| `v` | number | `1`. |
+| `v` | number | `1`; `2` for a feed with the fields of section 7.5. |
 | `mac.device` | uuid | the publisher's `trusted_device.uuid`. |
 | `mac.name` | text, 1 to 64 bytes | the publisher's `trusted_device.name`. For display. |
 | `seq` | number | equal to the `seq` of the relay record and of the AAD. |
@@ -168,7 +170,7 @@ Each agent:
 | `id` | decimal text, at most 20 characters | `agent.id` on this Mac. |
 | `name` | text, 1 to 64 bytes | `agent.name`. |
 | `host` | `claude`, `codex`, `t3`, or `other` | `ConnectHost::guess(name)` (`src/desktop/ui/agent_onboarding.rs`). For the icon. |
-| `where` | `mac` | the agent reaches the broker through the socket of the publishing Mac. The only value in v1. The reader shows "On <mac.name>". |
+| `where` | `mac` | the agent reaches the broker through the socket of the publishing Mac. The only value in v1 (v2 adds `remote`, section 7.5). The reader shows "On <mac.name>". |
 | `revoked` | bool | the agent is disconnected. |
 | `token_expires_at` | number | `AgentSummary.token_expires_at`. After it, the reader shows "Reconnect on <Mac>". |
 | `last_use_at` | number or `null` | the newest `item_use.at` of the agent. |
@@ -230,7 +232,7 @@ In this order; the first failure keeps the last good feed of that Mac on the scr
 
 1. The envelope opens (section 6.2). Else "Sync this vault to see the agents of <Mac>".
 2. The JSON has exactly the fields of section 7.1, within the limits. Else "Update Apassy to see the agents of <Mac>".
-3. `v` is 1 and `seq` equals the relay's `seq`.
+3. `v` is 1 or 2 (section 7.5) and `seq` equals the relay's `seq`. A feed of v1 has none of the fields of v2; a feed of v2 has those of section 7.5 in their form. Any other `v` shows "Update Apassy to see the agents of <Mac>".
 4. `mac.device` is a live `trusted_device` of kind `mac` whose device number in this team (`relay_devices[team id]`) equals the relay's `device_id`. Else the feed is ignored, with no text. The publisher's `trusted_device` row must carry `relay_devices[team]` equal to the relay's `device_id` on the reader's copy of the vault; a row without that entry publishes nothing there, and its feed is ignored without a text. Unlike the asker check of questions (questions section 13), a missing entry is never accepted: a feed never predates the membership, because the Mac publishes only after its row has its device number in the team.
 5. `seq` is above the highest `seq` that this reader accepted from that device (section 8). Else the feed is ignored, with no text.
 
@@ -240,6 +242,43 @@ In this order; the first failure keeps the last good feed of that Mac on the scr
 - For a Mac with no good feed, a failed step 1 shows "Sync this vault to see the agents of <Mac>", and a failed step 2 or 3 "Update Apassy to see the agents of <Mac>". A Mac that has a good feed keeps showing it.
 - It keeps the last good feed of each other Mac and the highest `seq` of each in memory only. A lock, another vault, and the questions going off drop the feeds; the marks stay while the app runs. After a restart it has no mark (section 15).
 - A Mac reader shows the agents read-only, with no action: a change is made on the Mac of the feed.
+
+### 7.5 Feed v2
+
+Added 2026-11-03 for the Bouncer section of the Mac (`docs/design/implementation-plan-bouncer-section.md`, sections 2 and 3). A Mac of 0.5.16 or later publishes `v: 2`. The fields of section 7.1 stay as they are, with their rules; v2 adds these, and a feed of v1 has none of them (a reader then leaves them empty and shows "—" for their tiles). Every field of v2 is absent in v1, so a feed of v1 is the same bytes as before.
+
+```json
+{
+  "v": 2,
+  "mac": {"device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", "name": "MacBook Pro"},
+  "seq": 1790000040, "generated_at": 1790000040, "truncated": false,
+  "remote_access": "on",
+  "week": {"by_you": 3, "automatic": 128, "days": [[5, 2], [3, 0], [0, 0], [0, 0], [4, 1], [0, 0], [1, 1]], "answer_p50_secs": 42},
+  "agents": [
+    {"id": "9", "name": "Grok Bot", "host": "other", "where": "remote", "connected_at": 1789999000, "revoked": false,
+     "token_expires_at": 1797776000, "last_use_at": 1790000010, "uses_this_week": 2,
+     "days": [[2, 2, 1], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+     "projects": [], "note": "", "restricted": true, "actions": [], "exceptions": [], "recent": []}
+  ]
+}
+```
+
+| Field | Type | Rule |
+| --- | --- | --- |
+| `remote_access` | `off`, `on`, or `problem` | required in v2. `off`: the public route of the node of this Mac (Tailscale Funnel) is off. `on`: it is on. `problem`: it is on and `Node::status` reports a problem (Tailscale missing or not connected, a policy, a port taken). Never the address, the port, or the tailnet name. |
+| `week.days` | list of exactly 7 pairs `[runs, asked]`, numbers 0 to 2^32 − 1, `asked` ≤ `runs` | required in v2. The runs of the decision log of this Mac (`decision_log` rows with `request = 'run'`) of the last 7 × 24 h by local calendar day of the Mac, today first, and those that asked the owner (`Vault::bouncer_stats`, implementation plan section 3). A run of the first hours of the window on an eighth local day counts in no pair. |
+| `week.answer_p50_secs` | number 0 to 2^32 − 1, `null`, or absent | the median time from the question to the owner's answer (`decision_log.wait_ms`, vault schema 27, of the rows with `asked = 1` and `decided_by = 'owner'`) in the same window, rounded to whole seconds. Absent or `null`: no such answer. A reader of several Macs weighs each Mac's median by its `week.by_you` and says that the result is approximate. |
+| `agents[].where` | `mac` or `remote` | in v2 also `remote`: a cloud agent of the node of this Mac (vault `agent.kind = cloud`, revoked ones too). It reaches the Mac through the MCP address of the node, not through the socket. The reader shows "Remote" on it. |
+| `agents[].connected_at` | number, or absent | only for `where = remote`: when the agent connected (its vault `agent.created_at`). Absent for an agent on the Mac. |
+| `agents[].days` | list of exactly 7 triples `[runs, asked, not_allowed]`, numbers 0 to 2^32 − 1, `asked` and `not_allowed` ≤ `runs` | required in v2, for each agent, also one with no run (seven zeros). As `week.days`, for the agent; `not_allowed` counts its denied runs: by the owner, by a rule, or with no answer. |
+
+The days are pairs and triples, not objects, so that the fields of v2 of 64 agents add at most 20 KiB to a feed even with every number at 2^32 − 1 (`MAX_V2_EXTRA_BYTES`); a usual feed gains a few KiB. A reader shows them as objects (`{runs, asked}`, `{runs, asked, not_allowed}`).
+
+**Fitting (section 7.3).** The steps do not change. They never cut `week.days` or the `days` of an agent: an agent goes with its days, or not at all.
+
+**Readers.** The iPhone (`ios/ApassyCore/src/core/feed.rs`) and the Mac (`src/questions/feed_reader.rs`, through `Feed::parse`) take `v` 1 and 2 and refuse 3 and any other `v` with "Update Apassy to see the agents of <Mac>". They refuse a feed of v1 with a field of v2, or with `where = remote`, and a feed of v2 without `remote_access` or the days, with a value outside its form, or with `connected_at` on an agent of `where = mac`. The iPhone's `feed_list` adds `remote_access` to each Mac, `days` and `answer_p50_secs` to its `week`, and `connected_at` and `days` to each agent (empty or `null` for a feed of v1).
+
+**Older readers.** An iPhone or a Mac of 0.5.15 or earlier refuses `v: 2` (its decoder takes `v` 1 only) and shows "Update Apassy to see the agents of <Mac>" for each Mac of 0.5.16 until it is updated. Every component of a release ships together (AGENTS.md), so this lasts until the update.
 
 ## 8. Order and freshness
 
@@ -580,7 +619,7 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 
 ### 14.1 Versions
 
-- `v` is `1` in every request body, feed, and settle, and `1` or `2` in an action plaintext (section 9.2: `2` carries `names`). The relay refuses another `v` with `400`; it never sees the `v` of a plaintext. A reader that cannot read a feed's `v`, or a new field or value, shows "Update Apassy to see the agents of <Mac>". A new field in a feed, an action, or a settle is a new `v`; the mark of section 7.1 is white space, not a field, so that readers of 0.5.2 still read the feed.
+- `v` is `1` in every request body and settle, `1` or `2` in a feed (section 7.5: `2` carries the figures of the Bouncer section; a Mac of 0.5.16 publishes `2`), and `1` or `2` in an action plaintext (section 9.2: `2` carries `names`). The relay refuses another `v` with `400`; it never sees the `v` of a plaintext. A reader that cannot read a feed's `v`, or a new field or value, shows "Update Apassy to see the agents of <Mac>". A new field in a feed, an action, or a settle is a new `v`; the mark of section 7.1 is white space, not a field, so that readers of 0.5.2 still read the feed.
 - The tags `apassy-feed-v1` (AAD), `apassy-feed-action-v1` and `apassy-feed-action-v2` (action strings) change with any change of their bytes.
 - New optional fields in a relay result are ignored by the app.
 
@@ -596,6 +635,9 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 | An iPhone of 0.5.2 (before the names, section 9.3) and a new Mac | It reads the feed with the mark (white space). It sends v1 actions: the Mac applies those of `only` rows, with the Activity note of section 9.5 step 10, and refuses the others: "<Mac> refused it: update Apassy on <iPhone> to remove this from it, or remove it on this Mac." |
 | A new iPhone and a Mac of 0.5.2 | The feed has no mark. The iPhone offers no removal of `never` or `always_ask` there ("Update Apassy on <Mac> to remove this from the iPhone"); an `only` removal goes as v2, which that Mac refuses ("it has a bad form"), and the iPhone shows the same update text. Remove the exception on the Mac, or update it. |
 | A Mac put back to 0.5.2 | As a Mac of 0.5.2 above: its next feed has no mark. |
+| An iPhone or a Mac of 0.5.15 or earlier and a Mac of 0.5.16 | The feed is of v2 (section 7.5). The old reader refuses it and shows "Update Apassy to see the agents of <Mac>" until it is updated. The relay is the same. |
+| A new reader and a Mac of 0.5.15 or earlier | The feed is of v1. The reader shows it and leaves the tiles of v2 empty ("—"). |
+| A Mac put back to 0.5.15 | Its next feed is of v1 again; vault schema 27 must be undone first (the vault of 0.5.15 refuses a file of schema 27). |
 | An iPhone without an answer key for the team (an old link) | It shows the feed and offers removals of `only` rows. For `never` and `always_ask` it says "Connect this iPhone again on a Mac to use Face ID here." |
 | A Connect team (relay-connect-v1) | Works as any team, with the `connect` preset's `feed_bytes` (1 MiB) and the Connect long-poll bound. |
 | The local-network companion (companion-v1) | Unchanged. It carries no feed in v1. |
@@ -729,6 +771,7 @@ Settle ciphertext (hex, 130 bytes):
 - The signature of 17.2 verifies with the answer key over the action string, and fails after one changed character of it (for example `:only:` instead of `:never:`, or another `to`), and with the device key of relay-sync-v1 section 15. A new signature of the same string differs and still verifies.
 - The target (the publisher of 17.1, with the exception row `(4, Shop database, never, 1789990000)` and its last `seq` `1790000040`) applies the action with its clock at `1790000000` to `1790000120`, and refuses it at `1790000121` (`refused`, too old), with the row made again at `1789990001` (`stale`), on a target whose last published `seq` is `1790000039` (`stale`: the action names a feed it never published; `feed_seq` is signed, so a test changes the target, not the action), from a `trusted_device` row whose `answer_key` is another key (`refused`), from the iPhone's `sign_key` (`refused`), and a second time with the same `action_id` (no second settle).
 - The reader shows the feed of 17.1 once, ignores it again with the same `seq`, and ignores a feed of that device with a lower `seq`.
+- Feed v2 (section 7.5): both readers read the feed of 17.1 (v1, the fields of v2 empty) and the same feed as v2 with the fields of section 7.5, and refuse it with `v` 3, a feed of v1 with a field of v2, and a feed of v2 without one, with six days, or with `asked` over `runs`. The fields of v2 of 64 agents at their limits add at most 20 KiB. `fit` never cuts the days. The feed that a Mac builds carries the days and the median of `Vault::bouncer_stats` over its window.
 - With the values of 17.6: the reader of the feed of 17.6 makes the action string of 17.6 for the exception of 17.2, with the names that it shows, and so does the reader of the feed of 17.1 (no mark), whose list says that the Mac lacks the mark; with no marks file, or an empty one, too. A newer feed of the Mac than the confirmed one makes the reader refuse the string. The decoder of 0.5.2 reads the feed of 17.6. The signature of 17.6 verifies over the string of 17.6, and not over it with other names, nor over the string of 17.2 (nor that of 17.2 over 17.6). The target opens the action of 17.6 with its `names`. A target applies a v2 action whose names are those of its rows, and settles it `stale` ("the names on the iPhone did not match this Mac") when the action names the agent "Scratch Bot", the item "Test DB", or the Mac "Scratch Mac" instead, for `never` and for `only`, and leaves the row; with a signature that does not verify it is `refused` for the signature first. Its gate refuses those names and any v1 action (`RemoteRejected`). It refuses a v1 action for `never` and `always_ask`, leaves the row, and applies a v1 action for `only`, with the Activity note. A rename of the item after the first check of the names fails the check under the lock of the removal.
 
 ### 17.6 The names (v2)
