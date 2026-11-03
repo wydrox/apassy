@@ -1,0 +1,1200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apassy · Bouncer: agents across your Macs</title>
+<!--
+  Mockup for work unit U3 of implementation-plan-0037-cloud-agents.md, after the owner's
+  feedback of 2026-11-03 ("Owner feedback on the first mockup"). It replaces the rejected
+  "Settings → Cloud agents" frames. Static frames for the owner's approval before any UI
+  code. Synthetic data only.
+  The visual language is copied from app-v2-mockup.html. Light appearance only: the app
+  (kit::apply_theme sets ThemePreference::Light) and app-v2-mockup.html have no dark one.
+  One self-contained file: inline CSS and SVG, no script, no font file, no network request.
+  Data that relay-feed-v1 does not carry today (F1 … F6) and the choices are in the notes
+  at the end of the page, not in the windows.
+-->
+<style>
+:root{
+  --bg:#ffffff;--side:#ececef;--detail:#f6f6f7;--group:#ffffff;
+  --line:rgba(0,0,0,.09);--line2:rgba(0,0,0,.06);
+  --label:rgba(0,0,0,.88);--sec:rgba(0,0,0,.52);--ter:rgba(0,0,0,.30);
+  --fill:rgba(0,0,0,.05);--fill2:rgba(0,0,0,.08);--fill3:rgba(0,0,0,.12);
+  --accent:#0a6cff;--accent-press:#005ee0;--sel:#0a6cff;--link:#0066d6;
+  --red:#e0352b;--orange:#c86a00;--green:#24a148;
+  --t-warn:#a65200;--t-crit:#c81e1e;--t-good:#1d8036;--t-acc:#0066d6;
+  --s-auto:#0a6cff;--s-ask:#e8890c;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;color:var(--label);-webkit-font-smoothing:antialiased;background:#cfd0d5}
+svg{display:block}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+
+/* ---- The page of frames. ---- */
+.page{min-width:1260px;padding:36px 40px 70px}
+.intro{max-width:1180px;margin:0 auto 34px}
+.intro h1{font-size:22px;font-weight:700;margin:0 0 6px;letter-spacing:-.01em}
+.intro p{margin:0 0 6px;color:rgba(0,0,0,.62);max-width:900px}
+.intro ol{margin:10px 0 0;padding-left:20px;color:rgba(0,0,0,.62);columns:2;column-gap:40px;max-width:900px}
+.frame{max-width:1180px;margin:0 auto 52px}
+.flabel{margin:0 0 12px 4px}
+.flabel b{font-size:14px;font-weight:700;color:#232327}
+.flabel span{display:block;font-size:12px;color:rgba(0,0,0,.55);margin-top:2px;max-width:940px}
+.flabel .fnum{display:inline-grid;color:#fff;font-size:11px;margin-top:0;max-width:none}
+.fnum{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#232327;color:#fff;font-size:11px;font-weight:700;margin-right:8px;vertical-align:1px}
+.nf{display:inline-block;font-size:9.5px;font-weight:700;color:#7a3ec2;background:rgba(122,62,194,.12);border-radius:4px;padding:0 4px;margin-left:4px;vertical-align:1px;letter-spacing:.02em;line-height:14px;font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+
+/* ---- The window, as in app-v2-mockup.html. ---- */
+.win{display:flex;width:100%;min-height:660px;background:var(--bg);border-radius:12px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 22px 70px rgba(0,0,0,.28);position:relative}
+.side{width:216px;flex:none;background:var(--side);border-right:.5px solid var(--line);display:flex;flex-direction:column}
+.side .chrome{height:52px;flex:none;display:flex;align-items:center;padding:0 18px;gap:8px}
+.lights{display:flex;gap:8px}.lights i{width:12px;height:12px;border-radius:50%;display:block;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.15)}
+.sidetoggle{margin-left:auto;width:28px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--sec)}
+.sidetoggle svg{width:17px;height:17px}
+.side .scroll{flex:1;padding:0 10px 10px}
+.sh{font-size:11px;font-weight:600;color:var(--sec);padding:12px 8px 4px}
+.si{display:flex;align-items:center;gap:7px;width:100%;height:28px;border-radius:6px;padding:0 8px}
+.si.on{background:rgba(0,0,0,.09)}
+.si svg{width:15px;height:15px;flex:none;color:var(--accent)}
+.si .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.si .cnt{color:var(--sec);font-size:12px;font-variant-numeric:tabular-nums}
+.si .bdg{font-size:11px;font-weight:600;border-radius:9px;padding:0 6px;min-width:18px;text-align:center;background:var(--red);color:#fff}
+.si.l1{padding-left:22px}
+.sq{width:13px;height:13px;border-radius:3.5px;flex:none;margin:0 1px;display:grid;place-items:center;color:#fff;font-size:8.5px;font-weight:700;line-height:1}
+.side .foot{padding:8px 10px 10px;border-top:.5px solid var(--line)}
+.me{display:flex;align-items:center;gap:8px;padding:4px 6px}
+.me .av{width:22px;height:22px;border-radius:50%;background:linear-gradient(#ffa43a,#ff8a00);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:600;flex:none}
+.me .t{flex:1;line-height:1.2}.me .t small{display:block;color:var(--sec);font-size:11px}
+.ib{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--sec);flex:none}
+.ib svg{width:16px;height:16px}
+
+/* The list column and the detail of Decisions, as today. */
+.listcol{width:300px;flex:none;border-right:.5px solid var(--line);display:flex;flex-direction:column;background:var(--bg)}
+.tb{height:52px;flex:none;display:flex;align-items:center;padding:0 10px 0 16px;gap:6px}
+.tb .ttl{flex:1;min-width:0;line-height:1.2}
+.tb .ttl b{font-size:13px;font-weight:700;display:block}
+.tb .ttl small{font-size:11px;color:var(--sec)}
+.rows{flex:1;padding:4px 8px 12px}
+.gh{font-size:11px;font-weight:600;color:var(--sec);padding:10px 8px 4px;display:flex;align-items:center}
+.gh span{margin-left:auto;font-weight:400}
+.r{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;min-height:48px}
+.r.top{align-items:flex-start}
+.r.on{background:var(--sel);color:#fff}
+.r.on .sub,.r.on .meta,.r.on .sub3{color:rgba(255,255,255,.82)}
+.r .tx{flex:1;min-width:0}
+.r .ttl2{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub,.r .sub3{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub3 .bad{color:var(--t-crit)}
+.r .meta{display:flex;align-items:center;gap:6px;color:var(--sec);font-size:12px;flex:none;font-variant-numeric:tabular-nums}
+.dotp{width:7px;height:7px;border-radius:50%;background:var(--red);flex:none}
+.r.on .dotp{background:#fff}
+.tm{color:var(--orange);font-weight:500;font-variant-numeric:tabular-nums}
+.r.on .tm{color:#fff}
+.tile{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px;flex:none;letter-spacing:-.02em;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12)}
+.tile svg{width:16px;height:16px}
+.tile.s{width:20px;height:20px;border-radius:5px;font-size:10px}.tile.s svg{width:11px;height:11px}
+.ava{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px;flex:none;position:relative}
+.ava.l{width:56px;height:56px;font-size:22px}
+.ava.s{width:22px;height:22px;font-size:10.5px}
+.ava .cl{position:absolute;right:-3px;bottom:-3px;width:15px;height:15px;border-radius:50%;background:#fff;color:var(--accent);display:grid;place-items:center;box-shadow:0 0 0 .5px rgba(0,0,0,.15)}
+.ava .cl svg{width:10px;height:10px}
+.ava.s .cl{width:13px;height:13px;right:-4px;bottom:-4px}.ava.s .cl svg{width:8.5px;height:8.5px}
+.ava.l .cl{width:22px;height:22px;right:-2px;bottom:-2px}.ava.l .cl svg{width:14px;height:14px}
+.detail{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.detail .tb{justify-content:flex-end;padding:0 12px;gap:4px}
+.dscroll{flex:1}
+.dpad{max-width:640px;margin:0 auto;padding:0 28px 34px}
+
+/* The wide pages of Bouncer: Overview, Agents, an agent, Logs. */
+.content{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.content .tb{padding:0 16px 0 24px}
+.tbtn{height:28px;border-radius:6px;padding:0 9px 0 5px;display:flex;align-items:center;gap:2px;color:var(--label);flex:none;background:var(--fill)}
+.tbtn svg{width:16px;height:16px;color:var(--sec)}
+.scopebar{display:flex;align-items:center;gap:6px;padding:0 24px 12px;font-size:12.5px;color:var(--sec);flex-wrap:wrap;position:relative}
+.scopebar .grow{flex:1}
+.listcol .scopebar{padding:0 16px 8px;row-gap:6px}
+.popm{display:inline-flex;align-items:center;gap:7px;height:22px;padding:0 8px 0 9px;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 .5px 1px rgba(0,0,0,.07);color:var(--label);font-size:12.5px;white-space:nowrap}
+.popm::after{content:"";width:5px;height:5px;border-right:1.5px solid var(--sec);border-bottom:1.5px solid var(--sec);transform:rotate(45deg) translateY(-2px)}
+.popm.open{box-shadow:0 0 0 2px rgba(10,108,255,.45)}
+.wpad{max-width:900px;margin:0 auto;padding:2px 28px 34px}
+.wpad.n{max-width:720px}
+.menu{position:absolute;background:rgba(250,250,250,.98);border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.2);padding:5px;z-index:30;min-width:290px;font-size:13px;color:var(--label)}
+.menu .mi{display:flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:5px}
+.menu .mi .ck{width:14px;flex:none;font-size:12px;text-align:center}
+.menu .mi small{margin-left:auto;padding-left:14px;color:var(--sec);font-size:12px}
+.menu .mi.sel{background:var(--accent);color:#fff}.menu .mi.sel small{color:rgba(255,255,255,.85)}
+.menu .mi.dim{color:var(--sec)}
+.menu hr{border:0;border-top:.5px solid var(--line);margin:4px 6px}
+
+.hdr{display:flex;align-items:center;gap:14px;margin:6px 0 22px}
+.hdr h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-.01em;line-height:1.2}
+.hdr .s{color:var(--sec);margin-top:2px}
+.caps{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
+.cap{font-size:11px;font-weight:500;border-radius:5px;padding:1px 6px;background:var(--fill2);color:var(--sec);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.cap svg{width:11px;height:11px}
+.cap.red{background:rgba(224,53,43,.1);color:#c42b22}
+.cap.acc{background:rgba(10,108,255,.1);color:var(--t-acc)}
+.gl{font-size:12px;font-weight:600;color:var(--sec);margin:20px 2px 6px;display:flex;align-items:center;gap:6px}
+.gl span{margin-left:auto;font-weight:400}
+.grp{background:var(--group);border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.08),0 .5px 1.5px rgba(0,0,0,.05)}
+.fr{display:flex;align-items:center;gap:10px;min-height:38px;padding:7px 12px;position:relative}
+.fr+.fr::before,.tr+.tr::before,.expand+.tr::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.fr.top{align-items:flex-start}
+.fr .k{flex:none;min-width:130px;color:var(--label)}
+.fr .v{flex:1;min-width:0;text-align:right;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fr .v.l{text-align:left;color:var(--label);white-space:normal}
+.fr .kn{flex:1;min-width:0}
+.fr .kn .nt{font-size:12px;color:var(--sec);margin-top:2px;line-height:1.4}
+.fr .chev,.tr .chev{color:var(--ter);font-size:15px}
+.lnk{color:var(--link)}
+.mono{font-family:var(--mono);font-size:12px}
+.pb{border:0;border-radius:6px;height:24px;padding:0 10px;background:var(--fill2);font-size:12.5px;font-weight:500;flex:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit;color:var(--label)}
+.pb svg{width:13px;height:13px;color:var(--sec)}
+.pb.pri{background:var(--accent);color:#fff}
+.sw{width:32px;height:19px;border-radius:10px;background:var(--fill3);position:relative;flex:none;border:0;padding:0}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 .5px 2px rgba(0,0,0,.3)}
+.sw.on{background:var(--green)}.sw.on::after{left:15px}
+.sw.dis{opacity:.4}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px;vertical-align:0;flex:none}
+.dot.warn{background:#ff9500}.dot.crit{background:#ff3b30}.dot.off{background:#a0a0a6}
+.tn{font-size:12px;line-height:1.4;display:flex;gap:6px;align-items:flex-start}
+.tn svg{width:13px;height:13px;flex:none;margin-top:1.5px}
+.tn.warn{color:var(--t-warn)}.tn.crit{color:var(--t-crit)}.tn.good{color:var(--t-good)}.tn.acc{color:var(--t-acc)}
+.np p{margin:0 0 5px;font-size:12px;color:var(--sec);line-height:1.4}.np p:last-child{margin:0}
+.act{display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0}
+.act .tx{flex:1;min-width:0;text-align:left}
+.act .a1{color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act .a1.mono{font-size:12px}
+.act .a2{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act .when{font-size:12px;color:var(--ter);flex:none}
+.st{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;flex:none;margin-top:1px}
+.st svg{width:10px;height:10px;color:#fff}
+.st.ok{background:var(--green)}.st.you{background:var(--accent)}.st.no{background:var(--red)}.st.wait{background:#ff9500}
+.cmd{font-family:var(--mono);font-size:12px;background:#f2f2f4;border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-all;color:var(--label);flex:1;text-align:left}
+.note{font-size:12px;color:var(--sec);margin:6px 4px 0;line-height:1.4}
+.meta-foot{text-align:center;font-size:11px;color:var(--ter);margin-top:22px;line-height:1.45}
+.abar{flex:none;border-top:.5px solid var(--line);background:rgba(246,246,247,.92);padding:10px 16px;display:flex;align-items:center;gap:8px}
+.abar .cap2{flex:1;font-size:11.5px;color:var(--sec);min-width:0}
+.btn{border:0;border-radius:7px;height:28px;padding:0 14px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.16),0 .5px 1px rgba(0,0,0,.08);font-weight:500;white-space:nowrap;flex:none;font-family:inherit;font-size:13px;color:var(--label);display:inline-flex;align-items:center;gap:6px}
+.btn svg{width:14px;height:14px;color:var(--sec)}
+.btn.pri{background:var(--accent);color:#fff;box-shadow:0 .5px 1px rgba(0,0,0,.2)}
+.btn.pri svg{color:#fff}
+.btn.des{color:var(--red)}
+.field{width:100%;border:0;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.18) inset;padding:5px 9px;display:block;font:inherit;color:inherit;min-height:44px}
+.field.ph{color:var(--ter)}
+.seg{display:inline-flex;background:var(--fill2);border-radius:7px;padding:2px;gap:2px;flex:none}
+.seg span{padding:1px 10px;border-radius:5px;font-size:12px;color:var(--label)}
+.seg span.on{background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.12);font-weight:500}
+.searchf{height:24px;border-radius:7px;background:var(--fill);display:flex;align-items:center;gap:6px;padding:0 8px;color:var(--ter);font-size:12.5px;width:230px}
+.searchf svg{width:13px;height:13px}
+.pgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.pcard{background:var(--detail);border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18);padding:14px 22px 20px}
+.pcard.flush{padding:0;overflow:hidden;display:flex;flex-direction:column}
+.pcard .plabel{font-size:12px;font-weight:600;color:#232327;margin:0 0 2px}
+.pcard .plabel small{display:block;font-weight:400;color:rgba(0,0,0,.5)}
+.pcard.flush .plabel{padding:14px 22px 0}
+
+/* Overview. */
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.stats.four{grid-template-columns:repeat(4,1fr)}
+.stat{background:#fff;border-radius:10px;box-shadow:0 0 0 1px rgba(0,0,0,.07);padding:11px 14px 12px}
+.stat .sl{font-size:12px;color:var(--sec)}
+.stat .sn{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em;margin:1px 0 1px;line-height:1.25}
+.stat .sn small{font-size:13px;font-weight:500;color:var(--sec);margin-left:3px}
+.stat .ss{font-size:11.5px;color:var(--sec);line-height:1.35}
+.two{display:grid;grid-template-columns:1.2fr 1fr;gap:16px;align-items:start}
+.chart{padding:12px 14px 8px}
+.chart svg text{font:11px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;fill:rgba(0,0,0,.52)}
+.chart svg text.v{fill:rgba(0,0,0,.72);font-weight:500}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--sec);margin:0 0 6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.att{display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0}
+.att .ai{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;flex:none;margin-top:1px}
+.att .ai svg{width:13px;height:13px;color:#fff}
+.att .ai.warn{background:#ff9500}.att .ai.crit{background:#ff3b30}.att .ai.off{background:#8e8e93}
+.att .t1{color:var(--label);font-weight:500}
+.att .t2{font-size:12px;color:var(--sec);line-height:1.4;margin-top:1px}
+.att .t3{font-size:12px;margin-top:3px}
+
+/* Tables in groups. */
+.tr{display:grid;align-items:center;gap:10px;padding:7px 12px;min-height:40px;position:relative}
+.tr.th{font-size:11px;font-weight:600;color:var(--sec);min-height:28px;padding:6px 12px 5px}
+.tr .num{text-align:right;font-variant-numeric:tabular-nums}
+.tr .sec{color:var(--sec)}
+.tr .cut{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.tr.warnrow .hl{color:var(--t-warn);font-weight:500}
+.agc{display:flex;align-items:center;gap:9px;min-width:0}
+.agc .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.g-ov{grid-template-columns:2fr 1.5fr .7fr .8fr .7fr 1.1fr}
+.g-ag{grid-template-columns:1.7fr 1.5fr 1.35fr .75fr .75fr 14px}
+.g-lg{grid-template-columns:52px 1.25fr 1.05fr 1.05fr 1.3fr 1.5fr 14px}
+.g-px{grid-template-columns:70px 56px 1fr 1.2fr}
+.stt{display:inline-flex;align-items:center;gap:0;white-space:nowrap}
+.stt.live{color:var(--t-good)}
+.stt.wait{color:var(--t-warn)}
+.stt.idle{color:var(--sec)}
+.envh{display:flex;align-items:center;gap:8px;margin:24px 2px 8px}
+.envh:first-child{margin-top:8px}
+.envh svg{width:17px;height:17px;color:var(--sec)}
+.envh b{font-size:13.5px;font-weight:700}
+.envh .r2{margin-left:auto;font-size:12px;color:var(--sec);display:flex;align-items:center;gap:4px}
+.dim{opacity:.5}
+.expand{background:#fafafb;border-top:.5px solid var(--line2);padding:10px 14px 12px 76px}
+.expand .gl{margin:10px 0 5px}
+.expand .gl:first-child{margin-top:0}
+.disc{display:flex;align-items:center;gap:6px;color:var(--sec);font-size:12.5px;margin:10px 6px 0}
+.disc::before{content:"";width:5px;height:5px;border-right:1.5px solid var(--sec);border-bottom:1.5px solid var(--sec);transform:rotate(-45deg);margin-right:3px}
+
+/* The browser page of the connect flow. */
+.bwin{background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18)}
+.bbar{height:38px;background:#ececef;border-bottom:.5px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 12px}
+.bbar .lights i{width:11px;height:11px}
+.burl{flex:1;height:24px;border-radius:6px;background:#fff;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12);display:flex;align-items:center;gap:6px;padding:0 9px;font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden}
+.burl svg{width:11px;height:11px;flex:none}
+.burl b{color:var(--label);font-weight:400}
+.bpage{padding:48px 40px 44px;text-align:center;min-height:360px}
+.bpage .logo{width:44px;height:40px;margin:0 auto 18px}
+.bpage h2{font-size:19px;font-weight:700;margin:0 auto 8px;max-width:360px;line-height:1.3;letter-spacing:-.01em}
+.bpage p{margin:0 auto 6px;color:var(--sec);max-width:340px;line-height:1.45}
+.bcode{display:inline-block;margin:16px 0 4px;font-family:var(--mono);font-size:20px;letter-spacing:3px;background:#f2f2f4;border-radius:8px;padding:8px 16px;color:var(--label)}
+.bwait{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:22px;color:var(--sec);font-size:12.5px}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid rgba(0,0,0,.12);border-top-color:var(--accent)}
+.bdone{width:44px;height:44px;border-radius:50%;background:var(--green);display:grid;place-items:center;margin:0 auto 16px}
+.bdone svg{width:24px;height:24px;color:#fff}
+.bfoot{margin-top:26px;font-size:11px;color:var(--ter)}
+
+/* The notes at the end. */
+.notes{max-width:1180px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.15);padding:22px 28px 24px}
+.notes h2{font-size:15px;margin:0 0 8px}
+.notes h2+p{margin-top:0}
+.notes table{border-collapse:collapse;width:100%;font-size:12.5px;margin:8px 0 18px}
+.notes th,.notes td{text-align:left;vertical-align:top;padding:6px 10px 6px 0;border-top:.5px solid var(--line)}
+.notes th{font-size:11.5px;color:var(--sec);font-weight:600;border-top:0}
+.notes td:first-child{white-space:nowrap}
+.notes ul{margin:6px 0 16px;padding-left:18px;line-height:1.5}
+.notes code{font-family:var(--mono);font-size:11.5px;background:#f2f2f4;border-radius:4px;padding:0 4px}
+
+/* Help (i) and its popover, the Read-only tag, the empty-state block. */
+.hi{width:18px;height:18px;border-radius:50%;display:inline-grid;place-items:center;color:var(--sec);flex:none}
+.hi svg{width:15px;height:15px}
+.hi.open{color:var(--accent);background:rgba(10,108,255,.1)}
+.hpop{position:absolute;width:300px;background:#fff;border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.22);padding:11px 14px 9px;z-index:20;font-size:12px;line-height:1.45;color:var(--label)}
+.hpop p{margin:0 0 5px}
+.cap.ro svg{width:10px;height:10px}
+.es{padding:24px 16px;text-align:center}
+.es b{display:block;font-size:14px;font-weight:600}
+.es .l{color:var(--sec);font-size:12.5px;margin-top:3px}
+.es .bt{margin-top:12px;display:flex;gap:14px;justify-content:center;align-items:center}
+.es .bt:empty{display:none}
+</style>
+</head>
+<body>
+
+<!-- The icons, used with <use href="#…">. -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9.5 5v14"/><path d="M5.5 8.5h2M5.5 11h2"/></g></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></g></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></g></symbol>
+  <symbol id="i-checkc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></g></symbol>
+  <symbol id="i-agent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></g></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19.5V13M10 19.5V8M15 19.5v-9M20 19.5V5"/></g></symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r=".6"/><circle cx="4.8" cy="12" r=".6"/><circle cx="4.8" cy="17.5" r=".6"/></g></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></g></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></g></symbol>
+  <symbol id="i-touch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 5.6A8.5 8.5 0 0 1 20.5 12v1.5M3.5 12a8.5 8.5 0 0 1 1.2-4.4M7 19.5a12 12 0 0 0 1.5-6.5 3.5 3.5 0 0 1 7 0v1M12 13a14 14 0 0 1-2 7.5M15.3 17.5a17 17 0 0 1-1 3M3.6 15.5a9 9 0 0 0 1-3.5"/></g></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4M12 17h.01"/></g></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></g></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></g></symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12.5l4 4 8-9"/></g></symbol>
+  <symbol id="i-no" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10M17 7L7 17"/></g></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6.5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="17.5" cy="12" r="1.7"/></g></symbol>
+  <symbol id="i-mini" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="8" width="17" height="8" rx="2.5"/><path d="M7 13h.01"/></g></symbol>
+  <symbol id="i-laptop" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></g></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></g></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></g></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></g></symbol>
+  <symbol id="i-mark" viewBox="0 0 229 206.2"><path d="M0,114.5A114.5,114.5 0 0 1 229,114.5L229,204.2A2,2 0 0 1 227,206.2L190.5,206.2A21,21 0 0 1 169.5,185.2L169.5,114.5A55,55 0 0 0 59.5,114.5L59.5,204.2A2,2 0 0 1 57.5,206.2L2,206.2A2,2 0 0 1 0,204.2Z" fill="#0e1820"/><path d="M75,97.76A2.5,2.5 0 0 1 78.47,95.45L105.54,106.78A26,26 0 0 1 121.5,130.76L121.5,178.76A3,3 0 0 1 119.95,181.39L76.48,205.38A1,1 0 0 1 75,204.51Z" fill="#0a77fe"/></symbol>
+</svg>
+
+<div class="page">
+
+<div class="intro">
+  <h1>Apassy · Bouncer across your Macs</h1>
+  <p>Mockup for U3 of implementation-plan-0037-cloud-agents.md, after the owner's feedback of 2026-11-03. Synthetic data. Light appearance only. Environments: Mac mini (office) (this Mac), Mac mini (studio), MacBook Pro. Now: Tue 3 Nov 2026, 14:20. Feed fields, choices, and notes are at the end.</p>
+  <ol>
+    <li>Overview</li>
+    <li>Agents, all environments</li>
+    <li>Agents, one environment</li>
+    <li>Agent pages</li>
+    <li>Decisions</li>
+    <li>Logs</li>
+    <li>Browser connect page</li>
+    <li>Remote access problems</li>
+    <li>Empty: first run</li>
+    <li>Empty: quiet day</li>
+    <li>Empty: no results</li>
+    <li>Empty: other Macs</li>
+    <li>Empty: new remote agent</li>
+    <li>Empty: filtered Logs</li>
+  </ol>
+</div>
+
+<!-- ============================================================ 1 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">1</span>Overview · All environments</b>
+    <span>Numbers, trend, attention, and agents across Macs.</span></div>
+  <div class="win">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si on"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="content">
+      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="wpad">
+        <div class="stats">
+          <div class="stat"><div class="sl">Runs</div><div class="sn">424</div></div>
+          <div class="stat"><div class="sl">Allowed by bouncer</div><div class="sn">370<small>87%</small></div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">51<small>12%</small></div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">7</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">14 s</div></div>
+        </div>
+
+        <div class="two">
+          <div>
+            <div class="gl">Runs per day</div>
+            <div class="grp chart">
+              <div class="legend"><span><i style="background:var(--s-auto)"></i>Allowed by bouncer</span><span><i style="background:var(--s-ask)"></i>Asked you</span></div>
+              <svg viewBox="0 0 470 164" width="100%" role="img" aria-label="Runs per day, last 7 days. Wed 48, Thu 71, Fri 66, Sat 22, Sun 18, Mon 95, today 104. Asked you: 6, 9, 8, 2, 1, 11, 14.">
+                <path d="M30 140H460" stroke="rgba(0,0,0,.18)" stroke-width="1"/>
+                <path d="M30 85H460M30 30H460" stroke="rgba(0,0,0,.07)" stroke-width="1"/>
+                <text x="24" y="143.5" text-anchor="end">0</text><text x="24" y="88.5" text-anchor="end">50</text><text x="24" y="33.5" text-anchor="end">100</text>
+                <g><title>Wed 28 Oct: 48 runs, 6 asked you</title><rect x="43" y="93.8" width="34" height="46.2" fill="#0a6cff"/><path d="M43,91.8V88.2Q43,85.2 46,85.2H74Q77,85.2 77,88.2V91.8Z" fill="#e8890c"/><text class="v" x="60" y="80" text-anchor="middle">48</text></g>
+                <g><title>Thu 29 Oct: 71 runs, 9 asked you</title><rect x="103" y="71.8" width="34" height="68.2" fill="#0a6cff"/><path d="M103,69.8V62.9Q103,59.9 106,59.9H134Q137,59.9 137,62.9V69.8Z" fill="#e8890c"/><text class="v" x="120" y="54.7" text-anchor="middle">71</text></g>
+                <g><title>Fri 30 Oct: 66 runs, 8 asked you</title><rect x="163" y="76.2" width="34" height="63.8" fill="#0a6cff"/><path d="M163,74.2V68.4Q163,65.4 166,65.4H194Q197,65.4 197,68.4V74.2Z" fill="#e8890c"/><text class="v" x="180" y="60.2" text-anchor="middle">66</text></g>
+                <g><title>Sat 31 Oct: 22 runs, 2 asked you</title><rect x="223" y="118" width="34" height="22" fill="#0a6cff"/><path d="M223,116V114.9Q223,113.8 224.1,113.8H255.9Q257,113.8 257,114.9V116Z" fill="#e8890c"/><text class="v" x="240" y="108.6" text-anchor="middle">22</text></g>
+                <g><title>Sun 1 Nov: 18 runs, 1 asked you</title><rect x="283" y="121.3" width="34" height="18.7" fill="#0a6cff"/><path d="M283,119.3V118.75Q283,118.2 283.55,118.2H316.45Q317,118.2 317,118.75V119.3Z" fill="#e8890c"/><text class="v" x="300" y="113" text-anchor="middle">18</text></g>
+                <g><title>Mon 2 Nov: 95 runs, 11 asked you</title><rect x="343" y="47.6" width="34" height="92.4" fill="#0a6cff"/><path d="M343,45.6V36.5Q343,33.5 346,33.5H374Q377,33.5 377,36.5V45.6Z" fill="#e8890c"/><text class="v" x="360" y="28.3" text-anchor="middle">95</text></g>
+                <g><title>Today: 104 runs, 14 asked you</title><rect x="403" y="41" width="34" height="99" fill="#0a6cff"/><path d="M403,39V26.6Q403,23.6 406,23.6H434Q437,23.6 437,26.6V39Z" fill="#e8890c"/><text class="v" x="420" y="18.4" text-anchor="middle">104</text></g>
+                <text x="60" y="157" text-anchor="middle">Wed</text><text x="120" y="157" text-anchor="middle">Thu</text><text x="180" y="157" text-anchor="middle">Fri</text><text x="240" y="157" text-anchor="middle">Sat</text><text x="300" y="157" text-anchor="middle">Sun</text><text x="360" y="157" text-anchor="middle">Mon</text><text x="420" y="157" text-anchor="middle" style="font-weight:600;fill:rgba(0,0,0,.72)">Today</text>
+              </svg>
+            </div>
+          </div>
+          <div>
+            <div class="gl">Needs attention<span>3</span></div>
+            <div class="grp">
+              <div class="fr"><div class="att"><div class="ai warn"><svg><use href="#i-warn"/></svg></div><div><div class="t1">Codex asks often</div><div class="t2">Mac mini (studio) · 30% of runs</div></div></div><span class="chev">›</span></div>
+              <div class="fr"><div class="att"><div class="ai crit"><svg><use href="#i-key"/></svg></div><div><div class="t1">Stripe live used 3 times <span class="cap red">Production</span></div><div class="t2">Claude Code · Mac mini (office)</div></div></div><span class="chev">›</span></div>
+              <div class="fr"><div class="att"><div class="ai off"><svg><use href="#i-laptop"/></svg></div><div><div class="t1">MacBook Pro not reporting</div><div class="t2">Last report 1 Nov, 18:40</div></div></div><span class="chev">›</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="gl">Agents<span>8</span></div>
+        <div class="grp">
+          <div class="tr th g-ov"><div>Agent</div><div>Environment</div><div class="num">Runs</div><div class="num">Asks You</div><div>Last Active</div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">Mac mini (office)</div><div class="num">142</div><div class="num">6%</div><div><span class="stt live"><span class="dot"></span>Active now</span></div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">98</div><div class="num">4%</div><div><span class="stt live"><span class="dot"></span>Active now</span></div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">Mac mini (office)</div><div class="num">61</div><div class="num">11%</div><div class="sec">25 min ago</div></div>
+          <div class="tr g-ov warnrow"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">44</div><div class="num hl">30%</div><div class="sec">1 h ago</div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">MacBook Pro</div><div class="num">31</div><div class="num">10%</div><div class="sec">1 Nov</div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">Mac mini (studio)</div><div class="num">27</div><div class="num">7%</div><div class="sec">3 h ago</div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span><span class="cap acc">Remote</span></div><div class="sec cut">Mac mini (office)</div><div class="num">12</div><div class="num">100%</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div></div>
+          <div class="tr g-ov"><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">MacBook Pro</div><div class="num">9</div><div class="num">11%</div><div class="sec">31 Oct</div></div>
+        </div>
+
+        <div class="gl">Environments</div>
+        <div class="grp">
+          <div class="fr"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-mini"/></svg><div class="k">Mac mini (office)</div><span class="cap">This Mac</span><div class="v">215 runs</div></div>
+          <div class="fr"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-mini"/></svg><div class="k">Mac mini (studio)</div><div class="v">169 runs</div></div>
+          <div class="fr dim"><svg style="width:16px;height:16px;color:var(--sec)"><use href="#i-laptop"/></svg><div class="k">MacBook Pro</div><div class="v">40 runs · 1 Nov</div></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">2</span>Agents · All environments</b>
+    <span>Grouped by Mac; remote access on this Mac. Help open.</span></div>
+  <div class="win">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si on"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="content">
+      <div class="tb"><div class="ttl"><b>Agents</b><small>8 agents</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="wpad">
+
+        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span></div>
+        <div class="grp" style="position:relative">
+          <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="hi open"><svg><use href="#i-info"/></svg></span><span class="sw on"></span></div>
+          <div class="fr"><div class="k" style="min-width:96px">MCP address</div><div class="v mono" style="color:var(--label);text-align:left">https://rafals-mac-mini.tail71fdd0.ts.net:8443/mcp</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+          <div class="hpop" style="right:44px;top:44px">
+            <p><b>Remote Access</b></p>
+            <p>Tailscale Funnel opens only the MCP endpoint and the proxy.</p>
+            <p>Credential values stay on this Mac.</p>
+            <p>Give a cloud agent the address. It asks to connect; you approve it in Decisions.</p>
+            <p>Switching needs Touch ID. Keep this Mac unlocked and awake.</p>
+          </div>
+        </div>
+
+        <div class="grp" style="margin-top:12px">
+          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs Today</div><div class="num">Asks You</div><div></div></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">apassy, acme-billing</div><div><span class="stt live"><span class="dot"></span>Active now</span></div><div class="num">41</div><div class="num">6%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">acme-billing</div><div><span class="stt idle"><span class="dot off"></span>25 min ago</span></div><div class="num">14</div><div class="num">11%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span><span class="cap acc">Remote</span></div><div class="sec cut">—</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div><div class="num">5</div><div class="num">100%</div><span class="chev">›</span></div>
+        </div>
+        <div class="disc">Disconnected (1)</div>
+
+        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (studio)</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">1 min ago</span></div>
+        <div class="grp">
+          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs Today</div><div class="num">Asks You</div><div></div></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">synthetic-shop</div><div><span class="stt live"><span class="dot"></span>Active now</span></div><div class="num">29</div><div class="num">4%</div><span class="chev">›</span></div>
+          <div class="tr g-ag warnrow"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">synthetic-shop, infra</div><div><span class="stt idle"><span class="dot off"></span>1 h ago</span></div><div class="num">9</div><div class="num hl">30%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">apassy</div><div><span class="stt idle"><span class="dot off"></span>3 h ago</span></div><div class="num">6</div><div class="num">7%</div><span class="chev">›</span></div>
+        </div>
+
+        <div class="envh dim"><svg><use href="#i-laptop"/></svg><b>MacBook Pro</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">Last report 1 Nov</span></div>
+        <div class="grp dim">
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">side-project</div><div class="sec">1 Nov</div><div class="num sec">—</div><div class="num">10%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">side-project</div><div class="sec">31 Oct</div><div class="num sec">—</div><div class="num">11%</div><span class="chev">›</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================ 3 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">3</span>Agents · Mac mini (studio)</b>
+    <span>One environment selected; the scope menu open.</span></div>
+  <div class="win" style="min-height:520px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si on"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="content">
+      <div class="tb"><div class="ttl"><b>Agents</b><small>3 agents</small></div></div>
+      <div class="scopebar">Showing <span class="popm open">Mac mini (studio)</span> in <span class="popm">All Projects</span>
+        <div class="menu" style="left:78px;top:28px">
+          <div class="mi"><span class="ck"></span>All Environments</div>
+          <hr>
+          <div class="mi"><span class="ck"></span>Mac mini (office)<small>This Mac</small></div>
+          <div class="mi sel"><span class="ck">✓</span>Mac mini (studio)<small>1 min ago</small></div>
+          <div class="mi dim"><span class="ck"></span>MacBook Pro<small>1 Nov</small></div>
+        </div>
+      </div>
+      <div class="wpad">
+        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (studio)</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">Remote access off · 1 min ago</span></div>
+        <div class="grp">
+          <div class="tr th g-ag"><div>Agent</div><div>Project</div><div>Status</div><div class="num">Runs Today</div><div class="num">Asks You</div><div></div></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div class="sec cut">synthetic-shop</div><div><span class="stt live"><span class="dot"></span>Active now</span></div><div class="num">29</div><div class="num">4%</div><span class="chev">›</span></div>
+          <div class="tr g-ag warnrow"><div class="agc"><div class="ava" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div class="sec cut">synthetic-shop, infra</div><div><span class="stt idle"><span class="dot off"></span>1 h ago</span></div><div class="num">9</div><div class="num hl">30%</div><span class="chev">›</span></div>
+          <div class="tr g-ag"><div class="agc"><div class="ava" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div class="sec cut">apassy</div><div><span class="stt idle"><span class="dot off"></span>3 h ago</span></div><div class="num">6</div><div class="num">7%</div><span class="chev">›</span></div>
+        </div>
+        <div class="gl">This week</div>
+        <div class="stats four">
+          <div class="stat"><div class="sl">Runs</div><div class="sn">169</div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">19<small>11%</small></div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">3</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">19 s</div></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">4</span>Agent pages</b>
+    <span>Grok Bot (remote); below, an agent of another Mac.</span></div>
+  <div class="win">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si on"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="content">
+      <div class="tb"><span class="tbtn"><svg><use href="#i-back"/></svg>Agents</span><div class="ttl"></div><span class="ib"><svg><use href="#i-dots"/></svg></span></div>
+      <div class="wpad n">
+        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1 style="display:flex;align-items:center;gap:8px">Grok Bot <span class="cap acc"><svg><use href="#i-cloud"/></svg>Remote</span><span class="hi"><svg><use href="#i-info"/></svg></span></h1><div class="s">Mac mini (office) · last seen now</div></div></div>
+
+        <div class="stats four">
+          <div class="stat"><div class="sl">Runs</div><div class="sn">12</div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">12<small>100%</small></div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">2</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">21 s</div></div>
+        </div>
+
+        <div class="gl">Recent runs</div>
+        <div class="grp">
+          <div class="fr top"><div class="act"><span class="st wait"><svg><use href="#i-dots"/></svg></span><div class="tx"><div class="a1 mono">curl -H "Authorization: Bearer $HTTPBIN_TOKEN" $APASSY_BASE_HTTPBIN_TOKEN/bearer</div><div class="a2">httpbin test token · Waits for you</div></div><span class="when">1 min ago</span></div></div>
+          <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1 mono">gh api repos/acme/billing/issues --paginate</div><div class="a2">GitHub token · Allowed on iPhone</div></div><span class="when">8 min ago</span></div></div>
+          <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1 mono">curl $APASSY_BASE_STRIPE_TEST/v1/customers?limit=3</div><div class="a2">Stripe test · Allowed by you</div></div><span class="when">2 h ago</span></div></div>
+          <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1 mono">curl -X DELETE $APASSY_BASE_STRIPE_TEST/v1/customers/cus_TEST91</div><div class="a2">Stripe test · Denied by you</div></div><span class="when">Yesterday</span></div></div>
+          <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1 mono">gh api -X POST repos/acme/billing/issues -f title=Weekly</div><div class="a2">GitHub token · Denied by you</div></div><span class="when">Yesterday</span></div></div>
+        </div>
+
+        <div class="gl">Can see</div>
+        <div class="grp">
+          <div class="fr"><div class="agc" style="flex:1"><div class="tile s" style="background:#8e8e93"><svg><use href="#i-key"/></svg></div>httpbin test token</div><span class="pb">Remove</span></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="tile s" style="background:#24292f"><svg><use href="#i-key"/></svg></div>GitHub token</div><span class="pb">Remove</span></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="tile s" style="background:#635bff"><svg><use href="#i-key"/></svg></div>Stripe test</div><span class="pb">Remove</span></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="tile s" style="background:#635bff"><svg><use href="#i-key"/></svg></div>Stripe live <span class="cap red">Never</span></div><span class="pb">Remove</span></div>
+          <div class="fr"><div class="kn lnk">Choose Credentials…</div></div>
+        </div>
+
+        <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Disconnect…</div><div class="v"></div><svg style="width:15px;height:15px;color:var(--sec)"><use href="#i-touch"/></svg></div></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="pgrid" style="margin-top:22px">
+    <div class="pcard">
+      <div class="plabel">4b · Agent of another Mac</div>
+      <div class="hdr" style="margin-top:16px"><div class="ava l" style="background:#10a37f">C</div><div><h1 style="display:flex;align-items:center;gap:8px">Codex <span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span></h1><div class="s">Mac mini (studio) · 1 h ago</div></div></div>
+      <div class="stats" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat"><div class="sl">Runs</div><div class="sn">44</div></div>
+        <div class="stat"><div class="sl">Asked you</div><div class="sn">13<small>30%</small></div></div>
+        <div class="stat"><div class="sl">Denied</div><div class="sn">3</div></div>
+      </div>
+      <div class="gl">Recent runs</div>
+      <div class="grp">
+        <div class="fr top"><div class="act"><span class="st no"><svg><use href="#i-no"/></svg></span><div class="tx"><div class="a1">Deploy key</div><div class="a2">synthetic-shop · Denied by you</div></div><span class="when">1 h ago</span></div></div>
+        <div class="fr top"><div class="act"><span class="st you"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1">Deploy key</div><div class="a2">synthetic-shop · Allowed by you</div></div><span class="when">2 h ago</span></div></div>
+        <div class="fr top"><div class="act"><span class="st ok"><svg><use href="#i-ok"/></svg></span><div class="tx"><div class="a1">Shop database</div><div class="a2">synthetic-shop · Allowed by bouncer</div></div><span class="when">3 h ago</span></div></div>
+      </div>
+      <div class="note" style="margin-top:14px;text-align:center">Change on Mac mini (studio).</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 5 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">5</span>Decisions</b>
+    <span>Open on top, history below; 5b is the run card.</span></div>
+  <div class="win" style="min-height:640px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si on"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Decisions</b><small>51 by you · 373 automatic</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="rows">
+        <div class="gh">Waiting<span>2</span></div>
+        <div class="r on"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot wants to connect</div><div class="sub">Mac mini (office)</div></div><div class="meta"><span class="tm">4:31</span></div></div>
+        <div class="r"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">httpbin test token</div><div class="sub">Grok Bot · Mac mini (office)</div></div><div class="meta"><span class="dotp"></span><span class="tm">4:02</span></div></div>
+
+        <div class="gh" style="padding-top:16px">History</div>
+        <div style="padding:2px 8px 4px"><span class="seg"><span class="on">All</span><span>Asked You</span><span>Automatic</span><span>Denied</span></span></div>
+        <div style="padding:2px 8px 6px"><span class="popm">All Agents</span></div>
+        <div class="gh">Today</div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Shop database</div><div class="sub3">Mac mini (studio)</div><div class="sub3">Allowed by bouncer</div></div><div class="meta">14:14</div></div>
+        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · GitHub token</div><div class="sub3">Mac mini (office)</div><div class="sub3">Allowed on iPhone</div></div><div class="meta">14:12</div></div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Stripe live</div><div class="sub3">Mac mini (office)</div><div class="sub3">Allowed by you</div></div><div class="meta">14:02</div></div>
+        <div class="r top"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex · Deploy key</div><div class="sub3">Mac mini (studio)</div><div class="sub3"><span class="bad">Denied by you</span></div></div><div class="meta">13:18</div></div>
+        <div class="gh">Yesterday</div>
+        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · GitHub token</div><div class="sub3">Mac mini (office)</div><div class="sub3"><span class="bad">Denied by you</span></div></div><div class="meta">18:22</div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1>Grok Bot wants to connect</h1><div class="s">Mac mini (office) · <span class="tm">4:31</span> left</div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="k">Code</div><div class="v mono" style="color:var(--label);font-size:17px;letter-spacing:3px">K7Q-4MD</div></div>
+        </div>
+        <div class="tn warn" style="margin:10px 4px 0;font-size:12.5px"><svg><use href="#i-warn"/></svg><span>Deny unless you just added Apassy to Grok Bot.</span></div>
+      </div></div>
+      <div class="abar"><span class="btn des">Deny</span><div class="cap2"></div><span class="btn pri"><svg><use href="#i-touch"/></svg>Allow</span></div>
+    </section>
+  </div>
+
+  <div class="pgrid" style="margin-top:22px">
+    <div class="pcard flush">
+      <div class="plabel">5b · Run question of a remote agent</div>
+      <div style="padding:14px 22px 14px">
+        <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1>Grok Bot wants to use httpbin test token</h1><div class="s">Mac mini (office) · <span class="tm">4:02</span> left</div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="k">Credential</div><div class="v" style="display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--label)"><div class="tile s" style="background:#8e8e93"><svg><use href="#i-key"/></svg></div>httpbin test token<span class="cap">Development</span></div></div>
+          <div class="fr"><div class="k">Agent</div><div class="v">Grok Bot</div></div>
+          <div class="fr"><div class="k">Sends To</div><div class="v">httpbin.org</div></div>
+          <div class="fr"><div class="k">Request</div><div class="v" style="color:var(--label)">"Test my httpbin token with curl." <span class="cap" style="background:rgba(255,149,0,.14);color:var(--t-warn)">Not verified</span></div></div>
+        </div>
+        <div class="gl">Command</div>
+        <div class="grp"><div class="fr"><div class="cmd">curl -H "Authorization: Bearer $HTTPBIN_TOKEN" $APASSY_BASE_HTTPBIN_TOKEN/bearer</div></div></div>
+      </div>
+      <div class="abar" style="margin-top:auto"><span class="btn des">Deny</span><div class="cap2"></div><span class="btn pri">Allow Once</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">6</span>Logs · All environments</b>
+    <span>Activity of every Mac; one remote run expanded.</span></div>
+  <div class="win" style="min-height:700px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si on"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="content">
+      <div class="tb"><div class="ttl"><b>Logs</b></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span><span class="grow"></span>
+        <span class="seg"><span class="on">All</span><span>Runs</span><span>Connections</span><span>Denied</span></span>
+        <span class="popm">All Agents</span>
+        <span class="searchf"><svg><use href="#i-search"/></svg>Filter</span>
+      </div>
+      <div class="wpad" style="max-width:none;padding:2px 24px 28px">
+        <div class="gl" style="margin-top:4px">Today</div>
+        <div class="grp">
+          <div class="tr th g-lg"><div>Time</div><div>Environment</div><div>Agent</div><div>Event</div><div>Credential</div><div>Outcome</div><div></div></div>
+          <div class="tr g-lg"><div class="sec">14:19</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot (new)</span></div><div>Connect</div><div class="sec">—</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">14:19</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">httpbin test token</div><div><span class="stt wait"><span class="dot warn"></span>Waits for you</span></div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">14:14</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Shop database</div><div class="cut">Allowed by bouncer</div><span class="chev">›</span></div>
+          <div class="tr g-lg" style="background:#fafafb"><div class="sec">14:12</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut">Allowed on iPhone</div><svg style="width:13px;height:13px;color:var(--sec)"><use href="#i-down"/></svg></div>
+          <div class="expand">
+            <div class="cmd" style="display:block">gh api repos/acme/billing/issues --paginate</div>
+            <div class="gl">Proxied requests<span>4 min</span></div>
+            <div class="grp">
+              <div class="tr th g-px"><div>Time</div><div>Method</div><div>Host</div><div>Status</div></div>
+              <div class="tr g-px"><div class="sec">14:12:08</div><div class="mono">GET</div><div class="mono">api.github.com</div><div><span class="dot"></span>200</div></div>
+              <div class="tr g-px"><div class="sec">14:12:09</div><div class="mono">GET</div><div class="mono">api.github.com</div><div><span class="dot"></span>200</div></div>
+              <div class="tr g-px"><div class="sec">14:12:11</div><div class="mono">GET</div><div class="mono">api.github.com</div><div><span class="dot"></span>200</div></div>
+              <div class="tr g-px"><div class="sec">14:13:40</div><div class="mono">GET</div><div class="mono">api.github.com</div><div><span class="dot warn"></span>404</div></div>
+              <div class="tr g-px"><div class="sec">14:14:02</div><div class="mono">GET</div><div class="mono">uploads.example.net</div><div style="color:var(--t-crit)"><span class="dot crit"></span>Refused: wrong host</div></div>
+            </div>
+          </div>
+          <div class="tr g-lg"><div class="sec">14:02</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Stripe live <span class="cap red">Production</span></div><div class="cut">Allowed by you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">13:55</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div>Run</div><div class="cut">OpenAI API</div><div class="cut">Allowed by bouncer</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">13:18</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#10a37f">C</div><span class="nm">Codex</span></div><div>Run</div><div class="cut">Deploy key</div><div class="cut" style="color:var(--t-crit)">Denied by you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">13:05</div><div class="cut">Mac mini (office)</div><div class="sec">—</div><div>Remote access on</div><div class="sec">—</div><div class="cut">By you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">11:20</div><div class="cut">Mac mini (studio)</div><div class="agc"><div class="ava s" style="background:#6e5ae6">T</div><span class="nm">T3 Code</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut">Allowed by bouncer</div><span class="chev">›</span></div>
+        </div>
+        <div class="gl">Yesterday</div>
+        <div class="grp">
+          <div class="tr g-lg"><div class="sec">18:22</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">GitHub token</div><div class="cut" style="color:var(--t-crit)">Denied by you</div><span class="chev">›</span></div>
+          <div class="tr g-lg"><div class="sec">16:05</div><div class="cut">Mac mini (office)</div><div class="agc"><div class="ava s" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><span class="nm">Grok Bot</span></div><div>Run</div><div class="cut">Stripe test</div><div class="cut" style="color:var(--t-crit)">Denied by you</div><span class="chev">›</span></div>
+        </div>
+        <div class="gl dim">1 Nov</div>
+        <div class="grp dim">
+          <div class="tr g-lg"><div class="sec">18:40</div><div class="cut">MacBook Pro</div><div class="agc"><div class="ava s" style="background:#d97757">C</div><span class="nm">Claude Code</span></div><div>Run</div><div class="cut">Side project database</div><div class="cut">Allowed by bouncer</div><span class="chev">›</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================ 7 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">7</span>Browser connect page</b>
+    <span>Served by this Mac's public address: waiting, then done.</span></div>
+  <div class="pgrid">
+    <div class="bwin">
+      <div class="bbar"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><div class="burl"><svg><use href="#i-lock"/></svg><b>rafals-mac-mini.tail71fdd0.ts.net</b>:8443/oauth/authorize?client_id=…</div></div>
+      <div class="bpage">
+        <svg class="logo"><use href="#i-mark"/></svg>
+        <h2>Grok Bot wants to connect to Mac mini (office)</h2>
+        <div class="bcode">K7Q-4MD</div>
+        <p>Approve on your Mac or iPhone.</p>
+        <div class="bwait"><span class="spin"></span></div>
+      </div>
+    </div>
+    <div class="bwin">
+      <div class="bbar"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><div class="burl"><svg><use href="#i-lock"/></svg><b>rafals-mac-mini.tail71fdd0.ts.net</b>:8443/oauth/authorize?client_id=…</div></div>
+      <div class="bpage">
+        <div class="bdone"><svg><use href="#i-ok"/></svg></div>
+        <h2>Connected</h2>
+        <p>You can close this page.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 8 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">8</span>Remote access problems</b>
+    <span>One line and one button each; switch disabled.</span></div>
+  <div class="pgrid">
+    <div class="pcard">
+      <div class="plabel">8a · Not installed</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Tailscale is not installed.</span></div><span class="pb">Get Tailscale…</span></div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">8b · Not connected</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Tailscale is not connected.</span></div><span class="pb">Check Again</span></div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">8c · Funnel not allowed</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn crit" style="flex:1"><svg><use href="#i-warn"/></svg><span>Your tailnet policy blocks Funnel.</span></div><span class="pb">Open Admin Console…</span></div>
+      </div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">8d · Port 8443 in use</div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="sw dis"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Another app uses port 8443.</span></div><span class="pb pri">Use Port 10000</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 9 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">9</span>Empty · first run</b>
+    <span>One Mac, no agents, no runs.</span></div>
+  <div class="win" style="min-height:0">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">4</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si on"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="content">
+      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="wpad" style="padding-bottom:40px">
+        <div class="stats">
+          <div class="stat"><div class="sl">Runs</div><div class="sn">0</div></div>
+          <div class="stat"><div class="sl">Allowed by bouncer</div><div class="sn">0</div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">0</div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">0</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">—</div></div>
+        </div>
+        <div class="grp" style="margin-top:16px"><div class="es"><b>No runs yet</b><div class="l">Connect an agent to see its runs here.</div><div class="bt"><span class="btn pri">Connect an Agent…</span><span class="lnk">Turn On Remote Access</span></div></div></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="win" style="min-height:0;margin-top:22px">
+    <section class="content">
+      <div class="tb"><div class="ttl"><b>Agents</b></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="wpad" style="padding-bottom:40px">
+        <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span></div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw"></span></div>
+        </div>
+        <div class="grp" style="margin-top:12px"><div class="es"><b>No agents yet</b><div class="l">Connected agents and their runs show here.</div><div class="bt"><span class="btn pri">Connect an Agent…</span></div></div></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="pgrid" style="margin-top:22px">
+    <div class="win" style="min-height:360px">
+      <section class="listcol" style="width:240px">
+        <div class="tb"><div class="ttl"><b>Decisions</b></div></div>
+        <div class="rows"><div class="es" style="padding-top:40px"><b>No decisions yet</b></div></div>
+      </section>
+      <section class="detail">
+        <div class="tb"></div>
+        <div class="dpad" style="padding:0 20px 24px">
+          <div class="gl" style="font-size:15px;color:var(--label);margin-top:0">This week</div>
+          <div class="stats" style="grid-template-columns:1fr 1fr">
+            <div class="stat"><div class="sl">By you</div><div class="sn">0</div></div>
+            <div class="stat"><div class="sl">Automatic</div><div class="sn">0</div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div class="win" style="min-height:360px">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Logs</b></div></div>
+        <div class="wpad" style="padding:2px 20px 24px">
+          <div class="grp">
+            <div class="tr th" style="grid-template-columns:44px 1fr 1fr 1fr 1fr"><div>Time</div><div>Agent</div><div>Event</div><div>Credential</div><div>Outcome</div></div>
+            <div class="es"><b>No activity yet</b></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 10 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">10</span>Empty · quiet day</b>
+    <span>09:05: nothing open, a week of history.</span></div>
+  <div class="win" style="min-height:560px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si on"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Decisions</b><small>37 by you · 283 automatic</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="rows">
+        <div style="padding:6px 8px 4px;font-weight:500">Nothing waits for you</div>
+        <div class="gh" style="padding-top:14px">History</div>
+        <div style="padding:2px 8px 4px"><span class="seg"><span class="on">All</span><span>Asked You</span><span>Automatic</span><span>Denied</span></span></div>
+        <div class="gh">Yesterday</div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · API token</div><div class="sub3">Mac mini (office)</div><div class="sub3">Allowed by bouncer</div></div><div class="meta">19:42</div></div>
+        <div class="r top"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex · Deploy key</div><div class="sub3">Mac mini (studio)</div><div class="sub3">Allowed on iPhone</div></div><div class="meta">18:10</div></div>
+        <div class="r top"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div class="tx"><div class="ttl2">Grok Bot · Stripe test</div><div class="sub3">Mac mini (office)</div><div class="sub3">Allowed by you</div></div><div class="meta">16:31</div></div>
+        <div class="gh">Earlier</div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Stripe live</div><div class="sub3">Mac mini (office)</div><div class="sub3"><span class="bad">Denied by you</span></div></div><div class="meta">Sun</div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div style="display:flex;align-items:center;gap:6px;font-weight:500;margin-top:4px"><svg style="width:16px;height:16px;color:var(--green)"><use href="#i-checkc"/></svg>All clear</div>
+        <div class="gl" style="font-size:15px;color:var(--label);margin-top:18px">This week</div>
+        <div class="stats" style="grid-template-columns:1fr 1fr">
+          <div class="stat"><div class="sl">By you</div><div class="sn">37</div></div>
+          <div class="stat"><div class="sl">Automatic</div><div class="sn">283</div></div>
+        </div>
+        <div class="gl">Environments</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Mac mini (office)</div><span class="cap">This Mac</span><div class="v">22 · 141</div></div>
+          <div class="fr"><div class="k">Mac mini (studio)</div><div class="v">12 · 107</div></div>
+          <div class="fr dim"><div class="k">MacBook Pro</div><div class="v">3 · 35 · 1 Nov</div></div>
+        </div>
+        <div class="gl">Most active</div>
+        <div class="grp">
+          <div class="fr"><div class="agc" style="flex:1"><div class="ava s" style="background:#d97757">C</div>Claude Code</div><div class="v">101 · Mac mini (office)</div></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="ava s" style="background:#d97757">C</div>Claude Code</div><div class="v">69 · Mac mini (studio)</div></div>
+          <div class="fr"><div class="agc" style="flex:1"><div class="ava s" style="background:#10a37f">C</div>Codex</div><div class="v">47 · Mac mini (office)</div></div>
+        </div>
+      </div></div>
+    </section>
+  </div>
+
+  <div class="win" style="min-height:0;margin-top:22px">
+    <section class="content">
+      <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days</small></div></div>
+      <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">All Projects</span></div>
+      <div class="wpad">
+        <div class="stats">
+          <div class="stat"><div class="sl">Runs</div><div class="sn">320</div></div>
+          <div class="stat"><div class="sl">Allowed by bouncer</div><div class="sn">280<small>88%</small></div></div>
+          <div class="stat"><div class="sl">Asked you</div><div class="sn">37<small>12%</small></div></div>
+          <div class="stat"><div class="sl">Denied</div><div class="sn">6</div></div>
+          <div class="stat"><div class="sl">Median answer</div><div class="sn">15 s</div></div>
+        </div>
+        <div class="two">
+          <div>
+            <div class="gl">Runs per day</div>
+            <div class="grp chart">
+              <div class="legend"><span><i style="background:var(--s-auto)"></i>Allowed by bouncer</span><span><i style="background:var(--s-ask)"></i>Asked you</span></div>
+              <svg viewBox="0 0 470 164" width="100%" role="img" aria-label="Runs per day, last 7 days. Wed 48, Thu 71, Fri 66, Sat 22, Sun 18, Mon 95, today 0.">
+                <path d="M30 140H460" stroke="rgba(0,0,0,.18)" stroke-width="1"/>
+                <path d="M30 85H460M30 30H460" stroke="rgba(0,0,0,.07)" stroke-width="1"/>
+                <text x="24" y="143.5" text-anchor="end">0</text><text x="24" y="88.5" text-anchor="end">50</text><text x="24" y="33.5" text-anchor="end">100</text>
+                <g><title>Wed 28 Oct: 48 runs</title><rect x="43" y="93.8" width="34" height="46.2" fill="#0a6cff"/><path d="M43,91.8V88.2Q43,85.2 46,85.2H74Q77,85.2 77,88.2V91.8Z" fill="#e8890c"/><text class="v" x="60" y="80" text-anchor="middle">48</text></g>
+                <g><title>Thu 29 Oct: 71 runs</title><rect x="103" y="71.8" width="34" height="68.2" fill="#0a6cff"/><path d="M103,69.8V62.9Q103,59.9 106,59.9H134Q137,59.9 137,62.9V69.8Z" fill="#e8890c"/><text class="v" x="120" y="54.7" text-anchor="middle">71</text></g>
+                <g><title>Fri 30 Oct: 66 runs</title><rect x="163" y="76.2" width="34" height="63.8" fill="#0a6cff"/><path d="M163,74.2V68.4Q163,65.4 166,65.4H194Q197,65.4 197,68.4V74.2Z" fill="#e8890c"/><text class="v" x="180" y="60.2" text-anchor="middle">66</text></g>
+                <g><title>Sat 31 Oct: 22 runs</title><rect x="223" y="118" width="34" height="22" fill="#0a6cff"/><path d="M223,116V114.9Q223,113.8 224.1,113.8H255.9Q257,113.8 257,114.9V116Z" fill="#e8890c"/><text class="v" x="240" y="108.6" text-anchor="middle">22</text></g>
+                <g><title>Sun 1 Nov: 18 runs</title><rect x="283" y="121.3" width="34" height="18.7" fill="#0a6cff"/><path d="M283,119.3V118.75Q283,118.2 283.55,118.2H316.45Q317,118.2 317,118.75V119.3Z" fill="#e8890c"/><text class="v" x="300" y="113" text-anchor="middle">18</text></g>
+                <g><title>Mon 2 Nov: 95 runs</title><rect x="343" y="47.6" width="34" height="92.4" fill="#0a6cff"/><path d="M343,45.6V36.5Q343,33.5 346,33.5H374Q377,33.5 377,36.5V45.6Z" fill="#e8890c"/><text class="v" x="360" y="28.3" text-anchor="middle">95</text></g>
+                <g><title>Today: no runs yet</title><rect x="403" y="138" width="34" height="2" fill="rgba(0,0,0,.18)"/><text class="v" x="420" y="131" text-anchor="middle">0</text></g>
+                <text x="60" y="157" text-anchor="middle">Wed</text><text x="120" y="157" text-anchor="middle">Thu</text><text x="180" y="157" text-anchor="middle">Fri</text><text x="240" y="157" text-anchor="middle">Sat</text><text x="300" y="157" text-anchor="middle">Sun</text><text x="360" y="157" text-anchor="middle">Mon</text><text x="420" y="157" text-anchor="middle" style="font-weight:600;fill:rgba(0,0,0,.72)">Today</text>
+              </svg>
+            </div>
+          </div>
+          <div>
+            <div class="gl">Needs attention<span>1</span></div>
+            <div class="grp">
+              <div class="fr"><div class="att"><div class="ai off"><svg><use href="#i-laptop"/></svg></div><div><div class="t1">MacBook Pro not reporting</div><div class="t2">Last report 1 Nov, 18:40</div></div></div><span class="chev">›</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================ 11 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">11</span>Empty · no results</b>
+    <span>A new Mac without agents; a project without runs.</span></div>
+  <div class="pgrid">
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Agents</b></div></div>
+        <div class="scopebar">Showing <span class="popm">Mac mini (lab)</span> in <span class="popm">All Projects</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (lab)</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">08:12</span></div>
+          <div class="grp"><div class="es"><b>No agents yet</b><div class="l">Connect agents on Mac mini (lab).</div><div class="bt"><span class="lnk">Show All Environments</span></div></div></div>
+        </div>
+      </section>
+    </div>
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Overview</b><small>Last 7 days</small></div></div>
+        <div class="scopebar">Showing <span class="popm">All Environments</span> in <span class="popm">billing-v2</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="grp" style="margin-top:8px"><div class="es"><b>No runs in billing-v2</b><div class="l">Last run 21 Oct, by Codex.</div><div class="bt"><span class="btn pri">Show All Projects</span></div></div></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 12 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">12</span>Empty · other Macs</b>
+    <span>A Mac that never reported; this is the only Mac.</span></div>
+  <div class="pgrid">
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Agents</b></div></div>
+        <div class="scopebar">Showing <span class="popm">iMac (home)</span> in <span class="popm">All Projects</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="envh"><svg><use href="#i-laptop"/></svg><b>iMac (home)</b><span class="cap ro"><svg><use href="#i-lock"/></svg>Read-only</span><span class="r2">Never reported</span></div>
+          <div class="grp"><div class="es"><b>No report yet</b><div class="l">Turn on Show agents on my other devices on that Mac.</div><div class="bt"><span class="hi"><svg><use href="#i-info"/></svg></span></div></div></div>
+        </div>
+      </section>
+    </div>
+    <div class="win" style="min-height:300px">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Agents</b><small>3 agents</small></div></div>
+        <div class="scopebar">Showing <span class="popm open">Mac mini (office)</span> in <span class="popm">All Projects</span>
+          <div class="menu" style="left:78px;top:28px;min-width:260px">
+            <div class="mi sel"><span class="ck">✓</span>Mac mini (office)<small>This Mac</small></div>
+            <hr>
+            <div style="padding:3px 10px 5px 26px;font-size:12px;color:var(--sec)">Other Macs appear when they use this vault.</div>
+          </div>
+        </div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span></div>
+          <div class="grp">
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#d97757">C</div>Claude Code</div><span class="stt live"><span class="dot"></span>Active now</span></div>
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#10a37f">C</div>Codex</div><span class="stt idle"><span class="dot off"></span>25 min ago</span></div>
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div>Grok Bot<span class="cap acc">Remote</span></div><span class="stt idle"><span class="dot off"></span>2 h ago</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 13 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">13</span>Empty · new remote agent</b>
+    <span>Just connected; remote access on, no remote agent yet.</span></div>
+  <div class="pgrid">
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><span class="tbtn"><svg><use href="#i-back"/></svg>Agents</span><div class="ttl"></div></div>
+        <div class="wpad" style="padding:2px 22px 28px">
+          <div class="hdr"><div class="ava l" style="background:#ff375f">G<span class="cl"><svg><use href="#i-cloud"/></svg></span></div><div><h1 style="display:flex;align-items:center;gap:8px">Grok Bot <span class="cap acc"><svg><use href="#i-cloud"/></svg>Remote</span></h1><div class="s">Mac mini (office) · connected 1 min ago</div></div></div>
+          <div class="grp"><div class="es"><b>Choose what it can see</b><div class="l">It sees no credentials yet.</div><div class="bt"><span class="btn pri">Choose Credentials…</span></div></div></div>
+          <div class="gl">Recent runs</div>
+          <div class="grp"><div class="fr"><div class="v l" style="color:var(--sec)">No runs yet</div></div></div>
+          <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Disconnect…</div><div class="v"></div><svg style="width:15px;height:15px;color:var(--sec)"><use href="#i-touch"/></svg></div></div>
+        </div>
+      </section>
+    </div>
+    <div class="win" style="min-height:0">
+      <section class="content">
+        <div class="tb"><div class="ttl"><b>Agents</b><small>2 agents</small></div></div>
+        <div class="scopebar">Showing <span class="popm">Mac mini (office)</span> in <span class="popm">All Projects</span></div>
+        <div class="wpad" style="padding:2px 20px 28px">
+          <div class="envh"><svg><use href="#i-mini"/></svg><b>Mac mini (office)</b><span class="cap">This Mac</span></div>
+          <div class="grp">
+            <div class="fr"><div class="kn"><div>Remote Access</div><div class="nt">Cloud agents can reach this Mac</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw on"></span></div>
+            <div class="fr"><div class="v mono" style="color:var(--label);text-align:left;font-size:11px">https://rafals-mac-mini.tail71fdd0.ts.net:8443/mcp</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+            <div class="fr"><div class="tn acc"><svg><use href="#i-cloud"/></svg><span>No remote agents yet. Give one this address.</span></div></div>
+          </div>
+          <div class="grp" style="margin-top:12px">
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#d97757">C</div>Claude Code</div><span class="stt live"><span class="dot"></span>Active now</span></div>
+            <div class="tr" style="grid-template-columns:1fr auto"><div class="agc"><div class="ava" style="background:#10a37f">C</div>Codex</div><span class="stt idle"><span class="dot off"></span>25 min ago</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 14 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">14</span>Empty · filtered Logs</b>
+    <span>Filters set, nothing matches.</span></div>
+  <div class="win" style="min-height:0">
+    <section class="content">
+      <div class="tb"><div class="ttl"><b>Logs</b></div></div>
+      <div class="scopebar">Showing <span class="popm">Mac mini (office)</span> in <span class="popm">acme-billing</span><span class="grow"></span>
+        <span class="seg"><span>All</span><span>Runs</span><span>Connections</span><span class="on">Denied</span></span>
+        <span class="popm">Grok Bot</span>
+        <span class="searchf" style="color:var(--label)"><svg style="color:var(--ter)"><use href="#i-search"/></svg>delete</span>
+      </div>
+      <div class="wpad" style="max-width:none;padding:2px 24px 28px">
+        <div class="grp">
+          <div class="tr th g-lg"><div>Time</div><div>Environment</div><div>Agent</div><div>Event</div><div>Credential</div><div>Outcome</div><div></div></div>
+          <div class="es"><b>No matches</b><div class="bt"><span class="btn pri">Clear Filters</span></div></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================================================ Notes -->
+<div class="notes">
+  <h2>Data that relay-feed-v1 does not carry today</h2>
+  <p class="note" style="margin:0 0 4px">Other Macs otherwise use existing fields: <code>mac.name</code>, <code>generated_at</code> (stale after 24 h), <code>week.by_you</code>, <code>week.automatic</code>, and each agent's <code>host</code>, <code>revoked</code>, <code>last_use_at</code>, <code>uses_this_week</code>, <code>projects</code>, <code>restricted</code>, <code>actions</code>, <code>exceptions</code>, <code>recent</code> (≤ 20). Data of this Mac is local.</p>
+  <table>
+    <tr><th>Tag</th><th>Shown in</th><th>Proposed field (additive, section 7.1)</th><th>Note</th></tr>
+    <tr><td>F1</td><td>No frame yet: a remote agent of another Mac</td><td><code>agents[].where</code> = <code>"remote"</code></td><td>A 0.5.2 reader refuses a feed with an unknown value ("Update Apassy"): ship with the next feed version, or leave remote agents out for old readers.</td></tr>
+    <tr><td>F2</td><td>No frame yet: "connected" date of another Mac's agent</td><td><code>agents[].connected_at</code></td><td>Needed with F1.</td></tr>
+    <tr><td>F3</td><td>Frame 1 Agents table (Runs, Asks You of other Macs); frames 2, 3 Runs Today, Asks You; frame 4b tiles</td><td><code>agents[].days</code>: 7 × <code>{runs, asked, not_allowed}</code>, today first</td><td><code>uses_this_week</code> and <code>actions</code> count credential uses, not runs.</td></tr>
+    <tr><td>F4</td><td>Frame 1 and 10 Median answer (other Macs' part); frame 3 Median answer</td><td><code>week.answer_p50_secs</code> (number or <code>null</code>)</td><td>All environments: the p50 of each Mac weighted by <code>week.by_you</code>; close to the true median, not exact. Frame 4b has no Median tile for this reason.</td></tr>
+    <tr><td>F5</td><td>Frames 1 and 10 Runs per day</td><td><code>week.days</code>: 7 × <code>{runs, asked}</code>, today first</td><td>Top level, because a feed may leave agents out to fit (section 7.3).</td></tr>
+    <tr><td>F6</td><td>Frame 3 header "Remote access off"</td><td><code>remote_access</code>: <code>off</code> / <code>on</code> / <code>problem</code></td><td>Never the address.</td></tr>
+  </table>
+  <p class="note" style="margin:0 0 16px">Not proposed, by design: proxied requests of another Mac (section 7.2 forbids destinations), open questions of another Mac (they go through the questions channel), connect events of other Macs (Logs shows runs only for them). "Active now" = <code>last_use_at</code> within 10 minutes.</p>
+
+  <h2>Text rules of the windows</h2>
+  <ul>
+    <li>No paragraphs. At most one helper line of 12 words or fewer per block; longer text goes into an ⓘ popover (drawn open only in frame 2).</li>
+    <li>Stat tiles: label and number, a percentage where it helps. The page header says "Last 7 days" once.</li>
+    <li>Group headings and stat labels: sentence case, 3 words or fewer, as in the app. Column headings, buttons, menu items, and segmented choices: title-style ("Asks You", "Connect an Agent…", "Clear Filters", "All Environments").</li>
+    <li>Empty states: a title of 5 words or fewer, one line of 12 words or fewer, one primary button, at most one link.</li>
+    <li>Other Macs: one "Read-only" tag in the group or page header; "Change on &lt;Mac&gt;." only on the agent page.</li>
+    <li>Outcome words everywhere: "Allowed by bouncer", "Allowed by you", "Allowed on iPhone", "Denied by you", "Waits for you".</li>
+  </ul>
+
+  <h2>Help popovers (ⓘ)</h2>
+  <ul>
+    <li><b>Remote access</b> (frame 2, open): what Funnel opens, values stay on the Mac, how a cloud agent connects, Touch ID, unlocked and awake.</li>
+    <li><b>Agent header</b> (frame 4): kind (MCP client on the internet), connected 28 Oct with Touch ID, access valid until 26 Jan 2027, no project.</li>
+    <li><b>Never reported</b> (frame 12a): the three steps on that Mac: open Apassy, unlock the vault, turn on Settings &gt; Devices &gt; Relay &gt; "Show agents on my other devices".</li>
+  </ul>
+
+  <h2>Choices</h2>
+  <ul>
+    <li><b>Sidebar:</b> section "Bouncer" with Overview, Decisions (badge), Agents (count), Logs; ⌘2–⌘5 in that order.</li>
+    <li><b>Scope bar:</b> the bar of PR #88; "All devices" becomes "All Environments". The menu shows "This Mac" and the age of each report. With one Mac it still shows (frame 12b), unlike today.</li>
+    <li><b>Layout:</b> Overview, Agents, agent pages, and Logs are wide single panes (tables); an agent opens as a page with "‹ Agents". Decisions keeps list and detail.</li>
+    <li><b>Period:</b> fixed at 7 days, as "This week" and the feed.</li>
+    <li><b>Words:</b> "Remote" for remote agents in the app; "cloud agent" only in the remote access subtitle and help.</li>
+    <li><b>Kind of agent:</b> letter avatar in <span class="mono">kit::agent_color</span> (Grok Bot #ff375f), a cloud badge, and a "Remote" tag.</li>
+    <li><b>Status:</b> "Active now" (use in the last 10 min), "Waits for you", a relative time today, a date before today. A Mac silent for 24 h is dimmed.</li>
+    <li><b>Ask rate</b> of 25% or more is orange and an attention item. Attention order: a silent Mac, a production credential used, an agent that asks often, a remote agent with denials.</li>
+    <li><b>Agent page:</b> header, four tiles, five recent runs, Can See (Only rows, Never rows, "Choose Credentials…"), "Disconnect…" last with Touch ID. Local and remote agents share it. The note for the bouncer and the facts (kind, connected, access) move behind the header ⓘ or the "…" menu ("Show in Logs", "Edit Note…", "Disconnect…").</li>
+    <li><b>Connect decision:</b> code K7Q-4MD on the card and the browser page, one warning line, Allow (Touch ID) / Deny, nothing remembered. A second agent with a used name is listed as "Grok Bot 2". After 5 minutes it ends as denied.</li>
+    <li><b>Run question of a remote agent:</b> rows Credential, Agent, Sends To, Request with "Not verified"; the command; Deny / Allow Once. Every remote run asks you.</li>
+    <li><b>Decisions history</b> replaces the "Activity" button; filters All / Asked You / Automatic / Denied and one agent. Only questions of this Mac wait here. A decision of another Mac opens read-only.</li>
+    <li><b>Logs:</b> events Run, Connect, Disconnect, Remote access on/off. Proxied requests show time, method, host, status; no path, header, body, or value. Rows of other Macs: runs only, newest 20 per agent.</li>
+    <li><b>Browser page:</b> other endings with the same layout: "You denied the connection." and "The request ended."</li>
+    <li><b>Problem states:</b> the switch is disabled; the line and button change. 8c opens the link of Tailscale's message; 8d moves the address to port 10000.</li>
+    <li><b>Ways in for local agents:</b> "Connect an Agent…" (the sheet of today shows Claude Code, Codex, T3 Code, Other, and the <span class="mono">apassy setup claude|codex --write</span> commands). It connects agents of this Mac only; remote agents never need a button.</li>
+    <li><b>Never reported Mac</b> (frame 12a): listed from the vault's <span class="mono">trusted_device</span> rows of kind <span class="mono">mac</span>, a change: today's reader lists only Macs with a feed.</li>
+    <li><b>Quiet Decisions</b> (frame 10a): today's empty state, with "Recent decisions" called "History" and "Devices" called "Environments". The Environments rows show "by you · automatic".</li>
+    <li><b>Settings → Bouncer</b> stays for the brain.</li>
+  </ul>
+</div>
+
+</div>
+</body>
+</html>
