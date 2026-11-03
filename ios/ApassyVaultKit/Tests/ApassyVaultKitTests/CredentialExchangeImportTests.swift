@@ -172,6 +172,11 @@ import Testing
         try FollowUpCases().ed25519SSHKeysAreWrittenInTheOpenSSHFormat()
     }
 
+    @Test func anOpenSSHEd25519KeyIsAcceptedBySSHKeygen() throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else { return }
+        try FollowUpCases().anOpenSSHEd25519KeyIsAcceptedBySSHKeygen()
+    }
+
     @Test func anOlderSystemWithholdsPasskeysWithExtensionData() throws {
         guard #available(macOS 26.0, iOS 26.0, *) else { return }
         try FollowUpCases().anOlderSystemWithholdsPasskeysWithExtensionData()
@@ -898,6 +903,47 @@ private struct FollowUpCases {
         #expect(plan.entries.first?.main?.value.hasPrefix("-----BEGIN OPENSSH PRIVATE KEY-----") == true)
         #expect(CredentialExchangeImport.openSSH(ed25519: rsaPKCS8, comment: "") == nil)
         #expect(CredentialExchangeImport.openSSH(ed25519: P256.Signing.PrivateKey().derRepresentation, comment: "") == nil)
+    }
+
+    /// The output of `ssh-keygen -y` for a fixed synthetic seed (bytes 0 to 31), made in the OpenSSH
+    /// form by an independent encoder; the public key is the Ed25519 public key of that seed.
+    func anOpenSSHEd25519KeyIsAcceptedBySSHKeygen() throws {
+        #if os(macOS)
+        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        guard
+            let tool = paths.map({ URL(fileURLWithPath: $0).appendingPathComponent("ssh-keygen").path })
+                .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+        else {
+            print("ssh-keygen is not on PATH: the OpenSSH check is skipped")
+            return
+        }
+        let seed = Data((0..<32).map { UInt8($0) })
+        let der = ed25519PKCS8(seed)
+        let text = try #require(CredentialExchangeImport.openSSH(ed25519: der, comment: "ada@laptop"))
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("apassy-openssh-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("id_ed25519")
+        #expect(FileManager.default.createFile(atPath: file.path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600]))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = ["-y", "-f", file.path]
+        let output = Pipe()
+        let errors = Pipe()
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        let printed = output.fileHandleForReading.readDataToEndOfFile()
+        let failure = errors.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0, "ssh-keygen: \(String(decoding: failure, as: UTF8.self))")
+        #expect(
+            String(decoding: printed, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAOhB7/zzhC+HXDdGOdLwJln5NYwm6UNXx3chmQSVTG4 ada@laptop")
+        #endif
     }
 
     func anOlderSystemWithholdsPasskeysWithExtensionData() throws {

@@ -22,17 +22,56 @@ export const EXTENSION_ID = "bbnpgnjnfjlbgggmpnhejpmfjhmmhiih";
 const MANIFEST = JSON.parse(fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf8"));
 const source = (name) => fs.readFileSync(path.join(EXTENSION_DIR, name), "utf8");
 
-export const flush = async (rounds = 20) => {
+// WebCrypto runs on the thread pool, so a call can outlive any fixed number of
+// turns on a busy CI runner. The background gets a crypto whose in-flight calls
+// are counted, and `flush` also waits until none is left.
+let cryptoInFlight = 0;
+function trackedCrypto() {
+  const subtle = new Proxy(webcrypto.subtle, {
+    get(target, key) {
+      const value = target[key];
+      if (typeof value !== "function") return value;
+      return (...args) => {
+        cryptoInFlight += 1;
+        const done = () => { cryptoInFlight -= 1; };
+        let result;
+        try { result = value.apply(target, args); } catch (error) { done(); throw error; }
+        Promise.resolve(result).then(done, done);
+        return result;
+      };
+    },
+  });
+  return {
+    subtle,
+    getRandomValues: (array) => webcrypto.getRandomValues(array),
+    randomUUID: () => webcrypto.randomUUID(),
+  };
+}
+
+const turns = async (rounds) => {
   for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve));
 };
 
-// Waits until `condition()` holds, or the deadline passes. A fixed number of
-// `flush` rounds is not enough when the code awaits WebCrypto (the thread pool),
-// which is slow on a busy CI runner.
+// A few turns for plain callbacks, then until every WebCrypto call has finished
+// (5 s at most, then it fails with a message instead of a wrong assertion).
+export const flush = async (rounds = 20) => {
+  const deadline = Date.now() + 5000;
+  await turns(rounds);
+  while (cryptoInFlight > 0) {
+    if (Date.now() > deadline) throw new Error("flush: a WebCrypto call was still pending after 5000 ms");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    await turns(rounds);
+  }
+};
+
+// Waits until `condition()` holds. It fails with a clear message when the
+// deadline passes, so a slow runner shows "never became true" and not a
+// misleading assertion later.
 export const waitFor = async (condition, timeoutMs = 5000) => {
   const deadline = Date.now() + timeoutMs;
   await flush();
-  while (!condition() && Date.now() < deadline) {
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`waitFor: not true after ${timeoutMs} ms: ${condition}`);
     await new Promise((resolve) => setTimeout(resolve, 5));
     await flush();
   }
@@ -207,7 +246,7 @@ export function loadBackground({ permissions = [] } = {}) {
 
   const context = vm.createContext({
     chrome,
-    crypto: webcrypto,
+    crypto: trackedCrypto(),
     TextEncoder,
     URL,
     atob,
