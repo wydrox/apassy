@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use apassy::sync as relay_api;
 
 #[cfg(feature = "vault")]
+pub mod fake_connect;
+#[cfg(feature = "vault")]
 pub mod fake_relay;
 
 /// A fake Jev-compatible bouncer (contract v2). By default it answers a clean,

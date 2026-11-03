@@ -41,6 +41,7 @@ mod companion;
 mod companion_activity;
 mod companion_owner;
 mod companion_store;
+mod connect_account;
 mod contracts;
 mod corrections;
 mod declaration_suggestions;
