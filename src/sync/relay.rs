@@ -160,6 +160,7 @@ pub(crate) fn sync_error(error: ApiError) -> SyncError {
             (403, "join_refused") => SyncError::Relay(RelayRefusal::JoinRefused),
             (403, "sync_head_invalid") => SyncError::Relay(RelayRefusal::HeadInvalid),
             (403, "team_limit") => SyncError::Relay(RelayRefusal::TeamLimit),
+            (403, "plan_required") => SyncError::Relay(RelayRefusal::PlanRequired),
             (403, _) => SyncError::Relay(RelayRefusal::Forbidden),
             (400, _) => SyncError::Relay(RelayRefusal::InvalidRequest),
             (404, _) => SyncError::Relay(RelayRefusal::NotFound),
@@ -2206,6 +2207,108 @@ impl RelaySync {
             Some(created.device_id),
         ));
         self.finish_enable(vault, session, &local.vault_id, team, None)
+    }
+
+    /// Turn relay sync on without a team code (plans section 4.1): a relay that gives new
+    /// Connect teams a sync size (`APASSY_RELAY_CONNECT_SYNC_BYTES`, the hosted relay until
+    /// Apassy Connect starts) takes a Connect team with the purpose `sync`. The team is
+    /// the vault's one Connect team:
+    ///
+    /// - this Mac's questions membership on the same relay, when the vault asks through
+    ///   one: no relay call; the membership gets the purpose `sync` with the first push;
+    /// - else the saved Connect attempt of the vault (`Vault::pending_connect`), also one
+    ///   that a questions attempt left: its key is committed before `POST /v1/connect`,
+    ///   and a lost answer recovers the same team at the next try (ADR 0032 F06);
+    /// - a vault with a questions team that another Mac holds: `JoinOtherMac`.
+    ///
+    /// Then the sign-in and the push of version 1, as [`Self::create_team`]. A team made
+    /// before the relay's setting answers 403 `plan_required`
+    /// (`RelayRefusal::PlanRequired`); nothing turns on, and the attempt stays for a retry.
+    pub fn create_team_codeless(
+        &self,
+        vault: &mut Vault,
+        vault_name: &str,
+        device: &str,
+    ) -> Result<RelayEnableReport, crate::relay::connect::ConnectError> {
+        let _run = self.try_run()?;
+        self.create_team_codeless_in(vault, vault_name, device)
+    }
+
+    /// [`Self::create_team_codeless`] with the shared vault slot of the app, as
+    /// [`Self::sync_shared`]: `POST /v1/connect` and the upload of version 1 run without
+    /// the slot's mutex.
+    pub fn create_team_codeless_shared(
+        &self,
+        slot: &Mutex<Option<Vault>>,
+        accept: impl Fn(&Vault) -> bool,
+        vault_name: &str,
+        device: &str,
+    ) -> Result<RelayEnableReport, crate::relay::connect::ConnectError> {
+        let _run = self.run_shared()?;
+        self.create_team_codeless_in(&mut SharedSlot { slot, accept }, vault_name, device)
+    }
+
+    fn create_team_codeless_in<A: VaultAccess + ?Sized>(
+        &self,
+        vault: &mut A,
+        vault_name: &str,
+        device: &str,
+    ) -> Result<RelayEnableReport, crate::relay::connect::ConnectError> {
+        use crate::relay::connect::{self, ConnectError};
+        use crate::vault::MembershipPurpose;
+        if self.state()?.is_some() {
+            return Err(SyncError::AlreadyEnabled.into());
+        }
+        let url = self.config.relay_url()?;
+        let team = clean_name(vault_name, "Vault");
+        let device = clean_name(device, "Mac");
+        // The team of the vault on this relay, or its saved attempt with a committed key.
+        enum Staged {
+            Team(crate::vault::RelayMembership),
+            Attempt(crate::vault::PendingConnect),
+            Refused(ConnectError),
+        }
+        // One local step.
+        let (local, staged) = vault.with(|vault| {
+            self.require_unlocked(vault)?;
+            let local = vault.sync_identity()?;
+            let staged = match crate::relay::membership::questions_team_for_sync(vault, &url)? {
+                Some(membership) => Staged::Team(membership),
+                None => match connect::prepare_connect_for(
+                    vault,
+                    url.as_str(),
+                    &team,
+                    &device,
+                    MembershipPurpose::Sync,
+                ) {
+                    Ok(pending) => Staged::Attempt(pending),
+                    Err(error) => Staged::Refused(error),
+                },
+            };
+            Ok((local, staged))
+        })?;
+        let membership = match staged {
+            Staged::Team(membership) => membership,
+            Staged::Refused(error) => return Err(error),
+            Staged::Attempt(pending) => {
+                // No vault lock across the relay call; the answer is kept before the push.
+                let membership = connect::create_connect_for(&pending, MembershipPurpose::Sync)?;
+                vault.with(|vault| Ok(vault.keep_connect_result(&membership)?))?;
+                membership
+            }
+        };
+        if membership.relay_url != url.as_str() {
+            return Err(ConnectError::OriginChanged);
+        }
+        let key = DeviceKey::from_pkcs8(membership.key_pkcs8.clone())?;
+        let session = Arc::new(Session::new(
+            url,
+            &membership.team_id,
+            key,
+            Some(membership.device_id),
+        ));
+        *lock(&self.refused) = None;
+        Ok(self.finish_enable(vault, session, &local.vault_id, team, None)?)
     }
 
     /// Turn relay sync on for a vault that is already on the relay, with a device that

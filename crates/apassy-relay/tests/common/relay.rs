@@ -168,6 +168,7 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         questions_to_approvers: false,
         connect_teams_per_day: 200,
         connect_teams_max: 1000,
+        connect_sync_bytes: 0,
         auth_limiter: false,
         oauth: None,
     }

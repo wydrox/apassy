@@ -170,6 +170,10 @@ struct Team {
     feed_change: u64,
     feed_actions: Vec<FakeAction>,
     feed_action_seq: u64,
+    /// The `sync_bytes` of a Connect team (`POST /v1/connect`), from the relay's
+    /// setting when it was made; `None` for a team of a team code (the relay's
+    /// `max_bytes`). `Some(0)`: a push and a receipt are 403 `plan_required`.
+    sync_bytes: Option<u64>,
 }
 
 /// The feed of one device: the envelope as the text that came.
@@ -253,6 +257,9 @@ struct Relay {
     origin: String,
     team_codes: Vec<String>,
     connect_keys: BTreeMap<Vec<u8>, String>,
+    /// `APASSY_RELAY_CONNECT_SYNC_BYTES`: the `sync_bytes` of each new Connect team. 0,
+    /// as the relay's default: a push to a Connect team is 403 `plan_required`.
+    connect_sync_bytes: u64,
     connect_recovery: bool,
     connect_challenge_patch: Option<Value>,
     link_expiry_override: Option<u64>,
@@ -378,6 +385,27 @@ impl FakeRelay {
     }
     pub fn alter_connect_challenge(&self, patch: Value) {
         lock(&self.shared.0).connect_challenge_patch = Some(patch);
+    }
+    /// The relay's `APASSY_RELAY_CONNECT_SYNC_BYTES`: the `sync_bytes` of each Connect
+    /// team made from now on (0: no relay sync, `plan_required`).
+    pub fn set_connect_sync_bytes(&self, bytes: u64) {
+        lock(&self.shared.0).connect_sync_bytes = bytes;
+    }
+    /// `admin limits <team> --sync-bytes <bytes>` for one team.
+    pub fn set_team_sync_bytes(&self, team_id: &str, bytes: u64) {
+        lock(&self.shared.0)
+            .teams
+            .get_mut(team_id)
+            .expect("team")
+            .sync_bytes = Some(bytes);
+    }
+    /// The ids of the Connect teams that the relay made.
+    pub fn connect_teams(&self) -> Vec<String> {
+        lock(&self.shared.0)
+            .connect_keys
+            .values()
+            .cloned()
+            .collect()
     }
     pub fn support_connect_recovery(&self) {
         lock(&self.shared.0).connect_recovery = true;
@@ -1191,9 +1219,11 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                     .connect_keys
                     .insert(public_key.clone(), team_id.clone());
             }
+            let sync_bytes = connect.then_some(relay.connect_sync_bytes);
             relay.teams.insert(
                 team_id.clone(),
                 Team {
+                    sync_bytes,
                     name: body["team"].as_str().unwrap_or_default().to_owned(),
                     devices: vec![Device {
                         id: device_id,
@@ -1537,6 +1567,9 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                 ("POST", ["sync", "receipt"]) => {
                     let version = request.json()["version"].as_u64().unwrap_or(0);
                     let team = relay.teams.get_mut(&team_id).expect("team");
+                    if team.sync_bytes == Some(0) {
+                        return fail(403, "plan_required");
+                    }
                     if version > team.version() {
                         return fail(409, "conflict");
                     }
@@ -1651,7 +1684,12 @@ fn put(
     changed: &Condvar,
 ) -> Outgoing {
     let length = request.body.len() as u64;
-    if length > relay.max_bytes {
+    // A Connect team without vault sync: before the size (SPEC 26.4).
+    let team_bytes = relay.teams.get(team_id).and_then(|team| team.sync_bytes);
+    if team_bytes == Some(0) {
+        return fail(403, "plan_required");
+    }
+    if length > team_bytes.unwrap_or(relay.max_bytes).min(relay.max_bytes) {
         return fail(413, "payload_too_large");
     }
     let team = relay.teams.get_mut(team_id).expect("team");

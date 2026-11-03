@@ -901,6 +901,10 @@ impl Hub {
         }
         let per_day = self.config.connect_teams_per_day;
         let max = self.config.connect_teams_max;
+        // The vault sync size of the relay's setting (`APASSY_RELAY_CONNECT_SYNC_BYTES`):
+        // 0 keeps `plan_required` on a push. A team keeps it after the setting changes.
+        let limits = TeamLimits::connect_with(self.config.connect_sync_bytes);
+        limits.validate()?;
         // In memory only: the count of this client prefix today.
         let ticket = self
             .connect_prefixes
@@ -929,7 +933,7 @@ impl Hub {
                 refused = Some(reason);
                 error
             })?;
-            directory::insert_connect_team(tx, &new.id, &name, &new.file_key, now)?;
+            directory::insert_connect_team(tx, &new.id, &name, &new.file_key, &limits, now)?;
             directory::insert_connect_key(tx, &key_hash, &new.id, now)?;
             self.directory.audit.write_on(
                 tx,
@@ -969,7 +973,7 @@ impl Hub {
         })?;
         // A team that cannot be served (its cap) stays in `relay.db`, out of service like
         // a team that fails to open at start: the call answers 500.
-        self.register(id.clone(), store, TeamLimits::connect(), TeamKind::Connect)?;
+        self.register(id.clone(), store, limits, TeamKind::Connect)?;
         Ok((id, owner_id, device_id))
     }
 
@@ -1295,7 +1299,7 @@ impl Hub {
         let changed = self.directory.store.tx(|tx| {
             let Some(row) = directory::team_by_id(tx, id)? else { return Ok(false); };
             if row.state != TeamState::Active || row.kind != TeamKind::Connect
-                || row.limits != TeamLimits::connect() { return Ok(false); }
+                || !row.limits.is_connect_preset(self.config.connect_sync_bytes) { return Ok(false); }
             core.store.with(|conn| {
                 if !sweep_idle(conn, row.created_at, before)? { return Ok(false); }
                 if !dry_run {
@@ -1333,8 +1337,9 @@ impl Hub {
     /// team whose newest sign-in of any live device (or, without one, the newest device's
     /// creation) is `idle_days` old, with the reason `idle`, however many devices it has;
     /// deletes each Connect team that a sweep suspended `delete_days` ago or earlier. A
-    /// team whose limits are not `TeamLimits::connect()` (a plan lifted them) or that
-    /// has a vault sync head is never swept. A team that the operator suspended, or that
+    /// team whose limits are not a Connect preset (`TeamLimits::is_connect_preset` of
+    /// `APASSY_RELAY_CONNECT_SYNC_BYTES`: a plan lifted them) or that has a vault sync
+    /// head is never swept. A team that the operator suspended, or that
     /// a sweep suspended and the operator resumed, is never deleted here. A team
     /// suspended in this run is deleted in a later one. `dry_run` changes nothing and
     /// names the same teams.
@@ -1370,7 +1375,9 @@ impl Hub {
                 break;
             }
             // A plan's team (lifted limits) is the operator's, not the sweep's.
-            if row.kind != TeamKind::Connect || row.limits != TeamLimits::connect() {
+            if row.kind != TeamKind::Connect
+                || !row.limits.is_connect_preset(self.config.connect_sync_bytes)
+            {
                 continue;
             }
             let done = match row.state {

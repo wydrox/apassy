@@ -347,6 +347,9 @@ pub enum RelayRefusal {
     HeadInvalid,
     /// `403 team_limit`: the pushes of this hour are used up.
     TeamLimit,
+    /// `403 plan_required`: the team keeps no vault copy on this relay (its `sync_bytes`
+    /// is 0, a Connect team made before the relay's sync setting).
+    PlanRequired,
     /// `404 not_found`.
     NotFound,
     /// `409 conflict`.
@@ -371,6 +374,9 @@ impl fmt::Display for RelayRefusal {
             Self::JoinRefused => "the other Mac refused, or the link expired",
             Self::HeadInvalid => "the relay refused the signed head of this push",
             Self::TeamLimit => "the relay limits the pushes of this vault for this hour",
+            Self::PlanRequired => {
+                "the relay does not keep vault copies for this connection yet. Ask the operator of the relay to turn on relay sync for it"
+            }
             Self::NotFound => "the relay does not have this item",
             Self::Conflict => {
                 "the relay's record of this Mac does not match. Nothing was added"

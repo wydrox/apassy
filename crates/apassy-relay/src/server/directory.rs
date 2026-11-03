@@ -302,15 +302,31 @@ impl TeamLimits {
     /// of questions, and 1 MiB of feeds. The other fields are the defaults. Devices are
     /// 10 per member, as in every team.
     pub fn connect() -> Self {
+        Self::connect_with(0)
+    }
+
+    /// [`Self::connect`] with the vault sync size `sync_bytes` of the relay's setting
+    /// `APASSY_RELAY_CONNECT_SYNC_BYTES` (docs/SPEC.md section 26.4): 0 is no vault sync,
+    /// else the largest snapshot. `sync_bytes` is stored in every limits column, so an
+    /// image before this setting reads it; `FEED_LIMIT_FIELDS` keep their rule.
+    pub fn connect_with(sync_bytes: u64) -> Self {
         Self {
             members: 1,
             items: 0,
             agents: 0,
-            sync_bytes: 0,
+            sync_bytes,
             question_bytes: CONNECT_QUESTION_BYTES,
             feed_bytes: CONNECT_FEED_BYTES,
             ..Self::default()
         }
+    }
+
+    /// Whether these are the limits a Connect team starts with on a relay whose setting
+    /// is `sync_bytes`: [`Self::connect`], or [`Self::connect_with`] of the setting. A
+    /// team with other limits got them from the operator (a plan); the idle sweep leaves
+    /// it alone.
+    pub fn is_connect_preset(&self, sync_bytes: u64) -> bool {
+        *self == Self::connect() || *self == Self::connect_with(sync_bytes)
     }
 
     /// The limits of the personal team of an embedded node (docs/SPEC.md section 30.2):
@@ -329,7 +345,8 @@ impl TeamLimits {
     /// The largest file of a team of `kind` (`Store::set_max_bytes`), or `None` for no
     /// cap. A Connect team: its `question_bytes` and `feed_bytes`, plus
     /// `CONNECT_FILE_SLACK` for its rows and audit, plus room for the items and members
-    /// that a plan may give it. An operator team has no cap: the operator made it with a
+    /// that a plan may give it, plus `CONNECT_SYNC_FILE_BYTES` for the sync heads when
+    /// it has vault sync (the snapshots are files of their own). An operator team has no cap: the operator made it with a
     /// code and watches it.
     pub fn file_bytes(&self, kind: TeamKind) -> Option<u64> {
         match kind {
@@ -343,7 +360,12 @@ impl TeamLimits {
                         self.members
                             .saturating_sub(1)
                             .saturating_mul(MEMBER_FILE_BYTES),
-                    ),
+                    )
+                    .saturating_add(if self.sync_bytes == 0 {
+                        0
+                    } else {
+                        CONNECT_SYNC_FILE_BYTES
+                    }),
             ),
         }
     }
@@ -515,6 +537,11 @@ pub const CONNECT_FILE_SLACK: u64 = 8 * 1_048_576;
 /// Room in a Connect team's file for each item and each member beyond the first that a
 /// plan gives it: an item holds up to 4 KiB sealed, a member its devices and its audit.
 pub const ITEM_FILE_BYTES: u64 = 16 * 1024;
+/// Room in a Connect team's file for vault sync (`sync_bytes` above 0): up to
+/// `sync::KEPT_HEADS` (10000) signed heads of about 600 bytes each with their index, the
+/// receipts, and the audit rows of the pushes. The snapshots are files in
+/// `teams/<team id>.sync/`, at most two of `sync_bytes` each.
+pub const CONNECT_SYNC_FILE_BYTES: u64 = 16 * 1_048_576;
 pub const MEMBER_FILE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -935,9 +962,10 @@ pub fn insert_connect_team(
     id: &TeamId,
     name: &str,
     file_key: &SecretString,
+    limits: &TeamLimits,
     now: u64,
 ) -> RelayResult<()> {
-    let limits = TeamLimits::connect().stored_json(TeamKind::Connect)?;
+    let limits = limits.stored_json(TeamKind::Connect)?;
     conn.execute(
         "INSERT INTO team (id, name, file_key, state, legacy, created_at, limits, kind) VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5, 'connect')",
         params![id.as_str(), name, file_key.expose(), to_i(now), limits],
@@ -1410,6 +1438,44 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
+    fn connect_with_sync_bytes_stores_them_and_keeps_the_rollback_rule() {
+        let synced = TeamLimits::connect_with(67_108_864);
+        synced.validate().unwrap();
+        assert_eq!(
+            TeamLimits {
+                sync_bytes: 0,
+                ..synced
+            },
+            TeamLimits::connect()
+        );
+        // `sync_bytes` is a field of every image's limits; the feed fields stay out.
+        let text = synced.stored_json(TeamKind::Connect).unwrap();
+        assert!(text.contains(r#""sync_bytes":67108864"#), "{text}");
+        for name in FEED_LIMIT_FIELDS {
+            assert!(!text.contains(name), "{text}");
+        }
+        assert_eq!(
+            TeamLimits::from_stored(Some(&text), TeamKind::Connect).unwrap(),
+            synced
+        );
+        // Room for the sync heads, only with vault sync: 11 + 16 MiB.
+        assert_eq!(synced.file_bytes(TeamKind::Connect), Some(27 * 1_048_576));
+        // Both are presets of a relay with the setting; a raised team is not.
+        assert!(synced.is_connect_preset(67_108_864));
+        assert!(TeamLimits::connect().is_connect_preset(67_108_864));
+        assert!(!synced.is_connect_preset(0));
+        let raised = synced
+            .apply(TeamLimitsUpdate {
+                members: Some(5),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!raised.is_connect_preset(67_108_864));
+        // A value between 0 and 1 MiB is not a limit.
+        assert!(TeamLimits::connect_with(1024).validate().is_err());
+    }
+
+    #[test]
     fn directory_migrates_1002_to_1005_and_keeps_teams_as_operator() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
@@ -1481,7 +1547,7 @@ PRAGMA user_version = 1002;
             .store
             .tx(|tx| {
                 check_connect_key(tx, &one, 2, 1000)?;
-                insert_connect_team(tx, &team, "Mac", &key, 1000)?;
+                insert_connect_team(tx, &team, "Mac", &key, &TeamLimits::connect(), 1000)?;
                 insert_connect_key(tx, &one, &team, 1000)
             })
             .unwrap();
