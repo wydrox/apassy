@@ -1865,6 +1865,7 @@ fn run_inner(
                 UseOutcome::Allowed,
                 use_decided_by,
                 &answered_on,
+                decision_id,
             );
             for item_id in &items {
                 let _ = vault.record_run(agent.id, *item_id);
