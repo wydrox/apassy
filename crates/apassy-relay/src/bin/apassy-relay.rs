@@ -26,6 +26,7 @@ const USAGE: &str = "Usage:
   apassy-relay migrate
   apassy-relay rollback-check
   apassy-relay downgrade-schema-6
+  apassy-relay downgrade-directory-1003
   apassy-relay snapshot-check
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin teams
@@ -57,7 +58,10 @@ relay, and prints what a rollback to schema 5 would undo (docs/OPERATIONS.md 21.
 exits 1 when any team is not clean.
 `downgrade-schema-6` runs with the relay stopped: every team file of schema 7 goes back
 to 6 in place, and each agent with an item list is revoked (docs/OPERATIONS.md 23.3). It
-exits 1 when any team failed.";
+exits 1 when any team failed.
+`downgrade-directory-1003` runs with the relay stopped: relay.db goes from 1004 back to
+1003 in place, and its OAuth clients, connect requests, and refresh tokens are dropped
+(docs/OPERATIONS.md 24.3).";
 
 /// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
 /// before a deletion.
@@ -71,6 +75,7 @@ enum Command {
     Migrate,
     RollbackCheck,
     DowngradeSchema6,
+    DowngradeDirectory1003,
     SnapshotCheck,
     Admin(Operator),
     Help,
@@ -253,6 +258,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "migrate" if args.len() == 1 => Ok(Command::Migrate),
         "rollback-check" if args.len() == 1 => Ok(Command::RollbackCheck),
         "downgrade-schema-6" if args.len() == 1 => Ok(Command::DowngradeSchema6),
+        "downgrade-directory-1003" if args.len() == 1 => Ok(Command::DowngradeDirectory1003),
         "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
@@ -394,6 +400,18 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(&error.message),
         },
+        Command::DowngradeDirectory1003 => {
+            match apassy_relay::server::directory::Directory::downgrade_to_1003(&config) {
+                Ok((from, to)) => {
+                    println!("{}", serde_json::json!({"from": from, "to": to}));
+                    eprintln!(
+                        "apassy-relay: relay.db is at version {to}; the image of directory 1003 can open it."
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error.message),
+            }
+        }
         Command::DowngradeSchema6 => {
             match apassy_relay::server::rollback::downgrade_to_6(&config) {
                 Ok(teams) => {
@@ -613,6 +631,11 @@ mod tests {
             Command::DowngradeSchema6
         ));
         assert!(parse(&args(&["downgrade-schema-6", "--now"])).is_err());
+        assert!(matches!(
+            parse(&args(&["downgrade-directory-1003"])).unwrap(),
+            Command::DowngradeDirectory1003
+        ));
+        assert!(parse(&args(&["downgrade-directory-1003", "--now"])).is_err());
         assert!(parse_admin(&args(&["rollback-check"])).is_err());
         for values in [
             vec!["delete"],

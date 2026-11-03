@@ -332,7 +332,7 @@ fn directory_teams(config: &RelayConfig) -> RelayResult<Vec<TeamRow>> {
     let store = Store::open_read_only(&config.directory_path(), &config.master_key)?;
     if store.user_version()? != DIRECTORY_VERSION {
         return Err(RelayError::internal(
-            "relay.db is not the directory of this relay version (1003).",
+            "relay.db is not the directory of this relay version (1004).",
         ));
     }
     store.with(directory::read_teams)
