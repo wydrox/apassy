@@ -571,6 +571,7 @@ pub(super) fn native_menu_context(
             items::Filter::All => 0,
             items::Filter::Conflicts => 1,
             items::Filter::Archived => 2,
+            items::Filter::Duplicates => 3,
         },
         search_all: app.ui.search_all,
         sheet: app.ui.sheet.clone(),
