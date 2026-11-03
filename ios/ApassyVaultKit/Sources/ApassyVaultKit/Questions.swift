@@ -259,7 +259,7 @@ public struct ConnectRequestCard: Codable, Sendable, Equatable {
         self.localRedirect = localRedirect
     }
 
-    public init(from decoder: Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         askerDevice = try container.decode(String.self, forKey: .askerDevice)
         createdAt = try container.decode(Int64.self, forKey: .createdAt)
