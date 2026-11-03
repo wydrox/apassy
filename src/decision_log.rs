@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -168,14 +168,17 @@ pub fn append(line: &Line) {
 }
 
 /// Append `line` to `path` with mode 0600, after a move to [`rotated`] at
-/// [`MAX_BYTES`].
+/// [`MAX_BYTES`]. The mode of `open` applies to a new file only, and a rename keeps the
+/// mode, so both files get 0600 again here: an older or copied file may be 0644.
 pub fn append_to(path: &Path, line: &Line) -> io::Result<()> {
     let _guard = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
     if fs::metadata(path).is_ok_and(|meta| meta.len() >= MAX_BYTES) {
-        fs::rename(path, rotated(path))?;
+        let old = rotated(path);
+        fs::rename(path, &old)?;
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o600))?;
     }
     let mut text = serde_json::to_string(&line.bounded()).map_err(io::Error::other)?;
     text.push('\n');
@@ -184,6 +187,8 @@ pub fn append_to(path: &Path, line: &Line) -> io::Result<()> {
         .append(true)
         .mode(0o600)
         .open(path)?;
+    // fchmod on the open file: no window for a swapped path.
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(text.as_bytes())
 }
 
@@ -335,6 +340,29 @@ mod tests {
         let read_back = read(&path);
         assert_eq!(read_back.len(), 1, "the blank file has no lines");
         assert_eq!(read_back[0].at, 3);
+    }
+
+    /// A log that an older build or a copy left at 0644 becomes 0600 at the next write,
+    /// and so does its `.1` after a rotation.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn an_existing_0644_log_and_its_rotation_become_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        fs::write(&path, b"").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(mode(&path), 0o644);
+        append_to(&path, &line(1)).unwrap();
+        assert_eq!(mode(&path), 0o600);
+
+        // A full 0644 file moves to `.1`, which becomes 0600; the new file is 0600.
+        fs::write(&path, vec![b' '; usize::try_from(MAX_BYTES).unwrap()]).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        append_to(&path, &line(2)).unwrap();
+        assert_eq!(mode(&rotated(&path)), 0o600);
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[test]

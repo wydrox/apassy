@@ -195,10 +195,17 @@ impl PairingChannel {
             question_key: Zeroizing::new(key.bytes().to_vec()),
             key_updated_at: at,
             key_updated_by: by,
+            // An iPhone never checks a watch signature, and an iPhone on 0.5.15 does not
+            // know the kind `watch`: one such row makes the whole handoff unreadable to it.
+            // A watch (or a Mac) gets every row of the team.
             devices: vault
                 .trusted_devices()?
                 .into_iter()
                 .filter(|d| d.relay_devices.contains_key(team))
+                .filter(|d| {
+                    device.kind != crate::vault::TrustedDeviceKind::Iphone
+                        || d.kind != crate::vault::TrustedDeviceKind::Watch
+                })
                 .collect(),
         };
         if !handoff
@@ -378,5 +385,118 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// An iPhone on 0.5.15 knows only the kinds `mac` and `iphone` and drops a handoff
+    /// that it cannot parse. A handoff to an iPhone from a vault with a watch leaves the
+    /// watch row out, so the old iPhone reads it; a handoff to the watch keeps it.
+    #[test]
+    fn an_iphone_handoff_leaves_out_watch_rows_and_parses_on_0_5_15() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        #[serde(rename_all = "lowercase")]
+        enum OldKind {
+            Mac,
+            Iphone,
+        }
+        #[derive(serde::Deserialize)]
+        struct OldDevice {
+            kind: OldKind,
+            sign_key: Vec<u8>,
+        }
+        #[derive(serde::Deserialize)]
+        struct OldHandoff {
+            v: u8,
+            recipient: Vec<u8>,
+            devices: Vec<OldDevice>,
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("p.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let mac = DeviceKey::generate().unwrap();
+        vault
+            .set_relay_device(&RelayDevice {
+                relay_url: "https://relay.example.test".to_owned(),
+                team_id: TEAM.to_owned(),
+                device_id: 2,
+                public_key: mac.public_key().to_vec(),
+                key_pkcs8: mac.pkcs8().unwrap().clone(),
+                created_at: 0,
+            })
+            .unwrap();
+        enable_questions(&mut vault, "Synthetic Mac").unwrap();
+        let raw = format!(
+            "https://relay.example.test/link#apassy_lnk_{TEAM}_{}",
+            "cd".repeat(32)
+        );
+
+        // A watch that is already in the team.
+        let watch_relay = DeviceKey::generate().unwrap();
+        let watch_answer = DeviceKey::generate().unwrap();
+        let watch_name = watch_link_device_name("Test Watch", watch_answer.public_key()).unwrap();
+        let watch_row =
+            register_linked_device(&mut vault, TEAM, 9, &watch_name, watch_relay.public_key())
+                .unwrap()
+                .unwrap();
+        assert_eq!(watch_row.kind, TrustedDeviceKind::Watch);
+        // The iPhone that joins now.
+        let phone_relay = DeviceKey::generate().unwrap();
+        let phone_answer = DeviceKey::generate().unwrap();
+        let phone_name = link_device_name("Test iPhone", phone_answer.public_key()).unwrap();
+        let phone_row =
+            register_linked_device(&mut vault, TEAM, 10, &phone_name, phone_relay.public_key())
+                .unwrap()
+                .unwrap();
+        assert_eq!(phone_row.kind, TrustedDeviceKind::Iphone);
+
+        let open_as = |channel: &PairingChannel, key: &DeviceKey, name: &str| {
+            let sealed = channel.seal(&vault, TEAM, key.public_key()).unwrap();
+            let (_, peer) = PairingChannel::parse(&channel.link(&raw)).unwrap();
+            let wrapping = peer
+                .shared_key(key.pkcs8().unwrap(), &peer.mac_public)
+                .unwrap();
+            let nonce: [u8; 12] = decode_b64u(&sealed.nonce).unwrap().try_into().unwrap();
+            let cipher = decode_b64u(&sealed.ciphertext).unwrap();
+            open(
+                &wrapping,
+                &nonce,
+                &peer.aad(TEAM, key.public_key(), name),
+                &cipher,
+            )
+            .unwrap()
+        };
+
+        // To the iPhone: no watch row, and the 0.5.15 kind set parses it.
+        let channel = PairingChannel::generate(&raw).unwrap();
+        let plain = open_as(&channel, &phone_relay, &phone_name);
+        let handoff: Handoff = serde_json::from_slice(&plain).unwrap();
+        assert!(
+            handoff
+                .devices
+                .iter()
+                .all(|d| d.kind != TrustedDeviceKind::Watch)
+        );
+        assert!(
+            !handoff
+                .devices
+                .iter()
+                .any(|d| d.sign_key == watch_relay.public_key())
+        );
+        let old: OldHandoff = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(old.v, 1);
+        assert_eq!(old.recipient, phone_relay.public_key());
+        assert!(
+            old.devices
+                .iter()
+                .any(|d| { d.kind == OldKind::Iphone && d.sign_key == phone_relay.public_key() })
+        );
+
+        // To the watch: the watch row stays.
+        let channel = PairingChannel::generate(&raw).unwrap();
+        let plain = open_as(&channel, &watch_relay, &watch_name);
+        let handoff: Handoff = serde_json::from_slice(&plain).unwrap();
+        assert!(handoff.devices.iter().any(|d| {
+            d.kind == TrustedDeviceKind::Watch && d.sign_key == watch_relay.public_key()
+        }));
     }
 }

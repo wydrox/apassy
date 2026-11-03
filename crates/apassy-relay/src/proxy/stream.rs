@@ -8,7 +8,8 @@
 //!
 //! - `Scanner` finds a placeholder in a request body that comes in pieces.
 //! - `Replacer` replaces values with placeholders in a response stream, across the
-//!   borders of the pieces.
+//!   borders of the pieces. A `Pattern` (relay only) adds the JSON and HTML escapes
+//!   of a value.
 //! - `BodyReader` reads a `Content-Length`, chunked, or read-to-close body.
 
 use std::io::{self, Read};
@@ -185,7 +186,189 @@ pub(super) struct Pair {
 /// of a piece that can be the start of a value, so a stream (server-sent events) flows.
 pub(super) struct Replacer {
     pairs: Vec<Pair>,
+    patterns: Vec<Pattern>,
     pending: Zeroizing<Vec<u8>>,
+}
+
+/// A byte of a value that a JSON or HTML encoder can escape: every printable byte
+/// that is not a letter, a digit, or one of `-_.`.
+fn escapable(byte: u8) -> bool {
+    !byte.is_ascii_alphanumeric() && !b"-_.".contains(&byte)
+}
+
+/// One form of one byte of a value, and the bytes of the same length that replace it.
+struct Form {
+    from: Zeroizing<Vec<u8>>,
+    to: Vec<u8>,
+}
+
+/// The escaped forms of one value (`\/`, `\u002f`, `&amp;`, `&lt;`, `&#39;`, `&#x2F;`
+/// ...), in any mix: an upstream host that echoes the value in JSON or HTML escapes
+/// gives back no value. Each byte of the value is one place with its forms. The
+/// matching form of the placeholder byte replaces each form: the same escape of the
+/// placeholder byte, or, where no escape of that byte has the length (`\/`, `&lt;`),
+/// the placeholder byte repeated. So the bytes keep their length and show no part of
+/// the value.
+pub(super) struct Pattern {
+    places: Vec<Vec<Form>>,
+    /// The longest form of the whole value.
+    max_len: usize,
+}
+
+/// The result of a match at one offset.
+enum Step {
+    /// A whole form of the value: its length and the bytes that replace it.
+    Full(usize, Vec<u8>),
+    /// The data ends inside a possible form of the value.
+    Partial,
+    Miss,
+}
+
+/// `&#` + decimal + `;` of `byte` in exactly `len` bytes (leading zeros), or the byte
+/// repeated when the decimal does not fit.
+fn html_decimal(byte: u8, len: usize) -> Vec<u8> {
+    let digits = byte.to_string();
+    if 3 + digits.len() > len {
+        return vec![byte; len];
+    }
+    format!("&#{}{digits};", "0".repeat(len - 3 - digits.len())).into_bytes()
+}
+
+fn json_u(byte: u8, upper: bool) -> Vec<u8> {
+    if upper {
+        format!("\\u00{byte:02X}").into_bytes()
+    } else {
+        format!("\\u00{byte:02x}").into_bytes()
+    }
+}
+
+fn html_hex(byte: u8, upper: bool) -> Vec<u8> {
+    if upper {
+        format!("&#x{byte:02X};").into_bytes()
+    } else {
+        format!("&#x{byte:02x};").into_bytes()
+    }
+}
+
+impl Pattern {
+    /// The escaped forms of `value` with those of `placeholder`. `None` when the
+    /// lengths differ or no byte of the value has an escape: the raw pair covers it.
+    pub fn escaped(value: &[u8], placeholder: &[u8]) -> Option<Self> {
+        if value.is_empty()
+            || value.len() != placeholder.len()
+            || !value.iter().copied().any(escapable)
+        {
+            return None;
+        }
+        let places: Vec<Vec<Form>> = value
+            .iter()
+            .zip(placeholder)
+            .map(|(&byte, &shown)| Self::forms(byte, shown))
+            .collect();
+        let max_len = places
+            .iter()
+            .map(|forms| forms.iter().map(|form| form.from.len()).max().unwrap_or(1))
+            .sum();
+        Some(Self { places, max_len })
+    }
+
+    fn forms(byte: u8, shown: u8) -> Vec<Form> {
+        let mut forms = vec![Form {
+            from: Zeroizing::new(vec![byte]),
+            to: vec![shown],
+        }];
+        if !escapable(byte) {
+            return forms;
+        }
+        let mut add = |from: Vec<u8>, to: Vec<u8>| {
+            debug_assert_eq!(from.len(), to.len());
+            if !forms.iter().any(|form| *form.from == from) {
+                forms.push(Form {
+                    from: Zeroizing::new(from),
+                    to,
+                });
+            }
+        };
+        // JSON: `\/` and `\u00xx` in either case.
+        if byte == b'/' {
+            add(b"\\/".to_vec(), vec![shown; 2]);
+        }
+        for upper in [false, true] {
+            add(json_u(byte, upper), json_u(shown, upper));
+        }
+        // HTML: named, decimal (also with one leading zero, as PHP writes `&#039;`),
+        // and hexadecimal entities.
+        let named: Option<&[u8]> = match byte {
+            b'&' => Some(&b"&amp;"[..]),
+            b'<' => Some(&b"&lt;"[..]),
+            b'>' => Some(&b"&gt;"[..]),
+            b'\'' => Some(&b"&apos;"[..]),
+            b'"' => Some(&b"&quot;"[..]),
+            _ => None,
+        };
+        if let Some(named) = named {
+            add(named.to_vec(), html_decimal(shown, named.len()));
+        }
+        for zeros in 0..=1 {
+            let from = format!("&#{}{byte};", "0".repeat(zeros)).into_bytes();
+            let len = from.len();
+            add(from, html_decimal(shown, len));
+        }
+        for upper in [false, true] {
+            add(html_hex(byte, upper), html_hex(shown, upper));
+        }
+        forms
+    }
+
+    /// A form of the value that starts at `start` of `data`. Every mix of forms is
+    /// tried: each step keeps the offsets that the forms of the place can reach.
+    fn match_at(&self, data: &[u8], start: usize) -> Step {
+        let Some(&first) = data.get(start) else {
+            return Step::Miss;
+        };
+        if !self.places[0].iter().any(|form| form.from[0] == first) {
+            return Step::Miss;
+        }
+        // Each layer: (offset after the place, index in the layer before, form).
+        let mut layers: Vec<Vec<(usize, usize, usize)>> = Vec::with_capacity(self.places.len() + 1);
+        layers.push(vec![(start, 0, 0)]);
+        let mut partial = false;
+        for forms in &self.places {
+            let mut next: Vec<(usize, usize, usize)> = Vec::new();
+            for (parent, &(offset, _, _)) in layers[layers.len() - 1].iter().enumerate() {
+                let rest = &data[offset..];
+                for (index, form) in forms.iter().enumerate() {
+                    let from = form.from.as_slice();
+                    if rest.len() >= from.len() {
+                        let end = offset + from.len();
+                        if rest[..from.len()] == *from && !next.iter().any(|step| step.0 == end) {
+                            next.push((end, parent, index));
+                        }
+                    } else if from.starts_with(rest) {
+                        partial = true;
+                    }
+                }
+            }
+            if next.is_empty() {
+                return if partial { Step::Partial } else { Step::Miss };
+            }
+            layers.push(next);
+        }
+        let end = layers[layers.len() - 1][0].0;
+        let mut chosen = Vec::with_capacity(self.places.len());
+        let mut at = 0;
+        for layer in layers[1..].iter().rev() {
+            let (_, parent, form) = layer[at];
+            chosen.push(form);
+            at = parent;
+        }
+        chosen.reverse();
+        let mut to = Vec::with_capacity(end - start);
+        for (forms, &index) in self.places.iter().zip(&chosen) {
+            to.extend_from_slice(&forms[index].to);
+        }
+        Step::Full(end - start, to)
+    }
 }
 
 impl Replacer {
@@ -199,8 +382,15 @@ impl Replacer {
         );
         Self {
             pairs,
+            patterns: Vec::new(),
             pending: Zeroizing::new(Vec::new()),
         }
+    }
+
+    /// Also replace the escaped forms of these values ([`Pattern`]).
+    pub fn with_patterns(mut self, patterns: Vec<Pattern>) -> Self {
+        self.patterns = patterns;
+        self
     }
 
     /// Replaces in place. Returns true when a value was found.
@@ -213,6 +403,19 @@ impl Replacer {
                 data[at..at + pair.to.len()].copy_from_slice(&pair.to);
                 offset = at + pair.to.len();
                 found = true;
+            }
+        }
+        for pattern in &self.patterns {
+            let mut offset = 0;
+            while offset < data.len() {
+                match pattern.match_at(data, offset) {
+                    Step::Full(len, to) => {
+                        data[offset..offset + len].copy_from_slice(&to);
+                        offset += len;
+                        found = true;
+                    }
+                    Step::Partial | Step::Miss => offset += 1,
+                }
             }
         }
         found
@@ -229,6 +432,11 @@ impl Replacer {
                     .find(|&k| data[data.len() - k..] == from[..k])
                     .unwrap_or(0)
             })
+            .chain(self.patterns.iter().map(|pattern| {
+                (data.len().saturating_sub(pattern.max_len)..data.len())
+                    .find(|&start| matches!(pattern.match_at(data, start), Step::Partial))
+                    .map_or(0, |start| data.len() - start)
+            }))
             .max()
             .unwrap_or(0)
     }
@@ -486,6 +694,113 @@ mod tests {
             .expect("body");
             assert_eq!(out, b"he-fake-lo, fake again, REA", "step {step}");
         }
+    }
+
+    // A value with bytes that JSON and HTML encoders escape, and a placeholder of the
+    // same length (letters where the value has those bytes, as `mint` makes it).
+    const VALUE: &[u8] = b"sk_test_AB/cd<ef>gh&ij'kl%mn";
+    const PLACEHOLDER: &[u8] = b"sk_test_PQRSTUVWXYZabcdefghi";
+
+    /// Each escaped echo of the value and what the client gets in its place.
+    const ESCAPED: [(&str, &str); 6] = [
+        // PHP json_encode: `\/`. No escape of `R` has two bytes: it repeats.
+        (
+            r"sk_test_AB\/cd<ef>gh&ij'kl%mn",
+            "sk_test_PQRRSTUVWXYZabcdefghi",
+        ),
+        // Go encoding/json: `<`, `>`, `&`.
+        (
+            r"sk_test_AB/cd<ef>gh&ij'kl%mn",
+            r"sk_test_PQRSTUVWXYZabcdefghi",
+        ),
+        // .NET System.Text.Json: upper-case hex, and `'` too.
+        (
+            r"sk_test_AB/cd<ef>gh&ij'kl%mn",
+            r"sk_test_PQRSTUVWXYZabcdefghi",
+        ),
+        // Python html.escape: `&lt;`, `&gt;`, `&amp;`, `&#x27;`.
+        (
+            "sk_test_AB/cd&lt;ef&gt;gh&amp;ij&#x27;kl%mn",
+            "sk_test_PQRSTUUUUVWXXXXYZ&#97;bc&#x64;efghi",
+        ),
+        // PHP htmlspecialchars with ENT_QUOTES: `&#039;`.
+        (
+            "sk_test_AB/cd&lt;ef&gt;gh&amp;ij&#039;kl%mn",
+            "sk_test_PQRSTUUUUVWXXXXYZ&#97;bc&#100;efghi",
+        ),
+        // OWASP: `&#x2F;` too.
+        (
+            "sk_test_AB&#x2F;cd&lt;ef&gt;gh&amp;ij&#x27;kl%mn",
+            "sk_test_PQ&#x52;STUUUUVWXXXXYZ&#97;bc&#x64;efghi",
+        ),
+    ];
+
+    fn escaped_replacer() -> Replacer {
+        Replacer::new(vec![pair(VALUE, PLACEHOLDER)]).with_patterns(vec![
+            Pattern::escaped(VALUE, PLACEHOLDER).expect("a pattern"),
+        ])
+    }
+
+    #[test]
+    fn a_pattern_is_only_for_a_value_with_an_escapable_byte() {
+        assert!(Pattern::escaped(b"sk_test_AB-cd_ef.gh", b"sk_test_PQ-RS_TU.VW").is_none());
+        assert!(Pattern::escaped(VALUE, b"short").is_none());
+        assert!(Pattern::escaped(VALUE, PLACEHOLDER).is_some());
+    }
+
+    #[test]
+    fn an_escaped_echo_of_a_value_comes_back_as_the_placeholder() {
+        let value = String::from_utf8(VALUE.to_vec()).unwrap();
+        for (echo, shown) in ESCAPED {
+            assert_eq!(echo.len(), shown.len(), "{echo}");
+            let body = format!(r#"{{"echo":"{echo}","raw":"{value}","again":"{echo}"}}"#);
+            let placeholder = String::from_utf8(PLACEHOLDER.to_vec()).unwrap();
+            let want = format!(r#"{{"echo":"{shown}","raw":"{placeholder}","again":"{shown}"}}"#);
+
+            let mut data = body.clone().into_bytes();
+            assert!(escaped_replacer().replace_all(&mut data), "{echo}");
+            assert_eq!(String::from_utf8(data).unwrap(), want, "{echo}");
+
+            // Split across two reads, at every byte.
+            for split in 0..=body.len() {
+                let mut replacer = escaped_replacer();
+                let mut out = replacer.feed(&body.as_bytes()[..split]).to_vec();
+                out.extend_from_slice(&replacer.feed(&body.as_bytes()[split..]));
+                out.extend_from_slice(&replacer.finish());
+                assert_eq!(
+                    String::from_utf8(out).unwrap(),
+                    want,
+                    "{echo} split {split}"
+                );
+            }
+
+            // A body that comes in pieces of every size.
+            for step in 1..=body.len() {
+                let conn = Conn::new(Slow {
+                    data: body.as_bytes(),
+                    step,
+                });
+                let mut reader =
+                    BodyReader::new(conn, BodyLen::Length(body.len() as u64), escaped_replacer());
+                let mut out = Vec::new();
+                reader.read_to_end(&mut out).expect("body");
+                let out = String::from_utf8(out).unwrap();
+                assert_eq!(out, want, "{echo} step {step}");
+                assert!(!out.contains("AB/cd") && !out.contains("cd&lt;ef"), "{out}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_does_not_wait_for_text_that_cannot_be_an_escaped_value() {
+        let mut replacer = escaped_replacer();
+        assert_eq!(replacer.feed(b"data: {}\n\n").as_slice(), b"data: {}\n\n");
+        // A possible start of an escaped value waits; the rest goes out.
+        assert_eq!(replacer.feed(br"data: sk_test_AB\").as_slice(), b"data: ");
+        assert_eq!(
+            replacer.feed(br"/cd<ef>gh&ij'kl%mn").as_slice(),
+            b"sk_test_PQRRSTUVWXYZabcdefghi"
+        );
     }
 
     #[test]
