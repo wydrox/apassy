@@ -41,6 +41,7 @@ use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::{ServerConfig, ServerConnection};
 
 use super::certificate::NodeCertificate;
+use super::front_peers;
 use super::limits::{Connections, RateLimiter};
 use super::pin::Pin;
 use super::tailnet;
@@ -79,6 +80,12 @@ pub struct FrontLimits {
     /// default): no cap, because a snapshot upload of relay sync is larger than any
     /// fixed number; the relay has the size limits of its routes (plan D2).
     pub max_bytes_per_direction: Option<u64>,
+    /// With [`FrontRoute::ServeTcp`], open connections of one tailnet peer that Serve
+    /// names in its PROXY line, inside the shared pool: 16 (N8-5).
+    pub max_per_forwarded_peer: usize,
+    /// With [`FrontRoute::ServeTcp`], new connections per named tailnet peer and minute:
+    /// 60.
+    pub new_per_forwarded_peer_per_minute: usize,
 }
 
 impl Default for FrontLimits {
@@ -91,6 +98,8 @@ impl Default for FrontLimits {
             idle: Duration::from_secs(120),
             connect_target: Duration::from_secs(5),
             max_bytes_per_direction: None,
+            max_per_forwarded_peer: 16,
+            new_per_forwarded_peer_per_minute: 60,
         }
     }
 }
@@ -104,7 +113,13 @@ pub enum FrontRoute {
     /// The fallback of the plan's first risk: the front binds `127.0.0.1` on its port
     /// (`0`: any free port) and Tailscale Serve in TCP mode forwards the tailnet port to
     /// it (`tailnet::ServeTcp::enable`). Every peer is Tailscale's daemon on the
-    /// loopback, so the per-peer limits apply to all tailnet peers together.
+    /// loopback, so the per-peer limits of [`FrontLimits`] apply to all tailnet peers
+    /// together. When Serve sends a PROXY protocol v1 line (`--proxy-protocol=1`), the
+    /// front reads the tailnet peer from it and applies
+    /// [`FrontLimits::max_per_forwarded_peer`] and
+    /// [`FrontLimits::new_per_forwarded_peer_per_minute`] to that peer inside the pool
+    /// (N8-5). The front cannot tell Serve from another local process: any process on
+    /// this machine can connect to it and can write a PROXY line too.
     ServeTcp,
 }
 
@@ -361,6 +376,9 @@ struct Shared {
     limits: FrontLimits,
     connections: Arc<Connections>,
     rate: RateLimiter<IpAddr>,
+    /// The slots and the rate of the tailnet peers that Serve names (ServeTcp only).
+    forwarded: Arc<Connections>,
+    forwarded_rate: RateLimiter<IpAddr>,
     stop: AtomicBool,
     loopback_is_tailnet: bool,
     allow_loopback_bind: bool,
@@ -418,6 +436,8 @@ impl Front {
             limits,
             connections: Connections::new(limits.max_connections, limits.max_per_peer),
             rate: RateLimiter::new(limits.new_per_peer_per_minute),
+            forwarded: Connections::new(limits.max_connections, limits.max_per_forwarded_peer),
+            forwarded_rate: RateLimiter::new(limits.new_per_forwarded_peer_per_minute),
             stop: AtomicBool::new(false),
             loopback_is_tailnet: options.allow_test_peers || options.route == FrontRoute::ServeTcp,
             allow_loopback_bind: options.allow_loopback_bind
@@ -652,7 +672,7 @@ fn admit(shared: &Arc<Shared>, stream: TcpStream, peer: SocketAddr) {
     let _ = thread::Builder::new()
         .name("apassy-front-conn".to_owned())
         .spawn(move || {
-            serve(&worker, stream, config);
+            serve(&worker, stream, config, peer_ip);
             drop(slot);
         });
 }
@@ -751,14 +771,44 @@ fn handshake(tls: &mut TlsSide, socket: &mut TcpStream, deadline: Instant) -> Op
     (out.is_empty() || socket.write_all(&out).is_ok()).then_some(plain)
 }
 
-/// One connection: the handshake, the connection to the target, then the pump.
-fn serve(shared: &Arc<Shared>, mut client: TcpStream, config: Arc<ServerConfig>) {
+/// One connection: the handshake, the connection to the target, then the pump. While it
+/// pumps, the connection to the target names `peer` in [`front_peers`], so the relay
+/// counts the failed authentications of each peer apart (N8-1).
+fn serve(shared: &Arc<Shared>, mut client: TcpStream, config: Arc<ServerConfig>, peer: IpAddr) {
     let _ = client.set_nodelay(true);
     let limits = shared.limits;
+    let deadline = Instant::now() + limits.handshake;
+    let mut peer = peer;
+    // The slot of a peer that Serve names; it frees itself when the connection ends.
+    let mut _forwarded_slot = None;
+    if shared.route == FrontRoute::ServeTcp {
+        match forwarded_peer(&mut client, deadline) {
+            Ok(None) => {}
+            Ok(Some(named)) => {
+                let Ok(copy) = client.try_clone() else {
+                    return;
+                };
+                if !tailnet::is_tailnet_peer(named) || !shared.forwarded_rate.admit(named) {
+                    let _ = client.shutdown(Shutdown::Both);
+                    return;
+                }
+                let Some(slot) = shared.forwarded.admit(named, copy) else {
+                    let _ = client.shutdown(Shutdown::Both);
+                    return;
+                };
+                _forwarded_slot = Some(slot);
+                peer = named;
+            }
+            Err(()) => {
+                let _ = client.shutdown(Shutdown::Both);
+                return;
+            }
+        }
+    }
     let Ok(mut tls) = TlsSide::new(config) else {
         return;
     };
-    let Some(early) = handshake(&mut tls, &mut client, Instant::now() + limits.handshake) else {
+    let Some(early) = handshake(&mut tls, &mut client, deadline) else {
         let _ = client.shutdown(Shutdown::Both);
         return;
     };
@@ -771,7 +821,85 @@ fn serve(shared: &Arc<Shared>, mut client: TcpStream, config: Arc<ServerConfig>)
         return;
     };
     let _ = target.set_nodelay(true);
+    // Before the first byte to the target: the relay reads the request only after it.
+    let _entry = match (target.local_addr(), target.peer_addr()) {
+        (Ok(source), Ok(listener)) => Some(front_peers::register(source, listener, peer)),
+        _ => None,
+    };
     pump(shared, client, target, tls, early);
+}
+
+/// The longest PROXY protocol v1 line, `\r\n` included.
+const PROXY_V1_MAX: usize = 107;
+
+/// The tailnet peer that Tailscale Serve names in a PROXY protocol v1 line before the TLS
+/// bytes (`tailscale serve --proxy-protocol=1`, N8-5). `Ok(None)`: the connection starts
+/// with TLS (a Serve without the PROXY protocol), or the line says `UNKNOWN`. `Err`: a
+/// line that is not a PROXY v1 line, or no line before `deadline`. The line is read one
+/// byte at a time, so no TLS byte is taken from the socket.
+fn forwarded_peer(socket: &mut TcpStream, deadline: Instant) -> Result<Option<IpAddr>, ()> {
+    let mut first = [0u8; 1];
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() || socket.set_read_timeout(Some(left)).is_err() {
+        return Err(());
+    }
+    match socket.peek(&mut first) {
+        Ok(1) if first[0] == b'P' => {}
+        Ok(1) => return Ok(None),
+        _ => return Err(()),
+    }
+    let mut line = Vec::with_capacity(PROXY_V1_MAX);
+    while !line.ends_with(b"\r\n") {
+        if line.len() >= PROXY_V1_MAX {
+            return Err(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || socket.set_read_timeout(Some(left)).is_err() {
+            return Err(());
+        }
+        match socket.read(&mut first) {
+            Ok(1) => line.push(first[0]),
+            _ => return Err(()),
+        }
+    }
+    parse_proxy_v1(&line).map_err(|_| ())
+}
+
+/// A first line that is not a PROXY protocol v1 line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadProxyLine;
+
+/// The source address of a PROXY protocol v1 line such as
+/// `PROXY TCP4 100.64.0.2 100.64.0.1 54321 8444\r\n`. `Ok(None)` for `PROXY UNKNOWN`.
+pub fn parse_proxy_v1(line: &[u8]) -> Result<Option<IpAddr>, BadProxyLine> {
+    let text = std::str::from_utf8(line).map_err(|_| BadProxyLine)?;
+    let text = text.strip_suffix("\r\n").ok_or(BadProxyLine)?;
+    let mut parts = text.split(' ');
+    if parts.next() != Some("PROXY") {
+        return Err(BadProxyLine);
+    }
+    let family = parts.next().ok_or(BadProxyLine)?;
+    if family == "UNKNOWN" {
+        return Ok(None);
+    }
+    let fields: Vec<&str> = parts.collect();
+    let [source, destination, source_port, destination_port] = fields[..] else {
+        return Err(BadProxyLine);
+    };
+    let source: IpAddr = source.parse().map_err(|_| BadProxyLine)?;
+    let destination: IpAddr = destination.parse().map_err(|_| BadProxyLine)?;
+    source_port.parse::<u16>().map_err(|_| BadProxyLine)?;
+    destination_port.parse::<u16>().map_err(|_| BadProxyLine)?;
+    let family_matches = match family {
+        "TCP4" => source.is_ipv4() && destination.is_ipv4(),
+        "TCP6" => source.is_ipv6() && destination.is_ipv6(),
+        _ => false,
+    };
+    if family_matches {
+        Ok(Some(source.to_canonical()))
+    } else {
+        Err(BadProxyLine)
+    }
 }
 
 /// The read timeout of the pump: the idle limit and the stop flag are checked this
@@ -968,12 +1096,40 @@ mod tests {
         assert_eq!(limits.handshake, Duration::from_secs(15));
         assert_eq!(limits.idle, Duration::from_secs(120));
         assert_eq!(limits.max_bytes_per_direction, None);
+        assert_eq!(limits.max_per_forwarded_peer, 16);
+        assert_eq!(limits.new_per_forwarded_peer_per_minute, 60);
         assert!(
             limits.idle > Duration::from_secs(25),
             "a 25 s long poll passes"
         );
         assert_eq!(DEFAULT_PORT, 8444);
         assert!(FOLLOW_INTERVAL * 2 <= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_proxy_v1_line_names_its_source() {
+        let ip = |text: &str| text.parse::<IpAddr>().expect("address");
+        assert_eq!(
+            parse_proxy_v1(b"PROXY TCP4 100.64.0.2 100.64.0.1 54321 8444\r\n"),
+            Ok(Some(ip("100.64.0.2")))
+        );
+        assert_eq!(
+            parse_proxy_v1(b"PROXY TCP6 fd7a:115c:a1e0::2 fd7a:115c:a1e0::1 54321 8444\r\n"),
+            Ok(Some(ip("fd7a:115c:a1e0::2")))
+        );
+        assert_eq!(parse_proxy_v1(b"PROXY UNKNOWN\r\n"), Ok(None));
+        for bad in [
+            &b"PROXY TCP4 100.64.0.2 100.64.0.1 54321 8444\n"[..],
+            b"PROXY TCP4 100.64.0.2 100.64.0.1 54321\r\n",
+            b"PROXY TCP6 100.64.0.2 100.64.0.1 54321 8444\r\n",
+            b"PROXY TCP4 100.64.0.2 100.64.0.1 99999 8444\r\n",
+            b"PROXY UDP4 100.64.0.2 100.64.0.1 1 2\r\n",
+            b"PROXI TCP4 100.64.0.2 100.64.0.1 1 2\r\n",
+            b"PROXY TCP4 100.64.0.2 100.64.0.1 1 2 3\r\n",
+            b"\x16\x03\x01",
+        ] {
+            assert_eq!(parse_proxy_v1(bad), Err(BadProxyLine), "{bad:?}");
+        }
     }
 
     #[test]

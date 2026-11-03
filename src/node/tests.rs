@@ -431,6 +431,12 @@ impl RunningNode for FakeNode {
             .and_then(|listener| listener.local_addr().ok())
     }
 
+    /// The stand-in has one listener: the local route goes to it too. The relay crate's
+    /// tests check that the real local route listener is apart (N8-1).
+    fn local_route_addr(&self) -> Option<SocketAddr> {
+        self.tailnet_addr()
+    }
+
     fn create_device_team(
         &self,
         _name: &str,

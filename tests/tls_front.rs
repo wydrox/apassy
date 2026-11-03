@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use apassy::net::certificate::{CertificateError, NodeCertificate};
+use apassy::net::front_peers;
 use apassy::net::pin::{self, Pin};
 use apassy::net::tls_front::{
     DEFAULT_PORT, Front, FrontError, FrontHandle, FrontLimits, FrontOptions, FrontRoute,
@@ -295,6 +296,85 @@ fn the_serve_fallback_binds_only_the_loopback() {
     );
 }
 
+/// A finished TLS 1.3 session with the front at `address`, after a PROXY v1 line
+/// `proxy` as Tailscale Serve writes it with `--proxy-protocol=1`.
+fn connect_proxied(address: SocketAddr, pin: Pin, proxy: &str) -> io::Result<Tls> {
+    let mut socket = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(5)))?;
+    socket.write_all(proxy.as_bytes())?;
+    let name = ServerName::try_from("apassy-node.invalid")
+        .expect("name")
+        .to_owned();
+    let connection = ClientConnection::new(client_config(pin, &[&rustls::version::TLS13]), name)
+        .map_err(io::Error::other)?;
+    let mut tls = StreamOwned::new(connection, socket);
+    while tls.conn.is_handshaking() {
+        tls.conn.complete_io(&mut tls.sock)?;
+    }
+    Ok(tls)
+}
+
+fn proxy_line(peer: &str) -> String {
+    format!("PROXY TCP4 {peer} 100.64.0.7 50123 8444\r\n")
+}
+
+#[test]
+fn the_serve_fallback_reads_the_peer_of_a_proxy_line_and_caps_each_peer() {
+    let (sender, _sources) = std::sync::mpsc::channel();
+    let target = peer_server(sender);
+    let mut options = FrontOptions::new(Vec::new(), 0, certificate(), target);
+    options.route = FrontRoute::ServeTcp;
+    // The node's limits of the fallback (`node::tailnet::front_limits`): every connection
+    // comes from the loopback, so the loopback's share is the whole pool.
+    options.limits = FrontLimits {
+        max_per_peer: 64,
+        new_per_peer_per_minute: 480,
+        ..FrontLimits::default()
+    };
+    let front = Front::start(options).expect("front");
+    let address = front.bound()[0];
+    let pin = front.pin();
+    // The relay sees the tailnet peer that Serve names, not the loopback.
+    let mut first = connect_proxied(address, pin, &proxy_line("100.64.0.21")).expect("proxied tls");
+    assert_eq!(send_line(&mut first, "who").expect("line"), "100.64.0.21");
+    // Serve without the PROXY protocol: TLS first, and the peer is the loopback.
+    let mut plain = connect(&front).expect("tls");
+    assert_eq!(send_line(&mut plain, "who").expect("line"), "127.0.0.1");
+    // One peer gets 16 connections inside the pool of 64; the 17th is closed.
+    let cap = FrontLimits::default().max_per_forwarded_peer;
+    let mut held = vec![first];
+    for _ in 1..cap {
+        let mut tls =
+            connect_proxied(address, pin, &proxy_line("100.64.0.21")).expect("within the cap");
+        assert_eq!(send_line(&mut tls, "who").expect("line"), "100.64.0.21");
+        held.push(tls);
+    }
+    let over = connect_proxied(address, pin, &proxy_line("100.64.0.21"))
+        .and_then(|mut tls| send_line(&mut tls, "who"));
+    assert!(
+        over.as_deref().map_or(true, str::is_empty),
+        "the 17th connection of one peer is closed: {over:?}"
+    );
+    // Another peer still gets in.
+    let mut other =
+        connect_proxied(address, pin, &proxy_line("100.64.0.22")).expect("another peer");
+    assert_eq!(send_line(&mut other, "who").expect("line"), "100.64.0.22");
+    // A line that names no tailnet peer, or is not a PROXY line, is closed before TLS.
+    for bad in [
+        proxy_line("192.0.2.9"),
+        "PROXY TCP4 nonsense\r\n".to_owned(),
+    ] {
+        let refused =
+            connect_proxied(address, pin, &bad).and_then(|mut tls| send_line(&mut tls, "who"));
+        assert!(
+            refused.as_deref().map_or(true, str::is_empty),
+            "{bad:?}: {refused:?}"
+        );
+    }
+    drop(held);
+}
+
 // ----- peers -----
 
 #[test]
@@ -353,6 +433,65 @@ fn a_tailnet_peer_gets_tls_13_with_the_pin_and_its_bytes_reach_the_target() {
         handshake = old.conn.complete_io(&mut old.sock).map(|_| 0);
     }
     assert!(handshake.is_err(), "TLS 1.2 is refused");
+}
+
+/// A target that answers each connection's first line with the peer that the front
+/// named for it (`front_peers`), and sends the connection's source to `sources`.
+fn peer_server(sources: std::sync::mpsc::Sender<SocketAddr>) -> SocketAddr {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("target");
+    let address = listener.local_addr().expect("addr");
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let sources = sources.clone();
+            thread::spawn(move || {
+                let Ok(source) = stream.peer_addr() else {
+                    return;
+                };
+                let _ = sources.send(source);
+                let Ok(mut writer) = stream.try_clone() else {
+                    return;
+                };
+                // Each line gets the named peer; the connection stays until the peer ends.
+                for line in BufReader::new(stream).lines() {
+                    if line.is_err() {
+                        return;
+                    }
+                    let named = front_peers::peer_of(source, address)
+                        .map_or_else(|| "none".to_owned(), |ip| ip.to_string());
+                    if writer.write_all(format!("{named}\n").as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    address
+}
+
+#[test]
+fn the_front_names_the_peer_of_each_pumped_connection_until_it_ends() {
+    let (sender, sources) = std::sync::mpsc::channel();
+    let target = peer_server(sender);
+    let mut options = FrontOptions::new(vec![LOOPBACK], 0, certificate(), target);
+    options.allow_loopback_bind = true;
+    options.allow_test_peers = true;
+    let front = Front::start(options).expect("front");
+    let mut tls = connect(&front).expect("tls");
+    // The test peer is the loopback; on the tailnet it is the peer's 100.x address.
+    assert_eq!(send_line(&mut tls, "who").expect("line"), "127.0.0.1");
+    let source = sources
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a connection to the target");
+    assert_eq!(front_peers::peer_of(source, target), Some(LOOPBACK));
+    drop(tls);
+    assert!(
+        wait_until(Duration::from_secs(5), || front_peers::peer_of(
+            source, target
+        )
+        .is_none()),
+        "the entry goes with the connection"
+    );
 }
 
 #[test]

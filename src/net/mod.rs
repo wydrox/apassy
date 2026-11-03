@@ -7,6 +7,8 @@
 //! - [`sealed_key`]: AES-256-GCM under a key derived from the node master key.
 //! - [`certificate`]: the node certificate, its DER in a file and its key sealed.
 //! - [`limits`]: connection slots and per-key rates, shared with the companion.
+//! - [`front_peers`]: the tailnet peer behind each connection that a front pumps, for
+//!   the relay's per-peer failed-auth count (N8-1). In process only.
 //! - [`tls_front`]: the TLS front. It binds only tailnet addresses, refuses other
 //!   peers before the handshake, and pumps bytes to a loopback target. It never parses
 //!   HTTP.
@@ -17,6 +19,7 @@
 //! Nothing here binds `0.0.0.0` or `::`.
 
 pub mod certificate;
+pub mod front_peers;
 pub mod limits;
 pub mod pin;
 pub mod sealed_key;

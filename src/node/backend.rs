@@ -25,7 +25,8 @@
 //!   with the broker, and answers with `release` or `deny`.
 //! - On the tailnet (ADR 0037 stage 2, node-pairing-v1): a node started with a
 //!   `NodeTailnet` (`NodeBackend::start_on_tailnet`) also serves the devices of its teams
-//!   on a third loopback listener (`tailnet_addr`), the target of the TLS front. The app
+//!   on a third loopback listener (`tailnet_addr`), the target of the TLS front, and the
+//!   same routes for the Mac's own clients on a fourth (`local_route_addr`). The app
 //!   makes a team of devices in process (`create_device_team`), lists and revokes its
 //!   devices (`devices`, `revoke_device`), and a node makes one-use pairing codes
 //!   (`make_node_code`).
@@ -517,6 +518,14 @@ pub trait RunningNode: Send + Sync {
     /// The bound address of the tailnet listener (the target of the TLS front), if the
     /// node runs on the tailnet.
     fn tailnet_addr(&self) -> Option<SocketAddr> {
+        None
+    }
+
+    /// The bound address of the local route listener: the routes of the tailnet listener
+    /// for this Mac's own clients, which the TLS front never forwards to, so the failed
+    /// authentications of tailnet peers never limit them (N8-1). `None` without a tailnet
+    /// listener.
+    fn local_route_addr(&self) -> Option<SocketAddr> {
         None
     }
 

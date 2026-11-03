@@ -9,8 +9,12 @@ mod node;
 #[path = "common/relay.rs"]
 mod relay;
 
+use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream};
+
+use apassy::net::front_peers;
 use apassy::node::backend::{NewCloudAgent, RunningNode, TokenIssue};
-use apassy_relay::server::http::listener_alive;
+use apassy_relay::server::http::{AUTH_FAILURES_MAX, listener_alive};
 use node::{Node, NodeOptions, code};
 use serde_json::json;
 
@@ -198,4 +202,108 @@ fn the_tailnet_listener_stops_with_the_node() {
     });
     assert!(plain.node().tailnet_addr().is_none());
     assert!(plain.node().running().tailnet_listener_url().is_none());
+}
+
+/// `GET /v1/me` with a bad token on a new connection to `listener`, as the TLS front
+/// makes it for the tailnet peer `peer` (`front_peers`): `None` is a local process that
+/// connects without the front. Returns the status.
+fn bad_token_from(listener: SocketAddr, peer: Option<IpAddr>) -> u16 {
+    let mut stream = TcpStream::connect(listener).expect("connect");
+    let _entry = peer.map(|peer| {
+        front_peers::register(
+            stream.local_addr().expect("local"),
+            stream.peer_addr().expect("peer"),
+            peer,
+        )
+    });
+    write!(
+        stream,
+        "GET /v1/me HTTP/1.1\r\nHost: 100.64.0.7:8444\r\nAuthorization: Bearer apr_bad\r\nConnection: close\r\n\r\n"
+    )
+    .expect("write");
+    let mut answer = String::new();
+    let _ = stream.read_to_string(&mut answer);
+    answer
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status in {answer:?}"))
+}
+
+#[test]
+fn one_tailnet_peer_with_bad_tokens_does_not_limit_another_peer_or_the_local_route() {
+    let node = Node::start(NodeOptions::default());
+    let (_team, mac) = node.device_team("Approvals");
+    let tailnet = node.node().tailnet_addr().expect("a tailnet listener");
+    let local = node
+        .node()
+        .running()
+        .tailnet_local_addr
+        .expect("a local route listener");
+    assert_ne!(tailnet, local);
+    assert_eq!(local.ip(), tailnet.ip());
+    let peer_a: IpAddr = "100.64.0.11".parse().unwrap();
+    let peer_b: IpAddr = "100.64.0.12".parse().unwrap();
+    // Peer A sends 25 bad tokens in a minute: the first 20 get 401, then 429.
+    let statuses: Vec<u16> = (0..25)
+        .map(|_| bad_token_from(tailnet, Some(peer_a)))
+        .collect();
+    let limit = AUTH_FAILURES_MAX as usize;
+    assert!(
+        statuses[..limit].iter().all(|status| *status == 401),
+        "{statuses:?}"
+    );
+    assert!(
+        statuses[limit..].iter().all(|status| *status == 429),
+        "{statuses:?}"
+    );
+    // Peer B still gets its own answers, and signs in.
+    assert_eq!(bad_token_from(tailnet, Some(peer_b)), 401);
+    // A connection without the front (keyed by the loopback) is not peer A either.
+    assert_eq!(bad_token_from(tailnet, None), 401);
+    // The Mac's own clients go through the local route listener: the same routes, and
+    // no peer's failures count there.
+    let base = node.local_route();
+    let me = node.ok(&base, "GET", "/v1/me", Some(&mac.token), None);
+    assert_eq!(me["device_id"].as_u64(), Some(mac.id));
+    assert_eq!(status(&node, &base, "POST", "/v1/connect"), 404);
+    assert_eq!(bad_token_from(local, None), 401);
+    // The audit row of the limit names the peer.
+    let limited: Vec<_> = node
+        .relay_audit()
+        .into_iter()
+        .filter(|(action, detail)| action == "rate_limited" && detail.contains("\"peer\""))
+        .collect();
+    assert!(!limited.is_empty(), "an audit row of the limit");
+    assert!(
+        limited
+            .iter()
+            .all(|(_, detail)| detail.contains("100.64.0.11")),
+        "{limited:?}"
+    );
+}
+
+#[test]
+fn the_local_route_listener_counts_its_own_failures() {
+    let node = Node::start(NodeOptions::default());
+    let local = node
+        .node()
+        .running()
+        .tailnet_local_addr
+        .expect("a local route listener");
+    let tailnet = node.node().tailnet_addr().expect("a tailnet listener");
+    for _ in 0..AUTH_FAILURES_MAX {
+        assert_eq!(bad_token_from(local, None), 401);
+    }
+    assert_eq!(bad_token_from(local, None), 429);
+    // The tailnet peers are not limited by the local route's failures.
+    assert_eq!(
+        bad_token_from(tailnet, Some("100.64.0.13".parse().unwrap())),
+        401
+    );
+    assert!(
+        node.relay_audit()
+            .iter()
+            .any(|(action, detail)| action == "rate_limited" && detail.contains("local_route"))
+    );
 }

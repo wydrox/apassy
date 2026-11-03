@@ -305,9 +305,14 @@ pub fn parse_serve_tcp(json: &str, port: u16, own_target: &str) -> Result<ServeT
 /// not end TLS, so the iPhone still sees the node certificate and checks its pin.
 ///
 /// Commands, and no other: `tailscale serve status --json`,
-/// `tailscale serve --bg --tcp=<port> tcp://127.0.0.1:<local port>`, and
+/// `tailscale serve --bg --tcp=<port> --proxy-protocol=1 tcp://127.0.0.1:<local port>`
+/// (and without `--proxy-protocol` when the command line does not know it), and
 /// `tailscale serve --tcp=<port> off`. Never `serve reset`. Port 443 and the Funnel ports
 /// (8443, 10000) are refused.
+///
+/// With the PROXY protocol, Serve writes the tailnet peer in a first line, so the front
+/// limits each peer (N8-5). Without it every peer is the loopback. Either way the front
+/// cannot tell Serve from another process on this machine (docs/security/trust-model.md).
 pub struct ServeTcp {
     cli: std::sync::Arc<dyn crate::node::funnel::TailscaleCli>,
 }
@@ -353,10 +358,17 @@ impl ServeTcp {
         }
         let tcp = format!("--tcp={port}");
         let target = format!("tcp://{}", serve_tcp_target(local_port));
-        let output = self
+        let mut output = self
             .cli
-            .run(&["serve", "--bg", &tcp, &target])
+            .run(&["serve", "--bg", &tcp, "--proxy-protocol=1", &target])
             .ok_or(ServeTcpError::NoTailscale)?;
+        if !output.success && output.stderr.contains("proxy-protocol") {
+            // A Tailscale before the PROXY protocol: the forward without it.
+            output = self
+                .cli
+                .run(&["serve", "--bg", &tcp, &target])
+                .ok_or(ServeTcpError::NoTailscale)?;
+        }
         if !output.success {
             return Err(ServeTcpError::Failed(
                 output
@@ -374,6 +386,17 @@ impl ServeTcp {
             ServeTcpState::Free => {
                 Err(ServeTcpError::Failed("the forward is not there".to_owned()))
             }
+        }
+    }
+
+    /// Before the front takes a port: turn off a forward of `port` to the front's earlier
+    /// local port `previous`, left by a crash (N8-5). Until then the forward points at a
+    /// loopback port that any local process could bind. True when one was turned off.
+    /// Another program's forward stays.
+    pub fn clear_stale(&self, port: u16, previous: Option<u16>) -> Result<bool, ServeTcpError> {
+        match previous {
+            Some(previous) if previous != 0 => self.disable(port, previous),
+            _ => Ok(false),
         }
     }
 
@@ -586,6 +609,8 @@ mod tests {
     struct FakeCli {
         status: std::sync::Mutex<String>,
         calls: std::sync::Mutex<Vec<Vec<String>>>,
+        /// The command line knows `--proxy-protocol`.
+        proxy_protocol: std::sync::Mutex<bool>,
     }
 
     impl crate::node::funnel::TailscaleCli for FakeCli {
@@ -596,6 +621,23 @@ mod tests {
                 .push(args.iter().map(|a| (*a).to_owned()).collect());
             let stdout = match args {
                 ["serve", "status", "--json"] => self.status.lock().unwrap().clone(),
+                ["serve", "--bg", tcp, "--proxy-protocol=1", target]
+                    if *self.proxy_protocol.lock().unwrap() =>
+                {
+                    let port = tcp.trim_start_matches("--tcp=");
+                    let forward = target.trim_start_matches("tcp://");
+                    *self.status.lock().unwrap() = format!(
+                        r#"{{"TCP":{{"{port}":{{"TCPForward":"{forward}","ProxyProtocol":1}}}}}}"#
+                    );
+                    String::new()
+                }
+                ["serve", "--bg", _, "--proxy-protocol=1", _] => {
+                    return Some(crate::node::funnel::CliOutput {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "flag provided but not defined: -proxy-protocol".to_owned(),
+                    });
+                }
                 ["serve", "--bg", tcp, target] => {
                     let port = tcp.trim_start_matches("--tcp=");
                     let forward = target.trim_start_matches("tcp://");
@@ -622,6 +664,7 @@ mod tests {
         let cli = std::sync::Arc::new(FakeCli {
             status: std::sync::Mutex::new("{}".to_owned()),
             calls: std::sync::Mutex::new(Vec::new()),
+            proxy_protocol: std::sync::Mutex::new(true),
         });
         let serve = ServeTcp::new(cli.clone());
         assert_eq!(serve.enable(443, 51000), Err(ServeTcpError::Forbidden(443)));
@@ -635,6 +678,7 @@ mod tests {
             "serve".to_owned(),
             "--bg".to_owned(),
             "--tcp=8444".to_owned(),
+            "--proxy-protocol=1".to_owned(),
             "tcp://127.0.0.1:51000".to_owned(),
         ]));
         assert_eq!(serve.state(8444, 51000), Ok(ServeTcpState::Ours));
@@ -657,6 +701,53 @@ mod tests {
                 .any(|call| call.iter().any(|word| word == "reset")),
             "never serve reset"
         );
+    }
+
+    #[test]
+    fn an_old_command_line_gets_the_forward_without_the_proxy_protocol() {
+        let cli = std::sync::Arc::new(FakeCli {
+            status: std::sync::Mutex::new("{}".to_owned()),
+            calls: std::sync::Mutex::new(Vec::new()),
+            proxy_protocol: std::sync::Mutex::new(false),
+        });
+        let serve = ServeTcp::new(cli.clone());
+        serve.enable(8444, 51000).expect("on");
+        assert_eq!(serve.state(8444, 51000), Ok(ServeTcpState::Ours));
+        assert!(cli.calls.lock().unwrap().contains(&vec![
+            "serve".to_owned(),
+            "--bg".to_owned(),
+            "--tcp=8444".to_owned(),
+            "tcp://127.0.0.1:51000".to_owned(),
+        ]));
+    }
+
+    #[test]
+    fn a_stale_forward_of_a_crash_goes_before_the_front_takes_a_port() {
+        let cli = std::sync::Arc::new(FakeCli {
+            status: std::sync::Mutex::new(
+                r#"{"TCP":{"8444":{"TCPForward":"127.0.0.1:51000","ProxyProtocol":1}}}"#.to_owned(),
+            ),
+            calls: std::sync::Mutex::new(Vec::new()),
+            proxy_protocol: std::sync::Mutex::new(true),
+        });
+        let serve = ServeTcp::new(cli.clone());
+        // No earlier port known, or another one: nothing changes.
+        assert_eq!(serve.clear_stale(8444, None), Ok(false));
+        assert_eq!(serve.clear_stale(8444, Some(51001)), Ok(false));
+        assert_eq!(serve.state(8444, 51000), Ok(ServeTcpState::Ours));
+        // The forward of the front's earlier port goes; then the new one goes on.
+        assert_eq!(serve.clear_stale(8444, Some(51000)), Ok(true));
+        assert_eq!(serve.state(8444, 51000), Ok(ServeTcpState::Free));
+        serve.enable(8444, 52000).expect("the new forward");
+        assert_eq!(serve.state(8444, 52000), Ok(ServeTcpState::Ours));
+        // Another program's forward is never touched.
+        *cli.status.lock().unwrap() =
+            r#"{"TCP":{"8444":{"TCPForward":"127.0.0.1:22"}}}"#.to_owned();
+        assert_eq!(serve.clear_stale(8444, Some(52000)), Ok(false));
+        assert!(matches!(
+            serve.state(8444, 52000),
+            Ok(ServeTcpState::Other { .. })
+        ));
     }
 
     #[test]

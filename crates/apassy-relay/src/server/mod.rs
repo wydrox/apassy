@@ -348,11 +348,17 @@ pub struct RunningRelay {
     /// The bound address of the tailnet listener (`RelayConfig::tailnet_listen`): the
     /// target of the node's TLS front.
     pub tailnet_addr: Option<SocketAddr>,
+    /// The bound address of the local route listener: the same routes as the tailnet
+    /// listener, on a free port of the same loopback address, for the Mac's own clients
+    /// (the local route of the node origin). The TLS front never forwards to it, so the
+    /// failed authentications of tailnet peers never limit it (N8-1).
+    pub tailnet_local_addr: Option<SocketAddr>,
     hub: Arc<Hub>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<RelayResult<()>>>,
     public_handle: Option<JoinHandle<RelayResult<()>>>,
     tailnet_handle: Option<JoinHandle<RelayResult<()>>>,
+    tailnet_local_handle: Option<JoinHandle<RelayResult<()>>>,
     operator: Option<JoinHandle<()>>,
 }
 
@@ -406,6 +412,9 @@ impl RunningRelay {
             let _ = handle.join();
         }
         if let Some(handle) = self.tailnet_handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.tailnet_local_handle.take() {
             let _ = handle.join();
         }
         if let Some(handle) = self.operator.take() {
@@ -636,6 +645,11 @@ impl Relay {
         let (server, addr) = bind(hub.config.listen)?;
         let public = hub.config.public_listen.map(bind).transpose()?;
         let tailnet = hub.config.tailnet_listen.map(bind).transpose()?;
+        let tailnet_local = hub
+            .config
+            .tailnet_listen
+            .map(|listen| bind(SocketAddr::new(listen.ip(), 0)))
+            .transpose()?;
         let operator = operator::listen(hub.clone(), stop.clone())?;
         let serving = http::Serving {
             hub: hub.clone(),
@@ -644,6 +658,7 @@ impl Relay {
             stop: stop.clone(),
             scope: http::Scope::Node,
             limits: hub.config.limits,
+            local_route: false,
         };
         let spawned = std::thread::Builder::new()
             .name("relay-accept".to_string())
@@ -673,6 +688,7 @@ impl Relay {
                     member_reserve: 0,
                     ..hub.config.limits
                 },
+                local_route: false,
             };
             let spawned = std::thread::Builder::new()
                 .name("relay-public-accept".to_string())
@@ -695,23 +711,39 @@ impl Relay {
         }
         let mut tailnet_addr = None;
         let mut tailnet_handle = None;
-        if let Some((server, addr)) = tailnet {
-            // The devices of the tailnet (and on the Linux node, its team clients), with
-            // the lanes and limits of the node listener but threads of their own.
+        let mut tailnet_local_addr = None;
+        let mut tailnet_local_handle = None;
+        // The devices of the tailnet (and on the Linux node, its team clients), with the
+        // lanes and limits of the node listener but threads of their own. Then the local
+        // route of the Mac's own clients: the same routes on a listener of its own.
+        for (bound, local_route) in [(tailnet, false), (tailnet_local, true)] {
+            let Some((server, addr)) = bound else {
+                continue;
+            };
             let serving = http::Serving {
                 hub: hub.clone(),
-                proxy,
+                proxy: proxy.clone(),
                 server,
                 stop: stop.clone(),
                 scope: http::Scope::Tailnet {
                     agents: hub.config.tailnet_agents,
                 },
                 limits: hub.config.limits,
+                local_route,
+            };
+            let name = if local_route {
+                "relay-local-accept"
+            } else {
+                "relay-tailnet-accept"
             };
             let spawned = std::thread::Builder::new()
-                .name("relay-tailnet-accept".to_string())
+                .name(name.to_string())
                 .spawn(move || http::serve(serving));
             match spawned {
+                Ok(spawned) if local_route => {
+                    tailnet_local_addr = Some(addr);
+                    tailnet_local_handle = Some(spawned);
+                }
                 Ok(spawned) => {
                     tailnet_addr = Some(addr);
                     tailnet_handle = Some(spawned);
@@ -719,8 +751,8 @@ impl Relay {
                 Err(_) => {
                     stop.store(true, Ordering::Relaxed);
                     let _ = handle.join();
-                    if let Some(public) = public_handle {
-                        let _ = public.join();
+                    for other in [public_handle, tailnet_handle].into_iter().flatten() {
+                        let _ = other.join();
                     }
                     let _ = operator.join();
                     hub.close_all();
@@ -734,11 +766,13 @@ impl Relay {
             addr,
             public_addr,
             tailnet_addr,
+            tailnet_local_addr,
             hub,
             stop,
             handle: Some(handle),
             public_handle,
             tailnet_handle,
+            tailnet_local_handle,
             operator: Some(operator),
         })
     }

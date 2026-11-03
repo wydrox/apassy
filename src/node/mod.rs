@@ -83,6 +83,9 @@ const TEAM_NAME: &str = "Personal";
 /// The file in the node directory with the last Funnel target of the app, so a stale
 /// handler of an earlier port is known as the app's own.
 const LAST_TARGET_FILE: &str = "funnel-target";
+/// The local port of the front in the last Serve fallback (N8-5): a forward to it after a
+/// crash is stale.
+const SERVE_TCP_PORT_FILE: &str = "serve-tcp-port";
 /// Rows of "Recent cloud activity".
 const RECENT_ROWS: u32 = 20;
 /// Ports tried for the public listener before the start gives up.
@@ -654,7 +657,7 @@ impl Node {
             },
             tailnet_config,
         )?;
-        let tailnet_target = node.tailnet_addr();
+        let tailnet_target = node.tailnet_addr().zip(node.local_route_addr());
         let team = match team_id.map(NodeTeamId) {
             Some(team) if node.has_team(&team) => team,
             stored => {
@@ -785,15 +788,16 @@ impl Node {
     }
 
     /// The tailnet route of a start: the certificate, then the front on the relay's
-    /// tailnet listener, then the local route of the origin.
+    /// tailnet listener, then the local route of the origin to the local route listener.
+    /// `targets`: the tailnet listener and the local route listener.
     fn start_route(
         &self,
         here: &TailnetHere,
         state: &VaultState,
-        target: Option<SocketAddr>,
+        targets: Option<(SocketAddr, SocketAddr)>,
         certificate_key: &[u8],
     ) -> Result<TailnetRoute, NodeError> {
-        let target = target.ok_or_else(|| {
+        let (target, local_target) = targets.ok_or_else(|| {
             error(
                 "node_failed",
                 "The relay of the node has no tailnet listener.",
@@ -807,14 +811,26 @@ impl Node {
             );
         }
         self.check_not_stopping()?;
-        TailnetRoute::start(tailnet::RouteOptions {
+        let previous_local_port = std::fs::read_to_string(self.data_dir.join(SERVE_TCP_PORT_FILE))
+            .ok()
+            .and_then(|text| text.trim().parse().ok());
+        let route = TailnetRoute::start(tailnet::RouteOptions {
             here,
             port: state.tailnet_port,
             certificate,
             target,
+            local_target,
+            previous_local_port,
             cli: Arc::clone(&self.cli),
             name,
-        })
+        })?;
+        if let Some(local_port) = route.serve_local_port() {
+            let _ = std::fs::write(
+                self.data_dir.join(SERVE_TCP_PORT_FILE),
+                local_port.to_string(),
+            );
+        }
+        Ok(route)
     }
 
     /// Keep the node origin in the vault; a changed one means a new pairing.
