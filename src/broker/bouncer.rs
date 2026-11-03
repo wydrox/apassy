@@ -83,6 +83,12 @@ pub struct BouncerRequest {
     pub purpose: String,
     pub env_names: Vec<String>,
     pub instruction: String,
+    /// Where the user request comes from, when the broker knows more than "the user":
+    /// "Agent SDK turn" for a hook prompt that an Agent SDK host sent (`source: sdk`).
+    /// An agent can start its own SDK session with its own text, so the model reads
+    /// the request with that in mind. Empty for a prompt from the composer, a host
+    /// without a `source`, and the text of the agent.
+    pub task_provenance: String,
 }
 
 /// One model answer: the probability that the fact is true.
@@ -427,6 +433,12 @@ pub fn state_text(request: &BouncerRequest) -> String {
         state.push_str(&format!(
             " Agent's stated purpose: {}",
             request.purpose.trim()
+        ));
+    }
+    if !request.task_provenance.trim().is_empty() {
+        state.push_str(&format!(
+            " Task provenance: {}.",
+            request.task_provenance.trim()
         ));
     }
     if !request.instruction.trim().is_empty() {
@@ -828,6 +840,7 @@ mod tests {
             purpose: "Apply migrations".to_owned(),
             env_names: vec!["DB_URL".to_owned()],
             instruction: instruction.to_owned(),
+            task_provenance: String::new(),
         }
     }
 
@@ -895,6 +908,19 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .ends_with("Owner rule: Staging only.")
+        );
+        // Finding 4 of the 0.5.16 review: an Agent SDK turn is named in the state; the
+        // state of any other request is as before.
+        assert!(!state.contains("Task provenance"));
+        let sdk = BouncerRequest {
+            task_provenance: "Agent SDK turn".to_owned(),
+            ..request("")
+        };
+        let sdk_state = state_text(&sdk);
+        assert!(sdk_state.starts_with("User request: \"Apply the staging migration\""));
+        assert!(
+            sdk_state.ends_with(" Task provenance: Agent SDK turn."),
+            "{sdk_state}"
         );
     }
 

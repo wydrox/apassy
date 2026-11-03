@@ -334,8 +334,10 @@ impl Proxy {
                 }))
                 .collect()
         };
-        // The JSON and HTML escapes of each value (`\/`, `\u003c`, `&amp;`, `&#x2F;`),
-        // so an upstream host that echoes the value escaped gives back no value either.
+        // The JSON, HTML, and percent escapes of each value (`\/`, `\"`, `\u003c`,
+        // `\u00e9`, `&amp;`, `&#x2F;`, `%2F`), so an upstream host that echoes the value
+        // escaped gives back no value either. A pattern also replaces the raw pair of
+        // its value, and it shows the placeholder with the extra bytes after it.
         let patterns = || -> Vec<Pattern> {
             session
                 .secrets

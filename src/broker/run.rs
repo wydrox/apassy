@@ -838,12 +838,51 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
             AnswerKind::InProject(run.action)
         });
     }
-    if checked.facts.iter().any(|facts| facts.unconfirmed)
-        || checked.declarations.iter().any(Option::is_none)
-    {
+    // "Development" or "Production" labels one item. With two or more unconfirmed
+    // items the answer cannot name the item for every device, so the run asks as any
+    // other ([`QuestionInfo::classifiable_item`]).
+    if unconfirmed_count(checked) == 1 {
         valid.push(AnswerKind::CorrectEnvironment);
     }
     valid
+}
+
+/// The items of the run whose environment is production only by default, or that have
+/// no declaration: the items that "Allow as dev" or "Allow as prod" can label.
+fn item_unconfirmed(checked: &Checked, index: usize) -> bool {
+    checked.facts[index].unconfirmed || checked.declarations[index].is_none()
+}
+
+fn unconfirmed_count(checked: &Checked) -> usize {
+    (0..checked.facts.len())
+        .filter(|index| item_unconfirmed(checked, *index))
+        .count()
+}
+
+/// The index of `item_id` in the run when it is the only unconfirmed item, the item that
+/// a classification labels. `None` for any other item, and with two or more unconfirmed
+/// items.
+fn classified_index(checked: &Checked, items: &[u64], item_id: u64) -> Option<usize> {
+    let index = items.iter().position(|item| *item == item_id)?;
+    (item_unconfirmed(checked, index) && unconfirmed_count(checked) == 1).then_some(index)
+}
+
+/// Save "Allow as dev" or "Allow as prod" ([`Settled::classification`]): label the one
+/// item that the owner check named, never the other items of the run. A development
+/// label lowers the default risk and reversibility of the item, so a bundled production
+/// credential without a signal must keep its careful defaults. False when nothing was
+/// saved: the item is not the only unconfirmed item, or the vault failed.
+fn save_classification(
+    vault: &mut Vault,
+    checked: &Checked,
+    items: &[u64],
+    (environment, item_id): (crate::vault::Environment, u64),
+) -> bool {
+    classified_index(checked, items, item_id).is_some_and(|index| {
+        vault
+            .set_declaration_environment(items[index], environment)
+            .is_ok()
+    })
 }
 
 /// Read remembered execution answers. Evaluation scopes no longer affect routing.
@@ -1067,6 +1106,7 @@ fn run_inner(
             source: CLOUD_REQUEST_SOURCE.to_owned(),
             agent_text: None,
             flags: Vec::new(),
+            provenance: None,
         },
         None => ctx.prompts.resolve(
             checked.agent.id,
@@ -1235,6 +1275,7 @@ fn run_inner(
         purpose: request.purpose.trim().to_owned(),
         env_names: checked.env_names.clone(),
         instruction: String::new(),
+        task_provenance: resolved.provenance.unwrap_or_default().to_owned(),
     };
     // Shadow mode (ADR 0010): for a request that reaches the model step, the candidate
     // answers on its own thread. Its answer goes only to the vault. The decision below
@@ -1424,7 +1465,7 @@ fn run_inner(
             item_id: *item,
             name: facts.name.clone(),
             production: facts.production,
-            unconfirmed: facts.unconfirmed || checked.declarations[index].is_none(),
+            unconfirmed: item_unconfirmed(&checked, index),
             always_ask: facts.asks_always(),
         })
         .collect();
@@ -1593,6 +1634,7 @@ fn run_inner(
             attached,
             refusal_comment,
             classification,
+            classified_item,
             answered_on: relay_device,
             ..
         } = match settled {
@@ -1651,7 +1693,7 @@ fn run_inner(
         if cloud.is_none() {
             answer_choice = chosen;
             evaluation_choice = chosen_evaluation;
-            classification_choice = classification;
+            classification_choice = classification.zip(classified_item);
         }
         answered_on = answered_on_of(checked_with, relay_device);
         if answered_on == ANSWERED_ON_IPHONE {
@@ -1831,19 +1873,13 @@ fn run_inner(
             return WireResponse::failure("authorization_changed", reason);
         }
         // Persist classification only after the original authorization baseline passed.
-        if let Some(environment) = classification_choice {
-            for (index, facts) in checked.facts.iter().enumerate() {
-                if (facts.unconfirmed || checked.declarations[index].is_none())
-                    && vault
-                        .set_declaration_environment(items[index], environment)
-                        .is_err()
-                {
-                    return WireResponse::failure(
-                        "classification_failed",
-                        "Could not save the environment. Nothing ran.",
-                    );
-                }
-            }
+        if let Some(choice) = classification_choice
+            && !save_classification(vault, &checked, &items, choice)
+        {
+            return WireResponse::failure(
+                "classification_failed",
+                "Could not save the environment. Nothing ran.",
+            );
         }
         // A cloud run stops here, as the local evaluation does: the node releases the
         // values of the bindings that this check read, in this vault session.
