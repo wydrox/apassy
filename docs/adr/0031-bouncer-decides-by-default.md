@@ -146,9 +146,12 @@ unlabeled credentials, the owner chose a question with Allow as dev and Allow as
 prod over "anything unclear counts as development". A value without a signal gets
 production and admin scope by default, so its runs ask before inference until the
 owner labels it. The Decision section above states the earlier routing of
-unconfirmed production; this paragraph replaces it. Allow as dev sets only the
-environment: a default high risk or irreversibility stays, so the gate still needs a
-certain read from the bouncer brain for a command that is not known safe.
+unconfirmed production; this paragraph replaces it. Since 2026-11-03 (0.5.16), Allow
+as dev means development: when the owner labels a credential development or local, a
+risk or a reversibility that is only a default (no owner value, no strong signal)
+becomes medium and reversible, also at decision time for earlier labels, and that
+default risk is no default source; owner and strong-signal values do not change, and
+staging and production get the careful defaults.
 
 Unknown environments offer Allow as dev, Allow as prod, Dismiss, and Dismiss with
 comment. Either allow classifies the unknown items of this exact pending run

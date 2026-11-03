@@ -60,6 +60,10 @@ The app reads its own team from the signature of the running process (`codesign 
 
 From 0.5.0, the release names the disk image `Apassy-<version>.dmg` (owner request of 2026-10-12). The decision above does not change. Apps 0.3.0 to 0.4.1 accept only `file` = `Apassy.dmg` and download only `/download/Apassy.dmg`, so `latest.json` keeps that name, and the bucket keeps the same image under that key. From 0.5.0, the app also accepts `file` = `Apassy-<version>.dmg` with exactly the `version` of `latest.json` (no other name, version, or path), downloads `/download/<file>`, and keeps the checked image as `update/Apassy-<version>.dmg`. The switch of `latest.json` to the versioned name, and the end of `/download/Apassy.dmg`, wait until no app before 0.5.0 is in use ([release](../operations/release.md#image-names)).
 
+## Note of 2026-11-03: `Apassy.dmg` stays
+
+Decision ([D17](../design/implementation-plan-misc.md#d17-latestjson-keeps-apassydmg-0015-1)): `latest.json` keeps `"file": "Apassy.dmg"` and the bucket keeps that key. It costs one extra bucket key per release; removing it would leave every app of 0.3.0 to 0.4.1 without updates for ever. **Condition to remove:** no request for `/latest.json` with a user agent `Apassy/0.3.*` or `Apassy/0.4.*` for 90 days, read from Cloudflare's request analytics at each release preparation (read-only, aggregate; no new logging). If the analytics cannot show 90 days, the decision stays "keep". When the condition holds, one small change switches `file` to `Apassy-<version>.dmg` in `scripts/build-dmg.sh` and removes the Worker route.
+
 ## Relation to other records
 
 - ADR 0003: the vault key lives only in the app process. The install locks the vault first.

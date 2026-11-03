@@ -14,7 +14,9 @@ use super::decisions_activity::{self, Day, Source, day_of};
 use super::draw;
 use super::owner_tests::{collect, unlocked_app_with_item};
 use crate::broker::action_kind::ActionKind;
-use crate::desktop::remote_feeds::{ActivityScope, DeviceScope, RemoteFeedState, RemoteMac};
+use crate::desktop::remote_feeds::{
+    ActivityScope, DeviceScope, FeedProblem, RemoteFeedState, RemoteMac,
+};
 use crate::desktop::{DesktopApp, Place};
 use crate::questions::feed::{Feed, FeedUse};
 use crate::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
@@ -58,6 +60,7 @@ fn ready_mac(feed: Feed) -> RemoteMac {
         name: "MacBook Pro".to_owned(),
         state: RemoteFeedState::Ready(feed),
         received_at: now(),
+        problem: None,
     }
 }
 
@@ -190,6 +193,7 @@ fn the_scope_bar_gets_this_mac_the_ready_macs_and_the_projects() {
         name: "Mac mini".to_owned(),
         state: RemoteFeedState::NeedsSync,
         received_at: now(),
+        problem: None,
     });
     let activity = decisions_activity::load(&app);
     assert_eq!(
@@ -328,6 +332,7 @@ fn the_week_shows_each_device_and_the_most_active_agents() {
         name: "Mac mini".to_owned(),
         state: RemoteFeedState::NeedsUpdate,
         received_at: now(),
+        problem: None,
     });
     let local = app.owner_ui.session.week_counts().expect("counts");
     let local_row = format!("{} by you · {} automatic", local.by_you, local.automatic);
@@ -380,6 +385,37 @@ fn a_truncated_feed_says_that_older_uses_stay_on_its_mac() {
     app.ui.activity_scope = scope(DeviceScope::ThisMac, None);
     let (text, _) = frames(&mut app, WIDE, 3);
     assert!(!text.contains(note), "{text}");
+}
+
+/// A Mac whose later feed no longer opens keeps the counts and the decisions of its last
+/// good feed, and the list says why they are old (relay-feed-v1 section 7.4); in the
+/// scope of this Mac only, the note goes.
+#[test]
+fn a_kept_feed_keeps_its_activity_and_says_why_it_is_old() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = vault_app(&dir, example_feed());
+    app.remote_macs[0].problem = Some(FeedProblem::NeedsSync);
+    let note = "Sync this vault to see the activity of MacBook Pro.";
+    let activity = decisions_activity::gather(None, &[], &app.remote_macs);
+    assert_eq!(
+        activity.feed_notes(&DeviceScope::All),
+        vec![note.to_owned()]
+    );
+    assert!(activity.unavailable.is_empty(), "its counts stay");
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(text.contains(note), "{text}");
+    assert!(text.contains("API token"), "the old decisions stay: {text}");
+
+    app.remote_macs[0].problem = Some(FeedProblem::NeedsUpdate);
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(
+        text.contains("Update Apassy to see the activity of MacBook Pro."),
+        "{text}"
+    );
+
+    app.ui.activity_scope = scope(DeviceScope::ThisMac, None);
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(!text.contains("to see the activity of"), "{text}");
 }
 
 #[test]
@@ -435,38 +471,6 @@ fn a_decision_of_another_mac_shows_its_facts_read_only() {
     let (text, _) = frames(&mut app, WIDE, 3);
     assert!(!text.contains("npm run deploy"), "{text}");
     assert!(text.contains("All clear"), "{text}");
-}
-
-#[test]
-fn activity_adds_the_uses_of_the_other_macs_in_the_scope() {
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = vault_app(&dir, example_feed());
-    decisions::open_activity(&mut app);
-    let (text, _) = frames(&mut app, WIDE, 3);
-    for expected in [
-        "Activity",
-        "API token on MacBook Pro",
-        "Claude Code · Deploy in synthetic-shop · Answered on Test iPhone",
-        "Shop database on MacBook Pro",
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
-    assert!(
-        text.find("API token on MacBook Pro") < text.find("Shop database on MacBook Pro"),
-        "newest first: {text}"
-    );
-
-    app.ui.activity_scope = scope(DeviceScope::ThisMac, None);
-    let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(!text.contains("API token on MacBook Pro"), "{text}");
-
-    app.ui.activity_scope = scope(DeviceScope::All, Some("synthetic-shop"));
-    let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("API token on MacBook Pro"), "{text}");
-    assert!(
-        text.contains(super::decisions_activity::LOG_HAS_NO_PROJECT),
-        "{text}"
-    );
 }
 
 #[test]

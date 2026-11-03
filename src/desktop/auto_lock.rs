@@ -107,18 +107,11 @@ impl IdleSource {
         (idle, std::mem::take(&mut s.session), s.generation)
     }
 }
+/// The sleep-inclusive clock of owner deadlines: Darwin's `CLOCK_MONOTONIC` on macOS,
+/// `CLOCK_BOOTTIME` on Linux. `Instant` (the awake clock) pauses during sleep on both,
+/// so the gap between the two is the time suspended.
 fn clock_now() -> Duration {
-    #[cfg(target_os = "macos")]
-    {
-        rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
-            .try_into()
-            .unwrap_or_default()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-        START.get_or_init(Instant::now).elapsed()
-    }
+    crate::broker::approvals::owner_window::sleep_inclusive_now().unwrap_or_default()
 }
 fn sample_idle(s: &Sample) -> Option<Duration> {
     s.idle.and_then(|(idle, at, clock)| {
@@ -127,7 +120,7 @@ fn sample_idle(s: &Sample) -> Option<Duration> {
 }
 fn sampled_idle(idle: Duration, awake: Duration, elapsed: Duration) -> Option<Duration> {
     // A stalled helper is not evidence of inactivity. Suspension is: the
-    // sleep-inclusive clock advances while Instant pauses on macOS.
+    // sleep-inclusive clock advances while Instant pauses (macOS and Linux).
     if elapsed > awake + Duration::from_millis(10) {
         Some(idle + elapsed)
     } else {
@@ -380,6 +373,51 @@ mod tests {
         let (idle, session, _) = source.take();
         assert!(idle.unwrap() >= Duration::from_secs(901));
         assert!(session);
+    }
+
+    /// A suspend gap triggers auto-lock: the sleep-inclusive clock jumps, the awake clock
+    /// (`Instant`) does not, and the wake input resets the system idle time to zero.
+    #[test]
+    fn auto_lock_suspend_gap_locks_on_wake() {
+        for policy in [LockPolicy::FifteenMinutes, LockPolicy::Session] {
+            let source = IdleSource::default();
+            let mut timer = Timer::default();
+            // The sample ages are read on the real clock: start the injected one there.
+            let start = clock_now();
+            source.record_at(Some(0.0), false, start);
+            let (idle, session, _) = source.take();
+            assert!(!timer.due(policy, start, idle, true, true, session));
+            // 901 seconds of suspend; the first sample after the wake says "idle 0".
+            let woke = start + Duration::from_secs(901);
+            assert!(source.record_at(Some(0.0), false, woke));
+            let (idle, session, _) = source.take();
+            assert!(idle.unwrap() >= Duration::from_secs(901));
+            assert!(session);
+            assert!(
+                timer.due(policy, woke, idle, true, true, session),
+                "{policy:?} locks after the suspend"
+            );
+        }
+    }
+
+    /// The production clock counts suspension: `CLOCK_BOOTTIME` on Linux, Darwin's
+    /// `CLOCK_MONOTONIC` on macOS (unchanged).
+    #[test]
+    fn auto_lock_production_clock_counts_suspended_time() {
+        use crate::broker::approvals::owner_window::SLEEP_INCLUSIVE_CLOCK;
+        #[cfg(target_os = "linux")]
+        assert_eq!(SLEEP_INCLUSIVE_CLOCK, rustix::time::ClockId::Boottime);
+        #[cfg(target_os = "macos")]
+        assert_eq!(SLEEP_INCLUSIVE_CLOCK, rustix::time::ClockId::Monotonic);
+        let read = || -> Duration {
+            rustix::time::clock_gettime(SLEEP_INCLUSIVE_CLOCK)
+                .try_into()
+                .unwrap()
+        };
+        let before = read();
+        let now = clock_now();
+        let after = read();
+        assert!(before <= now && now <= after);
     }
 
     #[test]

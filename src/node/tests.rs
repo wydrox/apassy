@@ -1081,6 +1081,31 @@ fn the_same_client_reconnects_to_its_agent_and_a_taken_name_gets_a_number() {
 }
 
 #[test]
+fn a_new_or_ended_connect_request_wakes_the_desktop() {
+    let fx = fixture();
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&wakes);
+    // Set before the start: the running node gets it.
+    fx.node.set_on_connects_change(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    fx.running();
+    let before = wakes.load(std::sync::atomic::Ordering::SeqCst);
+    fx.offer_connect("cr_1", "client_grok", Some("Grok Bot"));
+    until("a wake for the new request", || {
+        (wakes.load(std::sync::atomic::Ordering::SeqCst) > before).then_some(())
+    });
+    let seen = wakes.load(std::sync::atomic::Ordering::SeqCst);
+    // No change: no wake.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), seen);
+    fx.state().connects.clear();
+    until("a wake for the ended request", || {
+        (wakes.load(std::sync::atomic::Ordering::SeqCst) > seen).then_some(())
+    });
+}
+
+#[test]
 fn names_of_remote_agents_are_unique_and_short() {
     let taken = vec!["Grok Bot".to_owned(), "grok bot 2".to_owned()];
     assert_eq!(unique_name(&taken, "Grok Bot"), "Grok Bot 3");

@@ -872,8 +872,8 @@ fn arrows_change_a_picker_without_moving_the_focus() {
     );
 }
 
-/// ⌘1 to ⌘3 switch the place, ⌘, opens Settings, ⌘[ leaves the credential, and ⌘L
-/// locks.
+/// ⌘1 to ⌘5 switch the place (All credentials, Overview, Decisions, Agents, Logs), ⌘,
+/// opens Settings, ⌘[ leaves the credential, and ⌘L locks.
 #[test]
 fn shortcuts_switch_places_open_settings_go_back_and_lock() {
     let dir = TempDir::new().expect("temp dir");
@@ -883,18 +883,21 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
     window.press(&mut app, Key::OpenBracket, Modifiers::COMMAND);
     assert!(app.place.is_credentials(), "⌘[ stays in the list");
     assert_eq!(app.selected_item_id, None, "⌘[ leaves the credential");
-    for (key, place) in [
-        (Key::Num2, Place::Decisions),
-        (Key::Num3, Place::Agents),
-        (Key::Num1, Place::CREDENTIALS),
+    for (key, place, text) in [
+        (Key::Num2, Place::Overview, "Last 7 days"),
+        (Key::Num3, Place::Decisions, "Decisions"),
+        (Key::Num4, Place::Agents, "Agents"),
+        (Key::Num5, Place::Logs, "No activity yet"),
+        (Key::Num1, Place::CREDENTIALS, "All credentials"),
     ] {
         window.press(&mut app, key, Modifiers::COMMAND);
         assert_eq!(app.place, place);
+        assert!(window.text.contains(text), "{place:?}: {}", window.text);
         // An empty Decisions ("Nothing waits for you.", "All clear") may have no control
         // to focus.
         assert!(
             window.focused().is_some() || place == Place::Decisions,
-            "the list took the focus for {place:?}"
+            "the page took the focus for {place:?}"
         );
     }
     window.press(&mut app, Key::Comma, Modifiers::COMMAND);
@@ -904,8 +907,8 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
         window.focused().is_some(),
         "the list of the sections took the focus"
     );
-    // Settings is a place: ⌘2 goes on to Decisions.
-    window.press(&mut app, Key::Num2, Modifiers::COMMAND);
+    // Settings is a place: ⌘3 goes on to Decisions.
+    window.press(&mut app, Key::Num3, Modifiers::COMMAND);
     assert_eq!(app.place, Place::Decisions);
     window.press(&mut app, Key::Comma, Modifiers::COMMAND);
     assert_eq!(app.place, Place::Settings);
@@ -1155,12 +1158,14 @@ fn control_command_s_collapses_the_sidebar_and_floats_it_in_a_narrow_window() {
     assert!(app.ui.sidebar_hidden);
     assert!(!window.text.contains("Personal"), "{}", window.text);
     // The rail keeps each place, with its name for VoiceOver.
-    assert!(
-        has_name(&window, "Decisions  ⌘2"),
-        "{:?}",
-        window.names.values().collect::<Vec<_>>()
-    );
-    window.press(&mut app, Key::Num3, Modifiers::COMMAND);
+    for name in ["Overview  ⌘2", "Decisions  ⌘3", "Agents  ⌘4", "Logs  ⌘5"] {
+        assert!(
+            has_name(&window, name),
+            "{name}: {:?}",
+            window.names.values().collect::<Vec<_>>()
+        );
+    }
+    window.press(&mut app, Key::Num4, Modifiers::COMMAND);
     assert_eq!(app.place, Place::Agents);
     window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
     assert!(!app.ui.sidebar_hidden);

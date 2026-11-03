@@ -6,7 +6,7 @@
 //! - With nothing waiting, the list shows the newest decisions in the scope by day, and
 //!   the detail shows the week: the totals, one row per device, and the most active
 //!   agents. A click on a decision shows its facts, read-only.
-//! - Activity adds the newest uses of the feeds to the log of this Mac.
+//! - Bouncer > Logs shows every run of this Mac and of the feeds (`logs.rs`).
 //!
 //! The rows of another Mac show what its feed says, nothing more. Its texts come from
 //! agents, so they show as plain text, never as a link.
@@ -23,10 +23,12 @@ use super::columns::{self, Group};
 use super::kit::{self, Font, Icon, Tone};
 use crate::broker::approvals::shown_path;
 use crate::desktop::DesktopApp;
-use crate::desktop::owner_store::{AgentActivity, AgentActivityRow, WeekCounts};
-use crate::desktop::remote_feeds::{ActivityScope, DeviceScope, RemoteFeedState, RemoteMac};
+use crate::desktop::owner_store::{AgentActivity, WeekCounts};
+use crate::desktop::remote_feeds::{
+    ActivityScope, DeviceScope, FeedProblem, RemoteFeedState, RemoteMac,
+};
 use crate::questions::feed::{Feed, FeedAgent, FeedUse};
-use crate::vault::{ActivityDecision, format_utc};
+use crate::vault::format_utc;
 
 /// The decisions that the list shows.
 pub(super) const RECENT: usize = 20;
@@ -278,6 +280,9 @@ pub(super) struct VaultActivity {
     pub(super) recent: Vec<PastDecision>,
     /// The other Macs whose feed left out older uses.
     pub(super) truncated: Vec<Source>,
+    /// The other Macs whose newest feed this Mac cannot show: the activity is that of
+    /// their last good feed (relay-feed-v1 section 7.4).
+    pub(super) stale: Vec<(Source, FeedProblem)>,
     pub(super) unavailable: Vec<Unavailable>,
 }
 
@@ -323,14 +328,29 @@ impl VaultActivity {
         agents
     }
 
-    /// "Some older uses are on MAC only." for each Mac in the scope whose feed left out
-    /// older uses.
-    pub(super) fn truncated_notes(&self, scope: &DeviceScope) -> Vec<String> {
-        self.truncated
+    /// The notes of the other Macs in the scope: "Sync this vault to see the activity of
+    /// MAC." (or "Update Apassy …") for each Mac whose newest feed this Mac cannot show,
+    /// then "Some older uses are on MAC only." for each Mac whose feed left out older
+    /// uses.
+    pub(super) fn feed_notes(&self, scope: &DeviceScope) -> Vec<String> {
+        let stale = self
+            .stale
+            .iter()
+            .filter(|(source, _)| source.in_scope(scope))
+            .map(|(source, problem)| match problem {
+                FeedProblem::NeedsSync => {
+                    format!("Sync this vault to see the activity of {}.", source.name())
+                }
+                FeedProblem::NeedsUpdate => {
+                    format!("Update Apassy to see the activity of {}.", source.name())
+                }
+            });
+        let truncated = self
+            .truncated
             .iter()
             .filter(|source| source.in_scope(scope))
-            .map(|source| format!("Some older uses are on {} only.", source.name()))
-            .collect()
+            .map(|source| format!("Some older uses are on {} only.", source.name()));
+        stale.chain(truncated).collect()
     }
 }
 
@@ -486,6 +506,9 @@ pub(super) fn gather(
                 automatic: feed.week.automatic,
             }),
         });
+        if let Some(problem) = remote.problem {
+            activity.stale.push((source.clone(), problem));
+        }
         if feed.truncated {
             activity.truncated.push(source.clone());
         }
@@ -648,7 +671,7 @@ pub(super) fn empty_list(
     let recent = activity.recent_in(scope);
     let groups = by_day(&recent, now, local_offset(now));
     let name_this_mac = activity.devices.len() > 1;
-    let notes = activity.truncated_notes(&scope.device);
+    let notes = activity.feed_notes(&scope.device);
     let mut chosen = None;
     columns::grouped_rows(
         ui,
@@ -934,48 +957,3 @@ pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision, why: Optio
         );
     }
 }
-
-// ---- Activity. ----
-
-/// The decisions of the other Macs in the scope as rows of the Activity log, newest
-/// first. The credential names the Mac, and the reason line names the agent, the action,
-/// the project, and who decided.
-pub(super) fn remote_activity_rows(
-    activity: &VaultActivity,
-    scope: &ActivityScope,
-) -> Vec<AgentActivityRow> {
-    activity
-        .recent
-        .iter()
-        .filter(|decision| decision.source != Source::ThisMac && in_scope(decision, scope))
-        .map(|decision| AgentActivityRow {
-            id: 0,
-            at: decision.at,
-            when: format_utc(decision.at),
-            agent: decision.agent.clone(),
-            item: format!("{} on {}", decision.item, decision.source.name()),
-            operation: if decision.command.is_empty() {
-                format!("{} in {}", decision.action, decision.project_text())
-            } else {
-                decision.command.clone()
-            },
-            decision: if decision.allowed() {
-                ActivityDecision::Allow
-            } else {
-                ActivityDecision::Deny
-            },
-            reason: format!(
-                "{} · {} in {} · {}",
-                decision.agent,
-                decision.action,
-                decision.project_text(),
-                decision.decided_text()
-            ),
-        })
-        .collect()
-}
-
-/// The note under Activity when a project is chosen: the log of this Mac keeps no
-/// project, so its rows are all shown.
-pub(super) const LOG_HAS_NO_PROJECT: &str =
-    "The log of this Mac keeps no project, so it shows all of its rows.";

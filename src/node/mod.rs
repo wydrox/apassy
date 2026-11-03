@@ -343,6 +343,9 @@ pub struct Node {
     /// Connect requests that the owner decided on this Mac or that the node withdrew, for
     /// the questions lane ([`Node::take_connect_ends`]), oldest first.
     connect_ends: Mutex<std::collections::VecDeque<(String, ConnectEnd)>>,
+    /// Called on the host thread when the connect requests change; every node of this
+    /// service gets it.
+    on_connects: Arc<Mutex<Option<host::ConnectsHook>>>,
 }
 
 /// The state of the open vault that a start needs.
@@ -367,7 +370,15 @@ impl Node {
             serial: AtomicU64::new(0),
             notes: Mutex::new(Notes::default()),
             connect_ends: Mutex::new(std::collections::VecDeque::new()),
+            on_connects: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Call `hook` (on the host thread, with no lock of the node held) each time the
+    /// connect requests that wait change: the desktop wakes its window, so Decisions and
+    /// the iPhone card see a new request at once, also while the window is idle.
+    pub fn set_on_connects_change(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *lock(&self.on_connects) = Some(Arc::new(hook));
     }
 
     /// True while the node runs.
@@ -590,7 +601,7 @@ impl Node {
                 }
             }
         };
-        let shared = Arc::new(host::Shared::new(
+        let mut shared = host::Shared::new(
             node,
             team,
             Arc::clone(vault),
@@ -598,7 +609,9 @@ impl Node {
             broker,
             state.epoch,
             public_url,
-        ));
+        );
+        shared.on_connects = Arc::clone(&self.on_connects);
+        let shared = Arc::new(shared);
         if let Err(failure) = self
             .check_not_stopping()
             .and_then(|()| shared.refresh(&[]).map(drop))

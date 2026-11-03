@@ -22,7 +22,8 @@ Apache-2.0 and builds from this repository.
 | Tailscale DERP relays | — | WireGuard ciphertext, sizes, times | Traffic |
 | Push gateway (Apassy project) | The APNs key | Push handles, node IP addresses, times | Tokens of other gateways, any question data |
 | Apple (APNs, iCloud) | Push delivery; iCloud copies if folder sync is on | Push metadata; SQLCipher ciphertext of iCloud copies | Vault contents |
-| Apassy Connect (paid, optional) | Sealed envelopes and sync snapshots | TLS records, ciphertext, sizes, times | Values, vault contents, questions, answers |
+| Apassy Connect (paid, optional) | Sealed envelopes and sync snapshots | TLS records, ciphertext, sizes, times | Values, vault contents, questions, answers, except the opt-in bouncer brain service below, which sees the bouncer state |
+| Bouncer brain service of Apassy Connect (paid, opt-in, ADR 0035) | The shared encoder; the owner's head sets while Apassy hosting is on; the examples of a training job for at most 24 h | The state of each bouncer request (user request, command, relative directory, purpose, variable names, owner rule), in memory for one request; the examples of a training job | Values, the vault, the vault path, absolute project paths. It cannot allow a run: the bouncer gate on the Mac decides |
 | Apassy project | Release signing keys | Nothing at run time | Anything of a user |
 | Upstream API (Stripe, OpenAI, …) | — | The requests made with its credential | Other credentials |
 

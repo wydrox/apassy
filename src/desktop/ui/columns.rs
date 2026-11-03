@@ -271,8 +271,10 @@ pub(super) fn place_title(app: &DesktopApp) -> String {
         #[cfg(not(feature = "vault"))]
         Place::Folder(Some(_)) => "Folder".to_owned(),
         Place::Shared(uuid) => super::sidebar::shared_vault(app, uuid).name,
+        Place::Overview => "Overview".to_owned(),
         Place::Decisions => "Decisions".to_owned(),
         Place::Agents => "Agents".to_owned(),
+        Place::Logs => "Logs".to_owned(),
         Place::Settings => "Settings".to_owned(),
     }
 }
@@ -284,4 +286,77 @@ pub(super) fn count_label(count: usize, one: &str, many: &str) -> String {
     } else {
         format!("{count} {many}")
     }
+}
+
+/// The toolbar of a wide pane: the title and the line under it on the row of the traffic
+/// lights, and the buttons at the right. After a rail (no full sidebar), the title starts
+/// after the traffic lights.
+pub(super) fn wide_toolbar(
+    ui: &mut Ui,
+    title: &str,
+    subtitle: &str,
+    trailing: impl FnOnce(&mut Ui),
+) {
+    let full = ui.max_rect();
+    let rect = Rect::from_min_size(full.min, Vec2::new(full.width(), kit::TOOLBAR + 12.0));
+    kit::window_drag_region(ui, rect);
+    let center_y = rect.top() + kit::LIGHTS_Y;
+    let row = Rect::from_min_max(
+        Pos2::new(rect.left() + 24.0, center_y - 14.0),
+        Pos2::new(rect.right() - 16.0, center_y + 14.0),
+    );
+    let buttons = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(row)
+                .layout(Layout::right_to_left(Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                trailing(ui);
+                ui.min_rect().width()
+            },
+        )
+        .inner;
+    let left = row.left().max(kit::LIGHTS_RIGHT + 10.0);
+    kit::toolbar_title_on_row(
+        ui,
+        left,
+        row.right() - buttons - 6.0,
+        center_y,
+        title,
+        subtitle,
+    );
+    ui.allocate_rect(rect, Sense::hover());
+}
+
+/// The reading width of a wide pane (the mockup's `.wpad`).
+pub(super) const WIDE_WIDTH: f32 = 900.0;
+
+/// The scope bar row of a wide pane, under its toolbar, at the left margin of 24 points.
+pub(super) fn wide_inset<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::NONE
+        .inner_margin(Margin {
+            left: 24,
+            right: 16,
+            top: 0,
+            bottom: 10,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// The scrolling body of a wide pane, in a column of [`WIDE_WIDTH`].
+pub(super) fn wide_body(ui: &mut Ui, salt: impl Hash + std::fmt::Debug, add: impl FnOnce(&mut Ui)) {
+    ScrollArea::vertical()
+        .id_salt(salt)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add_space(2.0);
+            kit::column(ui, WIDE_WIDTH, add);
+            kit::follow_focus(ui);
+            kit::keyboard_scroll(ui);
+        });
 }

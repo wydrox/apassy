@@ -20,7 +20,7 @@ use super::kit::{self, Font, Icon, Style, Tone};
 use super::{Sheet, close_sheet};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::{ActionUse, AgentOverview, ExceptionRow, RecentUse};
-use crate::desktop::remote_feeds::{DeviceScope, RemoteFeedState, RemoteMac};
+use crate::desktop::remote_feeds::{DeviceScope, FeedProblem, RemoteFeedState, RemoteMac};
 use crate::desktop::{DesktopApp, Place};
 use crate::vault::AgentSummary;
 use crate::vault::exceptions::{ExceptionKind, MAX_AGENT_NOTE_BYTES};
@@ -477,7 +477,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 agents.sort_by_key(|agent| agent.revoked);
                 let connected = agents.iter().filter(|agent| !agent.revoked).count();
                 count += connected;
-                let rows: Vec<Entry> = agents
+                let mut rows: Vec<Entry> = agents
                     .into_iter()
                     .map(|agent| Entry::Remote {
                         device: mac.device.clone(),
@@ -500,6 +500,19 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         },
                     })
                     .collect();
+                // A later feed of the Mac failed: its last good feed stays, with the
+                // text of the step (relay-feed-v1 section 7.4).
+                match mac.problem {
+                    Some(FeedProblem::NeedsSync) => rows.insert(
+                        0,
+                        Entry::Note(format!("Sync this vault to see the agents of {name}")),
+                    ),
+                    Some(FeedProblem::NeedsUpdate) => rows.insert(
+                        0,
+                        Entry::Note(format!("Update Apassy to see the agents of {name}")),
+                    ),
+                    None => {}
+                }
                 if !rows.is_empty() {
                     sections.push((name, rows, Some(connected)));
                 }

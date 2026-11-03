@@ -96,6 +96,9 @@ fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// What the host calls when the connect requests of the node change.
+pub(super) type ConnectsHook = Arc<dyn Fn() + Send + Sync>;
+
 /// A released run whose session may still be live.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveSession {
@@ -140,6 +143,9 @@ pub(super) struct Shared {
     asking: Mutex<HashSet<u64>>,
     /// The connect requests that wait for the owner, as the node gave them last.
     pub(super) connects: Mutex<Vec<PendingConnect>>,
+    /// Called when that list changes (the desktop wakes its window). Shared with the
+    /// service, so a hook set later reaches a running node.
+    pub(super) on_connects: Arc<Mutex<Option<ConnectsHook>>>,
     sessions: Mutex<Vec<LiveSession>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     pub(super) catalog: Mutex<CatalogState>,
@@ -168,6 +174,7 @@ impl Shared {
             retry_at: Mutex::new(HashMap::new()),
             asking: Mutex::new(HashSet::new()),
             connects: Mutex::new(Vec::new()),
+            on_connects: Arc::new(Mutex::new(None)),
             sessions: Mutex::new(Vec::new()),
             workers: Mutex::new(Vec::new()),
             catalog: Mutex::new(CatalogState::default()),
@@ -327,10 +334,22 @@ impl Shared {
         }
     }
 
-    /// Read the connect requests of the node again.
+    /// Read the connect requests of the node again, and call the hook when they changed.
     pub(super) fn poll_connects(&self) {
-        if let Some(Ok(list)) = self.with_node(|node| node.pending_connects()) {
-            *lock(&self.connects) = list;
+        let Some(Ok(list)) = self.with_node(|node| node.pending_connects()) else {
+            return;
+        };
+        let changed = {
+            let mut connects = lock(&self.connects);
+            let changed = *connects != list;
+            *connects = list;
+            changed
+        };
+        if changed {
+            let hook = lock(&self.on_connects).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
         }
     }
 

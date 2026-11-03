@@ -340,14 +340,13 @@ const BASE64URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0
 const SYMBOLS: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#%()*+,-./:;<=>?@[]^_{|}~";
 
-#[cfg(target_os = "macos")]
-const O_NONBLOCK: i32 = 0x0004;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW: i32 = 0x0100;
-#[cfg(not(target_os = "macos"))]
-const O_NONBLOCK: i32 = 0o4000;
-#[cfg(not(target_os = "macos"))]
-const O_NOFOLLOW: i32 = 0o400_000;
+/// The open flags of a file capture: non-blocking, so that a FIFO that took the place of
+/// the file does not block, and without a last symbolic link. The values come from the
+/// target (rustix), not from written numbers: `O_NOFOLLOW` differs by architecture. It is
+/// 0o400000 on x86_64 Linux and 0o100000 on aarch64 Linux, where 0o400000 is `O_LARGEFILE`.
+const CAPTURE_OPEN_FLAGS: i32 = rustix::fs::OFlags::NONBLOCK
+    .union(rustix::fs::OFlags::NOFOLLOW)
+    .bits() as i32;
 
 /// A capture: a command or a file.
 #[derive(Debug, Clone, Copy)]
@@ -996,17 +995,21 @@ fn file_metadata(canonical: &Path) -> Result<fs::Metadata, String> {
     Ok(meta)
 }
 
+/// Open a file for a capture with [`CAPTURE_OPEN_FLAGS`].
+fn open_capture(path: &Path) -> std::io::Result<fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(CAPTURE_OPEN_FLAGS)
+        .open(path)
+}
+
 /// Read one file for a capture (see the module documentation).
 fn read_file(text: &str, protected: &Protected) -> Result<Zeroizing<String>, String> {
     let canonical = checked_file(text, protected)?;
     let before = file_metadata(&canonical)?;
-    // Non-blocking and without a last symbolic link: a FIFO that took the place of the
-    // file does not block, and the identity check below refuses it.
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(O_NONBLOCK | O_NOFOLLOW)
-        .open(&canonical)
-        .map_err(|_| "The file cannot be read.".to_owned())?;
+    // A FIFO that took the place of the file does not block, and the identity check below
+    // refuses it. A symbolic link that took its place is not followed.
+    let file = open_capture(&canonical).map_err(|_| "The file cannot be read.".to_owned())?;
     let after = file
         .metadata()
         .map_err(|_| "The file cannot be read.".to_owned())?;
@@ -2256,6 +2259,53 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    /// The flags are the target's own values (Linux `asm-generic/fcntl.h` on x86_64,
+    /// `asm/fcntl.h` on arm64, `<sys/fcntl.h>` on macOS), so a file capture on each target
+    /// refuses a last symbolic link.
+    #[test]
+    fn capture_open_flags_are_the_values_of_the_target() {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert_eq!(CAPTURE_OPEN_FLAGS, 0o4000 | 0o400_000);
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            assert_eq!(CAPTURE_OPEN_FLAGS, 0o4000 | 0o100_000);
+            // 0o400000 is O_LARGEFILE on arm64: the old written value.
+            assert_eq!(CAPTURE_OPEN_FLAGS & 0o400_000, 0);
+        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(CAPTURE_OPEN_FLAGS, 0x0004 | 0x0100);
+    }
+
+    #[test]
+    fn capture_open_refuses_a_last_symbolic_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("synthetic-token.txt");
+        fs::write(&target, "synthetic-capture-value\n").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_capture(&target).is_ok());
+        let error = open_capture(&link).expect_err("a last symbolic link is refused");
+        // ELOOP on Linux and macOS.
+        assert_eq!(
+            error.raw_os_error(),
+            Some(rustix::io::Errno::LOOP.raw_os_error())
+        );
+    }
+
+    #[test]
+    fn capture_open_does_not_block_on_a_fifo() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("synthetic.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        // Without O_NONBLOCK this open waits for a writer forever.
+        let file = open_capture(&fifo).expect("a FIFO opens without a wait");
+        assert!(!file.metadata().unwrap().file_type().is_file());
     }
 
     #[test]

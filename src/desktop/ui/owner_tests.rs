@@ -211,7 +211,7 @@ fn secret_fields_keep_their_buffer_while_typing() {
 }
 
 /// A fake Touch ID helper that answers `not_available`, as on the development Mac.
-fn not_available_helper(dir: &Path) -> NativeHelper {
+pub(super) fn not_available_helper(dir: &Path) -> NativeHelper {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join("helper");
     std::fs::write(
@@ -522,7 +522,7 @@ fn open_settings_from_decisions_shows_the_notifications_tab() {
     assert!(!text.contains("Keyboard shortcuts"), "{text}");
 }
 
-fn waiting_run(agent: &str) -> PendingRun {
+pub(super) fn waiting_run(agent: &str) -> PendingRun {
     PendingRun {
         id: 0,
         agent: agent.to_owned(),

@@ -717,6 +717,114 @@ fn default_classification_needs_eighty_percent_even_for_a_safe_command() {
     assert_eq!(code(&handle.join().unwrap()), "approval_denied");
 }
 
+/// ADR 0031, 2026-11-03: "Allow as dev" means development. An unlabeled credential
+/// asks as production before the brain. After the label, a writing development command
+/// that fits the task is decided by the brain with the development thresholds and runs
+/// without a question, also for a label from before 0.5.16. A high risk from a strong
+/// provider signal keeps asking, and "Allow as prod" asks before the brain again.
+#[test]
+fn a_development_label_lets_a_fitting_writing_command_run_without_a_question() {
+    use apassy::vault::{DeclarationSource, DeclarationSources};
+    let all = |source| DeclarationSources {
+        environment: source,
+        risk: source,
+        scope: source,
+        reversibility: source,
+    };
+    // A value without a signal: production, high risk, admin, irreversible.
+    let unlabeled = Declaration {
+        project: "project".to_owned(),
+        environment: Environment::Production,
+        risk: RiskLevel::High,
+        scope: Scope::Admin,
+        reversibility: Reversibility::Irreversible,
+    };
+    // The brain: the command fits the task (95% by default) and writes (70%).
+    let fx = fixture_model(
+        Some(unlabeled.clone()),
+        true,
+        Duration::from_secs(10),
+        common::fake_bouncer(&[("writes", 0.7)]),
+    );
+    with_vault(&fx, |v| {
+        v.set_declaration_sources(fx.item_id, &all(DeclarationSource::Default))
+    })
+    .unwrap();
+    // A project script, as `node script.js` or `npm run seed`: not known safe.
+    std::fs::write(fx.project.join("seed.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    let seed = ["/bin/sh", "./seed.sh"];
+    let asks = |fx: &Fixture, wanted: &str| {
+        let handle = argv_later_at(fx, &fx.project, &seed);
+        let run = waiting(fx);
+        assert!(run.question.why.contains(wanted), "{}", run.question.why);
+        assert!(fx.broker.approvals().deny(run.id));
+        assert_eq!(code(&handle.join().expect("run")), "approval_denied");
+    };
+
+    // Unlabeled: production with write or admin scope asks before the brain.
+    asks(&fx, "write or admin scope");
+    assert_eq!(model_calls(&fx), 0);
+
+    // "Allow as dev": the broker saves the answer with this call before the run.
+    with_vault(&fx, |v| {
+        v.set_declaration_environment(fx.item_id, Environment::Development)
+    })
+    .unwrap();
+    assert_eq!(decided_by(&send_argv(&fx, &seed)), "Bouncer allowed");
+    assert_eq!(model_calls(&fx), 1);
+
+    // A label from before 0.5.16 kept the stored production defaults.
+    let earlier = Declaration {
+        environment: Environment::Development,
+        ..unlabeled.clone()
+    };
+    let labeled = DeclarationSources {
+        environment: DeclarationSource::Owner,
+        ..all(DeclarationSource::Default)
+    };
+    with_vault(&fx, |v| {
+        v.save_declaration(fx.item_id, &earlier, Some("sentry"), None)?;
+        v.set_declaration_sources(fx.item_id, &labeled)
+    })
+    .unwrap();
+    assert_eq!(decided_by(&send_argv(&fx, &seed)), "Bouncer allowed");
+    assert_eq!(model_calls(&fx), 2);
+    with_vault(&fx, |v| {
+        assert_eq!(v.declaration(fx.item_id).unwrap(), Some(earlier.clone()));
+    });
+
+    // A high risk from a strong provider signal stays: the brain must be sure that the
+    // command does not change state.
+    with_vault(&fx, |v| {
+        v.set_declaration_sources(
+            fx.item_id,
+            &DeclarationSources {
+                risk: DeclarationSource::Signal,
+                reversibility: DeclarationSource::Signal,
+                ..labeled
+            },
+        )
+    })
+    .unwrap();
+    asks(&fx, "writes");
+    assert_eq!(model_calls(&fx), 3);
+
+    // "Allow as prod": the careful defaults again, and write or admin scope asks
+    // before the brain.
+    with_vault(&fx, |v| {
+        v.set_declaration_sources(fx.item_id, &labeled)?;
+        v.set_declaration_environment(fx.item_id, Environment::Production)
+    })
+    .unwrap();
+    asks(&fx, "write or admin scope");
+    assert_eq!(model_calls(&fx), 3);
+    with_vault(&fx, |v| {
+        let declaration = v.declaration(fx.item_id).unwrap().expect("declaration");
+        assert_eq!(declaration.risk, RiskLevel::High);
+        assert_eq!(declaration.reversibility, Reversibility::Irreversible);
+    });
+}
+
 /// A question is in the decision log file with its reason kind and the brain answers,
 /// and without the command or the user request; the use of the run names its decision
 /// log entry, so Decisions can show why it asked.

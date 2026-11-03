@@ -27,7 +27,7 @@
 //! - A visible custom detail that looks like a setup key is not drawn. The page says that
 //!   it is hidden for safety (`exposes_setup_key`).
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Align, CornerRadius, Layout, Sense, Vec2};
 
@@ -45,9 +45,21 @@ use crate::otp::{self, OtpError, Totp};
 
 /// Below this many seconds the countdown turns to a warning color.
 const LOW_SECONDS: u64 = 5;
-/// The page redraws this often while it shows a code, so the countdown and the code
-/// stay current.
-const REDRAW: Duration = Duration::from_millis(250);
+/// The page shows whole seconds of the clock (`kit::now`): the code and its seconds
+/// change only when the second changes. While it shows a code, it redraws this long
+/// after each whole second. egui wakes a frame a little early (by the time that it
+/// predicts for a frame, about 17 ms), so the margin keeps the frame after the change.
+const AFTER_SECOND: Duration = Duration::from_millis(40);
+
+/// How long until the frame after the next whole second of `now`.
+pub(super) fn until_next_second(now: SystemTime) -> Duration {
+    let into = now
+        .duration_since(UNIX_EPOCH)
+        .map_or(Duration::ZERO, |since| {
+            Duration::from_nanos(u64::from(since.subsec_nanos()))
+        });
+    Duration::from_secs(1).saturating_sub(into) + AFTER_SECOND
+}
 
 // ---- The credential page. ----
 
@@ -341,7 +353,8 @@ fn show_code(ui: &mut egui::Ui, code: &Code) {
     let fraction = code.left as f32 / code.period.max(1) as f32;
     let filled = egui::Rect::from_min_size(rect.min, Vec2::new(width * fraction.min(1.0), 3.0));
     ui.painter().rect_filled(filled, radius, tone.mark());
-    ui.ctx().request_repaint_after(REDRAW);
+    ui.ctx()
+        .request_repaint_after(until_next_second(SystemTime::now()));
 }
 
 /// The hover text of "Show" on a code row. The check is the usual owner check, as for
