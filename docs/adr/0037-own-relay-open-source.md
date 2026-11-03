@@ -6,6 +6,7 @@ features are an enterprise track that comes later. Not implemented.
 When accepted, it replaces the hosted parts of ADR 0016 §5, ADR 0019 (a multi-tenant relay that the
 operator runs for teams), the default relay address of ADR 0022, and Connect creation on an
 Apassy-run server (ADR 0032). It keeps every wire contract and the device identity of ADR 0019.
+Plans and prices: [plans](../product/plans.md) (D2, D3, D7, and D14 in one page).
 
 ## Context
 
@@ -394,7 +395,7 @@ more. Work units, files, and checks: [implementation plan](../design/implementat
 | 4. Sync and teams on nodes | Node-to-node sync with a sync home. A team host on a node, shared to members across tailnets (section 9), with the embedded tailnet node (D9, starts with a spike). The way A switch (D10). Migration of hosted teams and relay-sync vaults. | L | Two Macs and a Linux sync home converge after one Mac is offline for a day. Konrad's agent, in another tailnet, runs way B on Rafal's team host. |
 | 5. Linked environments | `apassy environment link`, the SSH route, remote MCP. The Funnel route, off by default, for cloud sessions. | M | An agent on `devbox-arm` uses a credential through the Mac node and holds only placeholders. |
 | 6. Private sharing | Way C for AWS STS, GitHub Apps, Google Cloud, and OAuth refresh tokens. Remote signing for SigV4. Keys per member where a provider has a key-management API (section 10). | M–L | A member's agent uses AWS with STS credentials that expire within 15 minutes. |
-| 7. Apassy Connect, and hosted secrets retired | The hosted relay becomes Connect (D2): a byte relay with TLS through to the user's node, a blind sync store, and push, with accounts and Stripe (D3). Remove way B, team vaults, and the master key from the hosted service. | M–L | The hosted service has no master key, no team file, and no proxy route. A Mac without Tailscale reaches its iPhone and a cloud agent through Connect. |
+| 7. Apassy Connect, and hosted secrets retired | The hosted relay becomes Connect (D2): a byte relay with TLS through to the user's node and a blind sync store, with accounts, Stripe, and the plans of [plans](../product/plans.md) (D3). Push stays the free gateway of D7. Remove way B, team vaults, and the master key from the hosted service. | M–L | The hosted service has no master key, no team file, and no proxy route. A Mac without Tailscale reaches its iPhone and a cloud agent through Connect. |
 | 8. Later | Embedded tailnet on the iPhone, so it needs no Tailscale app. Linux isolation. Linux window. | — | Separate ADRs |
 
 ### Enterprise track (later, TEE)

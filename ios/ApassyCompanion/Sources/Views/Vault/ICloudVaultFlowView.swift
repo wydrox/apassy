@@ -10,18 +10,18 @@ struct AddVaultChoiceView: View {
         PairingScreen {
             PairingHero(
                 symbol: "externaldrive.badge.plus", title: "Add a vault",
-                message: "Use iCloud for your personal vault. Use the Apassy relay for a team vault.")
+                message: "Open your vault from iCloud Drive, or join a vault that your Mac syncs through the Apassy relay.")
         } actions: {
             Button {
                 root.addICloudVault()
             } label: {
-                Label("iCloud · Personal · Free", systemImage: "icloud").frame(maxWidth: .infinity)
+                Label("iCloud · Free", systemImage: "icloud").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             Button {
                 root.joinTeam()
             } label: {
-                Label("Join a team · Apassy relay", systemImage: "person.2").frame(maxWidth: .infinity)
+                Label("From your Mac · Apassy relay", systemImage: "macbook.and.iphone").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glass)
             Button("Cancel") { root.cancelAddVault() }

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Apassy team relay — alpha guide</title>
+  <title>Apassy team relay — guide for a relay that you run</title>
   <!-- Guide source: docs/ONBOARDING.md. Keep the text and commands the same. -->
   <style>
     :root {
@@ -61,8 +61,14 @@
 </head>
 <body>
   <main>
-    <h1>Apassy team relay — alpha guide</h1>
-      <p>This guide is for a team owner and a member. The relay URL is <code>https://apassy-relay.wyderka.cc</code>. The CLI is <code>apassy-team</code>.</p>
+    <h1>Apassy team relay — guide for a relay that you run</h1>
+      <p>This guide is for a team owner and a member. The CLI is <code>apassy-team</code>.</p>
+    <section aria-labelledby="which-relay">
+      <h2 id="which-relay">Which relay</h2>
+      <p>The hosted relay <code>https://apassy-relay.wyderka.cc</code> no longer serves team vaults (since Apassy 0.5.14). It refuses runs, remote MCP, the proxy, access requests, and new team-vault content with <code>410 team_vaults_retired</code>. It still serves the Apassy app: vault sync between your devices, approvals on the iPhone, the feed, and push. It also serves the downloads of this CLI.</p>
+      <p>Team vaults work on a relay that you run yourself. They are on by default there (<code>APASSY_RELAY_TEAM_VAULTS=1</code>). To run a relay, follow <a href="https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>. Later, a team host runs on an Apassy node on your own machine (ADR 0037, stage 4).</p>
+      <p>In the commands below, replace <code>RELAY_URL</code> with the address of your relay, for example <code>https://relay.example.com</code>.</p>
+    </section>
     <section aria-labelledby="install">
       <h2 id="install">Install</h2>
       <p>Run these commands on the owner&#x27;s machine and each member&#x27;s machine.</p>
@@ -73,8 +79,8 @@ sh install.sh</code></pre>
     </section>
     <section aria-labelledby="create-a-team-owner">
       <h2 id="create-a-team-owner">Create a team (owner)</h2>
-      <p>Get a one-time team code from the relay operator. The code starts with <code>apassy_tcd_</code>. Save the code in <code>team-code-file</code>. Replace <code>NAME</code> with the team name. Replace <code>OWNERNAME</code> with the owner&#x27;s name.</p>
-      <pre><code class="language-sh">apassy-team create --relay https://apassy-relay.wyderka.cc --team &quot;NAME&quot; \
+      <p>Get a one-time team code from the operator of your relay. If you run the relay, make the code on its server with <code>apassy-relay admin team-code --hours 72 &gt; team-code-file</code> (section 17 of <a href="https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>). The code starts with <code>apassy_tcd_</code>. Save the code in <code>team-code-file</code>. Replace <code>NAME</code> with the team name. Replace <code>OWNERNAME</code> with the owner&#x27;s name.</p>
+      <pre><code class="language-sh">apassy-team create --relay RELAY_URL --team &quot;NAME&quot; \
   --name OWNERNAME --device &quot;Owner laptop&quot; &lt; team-code-file
 apassy-team me</code></pre>
       <p><code>create</code> always makes an owner device and saves the team as current. This device becomes the team&#x27;s key holder. The CLI does not create a new owner token. Each member command signs in with the device key. The access token lasts 15 minutes and stays only in process memory. The CLI stops if the relay&#x27;s sign-in origin differs from the saved URL.</p>
@@ -96,7 +102,7 @@ APASSY_TEAM=TEAM_ID apassy-team me</code></pre>
       <h2 id="enroll-a-legacy-member">Enroll a legacy member</h2>
       <p>A legacy team from <code>apassy-relay init</code> has an owner token. Legacy member tokens expire 14 days after team creation or migration to server schema version 3. Enroll a device before this period ends. Use a configuration directory without an enrolled device for this team. <code>init</code> and <code>device enroll</code> do not change the current team. Keep <code>APASSY_TEAM_TOKEN</code> set until enrollment succeeds.</p>
       <pre><code class="language-sh">export XDG_CONFIG_HOME=&quot;$HOME/.config/apassy-device&quot;
-export APASSY_RELAY_URL=https://apassy-relay.wyderka.cc
+export APASSY_RELAY_URL=RELAY_URL
 export APASSY_TEAM_TOKEN=&quot;$(cat owner-token-file)&quot;
 apassy-team device enroll --name &quot;Owner laptop&quot;
 unset APASSY_TEAM_TOKEN
@@ -116,7 +122,7 @@ apassy-team invite --role member --name bob --grant 1 &gt; invite-link-file</cod
       <p><code>invite</code> prints <code>&lt;relay URL&gt;/join#&lt;code&gt;</code> once. Send the file to the member through a private channel. The invite code works once.</p>
       <p>Use <code>--name NAME</code> to set the member&#x27;s name. Repeat <code>--grant ID</code> for more collection grants. Use <code>--shared</code> only for role <code>member</code> on a shared device. Only an owner can invite a manager or another owner.</p>
       <p>Member: read the invite link or raw code from stdin. If the invite has no name, add <code>--name NAME</code>.</p>
-      <pre><code class="language-sh">apassy-team join --relay https://apassy-relay.wyderka.cc \
+      <pre><code class="language-sh">apassy-team join --relay RELAY_URL \
   --device &quot;Bob laptop&quot; &lt; invite-link-file</code></pre>
       <p>The CLI saves the device key before it sends the request. It prints two safety words and checks them against words it computes locally. If the words differ, the CLI stops. Tell the inviter these words through a trusted channel.</p>
       <p>Owner: list requests, then confirm with the words from the member.</p>
@@ -139,7 +145,7 @@ apassy-team grant --collection 1 --member 2</code></pre>
       <p>On an existing device, make a link code:</p>
       <pre><code class="language-sh">apassy-team device add &gt; device-link-code-file</code></pre>
       <p>Send the file to the new device through a private channel. On the new machine, read the code from stdin:</p>
-      <pre><code class="language-sh">apassy-team device link --relay https://apassy-relay.wyderka.cc \
+      <pre><code class="language-sh">apassy-team device link --relay RELAY_URL \
   --device &quot;Second laptop&quot; &lt; device-link-code-file</code></pre>
       <p>Get the safety words from the new device. On the existing device, list requests and confirm with those words:</p>
       <pre><code class="language-sh">apassy-team device pending
@@ -176,7 +182,7 @@ apassy-team device confirm LINK_ID --words &quot;W1 W2&quot;</code></pre>
   &quot;mcpServers&quot;: {
     &quot;apassy&quot;: {
       &quot;type&quot;: &quot;http&quot;,
-      &quot;url&quot;: &quot;https://apassy-relay.wyderka.cc/mcp&quot;,
+      &quot;url&quot;: &quot;RELAY_URL/mcp&quot;,
       &quot;headers&quot;: {
         &quot;Authorization&quot;: &quot;Bearer ${APASSY_TOKEN}&quot;
       }
@@ -202,14 +208,14 @@ apassy-team host status</code></pre>
     </section>
     <section aria-labelledby="what-the-alpha-does-not-protect">
       <h2 id="what-the-alpha-does-not-protect">What the alpha does not protect</h2>
-      <p>The relay operator or root on the VPS can read each team&#x27;s metadata. This includes team, member, collection, and item names, hosts, commands, and audit records. The operator cannot read stored item values without the item keys. Stored item values stay sealed with keys on the key-holder machine. The relay opens item values in memory for a run that the host permits.</p>
-      <p>Cloudflare sees traffic in clear. Old settings can retain invalid legacy member tokens in plain text after enrollment. Device access tokens stay only in process memory. Item keys remain plain text in <code>keys.json</code>. With file storage, anyone who reads a device key file can use that device until revocation. Protect these files and the key-holder machine.</p>
+      <p>The operator of your relay, or root on its server, can read each team&#x27;s metadata. This includes team, member, collection, and item names, hosts, commands, and audit records. The operator cannot read stored item values without the item keys. Stored item values stay sealed with keys on the key-holder machine. The relay opens item values in memory for a run that the host permits.</p>
+      <p>A TLS proxy in front of the relay sees traffic in clear. With the setup of <a href="https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>, that is Cloudflare. Old settings can retain invalid legacy member tokens in plain text after enrollment. Device access tokens stay only in process memory. Item keys remain plain text in <code>keys.json</code>. With file storage, anyone who reads a device key file can use that device until revocation. Protect these files and the key-holder machine.</p>
       <p>Safety words do not protect against the relay operator or a party in the network path. Always get the words from the person with the new device before confirmation. Keep two owners with separate devices to reduce the risk of losing all owner access. The operator cannot add an owner device through the relay.</p>
-      <p>The key-holder host must be online for every run. This is an alpha with no SLA. Relay backups are daily. You must also make a backup of the host&#x27;s <code>keys.json</code> file.</p>
+      <p>The key-holder host must be online for every run. This is an alpha with no SLA. Make backups of the relay with <code>apassy-relay admin backup</code> (section 13 of <a href="https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>). You must also make a backup of the host&#x27;s <code>keys.json</code> file.</p>
     </section>
     <section aria-labelledby="get-help">
       <h2 id="get-help">Get help</h2>
-      <p>Contact the relay operator who gave you the team code.</p>
+      <p>Contact the operator of your relay. Report a bug in Apassy at <a href="https://github.com/wydrox/apassy/issues">https://github.com/wydrox/apassy/issues</a>.</p>
     </section>
   </main>
 </body>
