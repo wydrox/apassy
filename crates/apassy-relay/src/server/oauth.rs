@@ -2219,7 +2219,7 @@ mod tests {
     fn pkce_and_codes() {
         // RFC 7636 appendix B.
         assert_eq!(
-            s256("dBjftJeZ4CVP-mJ92K9N0lE5n0aahg8JtEsQ1fx8ptg"),
+            s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
         assert!(challenge_ok("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"));

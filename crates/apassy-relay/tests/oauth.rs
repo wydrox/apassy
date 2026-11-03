@@ -33,7 +33,7 @@ const PUBLIC_URL: &str = "https://node.example.ts.net:8443";
 const MAC: &str = "Test Mac";
 const REDIRECT: &str = "https://client.example/oauth/callback";
 /// RFC 7636 appendix B.
-const VERIFIER: &str = "dBjftJeZ4CVP-mJ92K9N0lE5n0aahg8JtEsQ1fx8ptg";
+const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 const OTHER_VERIFIER: &str = "a-different-verifier-of-forty-three-chars-xx";
 const PAGE_HEADERS: [(&str, &str); 5] = [

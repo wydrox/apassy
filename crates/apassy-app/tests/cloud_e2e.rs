@@ -82,7 +82,7 @@ const DECOY_VALUE: &str = "SYNTHe2eDecoy0123456789abcdefABCDEFghij";
 /// The hosted relay: a remote agent of this Mac never hears of it (plan step 10).
 const HOSTED_RELAY: &str = "wyderka.cc";
 /// RFC 7636 appendix B.
-const RFC_VERIFIER: &str = "dBjftJeZ4CVP-mJ92K9N0lE5n0aahg8JtEsQ1fx8ptg";
+const RFC_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const RFC_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 const USER_REQUEST: &str = "Check my httpbin token.";
 
