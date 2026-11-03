@@ -869,10 +869,10 @@ fn add_kept(app: &mut DesktopApp, ctx: &egui::Context, detected: Vec<Detected>) 
     if let Some(first) = added.first() {
         super::items::reveal_saved(app, first.id, folder.clone());
     }
-    let place = FolderTree::load(app).path_label(folder.as_deref());
+    let place = FolderTree::load(app).in_folder(folder.as_deref());
     match lines.as_slice() {
-        [one] => app.set_ok(format!("Added {} in {place}.", one.line())),
-        _ => app.set_ok(format!("Added {} credentials in {place}.", added.len())),
+        [one] => app.set_ok(format!("Added {}{place}.", one.line())),
+        _ => app.set_ok(format!("Added {} credentials{place}.", added.len())),
     }
 }
 

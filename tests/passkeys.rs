@@ -4,18 +4,21 @@
 //! storage rules, and sync. Synthetic values only.
 
 use apassy::contracts::CredentialKind;
-use apassy::vault::passkey::ES256;
+use apassy::vault::passkey::{EDDSA, ES256, ES384, RS256};
 use apassy::vault::{
-    Field, ItemDraft, PasskeyAssertion, PasskeyCreate, PasskeyCreated, PasskeyError, PasskeyImport,
-    PasskeyTarget, SecretValue, SyncScope, Vault, VaultErrorKind,
+    Field, ItemDraft, ItemEventKind, LargeBlobOp, LargeBlobResult, PasskeyAssertion,
+    PasskeyAssertionExtensions, PasskeyCreate, PasskeyCreated, PasskeyError, PasskeyImport,
+    PasskeyLargeBlob, PasskeyPrfInput, PasskeyPrfSecrets, PasskeyTarget, SecretValue, SyncScope,
+    Vault, VaultErrorKind,
 };
 use ciborium::value::Value;
-use ring::digest;
 use ring::rand::SystemRandom;
 use ring::signature::{
-    ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair,
-    UnparsedPublicKey,
+    ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P384_SHA384_ASN1,
+    ECDSA_P384_SHA384_ASN1_SIGNING, ED25519, EcdsaKeyPair, Ed25519KeyPair, KeyPair,
+    RSA_PKCS1_2048_8192_SHA256, RsaKeyPair, UnparsedPublicKey, VerificationAlgorithm,
 };
+use ring::{digest, hmac};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -620,6 +623,8 @@ fn import_checks_the_key_and_signs_with_it() {
         pkcs8: Zeroizing::new(key.to_vec()),
         title: String::new(),
         attach,
+        prf: None,
+        large_blob: None,
     };
     let id = vault
         .import_passkey(import(document.as_ref(), vec![3; 20], None))
@@ -726,4 +731,472 @@ fn passkeys_sync_and_conflict_copies_are_not_listed_twice() {
         .sign_passkey(listed[0].item_id, RP, &created.credential_id, &HASH)
         .unwrap();
     assert!(verify_assertion(RP, &point, &HASH, &from_original));
+}
+
+// ---- Schema 25: more algorithms and WebAuthn extension data. ----
+
+/// Synthetic keys made with `openssl genpkey` for these tests only.
+const RSA_2048: &[u8] = include_bytes!("fixtures/passkeys/rsa2048-synthetic.pk8");
+const RSA_3072: &[u8] = include_bytes!("fixtures/passkeys/rsa3072-synthetic.pk8");
+const RSA_1024: &[u8] = include_bytes!("fixtures/passkeys/rsa1024-synthetic.pk8");
+const P521: &[u8] = include_bytes!("fixtures/passkeys/p521-synthetic.pk8");
+
+fn import_with(
+    key: &[u8],
+    credential_id: Vec<u8>,
+    prf: Option<PasskeyPrfSecrets>,
+    large_blob: Option<PasskeyLargeBlob>,
+) -> PasskeyImport {
+    PasskeyImport {
+        rp_id: RP.to_owned(),
+        credential_id,
+        user_handle: b"imported-user".to_vec(),
+        user_name: "bob".to_owned(),
+        user_display_name: "Bob".to_owned(),
+        pkcs8: Zeroizing::new(key.to_vec()),
+        title: String::new(),
+        attach: None,
+        prf,
+        large_blob,
+    }
+}
+
+fn synthetic_prf() -> PasskeyPrfSecrets {
+    PasskeyPrfSecrets {
+        with_uv: Zeroizing::new([0x11; 32]),
+        without_uv: Zeroizing::new([0x33; 32]),
+    }
+}
+
+/// Raw DEFLATE of `blob` in one stored block (RFC 1951, section 3.2.4).
+fn stored_deflate(blob: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(blob.len()).unwrap();
+    let mut data = vec![0x01];
+    data.extend_from_slice(&len.to_le_bytes());
+    data.extend_from_slice(&(!len).to_le_bytes());
+    data.extend_from_slice(blob);
+    data
+}
+
+fn verify_with(
+    algorithm: &'static dyn VerificationAlgorithm,
+    public: &[u8],
+    assertion: &PasskeyAssertion,
+) -> bool {
+    let mut message = assertion.authenticator_data.clone();
+    message.extend_from_slice(&HASH);
+    UnparsedPublicKey::new(algorithm, public)
+        .verify(&message, &assertion.signature)
+        .is_ok()
+}
+
+#[test]
+fn imported_es384_eddsa_and_rs256_keys_sign_and_verify() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir, "v.db");
+    let rng = SystemRandom::new();
+    let p384 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, &rng).unwrap();
+    let p384_public =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, p384.as_ref(), &rng)
+            .unwrap()
+            .public_key()
+            .as_ref()
+            .to_vec();
+    let ed = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    let ed_public = Ed25519KeyPair::from_pkcs8(ed.as_ref())
+        .unwrap()
+        .public_key()
+        .as_ref()
+        .to_vec();
+    let rsa_public = |key: &[u8]| {
+        RsaKeyPair::from_pkcs8(key)
+            .unwrap()
+            .public()
+            .as_ref()
+            .to_vec()
+    };
+    /// The key, the COSE algorithm, the verifier, the public key, and the signature length
+    /// (0: variable).
+    type Case<'a> = (
+        &'a [u8],
+        i64,
+        &'static dyn VerificationAlgorithm,
+        Vec<u8>,
+        usize,
+    );
+    let cases: [Case<'_>; 4] = [
+        (
+            p384.as_ref(),
+            ES384,
+            &ECDSA_P384_SHA384_ASN1,
+            p384_public,
+            0,
+        ),
+        (ed.as_ref(), EDDSA, &ED25519, ed_public, 64),
+        (
+            RSA_2048,
+            RS256,
+            &RSA_PKCS1_2048_8192_SHA256,
+            rsa_public(RSA_2048),
+            256,
+        ),
+        (
+            RSA_3072,
+            RS256,
+            &RSA_PKCS1_2048_8192_SHA256,
+            rsa_public(RSA_3072),
+            384,
+        ),
+    ];
+    for (n, case) in cases.into_iter().enumerate() {
+        let (key, algorithm, verification, public, signature_len) = case;
+        let credential_id = vec![n as u8 + 1; 20];
+        let id = vault
+            .import_passkey(import_with(key, credential_id.clone(), None, None))
+            .unwrap();
+        let assertion = vault.sign_passkey(id, RP, &credential_id, &HASH).unwrap();
+        assert_eq!(assertion.algorithm, algorithm);
+        assert_eq!(assertion.authenticator_data[32], ASSERTION_FLAGS);
+        if signature_len > 0 {
+            assert_eq!(assertion.signature.len(), signature_len);
+        }
+        assert!(verify_with(verification, &public, &assertion), "{n}");
+        assert!(assertion.prf.is_none() && assertion.large_blob.is_none());
+        // The export gives the algorithm and the key that signs.
+        let export = vault.export_passkey(id).unwrap();
+        assert_eq!(export.algorithm, algorithm);
+        assert_eq!(export.pkcs8.as_slice(), key);
+    }
+    assert_eq!(vault.passkeys(RP, &[]).unwrap().len(), 4);
+}
+
+#[test]
+fn other_algorithms_and_damaged_keys_are_refused() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir, "v.db");
+    let rng = SystemRandom::new();
+    let ed = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    let mut ed_wrong_public = ed.as_ref().to_vec();
+    let last = ed_wrong_public.len() - 1;
+    ed_wrong_public[last] ^= 1;
+    let mut rsa_damaged = RSA_2048.to_vec();
+    rsa_damaged[200] ^= 0xff;
+    for (n, key) in [
+        P521,
+        RSA_1024,
+        &rsa_damaged[..],
+        &RSA_2048[..RSA_2048.len() - 1],
+        &ed_wrong_public[..],
+        &ed.as_ref()[..40],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = vault
+            .import_passkey(import_with(key, vec![n as u8 + 1; 20], None, None))
+            .unwrap_err();
+        assert!(matches!(error, PasskeyError::BadKey), "{n}: {error:?}");
+    }
+    assert!(vault.all_passkeys().unwrap().is_empty());
+}
+
+#[test]
+fn prf_outputs_need_secrets_and_match_hmac() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir, "v.db");
+    let rng = SystemRandom::new();
+    let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+    let with = vault
+        .import_passkey(import_with(
+            document.as_ref(),
+            vec![1; 20],
+            Some(synthetic_prf()),
+            None,
+        ))
+        .unwrap();
+    let without = vault
+        .import_passkey(import_with(document.as_ref(), vec![2; 20], None, None))
+        .unwrap();
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &[0x11; 32]);
+    let prf = |first: &[u8], second: Option<&[u8]>, hashed: bool| PasskeyAssertionExtensions {
+        prf: Some(PasskeyPrfInput {
+            first: first.to_vec(),
+            second: second.map(<[u8]>::to_vec),
+            hashed,
+        }),
+        large_blob: None,
+    };
+    // WebAuthn inputs: the salt is SHA-256 of "WebAuthn PRF", a zero byte, the input.
+    let assertion = vault
+        .assert_passkey(
+            with,
+            RP,
+            &[1; 20],
+            &HASH,
+            &prf(b"one", Some(&b"two"[..]), false),
+        )
+        .unwrap();
+    let output = assertion.prf.as_ref().expect("PRF outputs");
+    let salt = |input: &[u8]| sha256(&[b"WebAuthn PRF\0".as_slice(), input].concat());
+    assert_eq!(
+        output.first.as_slice(),
+        hmac::sign(&key, &salt(b"one")).as_ref()
+    );
+    assert_eq!(
+        output.second.as_ref().unwrap().as_slice(),
+        hmac::sign(&key, &salt(b"two")).as_ref()
+    );
+    // An empty input: a hand-computed vector (Python: hmac.new(b"\x11" * 32,
+    // sha256(b"WebAuthn PRF\x00").digest(), sha256)).
+    let assertion = vault
+        .assert_passkey(with, RP, &[1; 20], &HASH, &prf(b"", None, false))
+        .unwrap();
+    let first = &assertion.prf.as_ref().unwrap().first;
+    let hex: String = first.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(
+        hex,
+        "bd06f2afab1a7090d7b822f4ab562eb09407c66e747a5eb0b8515d2ae7ced4b7"
+    );
+    // Hashed: the inputs are the salts.
+    let assertion = vault
+        .assert_passkey(with, RP, &[1; 20], &HASH, &prf(&[0x22; 32], None, true))
+        .unwrap();
+    let output = assertion.prf.as_ref().unwrap();
+    assert_eq!(
+        output.first.as_slice(),
+        hmac::sign(&key, &[0x22; 32]).as_ref()
+    );
+    assert!(output.second.is_none());
+    let error = vault
+        .assert_passkey(with, RP, &[1; 20], &HASH, &prf(&[0x22; 31], None, true))
+        .unwrap_err();
+    assert_eq!(vault_kind(error), VaultErrorKind::InvalidInput);
+    // The output does not show in Debug.
+    let text = format!("{assertion:?}");
+    assert!(text.contains("[redacted]"), "{text}");
+    let bytes = format!("{:?}", *output.first);
+    assert!(!text.contains(&bytes[1..bytes.len() - 1]), "{text}");
+    // Without secrets: no output, and the assertion still verifies.
+    let assertion = vault
+        .assert_passkey(without, RP, &[2; 20], &HASH, &prf(b"one", None, false))
+        .unwrap();
+    assert!(assertion.prf.is_none());
+    let pair =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, document.as_ref(), &rng).unwrap();
+    assert!(verify_assertion(
+        RP,
+        pair.public_key().as_ref(),
+        &HASH,
+        &assertion
+    ));
+    // Without a PRF request: no output.
+    let assertion = vault.sign_passkey(with, RP, &[1; 20], &HASH).unwrap();
+    assert!(assertion.prf.is_none());
+}
+
+#[test]
+fn large_blobs_import_read_write_and_refuse_too_big() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir, "v.db");
+    let rng = SystemRandom::new();
+    let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+    let imported = b"synthetic imported blob";
+    let id = vault
+        .import_passkey(import_with(
+            document.as_ref(),
+            vec![1; 20],
+            None,
+            Some(PasskeyLargeBlob {
+                data: Zeroizing::new(stored_deflate(imported)),
+                uncompressed_size: imported.len() as u64,
+            }),
+        ))
+        .unwrap();
+    let read = PasskeyAssertionExtensions {
+        prf: None,
+        large_blob: Some(LargeBlobOp::Read),
+    };
+    let write = |blob: &[u8]| PasskeyAssertionExtensions {
+        prf: None,
+        large_blob: Some(LargeBlobOp::Write(Zeroizing::new(blob.to_vec()))),
+    };
+    let read_now = |vault: &mut Vault| match vault
+        .assert_passkey(id, RP, &[1; 20], &HASH, &read)
+        .unwrap()
+        .large_blob
+    {
+        Some(LargeBlobResult::Read(blob)) => blob.map(|blob| blob.to_vec()),
+        other => panic!("not a read: {other:?}"),
+    };
+    assert_eq!(read_now(&mut vault).as_deref(), Some(&imported[..]));
+
+    // A write: a new revision, one history event without values, and the new blob.
+    let before = vault.details(id).unwrap().summary.revision;
+    let events = vault.item_events(id, 100).unwrap().len();
+    let blob: Vec<u8> = (0..20_000u32).map(|n| (n % 13) as u8).collect();
+    let assertion = vault
+        .assert_passkey(id, RP, &[1; 20], &HASH, &write(&blob))
+        .unwrap();
+    assert_eq!(assertion.large_blob, Some(LargeBlobResult::Written(true)));
+    assert_eq!(vault.details(id).unwrap().summary.revision, before + 1);
+    let history = vault.item_events(id, 100).unwrap();
+    assert_eq!(history.len(), events + 1);
+    assert_eq!(history[0].kind, ItemEventKind::Edited);
+    assert_eq!(history[0].detail, "secret:passkey");
+    assert_eq!(read_now(&mut vault).as_deref(), Some(blob.as_slice()));
+    // The details never show the reserved fields.
+    let details = vault.details(id).unwrap();
+    assert!(
+        details
+            .fields
+            .iter()
+            .all(|f| !f.name.starts_with("passkey_"))
+    );
+    // Too big: nothing changes.
+    let revision = vault.details(id).unwrap().summary.revision;
+    // Too big, and empty: an empty write stores nothing and keeps the blob.
+    for too_big in [vec![0u8; 65_537], random_bytes(60_000), Vec::new()] {
+        let assertion = vault
+            .assert_passkey(id, RP, &[1; 20], &HASH, &write(&too_big))
+            .unwrap();
+        assert_eq!(assertion.large_blob, Some(LargeBlobResult::Written(false)));
+    }
+    assert_eq!(vault.details(id).unwrap().summary.revision, revision);
+    assert_eq!(read_now(&mut vault).as_deref(), Some(blob.as_slice()));
+    // The largest blob that compresses well fits.
+    assert!(
+        vault
+            .write_large_blob(id, RP, &[1; 20], &vec![1u8; 65_536])
+            .unwrap()
+    );
+    assert!(!vault.write_large_blob(id, RP, &[1; 20], &[]).unwrap());
+    // Another credential or no passkey: false.
+    assert!(!vault.write_large_blob(id, RP, &[9; 20], b"x").unwrap());
+    let plain = vault.add(login("Plain", Some("SYNTH-pass"))).unwrap();
+    assert!(
+        !vault
+            .write_large_blob(plain.id, RP, &[1; 20], b"x")
+            .unwrap()
+    );
+
+    // A passkey without a blob reads nothing; an import of a bad blob fails.
+    let other = vault
+        .import_passkey(import_with(document.as_ref(), vec![2; 20], None, None))
+        .unwrap();
+    let assertion = vault
+        .assert_passkey(other, RP, &[2; 20], &HASH, &read)
+        .unwrap();
+    assert_eq!(assertion.large_blob, Some(LargeBlobResult::Read(None)));
+    for (size, data) in [
+        (imported.len() as u64 + 1, stored_deflate(imported)),
+        (3, vec![0xff, 0xff, 0xff]),
+        (0, Vec::new()),
+        (70_000, stored_deflate(imported)),
+    ] {
+        let error = vault
+            .import_passkey(import_with(
+                document.as_ref(),
+                vec![3; 20],
+                None,
+                Some(PasskeyLargeBlob {
+                    data: Zeroizing::new(data),
+                    uncompressed_size: size,
+                }),
+            ))
+            .unwrap_err();
+        assert_eq!(vault_kind(error), VaultErrorKind::InvalidInput, "{size}");
+    }
+}
+
+fn random_bytes(len: usize) -> Vec<u8> {
+    use ring::rand::SecureRandom;
+    let mut bytes = vec![0u8; len];
+    SystemRandom::new().fill(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn bad_extension_rows_are_absent_and_the_passkey_still_signs() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("v.db");
+    let mut vault = vault(&dir, "v.db");
+    let rng = SystemRandom::new();
+    let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+    let id = vault
+        .import_passkey(import_with(
+            document.as_ref(),
+            vec![1; 20],
+            Some(synthetic_prf()),
+            Some(PasskeyLargeBlob {
+                data: Zeroizing::new(stored_deflate(b"blob")),
+                uncompressed_size: 4,
+            }),
+        ))
+        .unwrap();
+    vault.lock().unwrap();
+    // Damage the optional rows directly in the file.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    crate::common::key_raw(&conn, PASS).unwrap();
+    conn.execute_batch(
+        "UPDATE item_field SET value = 'AAAA' WHERE name = 'passkey_prf_uv';
+         UPDATE item_field SET value = '5' WHERE name = 'passkey_large_blob_size';",
+    )
+    .unwrap();
+    drop(conn);
+    vault.unlock(PASS).unwrap();
+    let extensions = PasskeyAssertionExtensions {
+        prf: Some(PasskeyPrfInput {
+            first: b"one".to_vec(),
+            second: None,
+            hashed: false,
+        }),
+        large_blob: Some(LargeBlobOp::Read),
+    };
+    let assertion = vault
+        .assert_passkey(id, RP, &[1; 20], &HASH, &extensions)
+        .unwrap();
+    assert!(assertion.prf.is_none(), "a bad secret makes no output");
+    assert_eq!(assertion.large_blob, Some(LargeBlobResult::Read(None)));
+    let pair =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, document.as_ref(), &rng).unwrap();
+    assert!(verify_assertion(
+        RP,
+        pair.public_key().as_ref(),
+        &HASH,
+        &assertion
+    ));
+}
+
+#[test]
+fn an_es256_passkey_keeps_the_rows_of_schema_17() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("v.db");
+    let mut vault = vault(&dir, "v.db");
+    let created = create(&mut vault, RP, "Example");
+    vault.lock().unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    crate::common::key_raw(&conn, PASS).unwrap();
+    let names: Vec<(String, String, i64)> = conn
+        .prepare(
+            "SELECT name, CASE WHEN secret = 1 THEN '' ELSE value END, secret FROM item_field
+             WHERE item_id = ?1 AND substr(name, 1, 8) = 'passkey_' ORDER BY position",
+        )
+        .unwrap()
+        .query_map([created.item_id as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    drop(conn);
+    let only: Vec<&str> = names.iter().map(|(name, _, _)| name.as_str()).collect();
+    assert_eq!(only, RESERVED);
+    assert_eq!(names[0].1, "es256-pkcs8-v1");
+    assert_eq!(
+        names
+            .iter()
+            .map(|(_, _, secret)| *secret)
+            .collect::<Vec<_>>(),
+        [0, 0, 0, 0, 0, 0, 1]
+    );
 }

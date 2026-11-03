@@ -264,9 +264,11 @@ private struct CredentialExchangeCases {
                 credentials: [.basicAuthentication(.init(userName: field("bob"), password: field("synthetic-pw2")))]),
         ]
         let plan = CredentialExchangeImport.plan(data(items))
-        #expect(plan.entries.count == 2)
+        // The login with its passkey, the card (a Custom item), and the forum login.
+        #expect(plan.entries.count == 3)
+        #expect(plan.entries.map(\.kind) == [.login, .custom, .login])
         #expect(plan.invalid == 1)
-        #expect(plan.unsupported == 1)
+        #expect(plan.unsupported == 0)
         #expect(plan.exporter == "Exporter")
         let first = try #require(plan.entries.first)
         #expect(first.passkey?.key == key.derRepresentation)

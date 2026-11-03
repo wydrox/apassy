@@ -76,7 +76,7 @@ pub use owner_auth::{
     touch_id_detail, verify_remote_action, verify_remote_answer,
 };
 #[cfg(feature = "desktop")]
-pub(crate) use owner_auth::{LocalWindowSource, OwnerDeliveryFence};
+pub(crate) use owner_auth::{LocalWindowSource, OwnerDeliveryFence, PasskeyExtras};
 
 /// How often a waiting run checks that its vault session is still valid.
 const WATCH_INTERVAL: Duration = Duration::from_millis(100);

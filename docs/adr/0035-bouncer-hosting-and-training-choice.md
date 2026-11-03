@@ -8,6 +8,7 @@ trains it themselves or delegates; hosts it themselves or delegates." The owner
 answered the open decisions on the same day (last section).
 Fits the draft [ADR 0037](0037-own-relay-open-source.md): all of Apassy is open
 source, and Apassy Connect is the paid, optional hosted part (its D2 and D3).
+Plans (2026-11-03): "Personal and Team" below are the Connect plans; Connect Family is added. See [plans](../product/plans.md).
 Amends [ADR 0018](0018-local-bouncer-shared-vault-relay.md) ("The bouncer model,
 command analysis, and learning stay on each client computer") and
 [ADR 0009](0009-general-by-default-and-learning.md) section 2 ("They never leave the

@@ -124,16 +124,29 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         }
     }
 
+    /// A sign-in: the large blob operation with the blob to write, and the PRF values. iOS gives
+    /// the PRF values as the website sent them (WebAuthn `eval` and `evalByCredential`), not
+    /// hashed into hmac-secret salts: `AutoFillModel` sends them as raw for the core to hash.
     private static func extensions(_ input: ASPasskeyAssertionCredentialExtensionInput?) -> PasskeyExtensionRequest {
         guard let input else { return PasskeyExtensionRequest() }
         let largeBlob: PasskeyExtensionRequest.LargeBlob
+        var largeBlobWrite: Data?
         switch input.largeBlob?.operation {
         case .read: largeBlob = .read
-        case .write: largeBlob = .write
+        case .write(let data):
+            largeBlob = .write
+            largeBlobWrite = data
         case nil: largeBlob = .none
         @unknown default: largeBlob = .none
         }
-        return PasskeyExtensionRequest(largeBlob: largeBlob, prf: input.prf != nil)
+        let prf = input.prf
+        return PasskeyExtensionRequest(
+            largeBlob: largeBlob, prf: prf != nil,
+            prfValues: prf?.inputValues.map { PasskeyExtensionRequest.PRFValues(first: $0.saltInput1, second: $0.saltInput2) },
+            prfValuesByCredential: prf?.perCredentialInputValues?.mapValues {
+                PasskeyExtensionRequest.PRFValues(first: $0.saltInput1, second: $0.saltInput2)
+            } ?? [:],
+            largeBlobWrite: largeBlobWrite)
     }
 
     // MARK: - The answer

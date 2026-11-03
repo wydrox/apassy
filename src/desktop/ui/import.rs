@@ -45,6 +45,8 @@ struct Report {
     file: Option<PathBuf>,
     /// The result of "Delete the export file".
     deleted: Option<Result<(), String>>,
+    /// The vault has duplicates after the import: the result offers "Find duplicates…".
+    duplicates: bool,
 }
 
 impl ImportState {
@@ -61,6 +63,11 @@ impl ImportState {
     #[cfg(test)]
     pub(crate) fn has_preview(&self) -> bool {
         self.preview.is_some()
+    }
+
+    /// True while the result of an import shows.
+    pub(crate) fn has_report(&self) -> bool {
+        self.report.is_some()
     }
 
     /// Read the export file at the typed path. Items that are already in the vault are
@@ -131,6 +138,7 @@ impl ImportState {
             failed,
             file: self.file.take(),
             deleted: None,
+            duplicates: imported > 0 && super::duplicates::any(session),
         });
         imported
     }
@@ -193,11 +201,12 @@ fn existing_items(
 
 // ---- Settings section. ----
 
-/// Settings > Vault > Import: one row with "Import…".
+/// Settings > Vault > Import: one row with "Import…", and one with "Find duplicates…".
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     use super::settings::rows;
 
     let mut open = false;
+    let mut duplicates = false;
     rows::group(ui, Some("Import"), |g| {
         g.line(
             "1Password",
@@ -210,10 +219,21 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     .clicked();
             },
         );
+        g.line("Duplicates", Some(rows::value("Same account twice")), |ui| {
+            duplicates = kit::small_button(ui, "Find duplicates…", Style::Bordered)
+                .on_hover_text(
+                    "Apassy lists the items with the same website and username, or the same secret values. Merge keeps one item and archives the others.",
+                )
+                .clicked();
+        });
     });
     if open {
         app.import.forget();
         app.ui.sheet = Some(Sheet::Import);
+    }
+    if duplicates {
+        app.import.forget();
+        super::duplicates::open(app);
     }
 }
 
@@ -311,7 +331,7 @@ fn preview_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             return;
         };
         let subtitle = format!(
-            "{} in the {}. Apassy can import {}. Apassy is for the credentials that agents use, so API credentials, SSH keys, databases, and servers are selected. Logins, passwords, and notes are not. Agents get no access.",
+            "{} in the {}. Apassy can import {}. Apassy is for the credentials that agents use, so API credentials, SSH keys, databases, and servers are selected. Logins, passwords, notes, cards, and identities are not. Agents get no access.",
             count(preview.items.len(), "item", "items"),
             preview.format.label(),
             preview.importable(),
@@ -421,6 +441,7 @@ fn item_row(ui: &mut egui::Ui, index: usize, item: &ImportItem, format: Format, 
 fn report_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
     let mut done = false;
     let mut delete = false;
+    let mut duplicates = false;
     let response = kit::sheet(ctx, "import", 540.0, |ui| {
         let Some(report) = &app.import.report else {
             return;
@@ -453,6 +474,21 @@ fn report_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                         });
                     }
                 });
+            }
+            if report.duplicates {
+                kit::section(
+                    ui,
+                    Some("Duplicates"),
+                    Some(
+                        "Some items look like the same account. Merge keeps one item and archives the others.",
+                    ),
+                    |s| {
+                        s.row(|ui| {
+                            duplicates = kit::small_button(ui, "Find duplicates…", Style::Bordered)
+                                .clicked();
+                        });
+                    },
+                );
             }
             if let Some(file) = &report.file {
                 kit::section(
@@ -497,6 +533,10 @@ fn report_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
     });
     if delete {
         app.import.delete_file();
+    }
+    if duplicates {
+        // The result stays: Done in the duplicates sheet comes back to it.
+        super::duplicates::open(app);
     }
     if done {
         close_sheet(app, ctx);
@@ -781,7 +821,7 @@ mod tests {
             "Engineering · API Credential → API key",
             "Engineering · Login → Login",
             "Engineering · SSH Key → SSH key",
-            "Apassy does not import Credit Card items",
+            "Engineering · Credit Card → Custom",
             "Import 3 credentials",
         ] {
             assert!(text.contains(shown), "missing {shown}: {text}");
@@ -789,9 +829,10 @@ mod tests {
         assert_eq!(app.import.selected, [true, false, true, true, false]);
         assert!(!text.contains("Already in the vault"));
 
-        // Select all takes each item that can be imported, and none clears the list.
+        // Select all takes each item that can be imported (the card too), and none
+        // clears the list.
         app.import.select_all(true);
-        assert_eq!(app.import.selected, [true, true, true, true, false]);
+        assert_eq!(app.import.selected, [true, true, true, true, true]);
         app.import.select_all(false);
         assert_eq!(app.import.selected_count(), 0);
         app.import.selected = vec![true, false, false, true, false];
@@ -873,6 +914,35 @@ mod tests {
         // Nothing was imported.
         app.owner_ui.session.unlock(PASS).expect("unlock");
         assert!(names(&app).is_empty());
+    }
+
+    #[test]
+    fn the_result_offers_find_duplicates_when_the_import_made_some() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let file = write_export(
+            &dir,
+            vec![
+                api("Stripe test key", "SYNTH-OP-dup-token"),
+                api("Stripe copy", "SYNTH-OP-dup-token"),
+            ],
+        );
+        let ctx = egui::Context::default();
+        app.ui.sheet = Some(Sheet::Import);
+        app.import.path = file.display().to_string();
+        app.import.read(&app.owner_ui.session);
+        app.import.select_all(true);
+        assert_eq!(app.import.run(&mut app.owner_ui.session), 2);
+        let text = frames(&ctx, &mut app, Vec::new());
+        assert!(text.contains("Find duplicates…"), "{text}");
+
+        // The duplicates sheet lists the pair. The result of the import stays for Done.
+        super::super::duplicates::open(&mut app);
+        let text = frames(&ctx, &mut app, Vec::new());
+        assert!(text.contains("Stripe test key, Stripe copy"), "{text}");
+        assert!(app.import.has_report());
+        close_sheet(&mut app, &ctx);
+        assert!(!app.import.has_report());
     }
 
     #[test]

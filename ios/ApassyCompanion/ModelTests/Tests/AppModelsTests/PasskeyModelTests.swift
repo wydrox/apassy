@@ -314,7 +314,7 @@ private struct CredentialExchangeCases {
             Issue.record("The import did not finish: \(model.state)")
             return
         }
-        #expect(summary.hasPrefix("Imported 1 login, 1 with a passkey."))
+        #expect(summary.hasPrefix("Imported 1 item and 1 passkey."))
         #expect(!summary.contains("ada") && !summary.contains("example.com"))
         let id = try #require(try await service.passkeys(rpID: "example.com", allowed: []).first?.id)
         #expect(try await service.reveal(id: id, field: "password") == "synthetic-pw")
