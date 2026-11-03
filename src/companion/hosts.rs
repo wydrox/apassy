@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 const SCUTIL: &str = "/usr/sbin/scutil";
 const IFCONFIG: &str = "/sbin/ifconfig";
 /// Only known installation paths are used. The process environment cannot select a
-/// different executable through PATH.
-const TAILSCALE_PROGRAMS: [&str; 4] = [
+/// different executable through PATH. The Funnel route of the Mac's own node uses the
+/// same paths (`crate::node::funnel`).
+pub(crate) const TAILSCALE_PROGRAMS: [&str; 4] = [
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
     "/usr/local/bin/tailscale",
     "/opt/homebrew/bin/tailscale",
