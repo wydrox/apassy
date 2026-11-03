@@ -556,6 +556,243 @@ impl Card {
     }
 }
 
+// ---- The connect card, card v2 (section 7.4). ----
+
+/// The version of a connect card. Run cards stay [`QUESTION_CARD_VERSION`] (1): an old
+/// reader shows "Update Apassy to read this question" for a connect card only.
+pub const CONNECT_CARD_VERSION: u32 = 2;
+/// The `kind` of a connect card.
+pub const CONNECT_KIND: &str = "connect";
+/// The tag of the connect digest (section 8.1).
+pub const CONNECT_DIGEST_TAG: &str = "apassy-connect-question-v1";
+/// The `<choice>` line and the answer `kind` of "Allow" on a connect card.
+pub const ALLOW_CONNECT: &str = "allow_connect";
+/// The limits of the fields of a connect card (section 7.4).
+pub const MAX_CONNECT_ID_BYTES: usize = 64;
+pub const MAX_CLIENT_NAME_BYTES: usize = 64;
+pub const MAX_MAC_NAME_BYTES: usize = 64;
+pub const MAX_CODE_BYTES: usize = 16;
+
+/// The connect request of a connect card: a remote agent asks to connect to a Mac (the
+/// MCP authorization flow of ADR 0037). No token, no item, and no agent list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardConnect {
+    /// The connect request of the node (`PendingConnect.id`).
+    pub id: String,
+    /// The client name that the agent registered, cleaned by the relay.
+    pub client_name: String,
+    /// The Mac that the agent connects to.
+    pub mac_name: String,
+    /// The match code that the agent's browser page shows.
+    pub code: String,
+    /// When the connect request ends on the node (Unix seconds).
+    pub expires_at: u64,
+}
+
+impl CardConnect {
+    /// The forms of section 7.4: an ID of `A-Za-z0-9-_`, names and a code without a
+    /// control character, within their limits.
+    pub fn valid(&self) -> bool {
+        let text = |value: &str, max: usize| {
+            !value.is_empty()
+                && value.len() <= max
+                && !value.chars().any(|c| c.is_control() || is_format_char(c))
+        };
+        !self.id.is_empty()
+            && self.id.len() <= MAX_CONNECT_ID_BYTES
+            && self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && text(&self.client_name, MAX_CLIENT_NAME_BYTES)
+            && text(&self.mac_name, MAX_MAC_NAME_BYTES)
+            && text(&self.code, MAX_CODE_BYTES)
+    }
+}
+
+/// A Unicode format character (category Cf) that could reorder a name on the card.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
+}
+
+/// The plaintext of a connect card (card v2, `kind = connect`), with exactly the fields of
+/// the contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectCard {
+    pub v: u32,
+    pub kind: String,
+    pub qid: String,
+    pub asker: CardAsker,
+    pub created_at: u64,
+    pub connect: CardConnect,
+    pub digest: String,
+}
+
+/// The connect digest (section 8.1) as 64 lowercase hex characters: it covers the asker
+/// and every field of the connect request, so the device signs what it showed.
+pub fn connect_digest_hex(asker_device: &str, connect: &CardConnect) -> String {
+    use ring::digest::{Context, SHA256};
+    let mut hash = Context::new(&SHA256);
+    let text = |hash: &mut Context, value: &str| {
+        hash.update(&(value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    };
+    text(&mut hash, CONNECT_DIGEST_TAG);
+    text(&mut hash, asker_device);
+    text(&mut hash, &connect.id);
+    text(&mut hash, &connect.client_name);
+    text(&mut hash, &connect.mac_name);
+    text(&mut hash, &connect.code);
+    hash.update(&connect.expires_at.to_be_bytes());
+    hash.finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+impl ConnectCard {
+    /// The card of `connect`, asked by this Mac (`asker`).
+    pub fn new(
+        qid: &str,
+        asker_device: &str,
+        asker_name: &str,
+        created_at: u64,
+        connect: &CardConnect,
+    ) -> Self {
+        Self {
+            v: CONNECT_CARD_VERSION,
+            kind: CONNECT_KIND.to_owned(),
+            qid: qid.to_owned(),
+            asker: CardAsker {
+                device: asker_device.to_owned(),
+                name: asker_name.to_owned(),
+            },
+            created_at,
+            connect: connect.clone(),
+            digest: connect_digest_hex(asker_device, connect),
+        }
+    }
+
+    /// The plaintext: one JSON object. `TooLong` for a field over its limit or of a bad
+    /// form: the connect request stays on this Mac.
+    pub fn to_plaintext(&self) -> Result<Zeroizing<Vec<u8>>, CardError> {
+        if !self.connect.valid() || self.asker.name.is_empty() || self.asker.name.len() > 64 {
+            return Err(CardError::TooLong);
+        }
+        let bytes = Zeroizing::new(serde_json::to_vec(self).map_err(|_| CardError::Unreadable)?);
+        if bytes.len() > MAX_CARD_BYTES {
+            return Err(CardError::TooLong);
+        }
+        Ok(bytes)
+    }
+
+    /// Parse a connect card with exactly the fields of the contract: `v` 2, `kind`
+    /// `connect`, the forms of section 7.4, and the digest of its own fields.
+    pub fn parse(plaintext: &[u8]) -> Result<Self, CardError> {
+        if plaintext.len() > MAX_CARD_BYTES {
+            return Err(CardError::Unreadable);
+        }
+        let card: Self = serde_json::from_slice(plaintext).map_err(|_| CardError::Unreadable)?;
+        let good = card.v == CONNECT_CARD_VERSION
+            && card.kind == CONNECT_KIND
+            && valid_qid(&card.qid)
+            && card.connect.valid()
+            && !card.asker.name.is_empty()
+            && card.asker.name.len() <= 64
+            && card.digest == connect_digest_hex(&card.asker.device, &card.connect);
+        if good {
+            Ok(card)
+        } else {
+            Err(CardError::Unreadable)
+        }
+    }
+}
+
+/// Whether `plaintext` is a card v2 of the kind `connect` (any form): a Mac that lists
+/// the questions of the other devices leaves it out (the asking Mac and the iPhones
+/// answer a connect request).
+pub fn is_connect_card(plaintext: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(plaintext).is_ok_and(|value| {
+        value.get("v").and_then(serde_json::Value::as_u64) == Some(u64::from(CONNECT_CARD_VERSION))
+            && value.get("kind").and_then(serde_json::Value::as_str) == Some(CONNECT_KIND)
+    })
+}
+
+/// An answer to a connect card (section 9.1): Allow (an iPhone signs it with its Face ID
+/// answer key) or Deny (its relay key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectChoice {
+    Allow,
+    Deny,
+}
+
+impl ConnectChoice {
+    /// The answer `kind` and the `<choice>` line of the answer string.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Allow => ALLOW_CONNECT,
+            Self::Deny => "deny",
+        }
+    }
+
+    /// Allow gives authority: the answer key after Face ID signs it.
+    pub fn needs_owner_check(self) -> bool {
+        self == Self::Allow
+    }
+
+    /// The choice of an answer body: `allow_connect` or `deny`, with no extra field.
+    pub fn from_body(body: &AnswerBody) -> Option<Self> {
+        let plain = body.comment.is_none()
+            && body.action.is_none()
+            && body.project_key.is_none()
+            && body.item_id.is_none()
+            && body.environment.is_none();
+        match body.kind.as_str() {
+            ALLOW_CONNECT if plain => Some(Self::Allow),
+            "deny" if plain => Some(Self::Deny),
+            _ => None,
+        }
+    }
+}
+
+/// The signed text of an answer to a connect card: the answer string of section 9.3 with
+/// the `<choice>` `allow_connect` or `deny` and the connect digest. `None` when a field
+/// has a control character.
+pub fn connect_answer_string(
+    by: &str,
+    team_id: &str,
+    qid: &str,
+    choice: ConnectChoice,
+    digest: &str,
+    time: u64,
+) -> Option<String> {
+    let fields = [by, team_id, qid, digest];
+    if fields
+        .iter()
+        .any(|field| field.is_empty() || field.chars().any(char::is_control))
+    {
+        return None;
+    }
+    Some(format!(
+        "{ANSWER_TAG}\n{by}\n{team_id}\n{qid}\n{}\n{digest}\n{time}",
+        choice.kind()
+    ))
+}
+
 // ---- The answer (section 9). ----
 
 /// The environment of a correction.
@@ -861,6 +1098,32 @@ impl AnswerBody {
             _ => {}
         }
         body
+    }
+
+    /// The body of an answer to a connect card, signed with `signature` (DER). The answer
+    /// keeps `v` 1: its fields do not change, only the kind and the digest.
+    pub fn connect(
+        qid: &str,
+        by: &str,
+        choice: ConnectChoice,
+        digest: &str,
+        time: u64,
+        signature: &[u8],
+    ) -> Self {
+        Self {
+            v: VERSION,
+            qid: qid.to_owned(),
+            by: by.to_owned(),
+            kind: choice.kind().to_owned(),
+            comment: None,
+            action: None,
+            project_key: None,
+            item_id: None,
+            environment: None,
+            digest: digest.to_owned(),
+            time,
+            signature: encode_b64u(signature),
+        }
     }
 
     /// The plaintext: one JSON object, at most [`MAX_ANSWER_BYTES`].
@@ -1194,6 +1457,160 @@ mod tests {
         );
         let mismatch = card.replace(r#""item_ids":[]"#, r#""item_ids":["7"]"#);
         assert!(Card::parse(mismatch.as_bytes()).unwrap().to_run().is_none());
+    }
+
+    fn synthetic_connect() -> CardConnect {
+        CardConnect {
+            id: "cr_7Hq2xN".to_owned(),
+            client_name: "Grok Bot".to_owned(),
+            mac_name: "Synthetic Mac mini".to_owned(),
+            code: "482 913".to_owned(),
+            expires_at: 1_790_000_300,
+        }
+    }
+
+    #[test]
+    fn a_connect_card_is_card_v2_with_exactly_its_fields() {
+        let connect = synthetic_connect();
+        let card = ConnectCard::new(
+            "oKGio6SlpqeoqaqrrK2urw",
+            "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+            "Synthetic Mac mini",
+            1_790_000_000,
+            &connect,
+        );
+        assert_eq!(card.v, 2);
+        assert_eq!(card.kind, "connect");
+        assert_eq!(
+            card.digest,
+            connect_digest_hex("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect)
+        );
+        let bytes = card.to_plaintext().unwrap();
+        assert!(is_connect_card(&bytes));
+        assert_eq!(ConnectCard::parse(&bytes).unwrap(), card);
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                r#"{{"v":2,"kind":"connect","qid":"oKGio6SlpqeoqaqrrK2urw","asker":{{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"Synthetic Mac mini"}},"created_at":1790000000,"connect":{{"id":"cr_7Hq2xN","client_name":"Grok Bot","mac_name":"Synthetic Mac mini","code":"482 913","expires_at":1790000300}},"digest":"{}"}}"#,
+                card.digest
+            )
+        );
+        // The run reader (every Mac and iPhone before card v2) refuses it: "Update Apassy".
+        assert_eq!(Card::parse(&bytes), Err(CardError::Unreadable));
+        // Each field is covered by the digest, and a card with a changed field fails.
+        for (from, to) in [
+            (
+                r#""client_name":"Grok Bot""#,
+                r#""client_name":"Grok Bot 2""#,
+            ),
+            (
+                r#""mac_name":"Synthetic Mac mini""#,
+                r#""mac_name":"Other Mac""#,
+            ),
+            (r#""code":"482 913""#, r#""code":"482 914""#),
+            (r#""id":"cr_7Hq2xN""#, r#""id":"cr_7Hq2xM""#),
+            (r#""expires_at":1790000300"#, r#""expires_at":1790000301"#),
+            (
+                r#""device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d""#,
+                r#""device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4e""#,
+            ),
+        ] {
+            let change = to;
+            let changed = text.replacen(from, to, 1);
+            assert_ne!(changed, text, "{change}");
+            assert_eq!(
+                ConnectCard::parse(changed.as_bytes()),
+                Err(CardError::Unreadable),
+                "{change}"
+            );
+        }
+        for bad in [
+            text.replace(r#""v":2"#, r#""v":3"#),
+            text.replace(r#""kind":"connect""#, r#""kind":"run""#),
+            text.replace(r#""created_at""#, r#""extra":1,"created_at""#),
+            text.replace(r#","code":"482 913""#, ""),
+        ] {
+            assert_eq!(
+                ConnectCard::parse(bad.as_bytes()),
+                Err(CardError::Unreadable)
+            );
+        }
+        assert!(!is_connect_card(
+            text.replace(r#""kind":"connect""#, r#""kind":"run""#)
+                .as_bytes()
+        ));
+    }
+
+    #[test]
+    fn a_connect_card_refuses_bad_forms_and_never_posts_them() {
+        let good = synthetic_connect();
+        assert!(good.valid());
+        let mut cases = Vec::new();
+        for (field, value) in [
+            ("id", "cr 1".to_owned()),
+            ("id", String::new()),
+            ("id", "a".repeat(65)),
+            ("client_name", String::new()),
+            ("client_name", "x".repeat(65)),
+            ("client_name", "Grok\nBot".to_owned()),
+            ("client_name", "Grok\u{202E}toB".to_owned()),
+            ("mac_name", String::new()),
+            ("code", "1".repeat(17)),
+            ("code", "48\u{0}2".to_owned()),
+        ] {
+            let mut connect = good.clone();
+            match field {
+                "id" => connect.id = value,
+                "client_name" => connect.client_name = value,
+                "mac_name" => connect.mac_name = value,
+                _ => connect.code = value,
+            }
+            cases.push(connect);
+        }
+        for connect in cases {
+            assert!(!connect.valid(), "{connect:?}");
+            let card = ConnectCard::new("oKGio6SlpqeoqaqrrK2urw", "d", "Mac", 1, &connect);
+            assert_eq!(card.to_plaintext().err(), Some(CardError::TooLong));
+        }
+    }
+
+    #[test]
+    fn a_connect_answer_takes_allow_connect_or_deny_and_nothing_else() {
+        let allow = AnswerBody::connect("q", "b", ConnectChoice::Allow, "d", 7, b"sig");
+        let parsed = AnswerBody::parse(&allow.to_plaintext().unwrap()).unwrap();
+        assert_eq!(parsed.v, 1);
+        assert_eq!(parsed.kind, "allow_connect");
+        assert_eq!(
+            ConnectChoice::from_body(&parsed),
+            Some(ConnectChoice::Allow)
+        );
+        // A run question never takes it: its kind is unknown there.
+        assert_eq!(Choice::from_body(&parsed), None);
+        let deny = AnswerBody::connect("q", "b", ConnectChoice::Deny, "d", 7, b"sig");
+        assert_eq!(ConnectChoice::from_body(&deny), Some(ConnectChoice::Deny));
+        for kind in ["approve_once", "approve", "allow_once", "disconnect"] {
+            let mut other = allow.clone();
+            other.kind = kind.to_owned();
+            assert_eq!(ConnectChoice::from_body(&other), None, "{kind}");
+        }
+        let mut extra = allow.clone();
+        extra.action = Some("read".to_owned());
+        assert_eq!(ConnectChoice::from_body(&extra), None);
+        let mut comment = deny;
+        comment.comment = Some("no".to_owned());
+        assert_eq!(ConnectChoice::from_body(&comment), None);
+        assert!(ConnectChoice::Allow.needs_owner_check());
+        assert!(!ConnectChoice::Deny.needs_owner_check());
+        assert_eq!(
+            connect_answer_string("by", "t_7k2m5q4x3c", "qid", ConnectChoice::Allow, "d", 1)
+                .as_deref(),
+            Some("apassy-question-answer-v1\nby\nt_7k2m5q4x3c\nqid\nallow_connect\nd\n1")
+        );
+        assert_eq!(
+            connect_answer_string("b\ny", "t", "q", ConnectChoice::Deny, "d", 1),
+            None
+        );
     }
 
     #[test]
