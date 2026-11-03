@@ -18,6 +18,7 @@
 //! | `APASSY_RELAY_QUESTIONS_TO_APPROVERS` | `1`: take questions with `to: "approvers"`; `0`: refuse them with 403 `not_routed` (until shared vaults) | `0` |
 //! | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams (`POST /v1/connect`) the whole relay makes in 24 hours, 0 to 100000; over it 503 `busy`; `0` turns Connect off | `50` |
 //! | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once (active or suspended), 0 to 1000000; at it `POST /v1/connect` is 503 `busy`; `0` turns Connect off | `100` |
+//! | `APASSY_RELAY_CONNECT_SYNC_BYTES` | The largest vault snapshot of a new Connect team (its `sync_bytes`): `0` (no relay sync; a push is 403 `plan_required`) or 1048576 to 67108864. Existing teams keep theirs (`admin limits --sync-bytes`). The hosted relay sets 67108864 until Apassy Connect starts | `0` |
 //! | `APASSY_RELAY_CONNECT_LONG_POLLS` | Long polls that all Connect teams hold at once, 0 to 1024; a poll over it answers at once; `0`: every Connect poll answers at once | `96` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
@@ -57,6 +58,11 @@ pub const MAX_CONNECT_TEAMS_PER_DAY: u64 = 100_000;
 /// section 20.5).
 pub const DEFAULT_CONNECT_TEAMS_MAX: u64 = 100;
 pub const MAX_CONNECT_TEAMS_MAX: u64 = 1_000_000;
+/// `sync_bytes` of a new Connect team (`APASSY_RELAY_CONNECT_SYNC_BYTES`, docs/SPEC.md
+/// section 26.4): 0, no relay sync, so a snapshot push is 403 `plan_required`.
+pub const DEFAULT_CONNECT_SYNC_BYTES: u64 = 0;
+/// The smallest `APASSY_RELAY_CONNECT_SYNC_BYTES` above 0: 1 MiB, as `TeamLimits::validate`.
+pub const MIN_CONNECT_SYNC_BYTES: u64 = 1_048_576;
 /// The long polls that all Connect teams hold at once (`Limits::connect_long_polls`): the
 /// 128 threads of the question lane less the 32 of one team's share, so Connect teams
 /// always leave an operator team its share of the lane, and well under the member lane.
@@ -340,6 +346,10 @@ pub struct RelayConfig {
     /// Connect teams the relay holds at once, active or suspended
     /// (`APASSY_RELAY_CONNECT_TEAMS_MAX`). At it, `POST /v1/connect` is 503 `busy`.
     pub connect_teams_max: u64,
+    /// The `sync_bytes` of each new Connect team (`APASSY_RELAY_CONNECT_SYNC_BYTES`): 0
+    /// (no relay sync, 403 `plan_required`) or 1 MiB to 64 MiB. A team keeps the value
+    /// it was made with; `admin limits` changes it for one team.
+    pub connect_sync_bytes: u64,
     /// Each listener counts bad bearer tokens and session keys: after
     /// `http::AUTH_FAILURES_MAX` in `http::AUTH_FAILURE_WINDOW_SECS`, the listener answers
     /// 429 `rate_limited` until the window ends (docs/SPEC.md section 30.5). On for an
@@ -672,6 +682,7 @@ impl RelayConfig {
             questions_to_approvers: false,
             connect_teams_per_day: 0,
             connect_teams_max: 0,
+            connect_sync_bytes: DEFAULT_CONNECT_SYNC_BYTES,
             auth_limiter: true,
             oauth: Some(OAuthConfig::new(EMBEDDED_MAC_NAME)),
         };
@@ -736,6 +747,18 @@ impl RelayConfig {
             0,
             MAX_CONNECT_TEAMS_MAX,
         )?;
+        let connect_sync_bytes = number(
+            &lookup,
+            "APASSY_RELAY_CONNECT_SYNC_BYTES",
+            DEFAULT_CONNECT_SYNC_BYTES,
+            0,
+            crate::sync_head::MAX_SNAPSHOT_BYTES,
+        )?;
+        if connect_sync_bytes != 0 && connect_sync_bytes < MIN_CONNECT_SYNC_BYTES {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_CONNECT_SYNC_BYTES must be 0 (no relay sync) or 1048576 to 67108864.",
+            ));
+        }
         let connect_long_polls = number(
             &lookup,
             "APASSY_RELAY_CONNECT_LONG_POLLS",
@@ -795,6 +818,7 @@ impl RelayConfig {
             },
             connect_teams_per_day,
             connect_teams_max,
+            connect_sync_bytes,
             auth_limiter: false,
             oauth: None,
         })
@@ -999,6 +1023,35 @@ mod tests {
         assert!(with("1025").is_err());
         assert!(with("-1").is_err());
         assert!(with("some").is_err());
+    }
+
+    #[test]
+    fn connect_sync_bytes_is_0_or_1_mib_to_64_mib() {
+        let with = |value: Option<&str>| {
+            let mut pairs = vec![
+                ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+                ("APASSY_RELAY_EDGE_SECRET", EDGE),
+                ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+            ];
+            if let Some(value) = value {
+                pairs.push(("APASSY_RELAY_CONNECT_SYNC_BYTES", value));
+            }
+            RelayConfig::from_lookup(lookup(&pairs)).map(|config| config.connect_sync_bytes)
+        };
+        // Off by default: a new Connect team gets no relay sync.
+        assert_eq!(with(None).unwrap(), 0);
+        assert_eq!(with(Some("0")).unwrap(), 0);
+        assert_eq!(with(Some("1048576")).unwrap(), 1_048_576);
+        assert_eq!(with(Some("67108864")).unwrap(), 67_108_864);
+        for bad in ["1", "1048575", "67108865", "-1", "64MiB"] {
+            assert!(with(Some(bad)).is_err(), "{bad}");
+        }
+        // Every value that passes makes valid Connect limits.
+        for good in ["0", "1048576", "67108864"] {
+            crate::server::directory::TeamLimits::connect_with(with(Some(good)).unwrap())
+                .validate()
+                .unwrap();
+        }
     }
 
     #[test]

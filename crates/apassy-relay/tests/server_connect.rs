@@ -645,6 +645,92 @@ fn a_snapshot_push_to_a_connect_team_is_plan_required() {
     assert_eq!(team_info(&relay, &team)["limits"]["sync_bytes"], 0);
 }
 
+/// A snapshot push of `body` by `mac` as the first version.
+fn push_first(relay: &TestRelay, team: &TeamId, mac: &Device, body: &[u8]) -> Answer {
+    send(
+        &relay.url,
+        "PUT",
+        "/v1/sync/snapshot",
+        Some(&mac.token),
+        &first_push(team, mac, body),
+        body.to_vec(),
+    )
+}
+
+#[test]
+fn a_connect_team_gets_the_configured_sync_bytes() {
+    // The hosted relay's setting until Apassy Connect starts (plans section 4.1).
+    let mut relay = start_with(
+        |config| config.connect_sync_bytes = 67_108_864,
+        UpstreamOptions::default(),
+    );
+    let (team, mac) = connect(&relay, "Rafal");
+    let info = team_info(&relay, &team);
+    assert_eq!(info["kind"], "connect");
+    assert_eq!(info["limits"]["sync_bytes"], 67_108_864);
+    // The rest of the preset is as before: one member, no items, no agents.
+    assert_eq!(
+        (&info["limits"]["members"], &info["limits"]["items"], &info["limits"]["agents"]),
+        (&json!(1), &json!(0), &json!(0))
+    );
+    // The first push of a vault passes, and the head names version 1.
+    let body = vec![7u8; 4096];
+    let pushed = push_first(&relay, &team, &mac, &body);
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    let head = relay.ok("GET", "/v1/sync/head", &mac.token, None);
+    assert_eq!(head["version"], 1);
+    assert!(relay.config.sync_dir(&team).join("1.bin").exists());
+    // The file cap has room for the sync heads: 2 + 1 + 8 + 16 MiB.
+    assert_eq!(info["file_cap"], 27 * 1_048_576);
+    // A team keeps the value it was made with when the setting changes: a relay that
+    // sets 0 again makes teams with `plan_required`, and the old team still syncs.
+    relay.config.connect_sync_bytes = 0;
+    let restarted = relay.restart();
+    let (late, late_mac) = connect(&restarted, "Late");
+    assert_eq!(team_info(&restarted, &late)["limits"]["sync_bytes"], 0);
+    let refused = push_first(&restarted, &late, &late_mac, &body);
+    assert_eq!((refused.status, refused.code()), (403, "plan_required"));
+    assert_eq!(team_info(&restarted, &team)["limits"]["sync_bytes"], 67_108_864);
+}
+
+#[test]
+fn connect_sync_bytes_zero_keeps_plan_required() {
+    // The default of a relay that the owner runs, and of the hosted relay at the cutover.
+    let relay = start(UpstreamOptions::default());
+    assert_eq!(relay.config.connect_sync_bytes, 0);
+    let (team, mac) = connect(&relay, "Rafal");
+    assert_eq!(team_info(&relay, &team)["limits"]["sync_bytes"], 0);
+    assert_eq!(team_info(&relay, &team)["file_cap"], 11 * 1_048_576);
+    let refused = push_first(&relay, &team, &mac, &[7u8; 4096]);
+    assert_eq!((refused.status, refused.code()), (403, "plan_required"));
+}
+
+#[test]
+fn the_idle_sweep_takes_a_codeless_sync_team_only_without_a_head() {
+    let mut relay = start_with(
+        |config| config.connect_sync_bytes = 67_108_864,
+        UpstreamOptions::default(),
+    );
+    let (idle, _) = connect(&relay, "Idle");
+    let (synced, mac) = connect(&relay, "Synced");
+    let pushed = push_first(&relay, &synced, &mac, &[7u8; 4096]);
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    let old = now_unix() - 31 * DAY;
+    relay.edit_offline(|config| {
+        for team in [&idle, &synced] {
+            open_team_file(config, team)
+                .execute_batch(&format!(
+                    "UPDATE device SET last_seen_at = {old}, created_at = {old};"
+                ))
+                .unwrap();
+        }
+    });
+    // The setting's preset is a Connect preset: an idle team without a head goes; a
+    // team with a vault sync head never does.
+    assert_eq!(sweep(&relay, false)["suspended"], json!([idle]));
+    assert_eq!(team_info(&relay, &synced)["state"], "active");
+}
+
 #[test]
 fn connect_limits_one_member_no_items_no_agents() {
     let relay = start(UpstreamOptions::default());

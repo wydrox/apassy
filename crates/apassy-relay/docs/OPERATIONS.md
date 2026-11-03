@@ -1051,7 +1051,7 @@ What changes at the first start of this version:
 
 - `relay.db` moves from version 1002 to 1003 in one transaction: the column `team.kind` (every existing team becomes `operator`), the column `team.suspend_reason`, and the table `connect_key` (the SHA-256 of each public key that made a Connect team, with the id of its team while the team exists). The change is additive. A failure leaves 1002 and the relay does not start. The images before (`sync-*` and `questions-*`, directory 1002) refuse a 1003 file: see 20.3. This image also carries questions (section 19): from `sync-*` the team files move to schema 5 at the same start (19, with its `.pre-v5` copies).
 - A new edge route, `POST /v1/connect`. Its body carries a signature of the device key (SPEC 26.3), so only the holder of a key can make a team with it. `POST /v1/teams` and team codes work as before.
-- Three settings, sized for the production container (2 cores, 512 MiB, 20.5):
+- Three settings, sized for the production container (2 cores, 512 MiB, 20.5), and a fourth for relay sync without a code (20.6):
   - `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` (default 50, 0 to 100000): the Connect teams of the whole relay in any 24 hours. Over it, 503 `busy` with `Retry-After: 3600`.
   - `APASSY_RELAY_CONNECT_TEAMS_MAX` (default 100, 0 to 1000000): the Connect teams the relay holds at once, active or suspended. At it, 503 `busy` ("no room") with `Retry-After: 3600`. A deleted team frees its place. Raise it only after the measurement of 20.5.
   - `APASSY_RELAY_CONNECT_LONG_POLLS` (default 96, 0 to 1024): the long polls of all Connect teams together (below).
@@ -1142,7 +1142,7 @@ rollout; the rollback analysis below describes that historical boundary.
 
 ### 20.4 Idle Connect teams
 
-A Connect team whose devices have not signed in for 30 days is most likely abandoned, however many devices it linked. The sweep suspends such teams, then deletes them 30 days after their suspension. It touches only Connect teams whose limits are still the Connect preset and that have no vault sync head: never operator teams, teams a plan or `admin limits` lifted, teams that synced a vault, or teams the operator suspended:
+A Connect team whose devices have not signed in for 30 days is most likely abandoned, however many devices it linked. The sweep suspends such teams, then deletes them 30 days after their suspension. It touches only Connect teams whose limits are still a Connect preset (`TeamLimits::connect()`, or the same with the `sync_bytes` of `APASSY_RELAY_CONNECT_SYNC_BYTES`) and that have no vault sync head: never operator teams, teams a plan or `admin limits` lifted, teams that synced a vault, or teams the operator suspended:
 
 ```sh
 docker compose exec relay apassy-relay admin connect-sweep --dry-run       # names the teams, changes nothing
@@ -1182,6 +1182,17 @@ Each open team holds one SQLite connection for as long as the relay runs: one fi
 2. The room fits when the memory of all teams, plus the threads of the request, question, and feed lanes (two tasks per request, above), stays well under 512 MiB, the open files under 65536, and the start time under the 300 s start period. Write the numbers in this section with the date, then raise the room, or raise the container's limits first.
 
 Opening Connect teams only when they are first used, and closing idle ones, would remove this cost. It is not built: `Hub::team` is how every request, the sweep, `admin teams`, and the backup find a team, and an open on first use would let an unauthenticated sign-in call with a known team id start a key derivation. Lower the room, or run the sweep, if the start grows too long.
+
+### 20.6 Relay sync without a code (`APASSY_RELAY_CONNECT_SYNC_BYTES`)
+
+Plans section 4.1: until Apassy Connect starts, relay sync on the hosted relay is free and needs no team code. The Mac makes a Connect team (`POST /v1/connect`) with the purpose `sync`, or uses the Connect team that the vault has for questions, and pushes version 1. The relay setting that allows it:
+
+- `APASSY_RELAY_CONNECT_SYNC_BYTES` (default `0`; `0` or 1048576 to 67108864, another value stops the start): `sync_bytes` of each **new** Connect team (SPEC 26.4). `0` keeps 403 `plan_required` on a push, as before. The hosted relay sets `"67108864"` in the release that ships the Mac's codeless relay copy (plan s7, R1), and the relay deploys before the apps.
+- A team keeps the value it was made with. Connect teams made before the setting (questions teams) get the same size by hand, one team at a time: `docker compose exec relay apassy-relay admin limits <id> --sync-bytes 67108864`. The app asks for nothing: a vault whose questions team still has `sync_bytes` 0 sees "The relay does not keep vault copies for this connection yet" when it turns relay sync on.
+- **Capacity, before you set it.** Each Connect team then holds up to two snapshots (the current and the previous version) of up to `sync_bytes` each, in `teams/<id>.sync/`, plus one temporary file for each push in flight (`sync_transfers`, 2), plus a team file capped at 27 MiB (20 above; 16 MiB more than without sync). At the default room (`APASSY_RELAY_CONNECT_TEAMS_MAX` 100, `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` 50) that is at most 100 × 128 MiB = 12.5 GiB of snapshots, 2.6 GiB of team files, and the temporary files of the pushes that run; real vaults are far smaller. `admin backup` copies all of it, so the backup volume needs as much again. Check the free disk of the VPS for both (`df -h /opt/apassy`) before the setting goes live, and raise `APASSY_RELAY_CONNECT_TEAMS_MAX` only after this check and 20.5, and only with the owner.
+- Watch: `admin teams` (`kind: connect` teams with a `sync_head`, their `file_level`), the disk of the data and the backup volume, and `sync_refused {reason: "too_large"}` rows.
+- Rollback: set the variable back to `"0"` (or remove it) and `docker compose up -d --wait`. New Connect teams get no relay sync again; the teams made with it keep their limit until `admin limits <id> --sync-bytes 0`, which stops pushes and receipts but keeps the copies downloadable. An image before this setting ignores the variable and reads the stored limits as they are (no directory change).
+- The cutover of stage 7 (plan s7, O2) sets it to `"0"` again.
 
 ## 21. The feed of a Mac (team schema 6)
 
