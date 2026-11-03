@@ -1,6 +1,6 @@
 # Trust model
 
-Date: 2026-11-02. Updated 2026-11-03: cloud agents through Tailscale Funnel; Apassy Connect as planned for stage 7; the node over the tailnet and the push gateway (planned, contracts [node-pairing-v1](../contracts/node-pairing-v1.md) and [push-gateway-v1](../contracts/push-gateway-v1.md)). Decision:
+Date: 2026-11-02. Updated 2026-11-03: cloud agents through Tailscale Funnel; Apassy Connect as planned for stage 7; the node over the tailnet and the push gateway (built on `release/0.5.17`, not released yet; contracts [node-pairing-v1](../contracts/node-pairing-v1.md) and [push-gateway-v1](../contracts/push-gateway-v1.md); security panel [N8](../reviews/node-tailnet-2026-11/n8-panel.md)). Decision:
 [ADR 0037](../adr/0037-own-relay-open-source.md). This page says who can see what. Update it in the
 same change as any code that changes an answer here.
 
@@ -14,13 +14,14 @@ Apache-2.0 and builds from this repository.
 
 | Party | Holds | Sees | Cannot see |
 | --- | --- | --- | --- |
-| Your Mac or Linux node | Your vaults, the broker, the bouncer, your relay server, item keys of the teams it hosts | Everything of your vaults while they are unlocked; the values of runs it releases | — |
+| Your Mac | Your vaults, the broker, the bouncer, your relay server (the node), item keys of the teams it hosts | Everything of your vaults while they are unlocked; the values of runs it releases | — |
+| Your Linux node (`apassy serve`) | The relay directory and team files, SQLCipher under the node master key (a systemd credential, an encrypted `master.key.cred`, or a 0600 `master.key`); the sealed key of the node certificate; with `apassy team host`, the item keys of its teams (`keys.json`) | Sealed envelopes, relay sync ciphertext, team metadata, push handles and their secrets; the values of team runs that it releases | Your vaults: it needs no vault and no unlock. Who can act as its user (or root) can be the node |
 | Your iPhone | A vault opened from iCloud Drive or a node; its device and answer keys (Secure Enclave or Keychain) | Questions, feed, and access requests, after it opens them | Values in a question (a card never carries one) |
 | A team host node | The team file and its item keys | The values of runs that it releases. In way B, the members' requests to the upstream API and the answers | Members' personal vaults |
 | A team member's node | Its device key; in way A, a value for one run | Its own runs; in way A, the value (it can keep a copy) | In way B, the value |
 | Tailscale control server (or Headscale) | Node keys and names | Which nodes exist and their addresses | Traffic |
 | Tailscale DERP relays | — | WireGuard ciphertext, sizes, times | Traffic |
-| Push gateway (Apassy project) | The APNs key and its own handle key | Push handles (inside its key: device tokens, device kinds), node IP addresses, device IP addresses when a handle is made, times, the ciphertext of a sealed summary | Which team or vault a push is for, any question data, the text of a summary. It stores and logs nothing ([push-gateway-v1](../contracts/push-gateway-v1.md)) |
+| Push gateway (Apassy project) | The APNs key and its own handle key | Push handles (inside its key: device tokens, device kinds), node IP addresses, device IP addresses when a handle is made, times, the ciphertext of a sealed summary | Which team or vault a push is for, any question data, the text of a summary. It has no storage binding and logs nothing; Cloudflare's rate-limit counters (60 s) are keyed by the SHA-256 of the handle or of the client address ([push-gateway-v1](../contracts/push-gateway-v1.md)) |
 | Apple (APNs, iCloud) | Push delivery; iCloud copies if folder sync is on | Push metadata; SQLCipher ciphertext of iCloud copies | Vault contents |
 | Apassy Connect (paid, optional) | Sealed envelopes and sync snapshots; at stage 7 the account directory, the vault stores, and the Stripe ids (section "Apassy Connect") | TLS records, ciphertext, sizes, times, device names and public keys, the account's email and plan, vault ids, node names, client addresses in memory only | Values, vault contents, questions, answers, except the opt-in bouncer brain service below, which sees the bouncer state |
 | Bouncer brain service of Apassy Connect (paid, opt-in, ADR 0035) | The shared encoder; the owner's head sets while Apassy hosting is on; the examples of a training job for at most 24 h | The state of each bouncer request (user request, command, relative directory, purpose, variable names, owner rule), in memory for one request; the examples of a training job | Values, the vault, the vault path, absolute project paths. It cannot allow a run: the bouncer gate on the Mac decides |
@@ -57,7 +58,7 @@ A hosted cloud agent (first: Grok Bot) reaches the Mac's node at
 The owner decides every cloud run in this release, on the Mac or the iPhone. The node trusts the app
 process: code that runs in it can release any run, but it can read the vault anyway.
 
-## The node over the tailnet (planned: plan S2–S3)
+## The node over the tailnet (plan S2–S3; built on `release/0.5.17`, not released yet)
 
 A device reaches the Mac's node, or a Linux node, at the **node origin** `https://<Tailscale IPv4>:8444`
 behind a pinned self-signed certificate ([node-pairing-v1](../contracts/node-pairing-v1.md)). The
@@ -66,11 +67,11 @@ questions, the feed, the access requests, and relay sync use their contracts unc
 | Part | Holds | Sees | Cannot see or do |
 | --- | --- | --- | --- |
 | The node origin and its pin | The pairing link holds both (QR or pasted text); each device stores them with its membership, never in synced data | — | A link with another pin gives other safety words (the pin is in the handoff transcript); a stored pin changes only by a new pairing. Tailscale identity is never authorization |
-| The TLS front (tailnet addresses, port 8444) | The node certificate; its key sealed under the node master key (`node/front/key.sealed`) | TLS records of the devices; peer addresses; it ends TLS and forwards bytes to the relay's tailnet-scope listener on the loopback | It binds only `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, never `0.0.0.0` or `::`; it refuses other peers before the handshake; it parses no HTTP. It runs only while a vault is unlocked (Mac) or the service runs (Linux) |
-| The relay's tailnet-scope listener (loopback) | The node's team files (SQLCipher) | Device-signed requests: sealed envelopes, ciphertext, ids, push handles and their secrets | Operator routes, `/v1/connect`, OAuth; on the Mac also the team and agent routes: 404. It trusts no header |
+| The TLS front (tailnet addresses, port 8444) | The node certificate; its key sealed under the node master key (`node/front/key.sealed`) | TLS records of the devices; peer addresses; it ends TLS and forwards bytes to the relay's tailnet-scope listener on the loopback | It binds only the addresses that Tailscale names for this machine in `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, never `0.0.0.0` or `::`; it closes peers outside those ranges before the handshake; it parses no HTTP. In the Serve fallback (no interface has the Tailscale address) it binds `127.0.0.1` and Tailscale Serve forwards the tailnet port in TCP mode: every peer is then `127.0.0.1` (`tailscaled`, or any local process), and the per-peer limits are one pool for all of them. It runs only while a vault is unlocked (Mac) or the service runs (Linux) |
+| The relay's tailnet-scope listener (loopback) | The node's team files (SQLCipher) | Device-signed requests: sealed envelopes, ciphertext, ids, push handles and their secrets. Also requests without a key from any tailnet peer that the Tailscale ACLs let reach the front (sign-in challenges, link, join, and team codes); the Mac's own clients, plain over the loopback (the local route); on the Linux node, the member and agent requests of the team routes. Every request comes from the front's loopback address, so it cannot tell peers apart, and its failed-authentication limit counts the whole listener ([N8-1](../reviews/node-tailnet-2026-11/n8-panel.md)) | Operator routes, `/v1/connect`, OAuth; on the Mac also the team and agent routes: 404. It trusts no header |
 | A device with a pinned membership | Its device key, the pin, the alternatives | The node's answers | It never accepts another certificate for that origin and never falls back to system trust |
 | `tailscaled` and the tailnet | WireGuard keys | Which devices talk to the node, sizes, times | Traffic: TLS runs end to end between the device and the node |
-| Push gateway | The APNs key and its handle key | Handles, node addresses, times | Tokens are sealed under the gateway's key; the node never sees them. A node that held a handle can push the fixed notification within the limits until the handle expires (180 days) |
+| Push gateway | The APNs key and its handle key | Handles, node addresses, times | Tokens are sealed under the gateway's key; the node never sees them. A node that held a handle can push the fixed notification within the limits until the handle expires (180 days). Making a handle needs no proof of the device: whoever knows a device's APNs token can make handles for it and push the fixed notification within the per-handle and per-address limits ([N8-3](../reviews/node-tailnet-2026-11/n8-panel.md)) |
 
 ## Apassy Connect (ADR 0037 stage 7, planned)
 
