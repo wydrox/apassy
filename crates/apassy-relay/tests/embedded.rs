@@ -819,6 +819,49 @@ fn a_personal_team_is_made_without_a_code_and_a_restart_opens_it_again() {
     node.stop();
 }
 
+/// An agent of the MCP authorization flow has no live token until its client connects
+/// (`TokenIssue::Later`), yet it takes one of the 20 places of the personal team: a node
+/// counts every agent that is not revoked.
+#[test]
+fn agents_without_a_token_count_toward_the_agent_limit_of_a_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = EmbeddedRelay::default()
+        .start(node_config(dir.path()))
+        .unwrap();
+    let team = node.create_team("Personal").unwrap();
+    let later = |name: String| NewCloudAgent {
+        name,
+        items: Vec::new(),
+        token: TokenIssue::Later,
+    };
+    let mut first = None;
+    for index in 0..20 {
+        let made = node
+            .create_agent(&team, &later(format!("Remote {index}")))
+            .unwrap_or_else(|error| panic!("agent {index}: {error}"));
+        assert!(made.token.is_none(), "no token for the flow");
+        first.get_or_insert(made.agent_id);
+    }
+    for token in [TokenIssue::Later, TokenIssue::Now { lifetime_days: 30 }] {
+        let refused = node
+            .create_agent(
+                &team,
+                &NewCloudAgent {
+                    name: "One too many".to_string(),
+                    items: Vec::new(),
+                    token,
+                },
+            )
+            .expect_err("the 21st agent");
+        assert_eq!(refused.code, codes::TEAM_LIMIT, "{refused}");
+    }
+    // A revocation frees a place.
+    node.revoke_agent(&team, first.expect("an agent")).unwrap();
+    node.create_agent(&team, &later("Remote again".to_string()))
+        .unwrap();
+    node.stop();
+}
+
 #[test]
 fn a_node_goes_back_to_schema_6_and_its_listed_agents_are_revoked() {
     let dir = tempfile::tempdir().unwrap();
