@@ -1,7 +1,7 @@
 # ADR 0018 — Local bouncer and shared vault relay
 
 Date: 2026-10-01.
-Status: Architecture direction accepted by the owner. Not implemented. The relay alpha of ADR 0016 runs on the VPS, but it has none of the decisions below.
+Status: Architecture direction accepted by the owner. Not implemented. Update 2026-11-03: the shared vaults of this record will not run on the hosted relay. Since 0.5.14 the hosted relay refuses team-vault content (ADR 0037 D8). A shared vault moves to a team host on the owner's own node (ADR 0037 stage 4). The hosted relay on the VPS has none of the decisions below.
 
 ## Decision
 

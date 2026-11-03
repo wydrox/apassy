@@ -1,7 +1,7 @@
 # ADR 0026 — A simple app: three columns, folders, shared vaults
 
 Date: 2026-10-12.
-Status: ACCEPTED by the owner on 2026-10-12 ("jest już ok. działaj z implementacją"). Shipped in 0.5.0: the Mac app (§1–§5, §7) and the iPhone app (§8). Shared vaults (§6) are not built yet. On the iPhone, the agents, agent use, rules, requests, and suggestions wait for the feed from the Mac ([stage 5 plan](../design/stage5-plan.md), section D), and questions through the relay need the relay's team schema 5, which is not deployed yet. The approved mockup is [docs/design/app-v2-mockup.html](../design/app-v2-mockup.html). It goes with [ADR 0025](0025-low-friction-access.md).
+Status: ACCEPTED by the owner on 2026-10-12 ("jest już ok. działaj z implementacją"). Shipped in 0.5.0: the Mac app (§1–§5, §7) and the iPhone app (§8). Shared vaults (§6) are not built. They move to a team host on the owner's node (ADR 0037 stage 4). The feed from the Mac ([stage 5 plan](../design/stage5-plan.md), section D) brought the iPhone Agents tab in 0.5.2. Questions through the relay went live with relay team schema 5 on 2026-10-13. The approved mockup is [docs/design/app-v2-mockup.html](../design/app-v2-mockup.html). It goes with [ADR 0025](0025-low-friction-access.md).
 
 ## Current supersession — 2026-10-17
 

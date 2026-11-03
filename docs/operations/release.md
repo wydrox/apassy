@@ -64,6 +64,8 @@ helper fell back to the macOS dialog in 0.5.14. All six components move to
 relay image with `relay-image.yml` (tag `image-release-0.5.15`) and deploy it only
 after the owner approves the exact image and backup.
 
+State on 2026-11-03: only the macOS download (`latest.json` 0.5.15, 4fd3f9f) and the website went out at 0.5.15. TestFlight 0.5.15 (29895036) is an internal test build from 70e1bac0 with the watch app, not a release. The relay, the Linux CLI and the extension stay at 0.5.14. There is no tag `v0.5.15`. The open components go straight to 0.5.16 ([release plan](../design/release-plan-0.5.16.md)).
+
 ## 0.5.14 coordinated release
 
 0.5.14 collects the Touch ID panel (#54), the relay as a crate of this workspace

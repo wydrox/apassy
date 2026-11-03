@@ -1,6 +1,6 @@
 # Implementation plan — your own relay, build path (ADR 0037)
 
-Date: 2026-11-02. Status: PLAN, accepted with ADR 0037. Stages 0 and 1 started 2026-11-02. Decision: [ADR 0037](../adr/0037-own-relay-open-source.md).
+Date: 2026-11-02. Status: PLAN, accepted with ADR 0037. Stages 0 and 1 shipped in 0.5.14 (#66). The cloud slice of stage 2 has its own plan, `implementation-plan-0037-cloud-agents.md` (draft PR #85). Decision: [ADR 0037](../adr/0037-own-relay-open-source.md).
 
 ## Outcome and constraints
 

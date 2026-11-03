@@ -65,7 +65,7 @@ global policy. No physical Touch ID, App Nap, lock/sleep or signed-device
 acceptance is established by fixture tests; CI and isolated device acceptance
 remain required.
 
-Date: 2026-10-31. Status: owner-approved design; implementation proposed for review.
+Date: 2026-10-31. Status: owner-approved design; shipped in 0.5.8. The global window of the section above shipped in 0.5.13.
 Supersedes ADR 0021's every-fill rule for the opt-in modes below. Every time remains
 the default. The owner's final decisions supersede the narrower scope proposed in
 `docs/reviews/audit-2026-10-31/approvals-frequency.md`.

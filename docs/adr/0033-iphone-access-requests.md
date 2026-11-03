@@ -1,7 +1,7 @@
 # ADR 0033 — Answer access requests from the iPhone
 
 Date: 2026-11-01.
-Status: implemented for review, based on Connect onboarding #41 at `8e61e04`. Synthetic Rust/Core/Swift and Simulator acceptance is recorded with this implementation. Physical Face ID/Secure Enclave and notification acceptance remains pending; no release or deployment is authorized.
+Status: shipped in 0.5.10 (iPhone Requests: Deny, or Allow once with Face ID), based on Connect onboarding #41 at `8e61e04`. Synthetic Rust/Core/Swift and Simulator acceptance is recorded with this implementation. Physical Face ID/Secure Enclave and notification acceptance remains pending.
 
 The owner decided: the iPhone can **Deny**, or **Allow once** after fresh Face ID. Durable access grants stay Mac-only. Local Mac answers remain available.
 

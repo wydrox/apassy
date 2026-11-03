@@ -1,7 +1,7 @@
 # ADR 0028 — Retire the Wi-Fi companion; the relay carries every request to the iPhone
 
 Date: 2026-10-19.
-Status: Connect onboarding prerequisite implemented in ADR 0032. Wi-Fi retirement remains PROPOSED and is not accepted by the owner yet. When accepted, it supersedes [ADR 0020](0020-iphone-companion.md) §1–§5 in stages (section "Decision").
+Status: Connect onboarding prerequisite implemented in ADR 0032. [ADR 0033](0033-iphone-access-requests.md) (0.5.10) delivered the access requests through the relay of stage 2. Update 2026-11-03: the owner accepted the removal of the Wi-Fi companion in ADR 0037 D6 (2026-11-02), with one change: the LAN and tailnet routes of the owner's node (ADR 0037 stage 2) replace "the relay is the only path". companion-v1 goes after stage 2 ships, with the two-release notice of stage 3. This supersedes [ADR 0020](0020-iphone-companion.md) §1–§5 in stages (section "Decision").
 
 Connect onboarding prerequisite implemented by [ADR 0032](0032-connect-onboarding.md) on 2026-11-01: Free and Personal vaults can create a questions-only connection without an operator code or paid account, then confirm an iPhone and register push. This does not complete access-request transport or authorize removing the Wi-Fi companion; stages 2 and 3 remain open.
 

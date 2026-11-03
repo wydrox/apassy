@@ -1,7 +1,7 @@
 # ADR 0024 — Access at first use
 
 Date: 2026-10-09.
-Status: ACCEPTED by the owner on 2026-10-09 ("zgadzam się z rekomendacją"). In the code on branch `feat/access-at-first-use`.
+Status: ACCEPTED by the owner on 2026-10-09 ("zgadzam się z rekomendacją"). Shipped in 0.4.1. [ADR 0025](0025-low-friction-access.md) changed §1 in 0.5.0. The old branch is kept only as the tag `archive/access-at-first-use`.
 
 ## Context
 

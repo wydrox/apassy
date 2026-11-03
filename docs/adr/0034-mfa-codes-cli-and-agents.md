@@ -1,6 +1,6 @@
 # ADR 0034 — One-time codes in the owner CLI and agent runs
 
-Date: 2026-11-01. Status: owner-approved decisions, implementation proposed for review.
+Date: 2026-11-01. Status: owner-approved decisions; shipped in 0.5.10 (`apassy code`, and codes for agent runs only with owner approval).
 Amends [ADR 0030](0030-owner-check-window.md) and the OTP boundary of
 [ADR 0025](0025-low-friction-access.md). Existing production, host, exception,
 Always ask, missing-context and unavailable-bouncer rules remain in force.

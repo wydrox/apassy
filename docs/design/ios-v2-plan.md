@@ -1,6 +1,7 @@
 # The iPhone app v2: implementation plan
 
 Date: 2026-10-12. Source: [ADR 0026 §8](../adr/0026-simple-app.md) and the approved mockup [ios-v1-mockup.html](ios-v1-mockup.html). Branch: `feat/low-friction-access` (draft PR #15). No release, no TestFlight, no real vault: synthetic data only.
+Status (2026-11-03): done. Merged in PR #15 and shipped in 0.5.0. The main-flow UX plan of 2026-10-17 then changed the tabs ([ADR 0026](../adr/0026-simple-app.md)).
 
 ## What changes
 

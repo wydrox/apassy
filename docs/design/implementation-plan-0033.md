@@ -1,6 +1,6 @@
 # Implementation plan — iPhone access requests (ADR 0033)
 
-Date: 2026-11-01. Status: implementation in review. A-C are separate protocol/lifecycle/transport commits; D adds typed Core calls and durable submission guards; E adds fresh cancellable signing and native Requests; F adds synthetic integration/UI evidence. Physical-device acceptance below remains pending.
+Date: 2026-11-01. Status: done; shipped in 0.5.10. A-C are separate protocol/lifecycle/transport commits; D adds typed Core calls and durable submission guards; E adds fresh cancellable signing and native Requests; F adds synthetic integration/UI evidence. Physical-device acceptance below remains pending.
 Decision: [ADR 0033](../adr/0033-iphone-access-requests.md).
 Wire: [relay-access-request-v1](../contracts/relay-access-request-v1.md).
 

@@ -1,6 +1,7 @@
 # Plan: stage 5 (questions through the relay) and V3 (shared vaults)
 
 Date: 2026-10-12. Branch: `feat/low-friction-access` (draft PR #15). App 0.4.1 is released; schema 18 is not. ADR 0025 §3d–§3e and ADR 0026 §6 are the decisions this plan implements.
+Status (2026-11-03): stage 5 is done. Questions through the relay went live on 2026-10-13 (relay team schema 5), and the feed (section D) shipped in 0.5.2. V3 (shared vaults) is not built; it moves to a team host on the owner's node (ADR 0037 stage 4).
 
 ## 0. Verified state
 
