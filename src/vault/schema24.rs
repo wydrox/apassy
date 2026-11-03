@@ -247,7 +247,8 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), WATCH_SCHEMA_VERSION);
+        // The unlock goes on to the current schema (26: `schema26.rs`).
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
         assert_eq!(rows(conn), before);
         let extras: Vec<String> = conn
             .prepare(

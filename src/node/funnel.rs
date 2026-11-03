@@ -410,7 +410,7 @@ pub fn parse_refusal(text: &str) -> Option<FunnelError> {
     }
     let link = text
         .split_whitespace()
-        .map(|word| word.trim_matches(|c: char| matches!(c, '.' | ',' | ')' | '(' | '"' | '\'')))
+        .map(|word| word.trim_matches(['.', ',', ')', '(', '"', '\'']))
         .find(|word| {
             ["https://login.tailscale.com/", "https://tailscale.com/"]
                 .iter()

@@ -33,7 +33,7 @@ pub mod master_key;
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
@@ -156,11 +156,11 @@ pub struct CloudAgentView {
 }
 
 struct Running {
+    /// Each start has its own number, so that a check stops only the node it saw.
+    serial: u64,
     shared: Arc<host::Shared>,
     host: Option<JoinHandle<()>>,
     port: u16,
-    /// `https://<DNSName>:8443`.
-    public_url: String,
     funnel_on: bool,
 }
 
@@ -169,7 +169,8 @@ struct Notes {
     /// Why the last start failed.
     failure: Option<String>,
     keychain_fallback: bool,
-    /// The node key was new and the older node moved aside.
+    /// The node key was new and the older node moved aside, or the node lost the team
+    /// of the vault: the cloud agents must be added again.
     lost_key: bool,
 }
 
@@ -182,15 +183,20 @@ pub struct Node {
     /// The key, read once in each app process: a node restart (lock and unlock) asks no
     /// second Touch ID. It opens metadata only.
     key: Mutex<Option<(Zeroizing<String>, KeySource)>>,
+    /// Held for the whole of a start: one start at a time, and a stop waits for the start
+    /// on its way, so nothing (no Funnel route) is left after the stop returns.
+    start_lock: Mutex<()>,
     running: Mutex<Option<Running>>,
-    /// Grows with each stop, so that a start that was on its way gives up.
-    generation: AtomicU64,
+    /// Stops that wait for a start: the start gives up at its next step.
+    stops_waiting: AtomicUsize,
+    serial: AtomicU64,
     notes: Mutex<Notes>,
 }
 
 /// The state of the open vault that a start needs.
 struct VaultState {
     epoch: [u8; 32],
+    file: PathBuf,
     team: Option<String>,
     port: u16,
 }
@@ -203,8 +209,10 @@ impl Node {
             funnel: Funnel::new(options.cli),
             data_dir: options.data_dir,
             key: Mutex::new(None),
+            start_lock: Mutex::new(()),
             running: Mutex::new(None),
-            generation: AtomicU64::new(0),
+            stops_waiting: AtomicUsize::new(0),
+            serial: AtomicU64::new(0),
             notes: Mutex::new(Notes::default()),
         }
     }
@@ -218,19 +226,34 @@ impl Node {
     pub fn serves(&self) -> Option<[u8; 32]> {
         lock(&self.running)
             .as_ref()
-            .map(|running| running.shared.epoch)
+            .map(|running| running.shared.epoch())
     }
 
-    /// Whether the open vault wants the node: unlocked, the route on, and an active
-    /// cloud agent. `Some` is the vault session.
+    /// Whether the open vault wants a node to start: unlocked, the public route on, and
+    /// an active cloud agent. `Some` is the vault session.
     pub fn wanted(vault: &Vault) -> Option<[u8; 32]> {
+        Self::may_run(vault).filter(|_| vault.has_cloud_agents().unwrap_or(false))
+    }
+
+    /// Whether a running node may go on for the open vault: unlocked and the public
+    /// route on. Without a cloud agent a node goes on (the first agent is being made).
+    pub fn may_run(vault: &Vault) -> Option<[u8; 32]> {
         if vault.is_locked() {
             return None;
         }
-        let route_on = vault
+        vault
             .cloud_node_setting()
-            .is_ok_and(|setting| setting.route_on);
-        (route_on && vault.has_cloud_agents().unwrap_or(false)).then(|| vault.epoch())
+            .is_ok_and(|setting| setting.route_on)
+            .then(|| vault.epoch())
+    }
+
+    /// Serve the new session of the same vault file (a passphrase change or a backup
+    /// ends the session without a lock), so its sessions and the route stay. Returns
+    /// false when no node runs, or it serves another file: then stop it.
+    pub fn adopt(&self, vault: &Vault) -> bool {
+        lock(&self.running)
+            .as_ref()
+            .is_some_and(|running| running.shared.adopt(vault))
     }
 
     fn master_key(&self) -> Result<(NodeSecret, KeySource, bool), NodeError> {
@@ -270,6 +293,7 @@ impl Node {
         };
         Ok(VaultState {
             epoch: vault.epoch(),
+            file: vault.path().to_path_buf(),
             team: setting.team_id,
             port,
         })
@@ -287,24 +311,42 @@ impl Node {
         let _ = std::fs::write(self.data_dir.join(LAST_TARGET_FILE), port.to_string());
     }
 
-    /// Start the node for the open vault, unless it runs. See the module text. On an
-    /// error nothing runs, and [`Node::status`] says why.
+    /// A stop waits: the start gives up.
+    fn check_not_stopping(&self) -> Result<(), NodeError> {
+        if self.stops_waiting.load(Ordering::SeqCst) == 0 {
+            Ok(())
+        } else {
+            Err(error("node_stopped", "The node was stopped while it started."))
+        }
+    }
+
+    /// Forget the cloud agents of the vault: its node or its team is new.
+    fn forget_agents(vault: &SharedVault, epoch: [u8; 32]) {
+        let mut guard = lock(vault);
+        if let Some(vault) = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.epoch() == epoch)
+        {
+            let _ = vault.reset_cloud_node();
+            // The owner had the route on: it stays on.
+            let _ = vault.set_cloud_route_on(true);
+        }
+    }
+
+    /// Start the node for the open vault, unless it runs. See the module text. One start
+    /// runs at a time. On an error nothing runs, and [`Node::status`] says why.
     pub fn start(&self, vault: &SharedVault, broker: BrokerContext) -> Result<(), NodeError> {
-        let generation = self.generation.load(Ordering::SeqCst);
-        let result = self.start_inner(vault, broker, generation);
+        let _one = lock(&self.start_lock);
+        let result = self.start_inner(vault, broker);
         lock(&self.notes).failure = result.as_ref().err().map(|error| error.message.clone());
         result
     }
 
-    fn start_inner(
-        &self,
-        vault: &SharedVault,
-        broker: BrokerContext,
-        generation: u64,
-    ) -> Result<(), NodeError> {
+    fn start_inner(&self, vault: &SharedVault, broker: BrokerContext) -> Result<(), NodeError> {
         if self.is_running() {
             return Ok(());
         }
+        self.check_not_stopping()?;
         let state = Self::vault_state(vault)?;
         let dns_name = match self.funnel.status() {
             Tailscale::Missing => return Err(funnel_error(&FunnelError::NoTailscale)),
@@ -313,6 +355,7 @@ impl Node {
             }
             Tailscale::Connected { dns_name } => dns_name,
         };
+        self.check_not_stopping()?;
         let (key, source, retired) = self.master_key()?;
         {
             let mut notes = lock(&self.notes);
@@ -322,13 +365,10 @@ impl Node {
         let mut team_id = state.team.clone();
         if retired {
             // A new empty node: the cloud agents of the vault are gone with the old one.
-            let mut guard = lock(vault);
-            if let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) {
-                let _ = vault.reset_cloud_node();
-                let _ = vault.set_cloud_route_on(true);
-            }
+            Self::forget_agents(vault, state.epoch);
             team_id = None;
         }
+        self.check_not_stopping()?;
         let public_url = funnel::public_origin(&dns_name);
         let node = self.backend.start(NodeConfig {
             data_dir: self.data_dir.clone(),
@@ -338,37 +378,50 @@ impl Node {
         })?;
         let team = match team_id.map(NodeTeamId) {
             Some(team) if node.has_team(&team) => team,
-            _ => match node.create_team(TEAM_NAME) {
-                Ok(team) => {
-                    let mut guard = lock(vault);
-                    let saved = guard
-                        .as_mut()
-                        .filter(|vault| !vault.is_locked() && vault.epoch() == state.epoch)
-                        .map(|vault| vault.set_cloud_node_team(Some(&team.0)));
-                    if !matches!(saved, Some(Ok(()))) {
-                        drop(guard);
-                        node.stop();
-                        return Err(error(
-                            "vault_locked",
-                            "The vault was locked while the node started.",
-                        ));
+            stored => {
+                if stored.is_some() {
+                    // The node does not know the team of the vault (its directory is new):
+                    // the node ids of the vault's agents name nothing any more.
+                    Self::forget_agents(vault, state.epoch);
+                    lock(&self.notes).lost_key = true;
+                }
+                match node.create_team(TEAM_NAME) {
+                    Ok(team) => {
+                        let mut guard = lock(vault);
+                        let saved = guard
+                            .as_mut()
+                            .filter(|vault| !vault.is_locked() && vault.epoch() == state.epoch)
+                            .map(|vault| vault.set_cloud_node_team(Some(&team.0)));
+                        if !matches!(saved, Some(Ok(()))) {
+                            drop(guard);
+                            node.stop();
+                            return Err(error(
+                                "vault_locked",
+                                "The vault was locked while the node started.",
+                            ));
+                        }
+                        team
                     }
-                    team
+                    Err(failure) => {
+                        node.stop();
+                        return Err(failure);
+                    }
                 }
-                Err(failure) => {
-                    node.stop();
-                    return Err(failure);
-                }
-            },
+            }
         };
         let shared = Arc::new(host::Shared::new(
             node,
             team,
             Arc::clone(vault),
+            state.file.clone(),
             broker,
             state.epoch,
+            public_url,
         ));
-        if let Err(failure) = shared.refresh(&[]) {
+        if let Err(failure) = self
+            .check_not_stopping()
+            .and_then(|()| shared.refresh(&[]).map(drop))
+        {
             Self::teardown(&shared, None);
             return Err(failure);
         }
@@ -382,30 +435,37 @@ impl Node {
             Err(_) => {
                 Self::teardown(&shared, None);
                 let _ = self.funnel.disable(state.port);
-                return Err(error("node_failed", "The host thread of the node did not start."));
+                return Err(error(
+                    "node_failed",
+                    "The host thread of the node did not start.",
+                ));
             }
         };
-        let mut running = lock(&self.running);
         let current = {
             let guard = lock(vault);
             guard
                 .as_ref()
                 .is_some_and(|vault| !vault.is_locked() && vault.epoch() == state.epoch)
         };
-        if self.generation.load(Ordering::SeqCst) != generation || !current {
-            drop(running);
+        if let Err(failure) = self.check_not_stopping().and_then(|()| {
+            if current {
+                Ok(())
+            } else {
+                Err(error(
+                    "node_stopped",
+                    "The vault was locked while the node started.",
+                ))
+            }
+        }) {
             Self::teardown(&shared, Some(host));
             let _ = self.funnel.disable(state.port);
-            return Err(error(
-                "node_stopped",
-                "The vault was locked while the node started.",
-            ));
+            return Err(failure);
         }
-        *running = Some(Running {
+        *lock(&self.running) = Some(Running {
+            serial: self.serial.fetch_add(1, Ordering::SeqCst) + 1,
             shared,
             host: Some(host),
             port: state.port,
-            public_url,
             funnel_on: true,
         });
         Ok(())
@@ -422,11 +482,25 @@ impl Node {
     }
 
     /// Stop the node: every session ends and every run key goes, the Funnel route goes
-    /// off, and the host thread ends. A start on its way gives up. Nothing runs after
-    /// this call returns.
+    /// off, and the host thread ends. A start on its way gives up, and this call waits
+    /// for it. Nothing runs, and no route of the node is on, after it returns.
     pub fn stop(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        let Some(mut running) = lock(&self.running).take() else {
+        self.stop_running(None);
+    }
+
+    /// Stop the running node; with `only`, only when it is the start of that number.
+    fn stop_running(&self, only: Option<u64>) {
+        self.stops_waiting.fetch_add(1, Ordering::SeqCst);
+        let one = lock(&self.start_lock);
+        self.stops_waiting.fetch_sub(1, Ordering::SeqCst);
+        let running = {
+            let mut running = lock(&self.running);
+            if only.is_some_and(|serial| running.as_ref().map(|r| r.serial) != Some(serial)) {
+                return;
+            }
+            running.take()
+        };
+        let Some(mut running) = running else {
             return;
         };
         // The summary rows, while the vault is still open (at a quit; a lock wrote its
@@ -437,16 +511,21 @@ impl Node {
         if running.funnel_on {
             let _ = self.funnel.disable(running.port);
         }
+        drop(one);
     }
 
     /// Check the route of a running node: when the tailnet name changed or the Funnel
     /// handler is gone, stop it (the desktop starts it again with the new origin; the
-    /// sessions end). Returns true when it stopped the node.
+    /// sessions end). Only the node that it checked is stopped. Returns true when it
+    /// stopped the node.
     pub fn maintain(&self) -> bool {
-        let Some((port, public_url)) = lock(&self.running)
-            .as_ref()
-            .map(|running| (running.port, running.public_url.clone()))
-        else {
+        let Some((serial, port, public_url)) = lock(&self.running).as_ref().map(|running| {
+            (
+                running.serial,
+                running.port,
+                running.shared.public_url.clone(),
+            )
+        }) else {
             return false;
         };
         let name_changed = match self.funnel.status() {
@@ -458,8 +537,8 @@ impl Node {
             .serve_state(port)
             .is_ok_and(|state| state.funnel_port != funnel::PortUse::Ours);
         if name_changed || route_gone {
-            self.stop();
-            return true;
+            self.stop_running(Some(serial));
+            return !self.is_running();
         }
         false
     }
@@ -471,9 +550,8 @@ impl Node {
     }
 
     fn mcp_url(&self) -> Option<String> {
-        lock(&self.running)
-            .as_ref()
-            .map(|running| format!("{}/mcp", running.public_url))
+        self.shared()
+            .map(|shared| format!("{}/mcp", shared.public_url))
     }
 
     /// The node for Settings > Cloud agents. It runs the Tailscale command line.
@@ -500,7 +578,7 @@ impl Node {
             warnings.push(failure.clone());
         }
         if notes.lost_key {
-            warnings.push("The key of the node was lost, so Apassy made a new node. Add your cloud agents again.".to_owned());
+            warnings.push("The node lost its key or the team of this vault, so Apassy started it empty. Add your cloud agents again.".to_owned());
         }
         if notes.keychain_fallback {
             warnings.push("The node key is a file in the Apassy folder, because this build cannot use the Keychain.".to_owned());
@@ -571,29 +649,28 @@ impl Node {
             .shared()
             .ok_or_else(|| error("node_stopped", "The node is not running."))?;
         let (agent_id, created) = shared.add_agent(name, items, days)?;
-        let url = self
-            .mcp_url()
-            .ok_or_else(|| error("node_stopped", "The node is not running."))?;
         Ok(AddedAgent {
             agent_id,
             token: created.token,
             expires_at: created.expires_at,
-            url,
+            url: format!("{}/mcp", shared.public_url),
         })
     }
 
     /// The cloud agents of the open vault.
     pub fn agents(&self, vault: &SharedVault) -> Result<Vec<CloudAgentView>, NodeError> {
-        let live = self
-            .shared()
-            .map(|shared| shared.live_sessions())
-            .unwrap_or_default();
+        let shared = self.shared();
         let at = now();
         let guard = lock(vault);
         let vault = guard
             .as_ref()
             .filter(|vault| !vault.is_locked())
             .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
+        // Live sessions only of the node of this vault session.
+        let live = shared
+            .filter(|shared| shared.epoch() == vault.epoch())
+            .map(|shared| shared.live_sessions())
+            .unwrap_or_default();
         let agents = vault
             .cloud_agents()
             .map_err(|_| error("vault_error", "The cloud agents cannot be read."))?;
@@ -626,7 +703,8 @@ impl Node {
     /// Its token stops at its next request, its pending runs are denied, and its
     /// sessions end. The caller asks for the owner check first.
     pub fn revoke_agent(&self, vault: &SharedVault, agent_id: u64) -> Result<(), NodeError> {
-        let relay_agent = {
+        let shared = self.shared();
+        let (relay_agent, epoch) = {
             let mut guard = lock(vault);
             let vault = guard
                 .as_mut()
@@ -645,15 +723,20 @@ impl Node {
             vault
                 .revoke_agent(agent_id)
                 .map_err(|_| error("vault_error", "The agent cannot be revoked."))?;
-            relay
+            (relay, vault.epoch())
         };
-        if let Some(shared) = self.shared() {
+        // Only the node of this vault session knows the agent; else the revocation waits
+        // in the vault for the node of this vault (`pending_cloud_revocations`).
+        if let Some(shared) = shared.filter(|shared| shared.epoch() == epoch) {
             let revoked = shared
                 .with_node(|node| node.revoke_agent(&shared.team, NodeAgentId(relay_agent)));
             if matches!(revoked, Some(Ok(()))) || matches!(&revoked, Some(Err(e)) if e.code == "not_found")
             {
                 let mut guard = lock(vault);
-                if let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) {
+                if let Some(vault) = guard
+                    .as_mut()
+                    .filter(|vault| !vault.is_locked() && vault.epoch() == epoch)
+                {
                     let _ = vault.forget_cloud_agent(agent_id);
                 }
             }

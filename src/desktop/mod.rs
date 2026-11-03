@@ -346,8 +346,6 @@ impl DesktopApp {
             handle.approvals().invalidate_all();
         }
         self.stop_companion();
-        // The node serves one vault session: it stops, and starts again for the new one.
-        self.stop_node();
     }
 
     pub fn model(&self) -> &DesktopModel {

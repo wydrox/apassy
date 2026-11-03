@@ -19,6 +19,7 @@
 //! that the node has not seen.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
@@ -35,8 +36,9 @@ use crate::broker::decide::BrokerContext;
 use crate::broker::{CloudContext, CloudDecision, CloudRequest, SharedVault, evaluate_cloud};
 use crate::vault::{ActivityDecision, EnvDelivery, NewActivity, Vault, format_utc};
 
-/// The longest wait for pending runs, so a stop is seen soon.
-const WAIT: Duration = Duration::from_millis(500);
+/// The longest wait for pending runs. The wait holds the node, and a stop waits for it
+/// (on the UI thread), so it is short.
+const WAIT: Duration = Duration::from_millis(100);
 /// A poll that gives only runs in progress waits this long before the next one.
 const BUSY_PAUSE: Duration = Duration::from_millis(250);
 /// How often released runs are checked for their end, and the catalog is made again.
@@ -100,9 +102,14 @@ pub(super) struct Shared {
     pub(super) node: RwLock<Option<Box<dyn RunningNode>>>,
     pub(super) team: NodeTeamId,
     pub(super) vault: SharedVault,
+    /// The vault file of the team.
+    pub(super) vault_file: PathBuf,
     pub(super) broker: BrokerContext,
-    /// The vault session that the node serves.
-    pub(super) epoch: [u8; 32],
+    /// The vault session that the node serves. A passphrase change or a backup of the
+    /// same file starts a new session: the node takes it ([`Shared::adopt`]).
+    epoch: Mutex<[u8; 32]>,
+    /// `https://<DNSName>:8443`.
+    pub(super) public_url: String,
     pub(super) stop: Arc<AtomicBool>,
     in_flight: Mutex<HashSet<NodeRunId>>,
     sessions: Mutex<Vec<LiveSession>>,
@@ -115,15 +122,19 @@ impl Shared {
         node: Box<dyn RunningNode>,
         team: NodeTeamId,
         vault: SharedVault,
+        vault_file: PathBuf,
         broker: BrokerContext,
         epoch: [u8; 32],
+        public_url: String,
     ) -> Self {
         Self {
             node: RwLock::new(Some(node)),
             team,
             vault,
+            vault_file,
             broker,
-            epoch,
+            epoch: Mutex::new(epoch),
+            public_url,
             stop: Arc::new(AtomicBool::new(false)),
             in_flight: Mutex::new(HashSet::new()),
             sessions: Mutex::new(Vec::new()),
@@ -138,12 +149,28 @@ impl Shared {
         guard.as_deref().map(f)
     }
 
+    /// The vault session that the node serves.
+    pub(super) fn epoch(&self) -> [u8; 32] {
+        *lock(&self.epoch)
+    }
+
+    /// Serve the new session of the same vault file, after a passphrase change or a
+    /// backup. Returns false for another file or a locked vault.
+    pub(super) fn adopt(&self, vault: &Vault) -> bool {
+        if vault.is_locked() || vault.path() != self.vault_file.as_path() {
+            return false;
+        }
+        *lock(&self.epoch) = vault.epoch();
+        true
+    }
+
     /// Call `f` with the vault while the session of the node lasts.
     fn with_vault<R>(&self, f: impl FnOnce(&mut Vault) -> R) -> Option<R> {
+        let epoch = self.epoch();
         let mut guard = lock(&self.vault);
         guard
             .as_mut()
-            .filter(|vault| !vault.is_locked() && vault.epoch() == self.epoch)
+            .filter(|vault| !vault.is_locked() && vault.epoch() == epoch)
             .map(f)
     }
 

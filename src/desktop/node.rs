@@ -4,15 +4,19 @@
 //! (`RunOptions::node`); a build without it has no node. The lifecycle follows the
 //! iPhone listener (`companion.rs`):
 //!
-//! - [`DesktopApp::sync_node`] compares what the vault wants (unlocked, the public route
-//!   on, an active cloud agent: `Node::wanted`) with what runs, once a second. It starts
+//! - [`DesktopApp::sync_node`] compares what the vault wants with what runs, once a
+//!   second: a start needs an unlocked vault with the public route on and an active
+//!   cloud agent (`Node::wanted`); a running node goes on while the vault is unlocked
+//!   with the route on (`Node::may_run`), and a new session of the same vault file (a
+//!   passphrase change, a backup) is taken over (`Node::adopt`). It starts
 //!   the node on a worker thread (Touch ID for the node key, the Tailscale command
 //!   line), or stops it. The window calls it from `logic`, so it runs also while the
 //!   window is minimized. A start that failed is not tried again until the vault session
 //!   changes or the owner asks ([`DesktopApp::retry_node`]).
 //! - [`DesktopApp::stop_node`] stops it at once: the node (every session ends), the
 //!   Funnel route off, the host thread joined. The app calls it on lock, on quit, before
-//!   an update restart, and wherever it ends waiting runs.
+//!   an update restart, and before it leaves a vault for another one. After an open, a
+//!   create, or a restore, the next comparison stops a node of the earlier vault.
 //! - While the node runs, closing the window minimizes it instead of quitting
 //!   ([`DesktopApp::keep_open_for_node`]): the cloud agents still reach the Mac. A click
 //!   on the Dock icon or the Window menu shows it again. Quit Apassy (⌘Q) quits.
@@ -104,12 +108,20 @@ impl DesktopApp {
         self.node_changed();
     }
 
-    /// The vault session that wants the node, if any.
-    fn node_wanted(&self) -> Option<[u8; 32]> {
+    /// What the open vault wants of `node`: the session that wants a start (an active
+    /// cloud agent), and the session in which a running node may go on (the route on;
+    /// a node that serves an earlier session of the same file takes the new one).
+    fn node_wanted(&self, node: &Node) -> (Option<[u8; 32]>, Option<[u8; 32]>) {
         self.owner_ui
             .session
-            .with_vault(|vault| Node::wanted(vault))
-            .flatten()
+            .with_vault(|vault| {
+                let allowed = Node::may_run(vault);
+                if allowed.is_some() && node.serves().is_some() && node.serves() != allowed {
+                    node.adopt(vault);
+                }
+                (Node::wanted(vault), allowed)
+            })
+            .unwrap_or((None, None))
     }
 
     /// Start or stop the node so that it matches the vault. See the module text.
@@ -145,9 +157,9 @@ impl DesktopApp {
         // What runs decides, not what the window started: the node can stop by itself
         // (the route went off, the tailnet name changed), and "Add a cloud agent" starts
         // it from Settings.
-        let wanted = self.node_wanted();
+        let (wanted, allowed) = self.node_wanted(&node);
         let serves = node.serves();
-        if serves.is_some() && serves != wanted {
+        if serves.is_some() && serves != allowed {
             self.stop_node();
         } else if serves.is_some() {
             self.node.running_for = serves;
