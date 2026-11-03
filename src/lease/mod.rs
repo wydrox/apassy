@@ -606,8 +606,11 @@ impl ProviderEndpoints {
         Ok((destination, path.trim_end_matches('/').to_owned()))
     }
 
-    /// The destination and the path of a service-account key's `token_uri`: the default
-    /// `https://oauth2.googleapis.com/token` is [`ProviderEndpoints::google_token`].
+    /// The destination and the path of a service-account key's `token_uri`: only the
+    /// Google token endpoint `https://oauth2.googleapis.com/token`
+    /// ([`ProviderEndpoints::google_token`]). The key JSON comes from a paste, so another
+    /// URL would send a signed assertion of the key to any host (and make the key holder
+    /// call it); it is refused.
     pub fn google_token_for(
         &self,
         token_uri: &str,
@@ -615,7 +618,7 @@ impl ProviderEndpoints {
         if token_uri == google::DEFAULT_TOKEN_URI {
             return Ok((self.google_token.clone(), google::TOKEN_PATH.to_owned()));
         }
-        https_target(token_uri)
+        Err(google::OTHER_TOKEN_URI)
     }
 
     /// The destination and the path of an OAuth `token_url` or `revoke_url`.

@@ -101,9 +101,9 @@ userinfo, query, or fragment (an `http://` loopback URL is allowed only in tests
 | Kind | Setting | Type and rule | Default |
 | --- | --- | --- | --- |
 | `aws_sts` | `role_arn` | `arn:aws:iam::<12 digits>:role/<path and name>`, at most 2048 bytes. With it the key holder calls `AssumeRole` (recommended). | none: `GetFederationToken` |
-| `aws_sts` | `policy` | JSON text of an IAM session policy object, at most 2048 bytes. | none: `AssumeRole` sends no policy; `GetFederationToken` sends an allow-all policy (S6-4) |
+| `aws_sts` | `policy` | JSON text of an IAM session policy object, at most 2048 bytes. | none: with `services`, both calls send a policy that allows `<service>:*` for each listed service; without them, `AssumeRole` sends no policy and `GetFederationToken` sends an allow-all policy (S6-4) |
 | `aws_sts` | `region` | `[a-z]{2}(-[a-z]+)+-[0-9]+`, for example `eu-central-1`. The STS endpoint is `sts.<region>.amazonaws.com`. | `us-east-1` |
-| `aws_sts` | `services` | 1 to 16 distinct AWS service names, each `[a-z0-9-]{1,32}`, for example `s3`. Used by signed requests (section 7) and `AWS_ENDPOINT_URL_<SERVICE>` (section 5.3). | none: no restriction |
+| `aws_sts` | `services` | 1 to 16 distinct AWS service names, each `[a-z0-9-]{1,32}`, for example `s3`. Used by signed requests (section 7), `AWS_ENDPOINT_URL_<SERVICE>` (section 5.3), and, without a `policy`, the session policy of a lease (`{"Effect":"Allow","Action":["<service>:*", …],"Resource":"*"}`; the names are IAM service prefixes). | none: no restriction |
 | `github_app` | `repositories` | 1 to 500 distinct repository names (`[A-Za-z0-9._-]{1,100}`, without the owner). | none: every repository of the installation |
 | `github_app` | `permissions` | Object of a permission name (`[a-z_]{1,64}`) to `read`, `write`, or `admin`, 1 to 64 entries. | none: the installation's permissions |
 | `github_app` | `api_url` | URL. | `https://api.github.com` |
@@ -123,7 +123,7 @@ temporary credentials" (S6-14).
 | --- | --- | --- |
 | `aws_sts` | `AssumeRole` with `role_arn`, else `GetFederationToken`; `DurationSeconds=900`; `RoleSessionName` or `Name` = `apassy-<run id>`; SigV4 with the long-lived key, service `sts`. `GetSessionToken` MUST NOT be used. | `Expiration` at most 900 s after the request, else `lease_failed`. |
 | `github_app` | RS256 JWT (`iat` 60 s back, `exp` at most 9 minutes ahead, `iss` = `app_id`) → `POST {api_url}/app/installations/{installation_id}/access_tokens` with `repositories` and `permissions`. | GitHub's `expires_at` (one hour). Revoked at run end (section 4.2). |
-| `google_service_account` | RS256 JWT of the key → `token_uri` (bootstrap token, kept on the key holder and dropped after the next call) → `iamcredentials.googleapis.com` `generateAccessToken` for `impersonate` with `scopes` and `lifetime: "900s"`. | `expireTime` at most 900 s ahead, else `lease_failed`. |
+| `google_service_account` | RS256 JWT of the key → `token_uri`, which MUST be `https://oauth2.googleapis.com/token` (another `token_uri` is `lease_failed` before any call: the key JSON comes from a paste) (bootstrap token, kept on the key holder and dropped after the next call) → `iamcredentials.googleapis.com` `generateAccessToken` for `impersonate` with `scopes` and `lifetime: "900s"`. | `expireTime` at most 900 s ahead, else `lease_failed`. |
 | `oauth_refresh` | `POST token_url` with `grant_type=refresh_token`, the client auth of `client_auth`, and `scope`. | `expires_in`, the real expiry. Without `revoke_url`: a missing `expires_in` or one over 3600 s is `lease_failed`. With `revoke_url` (revoked at run end): a longer `expires_in` is reported as it is; a missing one gives `expires_at = made_at + 3600`, and the activity row says that the expiry is unknown and the token is revoked at run end. |
 
 The whole exchange of one lease has a deadline of 20 seconds. Every secret is held in `Zeroizing`
