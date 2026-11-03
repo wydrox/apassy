@@ -72,7 +72,10 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    `x-apassy-relay-commit`. Check authenticated team/approval/sync paths and the
    backup timer. Public liveness alone is not acceptance for those paths.
 7. Rollback: stop the relay and select the archived previous image and compose
-   settings. From the release with directory 1004 (section 24) back to an image of
+   settings. From the release with team schema 8 and directory 1005 (section 25) back
+   to an image of schema 7 and directory 1004, run `apassy-relay downgrade-schema-7`
+   (section 25.2), then `apassy-relay downgrade-directory-1004` (section 25.3), with
+   the relay stopped. From the release with directory 1004 (section 24) back to an image of
    directory 1003, run `apassy-relay downgrade-directory-1003` with the relay stopped
    (section 24.3), after any team downgrade below. From the release with team
    schema 7 (section 23) back to a schema-6 image, first run
@@ -1516,3 +1519,113 @@ its node does not start, and the app has no command for the way back. Start the 
 this version again. (Releases ship all components at one version, so a Mac app is not
 downgraded on its own.)
 
+
+## 25. A node on the tailnet: push handles (team schema 8) and node pairing codes (directory 1005)
+
+A node (the relay inside the Mac app, later `apassy serve` on Linux) serves the devices
+of its teams on its tailnet address through a TLS front, signs devices in with its node
+origin, makes teams of devices in process or with a one-use node pairing code, and
+pushes through the push gateway with per-device handles (docs/SPEC.md section 32). It
+is configured in code (`RelayConfig::embedded` with a node origin), not from the
+environment. The hosted relay serves none of it: it has no tailnet listener, one
+sign-in origin (`APASSY_RELAY_PUBLIC_URL`), and its Worker push as before. No variable
+of the hosted relay changes.
+
+What changes for the hosted relay at the first start of this version:
+
+- Each team file moves to schema version 8: the relay copies it to
+  `teams/<id>.db.pre-v8` (mode 0600, encrypted like the file), then adds the table
+  `push_handle` in one transaction. The change is additive; `push_token` is untouched.
+  A team whose copy cannot be made stays at version 7 and does not open; free disk space
+  and start again. The previous image (schema 7) refuses a version 8 file.
+- `relay.db` moves from version 1004 to 1005 in one transaction: the column
+  `team_code.kind` (`operator` for every existing code). The image before (directory
+  1004) refuses a 1005 file.
+- New routes `PUT` and `DELETE /v1/push/handle`: the hosted relay answers 409
+  `push_unavailable` (it has no gateway). Its table of handles stays empty.
+- New commands: `apassy-relay downgrade-schema-7` (25.2),
+  `apassy-relay downgrade-directory-1004` (25.3), and
+  `apassy-relay admin node-code [--minutes <n>]`, which makes a code that only a node
+  takes (on the hosted relay `POST /v1/teams` refuses it as `invite_invalid`).
+
+On a Mac the node's team files and `relay.db` move the same way at the first start of
+the app of this version.
+
+### 25.1 What to watch
+
+- The relay log at the start: no `cannot be moved to schema version 8` and no error
+  about `relay.db`.
+- `admin teams`: every team `"open": true`.
+- `ls /data/teams/*.db.pre-v8`: one copy for each team that existed before the start.
+- `admin readiness` and the push status: the hosted relay keeps `"mode": "worker"`
+  (or `off`); a node with a gateway shows `"mode": "gateway"`.
+- On a node: team audit rows `push_handle_set`, `push_handle_removed`, `push_sent` with
+  `"via": "gateway"`, and `push_failed`. A run of `push_failed {"reason": "clock"}` means
+  the node's clock and the gateway's differ by more than 300 s: fix the clock. Relay
+  audit rows `node_code_created` and `team_created` with `code_kind` or
+  `"kind": "device"`.
+
+Owner steps: use the release runbook at the top of this document; it names these
+rollbacks in its step 7. Before the deploy, check the free disk (each team file is
+copied once, `.pre-v8`) and take a backup (`admin backup`, section 13) as usual: it
+holds `relay.db` at 1004 and the team files at 7.
+
+### 25.2 Rollback of team schema 8
+
+**In place (preferred).** It keeps every change since the migration. With the relay
+stopped:
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay downgrade-schema-7 > downgrade.json
+jq -e 'all(.[]; .error == null and (.to // 0) <= 7)' downgrade.json && echo "every team is at schema 7"
+```
+
+It takes `relay.lock`, so it refuses to run beside a relay. For each team file of
+version 8 it sets the version to 7 and changes nothing else: the schema 7 image never
+reads `push_handle`. A file of another version is left as it is. It exits 1 when any
+team has an `error`: that team is still at version 8. Fix it (disk space, the file) and
+run the command again. To go further back to a schema-6 image, run
+`downgrade-schema-6` instead: it takes a file of version 7 or 8 to 6 (23.3). Both
+commands open `relay.db` and move it to the directory version of this image, so run any
+directory downgrade (25.3, 24.3) after them. Then select the old image in
+`compose.yaml` and `docker compose up -d --wait`.
+
+On a node, its devices get no push while it runs the image of schema 7. A later start of
+a schema-8 image moves the files to 8 again (a new `.pre-v8`), keeps the handles, and
+deletes those of the devices and members revoked meanwhile.
+
+**From the copy.** `cp -p "/data/teams/$id.db.pre-v8" "/data/teams/$id.db"` for each
+team with a copy, with the relay stopped. As in section 21.3, every change of access
+since the migration comes back undone (revoked devices, members, agents, and grants
+work again) and the audit rows since then are gone. Use it only when the in-place way
+fails for a team.
+
+### 25.3 Rollback of directory 1005
+
+**In place (preferred).** With the relay stopped, after any team downgrade of 25.2:
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay downgrade-directory-1004
+```
+
+It takes `relay.lock`. It deletes the unused node pairing codes (the image of 1004 would
+take one for an operator code) and sets the version to 1004 in one transaction, and
+prints `{"from": 1005, "to": 1004}`; a 1004 file is left as it is (`{"from": 1004,
+"to": 1004}`). Any other version exits 1 and changes nothing. Used codes stay as
+history, and the `kind` column stays: the 1004 image never reads it. On the hosted
+relay no node code exists unless an operator made one, so nothing is lost; operator
+codes keep working. To go back to an image of directory 1003, run
+`downgrade-directory-1003` instead: it takes a 1004 or 1005 file to 1003 with the same
+step first (24.3). Then select the old image and `docker compose up -d --wait`.
+
+**From the backup.** Restore `relay.db` from the backup of 25.1 with the relay stopped,
+as in 24.3. Use it only when the in-place way fails.
+
+A later start of a 1005 image moves the file to 1005 again and keeps the column.
+
+**An Apassy app before this version on a Mac** refuses the node's files at schema 8 and
+`relay.db` at 1005: its node does not start, and the app has no command for the way
+back. Start the app of this version again. (Releases ship all components at one
+version, so a Mac app is not downgraded on its own.)
