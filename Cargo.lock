@@ -191,6 +191,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "apassy-app"
+version = "0.5.15"
+dependencies = [
+ "apassy",
+ "apassy-relay",
+ "eframe",
+ "rustix 1.1.4",
+ "tracing",
+]
+
+[[package]]
 name = "apassy-core"
 version = "0.5.15"
 dependencies = [

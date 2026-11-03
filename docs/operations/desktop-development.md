@@ -75,7 +75,7 @@ Isolation status: unverified.
 
 ## Vault feature
 
-`cargo run --locked --features desktop,vault --bin apassy` connects the Vault and Item details views to `apassy::vault`.
+`cargo run --locked --features desktop,vault --bin apassy` connects the Vault and Item details views to `apassy::vault`. That window has no node for cloud agents; `cargo run --locked -p apassy-app` (binary `apassy-app`, crates/apassy-app, ADR 0037) is the window with the Mac's own node, and the app bundle ships it as `Contents/MacOS/apassy`.
 The owner types a file path and a passphrase. Create and open return a locked file. Unlock, add, edit, search, delete, reveal, backup, and restore use that file.
 Secret fields are not search keys and are not copied into status text. Reveal keeps a value on screen until hide or lock. The desktop does not write the clipboard.
 Rules, agents, and activity stay on the in-memory demo. Reset demo does not delete the vault file.

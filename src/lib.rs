@@ -50,6 +50,10 @@ pub mod import;
 pub mod otp;
 
 pub mod native;
+/// The Mac's own node for cloud agents (ADR 0037): the seam to the embedded relay. It
+/// needs the vault.
+#[cfg(feature = "vault")]
+pub mod node;
 /// The owner command line channel (ADR 0017): wire and client.
 pub mod owner;
 pub mod paths;

@@ -383,6 +383,57 @@ pub fn check(config: &RelayConfig) -> RelayResult<Vec<TeamRollback>> {
     Ok(answers)
 }
 
+/// What `downgrade-schema-6` did to one team file.
+#[derive(Debug, Serialize)]
+pub struct Downgraded {
+    pub team: TeamId,
+    /// The schema version of the file before, when it could be read.
+    pub from: Option<i64>,
+    /// The schema version of the file after: 6 when it was 7, else as it was.
+    pub to: Option<i64>,
+    /// The agents with an item list that were revoked (`Store::downgrade_to_v6`).
+    pub agents_revoked: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `apassy-relay downgrade-schema-6` (docs/OPERATIONS.md section 23.3): with the relay
+/// stopped (it takes `relay.lock`), every team file of version 7 goes back to version 6
+/// in place, for the image of schema 6. Each agent with an item list is revoked, since
+/// that image would give it every item of its member's grants. A file of another version
+/// is left as it is. One team that fails does not stop the others: its `error` says why.
+pub fn downgrade_to_6(config: &RelayConfig) -> RelayResult<Vec<Downgraded>> {
+    let _lock = crate::server::hub::lock_data_dir(config)?;
+    let rows = directory::Directory::open(config)?.teams()?;
+    let now = crate::now_unix();
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let mut answer = Downgraded {
+                team: row.id.clone(),
+                from: None,
+                to: None,
+                agents_revoked: 0,
+                error: None,
+            };
+            let result = (|| -> RelayResult<()> {
+                let store = Store::open_at(&config.team_path(&row.id), &row.file_key)?;
+                let version = store.user_version()?;
+                answer.from = Some(version);
+                if version == 7 {
+                    answer.agents_revoked = store.downgrade_to_v6(now)?;
+                }
+                answer.to = Some(store.user_version()?);
+                Ok(())
+            })();
+            if let Err(error) = result {
+                answer.error = Some(error.message);
+            }
+            answer
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

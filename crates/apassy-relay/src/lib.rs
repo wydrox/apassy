@@ -9,7 +9,8 @@
 //! `hostkeys` (the crypto of host-held item keys), `device` (device keys, sign-in, and
 //! safety words), `decision` (the pure part of the
 //! decision per run, used by the relay and by the owner's host), `sync_head` (the
-//! signed head of a vault snapshot, docs/SPEC.md section 24).
+//! signed head of a vault snapshot, docs/SPEC.md section 24), `embedded` (the Mac's own
+//! node behind `apassy::node::backend`, docs/SPEC.md section 30).
 //! Track modules: `server` (track server), `proxy` (track proxy), `cli` (track client).
 #![forbid(unsafe_code)]
 
@@ -17,6 +18,7 @@ pub mod api;
 pub mod config;
 pub mod decision;
 pub mod device;
+pub mod embedded;
 pub mod error;
 pub mod hostkeys;
 pub mod ids;

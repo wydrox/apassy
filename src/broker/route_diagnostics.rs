@@ -37,6 +37,9 @@ pub enum ReasonKind {
     AccessCheck,
     Connector,
     BrowserFill,
+    /// A cloud agent of the Mac's own node (ADR 0037, cloud slice, decision 5): every
+    /// run asks the owner.
+    CloudAgent,
     ModelAllowed,
     RememberedAnswer,
     RememberedPattern,
@@ -63,6 +66,9 @@ impl ReasonKind {
             Self::AccessCheck => "This request didn't pass the access checks.",
             Self::Connector => "This connector operation needs your approval.",
             Self::BrowserFill => "The agent wants to fill a credential in your browser.",
+            Self::CloudAgent => {
+                "A cloud agent wants to use a credential. Its request is not verified."
+            }
             Self::ModelAllowed => "The bouncer gate allowed this run.",
             Self::RememberedAnswer => "Your earlier answer covers this run.",
             Self::RememberedPattern => "An approved pattern covers this run.",

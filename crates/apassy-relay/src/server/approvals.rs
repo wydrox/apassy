@@ -19,7 +19,7 @@ use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, ItemId, MemberId, RunId};
 use crate::now_unix;
 use crate::server::Core;
-use crate::server::audit::{RELAY_ACTOR, member_actor};
+use crate::server::audit::{EMBEDDED_HOST_ACTOR, RELAY_ACTOR, member_actor};
 use crate::server::auth::{AgentAuth, MemberAuth};
 use crate::server::store::{db, load_item, member_name, to_i, to_u};
 
@@ -480,6 +480,9 @@ pub enum Denier<'a> {
     Approver(&'a MemberAuth),
     /// The owner's host, on `POST /v1/host/requests/{id}/deny`.
     Host(&'a MemberAuth),
+    /// The in-process host of an embedded node (docs/SPEC.md section 30.6). No HTTP
+    /// route leads here: the caller owns the store.
+    Embedded,
 }
 
 /// Denies a pending run and drops its key. `POST /v1/approvals/{id}/deny` and
@@ -492,18 +495,23 @@ pub fn deny(
     now: u64,
 ) -> RelayResult<RunView> {
     let reason = checked_reason(request.reason.as_deref())?.map(|r| core.audit.mask_text(&r));
-    let (by, name) = match who {
-        Denier::Approver(member) => (member, format!("Denied by {}.", member.name)),
-        Denier::Host(member) => (member, "Denied by the owner's host.".to_string()),
+    let name = match who {
+        Denier::Approver(member) => format!("Denied by {}.", member.name),
+        Denier::Host(_) | Denier::Embedded => "Denied by the owner's host.".to_string(),
+    };
+    let actor = match who {
+        Denier::Approver(member) | Denier::Host(member) => member_actor(member.id.0),
+        Denier::Embedded => EMBEDDED_HOST_ACTOR.to_string(),
     };
     let (decided_by, approver_id) = match who {
         Denier::Approver(member) => (DecidedBy::Approver, Some(to_i(member.id.0))),
-        Denier::Host(_) => (DecidedBy::Host, None),
+        Denier::Host(_) | Denier::Embedded => (DecidedBy::Host, None),
     };
     let result = core.store.tx(|tx| {
         match who {
-            Denier::Host(_) => crate::server::devices::authorize_host_on(tx, by)?,
-            Denier::Approver(_) => crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?,
+            Denier::Host(by) => crate::server::devices::authorize_host_on(tx, by)?,
+            Denier::Approver(by) => crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?,
+            Denier::Embedded => {}
         }
         let run = load_run(tx, run_id)?.ok_or_else(|| RelayError::not_found("run"))?;
         let run = settle(core, tx, run, now)?;
@@ -531,7 +539,7 @@ pub fn deny(
         core.audit.write_on(
             tx,
             now,
-            &member_actor(by.id.0),
+            &actor,
             "run_denied",
             Some(run.id),
             &json!({"code": codes::APPROVAL_DENIED, "reason": note, "by": decided_text(decided_by)}),

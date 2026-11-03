@@ -11,7 +11,7 @@ description = "A personal credential manager with controlled agent access"
 autotests = false
 
 [workspace]
-members = [".", "ios/ApassyCore", "crates/apassy-relay"]
+members = [".", "ios/ApassyCore", "crates/apassy-relay", "crates/apassy-app"]
 default-members = ["."]
 
 [features]
@@ -73,6 +73,9 @@ rustix = { version = "=1.1.4", optional = true, default-features = false, featur
 # Main-process native menus through a safe API; no application framework or GTK.
 muda = { version = "=0.21.2", optional = true, default-features = false }
 
+# The owner command line and the window without the Mac's own node. The app bundle
+# ships `apassy-app` (crates/apassy-app) under this name; this target stays for the
+# integration tests (`CARGO_BIN_EXE_apassy`) and the demo build.
 [[bin]]
 name = "apassy"
 path = "src/main.rs"

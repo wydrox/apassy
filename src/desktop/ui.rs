@@ -62,6 +62,9 @@ pub(crate) mod kit;
 /// New credential entry points and local paste detection.
 #[cfg(feature = "vault")]
 mod new_credential;
+/// The lifecycle of the Mac's own node in the window (ADR 0037).
+#[cfg(all(test, feature = "vault"))]
+mod node_tests;
 /// One-time passwords (TOTP) on the credential pages.
 #[cfg(feature = "vault")]
 mod otp;

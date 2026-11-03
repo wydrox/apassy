@@ -103,6 +103,9 @@ mod tests {
         vault.lock().unwrap();
         let conn = Connection::open_with_flags(&path, OPEN_EXISTING).unwrap();
         apply_key(&conn, PASS).unwrap();
+        // Schema 26 (the cloud agents of the node) first: it has tables and a column.
+        conn.execute_batch(crate::vault::schema26::DOWNGRADE_TO_25_SQL)
+            .unwrap();
         conn.execute_batch(DOWNGRADE_TO_24_SQL).unwrap();
         assert_eq!(version(&conn), 24);
         let rows = field_rows(&conn);
@@ -117,7 +120,8 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), PASSKEY_EXTENSIONS_SCHEMA_VERSION);
+        // The unlock runs schema 26 after 25 (`schema26.rs`).
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
         assert_eq!(field_rows(conn), before, "no row changes");
         let format = before
             .iter()
@@ -154,13 +158,11 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let mut vault = Vault::create(&dir.path().join("new.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
+        // A new vault has schema 25 and the later schema 26 (`schema26.rs`).
         assert_eq!(
             version(vault.conn_ref().unwrap()),
-            PASSKEY_EXTENSIONS_SCHEMA_VERSION
-        );
-        assert_eq!(
-            PASSKEY_EXTENSIONS_SCHEMA_VERSION,
             crate::vault::SCHEMA_VERSION
         );
+        const { assert!(PASSKEY_EXTENSIONS_SCHEMA_VERSION < crate::vault::SCHEMA_VERSION) };
     }
 }
