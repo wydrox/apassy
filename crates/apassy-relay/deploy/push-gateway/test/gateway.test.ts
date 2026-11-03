@@ -15,7 +15,8 @@ import {
   type RateLimit,
 } from "../src/gateway.ts";
 import { decodeB64u, encodeB64u, makeProof, proofMessage } from "../src/handles.ts";
-import worker from "../src/index.ts";
+import worker, { LimitCounter as ExportedCounter } from "../src/index.ts";
+import { LIMITS, LimitCounter, step, type CounterNamespace, type CounterStorage } from "../src/limits.ts";
 import { V, range } from "./fixtures.ts";
 
 const ORIGIN = "https://push.example.com";
@@ -61,10 +62,54 @@ function env(extra: Partial<GatewayEnv> = {}): GatewayEnv {
     APNS_TOPIC: TOPIC,
     APNS_WATCH_TOPIC: WATCH_TOPIC,
     handles_per_address: limiter(),
+    handles_per_token: limiter(),
     pushes_per_handle: limiter(),
     pushes_per_address: limiter(),
+    pushes_per_token: limiter(),
     ...extra,
   };
+}
+
+/** The Durable Object counters in memory, on the clock `clock`: what `LIMITS` binds. */
+function counters(clock: { now: number }): CounterNamespace & { stored: Map<string, Map<string, unknown>> } {
+  const stored = new Map<string, Map<string, unknown>>();
+  const objects = new Map<string, LimitCounter>();
+  return {
+    stored,
+    idFromName: (name) => name,
+    get(id) {
+      const name = id as string;
+      let object = objects.get(name);
+      if (!object) {
+        const data = new Map<string, unknown>();
+        stored.set(name, data);
+        const storage: CounterStorage = {
+          get: async <T>(key: string) => data.get(key) as T | undefined,
+          put: async <T>(key: string, value: T) => void data.set(key, value),
+          deleteAll: async () => data.clear(),
+          setAlarm: async () => undefined,
+        };
+        object = new LimitCounter({ storage }, undefined, () => clock.now);
+        objects.set(name, object);
+      }
+      const counter = object;
+      return { fetch: (input: string, init?: RequestInit) => counter.fetch(new Request(input, init)) };
+    },
+  };
+}
+
+/** The gateway's environment with the real counters and no test limits. */
+function counted(clock: { now: number }) {
+  const limits = counters(clock);
+  const environment = env({
+    LIMITS: limits,
+    handles_per_address: undefined,
+    handles_per_token: undefined,
+    pushes_per_handle: undefined,
+    pushes_per_address: undefined,
+    pushes_per_token: undefined,
+  });
+  return { limits, environment };
 }
 
 interface Call {
@@ -226,11 +271,130 @@ describe("POST /v1/handles", () => {
 
   it("is unavailable without a gateway key or a limit binding", async () => {
     const { deps } = mock();
-    for (const extra of [{ GATEWAY_KEY: undefined }, { GATEWAY_KEY_ID: "0" }, { handles_per_address: undefined }]) {
+    for (const extra of [
+      { GATEWAY_KEY: undefined },
+      { GATEWAY_KEY_ID: "0" },
+      { handles_per_address: undefined },
+      { handles_per_token: undefined },
+    ]) {
       const refused = await answer(await handleGateway(post("/v1/handles", handleBody()), env(extra), deps));
       assert.equal(refused.status, 503);
       assert.equal(refused.body.error.code, "push_unavailable");
     }
+  });
+});
+
+describe("the limits of N8-3 and section 13", () => {
+  it("are the contract's hourly numbers, and 10 handles and 30 pushes per token", () => {
+    assert.deepEqual(LIMITS.pushes_per_handle, { limit: 60, period: 3600 });
+    assert.deepEqual(LIMITS.pushes_per_address, { limit: 600, period: 3600 });
+    assert.deepEqual(LIMITS.handles_per_address, { limit: 30, period: 3600 });
+    assert.deepEqual(LIMITS.handles_per_token, { limit: 10, period: 86400 });
+    assert.deepEqual(LIMITS.pushes_per_token, { limit: 30, period: 3600 });
+    assert.equal(ExportedCounter, LimitCounter, "the main module exports the counter class");
+  });
+
+  it("count a fixed window from its first request and never count a refusal", () => {
+    const limit = { limit: 2, period: 3600 };
+    let { window, allowed } = step(undefined, 1000, limit);
+    assert.deepEqual([window, allowed.success], [[1000, 1], true]);
+    ({ window, allowed } = step(window, 1500, limit));
+    assert.deepEqual([window, allowed.success], [[1000, 2], true]);
+    ({ window, allowed } = step(window, 4599, limit));
+    assert.deepEqual([window, allowed], [[1000, 2], { success: false, retryAfter: 1 }]);
+    ({ window, allowed } = step(window, 4600, limit));
+    assert.deepEqual([window, allowed.success], [[4600, 1], true]);
+    // A clock that went back starts a new window.
+    ({ window } = step([5000, 2], 4000, limit));
+    assert.deepEqual(window, [4000, 1]);
+  });
+
+  it("give one token 10 handles a day, over every address", async () => {
+    const { deps, state } = mock();
+    const { environment, limits } = counted(state);
+    for (let i = 0; i < 10; i++) {
+      const from = post("/v1/handles", handleBody(), { "cf-connecting-ip": `198.51.100.${i + 1}` });
+      assert.equal((await handleGateway(from, environment, deps)).status, 200, `handle ${i + 1}`);
+    }
+    const eleventh = await answer(
+      await handleGateway(post("/v1/handles", handleBody(), { "cf-connecting-ip": "198.51.100.99" }), environment, deps),
+    );
+    assert.equal(eleventh.status, 429);
+    assert.equal(eleventh.body.error.code, "rate_limited");
+    assert.ok(Number(eleventh.headers.get("retry-after")) > 3600, "the window is a day");
+    // Another token is not limited by this one.
+    const other = handleBody({ token: "ab".repeat(32) });
+    assert.equal((await handleGateway(post("/v1/handles", other), environment, deps)).status, 200);
+    // The counters hold counts under SHA-256 names only, never a token or an address.
+    for (const [name, data] of limits.stored) {
+      assert.match(name, /^[a-z_]+:[0-9a-f]{64}$/);
+      assert.ok(!name.includes(V.iphoneToken) && !name.includes("198.51.100"));
+      for (const value of data.values()) assert.ok(Array.isArray(value) && value.length === 2);
+    }
+    // A day later the token gets handles again.
+    state.now += 86400;
+    assert.equal((await handleGateway(post("/v1/handles", handleBody()), environment, deps)).status, 200);
+  });
+
+  it("give one token 30 pushes an hour through all its handles", async () => {
+    const { deps, state } = mock();
+    const handles: { handle: string; secret: string }[] = [];
+    // Three handles of the same token, made with test limits.
+    for (let i = 0; i < 3; i++) {
+      const made = await answer(await handleGateway(post("/v1/handles", handleBody()), env(), deps));
+      handles.push({ handle: made.body.handle, secret: made.body.secret });
+    }
+    const { environment } = counted(state);
+    for (let i = 0; i < 30; i++) {
+      const { handle, secret } = handles[i % 3]!;
+      const sent = await handleGateway(post("/v1/push", await pushBody(handle, secret)), environment, deps);
+      assert.equal(sent.status, 200, `push ${i + 1}`);
+    }
+    const { handle, secret } = handles[0]!;
+    const over = await answer(await handleGateway(post("/v1/push", await pushBody(handle, secret)), environment, deps));
+    assert.equal(over.status, 429);
+    assert.equal(over.body.error.code, "rate_limited");
+    // Another device's handle still pushes.
+    const watch = await handleGateway(post("/v1/push", await pushBody(V.watchHandle, V.watchSecret)), environment, deps);
+    assert.equal(watch.status, 200);
+  });
+
+  it("give one handle 60 pushes an hour, then 429 with the rest of the hour, then again", async () => {
+    const { calls, deps, state } = mock();
+    const { environment } = counted(state);
+    // Different addresses and a test limit per token, so that only the handle counts.
+    const perHandle = { ...environment, pushes_per_token: limiter(), pushes_per_address: limiter() };
+    for (let i = 0; i < 60; i++) {
+      const sent = await handleGateway(post("/v1/push", await pushBody(V.iphoneHandle, V.iphoneSecret)), perHandle, deps);
+      assert.equal(sent.status, 200, `push ${i + 1}`);
+    }
+    state.now += 600;
+    const over = await answer(
+      await handleGateway(post("/v1/push", await pushBody(V.iphoneHandle, V.iphoneSecret, { at: state.now, expires_at: state.now + 300 })), perHandle, deps),
+    );
+    assert.equal(over.status, 429);
+    assert.equal(over.headers.get("retry-after"), String(3600 - 600));
+    assert.equal(calls.length, 60);
+    state.now += 3000;
+    const again = await handleGateway(
+      post("/v1/push", await pushBody(V.iphoneHandle, V.iphoneSecret, { at: state.now, expires_at: state.now + 300 })),
+      perHandle,
+      deps,
+    );
+    assert.equal(again.status, 200);
+  });
+
+  it("is unavailable when a counter fails", async () => {
+    const { calls, deps } = mock();
+    const broken: CounterNamespace = {
+      idFromName: (name) => name,
+      get: () => ({ fetch: async () => new Response("", { status: 500 }) }),
+    };
+    const environment = env({ LIMITS: broken, pushes_per_token: undefined });
+    const refused = await answer(await handleGateway(post("/v1/push", await pushBody(V.iphoneHandle, V.iphoneSecret)), environment, deps));
+    assert.equal(refused.status, 503);
+    assert.equal(refused.body.error.code, "push_unavailable");
+    assert.equal(calls.length, 0);
   });
 });
 
@@ -497,12 +661,11 @@ describe("the deployment", () => {
     .filter((line) => !line.trim().startsWith("//"))
     .join("\n");
 
-  it("has no storage or log binding, and observability is off", () => {
+  it("has no storage or log binding but its counters, and observability is off", () => {
     for (const binding of [
       "kv_namespaces",
       "d1_databases",
       "r2_buckets",
-      "durable_objects",
       "queues",
       "analytics_engine_datasets",
       "logpush",
@@ -516,17 +679,18 @@ describe("the deployment", () => {
     assert.match(settings, /"observability": \{ "enabled": false \}/);
   });
 
-  it("names the three limits of the contract and no secret value", () => {
-    for (const name of ["handles_per_address", "pushes_per_handle", "pushes_per_address"]) {
-      assert.match(settings, new RegExp(`"name": "${name}"`));
-    }
+  it("binds the limit counters, and only them, and no secret value", () => {
+    assert.match(settings, /"durable_objects": \{ "bindings": \[\{ "name": "LIMITS", "class_name": "LimitCounter" \}\] \}/);
+    assert.match(settings, /"new_sqlite_classes": \["LimitCounter"\]/);
+    assert.equal(settings.match(/"class_name"/g)?.length, 1, "one Durable Object class");
+    assert.ok(!settings.includes('"ratelimits"'), "no per-minute binding: the counters keep the hourly limits");
     assert.ok(!settings.includes('"GATEWAY_KEY"'));
     assert.ok(!settings.includes('"APNS_KEY"'));
     assert.ok(!settings.includes("PRIVATE KEY"));
   });
 
   it("the gateway source has no console call", () => {
-    for (const file of ["../src/gateway.ts", "../src/handles.ts", "../src/index.ts"]) {
+    for (const file of ["../src/gateway.ts", "../src/handles.ts", "../src/index.ts", "../src/limits.ts"]) {
       const source = readFileSync(new URL(file, import.meta.url), "utf-8");
       assert.ok(!/console\./.test(source), file);
     }

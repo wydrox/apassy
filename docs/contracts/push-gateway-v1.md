@@ -14,7 +14,7 @@ Only the holder of the APNs key of the app's bundle id can push to the App Store
 - The device gives the node the handle and the secret, never the token.
 - For each new question the node asks the gateway to push to a handle, with a **proof** made from the secret. The gateway opens the handle, checks the proof, and sends the fixed notification.
 
-The gateway stores nothing, logs nothing, and sees no question data. The hosted relay (`apassy-relay.wyderka.cc`) keeps its Worker push (relay SPEC §25.6, relay-questions-v1 §10.8 and §14) until ADR 0037 stage 7; this contract does not change it.
+The gateway stores nothing but its limit counts (section 13), logs nothing, and sees no question data. The hosted relay (`apassy-relay.wyderka.cc`) keeps its Worker push (relay SPEC §25.6, relay-questions-v1 §10.8 and §14) until ADR 0037 stage 7; this contract does not change it.
 
 ## 2. Parts
 
@@ -80,6 +80,7 @@ Called by the device (the iPhone core, later the watch core), with system trust,
 {"v":1,"kind":"iphone","token":"<hex>","environment":"production","bundle_id":"com.wydrox.apassy.companion"}
 ```
 
+- The limits of section 13 for handle creations, per address and then per token: else 429 `rate_limited` with `Retry-After`.
 - `bundle_id` must equal the gateway's topic of `kind`: else 409 `wrong_bundle` (a build with another bundle id needs its own gateway).
 - Answer 200:
 
@@ -114,7 +115,7 @@ The gateway checks, in this order:
 1. The shape (section 3), `at < expires_at ≤ at + 600` (the question bound of relay-questions-v1 §10.2): else 400 `invalid_request`.
 2. `|at − now| ≤ 300` on the gateway's clock: else 403 `stale_request`.
 3. The rate limits of section 13: else 429 `rate_limited` with `Retry-After`.
-4. The handle (section 5): 403 `handle_invalid` or `handle_expired`.
+4. The handle (section 5): 403 `handle_invalid` or `handle_expired`. Then the limit per token of section 13 (the token inside the handle): else 429 `rate_limited`.
 5. The proof, in constant time, with the handle's secret: else 403 `proof_invalid`.
 6. The topic of the handle's kind exists (`APNS_WATCH_TOPIC` for `watch`): else 409 `kind_unavailable`. The APNs configuration is complete and the key imports: else 503 `push_unavailable`.
 7. One APNs request (section 11). `apns-expiration` is `expires_at`.
@@ -238,6 +239,8 @@ json       = the UTF-8 JSON below, no white space, fields in this order, at most
 | Pushes per handle | 60 per hour | SHA-256 of the handle text |
 | Pushes per node address | 600 per hour | SHA-256 of the client address |
 | Handle creations per address | 30 per hour | SHA-256 of the client address |
+| Handle creations per APNs token | 10 per day | SHA-256 of the token |
+| Pushes per APNs token, over all its handles | 30 per hour | SHA-256 of the token |
 | Request body | 4096 bytes | — |
 | Handle | at most 1024 bytes decoded | — |
 | Handle lifetime | 180 days | — |
@@ -246,6 +249,8 @@ json       = the UTF-8 JSON below, no white space, fields in this order, at most
 | Handles per device and team on a node | 1 | — |
 
 If the Cloudflare plan has no Rate Limiting binding, a Durable Object counter keyed the same way replaces it; it stores counts only, never a handle, token, or address.
+
+A Rate Limiting binding counts per 10 or 60 seconds only, so the Apassy gateway keeps these hourly and daily limits with that Durable Object counter: a fixed window from the first request, deleted when it ends ([N8-3, N8-4](../reviews/node-tailnet-2026-11/n8-panel.md)). The per-token limits bound what anyone who knows a device's APNs token can do: more handles or more addresses do not raise the rate at one device.
 
 ## 14. Who sees what
 
@@ -275,7 +280,7 @@ If the Cloudflare plan has no Rate Limiting binding, a Durable Object counter ke
 - The gateway learns which node addresses push to how many handles, and when.
 - A party that reads a push request in transit (only the gateway, behind TLS) can replay it for 300 s.
 - Open: whether watchOS shows both the mirrored iPhone alert and the watch's own push for the same question (a physical check before the watch unit; if it does, the watch unit decides which one to keep).
-- Open: whether the Cloudflare plan of the owner has Rate Limiting bindings (section 13).
+- Closed: the gateway keeps the limits of section 13 with a Durable Object counter, so it does not depend on Rate Limiting bindings (N8-4).
 
 ## 18. Test vectors
 

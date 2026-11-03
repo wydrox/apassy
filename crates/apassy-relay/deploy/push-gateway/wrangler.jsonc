@@ -1,24 +1,23 @@
 // The push gateway apassy-push (docs/contracts/push-gateway-v1.md, docs/operations/push-gateway.md).
-// It stores nothing and logs nothing: no KV, D1, R2, Durable Object, Queue, or log binding, and
+// It logs nothing and stores only its limit counters: no KV, D1, R2, Queue, or log binding, and
 // observability off. The secrets are GATEWAY_KEY and APNS_KEY (and GATEWAY_KEY_PREVIOUS during a
 // rotation): set them with `wrangler secret put` through Apassy, never in this file.
-// A self-hoster changes the name, the route, the APNs vars, and the namespace ids.
+// A self-hoster changes the name, the route, and the APNs vars.
 {
   "name": "apassy-push",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "workers_dev": false,
   "routes": [{ "pattern": "push.apassy.wyderka.cc", "custom_domain": true }],
-  // Section 13. A Rate Limiting binding counts per 10 or 60 seconds only, so the hourly limits
-  // of the contract (60 pushes per handle, 600 per node address, 30 handle creations per
-  // address) are kept as per-minute caps that let a burst through and bound abuse. The keys are
-  // SHA-256 of the handle text or of the client address. The namespace ids must be unique in
-  // the account (the relay's edge Worker uses 1001 to 1005).
-  "ratelimits": [
-    { "name": "handles_per_address", "namespace_id": "1101", "simple": { "limit": 10, "period": 60 } },
-    { "name": "pushes_per_handle", "namespace_id": "1102", "simple": { "limit": 10, "period": 60 } },
-    { "name": "pushes_per_address", "namespace_id": "1103", "simple": { "limit": 100, "period": 60 } }
-  ],
+  // Section 13. A Rate Limiting binding counts per 10 or 60 seconds only, so the hourly and
+  // daily limits of the contract (60 pushes per handle, 600 per node address, 30 handle
+  // creations per address, each an hour; 30 pushes per APNs token an hour and 10 handles per
+  // token a day, N8-3) are kept by the counter that section 13 allows (src/limits.ts): one
+  // Durable Object per limit and key, the key SHA-256 of the handle, the address, or the token.
+  // It stores one window of counts, never a handle, token, or address, and deletes it when the
+  // window ends.
+  "durable_objects": { "bindings": [{ "name": "LIMITS", "class_name": "LimitCounter" }] },
+  "migrations": [{ "tag": "v1-limits", "new_sqlite_classes": ["LimitCounter"] }],
   "vars": {
     "GATEWAY_KEY_ID": "1",
     "APNS_KEY_ID": "2549AX5SGX",

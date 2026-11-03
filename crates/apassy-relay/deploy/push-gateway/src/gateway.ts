@@ -1,6 +1,7 @@
 // The push gateway `apassy-push` (docs/contracts/push-gateway-v1.md): `POST /v1/handles`,
-// `POST /v1/push`, and `GET /healthz`. It holds the APNs key and the gateway key and
-// nothing else: no storage binding, no log. A device exchanges its APNs token for a sealed
+// `POST /v1/push`, and `GET /healthz`. It holds the APNs key and the gateway key, and its
+// limit counters (limits.ts: counts keyed by SHA-256, one window each) and nothing else:
+// no other storage, no log. A device exchanges its APNs token for a sealed
 // handle and a secret; a node pushes to a handle with a proof made from the secret.
 // Erasable TypeScript only, so Node can run it with type stripping in the tests. This is
 // not the main module (index.ts), so it may export values freely.
@@ -35,11 +36,9 @@ import {
   type GatewayKey,
   type Kind,
 } from "./handles.ts";
+import { counterLimit, type CounterNamespace, type LimitName, type RateLimit } from "./limits.ts";
 
-/** A Rate Limiting binding of Workers (section 13). */
-export interface RateLimit {
-  limit(input: { key: string }): Promise<{ success: boolean }>;
-}
+export type { RateLimit } from "./limits.ts";
 
 export interface GatewayEnv {
   /** b64u of 32 random bytes: the AES-256-GCM key of new handles. A Worker secret. */
@@ -58,9 +57,14 @@ export interface GatewayEnv {
   APNS_TOPIC?: string;
   /** The bundle id of the watch app: device kind `watch`. Optional. */
   APNS_WATCH_TOPIC?: string;
+  /** The Durable Object counters of the limits (section 13, limits.ts). */
+  LIMITS?: CounterNamespace;
+  /** Tests only: a limit in place of its counter. */
   handles_per_address?: RateLimit;
+  handles_per_token?: RateLimit;
   pushes_per_handle?: RateLimit;
   pushes_per_address?: RateLimit;
+  pushes_per_token?: RateLimit;
 }
 
 export interface GatewayDeps {
@@ -77,7 +81,7 @@ const defaultDeps: GatewayDeps = {
   random: (length) => crypto.getRandomValues(new Uint8Array(length)),
 };
 
-/** The period of the Rate Limiting bindings, in seconds: the `Retry-After` of a 429. */
+/** The `Retry-After` of a 429 when the counter gives none, in seconds. */
 export const LIMIT_PERIOD_SECS = 60;
 
 /** The payload of a push with a sealed summary (section 11), before and after the summary. */
@@ -106,8 +110,8 @@ function error(status: number, code: string, message: string, extra: Record<stri
 const invalid = () => error(400, "invalid_request", "The request is not valid.");
 const tooLarge = () => error(413, "payload_too_large", "The body is larger than 4096 bytes.");
 const unavailable = () => error(503, "push_unavailable", "Push is not available on this gateway.");
-const limited = () =>
-  error(429, "rate_limited", "Too many requests. Try again later.", { "retry-after": String(LIMIT_PERIOD_SECS) });
+const limited = (retryAfter: number = LIMIT_PERIOD_SECS) =>
+  error(429, "rate_limited", "Too many requests. Try again later.", { "retry-after": String(retryAfter) });
 
 /** The body as text, or undefined when it is larger than MAX_BODY_BYTES bytes or not UTF-8. */
 async function readBody(request: Request): Promise<string | undefined> {
@@ -155,13 +159,28 @@ function address(request: Request): string {
   return request.headers.get("cf-connecting-ip")?.trim() || "unknown";
 }
 
-/** Whether the binding lets one more request through. Undefined: no binding, or it failed. */
-async function allows(binding: RateLimit | undefined, key: string): Promise<boolean | undefined> {
-  if (!binding) return undefined;
+/** The limit `name`: its counter, or in a test the limit given in its place. */
+function limitOf(env: GatewayEnv, name: LimitName): RateLimit | undefined {
+  const given = env[name];
+  if (given) return given;
+  return env.LIMITS ? counterLimit(env.LIMITS, name) : undefined;
+}
+
+/**
+ * Whether the limit `name` lets one more request of `key` through (keyed by SHA-256 of
+ * `key`). A 429 response when it does not; 503 when there is no counter or it failed: the
+ * gateway never pushes without its limits.
+ */
+async function check(env: GatewayEnv, name: LimitName, key: string): Promise<Response | undefined> {
+  const binding = limitOf(env, name);
+  if (!binding) return unavailable();
   try {
-    return (await binding.limit({ key: await limitKey(key) })).success;
+    const answer = await binding.limit({ key: await limitKey(key) });
+    if (answer.success) return undefined;
+    const wait = answer.retryAfter;
+    return limited(typeof wait === "number" && Number.isSafeInteger(wait) && wait > 0 ? wait : LIMIT_PERIOD_SECS);
   } catch {
-    return undefined;
+    return unavailable();
   }
 }
 
@@ -198,9 +217,12 @@ async function createHandle(request: Request, env: GatewayEnv, deps: GatewayDeps
   if (!isKind(kind) || !isToken(token) || !isEnvironment(environment) || !isBundleId(bundleId)) {
     return invalid();
   }
-  const allowed = await allows(env.handles_per_address, address(request));
-  if (allowed === undefined) return unavailable();
-  if (!allowed) return limited();
+  // Per address, then per token: whoever knows a token cannot make handles for it without
+  // bound (N8-3).
+  const byAddress = await check(env, "handles_per_address", address(request));
+  if (byAddress) return byAddress;
+  const byToken = await check(env, "handles_per_token", token as string);
+  if (byToken) return byToken;
   const topic = topicOf(env, kind);
   if (!topic) {
     return kind === "watch"
@@ -261,12 +283,10 @@ async function push(request: Request, env: GatewayEnv, deps: GatewayDeps): Promi
   }
 
   // 3. The limits: per node address, then per handle.
-  const byAddress = await allows(env.pushes_per_address, address(request));
-  if (byAddress === undefined) return unavailable();
-  if (!byAddress) return limited();
-  const byHandle = await allows(env.pushes_per_handle, handle);
-  if (byHandle === undefined) return unavailable();
-  if (!byHandle) return limited();
+  const byAddress = await check(env, "pushes_per_address", address(request));
+  if (byAddress) return byAddress;
+  const byHandle = await check(env, "pushes_per_handle", handle);
+  if (byHandle) return byHandle;
 
   // 4. The handle.
   const keys = await gatewayKeys(env);
@@ -278,6 +298,11 @@ async function push(request: Request, env: GatewayEnv, deps: GatewayDeps): Promi
       : error(403, "handle_invalid", "The handle is not valid at this gateway.");
   }
   const payload = opened.payload;
+
+  // 4a. The limit per APNs token, over every handle of that token (N8-3): more handles or
+  // more addresses do not raise the rate at one device.
+  const byToken = await check(env, "pushes_per_token", payload.token);
+  if (byToken) return byToken;
 
   // 5. The proof, in constant time.
   const secret = decodeB64u(payload.secret)!;
