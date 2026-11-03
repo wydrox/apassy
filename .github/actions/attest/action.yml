@@ -1,0 +1,119 @@
+# Proof for one release artifact (ADR 0037 section 8, implementation-plan-misc D11 and M20):
+# an SPDX JSON SBOM made with a pinned syft, then a GitHub build provenance attestation of
+# each subject and an SBOM attestation of the SBOM subjects. The job that uses this action
+# needs `permissions: id-token: write` and `attestations: write`.
+# A user checks the result with `gh attestation verify` (docs/operations/release.md,
+# "Attestations and SBOMs").
+name: Attest a release artifact
+description: SPDX SBOM, build provenance attestation, and SBOM attestation for release files.
+
+inputs:
+  subject-path:
+    description: >-
+      Files that get a build provenance attestation, one path or glob per line.
+    required: true
+  sbom-subject-path:
+    description: >-
+      Files that the SBOM describes and that get the SBOM attestation, one path or glob per
+      line. Default: subject-path.
+    required: false
+    default: ""
+  sbom-path:
+    description: A directory or a file that syft scans. Give this or sbom-image.
+    required: false
+    default: ""
+  sbom-image:
+    description: A local Docker image that syft scans. Give this or sbom-path.
+    required: false
+    default: ""
+  sbom-output:
+    description: The SPDX JSON file to write, for example target/proof/NAME.spdx.json.
+    required: true
+  sbom-all-files:
+    description: >-
+      "true" lists every scanned file with its SHA-256 in the SBOM, not only the files of
+      packages. For small inputs such as the extension zip contents.
+    required: false
+    default: "false"
+
+outputs:
+  sbom:
+    description: The SPDX JSON file.
+    value: ${{ inputs.sbom-output }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the inputs
+      shell: bash
+      env:
+        SBOM_PATH: ${{ inputs.sbom-path }}
+        SBOM_IMAGE: ${{ inputs.sbom-image }}
+        SBOM_OUTPUT: ${{ inputs.sbom-output }}
+      run: |
+        if { [ -n "$SBOM_PATH" ] && [ -n "$SBOM_IMAGE" ]; } || { [ -z "$SBOM_PATH" ] && [ -z "$SBOM_IMAGE" ]; }; then
+          echo "::error::Give exactly one of sbom-path and sbom-image."
+          exit 1
+        fi
+        if [ -n "$SBOM_PATH" ] && [ ! -e "$SBOM_PATH" ]; then
+          echo "::error::$SBOM_PATH does not exist."
+          exit 1
+        fi
+        mkdir -p "$(dirname "$SBOM_OUTPUT")"
+
+    - name: Make the SBOM of a directory or file
+      if: inputs.sbom-path != ''
+      uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      env:
+        SYFT_FILE_METADATA_SELECTION: ${{ inputs.sbom-all-files == 'true' && 'all' || 'owned-by-package' }}
+        SYFT_FILE_METADATA_DIGESTS: sha256
+      with:
+        path: ${{ inputs.sbom-path }}
+        format: spdx-json
+        output-file: ${{ inputs.sbom-output }}
+        syft-version: v1.56.0
+        upload-artifact: false
+        upload-release-assets: false
+        dependency-snapshot: false
+
+    - name: Make the SBOM of an image
+      if: inputs.sbom-image != ''
+      uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      with:
+        image: ${{ inputs.sbom-image }}
+        format: spdx-json
+        output-file: ${{ inputs.sbom-output }}
+        syft-version: v1.56.0
+        upload-artifact: false
+        upload-release-assets: false
+        dependency-snapshot: false
+
+    # attest needs an SPDX document. A broken or empty SBOM stops the job here.
+    - name: Check the SBOM
+      shell: bash
+      env:
+        SBOM_OUTPUT: ${{ inputs.sbom-output }}
+      run: |
+        python3 -I - "$SBOM_OUTPUT" <<'PY'
+        import json, os, sys
+        path = sys.argv[1]
+        size = os.path.getsize(path)
+        if size > 16 * 1024 * 1024:
+            sys.exit(f"error: {path} has {size} bytes; an attestation predicate can have at most 16 MiB")
+        document = json.load(open(path, encoding="utf-8"))
+        if not str(document.get("spdxVersion", "")).startswith("SPDX-2."):
+            sys.exit(f"error: {path} is not an SPDX 2 document")
+        print(f"{path}: {document['spdxVersion']}, {len(document.get('packages', []))} packages, "
+              f"{len(document.get('files', []))} files, {size} bytes")
+        PY
+
+    - name: Attest the build provenance
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-path: ${{ inputs.subject-path }}
+
+    - name: Attest the SBOM
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-path: ${{ inputs.sbom-subject-path || inputs.subject-path }}
+        sbom-path: ${{ inputs.sbom-output }}
