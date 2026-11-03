@@ -594,6 +594,7 @@ mod tests {
             own,
             removed: false,
             questions_only: true,
+            node_origin: None,
         }
     }
 

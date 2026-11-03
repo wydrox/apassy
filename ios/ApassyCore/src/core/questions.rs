@@ -3368,6 +3368,7 @@ mod tests {
             own: None,
             removed: false,
             questions_only: true,
+            node_origin: None,
         };
         {
             let mut state = guard(&core.questions);
@@ -3441,6 +3442,7 @@ mod tests {
             own: None,
             removed: false,
             questions_only: true,
+            node_origin: None,
         };
         (keys, key)
     }
