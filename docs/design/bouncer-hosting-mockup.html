@@ -812,8 +812,8 @@ svg{display:block}
 <div class="frame">
   <div class="flabel"><b>Demo states for the screenshots</b><span>Each state comes from the screenshot tour (<code>examples/screenshots.rs</code>), synthetic data only.</span></div>
   <ul class="fnotes">
-    <li><code>APASSY_TOUR_BRAIN_HOST=server</code> before <code>scripts/screenshots.sh</code>: the seed stores My Server (frame 4b: the synthetic host does not answer).</li>
-    <li><code>APASSY_TOUR_BRAIN_HOST=connect</code>: the seed stores an Apassy Connect row (frame 5).</li>
+    <li><code>APASSY_TOUR_BRAIN_HOST=server</code> before <code>scripts/screenshots.sh</code>: the seed stores My Server at <code>https://brain.tour.invalid</code>, which never resolves (frame 4b). Frame 4a needs a live https server with a public certificate and has no tour state.</li>
+    <li><code>APASSY_TOUR_BRAIN_HOST=connect</code>: the seed stores an Apassy Connect row at <code>https://brain.connect.invalid</code> (frame 5).</li>
     <li>Tour file step <code>brain-host server</code>, <code>brain-host server-shown</code>, <code>brain-host paste</code>, <code>brain-host consent</code>, <code>brain-host check</code>: frames 3a to 3d. <code>brain-host this-mac</code>: frame 6 (with a stored server).</li>
   </ul>
   <p class="note" style="margin:0">Owner rules applied: no empty pane, short text, help behind ⓘ, title case for buttons and menus, one blue button per view.</p>
