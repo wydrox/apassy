@@ -7,9 +7,11 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 ### Added
 
 - **Apple Watch:** a watch app that answers access requests only (ADR 0039). It can **Allow once** while the watch is unlocked on your wrist, or **Deny**. Connect it in Settings › Devices › Add Apple Watch on the iPhone, with the code from the Mac's Add an iPhone or a Mac…, and confirm the safety words with Touch ID on the Mac. The watch never shows run questions or vault items. Macs refuse every run answer from a watch. Apple Watch Series 9 or later, or Ultra 2 or later (arm64), with watchOS 27 or later.
+- **Cloud agents:** a hosted agent such as Grok Bot can use the credentials that you pick for it, without their values. Turn on the public route in Settings › Cloud agents (Tailscale Funnel to your own Mac, port 8443, off by default), add a cloud agent with its items, and copy the setup (an MCP URL and a bearer header) into the agent. You allow every run on the Mac or the iPhone. The agent gets placeholders and base URLs, and your Mac puts the real value into the API request. Revoke the agent, lock the vault, or quit Apassy, and the route stops ([contract](docs/contracts/cloud-agents-v1.md), [plugin](deploy/plugins/apassy-cloud/README.md)).
 
 ### Upgrade notes
 
+- Relay team schema 7: each team file gets the column `agent.items`, after a copy `<team>.db.pre-v7`. Existing agents keep every item of their grants. `apassy-relay downgrade-schema-6` is the way back (relay `docs/OPERATIONS.md` section 23).
 - Vault schema 24: `trusted_device` accepts the device kind `watch`. Apps at schema 23 or older refuse schema-24 copies until they update.
 
 ## [0.5.15] - 2026-11-03
