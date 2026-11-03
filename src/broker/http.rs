@@ -6,9 +6,9 @@
 //! header, follows no redirect, and reads at most 64 KiB of a JSON answer.
 //! [`send`] is the general request of the way C lease providers (implementation
 //! plan s6, unit B): form or JSON bodies, the caller's own headers, `PUT` and
-//! `DELETE`, and the response headers. The
-//! head-file transfers of the bouncer brain ([`put_file`], [`get_to_file`]) stream
-//! the file, with their own caps and a progress deadline.
+//! `DELETE`, and the response headers. The head-file transfers of the bouncer
+//! brain ([`put_file`], [`get_to_file`]) stream the file, with their own caps and
+//! a progress deadline.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
@@ -3228,6 +3228,622 @@ mod tests {
         );
         assert!(elapsed < total + Duration::from_secs(1), "{elapsed:?}");
         assert!(!target.exists());
+        server.join().expect("server");
+    }
+
+    // Unit B of implementation plan s6: `send` for the way C lease providers.
+
+    /// A synthetic long-lived value. No test sends it anywhere but the loopback.
+    const SYNTHETIC_SECRET: &str = "synthetic-long-lived-secret-0123456789";
+
+    /// A loopback destination whose port is closed. A request that passes the
+    /// checks fails with `Connect`; one that fails them never connects.
+    fn closed_loopback() -> DestinationUrl {
+        let (listener, destination) = loopback_listener();
+        drop(listener);
+        destination
+    }
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn a_form_body_is_encoded_exactly() {
+        let body = form_body(&[
+            ("Action", "AssumeRole"),
+            ("RoleSessionName", "apassy-run 1"),
+            ("Policy", r#"{"a":"b/c+d=e&f"}"#),
+            ("Empty", ""),
+            ("Unicode", "zł~._-"),
+        ]);
+        assert_eq!(
+            std::str::from_utf8(&body).expect("ascii"),
+            "Action=AssumeRole&RoleSessionName=apassy-run%201\
+             &Policy=%7B%22a%22%3A%22b%2Fc%2Bd%3De%26f%22%7D&Empty=&Unicode=z%C5%82~._-"
+        );
+        // The exact size: the buffer never grew, so no partial copy is left.
+        assert_eq!(body.capacity(), body.len());
+        assert!(form_body(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_form_post_sends_the_exact_bytes() {
+        let (listener, destination) = loopback_listener();
+        let host = destination.host_header();
+        let server = capture_one_request(listener);
+        let body = form_body(&[("Action", "GetFederationToken"), ("DurationSeconds", "900")]);
+        let authorization = "AWS4-HMAC-SHA256 \
+            Credential=AKIDEXAMPLE/20261103/us-east-1/sts/aws4_request, \
+            SignedHeaders=content-type;host;x-amz-date, Signature=0000";
+        let headers = [
+            ("X-Amz-Date", "20261103T120000Z"),
+            ("Authorization", authorization),
+        ];
+        let request = HttpRequest {
+            headers: &headers,
+            body: Some(Body::Form(&body)),
+            ..HttpRequest::new(Method::Post, "/")
+        };
+        let response = send(&destination, &request, soon(), None).expect("form post");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"{}");
+        assert_eq!(body.len(), 45);
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "POST / HTTP/1.1\r\nHost: {host}\r\nX-Amz-Date: 20261103T120000Z\r\n\
+                 Authorization: {authorization}\r\n\
+                 Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 45\r\n\
+                 Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n\
+                 Action=GetFederationToken&DurationSeconds=900"
+            )
+        );
+    }
+
+    #[test]
+    fn a_delete_with_a_bearer_sends_no_body() {
+        let (listener, destination) = loopback_listener();
+        let host = destination.host_header();
+        let server = capture_one_request(listener);
+        let headers = [
+            ("Accept", "application/vnd.github+json"),
+            ("X-GitHub-Api-Version", "2022-11-28"),
+        ];
+        let request = HttpRequest {
+            bearer: Some("ghs_synthetic0123456789"),
+            headers: &headers,
+            ..HttpRequest::new(Method::Delete, "/installation/token")
+        };
+        let response = send(&destination, &request, soon(), None).expect("delete");
+        assert_eq!(response.status, 200);
+        // An extra `Accept` replaces the default one; there is no body and no
+        // `Content-Length` with `DELETE`.
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "DELETE /installation/token HTTP/1.1\r\nHost: {host}\r\n\
+                 Authorization: Bearer ghs_synthetic0123456789\r\n\
+                 Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n\
+                 User-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+            )
+        );
+        // A body with DELETE or GET is refused before any connection.
+        let closed = closed_loopback();
+        for method in [Method::Delete, Method::Get] {
+            for body in [Body::Json(b"{}"), Body::Form(b"a=1"), Body::Json(b"")] {
+                let request = HttpRequest {
+                    body: Some(body),
+                    ..HttpRequest::new(method, "/x")
+                };
+                assert_eq!(
+                    send(&closed, &request, soon(), None).unwrap_err(),
+                    HttpFailure::Protocol,
+                    "{method:?}"
+                );
+            }
+        }
+        // Without a body the same request reaches the (closed) port.
+        assert_eq!(
+            send(
+                &closed,
+                &HttpRequest::new(Method::Delete, "/x"),
+                soon(),
+                None
+            )
+            .unwrap_err(),
+            HttpFailure::Connect
+        );
+    }
+
+    #[test]
+    fn a_header_with_a_control_character_is_protocol() {
+        let closed = closed_loopback();
+        let long_value = "v".repeat(MAX_HEADER_VALUE_BYTES + 1);
+        let long_name = "N".repeat(MAX_HEADER_NAME_BYTES + 1);
+        let refused: Vec<(&str, &str)> = vec![
+            ("X-Amz-Date", "2026\r\nInjected: yes"),
+            ("X-Amz-Date", "2026\n"),
+            ("X-Amz-Date", "2026\r"),
+            ("X-Amz-Date", "20\0"),
+            ("X-Amz-Date", "a\tb"),
+            ("X-Amz-Date", "a\u{7f}b"),
+            ("X-Amz-Date", " leading"),
+            ("X-Amz-Date", "trailing "),
+            ("X-Amz-Date", "zł"),
+            ("X-Amz-Date", long_value.as_str()),
+            ("", "value"),
+            ("X Amz", "value"),
+            ("X-Amz:Date", "value"),
+            ("X-Amz\r\nDate", "value"),
+            ("X-Amz\0", "value"),
+            (long_name.as_str(), "value"),
+            ("Host", "other.example"),
+            ("content-length", "0"),
+            ("Content-Type", "text/plain"),
+            ("Transfer-Encoding", "chunked"),
+            ("Connection", "keep-alive"),
+            ("Keep-Alive", "timeout=5"),
+            ("TE", "trailers"),
+            ("Trailer", "X-Amz-Date"),
+            ("Upgrade", "h2c"),
+            ("Expect", "100-continue"),
+            ("User-Agent", "other"),
+        ];
+        for header in &refused {
+            let headers = [*header];
+            for method in [Method::Get, Method::Post] {
+                let request = HttpRequest {
+                    headers: &headers,
+                    ..HttpRequest::new(method, "/")
+                };
+                assert_eq!(
+                    send(&closed, &request, soon(), None).unwrap_err(),
+                    HttpFailure::Protocol,
+                    "{:?} {method:?}",
+                    header.0
+                );
+            }
+        }
+        // A name twice (any case), an `Authorization` beside a bearer, and too
+        // many fields.
+        let twice = [("X-Amz-Date", "1"), ("x-amz-date", "2")];
+        let auth = [("Authorization", "Basic c3ludGhldGlj")];
+        let names: Vec<String> = (0..=MAX_REQUEST_HEADERS)
+            .map(|index| format!("X-Field-{index}"))
+            .collect();
+        let many: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "1")).collect();
+        for request in [
+            HttpRequest {
+                headers: &twice,
+                ..HttpRequest::new(Method::Get, "/")
+            },
+            HttpRequest {
+                bearer: Some("synthetic-bearer"),
+                headers: &auth,
+                ..HttpRequest::new(Method::Get, "/")
+            },
+            HttpRequest {
+                headers: &many,
+                ..HttpRequest::new(Method::Get, "/")
+            },
+            HttpRequest {
+                bearer: Some("bad bearer"),
+                ..HttpRequest::new(Method::Get, "/")
+            },
+            HttpRequest {
+                bearer: Some(""),
+                ..HttpRequest::new(Method::Get, "/")
+            },
+        ] {
+            assert_eq!(
+                send(&closed, &request, soon(), None).unwrap_err(),
+                HttpFailure::Protocol,
+                "{request:?}"
+            );
+        }
+        // A path with a control character, a space, or no leading slash, or a
+        // path over 8 KiB.
+        let long_path = format!("/{}", "p".repeat(MAX_PATH_BYTES));
+        for path in [
+            "/a b",
+            "/a\r\nX-Injected: yes",
+            "/a\0",
+            "relative",
+            "",
+            long_path.as_str(),
+        ] {
+            assert_eq!(
+                send(&closed, &HttpRequest::new(Method::Get, path), soon(), None).unwrap_err(),
+                HttpFailure::Protocol,
+                "{:?}",
+                path.len()
+            );
+        }
+        // Permitted: an `Authorization` without a bearer, an empty value, inner
+        // spaces, the most fields, and a query. They reach the (closed) port.
+        let fine = [
+            ("Authorization", "Basic c3ludGhldGlj"),
+            ("X-Empty", ""),
+            ("X-Inner", "a b, c"),
+        ];
+        let at_most = &many[..MAX_REQUEST_HEADERS];
+        for request in [
+            HttpRequest {
+                headers: &fine,
+                ..HttpRequest::new(Method::Get, "/v1/tokens?page=2&per_page=50")
+            },
+            HttpRequest {
+                headers: at_most,
+                ..HttpRequest::new(Method::Get, "/")
+            },
+        ] {
+            assert_eq!(
+                send(&closed, &request, soon(), None).unwrap_err(),
+                HttpFailure::Connect,
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_body_over_the_cap_is_too_large_before_any_connection() {
+        let closed = closed_loopback();
+        let over = vec![b'a'; MAX_REQUEST_BODY_BYTES + 1];
+        let at_cap = vec![b'a'; MAX_REQUEST_BODY_BYTES];
+        for method in [Method::Post, Method::Put] {
+            for (body, failure) in [
+                (Body::Form(&over), HttpFailure::TooLarge),
+                (Body::Json(&over), HttpFailure::TooLarge),
+                (Body::Form(&at_cap), HttpFailure::Connect),
+            ] {
+                let request = HttpRequest {
+                    body: Some(body),
+                    ..HttpRequest::new(method, "/")
+                };
+                assert_eq!(
+                    send(&closed, &request, soon(), None).unwrap_err(),
+                    failure,
+                    "{method:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_put_sends_json_and_the_response_headers_are_read() {
+        let (listener, destination) = loopback_listener();
+        let host = destination.host_header();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let seen = read_request(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\
+                      X-RateLimit-Remaining:  4 \r\nSet-Cookie: a=1\r\nset-cookie: b=2\r\n\r\n{}",
+                )
+                .expect("write");
+            seen
+        });
+        let request = HttpRequest {
+            bearer: Some("synthetic-bearer"),
+            body: Some(Body::Json(br#"{"ttl":900}"#)),
+            ..HttpRequest::new(Method::Put, "/v1/passwords?x=1")
+        };
+        let response = send(&destination, &request, soon(), None).expect("put");
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body, b"{}");
+        assert_eq!(response.header("x-ratelimit-remaining"), Some("4"));
+        assert_eq!(response.header("X-RATELIMIT-REMAINING"), Some("4"));
+        assert_eq!(response.header("set-cookie"), Some("a=1"));
+        assert_eq!(response.header("location"), None);
+        let pairs: Vec<(&str, &str)> = response
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("content-length", "2"),
+                ("x-ratelimit-remaining", "4"),
+                ("set-cookie", "a=1"),
+                ("set-cookie", "b=2"),
+            ]
+        );
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "PUT /v1/passwords?x=1 HTTP/1.1\r\nHost: {host}\r\n\
+                 Authorization: Bearer synthetic-bearer\r\n\
+                 Content-Type: application/json\r\nContent-Length: 11\r\n\
+                 Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n\
+                 {{\"ttl\":900}}"
+            )
+        );
+
+        // `POST` and `PUT` without a body send `Content-Length: 0` and no type.
+        for (method, name) in [(Method::Put, "PUT"), (Method::Post, "POST")] {
+            let (listener, destination) = loopback_listener();
+            let host = destination.host_header();
+            let server = capture_one_request(listener);
+            send(
+                &destination,
+                &HttpRequest::new(method, "/v1/x"),
+                soon(),
+                None,
+            )
+            .expect("send");
+            assert_eq!(
+                String::from_utf8(server.join().expect("server")).expect("text"),
+                format!(
+                    "{name} /v1/x HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\n\
+                     Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn request_json_bytes_are_unchanged_by_the_send_wrapper() {
+        for (method, body, expected_content) in [
+            (
+                Method::Post,
+                Some(&br#"{"a":1}"#[..]),
+                "Content-Type: application/json\r\nContent-Length: 7\r\n",
+            ),
+            (Method::Post, None, "Content-Length: 0\r\n"),
+            (Method::Get, None, ""),
+        ] {
+            let (listener, destination) = loopback_listener();
+            let host = destination.host_header();
+            let server = capture_one_request(listener);
+            request_json(
+                method,
+                &destination,
+                "/v1/heads",
+                BRAIN_KEY,
+                body,
+                soon(),
+                None,
+            )
+            .expect("request");
+            let tail = body.map_or(String::new(), |body| {
+                String::from_utf8(body.to_vec()).expect("text")
+            });
+            let verb = std::str::from_utf8(method.as_bytes()).expect("method");
+            assert_eq!(
+                String::from_utf8(server.join().expect("server")).expect("text"),
+                format!(
+                    "{verb} /v1/heads HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {BRAIN_KEY}\r\n\
+                     {expected_content}Accept: application/json\r\nUser-Agent: apassy-broker/0\r\n\
+                     Connection: close\r\n\r\n{tail}"
+                )
+            );
+        }
+        // `request_json` still needs a bearer; `send` permits none.
+        assert_eq!(
+            request_json(Method::Get, &closed_loopback(), "/", "", None, soon(), None).unwrap_err(),
+            HttpFailure::Protocol
+        );
+    }
+
+    #[test]
+    fn a_redirect_is_returned_and_not_followed() {
+        let (listener, destination) = loopback_listener();
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_head(&mut stream);
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{addr}/again\r\nContent-Length: 0\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("write");
+            drop(stream);
+            // No second connection arrives.
+            std::thread::sleep(Duration::from_millis(300));
+            listener.set_nonblocking(true).expect("nonblocking");
+            listener.accept().is_err()
+        });
+        let request = HttpRequest {
+            bearer: Some("synthetic-bearer"),
+            ..HttpRequest::new(Method::Get, "/first")
+        };
+        let response = send(&destination, &request, soon(), None).expect("redirect answer");
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            response.header("location"),
+            Some(format!("http://{addr}/again").as_str())
+        );
+        assert!(
+            server.join().expect("server"),
+            "the client followed the redirect"
+        );
+    }
+
+    #[test]
+    fn send_has_one_deadline_for_the_whole_exchange() {
+        let (listener, destination) = loopback_listener();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_request(&mut stream);
+            // Every fragment arrives before the deadline, the whole answer does not.
+            for chunk in [
+                b"HTTP/1.1 200 OK\r\n".as_slice(),
+                b"Content-Length: 2\r\n",
+                b"\r\n",
+                b"{",
+                b"}",
+            ] {
+                std::thread::sleep(Duration::from_millis(80));
+                if stream.write_all(chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        let body = form_body(&[("grant_type", "refresh_token")]);
+        let request = HttpRequest {
+            body: Some(Body::Form(&body)),
+            ..HttpRequest::new(Method::Post, "/token")
+        };
+        let began = Instant::now();
+        assert_eq!(
+            send(
+                &destination,
+                &request,
+                began + Duration::from_millis(200),
+                None
+            )
+            .unwrap_err(),
+            HttpFailure::Timeout
+        );
+        assert!(
+            began.elapsed() < Duration::from_millis(350),
+            "{:?}",
+            began.elapsed()
+        );
+        server.join().expect("server");
+
+        // The name lookup has the deadline too.
+        let pki = test_tls();
+        let remote = DestinationUrl::Https {
+            host: "sts.example.invalid".to_owned(),
+            port: 443,
+        };
+        let timeout = Duration::from_millis(300);
+        let began = Instant::now();
+        assert_eq!(
+            send_with(
+                &remote,
+                &request,
+                began + timeout,
+                Some(&pki.client),
+                resolve_slowly
+            )
+            .unwrap_err(),
+            HttpFailure::Timeout
+        );
+        assert!(began.elapsed() < timeout + Duration::from_secs(1));
+
+        // A deadline that has passed sends nothing; `https://` without TLS
+        // settings is a protocol failure.
+        let (listener, destination) = loopback_listener();
+        listener.set_nonblocking(true).expect("nonblocking");
+        assert_eq!(
+            send(&destination, &request, Instant::now(), None).unwrap_err(),
+            HttpFailure::Timeout
+        );
+        assert!(
+            listener.accept().is_err(),
+            "no connection after the deadline"
+        );
+        assert_eq!(
+            send(&remote, &request, soon(), None).unwrap_err(),
+            HttpFailure::Protocol
+        );
+    }
+
+    #[test]
+    fn a_form_post_over_tls_returns_the_status_headers_and_body() {
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let port = listener.local_addr().expect("addr").port();
+        let (_release, held) = mpsc::channel();
+        let server = answer_one_tls_request(
+            listener,
+            Arc::clone(&pki.config),
+            Some(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/xml\r\nContent-Length: 7\r\n\r\n<Error>"
+                    .to_vec(),
+            ),
+            held,
+        );
+        let body = form_body(&[("Action", "AssumeRole"), ("Version", "2011-06-15")]);
+        let headers = [("X-Amz-Date", "20261103T120000Z")];
+        let request = HttpRequest {
+            headers: &headers,
+            body: Some(Body::Form(&body)),
+            ..HttpRequest::new(Method::Post, "/")
+        };
+        let response = send_with(
+            &destination,
+            &request,
+            soon(),
+            Some(&pki.client),
+            resolve_to_this_computer,
+        )
+        .expect("form post over TLS");
+        assert_eq!(response.status, 400);
+        assert_eq!(response.header("content-type"), Some("text/xml"));
+        assert_eq!(response.body, b"<Error>");
+        let seen = String::from_utf8(server.join().expect("server")).expect("text");
+        assert!(
+            seen.starts_with(&format!("POST / HTTP/1.1\r\nHost: localhost:{port}\r\n")),
+            "{seen}"
+        );
+        assert!(seen.ends_with("\r\n\r\nAction=AssumeRole&Version=2011-06-15"));
+    }
+
+    #[test]
+    fn debug_output_holds_no_secret() {
+        let body = form_body(&[("refresh_token", SYNTHETIC_SECRET)]);
+        let headers = [
+            ("Authorization", SYNTHETIC_SECRET),
+            ("X-Amz-Security-Token", SYNTHETIC_SECRET),
+        ];
+        let query = format!("/v1/token?key={SYNTHETIC_SECRET}");
+        for request in [
+            HttpRequest {
+                headers: &headers,
+                body: Some(Body::Form(&body)),
+                ..HttpRequest::new(Method::Post, &query)
+            },
+            HttpRequest {
+                bearer: Some(SYNTHETIC_SECRET),
+                body: Some(Body::Json(SYNTHETIC_SECRET.as_bytes())),
+                ..HttpRequest::new(Method::Put, &query)
+            },
+        ] {
+            let text = format!("{request:?} {request:#?}");
+            assert!(!text.contains(SYNTHETIC_SECRET), "{text}");
+            assert!(text.contains("/v1/token"), "{text}");
+        }
+        let response = HttpResponse {
+            status: 200,
+            headers: vec![("set-cookie".to_owned(), SYNTHETIC_SECRET.to_owned())],
+            body: SYNTHETIC_SECRET.as_bytes().to_vec(),
+        };
+        let text = format!("{response:?} {response:#?}");
+        assert!(!text.contains(SYNTHETIC_SECRET), "{text}");
+        assert!(
+            text.contains("set-cookie") && text.contains("200"),
+            "{text}"
+        );
+        let failure = TransferFailure::Status(response);
+        assert!(!format!("{failure:?}").contains(SYNTHETIC_SECRET));
+
+        // A response that carries the secret: the failures of `send` hold no byte
+        // of it, only a kind.
+        let (listener, destination) = loopback_listener();
+        let server = answer_once(
+            listener,
+            format!("HTTP/1.1 200 OK\r\nContent-Length: 9999\r\n\r\n{SYNTHETIC_SECRET}")
+                .into_bytes(),
+        );
+        let failure = send(
+            &destination,
+            &HttpRequest::new(Method::Get, "/"),
+            soon(),
+            None,
+        )
+        .expect_err("cut answer");
+        assert_eq!(failure, HttpFailure::Protocol);
+        assert!(!format!("{failure:?}").contains(SYNTHETIC_SECRET));
         server.join().expect("server");
     }
 }
