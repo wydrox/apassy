@@ -376,7 +376,7 @@ Limits:
 | DERP relays | WireGuard ciphertext |
 | Apple | Push metadata. iCloud ciphertext if folder sync is on. |
 | Apassy Connect (if kept and used) | Sealed envelopes and ciphertext, sizes, times |
-| Bouncer brain service of Apassy Connect (paid, opt-in with a consent screen, ADR 0035) | The state of each bouncer request (user request, command, relative directory, purpose, variable names, owner rule), in memory for one request; the examples of a training job for at most 24 h. Never a value, the vault, the vault path, or an absolute project path. It cannot allow a run: the bouncer gate on the Mac decides |
+| Bouncer brain (on the owner's own server: free, opt-in with a consent screen and an owner check, consent version 1; the same protocol on the Apassy Connect service: paid, ADR 0035) | The state of each bouncer request (the user request, the shell command, the stated purpose, and the owner rule), the fixed model questions, and the hashes of the active and shadow head sets; an own server's operator is the owner, and the Connect service keeps a request in memory for one request; the examples of a training job for at most 24 h. Never a value, the vault, the vault path, or an absolute project path. It cannot allow a run: the bouncer gate on the Mac decides |
 | Team host node | The values of its team during released runs. It is the key holder already. |
 
 ## Stages

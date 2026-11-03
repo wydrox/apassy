@@ -5,7 +5,7 @@ import { REPO } from "../lib/site";
 // Chrome Web Store listing of the extension links here. Keep it true to the code:
 // docs/operations/browser.md, docs/adr/0015-automatic-updates.md, and
 // docs/adr/0022-relay-sync.md.
-const UPDATED = "2026-10-17";
+const UPDATED = "2026-11-03";
 ---
 <Page title="Privacy · apassy" description="What Apassy, its browser extension, and this site do with your data.">
   <main class="container">
@@ -31,7 +31,14 @@ const UPDATED = "2026-10-17";
           Apassy checks for updates: it reads <code>https://apassy.wyderka.cc/latest.json</code> after the start and then
           every 6 hours. Like any web request, it carries the IP address of your Mac. You can turn the check off in Settings.
         </li>
-        <li>The bouncer brain runs on your Mac. Agent commands and your rules are not sent anywhere.</li>
+        <li>
+          By default the bouncer brain runs on your Mac. Agent commands and your rules are not sent anywhere. If you choose
+          to run it on a server of yours (Settings, Bouncer, Runs on, My Server), Apassy first shows what leaves your Mac and
+          asks for Touch ID. Each question then goes to your server over HTTPS and holds the request of the user, the shell
+          command, the stated purpose of the agent, and your rule for it, if there is one. It never holds a secret value,
+          your vault, or a full project path. Your server is yours: Apassy receives none of it. The bouncer gate on your Mac
+          still decides every run.
+        </li>
         <li>The iPhone companion talks to your Mac on your local network only.</li>
       </ul>
 

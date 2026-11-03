@@ -1,13 +1,13 @@
 # Bouncer brain on your own server (self-host runbook)
 
-Date: 2026-11-03. Decision: [ADR 0035](../adr/0035-bouncer-hosting-and-training-choice.md) section 2. Plan: [implementation plan 0035](../design/implementation-plan-0035.md), units E2 (this image) and K1 (measurements). Protocol: [bouncer-brain-v1](../contracts/bouncer-brain-v1.md). Words: [bouncer.md](bouncer.md), Words.
+Date: 2026-11-03. Decision: [ADR 0035](../adr/0035-bouncer-hosting-and-training-choice.md) section 2. Plan: [implementation plan 0035](../design/implementation-plan-0035.md), units E2 (this image) and K1 (measurements). Protocol: [bouncer-brain-v1](../contracts/bouncer-brain-v1.md) and [bouncer-brain-v2](../contracts/bouncer-brain-v2.md) (training jobs). Words: [bouncer.md](bouncer.md), Words.
 
-Status: the image, its workflow and the bench script exist (E2). The Apassy app can use an own server only after units C1, C2 and J1 (HTTPS client, the hosting choice with its owner check, the Settings row). Until then the server works with `curl` and `bench.py`, and the bouncer gate on the Mac keeps using the bouncer brain on this Mac.
+Status: the image, its workflow and the bench script exist (E2). The Apassy app uses an own server when you choose it in Settings > Bouncer > Bouncer brain > Runs on > My Server… (HTTPS client, the choice with its owner check and consent, head set upload, merged shadow: units C1, C2, F, G and J1 are merged). Without that choice the bouncer gate keeps using the bouncer brain on this Mac. Training jobs on the server exist (I-srv); the app does not send a job yet (I-cli and J2). The K1 measurements (section 11) are pending: they need one paid devbox run that the owner confirms.
 
 ## 1. What runs where
 
 - The **bouncer gate** stays in Apassy on the Mac and makes every decision. The server gives only probabilities.
-- The **bouncer brain** server is `tools/basemodel/serve.py` in a container. It receives the state of each request (the user request, the command, the directory relative to the project, the purpose, the environment variable names, the owner rule). It never receives a secret value, the vault path or an absolute project path.
+- The **bouncer brain** server is `tools/basemodel/serve.py` in a container. It receives the state of each request (the user request, the shell command, the stated purpose of the agent, and your rule if there is one), the fixed model questions, and the hash of the active head set and of the shadow head set. It never receives a secret value, the vault path or an absolute project path. You see this list in the consent screen of Apassy (version 1) before you choose the server.
 - The server has a bearer token. Tailscale gives reachability only, never authorization. The token of your server is in the vault on your Mac only; it does not sync.
 - A non-loopback address must use `https://` with a public certificate (platform roots on the Mac). A Tailscale Serve certificate for the `*.ts.net` name works. A private CA or a self-signed certificate does not.
 - Unavailable, slow (more than 20 s per attempt), a wrong version, a wrong head hash (409) or a 401 is "unavailable" for the bouncer gate: it asks the owner. It is never an allowance.
@@ -102,7 +102,7 @@ volumes:
 
 - One token per server. Apassy sends it as `Authorization: Bearer <token>` on every route except `GET /health`. The server compares it in constant time. A missing or wrong token gives 401, and the bouncer gate asks the owner.
 - The routes that write (`PUT` and `DELETE /v1/heads/<sha256>`, `DELETE /v1/owner`) work only when the server has a token.
-- Rotation: write a new token to the file, restart the container (`docker restart apassy-brain`), and enter the new token in Apassy (the change of the hosting needs the owner check of unit C2). The old token stops at the restart.
+- Rotation: write a new token to the file, restart the container (`docker restart apassy-brain`), and enter the new token in Apassy (the change of the hosting needs the owner check, Touch ID). The old token stops at the restart.
 - Never put the token in a shell history, a repository, a chat or a log. `openssl rand … > file` writes it without showing it.
 
 ## 5. HTTPS with a Tailscale Serve certificate
@@ -118,11 +118,11 @@ volumes:
    The address is `https://<machine>.<tailnet>.ts.net`. The certificate is a public Let's Encrypt certificate, so the platform roots on the Mac accept it.
 3. From the Mac (on the same tailnet): `curl -s https://<machine>.<tailnet>.ts.net/health`.
 4. Do not use Tailscale Funnel: it puts the server on the public internet, and then the token is the only protection.
-5. In Apassy (after C2 and J1): Settings > Bouncer brain > Hosting > My server, with the address and the token. The change needs a fresh owner check. Apassy then uploads the active and shadow head sets (unit G).
+5. In Apassy: Settings > Bouncer > Bouncer brain > Runs on > My Server…, with the address and the token. Apassy shows what leaves the Mac (consent version 1), and the change needs a fresh owner check (Touch ID). Apassy then uploads the active and shadow head sets (unit G) before the switch completes; a failed upload keeps the old host.
 
 ## 6. Training on your server
 
-Until unit I-srv adds `POST /v1/train`, one training job runs as a separate container from an export folder (`train.jsonl`, `val.jsonl`, `stats.json`, fine-tune.md section 6.1 step 4). The training gate stays: 300 owner decisions and 30 denials.
+The server runs training jobs itself (`PUT /v1/train/<sha256>`, [fine-tune.md](fine-tune.md) section 6.3). A job starts only when the host has the trainer's memory cap (4 GiB by default, `APASSY_JOB_MEMORY_MB`) plus 1 GiB free, so give the container at least 5 GiB if you train on it; until then the job stays `queued`. The app does not send a job yet (units I-cli and J2). Until then, you can run one job by hand as a separate container from an export folder (`train.jsonl`, `val.jsonl`, `stats.json`, fine-tune.md section 6.1 step 4). The training gate stays: 300 owner decisions and 30 denials.
 
 ```
 docker run --rm --cpus=2 --memory=4g --memory-swap=4g --cpu-shares=256 \
@@ -289,7 +289,7 @@ The report has the wall time, the peak resident memory of the trainer (`child_pe
    shasum -a 256 "$K1/h1/H1.safetensors"     # must be H1
    ```
 
-3. One local `serve.py` on the Mac on a free port, with its own heads folder, beside the running Apassy brain (do not stop or change the owner's brain on 8770 or a candidate on 8775). Check the free memory first (about 3 GB).
+3. One local `serve.py` on the Mac on a free port, with its own heads folder, beside the running Apassy brain (do not stop or change the owner's brain on 8770). Check the free memory first (about 3 GB).
 
    ```
    cd "$(git rev-parse --show-toplevel)"
@@ -342,7 +342,7 @@ D rm -f k1-cuda
 
 ## 11. Measurements
 
-Not measured yet (K1). Fill in from `$K1/results/*.json`:
+Not measured yet (K1). K1 is one bounded paid run on `devbox-x86` and `devbox-arm` (section 10); the owner has to confirm the cost before it starts. Fill in from `$K1/results/*.json`:
 
 | Value | x86 no limits | x86 2 vCPU / 3 GB | arm no limits | arm 2 vCPU / 3 GB |
 | --- | --- | --- | --- | --- |

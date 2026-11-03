@@ -59,11 +59,11 @@ The state has the agent name, the command, the working directory relative to the
 
 A risk is high when its probability is 0.5 or more. The threshold is in the broker code and is version 1 of the bouncer contract.
 
-A timeout (3 seconds), a connection error, a response that is not valid, or a missing answer gives "unavailable". Unavailable is never an allowance.
+A timeout (10 seconds for each attempt on this Mac; 20 seconds for each attempt on a server that the owner chose, [ADR 0035](0035-bouncer-hosting-and-training-choice.md)), a connection error, a response that is not valid, or a missing answer gives "unavailable". Unavailable is never an allowance.
 
 ### Local service
 
-- The desktop app calls the bouncer at `http://127.0.0.1:8770` by default. `APASSY_BOUNCER_URL` changes the address. Only a loopback address is permitted in this phase.
+- The desktop app calls the bouncer at `http://127.0.0.1:8770` by default. `APASSY_BOUNCER_URL` changes the address; it and `bouncer.json` accept only a loopback address. Since ADR 0035 the owner can choose a server over `https://` in Settings (stored in the vault, with an owner check); that choice is not an environment variable or a file.
 - The owner starts Laya separately. See `docs/operations/bouncer.md`.
 - Each decision in the activity log has the bouncer result and the high risks.
 

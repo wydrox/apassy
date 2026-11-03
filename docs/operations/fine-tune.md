@@ -213,8 +213,10 @@ Code: `src/broker/finetune.rs` (gate, examples, trainer supervisor),
    manifest, so `serve.py` accepts it), and `result.json`.
 7. The broker deletes the example files and checks `result.json`: the version is
    `apassy-local-v1+<first 8 hex of the SHA-256>`, and the checkpoint is a file in the
-   candidate folder. Then it registers the candidate in shadow mode (section 8). A
-   failed, stopped, or timed-out training deletes the whole candidate folder.
+   candidate folder. Then it registers the candidate in shadow mode (section 8). It
+   has no address: it answers in the request of the active model once its head file is
+   on the host of the bouncer brain (section 6.4). A failed, stopped, or timed-out
+   training deletes the whole candidate folder.
 
 The base checkpoint is the first file of: `APASSY_BASE_MODEL`,
 `$APASSY_LAYA_DIR/models/apassy-base-v1.safetensors`,
@@ -252,6 +254,52 @@ the export give no label.
 Tests: `export_lines_map_to_owner_labels`, `many_approvals_give_a_heavier_denial`, and
 `a_bad_export_gives_no_examples` (`src/broker/finetune.rs`).
 
+### 6.3 Where the training runs
+
+The owner chooses where the bouncer brain trains in the "Training" choice of the
+Learning view ([ADR 0035](../adr/0035-bouncer-hosting-and-training-choice.md)). The
+default is this Mac, which is the pipeline above. The training gate (section 7) is
+the same everywhere.
+
+Server side, built (unit I-srv; [bouncer-brain-v2](../contracts/bouncer-brain-v2.md)
+section 4, `tools/basemodel/jobs.py`): a bouncer brain server trains one job with
+`tools/finetune/local_train.py` from one upload.
+
+- `PUT /v1/train/<sha256>` starts the job. The id is the SHA-256 of the body:
+  `train.jsonl` then `val.jsonl` (at most 64 MiB), and the job manifest with the
+  counts of `stats.json` in the `Apassy-Manifest` header. The server checks the
+  hashes, the base revision and weights, and the gate counts (300 owner decisions,
+  30 denials). `GET /v1/train/<id>` gives the state (`queued`, `running`, `done`,
+  `failed`, `deleted`) without example data. `GET /v1/train/<id>/result` gives the head
+  file only. `DELETE /v1/train/<id>` deletes the job.
+- The trainer has a memory cap, 4 GiB by default (`APASSY_JOB_MEMORY_MB`; 0 is no cap
+  and no start rule). A job starts only when the host has the cap plus 1 GiB free, so
+  the container needs at least 5 GiB at the default. Until then the job stays `queued`.
+  It runs at low CPU priority with a deadline of at most 3 hours. There is one job
+  for each owner and one at a time on a server.
+- The examples are deleted when the job ends, before the state changes, and at the
+  latest 24 hours after the upload. The result stays until you delete the job, at
+  the latest 7 days after the end. No log line has an example, a state or an answer.
+  The runbook is [bouncer-hosting.md](bouncer-hosting.md), section 6.
+
+A head set from a job starts in shadow mode on the Mac like a local one, and only
+the owner promotes it. The app side of a remote job (upload from the Learning view,
+poll, download, register) is not merged yet (units I-cli and J2).
+
+### 6.4 Head file on the host
+
+A head set that was trained on this Mac runs where the bouncer brain runs
+(`src/broker/heads_place.rs`, unit G). `heads_place::place` uploads the head file and its
+`manifest.json` with `PUT /v1/heads/<sha256>` (the manifest has names, hashes, counts
+and training numbers, no example and no request data), also to the server on this Mac
+with the key of this start of Apassy. A `409 heads_full` deletes the oldest replaced
+candidate of this owner on that host, and the upload is tried once more. Only after the
+upload does the vault write `model_candidate.uploaded_to`. Until then the candidate
+gives "no answer" in shadow mode and cannot be promoted. A change of the hosting choice
+uploads the active and the shadow head set first; a failed upload keeps the old host.
+A bouncer brain on this Mac that runs outside Apassy without `APASSY_BOUNCER_KEY` takes
+no head set from Apassy: the Learning view says so.
+
 ## 7. Training gate
 
 `finetune::train` enforces the gate in code. Settings > Bouncer > Calibration and learning shows the gate and turns
@@ -274,19 +322,23 @@ do not count.
 
 Code: `src/broker/shadow.rs`, `src/broker/run.rs`.
 
-- The candidate server runs on its own loopback port. The default is
-  `http://127.0.0.1:8775` (`APASSY_CANDIDATE_URL`). The owner starts it with
-  `APASSY_BASE_MODEL=<candidate folder>/candidate.safetensors LAYA_PORT=8775
-  tools/basemodel/start.sh`. `serve.py` reads `manifest.json` next to the checkpoint,
-  checks the SHA-256 of the checkpoint and of the base weights, and answers with the
-  version `apassy-local-v1+<hash8>`. Settings > Bouncer > Calibration and learning shows this command.
+- There is no candidate server and no port 8775 any more (unit F). The candidate rides in
+  the request of the active model: the request has `heads` (the SHA-256 of the active
+  head set, when it is pinned) and `shadow_heads` (the SHA-256 of the candidate), and
+  the answer has a `shadow` part from the same encoder pass
+  ([bouncer-brain-v1](../contracts/bouncer-brain-v1.md) section 3). This works the same
+  on this Mac and on your server. `serve.py` reads `manifest.json` next to the head file,
+  checks the SHA-256 of the head file and of the base weights, and answers with the
+  version `apassy-local-v1+<hash8>`. A candidate answers only when its head file is on
+  the host of the bouncer brain (section 6.4).
 - For each request that reaches the model step (no hard owner rule, no rule flag, a
-  user request, declarations, and no active remembered pattern), the broker starts the
-  candidate call on its own thread before it asks the active model. The broker decides
-  with the active model only. It does not wait for the candidate.
+  user request, declarations, and no active remembered pattern), the broker adds the
+  shadow pin to the one request to the active model. The broker decides with the active
+  answer only. A missing `shadow` part, a `shadow.error`, another head set or version,
+  or a head file that is not on the host is "no answer" and changes nothing.
 - The candidate outcome is the decision of the same policy (`decide_learned`) with the
   candidate answers, at the active `task_match` level, without a pattern: "run" or
-  "ask". The candidate client accepts only answers with the registered version.
+  "ask". The broker accepts only a shadow answer with the registered version and head hash.
   Another version or no answer is "no answer".
 - After the decision (a run without the owner) or the owner answer, the thread stores
   one row: the candidate outcome, the real outcome (run or ask), and the owner decision
@@ -294,6 +346,9 @@ Code: `src/broker/shadow.rs`, `src/broker/run.rs`.
   command, no user request, and no secret value. A lock or an unlock in between drops
   the row.
 - A new training replaces the candidate in shadow mode.
+- Promotion also needs the head file on the host. A promotion writes the SHA-256 of the
+  head set (`model_activation.heads_sha256`), and from then on each request pins it.
+  The refusal says which host lacks the file.
 
 Agreement (goal item B10): only rows with an owner decision and a candidate answer
 count. See [learning](learning.md), section 5.
@@ -310,7 +365,7 @@ One transaction migrates a vault from schema 8 to 9 (`src/vault/candidate.rs`):
 
 | Table | Content |
 | --- | --- |
-| `model_candidate` | version, loopback address, checkpoint path and SHA-256, creation time, state (`shadow`, `promoted`, `replaced`, `rolled_back`), end time, and the training report (numbers only). The newest 50 candidates stay |
+| `model_candidate` | version, address (empty for a candidate since unit F; old rows keep their 8775 address, which is no longer read), checkpoint path and SHA-256, creation time, state (`shadow`, `promoted`, `replaced`, `rolled_back`), end time, and the training report (numbers only). The newest 50 candidates stay |
 | `shadow_decision` | candidate, time, real outcome, candidate outcome, owner decision, and candidate answers. The newest 20,000 rows stay |
 | `model_activation` | each promotion and rollback: version and address, candidate, the version and address before, and shadow numbers. The newest row names the active model. No row, or an empty address, is the default bouncer. The newest 100 rows stay |
 
@@ -404,6 +459,8 @@ deleted and has no shadow numbers.
 
 ### 11.2 Shadow session
 
+This session predates the merged shadow (unit F). It used a separate candidate server on port 8775; that server no longer exists (section 8).
+
 The base model `apassy-base-v1+83224960` served as the active model on port 8774. The
 candidate `apassy-local-v1+c28c8cb7` served on port 8775
 (`APASSY_BASE_MODEL=<folder>/candidate.safetensors LAYA_PORT=8775
@@ -438,8 +495,8 @@ shadow_mode::shadow_session_on_synthetic_requests -- --ignored --nocapture
 
 ## 12. Limits
 
-- The owner starts the candidate server, as the base server. Without it, each shadow
-  row is "no answer" and does not count.
+- Shadow rows count only while the head file of the candidate is on the host of the
+  bouncer brain and that host answers. Otherwise a row is "no answer" and does not count.
 - Agreement counts only requests that the owner decided. A request that the active
   model ran without the owner has no owner label. The card shows "same outcome as the
   active model" for these requests. A candidate that asks more often is not measured
