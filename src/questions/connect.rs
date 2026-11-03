@@ -428,10 +428,15 @@ impl Shared {
         attempts.retain(|id, _| lock(&self.connects).wanted.contains_key(id));
         // New connect requests: seal and post.
         for (connect, ended) in &wanted {
+            // A request that waited for a free slot or for the question key tries again; one
+            // that failed for good stays on this Mac.
+            let retry = local
+                .get(&connect.id)
+                .is_none_or(|reason| reason == BUSY || reason == NO_KEY);
             if ended.is_some()
                 || connect.expires_at <= now
                 || attempts.contains_key(&connect.id)
-                || local.contains_key(&connect.id)
+                || !retry
             {
                 continue;
             }
