@@ -47,6 +47,8 @@ const COPY_BUFFER: usize = 64 * 1024;
 pub struct SyncError {
     pub error: RelayError,
     pub current: Option<u64>,
+    /// The seconds of `Retry-After` (429 `rate_limited`).
+    pub retry_after: Option<u64>,
 }
 
 impl From<RelayError> for SyncError {
@@ -54,6 +56,7 @@ impl From<RelayError> for SyncError {
         Self {
             error,
             current: None,
+            retry_after: None,
         }
     }
 }
@@ -68,7 +71,37 @@ fn precondition(current: u64) -> SyncError {
             format!("The current version is {current}. Read the head and try again."),
         ),
         current: Some(current),
+        retry_after: None,
     }
+}
+
+/// The seconds until a Connect team may push `incoming` more bytes: `None` while the
+/// snapshots of the last 3600 seconds and `incoming` stay within
+/// `CONNECT_SYNC_BYTES_PER_HOUR`, else the time when enough of them leave the window
+/// (at least 1).
+fn bytes_wait(conn: &Connection, now: u64, incoming: u64) -> RelayResult<Option<u64>> {
+    let cap = crate::server::directory::CONNECT_SYNC_BYTES_PER_HOUR;
+    let mut stmt = conn
+        .prepare("SELECT pushed_at, size FROM sync_head WHERE pushed_at > ?1 ORDER BY pushed_at")
+        .map_err(db)?;
+    let rows = stmt
+        .query_map(params![to_i(now.saturating_sub(3600))], |row| {
+            Ok((to_u(row.get(0)?), to_u(row.get(1)?)))
+        })
+        .map_err(db)?
+        .collect::<Result<Vec<(u64, u64)>, _>>()
+        .map_err(db)?;
+    let mut left: u64 = rows.iter().map(|(_, size)| *size).sum();
+    if left.saturating_add(incoming) <= cap {
+        return Ok(None);
+    }
+    for (at, size) in rows {
+        left = left.saturating_sub(size);
+        if left.saturating_add(incoming) <= cap {
+            return Ok(Some(at.saturating_add(3600).saturating_sub(now).max(1)));
+        }
+    }
+    Ok(Some(3600))
 }
 
 /// 403 `sync_head_invalid`, naming the check that failed.
@@ -594,7 +627,28 @@ pub fn push(
         if to_u(pushes) >= limits.sync_pushes_per_hour {
             return Err(core.limit_error_on(conn, now, "sync_pushes_per_hour")?);
         }
-        Ok(())
+        // The bytes of a Connect team in the hour: anyone can make such a team.
+        if core.kind == crate::api::TeamKind::Connect
+            && let Some(wait) = bytes_wait(conn, now, request.content_length)?
+        {
+            core.limit_error_on(conn, now, "sync_bytes_per_hour")?;
+            return Ok(Some(wait));
+        }
+        Ok(None)
+    })
+    .map_err(SyncError::from)
+    .and_then(|wait| match wait {
+        None => Ok(()),
+        Some(wait) => Err(SyncError {
+            error: RelayError::new(
+                codes::RATE_LIMITED,
+                format!(
+                    "The team pushed its 512 MiB of snapshots for this hour. Try again in {wait} seconds."
+                ),
+            ),
+            current: None,
+            retry_after: Some(wait),
+        }),
     })?;
     let _slot = TransferSlot::take(core)?;
     let (latest, public_key) = core.store.with(|conn| {

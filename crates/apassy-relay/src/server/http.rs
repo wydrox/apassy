@@ -1481,12 +1481,22 @@ fn respond_sync(
             false,
             version.and_then(etag).into_iter().collect(),
         ),
-        Err(SyncError { error, current }) => respond_json_with(
+        Err(SyncError {
+            error,
+            current,
+            retry_after,
+        }) => respond_json_with(
             request,
             error.status(),
             &error.to_envelope(),
             error.code == codes::PAYLOAD_TOO_LARGE,
-            current.and_then(etag).into_iter().collect(),
+            current
+                .and_then(etag)
+                .into_iter()
+                .chain(retry_after.and_then(|seconds| {
+                    Header::from_bytes(&b"Retry-After"[..], seconds.to_string().as_bytes()).ok()
+                }))
+                .collect(),
         ),
     }
 }

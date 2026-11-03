@@ -700,6 +700,78 @@ fn a_connect_team_gets_the_configured_sync_bytes() {
     );
 }
 
+/// B-M2: a codeless Connect team pushes at most 30 snapshots an hour (403 `team_limit`)
+/// and at most 512 MiB of them (429 `rate_limited` with `Retry-After`: the seconds until
+/// enough of the hour's bytes leave the window), with one `limit_reached` row.
+#[test]
+fn a_connect_team_pushes_at_most_512_mib_and_30_snapshots_an_hour() {
+    let relay = start_with(
+        |config| config.connect_sync_bytes = 67_108_864,
+        UpstreamOptions::default(),
+    );
+    let (team, mac) = connect(&relay, "Rafal");
+    let info = team_info(&relay, &team);
+    assert_eq!(info["limits"]["sync_pushes_per_hour"], 30);
+    let body = vec![7u8; 4096];
+    let pushed = push_first(&relay, &team, &mac, &body);
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    // Eight more full snapshots of 64 MiB pushed 600 s ago fill the hour (heads only:
+    // the byte count reads the heads, before the chain checks of the next push).
+    let at = now_unix() - 600;
+    let conn = open_team_file(&relay.config, &team);
+    for version in 2..=9 {
+        conn.execute(
+            "INSERT INTO sync_head (version, vault_id, snapshot_sha256, size, previous_sha256,
+                 head_sha256, device_id, head_time, head, signature, pushed_at)
+             VALUES (?1, ?2, zeroblob(32), 67108864, zeroblob(32), zeroblob(32), ?3, 1, 'x',
+                 zeroblob(8), ?4)",
+            rusqlite::params![version, VAULT, mac.id as i64, at as i64],
+        )
+        .unwrap();
+    }
+    let refused = push_first(&relay, &team, &mac, &body);
+    assert_eq!(
+        (refused.status, refused.code()),
+        (429, "rate_limited"),
+        "{}",
+        refused.body
+    );
+    let wait: u64 = refused
+        .header("Retry-After")
+        .expect("Retry-After")
+        .parse()
+        .unwrap();
+    assert!((2990..=3000).contains(&wait), "{wait}");
+    let limits: Vec<String> = conn
+        .prepare("SELECT detail FROM audit WHERE action = 'limit_reached'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(limits, [r#"{"limit":"sync_bytes_per_hour"}"#]);
+    // 30 heads in the hour: the next push is 403 `team_limit` before the byte count.
+    conn.execute("DELETE FROM sync_head WHERE version > 1", [])
+        .unwrap();
+    for version in 2..=30 {
+        conn.execute(
+            "INSERT INTO sync_head (version, vault_id, snapshot_sha256, size, previous_sha256,
+                 head_sha256, device_id, head_time, head, signature, pushed_at)
+             VALUES (?1, ?2, zeroblob(32), 1, zeroblob(32), zeroblob(32), ?3, 1, 'x',
+                 zeroblob(8), ?4)",
+            rusqlite::params![version, VAULT, mac.id as i64, at as i64],
+        )
+        .unwrap();
+    }
+    let refused = push_first(&relay, &team, &mac, &body);
+    assert_eq!(
+        (refused.status, refused.code()),
+        (403, "team_limit"),
+        "{}",
+        refused.body
+    );
+}
+
 #[test]
 fn connect_sync_bytes_zero_keeps_plan_required() {
     // The default of a relay that the owner runs, and of the hosted relay at the cutover.

@@ -1041,13 +1041,14 @@ fn short_lived_settings_sync_and_hold_no_secret() {
     let source = a.add(aws_pair("AWS source")).unwrap().id;
     let member = a.add(aws_pair("AWS member key")).unwrap().id;
     let settings = r#"{"region":"eu-central-1","services":["s3"]}"#;
-    a.set_short_lived(
+    let (mut a, _) = crate::common::make_source(
+        a,
+        PASS,
         source,
         apassy::vault::ShortLivedKind::AwsSts,
         settings,
         1_700_000_000,
-    )
-    .unwrap();
+    );
     a.set_short_lived_enabled(source, false, 1_700_000_100)
         .unwrap();
     a.add_member_key(
@@ -1146,13 +1147,14 @@ fn a_concurrent_edit_keeps_way_c_on() {
     let mut a = Vault::create(&root.path().join("a.db"), PASS).unwrap();
     a.unlock(PASS).unwrap();
     let source = a.add(aws_pair("AWS source")).unwrap().id;
-    a.set_short_lived(
+    let (mut a, _) = crate::common::make_source(
+        a,
+        PASS,
         source,
         apassy::vault::ShortLivedKind::AwsSts,
         "{}",
         1_700_000_000,
-    )
-    .unwrap();
+    );
     let copy = root.path().join("seed.apassy");
     a.write_sync_copy(&copy, "Mac A").unwrap();
     let (mut b, _) = Vault::adopt_sync_copy(&copy, &root.path().join("b.db"), PASS).unwrap();

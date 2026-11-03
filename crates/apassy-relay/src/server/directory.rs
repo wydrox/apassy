@@ -298,9 +298,9 @@ pub struct TeamLimitsUpdate {
 
 impl TeamLimits {
     /// The limits of a new Connect team (docs/SPEC.md section 26): one member, no items
-    /// and no agents (so no runs and no proxy), no vault sync (`plan_required`), 2 MiB
-    /// of questions, and 1 MiB of feeds. The other fields are the defaults. Devices are
-    /// 10 per member, as in every team.
+    /// and no agents (so no runs and no proxy), no vault sync (`plan_required`), 30
+    /// snapshot pushes an hour, 2 MiB of questions, and 1 MiB of feeds. The other fields
+    /// are the defaults. Devices are 10 per member, as in every team.
     pub fn connect() -> Self {
         Self::connect_with(0)
     }
@@ -315,6 +315,7 @@ impl TeamLimits {
             items: 0,
             agents: 0,
             sync_bytes,
+            sync_pushes_per_hour: CONNECT_SYNC_PUSHES_PER_HOUR,
             question_bytes: CONNECT_QUESTION_BYTES,
             feed_bytes: CONNECT_FEED_BYTES,
             ..Self::default()
@@ -324,9 +325,16 @@ impl TeamLimits {
     /// Whether these are the limits a Connect team starts with on a relay whose setting
     /// is `sync_bytes`: [`Self::connect`], or [`Self::connect_with`] of the setting. A
     /// team with other limits got them from the operator (a plan); the idle sweep leaves
-    /// it alone.
+    /// it alone. The presets from before `CONNECT_SYNC_PUSHES_PER_HOUR` (600 pushes an
+    /// hour, the default) count too, so the teams made before it stay in the sweep.
     pub fn is_connect_preset(&self, sync_bytes: u64) -> bool {
-        *self == Self::connect() || *self == Self::connect_with(sync_bytes)
+        let earlier = |limits: Self| Self {
+            sync_pushes_per_hour: Self::default().sync_pushes_per_hour,
+            ..limits
+        };
+        [Self::connect(), Self::connect_with(sync_bytes)]
+            .into_iter()
+            .any(|preset| *self == preset || *self == earlier(preset))
     }
 
     /// The limits of the personal team of an embedded node (docs/SPEC.md section 30.2):
@@ -542,6 +550,14 @@ pub const ITEM_FILE_BYTES: u64 = 16 * 1024;
 /// receipts, and the audit rows of the pushes. The snapshots are files in
 /// `teams/<team id>.sync/`, at most two of `sync_bytes` each.
 pub const CONNECT_SYNC_FILE_BYTES: u64 = 16 * 1_048_576;
+/// `sync_pushes_per_hour` of a new Connect team: 30, a push every two minutes, which a
+/// vault that one person changes does not reach (docs/SPEC.md section 26.4).
+pub const CONNECT_SYNC_PUSHES_PER_HOUR: u64 = 30;
+/// The snapshot bytes that one Connect team may push in 3600 seconds: 512 MiB, eight
+/// full pushes of the largest `sync_bytes`. Over it: 429 `rate_limited` with
+/// `Retry-After` (docs/SPEC.md section 24.3 check 4). Not a stored limit: a plan that
+/// needs more makes the team an operator team.
+pub const CONNECT_SYNC_BYTES_PER_HOUR: u64 = 512 * 1_048_576;
 pub const MEMBER_FILE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1357,7 +1373,15 @@ mod tests {
         let connect_text =
             r#"{"members":1,"items":0,"agents":0,"sync_bytes":0,"question_bytes":2097152}"#;
         let connect = TeamLimits::from_stored(Some(connect_text), TeamKind::Connect).unwrap();
-        assert_eq!(connect, TeamLimits::connect());
+        // That image wrote no push count: the default of then, still a Connect preset.
+        assert_eq!(
+            connect,
+            TeamLimits {
+                sync_pushes_per_hour: 600,
+                ..TeamLimits::connect()
+            }
+        );
+        assert!(connect.is_connect_preset(0));
         assert_eq!(connect.feed_bytes, CONNECT_FEED_BYTES);
         let operator =
             TeamLimits::from_stored(Some(r#"{"members":7}"#), TeamKind::Operator).unwrap();
@@ -1409,12 +1433,14 @@ PRAGMA user_version = 1002;
                 items: defaults.items,
                 agents: defaults.agents,
                 sync_bytes: defaults.sync_bytes,
+                sync_pushes_per_hour: defaults.sync_pushes_per_hour,
                 question_bytes: defaults.question_bytes,
                 feed_bytes: defaults.feed_bytes,
                 ..connect
             },
             defaults
         );
+        assert_eq!(connect.sync_pushes_per_hour, CONNECT_SYNC_PUSHES_PER_HOUR);
         // The file cap grows by the feed budget: 2 + 1 + 8 MiB.
         assert_eq!(connect.file_bytes(TeamKind::Connect), Some(11 * 1_048_576));
         assert_eq!(defaults.file_bytes(TeamKind::Operator), None);
@@ -1473,6 +1499,22 @@ PRAGMA user_version = 1002;
         assert!(!raised.is_connect_preset(67_108_864));
         // A value between 0 and 1 MiB is not a limit.
         assert!(TeamLimits::connect_with(1024).validate().is_err());
+        // B-M2: 30 pushes an hour; a team made before with 600 is still a preset, any
+        // other count is the operator's.
+        assert_eq!(synced.sync_pushes_per_hour, CONNECT_SYNC_PUSHES_PER_HOUR);
+        assert_eq!(TeamLimits::connect().sync_pushes_per_hour, 30);
+        for earlier in [TeamLimits::connect(), synced] {
+            let before = TeamLimits {
+                sync_pushes_per_hour: 600,
+                ..earlier
+            };
+            assert!(before.is_connect_preset(67_108_864));
+            let lifted = TeamLimits {
+                sync_pushes_per_hour: 120,
+                ..earlier
+            };
+            assert!(!lifted.is_connect_preset(67_108_864));
+        }
     }
 
     #[test]

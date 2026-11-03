@@ -39,6 +39,7 @@ mod policy;
 pub mod providers;
 pub mod questions;
 mod relay_device;
+mod run_bindings;
 mod schema18;
 mod schema19;
 mod schema20;
@@ -136,6 +137,10 @@ pub use passkey::{
 pub use policy::{DeclarationSource, DeclarationSources};
 pub use questions::{QUESTION_KEY_NAME, QuestionKey, question_key_id};
 pub use relay_device::RelayDevice;
+pub use run_bindings::{
+    AWS_KEY_ID_VARIABLE, AWS_SECRET_VARIABLE, GOOGLE_KEY_VARIABLE, LEASES_IN_RUNS, RunBindingError,
+    static_variable, static_variable_names,
+};
 pub use schema18::ONLY_MARKER_ITEM;
 pub use short_lived::{
     AwsStsSettings, FieldSwap, GithubAppSettings, GithubPermission, GithubPermissions,

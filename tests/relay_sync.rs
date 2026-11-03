@@ -1742,6 +1742,7 @@ fn relay_vault(dir: &std::path::Path, url: &str) -> (Mutex<Option<Vault>>, Relay
             public_key: key.public_key().to_vec(),
             key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
             created_at: 0,
+            account_key: false,
         })
         .expect("relay row");
     let config = RelayConfig::in_data_dir(dir, &vault_path, url, "relay");

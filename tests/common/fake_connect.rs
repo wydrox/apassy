@@ -1014,6 +1014,49 @@ fn authenticated(
             state.stores.push(store);
             ok(view)
         }
+        ("POST", ["vaults", team, "devices"]) => {
+            if !strict(body, &["device_id"]) {
+                return fail(400, "invalid_request");
+            }
+            let device_id = text(body, "device_id").to_owned();
+            let Some(added) = state
+                .devices
+                .iter()
+                .find(|entry| entry.id == device_id && entry.live)
+                .map(|entry| entry.account.clone())
+            else {
+                return fail(404, "not_found");
+            };
+            if added != account {
+                return fail(403, "not_in_group");
+            }
+            let Some(store) = state
+                .stores
+                .iter_mut()
+                .find(|store| store.account == account && store.team_id == *team)
+            else {
+                return fail(404, "not_found");
+            };
+            let number = match store.devices.iter().find(|(_, id)| *id == device_id) {
+                Some((number, _)) => *number,
+                None => {
+                    let number = store.devices.len() as u64 + 1;
+                    store.devices.push((number, device_id.clone()));
+                    number
+                }
+            };
+            ok(json!({"store_device_id": number, "device_id": device_id, "account_id": added}))
+        }
+        ("DELETE", ["vaults", team]) => {
+            let before = state.stores.len();
+            state
+                .stores
+                .retain(|store| !(store.account == account && store.team_id == *team));
+            if state.stores.len() == before {
+                return fail(404, "not_found");
+            }
+            ok(json!({"team_id": team}))
+        }
         ("GET", ["vaults"]) => {
             let views: Vec<Value> = state
                 .stores

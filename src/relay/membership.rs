@@ -842,6 +842,7 @@ mod tests {
                 public_key: key.public_key().to_vec(),
                 key_pkcs8: key.pkcs8().unwrap().clone(),
                 created_at: 0,
+                account_key: false,
             })
             .unwrap();
         assert_eq!(

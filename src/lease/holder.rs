@@ -280,7 +280,7 @@ mod tests {
             .unwrap()
             .id;
         vault
-            .set_short_lived(item, ShortLivedKind::OauthRefresh, SETTINGS, 1)
+            .set_short_lived_checked(item, ShortLivedKind::OauthRefresh, SETTINGS, 1)
             .unwrap();
         (Arc::new(Mutex::new(Some(vault))), item)
     }

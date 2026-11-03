@@ -69,6 +69,23 @@ fn connect_persists_before_network_and_adopts_only_questions_after_restart() {
         "legacy create omits the new field entirely"
     );
     assert!(!bodies.contains("key_pkcs8"));
+    // B-L6: the relay gets only generic names, never the vault's or the Mac's own; the
+    // vault keeps its own names.
+    let created: Vec<String> = relay
+        .request_bodies()
+        .into_iter()
+        .filter(|body| body.contains(r#""team":"#))
+        .collect();
+    assert!(!created.is_empty());
+    for body in &created {
+        assert!(body.contains(r#""team":"Vault""#), "{body}");
+        assert!(body.contains(r#""device_name":"Mac""#), "{body}");
+        assert!(
+            !body.contains("Personal") && !body.contains("Test Mac"),
+            "{body}"
+        );
+    }
+    assert_eq!(retry.team_name, "Personal");
 }
 
 /// One saved Connect attempt through its life: a short edge rate limit reports its

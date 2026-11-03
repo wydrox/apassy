@@ -650,7 +650,7 @@ pub enum OwnerRequest {
     },
     /// Add a device to the Apassy Connect account (connect-account-v1 section 7.1): the
     /// join exactly as "Add a device…" showed it, with the six safety words. The proof
-    /// goes to [`OwnerFlows::connect_proof`] for the Connect view (unit M2), which passes it
+    /// goes to [`OwnerFlows::take_connect_proof`] for the Connect view (unit M2), which passes it
     /// to `ConnectAccount::confirm_join`.
     ConfirmConnectDevice {
         account_id: String,
@@ -670,6 +670,21 @@ pub enum OwnerRequest {
     /// Delete the Apassy Connect account (section 6).
     DeleteConnectAccount {
         account_id: String,
+    },
+    /// Delete the vault store (relay copy) `team_id` of the vault `vault_name` at Apassy
+    /// Connect (section 8).
+    DeleteVaultStore {
+        team_id: String,
+        vault_name: String,
+    },
+    /// Add the device `device_id` ("`device_name`") of the account `account_id` to the
+    /// vault store `team_id` of the vault `vault_name` (section 8).
+    AddStoreDevice {
+        team_id: String,
+        device_id: String,
+        account_id: String,
+        device_name: String,
+        vault_name: String,
     },
     /// Change the Family or Team group (connect-billing-v1 section 6).
     ChangeConnectGroup {
@@ -1120,6 +1135,19 @@ impl OwnerRequest {
             Self::DeleteConnectAccount { account_id } => OwnerAction::DeleteConnectAccount {
                 account_id: account_id.clone(),
             },
+            Self::DeleteVaultStore { team_id, .. } => OwnerAction::DeleteVaultStore {
+                team_id: team_id.clone(),
+            },
+            Self::AddStoreDevice {
+                team_id,
+                device_id,
+                account_id,
+                ..
+            } => OwnerAction::AddStoreDevice {
+                team_id: team_id.clone(),
+                device_id: device_id.clone(),
+                account_id: account_id.clone(),
+            },
             Self::ChangeConnectGroup {
                 account_id,
                 group_id,
@@ -1546,6 +1574,19 @@ impl OwnerRequest {
                 page_text(device_name)
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
+            Self::DeleteVaultStore { vault_name, .. } => format!(
+                "Delete the relay copy of \"{}\" at Apassy Connect? Its snapshots go, and your devices stop syncing this vault through Connect. The vault stays on your devices.",
+                page_text(vault_name)
+            ),
+            Self::AddStoreDevice {
+                device_name,
+                vault_name,
+                ..
+            } => format!(
+                "Let \"{}\" sync the relay copy of \"{}\" at Apassy Connect? It can then read and change the encrypted copy; it still needs the passphrase to open the vault.",
+                page_text(device_name),
+                page_text(vault_name)
+            ),
             Self::ChangeConnectGroup { change, .. } => match change {
                 crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
                     "Add \"{}\" to your Apassy Connect family or team? They get the plan and can join the vaults that you share.",
@@ -1607,9 +1648,18 @@ fn delivery_words(name: &str, kind: crate::vault::ShortLivedKind, on: bool) -> S
         }
         _ => "a credential made for that run",
     };
-    if on {
+    // While runs make no lease, the text promises none (plan s6 unit F flips it).
+    if on && !crate::vault::LEASES_IN_RUNS {
+        format!(
+            "Use temporary credentials for \"{name}\". This version of Apassy does not make them in runs yet: runs of this item fail until it does, and they never get the long-lived key instead."
+        )
+    } else if on {
         format!(
             "Use temporary credentials for \"{name}\". Each run gets {lease}; the long-lived key stays in Apassy."
+        )
+    } else if let Some(names) = crate::vault::static_variable_names(kind) {
+        format!(
+            "Stop temporary credentials for \"{name}\". Runs then get the long-lived key itself in {names}."
         )
     } else {
         format!(
@@ -1812,11 +1862,26 @@ pub struct OwnerFlows {
     pub(crate) clipboard: CodeClipboard,
     /// The proof of the last Apassy Connect account check (`OwnerRequest::
     /// ConfirmConnectDevice` and the other Connect requests), until the Connect view
-    /// takes it. A lock drops it; it is bound to the vault session and lives 60 s.
-    pub(crate) connect_proof: Option<OwnerProof>,
+    /// takes it ([`OwnerFlows::take_connect_proof`]): the account call takes the proof
+    /// by value, so it works once. A lock drops it; it is bound to the vault session and
+    /// lives 60 s.
+    connect_proof: Option<OwnerProof>,
 }
 
 impl OwnerFlows {
+    /// Take the proof of the last Connect account check, once: the slot is empty after
+    /// it, also when the account call then fails (B-L1).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the Connect view of plan s7 unit M2 takes the proof"
+        )
+    )]
+    pub(crate) fn take_connect_proof(&mut self) -> Option<OwnerProof> {
+        self.connect_proof.take()
+    }
+
     /// Text about Touch ID for the owner check. `None` when Touch ID can run.
     pub(crate) fn touch_id_note(&self) -> Option<String> {
         if self.helper.is_none() {
@@ -2581,6 +2646,8 @@ impl DesktopApp {
             OwnerRequest::ConfirmConnectDevice { .. }
             | OwnerRequest::RevokeConnectDevice { .. }
             | OwnerRequest::DeleteConnectAccount { .. }
+            | OwnerRequest::DeleteVaultStore { .. }
+            | OwnerRequest::AddStoreDevice { .. }
             | OwnerRequest::ChangeConnectGroup { .. } => {
                 self.owner.connect_proof = Some(proof);
             }
@@ -2700,9 +2767,14 @@ impl DesktopApp {
         });
         match result {
             Some(Ok(())) if on => self.set_ok(format!("{name} now gives temporary credentials.")),
-            Some(Ok(())) => self.set_ok(format!(
-                "{name} no longer gives temporary credentials. Runs get its long-lived key."
-            )),
+            Some(Ok(())) => self.set_ok(match crate::vault::static_variable_names(kind) {
+                Some(names) => format!(
+                    "{name} no longer gives temporary credentials. Runs get its long-lived key in {names}."
+                ),
+                None => format!(
+                    "{name} no longer gives temporary credentials. Runs get its long-lived key."
+                ),
+            }),
             Some(Err(message)) => self.set_err(message),
             None => self.set_err("The vault is locked."),
         }
@@ -3327,12 +3399,94 @@ mod change_delivery_tests {
             assert!(!request.needs_live_ticket());
             let text = request.describe();
             assert!(text.contains("\"Synthetic AWS\""), "{text}");
-            if on {
+            if on && crate::vault::LEASES_IN_RUNS {
                 assert!(text.contains("15 minutes"), "{text}");
+            } else if on {
+                // No promise of a lease while runs make none.
+                assert!(!text.contains("15 minutes"), "{text}");
+                assert!(text.contains("does not make them in runs yet"), "{text}");
             } else {
+                // The static form names the variables of the long-lived key.
                 assert!(text.contains("long-lived key"), "{text}");
+                assert!(
+                    text.contains("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"),
+                    "{text}"
+                );
             }
             assert!(!text.contains("AKIA") && !text.contains("secret_access_key"));
         }
+        let google = OwnerRequest::ChangeDelivery {
+            item_id: 8,
+            name: "Synthetic service account".to_owned(),
+            kind: ShortLivedKind::GoogleServiceAccount,
+            on: false,
+        }
+        .describe();
+        assert!(google.contains("in GOOGLE_API_KEY"), "{google}");
+        assert!(!google.contains("CLOUDSDK_AUTH_ACCESS_TOKEN"), "{google}");
+    }
+}
+
+#[cfg(test)]
+mod connect_proof_tests {
+    use super::*;
+
+    /// B-L1: the Connect view takes the proof once; the slot is then empty, so a second
+    /// account call has no proof to use.
+    #[test]
+    fn the_connect_proof_is_taken_once() {
+        let mut flows = OwnerFlows::default();
+        assert!(flows.take_connect_proof().is_none());
+        let action = OwnerAction::DeleteVaultStore {
+            team_id: "t".repeat(32),
+        };
+        flows.connect_proof = Some(OwnerProof::issue_for_test(
+            action.clone(),
+            [1; 32],
+            std::time::Instant::now(),
+        ));
+        let proof = flows.take_connect_proof().expect("the proof");
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        assert!(flows.take_connect_proof().is_none());
+    }
+
+    /// B-M1: the store requests name their exact actions, and their texts name the vault
+    /// and the device, never an id.
+    #[test]
+    fn the_store_requests_name_their_actions() {
+        let team = "t".repeat(32);
+        let delete = OwnerRequest::DeleteVaultStore {
+            team_id: team.clone(),
+            vault_name: "Personal".to_owned(),
+        };
+        assert_eq!(
+            delete.action(),
+            OwnerAction::DeleteVaultStore {
+                team_id: team.clone()
+            }
+        );
+        assert!(delete.action().needs_fresh_local_check());
+        assert!(delete.describe().contains("\"Personal\""));
+        let add = OwnerRequest::AddStoreDevice {
+            team_id: team.clone(),
+            device_id: "dev_p4n6r2t7bc".to_owned(),
+            account_id: "acc_m3n5p7q2rb".to_owned(),
+            device_name: "iPhone".to_owned(),
+            vault_name: "Personal".to_owned(),
+        };
+        assert_eq!(
+            add.action(),
+            OwnerAction::AddStoreDevice {
+                team_id: team,
+                device_id: "dev_p4n6r2t7bc".to_owned(),
+                account_id: "acc_m3n5p7q2rb".to_owned(),
+            }
+        );
+        assert!(add.action().needs_fresh_local_check());
+        let text = add.describe();
+        assert!(
+            text.contains("\"iPhone\"") && !text.contains("dev_"),
+            "{text}"
+        );
     }
 }

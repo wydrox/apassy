@@ -2002,7 +2002,7 @@ fn run_inner(
                 }
                 secrets
             }
-            Err(reason) => {
+            Err((code, reason)) => {
                 record(
                     vault,
                     &agent,
@@ -2011,7 +2011,7 @@ fn run_inner(
                     ActivityDecision::Deny,
                     &reason,
                 );
-                return WireResponse::failure("missing_secret", reason);
+                return WireResponse::failure(code, reason);
             }
         }
     };
@@ -2306,6 +2306,15 @@ fn check_inner(
             fill.validate_site(vault)
                 .map_err(|reason| ("refused", reason))?;
         }
+        // Way C on without a lease in this build is `lease_failed` before the owner is
+        // asked; a static source adds the variables of its static form (S6, rule 4).
+        let extra = if browser_fill.is_none() && request.items.contains(item_id) {
+            vault
+                .run_extra_bindings(*item_id)
+                .map_err(|error| (error.code(), error.message(*item_id)))?
+        } else {
+            Vec::new()
+        };
         let binding = if browser_fill.is_some() && request.items.contains(item_id) {
             Some(EnvBinding { item_id: *item_id, env_name: format!("APASSY_BROWSER_{item_id}"), field: "password".to_owned(), delivery: EnvDelivery::Value })
         } else if !request.items.contains(item_id) {
@@ -2318,15 +2327,19 @@ fn check_inner(
         ))?;
         // Old synced records can have a name that belongs to another local item.
         // Never let one item replace another item's value in the process environment.
-        if !unique_env_names.insert(binding.env_name.clone()) {
-            return Err((
-                "duplicate_env_name",
-                format!(
-                    "Two requested credentials use the process variable {}. The owner must select different variable names in Apassy before this run.",
-                    binding.env_name
-                ),
-            ));
+        for name in
+            std::iter::once(&binding.env_name).chain(extra.iter().map(|extra| &extra.env_name))
+        {
+            if !unique_env_names.insert(name.clone()) {
+                return Err((
+                    "duplicate_env_name",
+                    format!(
+                        "Two requested credentials use the process variable {name}. The owner must select different variable names in Apassy before this run.",
+                    ),
+                ));
+            }
         }
+        env_names.extend(extra.into_iter().map(|extra| extra.env_name));
         if includes_code && request.items.contains(item_id) {
             if !unique_env_names.insert(code_name.clone()) {
                 return Err((
@@ -2755,7 +2768,21 @@ struct RunSecrets {
     codes: Vec<(String, crate::otp::Totp)>,
 }
 
-fn read_secrets(vault: &Vault, items: &[u64], codes: &[u64]) -> Result<RunSecrets, String> {
+fn read_secrets(
+    vault: &Vault,
+    items: &[u64],
+    codes: &[u64],
+) -> Result<RunSecrets, (&'static str, String)> {
+    // The second check of rule 4: way C turned on after the plan still gets no value.
+    for item_id in items {
+        if let Err(error) = vault.run_extra_bindings(*item_id) {
+            return Err((error.code(), error.message(*item_id)));
+        }
+    }
+    read_secret_values(vault, items, codes).map_err(|reason| ("missing_secret", reason))
+}
+
+fn read_secret_values(vault: &Vault, items: &[u64], codes: &[u64]) -> Result<RunSecrets, String> {
     let mut secrets = RunSecrets {
         env: Vec::new(),
         masks: Vec::new(),
@@ -2781,42 +2808,47 @@ fn read_secrets(vault: &Vault, items: &[u64], codes: &[u64]) -> Result<RunSecret
             .ok_or_else(|| {
                 format!("The owner must select one secret field for item {item_id} in Apassy.")
             })?;
-        let value = vault
-            .reveal(*item_id, &binding.field)
-            .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?
-            .into_zeroizing();
-        let EnvDelivery::Placeholder(hosts) = &binding.delivery else {
-            secrets.env.push(SecretEnv {
-                name: binding.env_name,
-                value,
-            });
-            continue;
-        };
-        let placeholder = mint_placeholder(&value).ok_or_else(|| {
+        let extra = vault
+            .run_extra_bindings(*item_id)
+            .map_err(|error| error.message(*item_id))?;
+        for binding in std::iter::once(binding).chain(extra) {
+            let value = vault
+                .reveal(*item_id, &binding.field)
+                .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?
+                .into_zeroizing();
+            let EnvDelivery::Placeholder(hosts) = &binding.delivery else {
+                secrets.env.push(SecretEnv {
+                    name: binding.env_name,
+                    value,
+                });
+                continue;
+            };
+            let placeholder = mint_placeholder(&value).ok_or_else(|| {
             format!(
                 "The value of item {item_id} is too short for a placeholder. The owner can use the real value mode for {}.",
                 binding.env_name
             )
         })?;
-        let hosts = hosts
-            .iter()
-            .map(|host| HostRule::parse(host))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| format!("Item {item_id} has a host that is not valid."))?;
-        secrets.env.push(SecretEnv {
-            name: binding.env_name.clone(),
-            value: zeroize::Zeroizing::new(placeholder.clone()),
-        });
-        secrets.masks.push(SecretEnv {
-            name: binding.env_name.clone(),
-            value: value.clone(),
-        });
-        secrets.proxied.push(ProxySecret {
-            name: binding.env_name,
-            placeholder,
-            value,
-            hosts,
-        });
+            let hosts = hosts
+                .iter()
+                .map(|host| HostRule::parse(host))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| format!("Item {item_id} has a host that is not valid."))?;
+            secrets.env.push(SecretEnv {
+                name: binding.env_name.clone(),
+                value: zeroize::Zeroizing::new(placeholder.clone()),
+            });
+            secrets.masks.push(SecretEnv {
+                name: binding.env_name.clone(),
+                value: value.clone(),
+            });
+            secrets.proxied.push(ProxySecret {
+                name: binding.env_name,
+                placeholder,
+                value,
+                hosts,
+            });
+        }
     }
     Ok(secrets)
 }

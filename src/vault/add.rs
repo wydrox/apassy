@@ -17,9 +17,10 @@
 //!   requests with the secret (`real_value` in the pack: AWS, Google Cloud). The
 //!   known hosts stay recorded through the declaration's provider.
 //! - A short-lived source (S6-14, [`Detected::short_lived`]): an AWS pair or a Google
-//!   service-account key gets its `short_lived` row (schema 32) with way C on and empty
-//!   settings, in the same transaction, after the fields are checked against the kind.
-//!   Each run then gets a lease, not the value.
+//!   service-account key gets its `short_lived` row (schema 32) with empty settings, in
+//!   the same transaction, after the fields are checked against the kind. Way C is on
+//!   only when runs make leases ([`super::LEASES_IN_RUNS`]); until then the row is off,
+//!   and each run gets the static form (`Vault::run_extra_bindings`).
 //! - No owner check: a new item moves no authority that an existing item has. The
 //!   bouncer decides each use of it (ADR 0025 §3).
 
@@ -359,7 +360,9 @@ fn bind_variable(tx: &Transaction<'_>, item: i64, detected: &Detected) -> VaultR
     history::record(tx, item, ItemEventKind::Variable, &detail)
 }
 
-/// The source row of a new item: way C on, with the default settings of `kind`.
+/// The source row of a new item, with the default settings of `kind`: way C on only when
+/// runs make leases ([`super::LEASES_IN_RUNS`]), else off, so that no run of the new item
+/// fails or gets the long-lived key under the variable of a lease.
 /// `InvalidInput`: the fields are not the fields of the kind, or the kind needs settings
 /// (OAuth: the token URL) or is reserved.
 fn add_short_lived(
@@ -372,8 +375,14 @@ fn add_short_lived(
     let settings = super::ShortLivedSettings::parse(kind, "{}")?.to_json();
     tx.execute(
         "INSERT INTO short_lived (item_id, kind, settings, enabled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 1, ?4, ?4)",
-        (item, kind.as_str(), settings, to_sql_time(now_unix())?),
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        (
+            item,
+            kind.as_str(),
+            settings,
+            i64::from(super::LEASES_IN_RUNS),
+            to_sql_time(now_unix())?,
+        ),
     )
     .map_err(|_| err(VaultErrorKind::Storage))?;
     Ok(())

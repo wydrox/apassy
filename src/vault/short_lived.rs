@@ -1056,6 +1056,59 @@ fn item_fields(
     rows.collect::<Result<_, _>>().map_err(storage)
 }
 
+/// Bind the static form of a source of `kind` that way C no longer covers (see
+/// [`Vault::set_short_lived_enabled`]). Nothing for a kind without a static form or a
+/// binding that the owner chose.
+fn static_binding(
+    tx: &rusqlite::Transaction<'_>,
+    item: i64,
+    kind: ShortLivedKind,
+) -> VaultResult<()> {
+    let Some((name, field)) = super::static_variable(kind) else {
+        return Ok(());
+    };
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT env_name FROM env_binding WHERE item_id = ?1",
+            [item],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    if current
+        .as_deref()
+        .is_some_and(|current| Some(current) != kind.detected_variable())
+    {
+        return Ok(());
+    }
+    let taken: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM env_binding WHERE env_name = ?1 AND item_id != ?2)",
+            rusqlite::params![name, item],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    let env_name = if taken { "" } else { name };
+    tx.execute(
+        "INSERT INTO env_binding (item_id, env_name, field, placeholder_hosts)
+         VALUES (?1, ?2, ?3, NULL)
+         ON CONFLICT(item_id) DO UPDATE SET env_name = excluded.env_name,
+             field = excluded.field, placeholder_hosts = NULL",
+        rusqlite::params![item, env_name, field],
+    )
+    .map_err(storage)?;
+    super::history::record(
+        tx,
+        item,
+        super::history::ItemEventKind::Variable,
+        if env_name.is_empty() {
+            "Automatic"
+        } else {
+            env_name
+        },
+    )
+}
+
 fn item_exists(conn: &rusqlite::Connection, item: i64) -> VaultResult<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM item WHERE id = ?1)",
@@ -1133,23 +1186,41 @@ impl Vault {
         rows.into_iter().map(short_lived_from_row).collect()
     }
 
-    /// Make `item` a source of `kind` with `settings` (JSON text) at `now`. The new row is
-    /// on. Returns the stored row. A change of an existing row needs the owner check:
-    /// [`Vault::change_short_lived`].
+    /// Make the existing item `item` a source of `kind` with `settings` (JSON text) at
+    /// `now`. The new row is on. Returns the stored row. The
+    /// settings decide what a lease can do and where the long-lived secret goes, so
+    /// `proof` must come from `OwnerGate::authorize` for
+    /// `OwnerAction::ChangeShortLivedSettings { item, kind, settings_sha256 }` with the
+    /// digest of exactly these settings, in this vault session; the proof is used up,
+    /// also when the call fails (A-L2). A new item from a paste gets its row in the add
+    /// transaction without a proof (`add::add_short_lived`): it moves no authority that an
+    /// existing item has. A change of an existing row is [`Vault::change_short_lived`].
     ///
     /// `NotFound`: no such item. `AlreadyExists`: the item has a row. `InvalidInput`: a
     /// reserved kind, settings that are not the strict settings of the kind, or fields of
     /// the item that are not the fields of the kind (a missing required field, a wrong
     /// `secret` flag, a value in another form, or a field twice).
+    /// [`ShortLivedChangeError::Proof`]: a proof of another change.
     pub fn set_short_lived(
         &mut self,
         item: u64,
         kind: ShortLivedKind,
         settings: &str,
+        proof: crate::broker::approvals::OwnerProof,
         now: u64,
-    ) -> VaultResult<ShortLived> {
+    ) -> Result<ShortLived, ShortLivedChangeError> {
+        self.require_unlocked()?;
         let parsed = ShortLivedSettings::parse(kind, settings)?;
-        self.write_short_lived(item, &parsed, false, now)
+        let expected = crate::broker::approvals::OwnerAction::ChangeShortLivedSettings {
+            item,
+            kind,
+            settings_sha256: parsed.digest(),
+        };
+        proof
+            .check(&expected, &self.epoch())
+            .map_err(ShortLivedChangeError::Proof)?;
+        drop(proof);
+        Ok(self.write_short_lived(item, &parsed, false, now)?)
     }
 
     /// Change the kind and the settings of the row of `item` to `settings` (JSON text) at
@@ -1249,6 +1320,13 @@ impl Vault {
     /// transaction. The kind and the settings stay as they are. The caller has checked
     /// the fresh owner proof of `OwnerAction::ChangeDelivery { item, kind, on }`.
     /// `NotFound`: the item has no source row.
+    ///
+    /// Off gives the static form of the kind (`super::static_variable`): a binding in the
+    /// layout of a lease (`AWS_ACCESS_KEY_ID` or `CLOUDSDK_AUTH_ACCESS_TOKEN` for the
+    /// long-lived secret), or none, becomes `AWS_SECRET_ACCESS_KEY` ←
+    /// `secret_access_key` or `GOOGLE_API_KEY` ← `key_json` (the automatic name when
+    /// another item has that name), with a history event. A binding that the owner
+    /// chose stays.
     pub fn set_short_lived_enabled(&mut self, item: u64, on: bool, now: u64) -> VaultResult<()> {
         let sql_id = to_sql_id(item)?;
         let at = to_sql_time(now)?;
@@ -1273,6 +1351,9 @@ impl Vault {
             rusqlite::params![i64::from(on), at, sql_id],
         )
         .map_err(storage)?;
+        if !on {
+            static_binding(&tx, sql_id, kind)?;
+        }
         let reason = if on {
             format!("Temporary credentials on ({}).", kind.label())
         } else {
@@ -1551,6 +1632,35 @@ impl Vault {
     }
 }
 
+/// [`Vault::set_short_lived`] with a fresh owner proof of exactly these settings, for the
+/// unit tests that make a source.
+#[cfg(test)]
+impl Vault {
+    pub(crate) fn set_short_lived_checked(
+        &mut self,
+        item: u64,
+        kind: ShortLivedKind,
+        settings: &str,
+        now: u64,
+    ) -> VaultResult<ShortLived> {
+        let digest = ShortLivedSettings::parse(kind, settings)?.digest();
+        let proof = crate::broker::approvals::OwnerProof::issue_for_test(
+            crate::broker::approvals::OwnerAction::ChangeShortLivedSettings {
+                item,
+                kind,
+                settings_sha256: digest,
+            },
+            self.epoch(),
+            std::time::Instant::now(),
+        );
+        self.set_short_lived(item, kind, settings, proof, now)
+            .map_err(|error| match error {
+                ShortLivedChangeError::Vault(error) => error,
+                ShortLivedChangeError::Proof(_) => invalid(),
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1625,7 +1735,7 @@ mod tests {
         let settings = r#"{"region":"eu-central-1","services":["s3","dynamodb"],
             "role_arn":"arn:aws:iam::123456789012:role/apassy-test"}"#;
         let row = vault
-            .set_short_lived(id, ShortLivedKind::AwsSts, settings, 1_700_000_000)
+            .set_short_lived_checked(id, ShortLivedKind::AwsSts, settings, 1_700_000_000)
             .unwrap();
         assert!(row.enabled, "a new source is on");
         vault
@@ -1706,7 +1816,7 @@ mod tests {
             ],
         );
         vault
-            .set_short_lived(id, ShortLivedKind::AwsSts, "{}", 1)
+            .set_short_lived_checked(id, ShortLivedKind::AwsSts, "{}", 1)
             .unwrap();
         let source = vault.short_lived_source(id).unwrap();
         let names: Vec<&str> = source.fields.iter().map(|f| f.name.as_str()).collect();
@@ -1743,7 +1853,7 @@ mod tests {
         ] {
             assert_eq!(
                 vault
-                    .set_short_lived(id, kind, settings, 1)
+                    .set_short_lived_checked(id, kind, settings, 1)
                     .unwrap_err()
                     .kind(),
                 VaultErrorKind::InvalidInput,
@@ -1753,7 +1863,7 @@ mod tests {
         // A reserved kind is refused until unit K defines it.
         assert_eq!(
             vault
-                .set_short_lived(id, ShortLivedKind::CloudflareToken, "{}", 1)
+                .set_short_lived_checked(id, ShortLivedKind::CloudflareToken, "{}", 1)
                 .unwrap_err()
                 .kind(),
             VaultErrorKind::InvalidInput
@@ -1781,7 +1891,7 @@ mod tests {
             let other = item(&mut vault, fields);
             assert_eq!(
                 vault
-                    .set_short_lived(other, kind, "{}", 1)
+                    .set_short_lived_checked(other, kind, "{}", 1)
                     .unwrap_err()
                     .kind(),
                 VaultErrorKind::InvalidInput
@@ -1790,7 +1900,7 @@ mod tests {
         }
         assert_eq!(
             vault
-                .set_short_lived(999, kind, "{}", 1)
+                .set_short_lived_checked(999, kind, "{}", 1)
                 .unwrap_err()
                 .kind(),
             VaultErrorKind::NotFound
@@ -1811,7 +1921,7 @@ mod tests {
         let mut vault = vault(&dir);
         let id = aws(&mut vault);
         vault
-            .set_short_lived(id, ShortLivedKind::AwsSts, "{}", 1)
+            .set_short_lived_checked(id, ShortLivedKind::AwsSts, "{}", 1)
             .unwrap();
         let revision = vault.details(id).unwrap().summary.revision;
         vault
@@ -1866,7 +1976,9 @@ mod tests {
         ];
         for (kind, fields, settings) in cases {
             let id = item(&mut vault, fields);
-            let row = vault.set_short_lived(id, kind, settings, 5).unwrap();
+            let row = vault
+                .set_short_lived_checked(id, kind, settings, 5)
+                .unwrap();
             assert_eq!(row.kind, kind);
             assert_eq!(row.settings().unwrap().kind(), kind);
             assert_eq!(vault.short_lived_source(id).unwrap().kind, kind);
@@ -1974,7 +2086,7 @@ mod tests {
         };
         let id = item(&mut vault, oauth_fields("SYNTH-refresh-1"));
         vault
-            .set_short_lived(
+            .set_short_lived_checked(
                 id,
                 ShortLivedKind::OauthRefresh,
                 r#"{"token_url":"https://auth.example.com/token","client_auth":"body"}"#,
@@ -2082,6 +2194,51 @@ mod tests {
         );
     }
 
+    /// A-L2: making an existing item a source needs the owner check of exactly those
+    /// settings; a proof of other settings, of the switch, or of another session makes
+    /// no row.
+    #[test]
+    fn making_an_existing_item_a_source_needs_the_owner_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = vault(&dir);
+        let id = aws(&mut vault);
+        let kind = ShortLivedKind::AwsSts;
+        let settings = r#"{"region":"eu-central-1"}"#;
+        let wrong = [
+            settings_proof(&vault, id, kind, "{}"),
+            settings_proof(&vault, id + 1, kind, settings),
+            OwnerProof::issue_for_test(
+                OwnerAction::ChangeDelivery {
+                    item: id,
+                    kind,
+                    on: true,
+                },
+                vault.epoch(),
+                std::time::Instant::now(),
+            ),
+            OwnerProof::issue_for_test(
+                OwnerAction::ChangeShortLivedSettings {
+                    item: id,
+                    kind,
+                    settings_sha256: ShortLivedSettings::parse(kind, settings).unwrap().digest(),
+                },
+                [0; 32],
+                std::time::Instant::now(),
+            ),
+        ];
+        for proof in wrong {
+            assert!(matches!(
+                vault.set_short_lived(id, kind, settings, proof, 1),
+                Err(ShortLivedChangeError::Proof(_))
+            ));
+            assert_eq!(vault.short_lived(id).unwrap(), None);
+        }
+        let proof = settings_proof(&vault, id, kind, settings);
+        let row = vault.set_short_lived(id, kind, settings, proof, 2).unwrap();
+        assert!(row.enabled);
+        assert_eq!(row.settings().unwrap().kind(), kind);
+    }
+
     #[test]
     fn a_settings_change_needs_the_owner_check_of_exactly_those_settings() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -2095,12 +2252,12 @@ mod tests {
             ],
         );
         let first = r#"{"token_url":"https://auth.example.com/token","client_auth":"body"}"#;
-        vault.set_short_lived(id, kind, first, 1).unwrap();
+        vault.set_short_lived_checked(id, kind, first, 1).unwrap();
         // The create-only call cannot change an existing row.
         let moved = r#"{"token_url":"https://attacker.example.net/token","client_auth":"body"}"#;
         assert_eq!(
             vault
-                .set_short_lived(id, kind, moved, 2)
+                .set_short_lived_checked(id, kind, moved, 2)
                 .unwrap_err()
                 .kind(),
             VaultErrorKind::AlreadyExists
@@ -2183,7 +2340,7 @@ mod tests {
         let mut vault = vault(&dir);
         let id = aws(&mut vault);
         vault
-            .set_short_lived(id, ShortLivedKind::AwsSts, "{}", 1)
+            .set_short_lived_checked(id, ShortLivedKind::AwsSts, "{}", 1)
             .unwrap();
         let revision = vault.details(id).unwrap().summary.revision;
         vault.delete(id, revision).unwrap();

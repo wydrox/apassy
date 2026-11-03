@@ -186,52 +186,68 @@ impl AccountState {
     }
 }
 
+/// The proof that this Mac is no longer a device of its account: it forgot the account
+/// ([`forget_this_device`], also after a revoke of this Mac or a deletion), or Connect
+/// answered a fresh sign-in with `401` ([`ConnectError::Revoked`]). Only it lets
+/// [`drop_account_rows`] remove every vault row of the account key: a missing or
+/// unreadable account file never does (B-L2).
+#[derive(Debug)]
+pub struct Forgotten(());
+
+impl Forgotten {
+    /// The proof from a confirmed `401` of Connect: `Some` only for
+    /// [`ConnectError::Revoked`] (a second `401` after a fresh sign-in, or a refused
+    /// challenge).
+    pub fn revoked(error: &ConnectError) -> Option<Self> {
+        (*error == ConnectError::Revoked).then_some(Self(()))
+    }
+}
+
 /// Forget the account on this Mac: the account file and the account device key go.
 /// Connect is not asked (a revoked or deleted device cannot ask). The vault rows that
-/// signed with the key go with [`drop_stale_account_rows`] when each vault is open.
-pub fn forget_this_device(store: &dyn DeviceKeyStore, path: &Path) -> Result<(), ConnectError> {
+/// signed with the key go with [`drop_account_rows`] and the returned proof, when each
+/// vault is open.
+pub fn forget_this_device(
+    store: &dyn DeviceKeyStore,
+    path: &Path,
+) -> Result<Forgotten, ConnectError> {
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(_) => return Err(ConnectError::Local),
     }
     AccountSigner::forget(store)?;
-    Ok(())
+    Ok(Forgotten(()))
 }
 
-/// Remove the vault store rows of `vault` (schema 34, `key_source = 'account'`) that the
-/// account of this Mac can no longer sign for: all of them without an account, else the
-/// rows of another public key than the account key of `state`. Call it when a vault
-/// opens and after [`forget_this_device`]. Returns how many rows went.
-pub fn drop_stale_account_rows(
-    vault: &mut Vault,
-    state: Option<&AccountState>,
-) -> VaultResult<usize> {
-    let key = state.and_then(|state| point(&state.public_key));
-    let stale = vault.relay_memberships()?.into_iter().any(|membership| {
-        membership.uses_account_key() && key.as_deref() != Some(membership.public_key.as_slice())
-    });
-    if !stale {
+/// Remove the vault store rows of `vault` (schema 34, `key_source = 'account'`) of
+/// another public key than the account key of `state`: rows that this account can no
+/// longer sign for. Call it when a vault opens and the account file loaded. Without an
+/// account file, or with one that does not load, call nothing: the rows stay until this
+/// Mac forgets the account ([`drop_account_rows`]). Returns how many rows went.
+pub fn drop_stale_account_rows(vault: &mut Vault, state: &AccountState) -> VaultResult<usize> {
+    let Some(key) = point(&state.public_key) else {
         return Ok(0);
-    }
-    match key {
-        None => vault.remove_account_memberships(),
-        Some(key) => {
-            let teams: Vec<String> = vault
-                .relay_memberships()?
-                .into_iter()
-                .filter(|membership| membership.uses_account_key() && membership.public_key != key)
-                .map(|membership| membership.team_id)
-                .collect();
-            let mut removed = 0;
-            for team in teams {
-                if vault.remove_relay_membership(&team)? {
-                    removed += 1;
-                }
-            }
-            Ok(removed)
+    };
+    let teams: Vec<String> = vault
+        .relay_memberships()?
+        .into_iter()
+        .filter(|membership| membership.uses_account_key() && membership.public_key != key)
+        .map(|membership| membership.team_id)
+        .collect();
+    let mut removed = 0;
+    for team in teams {
+        if vault.remove_relay_membership(&team)? {
+            removed += 1;
         }
     }
+    Ok(removed)
+}
+
+/// Remove every vault store row of `vault` that signs with an account key, after this
+/// Mac left its account (`_forgotten`). Returns how many rows went.
+pub fn drop_account_rows(vault: &mut Vault, _forgotten: &Forgotten) -> VaultResult<usize> {
+    vault.remove_account_memberships()
 }
 
 /// The account token in memory. Debug is redacted; the text is erased on drop.
@@ -395,9 +411,14 @@ pub struct ConnectAccount {
     client: ConnectClient,
     state: AccountState,
     path: PathBuf,
-    signer: Arc<AccountSigner>,
+    /// The account device key in memory, from the Keychain. A sign-out (a lock, a quit,
+    /// a revoke) drops it; [`ConnectAccount::reopen_signer`] reads it again.
+    signer: Option<Arc<AccountSigner>>,
     token: Option<AccountToken>,
     entitlement: Option<Entitlement>,
+    /// Connect confirmed that this Mac is no longer a device of the account: every later
+    /// call is [`ConnectError::Revoked`], also without the key in memory.
+    revoked: bool,
     clock: Clock,
 }
 
@@ -430,9 +451,10 @@ impl ConnectAccount {
             client,
             state,
             path: path.to_owned(),
-            signer,
+            signer: Some(signer),
             token: None,
             entitlement: None,
+            revoked: false,
             clock: system_clock(),
         }
     }
@@ -582,9 +604,40 @@ impl ConnectAccount {
 
     /// The account device key of this Mac: for the sign-in of the bouncer brain
     /// (`AccountSigner::sign_brain_sign_in`, plan 0035 C3 and H) and for the relay-sync
-    /// sign-ins and heads of the vault stores (unit M3).
-    pub fn signer(&self) -> Arc<AccountSigner> {
-        Arc::clone(&self.signer)
+    /// sign-ins and heads of the vault stores (unit M3). [`ConnectError::SignedOut`]
+    /// after a sign-out. A holder of the key drops it when the vault locks, as
+    /// [`Self::sign_out`] does.
+    pub fn signer(&self) -> Result<Arc<AccountSigner>, ConnectError> {
+        if self.revoked {
+            return Err(ConnectError::Revoked);
+        }
+        self.signer.clone().ok_or(ConnectError::SignedOut)
+    }
+
+    /// Drop everything from memory after Connect confirmed the revoke: [`Self::sign_out`],
+    /// and every later call is [`ConnectError::Revoked`].
+    fn revoked(&mut self) -> ConnectError {
+        self.sign_out();
+        self.revoked = true;
+        ConnectError::Revoked
+    }
+
+    /// Read the account device key of this Mac again from `store` (Touch ID) after a
+    /// sign-out. A missing key, or another key than the account file names, is
+    /// [`ConnectError::KeyLost`].
+    pub fn reopen_signer(&mut self, store: &dyn DeviceKeyStore) -> Result<(), ConnectError> {
+        let signer = AccountSigner::open(store)?.ok_or(ConnectError::KeyLost)?;
+        if signer.public_key_b64u() != self.state.public_key {
+            return Err(ConnectError::KeyLost);
+        }
+        self.signer = Some(Arc::new(signer));
+        Ok(())
+    }
+
+    /// The public key of this Mac's account key, X9.63, from the account file (checked
+    /// when it loaded). It needs no private key.
+    fn own_public_key(&self) -> Vec<u8> {
+        point(&self.state.public_key).unwrap_or_default()
     }
 
     /// Whether a token is in memory and good for another minute.
@@ -594,32 +647,33 @@ impl ConnectAccount {
             .is_some_and(|token| self.now().saturating_add(TOKEN_MARGIN) < token.until)
     }
 
-    /// Drop the token and the entitlement from memory: a lock, a quit, a revoke.
+    /// Drop the token, the entitlement, and the account device key from memory: a lock,
+    /// a quit, a revoke. A later call that needs the key is [`ConnectError::SignedOut`]
+    /// until [`Self::reopen_signer`].
     pub fn sign_out(&mut self) {
         self.token = None;
         self.entitlement = None;
+        self.signer = None;
     }
 
     /// Sign in now: a challenge, the origin check, the signature, the token. A key that
     /// Connect does not know any more is [`ConnectError::Revoked`] and drops the token.
     pub fn sign_in(&mut self) -> Result<(), ConnectError> {
         self.token = None;
-        let public_key = self.signer.public_key_b64u();
+        let signer = self.signer()?;
+        let public_key = signer.public_key_b64u();
         let challenge = match self.client.challenge(&ChallengeRequest {
             account_id: &self.state.account_id,
             public_key: &public_key,
         }) {
             Ok(challenge) => challenge,
-            Err(ConnectError::Unauthenticated) => {
-                self.sign_out();
-                return Err(ConnectError::Revoked);
-            }
+            Err(ConnectError::Unauthenticated) => return Err(self.revoked()),
             Err(error) => return Err(error),
         };
         let now = self.now();
         match finish_sign_in(
             &self.client,
-            &self.signer,
+            &signer,
             &self.state.account_id,
             challenge,
             Some(self.state.device_id.as_str()),
@@ -629,12 +683,8 @@ impl ConnectAccount {
                 self.token = Some(token);
                 Ok(())
             }
-            Err(error) => {
-                if error == ConnectError::Revoked {
-                    self.sign_out();
-                }
-                Err(error)
-            }
+            Err(ConnectError::Revoked) => Err(self.revoked()),
+            Err(error) => Err(error),
         }
     }
 
@@ -665,10 +715,7 @@ impl ConnectAccount {
         self.sign_in()?;
         let token = self.fresh_token()?;
         match call(&self.client, token.as_str()) {
-            Err(ConnectError::Unauthenticated) => {
-                self.sign_out();
-                Err(ConnectError::Revoked)
-            }
+            Err(ConnectError::Unauthenticated) => Err(self.revoked()),
             other => other,
         }
     }
@@ -700,22 +747,25 @@ impl ConnectAccount {
     /// Delete the account at Connect (section 6) after a fresh owner check for
     /// [`Self::delete_action`] in the vault session `epoch`, then forget it on this Mac:
     /// the account file and the account key go.
+    /// The proof is used up, also when the call fails. Returns the answer of Connect
+    /// and the proof for [`drop_account_rows`].
     pub fn delete(
         mut self,
         store: &dyn DeviceKeyStore,
-        proof: &OwnerProof,
+        proof: OwnerProof,
         epoch: &[u8; 32],
-    ) -> Result<AccountDeleted, ConnectError> {
+    ) -> Result<(AccountDeleted, Forgotten), ConnectError> {
         proof
             .check(&self.delete_action(), epoch)
             .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
         let deleted = self.with_token(|client, token| client.delete_account(token))?;
         if deleted.account_id != self.state.account_id {
             return Err(ConnectError::BadAnswer);
         }
         self.sign_out();
-        forget_this_device(store, &self.path)?;
-        Ok(deleted)
+        let forgotten = forget_this_device(store, &self.path)?;
+        Ok((deleted, forgotten))
     }
 
     // ---- Devices (section 7). ----
@@ -738,6 +788,7 @@ impl ConnectAccount {
     /// 5 s while the sheet is open. An entry with a bad key is left out.
     pub fn pending_joins(&mut self, link: &DeviceLink) -> Result<Vec<PendingJoin>, ConnectError> {
         let pending = self.with_token(|client, token| client.pending(token))?;
+        let own_key = self.own_public_key();
         Ok(pending
             .into_iter()
             .filter(|join| join.link_id == link.link_id)
@@ -747,7 +798,7 @@ impl ConnectAccount {
                 let words = safety_words(
                     &self.state.account_id,
                     link.code.expose(),
-                    self.signer.public_key(),
+                    &own_key,
                     &public_key,
                 );
                 Some(PendingJoin {
@@ -768,19 +819,19 @@ impl ConnectAccount {
     /// [`PendingJoin::owner_action`] in the vault session `epoch`: Connect adds exactly
     /// the key for which this Mac computed the words. The words are computed again from
     /// the code and the key, so a changed entry is [`ConnectError::WordsMismatch`] and
-    /// nothing is sent.
+    /// nothing is sent. The proof is used up, also when the call fails.
     pub fn confirm_join(
         &mut self,
         link: &DeviceLink,
         join: &PendingJoin,
-        proof: &OwnerProof,
+        proof: OwnerProof,
         epoch: &[u8; 32],
     ) -> Result<DeviceView, ConnectError> {
         if join.link_id != link.link_id
             || safety_words(
                 &self.state.account_id,
                 link.code.expose(),
-                self.signer.public_key(),
+                &self.own_public_key(),
                 &join.public_key,
             ) != join.words
         {
@@ -789,6 +840,7 @@ impl ConnectAccount {
         proof
             .check(&join.owner_action(&self.state.account_id), epoch)
             .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
         let public_key = encode_b64u(&join.public_key);
         let device =
             self.with_token(|client, token| client.confirm(token, join.join_id, &public_key))?;
@@ -819,16 +871,18 @@ impl ConnectAccount {
     /// Revoke `device` (section 7.4) after a fresh owner check for
     /// [`Self::revoke_action`] in the vault session `epoch`. This Mac may revoke itself
     /// ("Forget this device"): its token goes, and the caller runs
-    /// [`forget_this_device`] and [`drop_stale_account_rows`].
+    /// [`forget_this_device`] and [`drop_account_rows`]. The proof is used up, also when
+    /// the call fails.
     pub fn revoke(
         &mut self,
         device: &DeviceView,
-        proof: &OwnerProof,
+        proof: OwnerProof,
         epoch: &[u8; 32],
     ) -> Result<RevokeOutcome, ConnectError> {
         proof
             .check(&self.revoke_action(device), epoch)
             .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
         let answer = self.with_token(|client, token| client.revoke(token, &device.device_id))?;
         if answer.device_id != device.device_id {
             return Err(ConnectError::BadAnswer);
@@ -901,19 +955,68 @@ impl ConnectAccount {
         self.with_token(|client, token| client.vault_stores(token))
     }
 
+    /// The owner action of adding the device `device_id` of the account `account_id` to
+    /// the store `team_id`.
+    pub fn add_store_device_action(
+        team_id: &str,
+        device_id: &str,
+        account_id: &str,
+    ) -> OwnerAction {
+        OwnerAction::AddStoreDevice {
+            team_id: team_id.to_owned(),
+            device_id: device_id.to_owned(),
+            account_id: account_id.to_owned(),
+        }
+    }
+
     /// `POST /v1/account/vaults/{team_id}/devices`: add another live device of the
-    /// account (or of the group) to a store this Mac is in.
+    /// account (or of the group) to a store this Mac is in, after a fresh owner check
+    /// for [`Self::add_store_device_action`] in the vault session `epoch`: the device can
+    /// then read and write the relay copy. The proof is used up, also when the call
+    /// fails. An answer for another device or account is [`ConnectError::BadAnswer`].
     pub fn add_store_device(
         &mut self,
         team_id: &str,
         device_id: &str,
+        account_id: &str,
+        proof: OwnerProof,
+        epoch: &[u8; 32],
     ) -> Result<StoreDevice, ConnectError> {
-        self.with_token(|client, token| client.add_store_device(token, team_id, device_id))
+        proof
+            .check(
+                &Self::add_store_device_action(team_id, device_id, account_id),
+                epoch,
+            )
+            .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
+        let added =
+            self.with_token(|client, token| client.add_store_device(token, team_id, device_id))?;
+        if added.device_id != device_id || added.account_id != account_id {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(added)
     }
 
-    /// `DELETE /v1/account/vaults/{team_id}`: the store and its snapshots go. The UI asks
-    /// for the owner check of the relay copy deletion first (unit M3).
-    pub fn delete_vault_store(&mut self, team_id: &str) -> Result<(), ConnectError> {
+    /// The owner action of deleting the store `team_id`.
+    pub fn delete_vault_store_action(team_id: &str) -> OwnerAction {
+        OwnerAction::DeleteVaultStore {
+            team_id: team_id.to_owned(),
+        }
+    }
+
+    /// `DELETE /v1/account/vaults/{team_id}`: the store and its snapshots go, after a
+    /// fresh owner check for [`Self::delete_vault_store_action`] in the vault session
+    /// `epoch`. The proof is used up, also when the call fails.
+    pub fn delete_vault_store(
+        &mut self,
+        team_id: &str,
+        proof: OwnerProof,
+        epoch: &[u8; 32],
+    ) -> Result<(), ConnectError> {
+        proof
+            .check(&Self::delete_vault_store_action(team_id), epoch)
+            .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
         let answer = self.with_token(|client, token| client.delete_vault_store(token, team_id))?;
         if answer.team_id != team_id {
             return Err(ConnectError::BadAnswer);

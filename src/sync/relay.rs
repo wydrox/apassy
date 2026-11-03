@@ -2454,6 +2454,7 @@ impl RelaySync {
             public_key: session.key.public_key().to_vec(),
             key_pkcs8: key,
             created_at: 0,
+            account_key: false,
         };
         vault.with(|vault| {
             vault.set_relay_device(&row)?;
@@ -2507,6 +2508,7 @@ impl RelaySync {
                     public_key: session.key.public_key().to_vec(),
                     key_pkcs8: session.key.pkcs8().cloned().unwrap_or_default(),
                     created_at: 0,
+                    account_key: false,
                 })
             })
             // A pinned node: its pin and alternatives stay with the membership.

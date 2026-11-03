@@ -476,6 +476,20 @@ pub enum OwnerAction {
     DeleteConnectAccount {
         account_id: String,
     },
+    /// Delete a vault store of the Apassy Connect account (connect-account-v1 section 8):
+    /// the relay copy of one vault and its snapshots go at Connect. The proof names the
+    /// store by its relay team.
+    DeleteVaultStore {
+        team_id: String,
+    },
+    /// Add a device of the Apassy Connect account, or of its group, to a vault store
+    /// (section 8): the device can then read and write the relay copy of that vault. The
+    /// proof names the store, the device, and the account of the device.
+    AddStoreDevice {
+        team_id: String,
+        device_id: String,
+        account_id: String,
+    },
     /// Change the Family or Team group of the Apassy Connect account (connect-billing-v1
     /// section 6): confirm or remove a member, or change the seats.
     ChangeConnectGroup {
@@ -684,6 +698,8 @@ impl OwnerAction {
             Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
+            Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
+            Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
             Self::SetTailnetRoute { on: true } => "Reach this Mac on your tailnet",
             Self::SetTailnetRoute { on: false } => "Stop the tailnet route",
@@ -901,6 +917,12 @@ impl OwnerAction {
             Self::DeleteConnectAccount { .. } => {
                 "delete your Apassy Connect account, its vault stores, and its plan".to_owned()
             }
+            Self::DeleteVaultStore { .. } => {
+                "delete the relay copy of this vault and its snapshots at Apassy Connect".to_owned()
+            }
+            Self::AddStoreDevice { .. } => {
+                "let another device sync the relay copy of this vault at Apassy Connect".to_owned()
+            }
             Self::ChangeConnectGroup { change, .. } => match change {
                 ConnectGroupChange::ConfirmMember { name, .. } => format!(
                     "add \"{}\" to your Apassy Connect family or team",
@@ -931,17 +953,22 @@ impl OwnerAction {
     /// confirm: the global owner window never covers it (ADR 0035 section 1, plan 0035
     /// C2). A change of the bouncer brain host or trainer sends request data to another
     /// computer, so each change asks again. The Apassy Connect account actions (plan s7
-    /// M1) add or remove a device or a person of the account, or end it, so each asks
-    /// again too.
+    /// M1) add or remove a device or a person of the account, a device of a vault store,
+    /// or a vault store, or end the account, so each asks again too. Turning way C off
+    /// gives runs the long-lived key again (contract private-sharing-v1 rule 3), so it
+    /// asks again as well; turning it on gives runs less and stays in the window.
     pub fn needs_fresh_local_check(&self) -> bool {
         matches!(
             self,
             Self::ChangeBouncerHosting { .. }
                 | Self::ChangeBouncerTraining { .. }
                 | Self::ChangeShortLivedSettings { .. }
+                | Self::ChangeDelivery { on: false, .. }
                 | Self::ConfirmConnectDevice { .. }
                 | Self::RevokeConnectDevice { .. }
                 | Self::DeleteConnectAccount { .. }
+                | Self::DeleteVaultStore { .. }
+                | Self::AddStoreDevice { .. }
                 | Self::ChangeConnectGroup { .. }
         )
     }
@@ -2176,6 +2203,14 @@ mod evaluation_tests {
                 group_id: "grp_f4m6n2p7qa".into(),
                 change: ConnectGroupChange::SetSeats { quantity: 6 },
             },
+            OwnerAction::DeleteVaultStore {
+                team_id: "t".repeat(32),
+            },
+            OwnerAction::AddStoreDevice {
+                team_id: "t".repeat(32),
+                device_id: "dev_p4n6r2t7bc".into(),
+                account_id: "acc_m3n5p7q2rb".into(),
+            },
         ] {
             assert!(action.needs_fresh_local_check(), "{action:?}");
             #[cfg(feature = "desktop")]
@@ -2360,7 +2395,12 @@ mod evaluation_tests {
             on: true,
         };
         assert!(on.reason().contains("15 minutes"));
-        assert!(!action.needs_fresh_local_check());
+        // Off gives runs the long-lived key again: only a fresh check on this Mac makes
+        // it, never the global window (A-L1). On gives runs less.
+        assert!(action.needs_fresh_local_check());
+        #[cfg(feature = "desktop")]
+        assert!(!LocalWindowSource::LocalOwner.permits(&action));
+        assert!(!on.needs_fresh_local_check());
     }
 
     #[test]

@@ -117,6 +117,17 @@ pub fn prepare_connect_for(
     Ok(pending)
 }
 
+/// The team name that a codeless Connect team gets on the relay (plan s7 S0, B-L6): the
+/// relay never learns the name of the vault. The vault keeps its own name locally.
+pub const CODELESS_TEAM_NAME: &str = "Vault";
+/// The device name that a codeless Connect team gets on the relay: the kind of the
+/// device, never the name that the owner gave it.
+pub const CODELESS_DEVICE_NAME: &str = if cfg!(target_os = "ios") {
+    "iPhone"
+} else {
+    "Mac"
+};
+
 fn label(name: &str, fallback: &str) -> String {
     let name = clean_name(name, fallback);
     let mut out = String::new();
@@ -249,10 +260,11 @@ pub fn create_connect_for(
         let public = key.public_key_b64u();
         let mut message =
             format!("apassy-relay connect v1\0{}\0{public}", url.as_str()).into_bytes();
+        // Only generic names go to the relay; `pending` keeps the local names.
         let request = Create {
             v: 1,
-            team: &pending.team_name,
-            device_name: &pending.device_name,
+            team: CODELESS_TEAM_NAME,
+            device_name: CODELESS_DEVICE_NAME,
             public_key: &public,
             signature: encode_b64u(&key.sign(&message)?),
             recovery_nonce: None,
