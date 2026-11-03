@@ -63,6 +63,23 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.16 coordinated release
+
+0.5.16 collects the work on main since 0.5.15 (Apple Watch, passkey PRF and
+large blob, full Credential Exchange import, Find duplicates, Agents and
+Decisions of every Mac, the decision log) and the release branch: remote agents
+through the Mac's node and the MCP authorization flow, the Bouncer section, the
+fixes for the over-asking bouncer and the idle CPU, the review fixes, and the
+iPhone demo with the App Store package. All six components move to 0.5.16; the
+relay, the Linux CLI and the extension come from 0.5.14. The vault schema goes
+to 27, relay team schema to 7, and the relay directory to 1004. Build the relay
+image with `relay-image.yml` (tag `image-release-0.5.16`) and deploy it only
+after the owner approves the exact image and backup.
+
+State on 2026-11-03: prepared, not published. The version bump and the changelog
+are on `r16/version-bump` (from `release/0.5.16`). No component is live at 0.5.16
+and there is no tag `v0.5.16`.
+
 ## 0.5.15 coordinated release
 
 0.5.15 fixes the Touch ID panel for vault unlock (#80): the LSUIElement keychain

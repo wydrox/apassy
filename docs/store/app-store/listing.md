@@ -118,7 +118,7 @@ Rules that this text follows ([plans.md](../../product/plans.md) §5 and §3, Ap
 
 App Store Connect does not show "What's New" for the first version of an app. Use this text from the
 second App Store version. Write it from the dated changelog of that release, only with what the
-iPhone and the watch change. The text for the version after 0.5.15, from the `[Unreleased]` changelog:
+iPhone and the watch change. The text for 0.5.16, from its changelog section:
 
 ```text
 - Apple Watch: answer access requests with Allow once or Deny while the watch is unlocked on your wrist. Connect it in Settings > Devices > Add Apple Watch.
@@ -126,6 +126,8 @@ iPhone and the watch change. The text for the version after 0.5.15, from the `[U
 - More passkeys: ES384, EdDSA and RS256 passkeys from another app, with their PRF and large blob data.
 - Find duplicates: Settings > General > Find duplicates lists the items that hold the same account and merges them.
 - Lock screen: Face ID asks first; the passphrase field shows only when Face ID does not open the vault.
+- Try the Demo: look around the app with sample data only, without a vault.
+- Remote agents: allow a hosted agent's connect request and its runs from Requests.
 ```
 
 ## Age rating
