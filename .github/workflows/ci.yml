@@ -186,6 +186,8 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/brain-venv"
           "$RUNNER_TEMP/brain-venv/bin/pip" install --quiet 'fastapi==0.141.1' 'httpx==0.28.1'
           "$RUNNER_TEMP/brain-venv/bin/python" -I -B -m unittest discover -s tests/basemodel -p 'test_*.py'
+          # The K1 bench script (implementation plan 0035, E2) without a server or torch.
+          "$RUNNER_TEMP/brain-venv/bin/python" -I -B tools/basemodel/bench.py --dry-run
 
       - name: Check coordinated release versions
         run: |
