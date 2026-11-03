@@ -12,6 +12,7 @@
 !tools/basemodel/common.py
 !tools/basemodel/app.py
 !tools/basemodel/heads_cache.py
+!tools/basemodel/jobs.py
 !tools/basemodel/serve.py
 !tools/basemodel/train.py
 !tools/basemodel/bench.py

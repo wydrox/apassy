@@ -96,7 +96,7 @@ PY
 COPY LICENSE /opt/apassy/licenses/LICENSE
 COPY tools/basemodel/NOTICE /opt/apassy/licenses/NOTICE
 COPY tests/fixtures/bouncer/cases.tsv /opt/apassy/bench/cases.tsv
-COPY tools/basemodel/app.py tools/basemodel/heads_cache.py tools/basemodel/serve.py \
+COPY tools/basemodel/app.py tools/basemodel/heads_cache.py tools/basemodel/jobs.py tools/basemodel/serve.py \
      tools/basemodel/train.py tools/basemodel/bench.py tools/basemodel/fetch_weights.py \
      /opt/apassy/tools/basemodel/
 COPY tools/finetune/local_train.py /opt/apassy/tools/finetune/local_train.py
