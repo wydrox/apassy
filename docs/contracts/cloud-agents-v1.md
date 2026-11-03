@@ -316,7 +316,7 @@ Short-lived credentials and signed requests (2026-11-03, not built yet): an item
 owner's host can turn into a short-lived one (AWS STS, a GitHub App, a Google service account, an OAuth
 refresh token) gets its short-lived value in `env` instead of a placeholder, and AWS keys can get a
 placeholder that the node re-signs. The additions to `SessionView` (`short_lived`, `signers`), to
-`AccessItem` (`delivery`), and the variables are frozen in
+`AccessItem` (`credential_form`), and the variables are frozen in
 [private sharing v1](private-sharing-v1.md) section 5. The table above changes when the relay
 implements them.
 

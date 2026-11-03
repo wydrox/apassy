@@ -1835,7 +1835,7 @@ mod private_sharing {
         pub fields: BTreeMap<String, Vec<FieldRule>>,
         pub settings: BTreeMap<String, Vec<String>>,
         pub lease: BTreeMap<String, LeaseRule>,
-        pub delivery: Vec<String>,
+        pub credential_form: Vec<String>,
         pub codes: Vec<String>,
         pub audit_actions: Vec<String>,
     }
@@ -2426,7 +2426,7 @@ mod private_sharing {
 
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
-    pub enum Delivery {
+    pub enum CredentialForm {
         #[default]
         Placeholder,
         TemporaryCredentials,
@@ -2456,7 +2456,7 @@ mod private_sharing {
         pub approval: String,
         pub rule: Value,
         #[serde(default)]
-        pub delivery: Delivery,
+        pub credential_form: CredentialForm,
     }
 
     #[derive(Debug, Deserialize)]
@@ -3015,25 +3015,22 @@ fn private_sharing_v1_fixtures_match_the_contract() {
             .any(|name| name.starts_with("AWS_ENDPOINT_URL"))
     );
 
-    // Section 5.4: one access item of each delivery, matching the session view.
+    // Section 5.4: one access item of each credential form, matching the session view.
     let access: ps::AccessView = ps::strict("access-view.json", ps::ACCESS_VIEW);
-    let deliveries: Vec<String> = access
+    let forms: Vec<String> = access
         .items
         .iter()
-        .map(|item| serde_json::to_value(item.delivery).expect("delivery json"))
-        .map(|value| value.as_str().expect("delivery text").to_owned())
+        .map(|item| serde_json::to_value(item.credential_form).expect("credential form json"))
+        .map(|value| value.as_str().expect("credential form text").to_owned())
         .collect();
-    assert_eq!(deliveries, kinds.delivery);
-    for delivery in &kinds.delivery {
-        assert!(
-            contract.contains(&format!("| `{delivery}` |")),
-            "{delivery}"
-        );
+    assert_eq!(forms, kinds.credential_form);
+    for form in &kinds.credential_form {
+        assert!(contract.contains(&format!("| `{form}` |")), "{form}");
     }
     for item in &access.items {
-        match item.delivery {
-            ps::Delivery::Placeholder => assert!(!item.base_url_vars.is_empty()),
-            ps::Delivery::TemporaryCredentials => {
+        match item.credential_form {
+            ps::CredentialForm::Placeholder => assert!(!item.base_url_vars.is_empty()),
+            ps::CredentialForm::TemporaryCredentials => {
                 assert!(item.base_url_vars.is_empty());
                 assert!(
                     view.short_lived
@@ -3042,7 +3039,7 @@ fn private_sharing_v1_fixtures_match_the_contract() {
                             && lease.env_names[0] == item.env_name)
                 );
             }
-            ps::Delivery::SignedRequests => {
+            ps::CredentialForm::SignedRequests => {
                 assert!(item.base_url_vars.is_empty());
                 assert!(view.signers.iter().any(
                     |signer| signer.item_id == item.item_id && signer.env_name == item.env_name
@@ -3404,14 +3401,21 @@ fn private_sharing_v1_old_session_views_and_access_items_still_parse() {
     let original: Value = serde_json::from_str(ps::SESSION_VIEW).expect("fixture");
     assert_eq!(fixture, original);
 
-    // An access item of an older node has no delivery: it is a placeholder item.
+    // An access item of an older node has no credential form: it is a placeholder item.
     let mut item: Value =
         serde_json::from_str::<Value>(ps::ACCESS_VIEW).expect("access")["items"][0].clone();
-    item.as_object_mut().expect("item").remove("delivery");
+    item.as_object_mut()
+        .expect("item")
+        .remove("credential_form");
     let parsed: ps::AccessItem = serde_json::from_value(item.clone()).expect("old item");
-    assert_eq!(parsed.delivery, ps::Delivery::Placeholder);
-    item["delivery"] = json!("real_value");
-    assert!(serde_json::from_value::<ps::AccessItem>(item).is_err());
+    assert_eq!(parsed.credential_form, ps::CredentialForm::Placeholder);
+    let mut wrong = item.clone();
+    wrong["credential_form"] = json!("real_value");
+    assert!(serde_json::from_value::<ps::AccessItem>(wrong).is_err());
+    // The old name is not read as the credential form (strict access items refuse it).
+    let mut renamed = item;
+    renamed["delivery"] = json!("temporary_credentials");
+    assert!(serde_json::from_value::<ps::AccessItem>(renamed).is_err());
 }
 
 #[test]
@@ -3738,6 +3742,8 @@ fn private_sharing_v1_contract_states_the_rules() {
         "pub signers: Vec<SignerView>",
         "`temporary_credentials`",
         "`signed_requests`",
+        "`AccessItem.credential_form`",
+        "`credential_form TEXT NOT NULL",
     ] {
         assert!(contract.contains(needle), "the contract lacks: {needle}");
     }

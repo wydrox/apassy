@@ -45,7 +45,7 @@
     "google_service_account": {"secrets": ["$binding"], "plain": [], "max_secs": 900, "revoke": null},
     "oauth_refresh": {"secrets": ["$binding"], "plain": [], "max_secs": null, "revoke": "oauth"}
   },
-  "delivery": ["placeholder", "temporary_credentials", "signed_requests"],
+  "credential_form": ["placeholder", "temporary_credentials", "signed_requests"],
   "codes": ["lease_failed", "lease_revoke_failed", "sign_refused"],
   "audit_actions": [
     "lease_made",
