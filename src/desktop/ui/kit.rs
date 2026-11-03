@@ -206,9 +206,10 @@ pub(crate) fn relative_time(at: u64, now: u64) -> String {
     }
 }
 
-/// The UTC day of `at` with the English month abbreviation: "9 Oct 2026".
+/// The UTC day of `at` with the English month abbreviation: "9 Oct 2026". A day ahead,
+/// such as the end of a token, shows in this form too.
 #[cfg(feature = "vault")]
-fn day_month_year(at: u64) -> String {
+pub(crate) fn day_month_year(at: u64) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];

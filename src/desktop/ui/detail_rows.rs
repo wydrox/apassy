@@ -337,6 +337,29 @@ pub(super) fn pop_menu<T: PartialEq + Clone>(
     shown: &str,
     name: &str,
 ) -> Response {
+    pop_menu_styled(ui, value, options, shown, name, false)
+}
+
+/// [`pop_menu`] on white with a thin border, for a menu inside a sentence, as the scope
+/// bar of Agents and Decisions.
+pub(super) fn bordered_pop_menu<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    value: &mut T,
+    options: &[(T, String)],
+    shown: &str,
+    name: &str,
+) -> Response {
+    pop_menu_styled(ui, value, options, shown, name, true)
+}
+
+fn pop_menu_styled<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    value: &mut T,
+    options: &[(T, String)],
+    shown: &str,
+    name: &str,
+    bordered: bool,
+) -> Response {
     let galley = kit::galley(ui, kit::text(shown, Font::Callout).size(12.5));
     let size = Vec2::new(galley.size().x + 31.0, 22.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -346,15 +369,28 @@ pub(super) fn pop_menu<T: PartialEq + Clone>(
         response.scroll_to_me(None);
     }
     if ui.is_rect_visible(rect) {
-        let fill = if response.is_pointer_button_down_on() {
-            BUTTON_HOVER
-        } else if response.hovered() {
-            BUTTON
+        let (pressed, hovered, rest) = if bordered {
+            (kit::FILL_PRESSED, kit::FILL, kit::SURFACE)
         } else {
-            POP
+            (BUTTON_HOVER, BUTTON, POP)
+        };
+        let fill = if response.is_pointer_button_down_on() {
+            pressed
+        } else if response.hovered() {
+            hovered
+        } else {
+            rest
         };
         let painter = ui.painter();
         painter.rect_filled(rect, 6, fill);
+        if bordered {
+            painter.rect_stroke(
+                rect,
+                6,
+                Stroke::new(1.0, kit::BORDER),
+                egui::StrokeKind::Inside,
+            );
+        }
         if response.has_focus() {
             kit::focus_ring(painter, rect, 6);
         }

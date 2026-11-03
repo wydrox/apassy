@@ -2610,6 +2610,7 @@ impl DesktopApp {
         self.poll_unlock(ctx);
         self.poll_companion(ctx);
         self.questions_poll(ctx);
+        self.poll_remote_feeds();
         self.poll_remote_answers(ctx);
         self.owner_ui.session.expire_reveals();
         if let Some(left) = self.owner_ui.session.next_reveal_expiry() {
@@ -2941,6 +2942,8 @@ impl DesktopApp {
         if let Some(questions) = &self.owner.questions {
             questions.forget();
         }
+        // The feeds of the other Macs go with the session (relay-feed-v1).
+        self.forget_remote_feeds();
         self.erase_typed_secrets(ctx);
     }
 

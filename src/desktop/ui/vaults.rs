@@ -216,6 +216,7 @@ impl DesktopApp {
         self.ui.discard_item_changes = false;
         self.ui.discard_item_kind_change = false;
         self.files.forget();
+        self.forget_remote_feeds();
         self.erase_typed_secrets(ctx);
         self.place = Place::CREDENTIALS;
         self.selected_item_id = None;
