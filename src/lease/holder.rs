@@ -140,8 +140,7 @@ impl KeyHolder {
             // Another key holder may have rotated the token after the read: read once
             // more, and try a stored token that differs from the one sent.
             let again = self.read(item)?;
-            if refresh_token(&again).is_some() && refresh_token(&again) != refresh_token(&source)
-            {
+            if refresh_token(&again).is_some() && refresh_token(&again) != refresh_token(&source) {
                 source = again;
                 result = acquire(&source, scope, &self.endpoints, self.tls.as_deref());
             }
@@ -351,7 +350,11 @@ mod tests {
         assert_eq!(*rotation, RotationOutcome::Stored);
         assert_eq!(stored(&vault, item), ROTATED);
         assert!(error.update_field.is_none());
-        assert!(error.message.contains("not a bearer token"), "{}", error.message);
+        assert!(
+            error.message.contains("not a bearer token"),
+            "{}",
+            error.message
+        );
         assert!(error.message.contains(ROTATED_STORED), "{}", error.message);
         assert!(!error.message.contains("authorize the item again"));
         scan::assert_no_secrets(
@@ -431,7 +434,11 @@ mod tests {
         server.join().expect("fake token endpoint");
         assert_eq!(held.rotation, RotationOutcome::KeptNewer);
         assert!(held.lease.update_field.is_none());
-        assert_eq!(stored(&vault, item), NEWER, "the newer token is not overwritten");
+        assert_eq!(
+            stored(&vault, item),
+            NEWER,
+            "the newer token is not overwritten"
+        );
     }
 
     #[test]

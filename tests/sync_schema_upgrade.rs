@@ -1001,6 +1001,8 @@ fn a_pushed_copy_has_no_bouncer_host_row_and_a_later_copy_is_refused() {
 /// The schema before schema 32 in the migration chain (`src/vault/schema32.rs`,
 /// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
 const BEFORE_32: i64 = 29;
+/// The schema of `short_lived` and `member_key`.
+const SCHEMA_32: i64 = 32;
 
 const AWS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
 const AWS_SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
@@ -1121,8 +1123,10 @@ fn short_lived_settings_sync_and_hold_no_secret() {
     assert_eq!(kept.settings_json, settings);
     assert!(a.member_key(member).unwrap().is_some());
 
-    // No build has a schema between the previous one and 32.
-    for gap in (BEFORE_32 + 1)..CURRENT {
+    // No build has a schema between the previous one and 32. (The loop ran to CURRENT
+    // and so wanted schema 32 refused; it never ran while the AWS item of this test could
+    // not be added.)
+    for gap in (BEFORE_32 + 1)..SCHEMA_32 {
         let path = root.path().join(format!("gap-{gap}.apassy"));
         a.write_sync_copy(&path, "Mac A").unwrap();
         set_schema(&path, PASS, gap, true);

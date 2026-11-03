@@ -1559,7 +1559,12 @@ mod tests {
     use crate::vault::ItemDraft;
 
     /// A fresh owner proof for a change of the settings of `item` to `settings`.
-    fn settings_proof(vault: &Vault, item: u64, kind: ShortLivedKind, settings: &str) -> OwnerProof {
+    fn settings_proof(
+        vault: &Vault,
+        item: u64,
+        kind: ShortLivedKind,
+        settings: &str,
+    ) -> OwnerProof {
         OwnerProof::issue_for_test(
             OwnerAction::ChangeShortLivedSettings {
                 item,
@@ -1646,7 +1651,12 @@ mod tests {
         assert!(!source.enabled);
         assert_eq!(source.settings, ShortLivedSettings::AwsSts(aws.clone()));
         // A change of the settings of a row that is off keeps it off.
-        let proof = settings_proof(&vault, id, ShortLivedKind::AwsSts, r#"{"region":"us-west-2"}"#);
+        let proof = settings_proof(
+            &vault,
+            id,
+            ShortLivedKind::AwsSts,
+            r#"{"region":"us-west-2"}"#,
+        );
         vault
             .change_short_lived(
                 id,
@@ -2060,8 +2070,16 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert!(details.iter().any(|detail| detail == "secret:refresh_token"));
-        assert!(details.iter().all(|detail| !detail.contains("SYNTH-refresh")));
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail == "secret:refresh_token")
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("SYNTH-refresh"))
+        );
     }
 
     #[test]
@@ -2081,7 +2099,10 @@ mod tests {
         // The create-only call cannot change an existing row.
         let moved = r#"{"token_url":"https://attacker.example.net/token","client_auth":"body"}"#;
         assert_eq!(
-            vault.set_short_lived(id, kind, moved, 2).unwrap_err().kind(),
+            vault
+                .set_short_lived(id, kind, moved, 2)
+                .unwrap_err()
+                .kind(),
             VaultErrorKind::AlreadyExists
         );
         // A proof for other settings, for the on/off switch, or of another session
@@ -2089,7 +2110,11 @@ mod tests {
         let wrong = [
             settings_proof(&vault, id, kind, first),
             OwnerProof::issue_for_test(
-                OwnerAction::ChangeDelivery { item: id, kind, on: true },
+                OwnerAction::ChangeDelivery {
+                    item: id,
+                    kind,
+                    on: true,
+                },
                 vault.epoch(),
                 std::time::Instant::now(),
             ),

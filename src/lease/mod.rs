@@ -698,8 +698,9 @@ pub(crate) fn acquire_at(
     {
         // A rotated refresh token goes with the error: the caller still stores it.
         let mut lease = lease;
-        return Err(LeaseError::invalid_answer(source.kind())
-            .with_update_field(lease.update_field.take()));
+        return Err(
+            LeaseError::invalid_answer(source.kind()).with_update_field(lease.update_field.take())
+        );
     }
     Ok(lease)
 }
@@ -1474,16 +1475,25 @@ mod tests {
         oauth.expiry_unknown = true;
         oauth.check().expect("revoked, shown as one hour");
         oauth.expires_at = oauth.made_at + 900;
-        assert!(oauth.check().is_err(), "an unknown expiry is shown as one hour");
+        assert!(
+            oauth.check().is_err(),
+            "an unknown expiry is shown as one hour"
+        );
         oauth.expires_at = oauth.made_at + 3600;
         let revoke = oauth.revoke.take();
-        assert!(oauth.check().is_err(), "an unknown expiry needs the revocation");
+        assert!(
+            oauth.check().is_err(),
+            "an unknown expiry needs the revocation"
+        );
         // Without a revocation, an OAuth lease lives at most one hour; with one, the
         // provider's longer expiry is reported as it is.
         oauth.expiry_unknown = false;
         oauth.check().expect("one hour");
         oauth.expires_at = oauth.made_at + 3601;
-        assert!(oauth.check().is_err(), "longer than one hour without revocation");
+        assert!(
+            oauth.check().is_err(),
+            "longer than one hour without revocation"
+        );
         oauth.revoke = revoke;
         oauth.check().expect("revoked at run end");
         let mut google = lease_from(&json(LEASE_GOOGLE));

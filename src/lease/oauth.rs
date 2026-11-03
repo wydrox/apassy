@@ -361,8 +361,7 @@ mod tests {
     use super::*;
     use crate::lease::testing::{Reply, Seen, deadline, endpoints, fake, untouched};
     use crate::lease::{
-        LeaseCode, UNKNOWN_EXPIRY_NOTE, Revoke, RunScope, acquire_at, check_source, revoke_at,
-        scan,
+        LeaseCode, Revoke, RunScope, UNKNOWN_EXPIRY_NOTE, acquire_at, check_source, revoke_at, scan,
     };
     use crate::vault::{Field, ShortLivedSettings};
 
@@ -653,8 +652,10 @@ mod tests {
             ),
         ];
         for (answer, words) in &cases {
-            let (result, _) =
-                acquire_with(&source(&without, Some(CLIENT_SECRET)), Reply::json(200, answer));
+            let (result, _) = acquire_with(
+                &source(&without, Some(CLIENT_SECRET)),
+                Reply::json(200, answer),
+            );
             let error = result.unwrap_err();
             assert_eq!(error.code, LeaseCode::LeaseFailed, "{words}");
             assert_eq!(error.status, LeaseStatus::InvalidAnswer, "{words}");

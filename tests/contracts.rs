@@ -2103,7 +2103,13 @@ mod private_sharing {
         if let Some(url) = &settings.revoke_url {
             ensure(is_https_url(url), "revoke_url")?;
             // Revision 2026-11-03: the revocation goes to the host of the token URL.
-            let host = |url: &str| url[8..].split('/').next().unwrap_or("").to_ascii_lowercase();
+            let host = |url: &str| {
+                url[8..]
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+            };
             ensure(host(url) == host(&settings.token_url), "revoke_url")?;
         }
         if let Some(scope) = &settings.scope {

@@ -774,8 +774,15 @@ mod tests {
             ),
         ] {
             let (endpoints, fake) = fake_sts(Answer::Credentials { lifetime: 900 });
-            acquire_at(&source(settings), &scope(), &endpoints, None, deadline(), NOW)
-                .expect("lease");
+            acquire_at(
+                &source(settings),
+                &scope(),
+                &endpoints,
+                None,
+                deadline(),
+                NOW,
+            )
+            .expect("lease");
             let seen = fake.join().expect("fake STS");
             assert!(seen.signature_ok);
             assert_eq!(form_value(&seen.form, "Action").as_deref(), Some(action));

@@ -2348,9 +2348,8 @@ mod evaluation_tests {
                 .unwrap()
                 .digest()
         };
-        let safe = settings(
-            r#"{"token_url":"https://auth.example.test/token","client_auth":"basic"}"#,
-        );
+        let safe =
+            settings(r#"{"token_url":"https://auth.example.test/token","client_auth":"basic"}"#);
         let action = OwnerAction::ChangeShortLivedSettings {
             item: 7,
             kind: ShortLivedKind::OauthRefresh,
