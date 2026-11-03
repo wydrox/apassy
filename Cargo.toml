@@ -15,7 +15,11 @@ members = [".", "ios/ApassyCore", "crates/apassy-relay"]
 default-members = ["."]
 
 [features]
-default = []
+# SQLCipher with vendored OpenSSL: the Mac app, the Linux CLI, the relay and the iPhone core.
+# Without it (`--no-default-features`), SQLCipher on Apple targets uses CommonCrypto: the
+# Apple Watch core (ADR 0039 section 4), because openssl-src cannot configure OpenSSL for watchOS.
+default = ["openssl"]
+openssl = ["rusqlite?/bundled-sqlcipher-vendored-openssl"]
 desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "time?/local-offset"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
 vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium", "dep:rustix"]
@@ -36,7 +40,7 @@ eframe = { version = "=0.36.2", optional = true, default-features = false, featu
 arboard = { version = "=3.6.1", optional = true, default-features = false }
 # Native open/save panels. The async API keeps the desktop event loop free.
 rfd = { version = "=0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }
-rusqlite = { version = "=0.40.2", optional = true, default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "=0.40.2", optional = true, default-features = false, features = ["bundled-sqlcipher"] }
 tempfile = { version = "=3.27.0", optional = true }
 getrandom = { version = "=0.4.3", optional = true }
 # ADR 0005: TLS for connector destinations. ring backend, macOS trust store.

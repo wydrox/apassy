@@ -39,6 +39,7 @@ mod relay_device;
 mod schema18;
 mod schema19;
 mod schema20;
+mod schema24;
 pub use connect::PendingConnect;
 mod suggestions;
 mod sync;
@@ -1117,6 +1118,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | 20
         | 21
         | 22
+        | 23
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1287,6 +1289,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
+    // Schema 24 adds no table and no column: it widens the kinds of `trusted_device`.
     for sql in v1
         .iter()
         .chain(v2)
@@ -1414,6 +1417,9 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < 23 {
         answers::add_code_schema(&tx)?;
     }
+    if from < schema24::WATCH_SCHEMA_VERSION {
+        schema24::add_schema_v24(&tx)?;
+    }
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1472,6 +1478,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     connect::add_schema(&tx)?;
     access_once::add_schema(&tx)?;
     answers::add_code_schema(&tx)?;
+    schema24::add_schema_v24(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

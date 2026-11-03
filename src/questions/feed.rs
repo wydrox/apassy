@@ -1023,6 +1023,8 @@ pub fn open_action(
     if removal.to != target.me.uuid {
         return Err(OTHER_TARGET);
     }
+    // Only an iPhone sends an action: a Mac is no sender in v1, and an Apple Watch sends
+    // none (ADR 0039 §3).
     let sender = devices
         .iter()
         .find(|device| {
@@ -1176,6 +1178,7 @@ impl Shared {
     fn look(&self, active: &Active) -> Option<Look> {
         let mut guard = lock(&self.vault);
         let vault = Self::vault_of(&mut guard, active)?;
+        // An Apple Watch reads no feed (ADR 0039): it does not count.
         let iphone = vault.trusted_devices().ok()?.iter().any(|device| {
             device.kind == TrustedDeviceKind::Iphone
                 && (device.relay_devices.contains_key(&active.team_id)

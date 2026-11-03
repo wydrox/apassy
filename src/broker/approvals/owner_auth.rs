@@ -448,6 +448,9 @@ impl OwnerAction {
             Self::ExportDecisions => "Export decisions",
             Self::RegisterAgent { .. } | Self::RegisterSetupAgent { .. } => "Connect an agent",
             Self::ChangeOwnerFrequency { .. } => "Change owner checks",
+            Self::RemoveOlderIphone { device, .. } if device.kind == TrustedDeviceKind::Watch => {
+                "Remove an Apple Watch"
+            }
             Self::RemoveOlderIphone { .. } => "Remove an iPhone",
             _ => "Confirm with Touch ID",
         }
@@ -458,6 +461,9 @@ impl OwnerAction {
     pub fn reason(&self) -> String {
         match self {
             Self::BrowserDebugging { .. } => "allow this exact browser debugging instance".into(),
+            Self::RemoveOlderIphone { device, .. } if device.kind == TrustedDeviceKind::Watch => {
+                "remove the older paired Apple Watch".into()
+            }
             Self::RemoveOlderIphone { .. } => "remove the older paired iPhone".into(),
             Self::AllowAccessOnce { .. } => "allow one scoped access attempt".to_owned(),
             Self::GrantAccessRequest { .. } => "grant access for this exact request".to_owned(),
@@ -1631,11 +1637,13 @@ fn remote_choice<'a>(
 
 /// The key of `device` that signs `choice` (relay-questions-v1 section 5.3): the answer
 /// key of an iPhone for an answer that needs the owner check, else the relay key
-/// (`sign_key`). `None`: an iPhone without an answer key.
+/// (`sign_key`). `None`: an iPhone without an answer key, and an Apple Watch for every
+/// answer: a watch answers access requests only (ADR 0039 §3).
 pub fn remote_key<'a>(device: &'a TrustedDevice, choice: &Choice) -> Option<&'a [u8]> {
     match device.kind {
+        TrustedDeviceKind::Watch => None,
         TrustedDeviceKind::Iphone if choice.needs_owner_check() => device.answer_key.as_deref(),
-        _ => Some(device.sign_key.as_slice()),
+        TrustedDeviceKind::Iphone | TrustedDeviceKind::Mac => Some(device.sign_key.as_slice()),
     }
 }
 
@@ -1643,7 +1651,8 @@ pub fn remote_key<'a>(device: &'a TrustedDevice, choice: &Choice) -> Option<&'a 
 /// 12.3 step 7 and 12.4): `now - 60 <= time <= now + 60`, then the signature over the
 /// answer string rebuilt from the device, the team, the question, `choice`, `digest`, and
 /// `time`, with the key of [`remote_key`]. A signature by the other key of the device is
-/// invalid.
+/// invalid. An Apple Watch is refused for every answer, as an unknown device is (ADR
+/// 0039 §3).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_remote_answer(
     device: &TrustedDevice,
@@ -1655,6 +1664,9 @@ pub fn verify_remote_answer(
     signature: &[u8],
     now: u64,
 ) -> Result<(), OwnerAuthError> {
+    if device.kind == TrustedDeviceKind::Watch {
+        return Err(OwnerAuthError::RemoteRejected);
+    }
     if time.saturating_add(PROOF_LIFETIME.as_secs()) < now
         || time > now.saturating_add(REMOTE_FUTURE_SLACK)
     {
@@ -1677,8 +1689,8 @@ pub fn verify_remote_answer(
 /// 9.5 step 8): `now - 60 <= time <= now + 60`, then the signature over the action
 /// string rebuilt from `signed` with the key of its kind: the answer key (Face ID) of an
 /// iPhone for the removal of a `never` or `always_ask` row, its relay key (`sign_key`)
-/// for an `only` row. A Mac is no sender in v1, and a signature by the other key of the
-/// device is invalid.
+/// for an `only` row. A Mac and an Apple Watch (ADR 0039 §3) are no senders in v1, and a
+/// signature by the other key of the device is invalid.
 pub fn verify_remote_action(
     device: &TrustedDevice,
     signed: &crate::questions::feed::RemovalAction,
@@ -1688,6 +1700,7 @@ pub fn verify_remote_action(
     if !crate::questions::feed::in_window(signed.time, now) {
         return Err(OwnerAuthError::RemoteStale);
     }
+    // Only an iPhone: a Mac and a watch row are refused for every action.
     if device.kind != TrustedDeviceKind::Iphone || device.uuid != signed.by {
         return Err(OwnerAuthError::RemoteRejected);
     }
@@ -2088,5 +2101,144 @@ mod touch_id_title_tests {
             binding: None,
         };
         assert_eq!(bypass.touch_id_title(), "Allow browser debugging");
+    }
+}
+
+/// An Apple Watch answers access requests only (ADR 0039 §3): the run questions and the
+/// feed refuse its row for every answer, signed with either of its keys.
+#[cfg(test)]
+mod watch_answer_tests {
+    use super::*;
+    use crate::sync::DeviceKey;
+
+    const TEAM: &str = "t_7k2m5q4x3c";
+    const QID: &str = "q_synthetic_watch";
+    const DIGEST: &str = "6f1c0e2a3b4d4e5f8a9b0c1d2e3f4a5b6f1c0e2a3b4d4e5f8a9b0c1d2e3f4a5b";
+    const NOW: u64 = 1_790_000_060;
+
+    fn row(kind: TrustedDeviceKind, sign: &DeviceKey, answer: &DeviceKey) -> TrustedDevice {
+        TrustedDevice {
+            uuid: "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b".to_owned(),
+            name: "Synthetic Watch".to_owned(),
+            kind,
+            relay_devices: [(TEAM.to_owned(), 3)].into(),
+            sign_key: sign.public_key().to_vec(),
+            answer_key: Some(answer.public_key().to_vec()),
+            created_at: 1,
+            updated_at: 1,
+            updated_by: String::new(),
+        }
+    }
+
+    fn every_choice() -> Vec<Choice> {
+        let project_key = "/tmp/synthetic-shop/.git".to_owned();
+        vec![
+            Choice::Approve,
+            Choice::ApproveAsDevelopment,
+            Choice::ApproveAsProduction,
+            Choice::DenyWithComment {
+                comment: "Not now".to_owned(),
+            },
+            Choice::ApproveOnce,
+            Choice::ApproveInProject {
+                action: ActionKind::Deploy,
+                project_key: project_key.clone(),
+            },
+            Choice::AllowProduction {
+                action: ActionKind::Deploy,
+                project_key,
+            },
+            Choice::CorrectEnvironment {
+                item_id: 7,
+                environment: RemoteEnvironment::Development,
+            },
+            Choice::CorrectEnvironment {
+                item_id: 7,
+                environment: RemoteEnvironment::Production,
+            },
+            Choice::Deny,
+            Choice::NeverForAgent,
+            Choice::AlwaysAskForAgent,
+            Choice::Disconnect,
+        ]
+    }
+
+    #[test]
+    fn a_watch_answers_no_run_question() {
+        let sign = DeviceKey::generate().unwrap();
+        let answer = DeviceKey::generate().unwrap();
+        let watch = row(TrustedDeviceKind::Watch, &sign, &answer);
+        let phone = row(TrustedDeviceKind::Iphone, &sign, &answer);
+        for choice in every_choice() {
+            assert_eq!(remote_key(&watch, &choice), None, "{choice:?}");
+            let text = answer_string(&watch.uuid, TEAM, QID, &choice, DIGEST, NOW).unwrap();
+            for key in [&sign, &answer] {
+                let signature = key.sign(text.as_bytes()).unwrap();
+                assert_eq!(
+                    verify_remote_answer(&watch, TEAM, QID, &choice, DIGEST, NOW, &signature, NOW),
+                    Err(OwnerAuthError::RemoteRejected),
+                    "{choice:?}"
+                );
+            }
+            // The same keys in an iPhone row: the key of the kind verifies.
+            let key = if choice.needs_owner_check() {
+                &answer
+            } else {
+                &sign
+            };
+            let signature = key.sign(text.as_bytes()).unwrap();
+            assert_eq!(
+                verify_remote_answer(&phone, TEAM, QID, &choice, DIGEST, NOW, &signature, NOW),
+                Ok(()),
+                "{choice:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_watch_sends_no_feed_action() {
+        let sign = DeviceKey::generate().unwrap();
+        let answer = DeviceKey::generate().unwrap();
+        let watch = row(TrustedDeviceKind::Watch, &sign, &answer);
+        let phone = row(TrustedDeviceKind::Iphone, &sign, &answer);
+        for kind in [
+            ExceptionKind::Never,
+            ExceptionKind::AlwaysAsk,
+            ExceptionKind::Only,
+        ] {
+            let removal = crate::questions::feed::RemovalAction {
+                by: watch.uuid.clone(),
+                to: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
+                team_id: TEAM.to_owned(),
+                action_id: "sLGys7S1tre4ubq7vL2-vw".to_owned(),
+                agent_id: 4,
+                item_uuid: "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c".to_owned(),
+                kind,
+                created_at: 1_789_990_000,
+                feed_seq: 1_790_000_040,
+                time: NOW,
+                names: None,
+            };
+            let text = removal.string().unwrap();
+            for key in [&sign, &answer] {
+                let signature = key.sign(text.as_bytes()).unwrap();
+                assert_eq!(
+                    verify_remote_action(&watch, &removal, &signature, NOW),
+                    Err(OwnerAuthError::RemoteRejected),
+                    "{kind:?}"
+                );
+            }
+            let key = if removal.gives_authority() {
+                &answer
+            } else {
+                &sign
+            };
+            let signature = key.sign(text.as_bytes()).unwrap();
+            assert_eq!(
+                verify_remote_action(&phone, &removal, &signature, NOW),
+                Ok(()),
+                "{kind:?}"
+            );
+        }
     }
 }

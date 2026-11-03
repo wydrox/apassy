@@ -108,10 +108,12 @@ pub(super) fn downgrade_sql() -> String {
             names.push(format!("{table}_{event}"));
         }
     }
-    let mut sql = names
-        .into_iter()
-        .map(|name| format!("DROP TRIGGER bouncer_scope_{name};\n"))
-        .collect::<String>();
+    let mut sql = super::schema24::DOWNGRADE_TO_23_SQL.to_owned();
+    sql.extend(
+        names
+            .into_iter()
+            .map(|name| format!("DROP TRIGGER bouncer_scope_{name};\n")),
+    );
     sql.push_str("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values;");
     sql.push_str(super::access_once::DOWNGRADE_TO_21_SQL);
     sql.push_str("DROP TABLE IF EXISTS relay_connect_pending; DROP TABLE bouncer_scope; UPDATE vault_meta SET schema_version = 19 WHERE id = 1; PRAGMA user_version = 19;");

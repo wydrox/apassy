@@ -1,7 +1,8 @@
 // Secure Enclave keys (contract 5.2). The code compiles where a Secure Enclave can exist. The
-// iOS Simulator has none, so it uses SoftwareKeys.
+// iOS Simulator has none, so it uses SoftwareKeys. watchOS has no biometry: the Apple Watch keeps
+// its own answer key (ADR 0039), so these keys are not built there.
 
-#if !targetEnvironment(simulator)
+#if !targetEnvironment(simulator) && !os(watchOS)
 
     import CryptoKit
     import Foundation

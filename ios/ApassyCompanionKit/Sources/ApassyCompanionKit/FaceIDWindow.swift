@@ -35,6 +35,10 @@ public final class FaceIDWindow: @unchecked Sendable {
     }
 
     public func authenticate(reason: String) async throws -> FaceIDLease {
+        #if os(watchOS)
+        // watchOS has no Face ID (ADR 0039): no window opens.
+        throw CompanionKeyError.biometryUnavailable
+        #else
         let probe = LAContext()
         let available = probe.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
         let hash = available ? probe.domainState.biometry.stateHash : nil
@@ -74,12 +78,16 @@ public final class FaceIDWindow: @unchecked Sendable {
             lock.withLock { active = nil; state.end(); context.invalidate() }
             throw error
         }
+        #endif
     }
 
     private func expire() { lock.withLock { state.expire() } }
 
     /// A separate context always asks, even while the old window is open.
     public func changeFrequency(_ value: FaceIDFrequency) async throws {
+        #if os(watchOS)
+        throw CompanionKeyError.biometryUnavailable
+        #else
         end()
         let context = LAContext()
         let generation = try lock.withLock {
@@ -109,6 +117,7 @@ public final class FaceIDWindow: @unchecked Sendable {
             } else if status != errSecSuccess { throw CompanionKeyError.failed(code: Int(status)) }
             state.configure(value)
         }
+        #endif
     }
 
     private static var settingQuery: [String: Any] {

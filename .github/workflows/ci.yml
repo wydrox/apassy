@@ -148,6 +148,13 @@ jobs:
       - name: Check vault API compile failures
         run: cargo test --offline --locked --features vault --doc
 
+      # The Apple Watch slices of the vault core (ADR 0039 section 4) build without the
+      # default `openssl` feature: SQLCipher uses CommonCrypto there and nowhere else.
+      - name: Check the Apple Watch vault core
+        run: |
+          rustup target add --toolchain 1.97.0 aarch64-apple-watchos aarch64-apple-watchos-sim
+          cargo check --offline --locked -p apassy-core --no-default-features --target aarch64-apple-watchos-sim
+
       # The vault core of the iPhone app (ios/ApassyCore) has no macOS code, so the
       # linux job lints it and the relay job tests it. The iPhone slices need Xcode
       # (ios/README.md).

@@ -1,3 +1,5 @@
+// Not built for watchOS: the Apple Watch uses WatchCoreService (ADR 0039).
+#if !os(watchOS)
 import ApassyCoreFFI
 import ApassyVaultKit
 import Foundation
@@ -10,13 +12,10 @@ import Foundation
 public final class CoreVaultService: VaultService, @unchecked Sendable {
     public enum Role: String, Sendable { case app, autofill }
 
-    /// The core is thread-safe (contract section 2); the pointer never changes.
-    private struct Pointer: @unchecked Sendable { let raw: OpaquePointer }
-
     private let role: Role
     private let cloudSession = ICloudSession()
     private let cloud: ICloudVaultTransfer
-    private let core: Pointer
+    private let core: CorePointer
     // Owns the callback's unretained context until core_free has returned.
     private let historyKeyStore: KeychainHistoryKeyStore?
     private let queue = DispatchQueue(label: "com.wydrox.apassy.core", qos: .userInitiated, attributes: .concurrent)
@@ -99,7 +98,7 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         guard let core = pointer else {
             throw VaultError(.internal, "The vault core did not start.")
         }
-        self.core = Pointer(raw: core)
+        self.core = CorePointer(raw: core)
     }
 
     deinit {
@@ -110,50 +109,13 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
 
     // MARK: - The wire
 
-    private struct Envelope<Result: Decodable>: Decodable {
-        struct Failure: Decodable {
-            var code: String
-            var message: String
-            var rekeyed: Bool?
-        }
-
-        var ok: Bool
-        var result: Result?
-        var error: Failure?
-    }
-
     struct Empty: Decodable {}
 
-    /// One call: `op` with `params`, decoded as `R`.
+    /// One call: `op` with `params`, decoded as `R` (`CoreWire`).
     func call<R: Decodable & Sendable>(
         _ op: String, _ params: [String: Any] = [:], as: R.Type = R.self
     ) async throws -> R {
-        var request = params
-        request["op"] = op
-        let data = try JSONSerialization.data(withJSONObject: request)
-        let text = String(decoding: data, as: UTF8.self)
-        return try await withCheckedThrowingContinuation { continuation in
-            queue.async { [core] in
-                let answer: Data = text.withCString { request in
-                    let pointer = apassy_core_call(core.raw, request)
-                    defer { apassy_core_free_string(pointer) }
-                    return Data(bytes: pointer, count: strlen(pointer))
-                }
-                do {
-                    let envelope = try JSONDecoder().decode(Envelope<R>.self, from: answer)
-                    if envelope.ok, let result = envelope.result {
-                        continuation.resume(returning: result)
-                    } else if let failure = envelope.error {
-                        let code = VaultError.Code(rawValue: failure.code) ?? .internal
-                        continuation.resume(throwing: VaultError(code, failure.message, rekeyed: failure.rekeyed ?? false))
-                    } else {
-                        continuation.resume(throwing: VaultError(.internal, "The vault core gave no answer."))
-                    }
-                } catch {
-                    continuation.resume(throwing: VaultError(.internal, "The answer of the vault core is not valid."))
-                }
-            }
-        }
+        try await CoreWire.call(core, on: queue, op, params)
     }
 
     func call(_ op: String, _ params: [String: Any] = [:]) async throws {
@@ -484,3 +446,4 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         return try await call("credential_export")
     }
 }
+#endif

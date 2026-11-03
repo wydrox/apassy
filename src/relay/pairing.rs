@@ -1,5 +1,6 @@
-//! A QR capability hands question keys to a confirmed iPhone over existing opaque question
-//! routes. The relay never sees the QR secret. No vault snapshot or paid sync is involved.
+//! A QR capability hands question keys to a confirmed iPhone or Apple Watch (ADR 0039 §6)
+//! over existing opaque question routes. The relay never sees the QR secret. No vault
+//! snapshot or paid sync is involved.
 use crate::questions::envelope::{Sealed, new_qid, open};
 use crate::questions::{QuestionsClient, QuestionsError};
 use crate::sync::DeviceKey;
@@ -168,10 +169,17 @@ impl PairingChannel {
             .into_iter()
             .find(|d| d.sign_key == recipient)
             .ok_or_else(|| crate::vault::VaultError::new(VaultErrorKind::InvalidInput))?;
-        let name = crate::questions::device_link::link_device_name(
-            &device.name,
-            device.answer_key.as_deref().unwrap_or_default(),
-        )
+        // The name of the link as the device sent it: the AAD binds it. A watch sent the
+        // `~W` marker (ADR 0039 §2), an iPhone the `~` marker.
+        let answer_key = device.answer_key.as_deref().unwrap_or_default();
+        let name = match device.kind {
+            crate::vault::TrustedDeviceKind::Watch => {
+                crate::questions::device_link::watch_link_device_name(&device.name, answer_key)
+            }
+            crate::vault::TrustedDeviceKind::Iphone | crate::vault::TrustedDeviceKind::Mac => {
+                crate::questions::device_link::link_device_name(&device.name, answer_key)
+            }
+        }
         .ok_or_else(|| crate::vault::VaultError::new(VaultErrorKind::InvalidInput))?;
         let wrapping = self
             .mac_private
@@ -288,5 +296,87 @@ impl PairingChannel {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::questions::device_link::{link_device_name, watch_link_device_name};
+    use crate::relay::membership::{enable_questions, register_linked_device};
+    use crate::vault::{RelayDevice, TrustedDeviceKind};
+
+    const PASS: &str = "synthetic-pairing-pass";
+    const TEAM: &str = "t_7k2m5q4x3c";
+
+    /// The handoff to a watch (relay-questions-v1 section 21, ADR 0039 §6) carries the row
+    /// of kind `watch`, and its AAD binds the `~W` name that the watch sent.
+    #[test]
+    fn a_watch_handoff_binds_its_watch_name_and_carries_its_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("p.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let mac = DeviceKey::generate().unwrap();
+        vault
+            .set_relay_device(&RelayDevice {
+                relay_url: "https://relay.example.test".to_owned(),
+                team_id: TEAM.to_owned(),
+                device_id: 2,
+                public_key: mac.public_key().to_vec(),
+                key_pkcs8: mac.pkcs8().unwrap().clone(),
+                created_at: 0,
+            })
+            .unwrap();
+        enable_questions(&mut vault, "Synthetic Mac").unwrap();
+
+        let raw = format!(
+            "https://relay.example.test/link#apassy_lnk_{TEAM}_{}",
+            "ab".repeat(32)
+        );
+        let channel = PairingChannel::generate(&raw).unwrap();
+        let relay_key = DeviceKey::generate().unwrap();
+        let answer_key = DeviceKey::generate().unwrap();
+        let name = watch_link_device_name("Test Watch", answer_key.public_key()).unwrap();
+        let row = register_linked_device(&mut vault, TEAM, 9, &name, relay_key.public_key())
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.kind, TrustedDeviceKind::Watch);
+        assert_eq!(row.name, "Test Watch");
+        assert_eq!(row.answer_key.as_deref(), Some(answer_key.public_key()));
+        let sealed = channel.seal(&vault, TEAM, relay_key.public_key()).unwrap();
+        assert_eq!(sealed.key_id, HANDOFF_KEY_ID);
+
+        // The watch side: the channel of the scanned link, its relay key, its own name.
+        let (_, watch) = PairingChannel::parse(&channel.link(&raw)).unwrap();
+        let wrapping = watch
+            .shared_key(relay_key.pkcs8().unwrap(), &watch.mac_public)
+            .unwrap();
+        let nonce: [u8; 12] = decode_b64u(&sealed.nonce).unwrap().try_into().unwrap();
+        let cipher = decode_b64u(&sealed.ciphertext).unwrap();
+        let plain = open(
+            &wrapping,
+            &nonce,
+            &watch.aad(TEAM, relay_key.public_key(), &name),
+            &cipher,
+        )
+        .unwrap();
+        let handoff: Handoff = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(handoff.recipient, relay_key.public_key());
+        assert!(handoff.devices.iter().any(|device| {
+            device.kind == TrustedDeviceKind::Watch
+                && device.sign_key == relay_key.public_key()
+                && device.relay_devices.get(TEAM) == Some(&9)
+        }));
+        // The iPhone form of the same name and key does not open it.
+        let iphone_name = link_device_name("Test Watch", answer_key.public_key()).unwrap();
+        assert!(
+            open(
+                &wrapping,
+                &nonce,
+                &watch.aad(TEAM, relay_key.public_key(), &iphone_name),
+                &cipher,
+            )
+            .is_none()
+        );
     }
 }

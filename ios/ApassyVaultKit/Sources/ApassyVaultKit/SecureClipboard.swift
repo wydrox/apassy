@@ -1,4 +1,5 @@
-#if canImport(UIKit)
+// watchOS has UIKit but no pasteboard (ADR 0039).
+#if canImport(UIKit) && !os(watchOS)
 import UIKit
 import UniformTypeIdentifiers
 

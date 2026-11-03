@@ -131,15 +131,6 @@ struct AccessRequestDetailView: View {
     }
     .accessibilityElement(children: .combine)
   }
-  private func escaped(_ text: String) -> String {
-    text.unicodeScalars.map { scalar in
-      if scalar.value == 92 { return "\\\\" }
-      if CharacterSet.controlCharacters.contains(scalar)
-        || scalar.properties.generalCategory == .format
-      {
-        return "\\u{\(String(scalar.value, radix: 16))}"
-      }
-      return String(scalar)
-    }.joined()
-  }
+  /// `AccessText.escaped`: the same rules as the watch, with U+2028 and U+2029.
+  private func escaped(_ text: String) -> String { AccessText.escaped(text) }
 }

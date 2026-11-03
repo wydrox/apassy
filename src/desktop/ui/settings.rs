@@ -148,6 +148,8 @@ fn relay_iphones(app: &DesktopApp) -> (bool, Vec<TrustedDevice>) {
         .trusted_devices()
         .unwrap_or_default()
         .into_iter()
+        // An Apple Watch is no iPhone: Devices lists it with its kind (ADR 0039), and the
+        // count of iPhones leaves it out.
         .filter(|device| device.kind == TrustedDeviceKind::Iphone)
         .collect();
     (true, iphones)

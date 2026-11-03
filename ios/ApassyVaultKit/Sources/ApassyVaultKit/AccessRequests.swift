@@ -95,3 +95,22 @@ public struct PreparedAccessAnswer: Decodable, Sendable {
   public let retry_before: UInt64
 }
 public struct SentAccessAnswer: Decodable, Sendable { public let sent: Bool }
+
+/// The display of agent and Mac text of an access request, on the iPhone and the watch.
+public enum AccessText {
+  /// Plain text: a backslash doubled, and control, format, line separator, and paragraph separator
+  /// characters (bidirectional overrides, U+2028, U+2029 among them) shown as `\u{…}`, so nothing
+  /// can hide, break, or reorder the text around it.
+  public static func escaped(_ text: String) -> String {
+    text.unicodeScalars.map { scalar in
+      if scalar.value == 92 { return "\\\\" }
+      let category = scalar.properties.generalCategory
+      if CharacterSet.controlCharacters.contains(scalar)
+        || category == .format || category == .lineSeparator || category == .paragraphSeparator
+      {
+        return "\\u{\(String(scalar.value, radix: 16))}"
+      }
+      return String(scalar)
+    }.joined()
+  }
+}

@@ -12,8 +12,10 @@ public final class ApprovalAuthentication: @unchecked Sendable {
   private var finished = false
   public init(window: FaceIDWindow? = nil) {
     self.window = window
+    #if !os(watchOS)
     context.touchIDAuthenticationAllowableReuseDuration = 0
     context.localizedFallbackTitle = ""
+    #endif
   }
   public var isCancelled: Bool { lock.withLock { ended || lease?.isValid == false } }
   public func cancel() {
@@ -43,17 +45,26 @@ public final class ApprovalAuthentication: @unchecked Sendable {
     }
   }
   public static var faceIDAvailable: Bool {
+    #if os(watchOS)
+    // watchOS has no Face ID (ADR 0039).
+    return false
+    #else
     let context = LAContext()
     defer { context.invalidate() }
     return context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
       && context.biometryType == .faceID
+    #endif
   }
   func requireFaceID(reason: String) throws {
     guard !isCancelled else { throw CompanionKeyError.cancelled }
+    #if os(watchOS)
+    throw CompanionKeyError.biometryUnavailable
+    #else
     context.localizedReason = reason
     guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil),
       context.biometryType == .faceID
     else { throw CompanionKeyError.biometryUnavailable }
+    #endif
   }
   deinit { finish() }
 }

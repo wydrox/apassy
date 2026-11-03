@@ -71,6 +71,11 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case historyStorageUnavailable = "history_storage_unavailable"
         case historyKeyMissing = "history_key_missing"
         case historyFull = "history_full"
+        // The Apple Watch (section 5.13, ADR 0039).
+        /// The watch holds a vault already: forget it first.
+        case alreadyConnected = "already_connected"
+        /// The Mac that confirmed the watch wrote no answer key for it: update Apassy on the Mac.
+        case macUpdateNeeded = "mac_update_needed"
     }
 
     public var code: Code

@@ -12,13 +12,19 @@ name = "apassy_core"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-apassy = { path = "../..", features = ["vault"] }
+apassy = { path = "../..", default-features = false, features = ["vault"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 zeroize = "=1.9.0"
 # The same versions as the apassy crate: TOTP (HMAC) and SHA-256, and the generator.
 ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
 getrandom = "=0.4.3"
+
+[features]
+# Vendored OpenSSL for SQLCipher (iPhone, Simulator, macOS tests). The Apple Watch slices build
+# with --no-default-features: SQLCipher then uses CommonCrypto (ADR 0039 section 4).
+default = ["openssl"]
+openssl = ["apassy/openssl"]
 
 [dev-dependencies]
 tempfile = "=3.27.0"

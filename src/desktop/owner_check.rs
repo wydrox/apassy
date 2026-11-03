@@ -981,7 +981,7 @@ impl OwnerRequest {
     /// One sentence for the owner check dialog. It has no secret value.
     pub fn describe(&self) -> String {
         match self {
-            Self::RemoveOlderIphone { device, .. } => format!("Remove the older paired iPhone '{}'? It will no longer receive or answer this vault's requests.", page_text(&device.name)),
+            Self::RemoveOlderIphone { device, .. } => format!("Remove the older paired {} '{}'? It will no longer receive or answer this vault's requests.", if device.kind == crate::vault::TrustedDeviceKind::Watch { "Apple Watch" } else { "iPhone" }, page_text(&device.name)),
             Self::AllowAccessOnce{..} => "Allow one scoped use attempt before the original request expires. The bouncer still checks the command and may ask you. This saves no grant.".into(),
             Self::BackupVault { path } => format!("Write an encrypted vault backup to {}? The vault locks afterwards.",page_text(&path.display().to_string())),
             Self::ExportDecisions => "Export the decision log to the command line.".to_owned(),
@@ -1309,13 +1309,23 @@ impl OwnerRequest {
             Self::PairCompanion { device_name, .. } => format!(
                 "Pair the iPhone \"{device_name}\". It can see the runs that wait for you and approve them with Face ID. It can never see a secret value."
             ),
-            Self::ConfirmSyncDevice { device_name, .. } => format!(
-                "Add the device \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
-            ),
+            Self::ConfirmSyncDevice { device_name, .. } => match crate::questions::device_link::split_linked_device_name(device_name) {
+                // The kind is visible before Touch ID (ADR 0039 §2).
+                (name, Some((crate::questions::device_link::LinkedDeviceKind::Watch, _))) => format!(
+                    "Connect Apple Watch “{name}” to the sync of this vault through the Apassy relay. This watch can allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access. It still needs the passphrase to open the vault."
+                ),
+                _ => format!(
+                    "Add the device \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
+                ),
+            },
             Self::ConfirmQuestionsDevice { device_name, .. } => {
-                let (name, answer_key) =
-                    crate::questions::device_link::split_link_device_name(device_name);
-                if answer_key.is_some() {
+                let (name, found) =
+                    crate::questions::device_link::split_linked_device_name(device_name);
+                if let Some((crate::questions::device_link::LinkedDeviceKind::Watch, _)) = found {
+                    format!(
+                        "Connect Apple Watch “{name}” to the questions of this vault through the Apassy relay. This watch can allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access. It gets no vault and no secret value through the relay."
+                    )
+                } else if found.is_some() {
                     format!(
                         "Add the iPhone \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them with Face ID; Apassy keeps its keys in the vault. It gets no vault and no secret value through the relay."
                     )

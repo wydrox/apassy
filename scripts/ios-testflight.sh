@@ -19,12 +19,13 @@
 # Optional:
 #   APASSY_IOS_BUILD       the build number. Default: minutes since 1970, so each run
 #                          has a new, higher number.
-#   APASSY_IOS_PROFILE, APASSY_IOS_AUTOFILL_PROFILE
-#                          the names of App Store provisioning profiles of the app and
-#                          the AutoFill extension, made with the "Apple Distribution"
-#                          certificate of this Mac. With them, the export signs
-#                          manually: an API key without access to cloud-managed
-#                          distribution certificates cannot let Xcode make them.
+#   APASSY_IOS_PROFILE, APASSY_IOS_AUTOFILL_PROFILE, APASSY_IOS_WATCH_PROFILE
+#                          the names of App Store provisioning profiles of the app, the
+#                          AutoFill extension and the Apple Watch app, made with the
+#                          "Apple Distribution" certificate of this Mac. With them, the
+#                          export signs manually: an API key without access to
+#                          cloud-managed distribution certificates cannot let Xcode
+#                          make them. Set all three or none.
 #
 # The version is MARKETING_VERSION of ios/ApassyCompanion/project.yml.
 # See ios/README.md, "TestFlight".
@@ -72,8 +73,8 @@ auth=(
   -authenticationKeyIssuerID "$APASSY_NOTARY_ISSUER"
 )
 
-echo "ios-testflight: the vault core for the iPhone"
-scripts/build-ios-core.sh device
+echo "ios-testflight: the vault core for the iPhone and the Apple Watch"
+scripts/build-ios-core.sh device watch
 
 echo "ios-testflight: the project"
 (cd ios/ApassyCompanion && xcodegen generate --spec project.yml --quiet)
@@ -93,7 +94,11 @@ destination=export
 [ "$upload" = 1 ] && destination=upload
 signing="<key>signingStyle</key>
   <string>automatic</string>"
-if [ -n "${APASSY_IOS_PROFILE:-}" ] && [ -n "${APASSY_IOS_AUTOFILL_PROFILE:-}" ]; then
+if [ -n "${APASSY_IOS_PROFILE:-}" ] || [ -n "${APASSY_IOS_AUTOFILL_PROFILE:-}" ] \
+  || [ -n "${APASSY_IOS_WATCH_PROFILE:-}" ]; then
+  [ -n "${APASSY_IOS_PROFILE:-}" ] && [ -n "${APASSY_IOS_AUTOFILL_PROFILE:-}" ] \
+    && [ -n "${APASSY_IOS_WATCH_PROFILE:-}" ] \
+    || fail "set APASSY_IOS_PROFILE, APASSY_IOS_AUTOFILL_PROFILE and APASSY_IOS_WATCH_PROFILE together"
   signing="<key>signingStyle</key>
   <string>manual</string>
   <key>signingCertificate</key>
@@ -104,6 +109,8 @@ if [ -n "${APASSY_IOS_PROFILE:-}" ] && [ -n "${APASSY_IOS_AUTOFILL_PROFILE:-}" ]
     <string>$APASSY_IOS_PROFILE</string>
     <key>com.wydrox.apassy.companion.autofill</key>
     <string>$APASSY_IOS_AUTOFILL_PROFILE</string>
+    <key>com.wydrox.apassy.companion.watchkitapp</key>
+    <string>$APASSY_IOS_WATCH_PROFILE</string>
   </dict>"
 fi
 options="$out/ExportOptions.plist"

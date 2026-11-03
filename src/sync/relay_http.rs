@@ -18,6 +18,15 @@
 //! the socket is in the [`Cancel`] before the TLS handshake. A request can also have an
 //! overall deadline ([`Request::deadline`]): connecting, sending, and reading all end by
 //! then.
+//!
+//! A host can install an external transport once per process ([`set_http_transport`],
+//! ADR 0039 section 5): the Apple Watch app, where URLSession is the only network API.
+//! [`exchange`] then hands each request to it instead of TCP and TLS: the method, the full
+//! URL, the headers with the bearer, the JSON body, and a timeout. The answer goes through
+//! the same checks and limits as an answer read from a socket. A request with a [`Cancel`]
+//! registers its request ID there, and [`Cancel::close`] cancels it through the transport.
+//! A snapshot (a file body or a download) never goes through it. Without an external
+//! transport nothing changes.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -111,7 +120,7 @@ impl RelayUrl {
 
 /// Why an exchange failed. No value holds the token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HttpError {
+pub enum HttpError {
     /// No connection: no byte of the request reached the relay.
     Connect,
     /// The connection failed after the request started. A push may have landed.
@@ -147,24 +156,47 @@ pub(crate) struct Request<'a> {
 }
 
 /// Ends the requests in flight from another thread: [`Self::close`] shuts their sockets
-/// down, and a request that starts after it fails at once. Several requests can use one
-/// `Cancel` at the same time (a long poll and a download).
+/// down or cancels them through the external transport, and a request that starts after
+/// it fails at once. Several requests can use one `Cancel` at the same time (a long poll
+/// and a download).
 #[derive(Debug, Default)]
 pub struct Cancel {
     closed: AtomicBool,
-    /// The sockets of the requests in flight, with a number for each request.
-    sockets: Mutex<Vec<(u64, TcpStream)>>,
+    /// The requests in flight, with a number for each request.
+    sockets: Mutex<Vec<(u64, InFlight)>>,
     next: AtomicU64,
+}
+
+/// A request in flight that a [`Cancel`] can end.
+enum InFlight {
+    /// A handle of the socket of a TCP request.
+    Socket(TcpStream),
+    /// The ID of a request of the external transport, with the transport.
+    External(u64, &'static dyn HttpTransport),
+}
+
+impl std::fmt::Debug for InFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Socket(socket) => f.debug_tuple("Socket").field(socket).finish(),
+            Self::External(id, _) => f.debug_tuple("External").field(id).finish(),
+        }
+    }
 }
 
 impl Cancel {
     /// End the requests in flight and every later one.
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        let sockets =
+        let held =
             std::mem::take(&mut *self.sockets.lock().unwrap_or_else(PoisonError::into_inner));
-        for (_, socket) in sockets {
-            let _ = socket.shutdown(Shutdown::Both);
+        for (_, in_flight) in held {
+            match in_flight {
+                InFlight::Socket(socket) => {
+                    let _ = socket.shutdown(Shutdown::Both);
+                }
+                InFlight::External(id, transport) => transport.cancel(id),
+            }
         }
     }
 
@@ -181,8 +213,24 @@ impl Cancel {
         }
         let number = self.next.fetch_add(1, Ordering::SeqCst);
         if let Ok(handle) = socket.try_clone() {
-            sockets.push((number, handle));
+            sockets.push((number, InFlight::Socket(handle)));
         }
+        Ok(number)
+    }
+
+    /// Keep the ID of a request of the external transport before it starts. Fails when
+    /// closed: the request then never goes out.
+    fn hold_external(
+        &self,
+        id: u64,
+        transport: &'static dyn HttpTransport,
+    ) -> Result<u64, HttpError> {
+        let mut held = self.sockets.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.is_closed() {
+            return Err(HttpError::Connect);
+        }
+        let number = self.next.fetch_add(1, Ordering::SeqCst);
+        held.push((number, InFlight::External(id, transport)));
         Ok(number)
     }
 
@@ -265,6 +313,195 @@ impl Answer {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     }
+}
+
+/// The longest time that an external request may take beyond the wait of a long poll,
+/// when the request has no earlier deadline.
+const EXTERNAL_MARGIN: Duration = HEADER_TIMEOUT;
+/// The most header lines of an answer of the external transport.
+const MAX_EXTERNAL_HEADERS: usize = 100;
+
+/// One request for the external transport. It holds the bearer (in `headers`) and the
+/// JSON body: the transport keeps no copy after [`HttpTransport::send`] returns.
+pub struct ExternalRequest<'a> {
+    /// Unique in this process. [`HttpTransport::cancel`] names it.
+    pub id: u64,
+    pub method: &'static str,
+    /// The relay origin and the path with its query.
+    pub url: String,
+    /// `Authorization`, `Content-Type`, the headers of the request, and `User-Agent`.
+    /// The transport sets `Host` and `Content-Length` itself.
+    pub headers: Vec<(&'static str, Zeroizing<String>)>,
+    /// The JSON body, when there is one.
+    pub body: Option<&'a [u8]>,
+    /// The whole request ends by then: the wait of a long poll and a margin, or less
+    /// when the request has a deadline.
+    pub timeout: Duration,
+}
+
+impl std::fmt::Debug for ExternalRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalRequest")
+            .field("id", &self.id)
+            .field("method", &self.method)
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The answer of the external transport. The body is erased on drop.
+pub struct ExternalAnswer {
+    pub status: u16,
+    /// The header lines as the transport got them.
+    pub headers: Vec<(String, String)>,
+    pub body: Zeroizing<Vec<u8>>,
+}
+
+/// A transport of the host for the relay requests (the URLSession of the Apple Watch
+/// app). Both calls can come from several threads at once.
+pub trait HttpTransport: Send + Sync {
+    /// Perform `request` and wait for its answer. [`HttpError::Connect`] when no byte
+    /// went out, [`HttpError::Broken`] when the request failed after it started or was
+    /// cancelled, [`HttpError::Protocol`] when the answer is not valid.
+    fn send(&self, request: &ExternalRequest<'_>) -> Result<ExternalAnswer, HttpError>;
+
+    /// End the request `id` at once. It can come from another thread while `send` of
+    /// that request runs, and also just before that `send` starts: the transport then
+    /// fails that `send` at once.
+    fn cancel(&self, id: u64);
+}
+
+static EXTERNAL: OnceLock<Box<dyn HttpTransport>> = OnceLock::new();
+static NEXT_EXTERNAL_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Install the external transport of this process, before the first relay request.
+/// Returns false, and changes nothing, when one is installed already.
+pub fn set_http_transport(transport: Box<dyn HttpTransport>) -> bool {
+    EXTERNAL.set(transport).is_ok()
+}
+
+/// The external transport, when the host installed one.
+fn external() -> Option<&'static dyn HttpTransport> {
+    EXTERNAL.get().map(Box::as_ref)
+}
+
+/// The timeout of an external request: the wait of a long poll and
+/// [`EXTERNAL_MARGIN`], at most the time left before the deadline. `Connect` when the
+/// deadline passed.
+fn external_timeout(request: &Request<'_>) -> Result<Duration, HttpError> {
+    let normal = request.wait.saturating_add(EXTERNAL_MARGIN);
+    let timeout = time_left(request.deadline, normal, HttpError::Connect)?;
+    Ok(timeout.max(Duration::from_millis(1)))
+}
+
+/// The header lines of an external request, with the checks of [`request_head`].
+fn external_headers(
+    request: &Request<'_>,
+    has_body: bool,
+) -> Result<Vec<(&'static str, Zeroizing<String>)>, HttpError> {
+    let mut lines = Vec::with_capacity(request.headers.len() + 3);
+    if let Some(token) = request.bearer {
+        if !valid_header_text(token) || token.contains(' ') {
+            return Err(HttpError::Protocol);
+        }
+        lines.push(("Authorization", Zeroizing::new(format!("Bearer {token}"))));
+    }
+    if has_body {
+        lines.push((
+            "Content-Type",
+            Zeroizing::new("application/json".to_owned()),
+        ));
+    }
+    for (name, value) in &request.headers {
+        if !valid_header_text(value) {
+            return Err(HttpError::Protocol);
+        }
+        lines.push((*name, Zeroizing::new(value.clone())));
+    }
+    lines.push(("User-Agent", Zeroizing::new("apassy-sync/1".to_owned())));
+    Ok(lines)
+}
+
+/// Whether `name` is an HTTP header name (a token).
+fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+/// An answer of the external transport, with the checks and limits of an answer read
+/// from a socket: a final status, at most [`MAX_HEAD_BYTES`] of valid header lines, and
+/// at most [`MAX_JSON_ANSWER`] bytes of body.
+fn checked_external(answer: ExternalAnswer) -> Result<Answer, HttpError> {
+    let ExternalAnswer {
+        status,
+        headers: lines,
+        body,
+    } = answer;
+    if !(200..600).contains(&status) || lines.len() > MAX_EXTERNAL_HEADERS {
+        return Err(HttpError::Protocol);
+    }
+    let mut size = 0usize;
+    let mut headers = Vec::with_capacity(lines.len());
+    for (name, value) in lines {
+        size = size.saturating_add(name.len() + value.len() + 4);
+        if size > MAX_HEAD_BYTES
+            || !valid_header_name(&name)
+            || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+        {
+            return Err(HttpError::Protocol);
+        }
+        headers.push((name.to_ascii_lowercase(), value.trim().to_owned()));
+    }
+    if body.len() > MAX_JSON_ANSWER {
+        return Err(HttpError::Protocol);
+    }
+    Ok(Answer {
+        status,
+        headers,
+        body,
+    })
+}
+
+/// [`exchange`] through the external transport `transport`. A file body fails: a
+/// snapshot never goes through it.
+fn exchange_external(
+    transport: &'static dyn HttpTransport,
+    url: &RelayUrl,
+    request: &Request<'_>,
+) -> Result<Answer, HttpError> {
+    if request.cancel.is_some_and(Cancel::is_closed) {
+        return Err(HttpError::Connect);
+    }
+    if !request.path.starts_with('/') || request.path.bytes().any(|b| !(0x21..0x7f).contains(&b)) {
+        return Err(HttpError::Protocol);
+    }
+    let body = match &request.body {
+        Body::None => None,
+        Body::Json(bytes) => Some(bytes.as_slice()),
+        Body::File(..) => return Err(HttpError::Protocol),
+    };
+    let timeout = external_timeout(request)?;
+    let headers = external_headers(request, body.is_some())?;
+    let id = NEXT_EXTERNAL_ID.fetch_add(1, Ordering::SeqCst);
+    let mut held = Held(None);
+    if let Some(cancel) = request.cancel {
+        let number = cancel.hold_external(id, transport)?;
+        held = Held(Some((cancel, number)));
+    }
+    let external = ExternalRequest {
+        id,
+        method: request.method,
+        url: format!("{}{}", url.as_str(), request.path),
+        headers,
+        body,
+        timeout,
+    };
+    let answer = transport.send(&external);
+    drop(external);
+    drop(held);
+    checked_external(answer?)
 }
 
 enum Conn {
@@ -794,8 +1031,16 @@ fn read_limited(reader: &mut impl Read, limit: usize) -> Result<Zeroizing<Vec<u8
     Ok(body)
 }
 
-/// Send a request and read the answer into memory (at most 2 MiB).
+/// Send a request and read the answer into memory (at most 2 MiB): through the external
+/// transport when the host installed one, else over TCP.
 pub(crate) fn exchange(url: &RelayUrl, request: &Request<'_>) -> Result<Answer, HttpError> {
+    match external() {
+        Some(transport) => exchange_external(transport, url, request),
+        None => exchange_tcp(url, request),
+    }
+}
+
+fn exchange_tcp(url: &RelayUrl, request: &Request<'_>) -> Result<Answer, HttpError> {
     let (mut conn, _complete, _held) = send(url, request)?;
     let Head {
         status,
@@ -827,13 +1072,17 @@ pub(crate) struct Downloaded {
 }
 
 /// Send a request and stream a `200` body to `dest` while hashing it. A body longer
-/// than `max` bytes fails. Another status reads its (JSON) body into the answer.
+/// than `max` bytes fails. Another status reads its (JSON) body into the answer. With an
+/// external transport it fails: the Apple Watch never downloads a snapshot.
 pub(crate) fn download(
     url: &RelayUrl,
     request: &Request<'_>,
     dest: &mut File,
     max: u64,
 ) -> Result<(Answer, Option<Downloaded>), HttpError> {
+    if external().is_some() {
+        return Err(HttpError::Protocol);
+    }
     let (mut conn, _complete, _held) = send(url, request)?;
     let Head {
         status,
@@ -1185,5 +1434,290 @@ mod tests {
         let url = RelayUrl::parse(&format!("http://127.0.0.1:{port}")).unwrap();
         let request = Request::new("GET", "/v1/sync/head".to_owned(), None);
         assert_eq!(exchange(&url, &request).unwrap_err(), HttpError::Connect);
+    }
+
+    /// A transport of the host for the tests: it records each request, answers with
+    /// `answer`, and, when `blocks`, waits until its request is cancelled.
+    struct FakeTransport {
+        answer: Box<dyn Fn() -> Result<ExternalAnswer, HttpError> + Send + Sync>,
+        blocks: bool,
+        seen: Mutex<Vec<SeenRequest>>,
+        cancelled: Mutex<Vec<u64>>,
+    }
+
+    struct SeenRequest {
+        id: u64,
+        method: &'static str,
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
+        timeout: Duration,
+    }
+
+    impl FakeTransport {
+        fn leaked(
+            blocks: bool,
+            answer: impl Fn() -> Result<ExternalAnswer, HttpError> + Send + Sync + 'static,
+        ) -> &'static Self {
+            Box::leak(Box::new(Self {
+                answer: Box::new(answer),
+                blocks,
+                seen: Mutex::new(Vec::new()),
+                cancelled: Mutex::new(Vec::new()),
+            }))
+        }
+
+        fn seen(&self) -> std::sync::MutexGuard<'_, Vec<SeenRequest>> {
+            self.seen.lock().unwrap()
+        }
+    }
+
+    impl HttpTransport for FakeTransport {
+        fn send(&self, request: &ExternalRequest<'_>) -> Result<ExternalAnswer, HttpError> {
+            self.seen.lock().unwrap().push(SeenRequest {
+                id: request.id,
+                method: request.method,
+                url: request.url.clone(),
+                headers: request
+                    .headers
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), value.as_str().to_owned()))
+                    .collect(),
+                body: request.body.map(<[u8]>::to_vec),
+                timeout: request.timeout,
+            });
+            if self.blocks {
+                let started = Instant::now();
+                while !self.cancelled.lock().unwrap().contains(&request.id) {
+                    if started.elapsed() > Duration::from_secs(10) {
+                        return Err(HttpError::Protocol);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                return Err(HttpError::Broken);
+            }
+            (self.answer)()
+        }
+
+        fn cancel(&self, id: u64) {
+            self.cancelled.lock().unwrap().push(id);
+        }
+    }
+
+    type AnswerFn = Box<dyn Fn() -> Result<ExternalAnswer, HttpError> + Send + Sync>;
+
+    fn boxed(
+        answer: impl Fn() -> Result<ExternalAnswer, HttpError> + Send + Sync + 'static,
+    ) -> AnswerFn {
+        Box::new(answer)
+    }
+
+    fn external_answer(
+        status: u16,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<ExternalAnswer, HttpError> {
+        Ok(ExternalAnswer {
+            status,
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            body: Zeroizing::new(body.to_vec()),
+        })
+    }
+
+    fn loopback() -> RelayUrl {
+        RelayUrl::parse("http://127.0.0.1:8787").unwrap()
+    }
+
+    /// The external transport gets the method, the full URL, the headers with the
+    /// bearer, the JSON body, and the timeout of a long poll; its answer reads as one
+    /// from a socket.
+    #[test]
+    fn an_external_transport_carries_the_request_and_its_answer() {
+        let transport = FakeTransport::leaked(false, || {
+            external_answer(
+                200,
+                &[("ETag", " \"3\" "), ("Content-Type", "application/json")],
+                b"{\"ok\":1}",
+            )
+        });
+        let mut request = Request::new(
+            "POST",
+            "/v1/questions?since=2&wait=25".to_owned(),
+            Some("apassy_acc_synthetic"),
+        );
+        request.headers.push(("If-Match", "\"2\"".to_owned()));
+        request.body = Body::Json(Zeroizing::new(b"{\"code\":\"synthetic\"}".to_vec()));
+        request.wait = Duration::from_secs(25);
+        let answer = exchange_external(transport, &loopback(), &request).unwrap();
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.header("etag"), Some("\"3\""));
+        assert_eq!(answer.header("content-type"), Some("application/json"));
+        assert_eq!(answer.body.as_slice(), b"{\"ok\":1}");
+        let all = transport.seen();
+        let [seen] = all.as_slice() else {
+            panic!("one request");
+        };
+        assert!(seen.id > 0);
+        assert_eq!(seen.method, "POST");
+        assert_eq!(
+            seen.url,
+            "http://127.0.0.1:8787/v1/questions?since=2&wait=25"
+        );
+        let headers: Vec<(&str, &str)> = seen
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                ("Authorization", "Bearer apassy_acc_synthetic"),
+                ("Content-Type", "application/json"),
+                ("If-Match", "\"2\""),
+                ("User-Agent", "apassy-sync/1"),
+            ]
+        );
+        assert_eq!(seen.body.as_deref(), Some(&b"{\"code\":\"synthetic\"}"[..]));
+        assert_eq!(seen.timeout, Duration::from_secs(25) + HEADER_TIMEOUT);
+        drop(all);
+        // A request without a body sends none; a deadline shortens the timeout.
+        let mut request = Request::new("GET", "/v1/devices".to_owned(), None);
+        request.deadline = Some(Instant::now() + Duration::from_secs(5));
+        exchange_external(transport, &loopback(), &request).unwrap();
+        let seen = transport.seen();
+        let last = seen.last().unwrap();
+        assert!(last.body.is_none());
+        assert!(last.timeout <= Duration::from_secs(5), "{:?}", last.timeout);
+        assert_eq!(
+            last.headers
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["User-Agent"]
+        );
+        assert_ne!(last.id, seen[0].id);
+    }
+
+    /// The errors of the transport come back as they are; an answer that a socket answer
+    /// would fail on fails the same way; a request that cannot go out never reaches the
+    /// transport.
+    #[test]
+    fn an_external_answer_has_the_limits_of_a_socket_answer() {
+        let request = Request::new("GET", "/v1/devices".to_owned(), None);
+        for error in [HttpError::Connect, HttpError::Broken, HttpError::Protocol] {
+            let transport = FakeTransport::leaked(false, move || Err(error));
+            assert_eq!(
+                exchange_external(transport, &loopback(), &request).unwrap_err(),
+                error
+            );
+        }
+        let large = vec![b'x'; MAX_JSON_ANSWER + 1];
+        let fits = vec![b'x'; MAX_JSON_ANSWER];
+        let long_value = "v".repeat(MAX_HEAD_BYTES);
+        let refused: Vec<AnswerFn> = vec![
+            boxed(|| external_answer(101, &[], b"")),
+            boxed(|| external_answer(600, &[], b"")),
+            boxed(|| external_answer(200, &[("X-Bad", "a\r\nSet: 1")], b"")),
+            boxed(|| external_answer(200, &[("Bad Name", "1")], b"")),
+            boxed(|| external_answer(200, &[("", "1")], b"")),
+            boxed(move || external_answer(200, &[("X-Long", long_value.as_str())], b"")),
+            boxed(move || external_answer(200, &[], &large)),
+        ];
+        for answer in refused {
+            let transport = FakeTransport::leaked(false, answer);
+            assert_eq!(
+                exchange_external(transport, &loopback(), &request).unwrap_err(),
+                HttpError::Protocol
+            );
+        }
+        let transport = FakeTransport::leaked(false, move || external_answer(404, &[], &fits));
+        let answer = exchange_external(transport, &loopback(), &request).unwrap();
+        assert_eq!((answer.status, answer.body.len()), (404, MAX_JSON_ANSWER));
+        // A file body, a bad path, a bad bearer, and a deadline that passed send nothing.
+        let transport = FakeTransport::leaked(false, || external_answer(200, &[], b""));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut upload = Request::new("PUT", "/v1/sync/snapshot".to_owned(), None);
+        upload.body = Body::File(file.path(), 0);
+        assert_eq!(
+            exchange_external(transport, &loopback(), &upload).unwrap_err(),
+            HttpError::Protocol
+        );
+        let bad_path = Request::new("GET", "v1/devices".to_owned(), None);
+        assert_eq!(
+            exchange_external(transport, &loopback(), &bad_path).unwrap_err(),
+            HttpError::Protocol
+        );
+        let bad_bearer = Request::new("GET", "/v1/devices".to_owned(), Some("a b"));
+        assert_eq!(
+            exchange_external(transport, &loopback(), &bad_bearer).unwrap_err(),
+            HttpError::Protocol
+        );
+        let mut late = Request::new("GET", "/v1/devices".to_owned(), None);
+        late.deadline = Some(Instant::now());
+        assert_eq!(
+            exchange_external(transport, &loopback(), &late).unwrap_err(),
+            HttpError::Connect
+        );
+        assert!(transport.seen().is_empty());
+    }
+
+    /// A close of the [`Cancel`] cancels an external request in flight through the
+    /// transport, and a request after the close never reaches it.
+    #[test]
+    fn a_cancel_ends_an_external_request() {
+        let transport = FakeTransport::leaked(true, || external_answer(200, &[], b""));
+        let cancel = std::sync::Arc::new(Cancel::default());
+        let poll = {
+            let cancel = std::sync::Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                let mut request = Request::new(
+                    "GET",
+                    "/v1/questions?since=1&wait=25".to_owned(),
+                    Some("apassy_acc_synthetic"),
+                );
+                request.wait = Duration::from_secs(25);
+                request.cancel = Some(&cancel);
+                let started = Instant::now();
+                let error = exchange_external(transport, &loopback(), &request).unwrap_err();
+                let left = cancel.sockets.lock().unwrap().len();
+                (error, started.elapsed(), left)
+            })
+        };
+        let started = Instant::now();
+        while transport.seen().is_empty() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cancel.close();
+        let (error, waited, left) = poll.join().unwrap();
+        assert_eq!(error, HttpError::Broken);
+        assert!(waited < Duration::from_secs(3), "{waited:?}");
+        assert_eq!(left, 0, "the request leaves its cancel");
+        let id = transport.seen()[0].id;
+        assert_eq!(*transport.cancelled.lock().unwrap(), vec![id]);
+        let mut request = Request::new("GET", "/v1/devices".to_owned(), None);
+        request.cancel = Some(&cancel);
+        assert_eq!(
+            exchange_external(transport, &loopback(), &request).unwrap_err(),
+            HttpError::Connect
+        );
+        assert_eq!(transport.seen().len(), 1);
+    }
+
+    /// Without an external transport (no test installs one), `exchange` and `download`
+    /// use TCP.
+    #[test]
+    fn without_an_external_transport_requests_use_tcp() {
+        assert!(external().is_none());
+        let (url, server) = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        let request = Request::new("GET", "/v1/devices".to_owned(), None);
+        assert_eq!(exchange(&url, &request).unwrap().body.as_slice(), b"{}");
+        assert!(
+            String::from_utf8(server.join().unwrap())
+                .unwrap()
+                .starts_with("GET /v1/devices HTTP/1.1\r\n")
+        );
     }
 }

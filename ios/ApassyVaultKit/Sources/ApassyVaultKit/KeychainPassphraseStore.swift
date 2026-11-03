@@ -1,3 +1,6 @@
+// The passphrase behind Face ID and the biometric owner check. watchOS has no biometry: the
+// Apple Watch keeps its replica passphrase in WatchReplicaStore (ADR 0039).
+#if !os(watchOS)
 import Foundation
 import LocalAuthentication
 import Security
@@ -223,3 +226,4 @@ public struct BiometricOwnerCheck: OwnerCheck {
         }
     }
 }
+#endif

@@ -3046,8 +3046,8 @@ fn access_detail(
             .with_vault(|v| v.access_status(c.agent.id.parse().unwrap_or(0), r.id).ok())
             .flatten();
         if let Some(receipt) = &r.receipt {
-            if let Some(device) = &receipt.device_name {
-                ui.strong(format!("Answered on {device}"));
+            if let Some(line) = receipt_answered_line(receipt) {
+                ui.strong(line);
             } else {
                 ui.strong("Access request ended without an answer");
             }
@@ -3100,6 +3100,22 @@ fn access_detail(
     });
 }
 
+/// "Answered on DEVICE" of the receipt of an access request, with "(Apple Watch)" after
+/// the name of a watch (ADR 0039). `None`: the request ended without an answer.
+fn receipt_answered_line(receipt: &crate::questions::access_request::Receipt) -> Option<String> {
+    let device = receipt.device_name.as_ref()?;
+    Some(
+        if receipt.device_kind == Some(crate::questions::access_request::DeviceKind::Watch) {
+            format!(
+                "Answered on {}",
+                crate::questions::device_link::watch_label(device)
+            )
+        } else {
+            format!("Answered on {device}")
+        },
+    )
+}
+
 #[cfg(test)]
 mod answered_tests {
     use super::*;
@@ -3136,6 +3152,36 @@ mod answered_tests {
             answered(2, "Test iPhone", 0).line(),
             "Answered on Test iPhone"
         );
+    }
+
+    #[test]
+    fn an_access_answer_from_a_watch_names_the_watch() {
+        use crate::questions::access_request::{DeviceKind, Outcome, Receipt, ReceiptChoice};
+        let receipt = |kind: Option<DeviceKind>, name: Option<&str>| Receipt {
+            vault_id: "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab".to_owned(),
+            team_id: "t_7k2m5q4x3c".to_owned(),
+            qid: "q_synthetic".to_owned(),
+            request_id: "1".to_owned(),
+            asker: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
+            digest: "synthetic".to_owned(),
+            outcome: Outcome::AllowedOnce,
+            answered_by: Some("6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b".to_owned()),
+            device_name: name.map(str::to_owned),
+            device_kind: kind,
+            kind: Some(ReceiptChoice::AllowOnce),
+            at: 1,
+            expires_at: 2,
+        };
+        assert_eq!(
+            receipt_answered_line(&receipt(Some(DeviceKind::Watch), Some("Test Watch"))).as_deref(),
+            Some("Answered on Test Watch (Apple Watch)")
+        );
+        assert_eq!(
+            receipt_answered_line(&receipt(Some(DeviceKind::Iphone), Some("Test iPhone")))
+                .as_deref(),
+            Some("Answered on Test iPhone")
+        );
+        assert_eq!(receipt_answered_line(&receipt(None, None)), None);
     }
 }
 

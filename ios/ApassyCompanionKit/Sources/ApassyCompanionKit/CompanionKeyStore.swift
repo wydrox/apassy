@@ -1,4 +1,5 @@
-// The keys of this build: the Secure Enclave on a device, software keys in the simulator.
+// The keys of this build: the Secure Enclave on a device, software keys in the simulator. The
+// companion pairing needs Face ID or Touch ID, so watchOS (ADR 0039) has no companion keys.
 
 import Foundation
 
@@ -6,7 +7,7 @@ import Foundation
 public enum CompanionKeyStore {
     /// Whether this build keeps its private keys in the Secure Enclave.
     public static var usesSecureEnclave: Bool {
-        #if targetEnvironment(simulator)
+        #if targetEnvironment(simulator) || os(watchOS)
             return false
         #else
             return true
@@ -19,6 +20,8 @@ public enum CompanionKeyStore {
     public static func createNew(service: String = CompanionKeychain.service) throws -> any CompanionKeys {
         #if targetEnvironment(simulator)
             return try SoftwareKeys.create(service: service)
+        #elseif os(watchOS)
+            throw CompanionKeyError.noSecureEnclave
         #else
             return try SecureEnclaveKeys.create(service: service)
         #endif
@@ -28,6 +31,8 @@ public enum CompanionKeyStore {
     public static func loadExisting(service: String = CompanionKeychain.service) throws -> (any CompanionKeys)? {
         #if targetEnvironment(simulator)
             return try SoftwareKeys.load(service: service)
+        #elseif os(watchOS)
+            return nil
         #else
             return try SecureEnclaveKeys.load(service: service)
         #endif
@@ -36,7 +41,7 @@ public enum CompanionKeyStore {
     /// Delete the keys.
     public static func deleteAll(service: String = CompanionKeychain.service) throws {
         try SoftwareKeys.delete(service: service)
-        #if !targetEnvironment(simulator)
+        #if !targetEnvironment(simulator) && !os(watchOS)
             try SecureEnclaveKeys.delete(service: service)
         #endif
     }

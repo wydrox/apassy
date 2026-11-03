@@ -147,6 +147,8 @@ pub enum ReceiptChoice {
 pub enum DeviceKind {
     Mac,
     Iphone,
+    /// An Apple Watch (ADR 0039).
+    Watch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

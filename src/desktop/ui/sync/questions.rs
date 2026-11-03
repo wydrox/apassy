@@ -22,13 +22,13 @@
 //!
 //! "Add an iPhone or a Mac…" links a device to the questions team: the "Add a device…"
 //! sheet of relay sync for a sync team, its questions mode ([`SyncSheet::AddIphone`])
-//! for a notifications-only team. The confirmation writes the row of an iPhone from the
-//! keys of its link (`register_linked_device`); a Mac writes its own. Devices lists each
-//! trusted device of the vault, with the push state of an iPhone when the relay tells it
-//! (`GET /v1/devices`, every 30 seconds while the tab shows), and "Remove…" for each
-//! other device ([`SyncSheet::RemoveQuestionsDevice`]): no owner check, it takes
-//! authority away. The removal keeps the row with `deleted_at`, writes a new question
-//! key, and revokes the device on the relay when this Mac can.
+//! for a notifications-only team. The confirmation writes the row of an iPhone or an Apple
+//! Watch (ADR 0039) from the keys of its link (`register_linked_device`); a Mac writes its
+//! own. Devices lists each trusted device of the vault, with the push state of an iPhone
+//! when the relay tells it (`GET /v1/devices`, every 30 seconds while the tab shows), and
+//! "Remove…" for each other device ([`SyncSheet::RemoveQuestionsDevice`]): no owner
+//! check, it takes authority away. The removal keeps the row with `deleted_at`, writes a
+//! new question key, and revokes the device on the relay when this Mac can.
 //!
 //! The team code and a pasted link stay in memory only from "Turn On…" or "Join…" to the
 //! relay call. A lock, another sync sheet, and the end of the try erase them.
@@ -182,6 +182,13 @@ pub(crate) fn device_words(device: &TrustedDevice, this_mac: bool, push: Option<
             "iPhone · answers with Face ID".to_owned()
         }
         (TrustedDeviceKind::Iphone, _) => "iPhone · its Face ID key has not synced yet".to_owned(),
+        // A watch registers no push token in v1 (ADR 0039 §7): no push state.
+        (TrustedDeviceKind::Watch, _) if device.answer_key.is_some() => {
+            return "Apple Watch · allows access requests once, on a wrist".to_owned();
+        }
+        (TrustedDeviceKind::Watch, _) => {
+            return "Apple Watch · its answer key is missing; connect it again".to_owned();
+        }
     };
     match push {
         Some(true) => words.push_str(" · Push on"),
@@ -189,6 +196,14 @@ pub(crate) fn device_words(device: &TrustedDevice, this_mac: bool, push: Option<
         None => {}
     }
     words
+}
+
+/// The name of a trusted device in a list: "<name> (Apple Watch)" for a watch (ADR 0039).
+pub(crate) fn device_label(device: &TrustedDevice) -> String {
+    match device.kind {
+        TrustedDeviceKind::Watch => crate::questions::device_link::watch_label(&device.name),
+        TrustedDeviceKind::Mac | TrustedDeviceKind::Iphone => device.name.clone(),
+    }
 }
 
 /// One row of the devices of the questions.
@@ -207,6 +222,7 @@ pub(crate) fn removal_words(kind: TrustedDeviceKind, icloud: bool) -> String {
     let device = match kind {
         TrustedDeviceKind::Mac => "this Mac",
         TrustedDeviceKind::Iphone => "this iPhone",
+        TrustedDeviceKind::Watch => "this Apple Watch",
     };
     let mut words = format!(
         "It can no longer answer the questions of this vault, and Apassy makes a new question key, so {device} cannot read the next questions. Apassy also removes it from the relay when this Mac can, so it gets no more notifications. To answer again it needs a new link and your confirmation."
@@ -884,7 +900,7 @@ impl DesktopApp {
                     .get(&membership.team_id)
                     .and_then(|id| questions.push.get(id).copied());
                 DeviceRow {
-                    name: device.name.clone(),
+                    name: device_label(device),
                     words: device_words(device, this_mac, push),
                     uuid: device.uuid.clone(),
                     removable: !this_mac,
@@ -941,8 +957,11 @@ impl DesktopApp {
                         &vault.epoch(),
                     )
                     .map_err(|_| SyncError::Vault(VaultErrorKind::Conflict))?;
-                if device.kind != TrustedDeviceKind::Iphone
-                    || membership.as_ref().is_none_or(|m| m.team_id != team)
+                // The older device of a new iPhone or a new watch (ADR 0039).
+                if !matches!(
+                    device.kind,
+                    TrustedDeviceKind::Iphone | TrustedDeviceKind::Watch
+                ) || membership.as_ref().is_none_or(|m| m.team_id != team)
                 {
                     return Err(SyncError::Vault(VaultErrorKind::Conflict));
                 }
@@ -1230,7 +1249,8 @@ pub(super) fn remove_device_sheet(
             ui,
             &format!(
                 "Remove “{}” from the questions of “{}”?",
-                device.name, entry.name
+                device_label(&device),
+                entry.name
             ),
             Some(&removal_words(device.kind, icloud)),
         );

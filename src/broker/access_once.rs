@@ -236,7 +236,9 @@ impl RemoteAccessAnswer {
             .trusted_device(&answer.by)
             .map_err(|_| wire::Error::Identity)?
             .ok_or(wire::Error::Identity)?;
-        if device.kind != crate::vault::TrustedDeviceKind::Iphone
+        // An iPhone and an Apple Watch (ADR 0039 §3) answer the same way: Deny with the
+        // relay key, Allow once with the answer key. A Mac row never answers here.
+        if receipt_kind(device.kind).is_none()
             || device.relay_devices.get(&r.card.card.team_id) != Some(&stamped)
         {
             return Err(wire::Error::Identity);
@@ -282,7 +284,7 @@ impl RemoteAccessAnswer {
             self.answer.kind,
             &self.device.uuid,
             &self.device.name,
-            DeviceKind::Iphone,
+            receipt_kind(self.device.kind).ok_or(wire::Error::Identity)?,
         );
         vault
             .commit_access_answer(
@@ -303,6 +305,15 @@ impl RemoteAccessAnswer {
                 )),
             )
             .map_err(|_| wire::Error::Expired)
+    }
+}
+/// The receipt kind of a device that may answer an access request from afar: an iPhone
+/// or an Apple Watch. `None` for a Mac.
+fn receipt_kind(kind: crate::vault::TrustedDeviceKind) -> Option<DeviceKind> {
+    match kind {
+        crate::vault::TrustedDeviceKind::Iphone => Some(DeviceKind::Iphone),
+        crate::vault::TrustedDeviceKind::Watch => Some(DeviceKind::Watch),
+        crate::vault::TrustedDeviceKind::Mac => None,
     }
 }
 fn receipt(
@@ -551,4 +562,252 @@ pub fn dispatch_legacy(vault: &mut Vault, id: u64) -> WireResponse {
         },
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contracts::CredentialKind;
+    use crate::relay::membership::{enable_questions, new_device_uuid};
+    use crate::sync::{DeviceKey, encode_b64u};
+    use crate::vault::{Field, ItemDraft, RelayDevice, SecretValue, TrustedDeviceKind};
+
+    const PASS: &str = "synthetic-access-once-pass";
+    const TEAM: &str = "t_7k2m5q4x3c";
+    const OTHER_TEAM: &str = "t_aaaaaaaaaa";
+
+    /// A vault whose questions go through `TEAM`, with the trusted devices that `devices`
+    /// registers, then one open access request that offers Allow once. Returns the
+    /// request ID and what `devices` returns.
+    ///
+    /// The devices come first: the policy digest of a request covers the
+    /// `trusted_device` rows, so a device registered after the request makes it stale
+    /// (`Expired`). The working folder is the canonical temporary folder, as the card
+    /// stores it (on macOS `/var` is a link to `/private/var`).
+    fn open_request<T>(
+        dir: &tempfile::TempDir,
+        devices: impl FnOnce(&mut Vault) -> T,
+    ) -> (Vault, u64, T) {
+        let mut vault = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let item = vault
+            .add(ItemDraft {
+                title: "API token".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".to_owned(),
+                    value: SecretValue::new("SYNTH-access-once".to_owned()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        let agent = vault.register_agent("claude-code").unwrap().0.id;
+        vault.set_env_binding(item, "API_TOKEN", "token").unwrap();
+        vault.set_agent_sees_all(agent, true).unwrap();
+        let mac = DeviceKey::generate().unwrap();
+        vault
+            .set_relay_device(&RelayDevice {
+                relay_url: "https://relay.example.test".to_owned(),
+                team_id: TEAM.to_owned(),
+                device_id: 2,
+                public_key: mac.public_key().to_vec(),
+                key_pkcs8: mac.pkcs8().unwrap().clone(),
+                created_at: 0,
+            })
+            .unwrap();
+        enable_questions(&mut vault, "Synthetic Mac").unwrap();
+        let made = devices(&mut vault);
+        let summary = vault
+            .list_agents()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == agent)
+            .unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let response = create(
+            &mut vault,
+            &summary,
+            item,
+            "Synthetic watch request",
+            cwd.to_str(),
+            &wire::Scope {
+                action: wire::Action::Read,
+                hosts: vec!["api.example.test".into()],
+            },
+        );
+        assert!(response.ok, "{response:?}");
+        let id = response.result.unwrap()["request_id"].as_u64().unwrap();
+        let record = vault.scoped_access_request(id).unwrap();
+        assert!(record.card.card.valid_answers.contains(&Choice::AllowOnce));
+        assert!(vault.access_record_live(&record), "the request is open");
+        (vault, id, made)
+    }
+
+    /// A device of `kind` with the relay key `sign` and the answer key `answer`, number 7
+    /// in `team`. Returns its UUID.
+    fn device(
+        vault: &mut Vault,
+        kind: TrustedDeviceKind,
+        sign: &DeviceKey,
+        answer: &DeviceKey,
+        team: &str,
+    ) -> String {
+        let uuid = new_device_uuid().unwrap();
+        vault
+            .register_trusted_device(
+                &uuid,
+                "Synthetic Watch",
+                kind,
+                sign.public_key(),
+                Some(answer.public_key()),
+            )
+            .unwrap();
+        vault.set_trusted_device_relay_id(&uuid, team, 7).unwrap();
+        uuid
+    }
+
+    fn keys() -> (DeviceKey, DeviceKey) {
+        (
+            DeviceKey::generate().unwrap(),
+            DeviceKey::generate().unwrap(),
+        )
+    }
+
+    fn signed(vault: &Vault, id: u64, by: &str, choice: Choice, key: &DeviceKey) -> wire::Answer {
+        let card = vault.scoped_access_request(id).unwrap().card;
+        let mut answer =
+            wire::Answer::prepare(&card, by, choice, crate::vault::access_once::now()).unwrap();
+        answer.signature = encode_b64u(&key.sign(&answer.message(&card).unwrap()).unwrap());
+        answer
+    }
+
+    #[test]
+    fn a_watch_denies_with_its_relay_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (sign, answer) = keys();
+        let (mut vault, id, watch) = open_request(&dir, |v| {
+            device(v, TrustedDeviceKind::Watch, &sign, &answer, TEAM)
+        });
+        // The answer key does not sign a Deny.
+        let wrong = signed(&vault, id, &watch, Choice::Deny, &answer);
+        assert_eq!(
+            RemoteAccessAnswer::verify(&vault, id, wrong, 7).unwrap_err(),
+            wire::Error::Signature
+        );
+        let deny = signed(&vault, id, &watch, Choice::Deny, &sign);
+        RemoteAccessAnswer::verify(&vault, id, deny, 7)
+            .unwrap()
+            .commit(&mut vault)
+            .unwrap();
+        let receipt = vault.scoped_access_request(id).unwrap().receipt.unwrap();
+        assert_eq!(receipt.outcome, Outcome::Denied);
+        assert_eq!(receipt.device_kind, Some(DeviceKind::Watch));
+        assert_eq!(receipt.answered_by.as_deref(), Some(watch.as_str()));
+    }
+
+    #[test]
+    fn a_watch_allows_once_with_its_answer_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (sign, answer) = keys();
+        let (mut vault, id, watch) = open_request(&dir, |v| {
+            device(v, TrustedDeviceKind::Watch, &sign, &answer, TEAM)
+        });
+        // The relay key does not sign an Allow once.
+        let wrong = signed(&vault, id, &watch, Choice::AllowOnce, &sign);
+        assert_eq!(
+            RemoteAccessAnswer::verify(&vault, id, wrong, 7).unwrap_err(),
+            wire::Error::Signature
+        );
+        let allow = signed(&vault, id, &watch, Choice::AllowOnce, &answer);
+        RemoteAccessAnswer::verify(&vault, id, allow, 7)
+            .unwrap()
+            .commit(&mut vault)
+            .unwrap();
+        let receipt = vault.scoped_access_request(id).unwrap().receipt.unwrap();
+        assert_eq!(receipt.outcome, Outcome::AllowedOnce);
+        assert_eq!(receipt.device_kind, Some(DeviceKind::Watch));
+        assert_eq!(receipt.device_name.as_deref(), Some("Synthetic Watch"));
+    }
+
+    #[test]
+    fn a_watch_whose_answer_key_is_its_relay_key_cannot_allow() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = DeviceKey::generate().unwrap();
+        let (vault, id, watch) = open_request(&dir, |v| {
+            device(v, TrustedDeviceKind::Watch, &key, &key, TEAM)
+        });
+        // A valid signature by the one key: refused for the identity, not the signature.
+        let allow = signed(&vault, id, &watch, Choice::AllowOnce, &key);
+        assert_eq!(
+            RemoteAccessAnswer::verify(&vault, id, allow, 7).unwrap_err(),
+            wire::Error::Identity
+        );
+        // Deny still verifies with the relay key.
+        let deny = signed(&vault, id, &watch, Choice::Deny, &key);
+        assert!(RemoteAccessAnswer::verify(&vault, id, deny, 7).is_ok());
+    }
+
+    #[test]
+    fn a_watch_of_another_number_or_team_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (sign, answer) = keys();
+        let (other_sign, other_answer) = keys();
+        let (vault, id, (watch, elsewhere)) = open_request(&dir, |v| {
+            (
+                device(v, TrustedDeviceKind::Watch, &sign, &answer, TEAM),
+                // Number 7 in another team only.
+                device(
+                    v,
+                    TrustedDeviceKind::Watch,
+                    &other_sign,
+                    &other_answer,
+                    OTHER_TEAM,
+                ),
+            )
+        });
+        for choice in [Choice::Deny, Choice::AllowOnce] {
+            let (key, other_key) = if choice == Choice::Deny {
+                (&sign, &other_sign)
+            } else {
+                (&answer, &other_answer)
+            };
+            // The right keys, stamped with another number in this team.
+            let reply = signed(&vault, id, &watch, choice, key);
+            assert_eq!(
+                RemoteAccessAnswer::verify(&vault, id, reply, 8).unwrap_err(),
+                wire::Error::Identity,
+                "{choice:?}"
+            );
+            // Mapped to another team only.
+            let reply = signed(&vault, id, &elsewhere, choice, other_key);
+            assert_eq!(
+                RemoteAccessAnswer::verify(&vault, id, reply, 7).unwrap_err(),
+                wire::Error::Identity,
+                "{choice:?}"
+            );
+        }
+        // The same keys with the right number verify: the refusals are the mapping.
+        let deny = signed(&vault, id, &watch, Choice::Deny, &sign);
+        assert!(RemoteAccessAnswer::verify(&vault, id, deny, 7).is_ok());
+    }
+
+    #[test]
+    fn a_mac_row_never_answers_from_afar() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (sign, answer) = keys();
+        let (vault, id, mac) = open_request(&dir, |v| {
+            device(v, TrustedDeviceKind::Mac, &sign, &answer, TEAM)
+        });
+        for (choice, key) in [(Choice::Deny, &sign), (Choice::AllowOnce, &answer)] {
+            let reply = signed(&vault, id, &mac, choice, key);
+            assert_eq!(
+                RemoteAccessAnswer::verify(&vault, id, reply, 7).unwrap_err(),
+                wire::Error::Identity,
+                "{choice:?}"
+            );
+        }
+    }
 }

@@ -2,13 +2,14 @@
 //! 19, stage 5 plan §A1).
 //!
 //! - A trusted device ([`TrustedDevice`]) may answer the questions of this vault. Each
-//!   device registers its own row with its relay key (`sign_key`) and, on an iPhone, its
-//!   answer key; the relay's device list is never the source of these keys. The rows
-//!   sync (`merge::SYNCED_TABLES`): the later `(updated_at, updated_by)` wins, and a
-//!   removed device keeps its row with `deleted_at`. A removal wins over any edit, so
-//!   a revoked device never comes back through a sync, and neither its UUID nor its
-//!   keys can register again (`AlreadyExists`): a device that joins again gets a new
-//!   UUID and a new relay key, and needs a new confirmation.
+//!   device registers its own row with its relay key (`sign_key`) and, on an iPhone or
+//!   a watch, its answer key; the relay's device list is never the source of these keys.
+//!   The rows sync (`merge::SYNCED_TABLES`): the later `(updated_at, updated_by)`
+//!   wins, and a removed device keeps its row with `deleted_at`. A removal wins over any
+//!   edit, so a revoked device never comes back through a sync, and neither its UUID nor
+//!   its keys can register again (`AlreadyExists`): a device that joins again gets a new
+//!   UUID and a new relay key, and needs a new confirmation. The kind `watch` comes with
+//!   schema 24 (ADR 0039).
 //!
 //!   A device can be in more than one relay team (a notifications team and a shared
 //!   vault team), with a device number in each. The numbers are a JSON object in the
@@ -59,14 +60,19 @@ fn storage<E>(_: E) -> super::VaultError {
 pub enum TrustedDeviceKind {
     Mac,
     Iphone,
+    /// An Apple Watch (schema 24, ADR 0039). It answers access requests only: Allow once
+    /// with its answer key, Deny with its relay key. It never answers a run question or
+    /// a feed action.
+    Watch,
 }
 
 impl TrustedDeviceKind {
-    /// The stored name: `mac` or `iphone`.
+    /// The stored name: `mac`, `iphone`, or `watch`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Mac => "mac",
             Self::Iphone => "iphone",
+            Self::Watch => "watch",
         }
     }
 
@@ -74,6 +80,7 @@ impl TrustedDeviceKind {
         match text {
             "mac" => Some(Self::Mac),
             "iphone" => Some(Self::Iphone),
+            "watch" => Some(Self::Watch),
             _ => None,
         }
     }
@@ -90,7 +97,7 @@ pub struct TrustedDevice {
     pub relay_devices: BTreeMap<String, u64>,
     /// The relay device key, a P-256 point in X9.63 form (65 bytes).
     pub sign_key: Vec<u8>,
-    /// iPhone: the Secure Enclave answer key, a P-256 point in X9.63 form.
+    /// iPhone or watch: the Secure Enclave answer key, a P-256 point in X9.63 form.
     pub answer_key: Option<Vec<u8>>,
     /// Unix seconds of the first registration.
     pub created_at: u64,

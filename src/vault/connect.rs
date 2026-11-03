@@ -206,6 +206,62 @@ impl Vault {
     }
 }
 
+/// Whether `id` is a sync vault ID: UUID text in lowercase (`sync::new_vault_id`).
+fn valid_replica_vault_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+impl Vault {
+    /// Give this new, empty vault the sync identity `vault_id` of another vault: the
+    /// questions-only replica of an Apple Watch (ADR 0039 section 4), which then adopts
+    /// the question handoff of that vault ([`Self::adopt_question_handoff`] checks the
+    /// identity). The replica never syncs, so it never meets a copy of that vault.
+    ///
+    /// Refused (`InvalidInput`) unless the vault holds no item, no relay membership (relay
+    /// sync is one too) and no question key, and was never pushed (generation 0). All
+    /// checks and the change are in one transaction.
+    pub fn adopt_replica_identity(&mut self, vault_id: &str) -> VaultResult<()> {
+        let invalid = || err(VaultErrorKind::InvalidInput);
+        if !valid_replica_vault_id(vault_id) {
+            return Err(invalid());
+        }
+        let tx = self
+            .conn_mut()?
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let (identity, digest) = super::sync::read_sync_row(&tx, "main")?;
+        if identity.generation != 0
+            || identity.pushed_at.is_some()
+            || !identity.pushed_by.is_empty()
+            || digest.is_some()
+        {
+            return Err(invalid());
+        }
+        let used: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM item)
+                    OR EXISTS(SELECT 1 FROM relay_membership)
+                    OR EXISTS(SELECT 1 FROM vault_secret WHERE name = 'question-key-v1')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        if used {
+            return Err(invalid());
+        }
+        tx.execute(
+            "UPDATE sync_meta SET vault_id = ?1 WHERE id = 1",
+            [vault_id],
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +295,92 @@ mod tests {
             .query_row("SELECT count(*) FROM bouncer_scope", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    const REPLICA_PASS: &str = "synthetic-replica-pass";
+    const REPLICA_ID: &str = "0f1e2d3c-4b5a-4968-8776-655443322110";
+
+    fn new_vault(dir: &tempfile::TempDir, name: &str) -> Vault {
+        let mut vault = Vault::create(&dir.path().join(name), REPLICA_PASS).unwrap();
+        vault.unlock(REPLICA_PASS).unwrap();
+        vault
+    }
+
+    #[test]
+    fn an_empty_vault_takes_the_identity_of_the_vault_it_answers_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = new_vault(&dir, "synthetic-replica.apassy");
+        let before = vault.sync_identity().unwrap();
+        assert_ne!(before.vault_id, REPLICA_ID);
+        vault.adopt_replica_identity(REPLICA_ID).unwrap();
+        let after = vault.sync_identity().unwrap();
+        assert_eq!(after.vault_id, REPLICA_ID);
+        assert_eq!(after.generation, 0);
+        // The identity stays after a lock.
+        vault.lock().unwrap();
+        vault.unlock(REPLICA_PASS).unwrap();
+        assert_eq!(vault.sync_identity().unwrap().vault_id, REPLICA_ID);
+    }
+
+    #[test]
+    fn a_used_vault_or_a_bad_id_keeps_its_identity() {
+        use crate::contracts::CredentialKind;
+        use crate::vault::{Field, ItemDraft, SecretValue};
+        let dir = tempfile::tempdir().unwrap();
+        let refused = |vault: &mut Vault, id: &str| {
+            let before = vault.sync_identity().unwrap().vault_id;
+            assert_eq!(
+                vault.adopt_replica_identity(id).unwrap_err().kind(),
+                VaultErrorKind::InvalidInput,
+                "{id}"
+            );
+            assert_eq!(vault.sync_identity().unwrap().vault_id, before);
+        };
+        let mut fresh = new_vault(&dir, "synthetic-fresh.apassy");
+        for bad in [
+            "",
+            "0F1E2D3C-4B5A-4968-8776-655443322110",
+            "0f1e2d3c4b5a49688776655443322110",
+            "0f1e2d3c-4b5a-4968-8776-65544332211",
+            "../../0f1e2d3c-4b5a-4968-8776-6554433",
+        ] {
+            refused(&mut fresh, bad);
+        }
+        let mut with_item = new_vault(&dir, "synthetic-item.apassy");
+        with_item
+            .add(ItemDraft {
+                title: "Synthetic login".into(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new("SYNTHETIC-NOT-A-LIVE-KEY-0039".into()),
+                    secret: true,
+                }],
+            })
+            .unwrap();
+        refused(&mut with_item, REPLICA_ID);
+        let mut member = new_vault(&dir, "synthetic-member.apassy");
+        let key = crate::sync::DeviceKey::generate().unwrap();
+        member
+            .add_relay_membership(&super::super::RelayMembership {
+                team_id: "t_7k2m5q4x3c".to_owned(),
+                relay_url: "https://relay.example.test".to_owned(),
+                device_id: 2,
+                public_key: key.public_key().to_vec(),
+                key_pkcs8: key.pkcs8().unwrap().clone(),
+                purposes: std::collections::BTreeSet::from([
+                    super::super::MembershipPurpose::Questions,
+                ]),
+                created_at: 0,
+            })
+            .unwrap();
+        refused(&mut member, REPLICA_ID);
+        let mut pushed = new_vault(&dir, "synthetic-pushed.apassy");
+        pushed
+            .write_sync_copy(&dir.path().join("synthetic-push.db"), "Synthetic Mac")
+            .unwrap();
+        refused(&mut pushed, REPLICA_ID);
     }
 }

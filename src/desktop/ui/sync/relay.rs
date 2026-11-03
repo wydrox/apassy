@@ -55,7 +55,7 @@ use crate::desktop::companion::QrModules;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::{DesktopApp, Place};
-use crate::questions::device_link::{shown_link_name, split_link_device_name};
+use crate::questions::device_link::{LinkedDeviceKind, shown_link_name, split_linked_device_name};
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::sync::{
     DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, PendingJoin,
@@ -63,7 +63,7 @@ use crate::sync::{
     RelayRefusal, RelaySync, RelayUrl, SyncError, SyncOutcome, VaultSync, device_name,
     valid_team_code,
 };
-use crate::vault::{Vault, VaultErrorKind};
+use crate::vault::{TrustedDeviceKind, Vault, VaultErrorKind};
 use crate::vaults::{self, Registry, SyncLink, VaultEntry};
 
 /// The name of the relay in the picker, the sidebar, and "Use a vault from another Mac".
@@ -281,7 +281,9 @@ struct AddMac {
     /// the questions team of the vault, not through relay sync.
     via: Option<QuestionsClient>,
     channel: Option<crate::relay::pairing::PairingChannel>,
-    handoff: Option<(crate::questions::envelope::Sealed, u64, String)>,
+    /// The sealed keys for a confirmed iPhone or Apple Watch, the expiry of the code, the
+    /// shown name of the device, and whether it is a watch.
+    handoff: Option<(crate::questions::envelope::Sealed, u64, String, bool)>,
 }
 
 impl AddMac {
@@ -939,14 +941,16 @@ impl DesktopApp {
                 }) {
                     match result {
                         Ok(()) => {
-                            let name = add
-                                .handoff
-                                .as_ref()
-                                .map(|(_, _, name)| name.as_str())
-                                .unwrap_or("Your iPhone");
-                            let text = format!(
-                                "Connected. {name} can now show requests and answer with Face ID. Turn on request notifications on the iPhone for push alerts."
-                            );
+                            let text = match add.handoff.as_ref() {
+                                Some((_, _, name, true)) => format!(
+                                    "Connected. {} can now allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access.",
+                                    crate::questions::device_link::watch_label(name)
+                                ),
+                                Some((_, _, name, false)) => format!(
+                                    "Connected. {name} can now show requests and answer with Face ID. Turn on request notifications on the iPhone for push alerts."
+                                ),
+                                None => "Connected. Your iPhone can now show requests and answer with Face ID. Turn on request notifications on the iPhone for push alerts.".to_owned(),
+                            };
                             add.added = Some(text.clone());
                             add.handoff = None;
                             add.code = None;
@@ -956,8 +960,13 @@ impl DesktopApp {
                             self.set_ok(text);
                         }
                         Err(error) => {
+                            let device = if add.handoff.as_ref().is_some_and(|h| h.3) {
+                                "Apple Watch"
+                            } else {
+                                "iPhone"
+                            };
                             add.error = Some(format!(
-                                "The iPhone was confirmed, but its connection keys have not arrived. Keep this screen open and select Check again. {error}"
+                                "The {device} was confirmed, but its connection keys have not arrived. Keep this screen open and select Check again. {error}"
                             ))
                         }
                     }
@@ -2023,7 +2032,7 @@ impl DesktopApp {
         let Some(add) = self.sync.relay.add.as_ref() else {
             return;
         };
-        let (Some(channel), Some(client), Some((sealed, expiry, _))) =
+        let (Some(channel), Some(client), Some((sealed, expiry, ..))) =
             (&add.channel, &add.via, &add.handoff)
         else {
             return;
@@ -2221,9 +2230,13 @@ impl DesktopApp {
                     .as_ref()
                     .is_some_and(|add| add.id == id && add.via.is_some());
                 let name = shown_link_name(&device.name);
+                // The kind comes from the link that the owner confirmed (ADR 0039 §2).
+                let watch = link_is_watch(&link.device_name);
+                let device_word = if watch { "Apple Watch" } else { "iPhone" };
                 // The owner check of this confirmation covers the keys of the link: the
-                // row of an iPhone is written here, from them (relay-questions-v1
-                // section 5.2). A Mac writes its own row after its own owner check.
+                // row of an iPhone or an Apple Watch is written here, from them
+                // (relay-questions-v1 section 5.2). A Mac writes its own row after its
+                // own owner check.
                 let iphone = self.relay_register_linked(id, link, device.id);
                 if matches!(&iphone, Some(Ok(()))) {
                     let channel = self
@@ -2254,13 +2267,13 @@ impl DesktopApp {
                                             .as_ref()
                                             .map(|c| c.expires_at)
                                             .unwrap_or(kit::now());
-                                        add.handoff = Some((sealed, expiry, name.clone()));
+                                        add.handoff = Some((sealed, expiry, name.clone(), watch));
                                     }
                                     self.relay_send_handoff();
                                     return;
                                 }
                                 _ => {
-                                    self.set_err("The iPhone was confirmed, but the vault could not transfer its keys. Keep the vault unlocked and pair again with a new code.");
+                                    self.set_err(format!("The {device_word} was confirmed, but the vault could not transfer its keys. Keep the vault unlocked and pair again with a new code."));
                                     return;
                                 }
                             }
@@ -2271,6 +2284,10 @@ impl DesktopApp {
                     Some(Err(error)) => format!(
                         "Added {name} to the relay, but the vault did not keep its keys: {}",
                         call_error(error)
+                    ),
+                    Some(Ok(())) if watch => format!(
+                        "Added. {} gets the access requests of this vault and can allow one once while it is unlocked on a wrist.",
+                        crate::questions::device_link::watch_label(&name)
                     ),
                     Some(Ok(())) => format!(
                         "Added. {name} gets the questions of this vault and answers with Face ID once this vault syncs to it."
@@ -2297,17 +2314,21 @@ impl DesktopApp {
         }
     }
 
-    /// The row of a device that this Mac confirmed: an iPhone whose link carries its
-    /// answer key, in the questions team (the team of "Add an iPhone or a Mac…", or the
-    /// sync team). `None` for a link without an answer key (a Mac) or a vault that is not
-    /// open here.
+    /// The row of a device that this Mac confirmed: an iPhone or an Apple Watch whose link
+    /// carries its answer key, in the questions team (the team of "Add an iPhone or a
+    /// Mac…", or the sync team). `None` for a link without an answer key (a Mac) or a
+    /// vault that is not open here.
     fn relay_register_linked(
         &mut self,
         id: &str,
         link: &PendingLink,
         device_id: u64,
     ) -> Option<Result<(), SyncError>> {
-        split_link_device_name(&link.device_name).1?;
+        let (name, found) = split_linked_device_name(&link.device_name);
+        let kind = match found?.0 {
+            LinkedDeviceKind::Iphone => TrustedDeviceKind::Iphone,
+            LinkedDeviceKind::Watch => TrustedDeviceKind::Watch,
+        };
         let via_team = self
             .sync
             .relay
@@ -2332,8 +2353,13 @@ impl DesktopApp {
                 &link.device_name,
                 &link.public_key,
             )?;
-            let (name, _) = split_link_device_name(&link.device_name);
-            older = older_iphones(vault.trusted_devices()?, &link.public_key, &name, &team);
+            older = older_devices(
+                vault.trusted_devices()?,
+                &link.public_key,
+                &name,
+                &team,
+                kind,
+            );
             Ok(())
         });
         if matches!(&written, Some(Ok(())))
@@ -3369,10 +3395,15 @@ pub(super) fn add_mac_sheet(
             // After a confirmation: the result and Done, nothing else.
             kit::tone_note(ui, added, Tone::Good);
             if let Some((device, _)) = &older {
+                let kind = if device.kind == TrustedDeviceKind::Watch {
+                    "Apple Watch"
+                } else {
+                    "iPhone"
+                };
                 kit::paragraph(
                     ui,
                     format!(
-                        "An older iPhone '{}' is still paired. Remove it?",
+                        "An older {kind} '{}' is still paired. Remove it?",
                         device.name
                     ),
                     Font::Body,
@@ -3419,11 +3450,13 @@ pub(super) fn add_mac_sheet(
             ui.add_space(8.0);
             match &pending.safety {
                 Some(words) => {
-                    let (shown, answer_key) = split_link_device_name(&pending.device_name);
-                    let kind = if answer_key.is_some() {
-                        " (an iPhone that answers with Face ID)"
-                    } else {
-                        ""
+                    let (shown, found) = split_linked_device_name(&pending.device_name);
+                    let watch = matches!(found, Some((LinkedDeviceKind::Watch, _)));
+                    let kind = match found {
+                        Some((LinkedDeviceKind::Iphone, _)) => {
+                            " (an iPhone that answers with Face ID)"
+                        }
+                        Some((LinkedDeviceKind::Watch, _)) | None => "",
                     };
                     let bound_words = app.sync.relay.add.as_ref().and_then(|add| {
                         let channel = add.channel.as_ref()?;
@@ -3434,6 +3467,15 @@ pub(super) fn add_mac_sheet(
                             &pending.device_name,
                         )
                     });
+                    if watch {
+                        // The kind is visible before Touch ID (ADR 0039 §2).
+                        ui.label(
+                            kit::text(watch_confirm_title(&shown), Font::Headline)
+                                .color(kit::LABEL),
+                        );
+                        kit::paragraph(ui, WATCH_CONFIRM_LINE, Font::Body, kit::LABEL);
+                        ui.add_space(4.0);
+                    }
                     safety_lines(
                         ui,
                         &format!(
@@ -3504,16 +3546,46 @@ pub(super) fn add_mac_sheet(
     response.escape
 }
 
-fn older_iphones(
+/// The title of the confirmation of a watch link (ADR 0039 §2).
+pub(crate) fn watch_confirm_title(name: &str) -> String {
+    format!("Connect Apple Watch “{name}”")
+}
+
+/// What a watch can do, under [`watch_confirm_title`].
+pub(crate) const WATCH_CONFIRM_LINE: &str = "This watch can allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access.";
+
+/// Whether the `device_name` of a link ends in the marker and key of an Apple Watch.
+pub(crate) fn link_is_watch(device_name: &str) -> bool {
+    matches!(
+        split_linked_device_name(device_name).1,
+        Some((LinkedDeviceKind::Watch, _))
+    )
+}
+
+/// The name of a device of the relay for a list: the name without the answer key, with
+/// "(Apple Watch)" after the name of a watch.
+pub(crate) fn link_device_label(device_name: &str) -> String {
+    match split_linked_device_name(device_name) {
+        (name, Some((LinkedDeviceKind::Watch, _))) => {
+            crate::questions::device_link::watch_label(&name)
+        }
+        (name, _) => name,
+    }
+}
+
+/// The devices of `kind` that a new device of that kind may replace: the same name, or
+/// a device in the team. A new watch never offers to remove an iPhone, nor the reverse.
+fn older_devices(
     devices: Vec<crate::vault::TrustedDevice>,
     new_key: &[u8],
     name: &str,
     team: &str,
+    kind: TrustedDeviceKind,
 ) -> Vec<(crate::vault::TrustedDevice, String)> {
     devices
         .into_iter()
         .filter(|d| {
-            d.kind == crate::vault::TrustedDeviceKind::Iphone
+            d.kind == kind
                 && d.sign_key != new_key
                 && (d.name == name || d.relay_devices.contains_key(team))
         })
@@ -3568,7 +3640,7 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                             ui.horizontal_wrapped(|ui| {
                                 ui.add(
                                     Label::new(
-                                        kit::text(shown_link_name(&device.name), Font::Body)
+                                        kit::text(link_device_label(&device.name), Font::Body)
                                             .color(kit::LABEL),
                                     )
                                     .wrap(),
@@ -3594,7 +3666,7 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                                     .inner
                                     .clicked()
                             {
-                                ask = Some((device.id, shown_link_name(&device.name)));
+                                ask = Some((device.id, link_device_label(&device.name)));
                             }
                         });
                     }
@@ -3957,7 +4029,13 @@ mod access_repair_tests {
             make("mac", "iPhone", TrustedDeviceKind::Mac, "team", 4),
             make("new", "iPhone", TrustedDeviceKind::Iphone, "team", 5),
         ];
-        let selected = older_iphones(rows.clone(), &[5], "iPhone", "team");
+        let selected = older_devices(
+            rows.clone(),
+            &[5],
+            "iPhone",
+            "team",
+            TrustedDeviceKind::Iphone,
+        );
         assert_eq!(
             selected
                 .iter()
@@ -3966,5 +4044,58 @@ mod access_repair_tests {
             vec!["old", "other"]
         );
         assert_eq!(rows.len(), 5);
+    }
+
+    /// A new watch offers to remove an older watch only, and a new iPhone never offers
+    /// a watch (ADR 0039).
+    #[test]
+    fn a_new_watch_and_a_new_iphone_offer_only_their_own_kind() {
+        use crate::vault::TrustedDevice;
+        let make = |id: &str, kind, key: u8| TrustedDevice {
+            uuid: id.into(),
+            name: "Test".into(),
+            kind,
+            relay_devices: std::collections::BTreeMap::from([("team".into(), 1)]),
+            sign_key: vec![key],
+            answer_key: None,
+            created_at: 1,
+            updated_at: 1,
+            updated_by: "synthetic".into(),
+        };
+        let rows = vec![
+            make("phone", TrustedDeviceKind::Iphone, 1),
+            make("old-watch", TrustedDeviceKind::Watch, 2),
+            make("mac", TrustedDeviceKind::Mac, 3),
+            make("new-watch", TrustedDeviceKind::Watch, 4),
+        ];
+        let uuids = |kind, key: u8| {
+            older_devices(rows.clone(), &[key], "Test", "team", kind)
+                .into_iter()
+                .map(|r| r.0.uuid)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(uuids(TrustedDeviceKind::Watch, 4), ["old-watch"]);
+        assert_eq!(uuids(TrustedDeviceKind::Iphone, 5), ["phone"]);
+    }
+
+    #[test]
+    fn a_watch_link_shows_its_kind() {
+        let key = crate::sync::DeviceKey::generate().unwrap();
+        let watch =
+            crate::questions::device_link::watch_link_device_name("Test Watch", key.public_key())
+                .unwrap();
+        let phone =
+            crate::questions::device_link::link_device_name("Test iPhone", key.public_key())
+                .unwrap();
+        assert!(link_is_watch(&watch));
+        assert!(!link_is_watch(&phone));
+        assert!(!link_is_watch("Mac mini"));
+        assert_eq!(link_device_label(&watch), "Test Watch (Apple Watch)");
+        assert_eq!(link_device_label(&phone), "Test iPhone");
+        assert_eq!(link_device_label("Mac mini"), "Mac mini");
+        assert_eq!(
+            watch_confirm_title("Test Watch"),
+            "Connect Apple Watch “Test Watch”"
+        );
     }
 }
