@@ -1,7 +1,7 @@
 # Apassy plans
 
 Date: 2026-11-03.
-Status: the structure is accepted by the owner on 2026-11-03 (three Connect plans, this page as the one source). Prices and the open decisions in section 6 are not decided.
+Status: accepted by the owner on 2026-11-03: three Connect plans, the size of Connect Family, free relay sync until Connect, and this page as the one source. Prices and the open decisions in section 6 are not decided.
 Decisions: [ADR 0037](../adr/0037-own-relay-open-source.md) D2, D3, D7, D8, D14; [ADR 0035](../adr/0035-bouncer-hosting-and-training-choice.md) (bouncer brain hosting).
 
 This page replaces the plan split of 2026-10-13: Free = iCloud and approvals through the relay, Personal (paid) = relay sync, Team (paid) = shared vaults. Relay sync and shared vaults are not what Apassy sells. Apassy sells the hosted service, Apassy Connect.
@@ -44,7 +44,7 @@ Connect never does the way B swap on an Apassy server and never holds a team key
 | Plan | For | Billing | Adds |
 | --- | --- | --- | --- |
 | Connect Personal | One person and all of their devices | Per month | The Connect functions for one person |
-| Connect Family | Up to 6 people (proposal) | One price per month for the family | The Connect functions for each person, and shared family vaults in the blind sync store. One organizer adds and removes members. |
+| Connect Family | 4 people. Each further person costs extra. | One price per month for 4 people, plus a price per month for each further person | The Connect functions for each person, and shared family vaults in the blind sync store. One organizer adds and removes members. |
 | Connect Team | A company or a group | Per member per month | The Connect functions for each member, roles, member management, and billing per seat. Later: the enterprise track. |
 
 - Prices: not decided. Set them before stage 7, from the measured cost of each function. The hosted bouncer brain costs the most ([implementation plan 0035](../design/implementation-plan-0035.md), measured on `devbox-x86`).
@@ -56,10 +56,17 @@ Connect never does the way B swap on an Apassy server and never holds a team key
 
 | What | Now | Ends |
 | --- | --- | --- |
-| Relay sync on the hosted relay (`apassy-relay.wyderka.cc`) | Works with a team code from the operator (ADR 0022). The operator gives codes by invitation. There is no public sign-up. | Stage 4 moves relay sync users to their own sync home ("Delete the copy on the relay" exists). Stage 7 makes the hosted store part of Connect. |
+| Relay sync on the hosted relay (`apassy-relay.wyderka.cc`) | Free for everyone until stage 7 (owner decision, 2026-11-03). Today it still needs a team code from the operator (ADR 0022); the path without a code is in section 4.1. | Stage 7 makes the hosted store part of paid Connect. The apps say so two releases before, as for D14, and offer an own sync home (stage 4, free) or Connect. "Delete the copy on the relay" exists. |
 | Approvals without a code (questions-only Connect, ADR 0032) | Free | Stage 7. The apps say so two releases before (D14) and offer Tailscale (free) or Connect. |
 | Shared team vaults and way B on the hosted relay | Off since 0.5.14 (`410 team_vaults_retired`, D8) | A relay that you run yourself keeps them (`APASSY_RELAY_TEAM_VAULTS=1`). Stage 4 moves teams to their own host node. |
 | Push | Free, through the hosted Worker | Stays free: it moves to the push gateway (D7) |
+
+### 4.1 Relay sync without a code (to build)
+
+1. Relay: a setting for the vault sync size of a new Connect team (today `TeamLimits::connect()` sets `sync_bytes` to 0, so a push gets `403 plan_required`). The hosted relay sets it above 0. Existing Connect teams get the same limit with `admin limits`. Check the Connect capacity limits (50 new teams a day, 100 in total) and the disk of the VPS against that size.
+2. Mac app: "New relay copy" without a team code. Apassy makes a Connect team with the purpose `sync` and pushes the first copy. A vault that already has a Connect team for questions uses that team. The team code stays an option for a relay that needs one.
+3. Text: the sheet says that relay sync is free until Apassy Connect starts. The notice two releases before stage 7 also covers relay sync.
+4. One release of all six components. The relay goes first.
 
 ## 5. Rules for text in the apps, the site, and the docs
 
@@ -73,10 +80,10 @@ Connect never does the way B swap on an Apassy server and never holds a team key
 | # | Decision | Recommendation |
 | --- | --- | --- |
 | 1 | Prices of the three plans | Set before stage 7, from measured cost |
-| 2 | Family: the number of people, and whether members have roles | 6 people; one organizer, the others are equal members |
-| 3 | Relay sync on the hosted relay for other users before stage 4 | Keep it by invitation (operator code), with no public promise |
+| 2 | Family: whether members have roles | One organizer, the others are equal members. (Decided 2026-11-03: 4 people, each further person costs extra.) |
+| 3 | The vault sync size of a free Connect team (section 4.1) | Measure the vault sizes and the VPS disk first. (Decided 2026-11-03: relay sync is free for everyone until stage 7.) |
 
 ## 7. Follow-ups
 
-- The relay guide (`crates/apassy-relay/docs/ONBOARDING.md`, served at `/guide`) still describes how to make a team on the hosted relay. Update it with the next relay release.
+- The relay guide (`crates/apassy-relay/docs/ONBOARDING.md`, served at `/guide`) describes a relay that you run yourself (2026-11-03). It goes live with the next Worker deploy.
 - `docs/operations/relay.md` and the relay deployment notes describe Connect at stage 7 (ADR 0037, process changes).
