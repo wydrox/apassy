@@ -132,7 +132,7 @@ async function readBody(request: Request): Promise<string | undefined> {
     offset += chunk.byteLength;
   }
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
   } catch {
     return "";
   }

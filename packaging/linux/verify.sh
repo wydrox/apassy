@@ -32,7 +32,9 @@ while [ "$#" -gt 0 ]; do
         *) die "unknown argument: $1" ;;
     esac
 done
-[ -n "$dist" ] && [ -n "$arch" ] || die 'usage: verify.sh --dist DIR --arch x86_64|aarch64 [--containers]'
+if [ -z "$dist" ] || [ -z "$arch" ]; then
+    die 'usage: verify.sh --dist DIR --arch x86_64|aarch64 [--containers]'
+fi
 case "$arch" in
     x86_64) deb_arch=amd64 ;;
     aarch64) deb_arch=arm64 ;;

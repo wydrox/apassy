@@ -339,7 +339,7 @@ export async function openHandle(text: string, keys: readonly GatewayKey[], now:
   }
   let textPlain: string;
   try {
-    textPlain = new TextDecoder("utf-8", { fatal: true }).decode(plain);
+    textPlain = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(plain);
   } catch {
     return invalid;
   }

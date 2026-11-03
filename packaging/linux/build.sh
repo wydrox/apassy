@@ -44,8 +44,9 @@ while [ "$#" -gt 0 ]; do
         *) die "unknown argument: $1" ;;
     esac
 done
-[ -n "$binary" ] && [ -n "$arch" ] && [ -n "$out" ] ||
+if [ -z "$binary" ] || [ -z "$arch" ] || [ -z "$out" ]; then
     die 'usage: build.sh --binary PATH --arch x86_64|aarch64 --out DIR [--max-glibc 2.31]'
+fi
 [ -f "$binary" ] || die "no binary at $binary"
 case "$arch" in
     x86_64) deb_arch=amd64; machine='Advanced Micro Devices X86-64' ;;
