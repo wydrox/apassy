@@ -978,13 +978,19 @@ fn an_old_candidate_row_with_an_8775_url_still_works_after_29() {
     assert_eq!((summary.requests, summary.no_answer), (3, 3));
     place(&fx, id);
     let calls = fx.active.calls();
-    assert_eq!(decisions(&fx), BASELINE);
+    // Without the run that the owner denies: the candidate answers "run" to it, and the
+    // shadow gate keeps a candidate that would allow an owner denial from promotion.
+    let placed: Vec<String> = [SEQUENCE[0], SEQUENCE[1], SEQUENCE[3]]
+        .iter()
+        .map(|script| outcome(&run(&fx, script)))
+        .collect();
+    assert_eq!(placed, [BASELINE[0], BASELINE[1], BASELINE[3]]);
     assert_eq!(
         shadow_heads(&fx.active.bodies_since(calls)),
-        vec![Some(SHA.to_owned()); 3]
+        vec![Some(SHA.to_owned()); 2]
     );
-    let summary = wait_for_rows(&fx, id, 6);
-    assert_eq!((summary.requests, summary.no_answer), (6, 3));
+    let summary = wait_for_rows(&fx, id, 5);
+    assert_eq!((summary.requests, summary.no_answer), (5, 3));
     shadow_rows(&fx, id, 100, 0, 0);
     promote(&fx, id, CANDIDATE).expect("promoted");
     let activation = with_vault(&fx, |vault| {
