@@ -401,10 +401,10 @@ func integrationTests(binary: String) {
     expect(errorCode(after.flatMap { readAnswer($0) }) == "locked", "the bridge works after a line that is too long")
     if let after { close(after) }
 
-    // A declared frame above 64 KiB.
+    // A declared frame above 128 KiB (0x00020001 bytes).
     if let fd = connectUnix(bridge.socket) {
-        _ = writeAll(fd, Data([0, 1, 0, 1]))
-        expect(errorCode(readAnswer(fd)) == "invalid_input", "a frame above 64 KiB gets invalid_input")
+        _ = writeAll(fd, Data([0, 2, 0, 1]))
+        expect(errorCode(readAnswer(fd)) == "invalid_input", "a frame above 128 KiB gets invalid_input")
         close(fd)
     }
 

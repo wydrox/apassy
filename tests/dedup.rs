@@ -244,16 +244,18 @@ fn identical_secrets_group_within_a_kind_and_never_without_a_value() {
 fn differences_name_labels_and_never_values() {
     let dir = TempDir::new().unwrap();
     let mut vault = vault(&dir, "differences.db");
+    // Same secret values, so one group; the visible detail, the notes, and the tags
+    // differ. (A different hidden detail would be another secret value: no group.)
     let mut first = api_key("Stripe", "SYNTH-DUP-token");
     first
         .fields
-        .push(field(&detail("Org ID"), "SYNTH-DUP-org-one", true));
+        .push(field(&detail("Org ID"), "SYNTH-DUP-org-one", false));
     first.notes = "First note".to_owned();
     first.tags = vec!["billing".to_owned()];
     let mut second = api_key("Stripe import", "SYNTH-DUP-token");
     second
         .fields
-        .push(field(&detail("Org ID"), "SYNTH-DUP-org-two", true));
+        .push(field(&detail("Org ID"), "SYNTH-DUP-org-two", false));
     second.notes = "Second note".to_owned();
     second.tags = vec!["1password".to_owned()];
     add(&mut vault, first);

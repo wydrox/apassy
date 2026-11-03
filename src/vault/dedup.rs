@@ -21,7 +21,8 @@
 //!
 //! - The kept item keeps its title, kind, folder, fields, values, passkey, and agent
 //!   settings. A field of another item that it lacks is added. A field with another
-//!   value stays, and the other value is added as the detail "Previous <label>" with the
+//!   value stays, and the other value is added as the detail "Previous <label>" (a
+//!   built-in label in lowercase, for example "Previous password") with the
 //!   same secret flag. Equal values are not repeated; website details are joined.
 //! - Notes are joined (distinct notes, a blank line between them); tags are joined. A
 //!   merge over a limit of the vault or of the item forms (notes, tags, details, fields,
@@ -267,6 +268,13 @@ fn field_label(name: &str) -> String {
         "project" => "Project".to_owned(),
         other => custom_detail_label(other).unwrap_or_else(|| other.to_owned()),
     }
+}
+
+/// The label after "Previous " in the detail that keeps another value of a field: a
+/// built-in label in lowercase ("Previous password", "Previous private key"), a custom
+/// detail label as it is ("Previous Org ID").
+fn previous_label(name: &str) -> String {
+    custom_detail_label(name).unwrap_or_else(|| field_label(name).to_lowercase())
 }
 
 /// The built-in field names of the item forms.
@@ -768,7 +776,7 @@ fn add_field(
             if fields[index].value.expose() == field.value.expose() {
                 return Ok(());
             }
-            let base = format!("Previous {label}");
+            let base = format!("Previous {}", previous_label(&field.name));
             let base = cut(&base, MAX_DETAIL_LABEL_BYTES);
             let repeated = fields.iter().any(|other| {
                 other.secret == field.secret
