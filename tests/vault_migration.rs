@@ -2884,14 +2884,14 @@ fn build_before_32(path: &Path) -> u64 {
         })
         .expect("item")
         .id;
-    vault
-        .set_short_lived(
-            item,
-            apassy::vault::ShortLivedKind::AwsSts,
-            "{}",
-            1_700_000_000,
-        )
-        .expect("source");
+    let (mut vault, _) = crate::common::make_source(
+        vault,
+        PASS,
+        item,
+        apassy::vault::ShortLivedKind::AwsSts,
+        "{}",
+        1_700_000_000,
+    );
     vault.lock().expect("lock");
     drop(vault);
     let conn = rusqlite::Connection::open(path).expect("open");
@@ -2921,14 +2921,14 @@ fn schema_32_adds_short_lived_and_member_key() {
     assert_eq!(vault.search("").expect("search").len(), 1);
     assert_eq!(vault.short_lived(item).expect("read"), None);
     assert!(vault.member_keys().expect("read").is_empty());
-    vault
-        .set_short_lived(
-            item,
-            apassy::vault::ShortLivedKind::AwsSts,
-            r#"{"region":"eu-central-1"}"#,
-            1_700_000_100,
-        )
-        .expect("a source after the migration");
+    let (vault, _) = crate::common::make_source(
+        vault,
+        PASS,
+        item,
+        apassy::vault::ShortLivedKind::AwsSts,
+        r#"{"region":"eu-central-1"}"#,
+        1_700_000_100,
+    );
     drop(vault);
     assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 

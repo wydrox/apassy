@@ -512,8 +512,10 @@ fn providers_of_cli_tools_get_the_real_value() {
     }
 }
 
-/// S6-14: an AWS key id and its secret in one paste make one item, a source of
-/// temporary credentials (way C on), bound to `AWS_ACCESS_KEY_ID`.
+/// S6-14: an AWS key id and its secret in one paste make one item with a source row.
+/// While runs make no lease (A-H1) way C is off and the item is a static key: the
+/// variable is `AWS_SECRET_ACCESS_KEY` ← `secret_access_key`, and a run adds
+/// `AWS_ACCESS_KEY_ID` ← `access_key_id`.
 #[test]
 fn an_aws_pair_becomes_one_short_lived_item() {
     use apassy::vault::ShortLivedKind;
@@ -541,9 +543,14 @@ fn an_aws_pair_becomes_one_short_lived_item() {
             names,
             [("access_key_id", false), ("secret_access_key", true)]
         );
-        // No part of the secret is in the title or the result line.
+        // No part of the secret is in the title or the result line; the line names
+        // both variables of a run.
         let line = apassy::vault::detect::summary_line(&detected);
         assert!(!line.contains(&secret) && !detected.title.contains(&secret));
+        assert!(
+            line.contains("AWS_ACCESS_KEY_ID · AWS_SECRET_ACCESS_KEY"),
+            "{line}"
+        );
 
         let summary = vault.add_detected(&detected, None, None).expect("add");
         let row = vault
@@ -551,11 +558,27 @@ fn an_aws_pair_becomes_one_short_lived_item() {
             .unwrap()
             .expect("a source row");
         assert_eq!(row.kind, ShortLivedKind::AwsSts);
-        assert!(row.enabled, "way C is on");
+        assert_eq!(
+            row.enabled,
+            apassy::vault::LEASES_IN_RUNS,
+            "way C waits for unit F"
+        );
+        assert!(!row.enabled);
         assert_eq!(row.settings_json, "{}");
         let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
         assert_eq!(binding.field, "secret_access_key");
+        assert_ne!(
+            binding.env_name, "AWS_ACCESS_KEY_ID",
+            "never the secret as the key id"
+        );
         assert_eq!(binding.delivery, EnvDelivery::Value);
+        // A run gets the key id too, from its own field.
+        let extra = vault.run_extra_bindings(summary.id).expect("static form");
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0].env_name, "AWS_ACCESS_KEY_ID");
+        assert_eq!(extra[0].field, "access_key_id");
+        assert_eq!(extra[0].delivery, EnvDelivery::Value);
+        assert!(!vault.run_needs_lease(summary.id).unwrap());
         let source = vault.short_lived_source(summary.id).unwrap();
         assert_eq!(source.field("access_key_id").unwrap().expose(), id);
         // The owner can edit the item (a `Custom` item needs no `token` field).
@@ -576,11 +599,11 @@ fn an_aws_pair_becomes_one_short_lived_item() {
         assert!(vault.short_lived_source(summary.id).is_ok());
         vault.delete(summary.id, edited.revision).unwrap();
     }
-    // The first pair took the variable name of the contract.
+    // The pair takes the static variable of the secret.
     let summary = vault.add_detected(&one(&texts[0]), None, None).unwrap();
     assert_eq!(
         vault.env_binding(summary.id).unwrap().unwrap().env_name,
-        "AWS_ACCESS_KEY_ID"
+        "AWS_SECRET_ACCESS_KEY"
     );
 
     // A key id alone or a secret alone stays a static key; two pairs stay four items.
@@ -602,9 +625,11 @@ fn an_aws_pair_becomes_one_short_lived_item() {
     assert!(detect(&temporary).iter().all(|d| d.short_lived.is_none()));
 }
 
-/// S6-14: a service-account key JSON with its private key and token URI makes one item,
-/// a source of Google access tokens, bound to `CLOUDSDK_AUTH_ACCESS_TOKEN`. A JSON
-/// without them stays the static key it was.
+/// S6-14: a service-account key JSON with its private key and token URI makes one item
+/// with a source row. While runs make no lease (A-H1) way C is off, and the key JSON has
+/// the static delivery of a pasted key JSON before unit D (the variable of the `gcp`
+/// pack, the real value), never `CLOUDSDK_AUTH_ACCESS_TOKEN`. A JSON without them stays
+/// the static key it was.
 #[test]
 fn a_service_account_json_becomes_a_short_lived_item() {
     use apassy::vault::ShortLivedKind;
@@ -618,9 +643,12 @@ fn a_service_account_json_becomes_a_short_lived_item() {
     );
     assert_eq!(detected.kind, CredentialKind::Custom);
     assert_eq!(detected.provider.as_deref(), Some("gcp"));
+    let partial = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","client_email":"bot@demo-project.iam.gserviceaccount.com"}"#;
+    // The variable of a pasted key JSON before unit D.
+    assert_eq!(detected.env_name, one(partial).env_name);
     assert_eq!(
         detected.env_name.as_deref(),
-        Some("CLOUDSDK_AUTH_ACCESS_TOKEN")
+        Some(apassy::vault::GOOGLE_KEY_VARIABLE)
     );
     assert_eq!(detected.fields.len(), 1);
     assert_eq!(detected.fields[0].name, "key_json");
@@ -632,10 +660,12 @@ fn a_service_account_json_becomes_a_short_lived_item() {
         .unwrap()
         .expect("a source row");
     assert_eq!(row.kind, ShortLivedKind::GoogleServiceAccount);
-    assert!(row.enabled);
+    assert!(!row.enabled, "way C waits for unit F");
     let binding = vault.env_binding(summary.id).unwrap().unwrap();
-    assert_eq!(binding.env_name, "CLOUDSDK_AUTH_ACCESS_TOKEN");
+    assert_eq!(binding.env_name, "GOOGLE_API_KEY");
     assert_eq!(binding.field, "key_json");
+    assert_eq!(binding.delivery, EnvDelivery::Value);
+    assert!(vault.run_extra_bindings(summary.id).unwrap().is_empty());
     assert_eq!(
         vault
             .short_lived_source(summary.id)
@@ -661,6 +691,99 @@ fn a_service_account_json_becomes_a_short_lived_item() {
         .expect("an edit of the source item");
     assert!(vault.short_lived_source(summary.id).is_ok());
 
-    let partial = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","client_email":"bot@demo-project.iam.gserviceaccount.com"}"#;
     assert_eq!(one(partial).short_lived, None);
+}
+
+/// A-H1 (c) and (d): with way C on, a run of the source fails with `lease_failed`
+/// (no fallback to the long-lived key) while runs make no lease. "Stop temporary
+/// credentials" gives the static form: a binding in the layout of a lease
+/// (`AWS_ACCESS_KEY_ID` or `CLOUDSDK_AUTH_ACCESS_TOKEN` for the long-lived secret)
+/// becomes `AWS_SECRET_ACCESS_KEY` or `GOOGLE_API_KEY`, and a binding that the owner chose
+/// stays. A static source bound in the layout of a lease is refused, not delivered.
+#[test]
+fn stopping_temporary_credentials_gives_the_static_variables() {
+    use apassy::vault::RunBindingError;
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    let aws = vault
+        .add_detected(
+            &one(&format!(
+                "AWS_ACCESS_KEY_ID={}\nAWS_SECRET_ACCESS_KEY={}\n",
+                fake("AKIA", 16),
+                fake("", 40)
+            )),
+            None,
+            None,
+        )
+        .unwrap()
+        .id;
+    let key = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","private_key":"-----BEGIN PRIVATE KEY-----\nU1lOVEhFVElD\n-----END PRIVATE KEY-----\n","client_email":"bot@demo-project.iam.gserviceaccount.com","token_uri":"https://oauth2.googleapis.com/token"}"#;
+    let google = vault.add_detected(&one(key), None, None).unwrap().id;
+    for (item, lease_name, field, static_name) in [
+        (
+            aws,
+            "AWS_ACCESS_KEY_ID",
+            "secret_access_key",
+            "AWS_SECRET_ACCESS_KEY",
+        ),
+        (
+            google,
+            "CLOUDSDK_AUTH_ACCESS_TOKEN",
+            "key_json",
+            "GOOGLE_API_KEY",
+        ),
+    ] {
+        // Way C on: no lease in runs, and no long-lived value instead.
+        vault
+            .set_short_lived_enabled(item, true, 1_700_000_000)
+            .unwrap();
+        assert!(vault.run_needs_lease(item).unwrap());
+        let error = vault.run_extra_bindings(item).unwrap_err();
+        assert_eq!(error, RunBindingError::LeaseFailed);
+        assert_eq!(error.code(), "lease_failed");
+        assert!(error.message(item).contains("not given instead"));
+        // The layout of a lease (the binding that detection gives with leases).
+        vault
+            .set_env_binding_with(item, lease_name, field, &EnvDelivery::Value)
+            .unwrap();
+        assert_eq!(
+            vault.run_extra_bindings(item).unwrap_err(),
+            RunBindingError::LeaseFailed
+        );
+        // Stop: the static form, with a history event.
+        vault
+            .set_short_lived_enabled(item, false, 1_700_000_100)
+            .unwrap();
+        let binding = vault.env_binding(item).unwrap().unwrap();
+        assert_eq!(binding.env_name, static_name);
+        assert_eq!(binding.field, field);
+        assert_eq!(binding.delivery, EnvDelivery::Value);
+        assert!(event_kinds(&vault, item).contains(&ItemEventKind::Variable));
+        assert!(!vault.run_needs_lease(item).unwrap());
+        assert!(vault.run_extra_bindings(item).is_ok());
+        // A static source bound in the layout of a lease again is refused.
+        vault
+            .set_env_binding_with(item, lease_name, field, &EnvDelivery::Value)
+            .unwrap();
+        assert!(matches!(
+            vault.run_extra_bindings(item).unwrap_err(),
+            RunBindingError::NeedsField(_)
+        ));
+        // A name that the owner chose stays through on and off.
+        let chosen = format!("OWNER_CHOSEN_{item}");
+        vault
+            .set_env_binding_with(item, &chosen, field, &EnvDelivery::Value)
+            .unwrap();
+        vault
+            .set_short_lived_enabled(item, true, 1_700_000_200)
+            .unwrap();
+        vault
+            .set_short_lived_enabled(item, false, 1_700_000_300)
+            .unwrap();
+        assert_eq!(vault.env_binding(item).unwrap().unwrap().env_name, chosen);
+    }
+    let extra = vault.run_extra_bindings(aws).unwrap();
+    assert_eq!(extra[0].env_name, "AWS_ACCESS_KEY_ID");
+    assert_eq!(extra[0].field, "access_key_id");
+    assert!(vault.run_extra_bindings(google).unwrap().is_empty());
 }

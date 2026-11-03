@@ -1257,6 +1257,7 @@ fn the_relay_switch_needs_the_owner_check_and_off_needs_none() {
             public_key: key.public_key().to_vec(),
             key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
             created_at: 0,
+            account_key: false,
         })
         .expect("relay row");
     let availability = |app: &DesktopApp| {
@@ -1486,6 +1487,7 @@ fn devices_list_the_team_and_revoke_needs_the_owner_check() {
             public_key: key.public_key().to_vec(),
             key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
             created_at: 0,
+            account_key: false,
         })
         .expect("relay row");
 

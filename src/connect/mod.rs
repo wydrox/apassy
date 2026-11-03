@@ -31,8 +31,8 @@ pub mod words;
 use std::fmt;
 
 pub use account::{
-    AccountState, Clock, ConnectAccount, DeviceLink, JoinPoll, JoinRequest, PendingJoin,
-    RevokeOutcome, account_file, drop_stale_account_rows, forget_this_device,
+    AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest, PendingJoin,
+    RevokeOutcome, account_file, drop_account_rows, drop_stale_account_rows, forget_this_device,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, ConnectClient, DeviceView, GroupView, PlanView,
@@ -108,6 +108,8 @@ pub enum ConnectError {
     TagRefused,
     /// The Keychain holds no account key for this Mac.
     NoDeviceKey,
+    /// The account key left memory with a sign-out (a lock): read it again first.
+    SignedOut,
     /// The account key cannot be read any more (the fingerprints changed), or another
     /// key is in the Keychain than the account file names.
     KeyLost,
@@ -169,6 +171,9 @@ impl fmt::Display for ConnectError {
             Self::BadAnswer => "Apassy Connect gave an answer that Apassy does not accept.",
             Self::TagRefused => "The account key of this Mac does not sign this.",
             Self::NoDeviceKey => "This Mac has no Apassy Connect key.",
+            Self::SignedOut => {
+                "Apassy Connect is signed out on this Mac. Unlock Apassy and try again."
+            }
             Self::KeyLost => {
                 "This Mac's Apassy Connect key is gone (the Touch ID fingerprints changed). Add this Mac again from another device, or recover the account."
             }

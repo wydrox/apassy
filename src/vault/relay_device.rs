@@ -75,6 +75,11 @@ pub struct RelayDevice {
     pub key_pkcs8: Zeroizing<Vec<u8>>,
     /// Unix time when the row was written.
     pub created_at: u64,
+    /// The row is a vault store of Apassy Connect (`key_source = 'account'`, schema 34):
+    /// read from the column, never from the length of the key. `false` for a row that
+    /// keeps its own key, and for every identity that a caller stores with
+    /// [`Vault::set_relay_device`].
+    pub account_key: bool,
 }
 
 impl fmt::Debug for RelayDevice {
@@ -92,12 +97,13 @@ impl RelayDevice {
     /// The shape of a row: a valid key of its own, or no key for an account row.
     fn is_valid(&self) -> bool {
         if self.uses_account_key() {
-            valid_account_identity(
-                &self.relay_url,
-                &self.team_id,
-                self.device_id,
-                &self.public_key,
-            )
+            self.key_pkcs8.is_empty()
+                && valid_account_identity(
+                    &self.relay_url,
+                    &self.team_id,
+                    self.device_id,
+                    &self.public_key,
+                )
         } else {
             valid_relay_identity(
                 &self.relay_url,
@@ -109,10 +115,11 @@ impl RelayDevice {
         }
     }
 
-    /// True for a vault store of Apassy Connect (schema 34): no private key here; the
-    /// account device key of this Mac signs. See the module documentation.
+    /// True for a vault store of Apassy Connect (schema 34, `key_source = 'account'`):
+    /// no private key here; the account device key of this Mac signs. See the module
+    /// documentation.
     pub fn uses_account_key(&self) -> bool {
-        self.key_pkcs8.is_empty()
+        self.account_key
     }
 }
 
@@ -204,9 +211,15 @@ impl Vault {
     /// of Apassy Connect the key is empty ([`RelayDevice::uses_account_key`]): sign with
     /// the account device key, after checking that its public key is `public_key`.
     pub fn relay_device(&self) -> VaultResult<Option<RelayDevice>> {
-        let Some(membership) = sync_membership(self.conn_ref()?)? else {
+        let conn = self.conn_ref()?;
+        let Some(membership) = sync_membership(conn)? else {
             return Ok(None);
         };
+        let source: String = storage(conn.query_row(
+            "SELECT key_source FROM relay_membership WHERE team_id = ?1",
+            [&membership.team_id],
+            |row| row.get(0),
+        ))?;
         let device = RelayDevice {
             relay_url: membership.relay_url,
             team_id: membership.team_id,
@@ -214,6 +227,7 @@ impl Vault {
             public_key: membership.public_key,
             key_pkcs8: membership.key_pkcs8,
             created_at: membership.created_at,
+            account_key: source == super::schema34::KEY_SOURCE_ACCOUNT,
         };
         if device.is_valid() {
             Ok(Some(device))
@@ -230,7 +244,7 @@ impl Vault {
     /// is now; `device.created_at` is ignored. A value of a bad shape, or no private key
     /// (an account row is [`Vault::set_account_relay_device`]), is `InvalidInput`.
     pub fn set_relay_device(&mut self, device: &RelayDevice) -> VaultResult<()> {
-        if device.key_pkcs8.is_empty() || !device.is_valid() {
+        if device.account_key || device.key_pkcs8.is_empty() || !device.is_valid() {
             return Err(err(VaultErrorKind::InvalidInput));
         }
         self.store_sync_identity(
@@ -367,6 +381,7 @@ mod tests {
             public_key,
             key_pkcs8: Zeroizing::new(vec![1u8; 138]),
             created_at: 0,
+            account_key: false,
         }
     }
 
@@ -406,6 +421,11 @@ mod tests {
             },
             RelayDevice {
                 key_pkcs8: Zeroizing::new(Vec::new()),
+                ..device()
+            },
+            // An account row never comes through the path of a row with its own key.
+            RelayDevice {
+                account_key: true,
                 ..device()
             },
         ] {

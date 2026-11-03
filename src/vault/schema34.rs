@@ -6,8 +6,10 @@
 //!   P-256 key in `key_pkcs8`, as before. `account` is a vault store of Apassy Connect: the
 //!   row names the team, the device number, and the public key, and holds no private key
 //!   (`key_pkcs8` is empty). The account device key of this Mac, one Keychain item
-//!   outside every vault (`crate::connect::device_key`), signs for it. A `CHECK` keeps a
-//!   private key out of an `account` row.
+//!   outside every vault (`crate::connect::device_key`), signs for it. A `CHECK` holds
+//!   both directions: a `vault` row has a key, and an `account` row has none, so the
+//!   column and the key never disagree (`RelayDevice::uses_account_key` reads the
+//!   column).
 //!
 //! The plan names the column `relay_device.key_source`; schema 19 moved the rows of
 //! `relay_device` to `relay_membership` and dropped that table, so the column is on
@@ -46,10 +48,12 @@ pub(super) const KEY_SOURCE_VAULT: &str = "vault";
 /// The stored name of a row that signs with the Connect account device key.
 pub(super) const KEY_SOURCE_ACCOUNT: &str = "account";
 
-/// The column of schema 34. An `account` row has an empty `key_pkcs8`.
+/// The column of schema 34. A `vault` row has a `key_pkcs8`, an `account` row an empty
+/// one.
 const SCHEMA_V34_SQL: &str = "
 ALTER TABLE relay_membership ADD COLUMN key_source TEXT NOT NULL DEFAULT 'vault'
-    CHECK (key_source = 'vault' OR (key_source = 'account' AND length(key_pkcs8) = 0));
+    CHECK ((key_source = 'vault' AND length(key_pkcs8) > 0)
+        OR (key_source = 'account' AND length(key_pkcs8) = 0));
 ";
 
 /// What `verify_expected_columns_in` reads for schema 34 and later.
@@ -191,9 +195,11 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("new.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        // The check of the column refuses a key in an account row and an unknown source.
+        // The check of the column refuses a key in an account row, a vault row without
+        // a key, and an unknown source.
         for (source, key) in [
             (KEY_SOURCE_ACCOUNT, vec![1u8; 138]),
+            (KEY_SOURCE_VAULT, Vec::new()),
             ("keychain", Vec::new()),
         ] {
             assert!(
@@ -218,6 +224,15 @@ mod tests {
             [public_key(9)],
         )
         .unwrap();
+        // Neither direction can change on its own later.
+        for change in [
+            "UPDATE relay_membership SET key_source = 'vault' WHERE team_id = 't_bbbbbbbbbb'",
+            "UPDATE relay_membership SET key_pkcs8 = X'01' WHERE team_id = 't_bbbbbbbbbb'",
+        ] {
+            assert!(conn.execute(change, []).is_err(), "{change}");
+        }
+        let read = vault.relay_device().unwrap().expect("the account row");
+        assert!(read.uses_account_key());
     }
 
     #[test]

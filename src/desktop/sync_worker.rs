@@ -1211,6 +1211,7 @@ mod tests {
                 public_key: key.public_key().to_vec(),
                 key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
                 created_at: 0,
+                account_key: false,
             })
             .expect("row");
         // As the app builds it from the vault list (`relay_of`).

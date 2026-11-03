@@ -1,6 +1,6 @@
 # Trust model
 
-Date: 2026-11-02. Updated 2026-11-03: cloud agents through Tailscale Funnel; Apassy Connect as planned for stage 7; the node over the tailnet and the push gateway (planned, contracts [node-pairing-v1](../contracts/node-pairing-v1.md) and [push-gateway-v1](../contracts/push-gateway-v1.md)). Decision:
+Date: 2026-11-02. Updated 2026-11-03: way C without leases in runs (0.5.17), the accepted risk of a synced way C switch, the account device key, and the codeless relay copies; cloud agents through Tailscale Funnel; Apassy Connect as planned for stage 7; the node over the tailnet and the push gateway (planned, contracts [node-pairing-v1](../contracts/node-pairing-v1.md) and [push-gateway-v1](../contracts/push-gateway-v1.md)). Decision:
 [ADR 0037](../adr/0037-own-relay-open-source.md). This page says who can see what. Update it in the
 same change as any code that changes an answer here.
 
@@ -37,6 +37,22 @@ Apache-2.0 and builds from this repository.
   2025).
 - Tailscale Funnel, when a user turns it on, exposes the node's agent endpoints to the internet,
   behind agent tokens (next section).
+- **Accepted: a synced copy can switch temporary credentials (way C).** A device that has the vault
+  key (it opened the vault with the passphrase) can push a copy that turns way C of a source item on
+  or off, or changes its settings (the role, the scopes, the token and revoke URLs), and this Mac
+  merges it without an owner check here. That is the same power as replacing the long-lived secret
+  of the item, which such a device already has. The owner checks `ChangeDelivery` and
+  `ChangeShortLivedSettings` guard the changes made on this Mac. A merge conflict keeps way C on.
+
+## Temporary credentials (way C) in 0.5.17
+
+Runs make no lease yet (plan s6 unit F; `LEASES_IN_RUNS` is false). A pasted AWS pair or Google
+service-account key becomes an item with a `short_lived` row that is off: runs get the long-lived
+key itself, AWS as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, Google as the key JSON in
+`GOOGLE_API_KEY` (never in `CLOUDSDK_AUTH_ACCESS_TOKEN`). A run of an item whose way C is on fails
+with `lease_failed` before the owner is asked; no run path gives the long-lived key, a placeholder of
+it, or an older lease instead. Turning way C off needs a fresh owner check on this Mac; making an
+existing item a source needs the owner check of its exact settings.
 
 ## Cloud agents through Tailscale Funnel
 
@@ -98,6 +114,22 @@ the contracts allow, and it becomes true when units C1 to C5 ship. The security 
 | Fallback F1 (not chosen) | — | If the owner chose it, Cloudflare and Connect would end the cloud agent's TLS and see its requests (the bearer token, placeholders, session keys), never values | Not in effect. Choosing it changes this table and the Funnel parity of the ingress row |
 
 The iPhone shows the plan only; it has no purchase, link, or price (connect-billing-v1 section 10).
+
+**The account device key** (connect-account-v1 section 5) is a software P-256 key in the Keychain of
+each device (this device only, not synchronizable, behind Touch ID), not a Secure Enclave key yet.
+Apassy reads it into memory only to sign the seven messages of section 5, and drops it from memory
+when the vault locks and at a sign-out. A change of the Touch ID fingerprints deletes it: the device
+is then no longer a device of its account, and the owner adds it again from another device or
+recovers the account with the recovery code. The vault rows that sign with it go only after the
+device forgot the account (a revoke of it, a deletion, "Forget this device") or Connect answered
+`401` to a fresh sign-in; a missing or unreadable account file removes nothing. Adding a device to a
+vault store and deleting a vault store need a fresh owner check on this Mac, as adding or revoking
+an account device does.
+
+**Relay copies without a code (plan s7 S0).** The hosted relay gets the team name `Vault` and the
+device name `Mac` (or `iPhone`) of a codeless relay copy, never the names that the owner gave them;
+the vault keeps its own names. A Connect team pushes at most 30 snapshots and 512 MiB of them an
+hour.
 
 ## The hosted relay today (until ADR 0037 stage 7)
 

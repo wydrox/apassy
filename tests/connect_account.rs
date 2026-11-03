@@ -19,8 +19,9 @@ use apassy::connect::device_key::{
 use apassy::connect::entitlement::{self, EntitlementError, EntitlementKey, Feature};
 use apassy::connect::{
     AccountSigner, AccountState, ConnectAccount, ConnectClient, ConnectError, DeviceKeyStore,
-    JoinPoll, JoinRequest, LinkCode, MemoryKeyStore, RecoveryCode, account_file,
-    drop_stale_account_rows, forget_this_device, link_hash, safety_words, same_safety_words,
+    Forgotten, JoinPoll, JoinRequest, LinkCode, MemoryKeyStore, RecoveryCode, account_file,
+    drop_account_rows, drop_stale_account_rows, forget_this_device, link_hash, safety_words,
+    same_safety_words,
 };
 use apassy::sync::{DeviceKey, HeadFields, NO_PREVIOUS, decode_b64u, sha256_hex, verify_signature};
 use apassy::vault::Vault;
@@ -121,7 +122,7 @@ fn join(
     assert_eq!(pending.len(), 1);
     let (proof, epoch) = owner.proof(pending[0].owner_action(&account.state().account_id));
     account
-        .confirm_join(&link, &pending[0], &proof, &epoch)
+        .confirm_join(&link, &pending[0], proof, &epoch)
         .expect("confirm");
     match request.poll().expect("poll") {
         JoinPoll::Confirmed(joined) => *joined,
@@ -384,7 +385,7 @@ fn creating_an_account_keeps_the_key_in_the_store_and_no_secret_in_the_file() {
     );
     assert_eq!(
         connect.known_keys(),
-        [account.signer().public_key().to_vec()]
+        [account.signer().unwrap().public_key().to_vec()]
     );
     // The recovery code is never sent; only its hash.
     let words = recovery.words();
@@ -436,7 +437,10 @@ fn creating_an_account_keeps_the_key_in_the_store_and_no_secret_in_the_file() {
     let opened = ConnectAccount::open(&a.store, &a.path)
         .unwrap()
         .expect("account");
-    assert_eq!(opened.signer().public_key(), account.signer().public_key());
+    assert_eq!(
+        opened.signer().unwrap().public_key(),
+        account.signer().unwrap().public_key()
+    );
     assert_eq!(
         ConnectAccount::create(client(&connect), &a.store, &a.path, "Rafal", "Mac").unwrap_err(),
         ConnectError::AccountExists
@@ -546,7 +550,7 @@ fn adding_a_device_needs_the_owner_check_and_both_sides_show_the_same_words() {
     });
     assert_eq!(
         account
-            .confirm_join(&link, join, &wrong, &epoch)
+            .confirm_join(&link, join, wrong, &epoch)
             .unwrap_err(),
         ConnectError::OwnerCheck(ProofRefusal::WrongAction)
     );
@@ -556,7 +560,7 @@ fn adding_a_device_needs_the_owner_check_and_both_sides_show_the_same_words() {
     if changed.words != join.words {
         assert_eq!(
             account
-                .confirm_join(&link, &changed, &proof, &epoch)
+                .confirm_join(&link, &changed, proof, &epoch)
                 .unwrap_err(),
             ConnectError::WordsMismatch
         );
@@ -567,7 +571,7 @@ fn adding_a_device_needs_the_owner_check_and_both_sides_show_the_same_words() {
     // The right proof adds exactly the key of the words.
     let (proof, epoch) = owner.proof(join.owner_action(&account_id));
     let added = account
-        .confirm_join(&link, join, &proof, &epoch)
+        .confirm_join(&link, join, proof, &epoch)
         .expect("confirm");
     assert_eq!(added.name, "iPhone");
     let joined = match request.poll().unwrap() {
@@ -657,7 +661,7 @@ fn a_revoked_device_drops_its_token_and_its_rows() {
     let (mut account, _) = create(&connect, &a);
     let mut phone = join(&connect, &mut account, &b, &owner);
     phone.view().expect("signed in");
-    let phone_key = phone.signer().public_key().to_vec();
+    let phone_key = phone.signer().unwrap().public_key().to_vec();
     owner.with_vault(|vault| {
         vault
             .set_account_relay_device(&connect.url, "t_aaaaaaaaaa", 2, &phone_key)
@@ -674,20 +678,20 @@ fn a_revoked_device_drops_its_token_and_its_rows() {
     // The revoke needs its own proof.
     let (wrong, epoch) = owner.proof(account.delete_action());
     assert!(matches!(
-        account.revoke(&target, &wrong, &epoch),
+        account.revoke(&target, wrong, &epoch),
         Err(ConnectError::OwnerCheck(ProofRefusal::WrongAction))
     ));
     let (proof, epoch) = owner.proof(account.revoke_action(&target));
-    let outcome = account.revoke(&target, &proof, &epoch).expect("revoke");
+    let outcome = account.revoke(&target, proof, &epoch).expect("revoke");
     assert!(!outcome.this_device);
 
     // The revoked device: its token is dropped at the next call.
     assert_eq!(phone.view().unwrap_err(), ConnectError::Revoked);
     assert!(!phone.is_signed_in());
-    forget_this_device(&b.store, &b.path).unwrap();
+    let forgotten = forget_this_device(&b.store, &b.path).unwrap();
     assert!(!b.store.has_key());
     assert!(!b.path.exists());
-    let removed = owner.with_vault(|vault| drop_stale_account_rows(vault, None).unwrap());
+    let removed = owner.with_vault(|vault| drop_account_rows(vault, &forgotten).unwrap());
     assert_eq!(removed, 1);
     assert!(owner.with_vault(|vault| vault.relay_device().unwrap().is_none()));
     assert_eq!(connect.live_devices(&account.state().account_id).len(), 1);
@@ -700,7 +704,7 @@ fn only_rows_of_another_key_are_stale() {
     let owner = owner();
     let a = device();
     let (account, _) = create(&connect, &a);
-    let key = account.signer().public_key().to_vec();
+    let key = account.signer().unwrap().public_key().to_vec();
     owner.with_vault(|vault| {
         vault
             .set_account_relay_device(&connect.url, "t_aaaaaaaaaa", 1, &key)
@@ -708,7 +712,7 @@ fn only_rows_of_another_key_are_stale() {
     });
     let state = account.state().clone();
     assert_eq!(
-        owner.with_vault(|vault| drop_stale_account_rows(vault, Some(&state)).unwrap()),
+        owner.with_vault(|vault| drop_stale_account_rows(vault, &state).unwrap()),
         0
     );
     let mut point = vec![4];
@@ -719,7 +723,7 @@ fn only_rows_of_another_key_are_stale() {
             .unwrap();
     });
     assert_eq!(
-        owner.with_vault(|vault| drop_stale_account_rows(vault, Some(&state)).unwrap()),
+        owner.with_vault(|vault| drop_stale_account_rows(vault, &state).unwrap()),
         1
     );
 }
@@ -816,14 +820,14 @@ fn deleting_the_account_needs_the_owner_check() {
     });
     let reopened = ConnectAccount::open(&a.store, &a.path).unwrap().unwrap();
     assert_eq!(
-        reopened.delete(&a.store, &wrong, &epoch).unwrap_err(),
+        reopened.delete(&a.store, wrong, &epoch).unwrap_err(),
         ConnectError::OwnerCheck(ProofRefusal::WrongAction)
     );
     assert!(a.path.exists());
     assert_eq!(connect.accounts(), std::slice::from_ref(&account_id));
     account.view().unwrap();
     let (proof, epoch) = owner.proof(account.delete_action());
-    let deleted = account.delete(&a.store, &proof, &epoch).expect("delete");
+    let (deleted, _forgotten) = account.delete(&a.store, proof, &epoch).expect("delete");
     assert_eq!(deleted.account_id, account_id);
     assert!(connect.accounts().is_empty());
     assert!(!a.path.exists());
@@ -883,7 +887,7 @@ fn account_rows_sign_relay_heads_that_the_fake_relay_verifies() {
     // The fake relay stands in for the relay-sync-v1 endpoints of the store: a team
     // whose device key is the account key.
     let relay = FakeRelay::start();
-    let signer = account.signer();
+    let signer = account.signer().unwrap();
     let created = http(
         &relay.url,
         "POST",
@@ -960,6 +964,142 @@ fn account_rows_sign_relay_heads_that_the_fake_relay_verifies() {
     );
     assert_eq!(pushed["version"], 1, "{pushed}");
     assert_eq!(relay.version(), 1);
+}
+
+/// B-M1: adding a device to a vault store and deleting a vault store each need a fresh
+/// owner check for exactly that store and device; a proof for another action, store, or
+/// device changes nothing at Connect.
+#[test]
+fn vault_store_devices_and_deletion_need_the_owner_check() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let (a, b) = (device(), device());
+    let (mut account, _) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    connect.entitle(&account_id);
+    let store = account
+        .create_vault_store("0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77", "Personal")
+        .expect("store");
+    let team = store.team_id.clone();
+    let phone = join(&connect, &mut account, &b, &owner);
+    let phone_id = phone.state().device_id.clone();
+    let devices = |account: &mut ConnectAccount| account.vault_stores().unwrap()[0].devices.len();
+
+    let other_device = "dev_aaaaaaaaaa".to_owned();
+    for wrong in [
+        account.delete_action(),
+        ConnectAccount::delete_vault_store_action(&team),
+        ConnectAccount::add_store_device_action(&team, &other_device, &account_id),
+        ConnectAccount::add_store_device_action(&team, &phone_id, "acc_aaaaaaaaaa"),
+    ] {
+        let (proof, epoch) = owner.proof(wrong);
+        assert_eq!(
+            account
+                .add_store_device(&team, &phone_id, &account_id, proof, &epoch)
+                .unwrap_err(),
+            ConnectError::OwnerCheck(ProofRefusal::WrongAction)
+        );
+    }
+    assert_eq!(devices(&mut account), 1);
+    let (proof, epoch) = owner.proof(ConnectAccount::add_store_device_action(
+        &team,
+        &phone_id,
+        &account_id,
+    ));
+    let added = account
+        .add_store_device(&team, &phone_id, &account_id, proof, &epoch)
+        .expect("add to the store");
+    assert_eq!(
+        (added.device_id.as_str(), added.store_device_id),
+        (phone_id.as_str(), 2)
+    );
+    assert_eq!(devices(&mut account), 2);
+
+    // Deleting the store: only its own proof.
+    for wrong in [
+        account.delete_action(),
+        ConnectAccount::delete_vault_store_action("t_aaaaaaaaaa"),
+        ConnectAccount::add_store_device_action(&team, &phone_id, &account_id),
+    ] {
+        let (proof, epoch) = owner.proof(wrong);
+        assert_eq!(
+            account
+                .delete_vault_store(&team, proof, &epoch)
+                .unwrap_err(),
+            ConnectError::OwnerCheck(ProofRefusal::WrongAction)
+        );
+    }
+    assert_eq!(connect.stores(&account_id), std::slice::from_ref(&team));
+    let (proof, epoch) = owner.proof(ConnectAccount::delete_vault_store_action(&team));
+    account
+        .delete_vault_store(&team, proof, &epoch)
+        .expect("delete the store");
+    assert!(connect.stores(&account_id).is_empty());
+}
+
+/// B-L2: the rows of the account key go only after this Mac forgot the account or
+/// Connect confirmed the revoke with `401`. No other error, and no missing account file,
+/// makes the proof for that.
+#[test]
+fn account_rows_go_only_after_a_forget_or_a_confirmed_revoke() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (account, _) = create(&connect, &a);
+    let key = account.signer().unwrap().public_key().to_vec();
+    owner.with_vault(|vault| {
+        vault
+            .set_account_relay_device(&connect.url, "t_aaaaaaaaaa", 1, &key)
+            .unwrap();
+    });
+    // The account file of this key keeps the row.
+    let state = account.state().clone();
+    assert_eq!(
+        owner.with_vault(|vault| drop_stale_account_rows(vault, &state).unwrap()),
+        0
+    );
+    for error in [
+        ConnectError::Offline,
+        ConnectError::Unauthenticated,
+        ConnectError::Local,
+        ConnectError::KeyLost,
+        ConnectError::NoAccount,
+    ] {
+        assert!(Forgotten::revoked(&error).is_none(), "{error:?}");
+    }
+    assert!(owner.with_vault(|vault| vault.relay_device().unwrap().is_some()));
+    let revoked = Forgotten::revoked(&ConnectError::Revoked).expect("a confirmed 401");
+    assert_eq!(
+        owner.with_vault(|vault| drop_account_rows(vault, &revoked).unwrap()),
+        1
+    );
+    assert!(owner.with_vault(|vault| vault.relay_device().unwrap().is_none()));
+}
+
+/// B-L5: a sign-out (as at a lock) drops the account key from memory; the account then
+/// signs nothing until it reads the same key again from the Keychain.
+#[test]
+fn a_sign_out_drops_the_account_key_from_memory() {
+    let connect = FakeConnect::start();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    account.view().expect("signed in");
+    account.sign_out();
+    assert_eq!(account.signer().unwrap_err(), ConnectError::SignedOut);
+    let tokens = connect.count("POST /v1/account/token");
+    assert_eq!(account.view().unwrap_err(), ConnectError::SignedOut);
+    assert_eq!(
+        connect.count("POST /v1/account/token"),
+        tokens,
+        "no sign-in"
+    );
+    // Another Keychain (another key) is not this account's key.
+    assert_eq!(
+        account.reopen_signer(&MemoryKeyStore::new()).unwrap_err(),
+        ConnectError::KeyLost
+    );
+    account.reopen_signer(&a.store).expect("the same key");
+    account.view().expect("signed in again");
 }
 
 /// One plain HTTP/1.1 request to a fake on loopback; the `result` of the envelope.

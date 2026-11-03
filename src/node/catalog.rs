@@ -102,6 +102,12 @@ fn eligible(
     let Some(binding) = vault.process_binding(item_id).map_err(storage)? else {
         return Ok(Err("no process field"));
     };
+    // Way C on: runs of this build make no lease (contract private-sharing-v1 rule 4).
+    if vault.run_needs_lease(item_id).map_err(storage)? {
+        return Ok(Err(
+            "gives temporary credentials, which runs do not make yet",
+        ));
+    }
     let EnvDelivery::Placeholder(hosts) = &binding.delivery else {
         return Ok(Err("not in placeholder mode"));
     };

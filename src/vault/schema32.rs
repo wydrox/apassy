@@ -222,7 +222,7 @@ mod tests {
         vault.unlock(PASS).unwrap();
         let item = vault.add(aws_pair()).unwrap().id;
         vault
-            .set_short_lived(item, ShortLivedKind::AwsSts, "{}", 1_700_000_000)
+            .set_short_lived_checked(item, ShortLivedKind::AwsSts, "{}", 1_700_000_000)
             .unwrap();
         vault.lock().unwrap();
         drop(vault);
@@ -382,7 +382,7 @@ mod tests {
         // The update trigger of the item itself keeps the explicit time here.
         let before = stamp(&vault);
         vault
-            .set_short_lived(item, ShortLivedKind::AwsSts, "{}", 1_700_000_000)
+            .set_short_lived_checked(item, ShortLivedKind::AwsSts, "{}", 1_700_000_000)
             .unwrap();
         assert!(stamp(&vault) > before, "the insert marks the item");
         let before = stamp(&vault);
