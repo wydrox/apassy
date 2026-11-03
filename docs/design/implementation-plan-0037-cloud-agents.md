@@ -54,7 +54,7 @@ URLs, and a session key, never a value. No Apassy-run server is on the path.
 ## Prototype (2026-11-03, `~/.apassy-grokbot-proto`, synthetic item only)
 
 - The relay from this workspace (`target/debug`, `APASSY_RELAY_TEAM_VAULTS=1`) on 127.0.0.1, a small
-  front that adds `X-Apassy-Edge`, `apassy-team host --dialog`, a synthetic item for `httpbin.org`, and
+  front that adds `X-Apassy-Edge`, `apassy-team host --dialog`, a synthetic item for `httpbingo.org`, and
   an agent token. `apassy_list_access` and `apassy_request_run` work over the tailnet URL. The host asks
   the owner with a dialog, because `curl` is not a known safe command.
 - Device sign-in in `apassy-team` is origin-bound (`src/cli/signin.rs`), so the host lane and the owner
@@ -257,7 +257,7 @@ format. `docs/store/grok-bot-submission.md`: listing text and testing instructio
 ## End-to-end acceptance (owner, physical)
 
 1. Funnel is allowed for this Mac in the tailnet policy, and the prototype handler on 8443 is removed.
-2. Settings → Cloud agents: route on, URL shown; a synthetic item for `httpbin.org` (`HTTPBIN_TOKEN`);
+2. Settings → Cloud agents: route on, URL shown; a synthetic item for `httpbingo.org` (`HTTPBIN_TOKEN`);
    agent "Grok Bot" with that one item; Copy setup.
 3. In Grok Bot (model gpt-6.1-sol fast): add the MCP server by URL and header. `apassy_list_access`
    shows one item. `apassy_request_run` for `curl -H "Authorization: Bearer $HTTPBIN_TOKEN"
