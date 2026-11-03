@@ -1,0 +1,9 @@
+{
+  "kind": "github_app",
+  "secrets": [{"name": "GITHUB_TOKEN", "value": "ghs_SyntheticInstallationToken0000000001"}],
+  "plain": [],
+  "made_at": 1793700000,
+  "expires_at": 1793703600,
+  "revoke": {"type": "github", "url": "https://api.github.com/installation/token"},
+  "update_field": null
+}

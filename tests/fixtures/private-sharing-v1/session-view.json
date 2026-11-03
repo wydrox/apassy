@@ -1,0 +1,22 @@
+{
+  "session_id": 7,
+  "expires_at": 1793700600,
+  "env": {
+    "APASSY_BASE_HTTPBIN_TOKEN": "https://team-host.tailnet-example.ts.net:8443/p/apassy_ses_synthetic/httpbingo.org",
+    "APASSY_RELAY_SESSION_EXPIRES": "1793700600",
+    "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+    "AWS_SECRET_ACCESS_KEY": "Ph7xQ2mVt9LrW4kZs8NcB3yHf6JdG1pA5eUo0iRq",
+    "GITHUB_TOKEN": "ghs_SyntheticInstallationToken0000000001",
+    "HTTPBIN_TOKEN": "httpbin-test-Qm4tZ8rV1xK0pL6sYw2nC9dF3hJ5aB7e"
+  },
+  "placeholders": ["AWS_SECRET_ACCESS_KEY", "HTTPBIN_TOKEN"],
+  "base_urls": {
+    "httpbingo.org": "https://team-host.tailnet-example.ts.net:8443/p/apassy_ses_synthetic/httpbingo.org"
+  },
+  "short_lived": [
+    {"item_id": 8, "kind": "github_app", "env_names": ["GITHUB_TOKEN"], "expires_at": 1793703600}
+  ],
+  "signers": [
+    {"item_id": 9, "env_name": "AWS_SECRET_ACCESS_KEY", "access_key_id": "AKIAIOSFODNN7EXAMPLE"}
+  ]
+}
