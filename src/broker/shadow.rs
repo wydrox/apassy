@@ -24,8 +24,8 @@ use std::fmt;
 use super::SharedVault;
 use super::approvals::{OwnerAction, OwnerProof};
 use super::bouncer::{
-    BouncerClient, BouncerRequest, BouncerVerdict, DecisionContext, Learned, ShadowPin, Thresholds,
-    decide_learned, decide_routed,
+    BouncerClient, BouncerVerdict, DecisionContext, Learned, ShadowPin, Thresholds, decide_learned,
+    decide_routed,
 };
 use super::decide::lock;
 use super::learning;

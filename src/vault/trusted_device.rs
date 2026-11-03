@@ -187,6 +187,14 @@ impl RelayMembership {
             &self.key_pkcs8,
         ) && valid_trust(self.pin.as_deref(), &self.alt)
     }
+
+    /// True for a vault store of Apassy Connect (schema 34, `key_source = 'account'`):
+    /// the row holds no private key (`key_pkcs8` is empty), and the account device key of
+    /// this Mac (`crate::connect::AccountSigner`) signs for it. Its `public_key` is the
+    /// public key of that account key when the row was written.
+    pub fn uses_account_key(&self) -> bool {
+        self.key_pkcs8.is_empty()
+    }
 }
 
 /// The most alternatives of a membership (node-pairing-v1 section 7).
@@ -229,14 +237,6 @@ fn parse_alt(text: Option<&str>) -> VaultResult<Vec<String>> {
     match text {
         None => Ok(Vec::new()),
         Some(text) => serde_json::from_str(text).map_err(storage),
-    }
-
-    /// True for a vault store of Apassy Connect (schema 34, `key_source = 'account'`):
-    /// the row holds no private key (`key_pkcs8` is empty), and the account device key of
-    /// this Mac (`crate::connect::AccountSigner`) signs for it. Its `public_key` is the
-    /// public key of that account key when the row was written.
-    pub fn uses_account_key(&self) -> bool {
-        self.key_pkcs8.is_empty()
     }
 }
 
