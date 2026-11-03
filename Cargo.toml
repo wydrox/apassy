@@ -66,8 +66,9 @@ time = { version = "=0.3.47", optional = true, default-features = false, feature
 flate2 = { version = "=1.1.10", optional = true, default-features = false, features = ["rust_backend"] }
 # Key-memory review F6: safe setrlimit for the core-dump limit of the desktop
 # process. The same version is already in Cargo.lock through tempfile. `termios`:
-# the owner command line turns off the echo when it reads a secret (ADR 0017).
-rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process", "termios", "time"] }
+# the owner command line turns off the echo when it reads a secret (ADR 0017). `fs`: the
+# open flags of each target (`O_NOFOLLOW` differs by architecture), not written numbers.
+rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "fs", "process", "termios", "time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Main-process native menus through a safe API; no application framework or GTK.
