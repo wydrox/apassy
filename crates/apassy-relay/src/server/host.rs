@@ -128,7 +128,10 @@ fn open_values(
 ) -> Result<Vec<SecretString>, Fault> {
     // The value of an embedded node's item is in the owner's vault, not here: only the
     // in-process host releases it (`release_values`). Over HTTP it fails closed.
-    if items.iter().any(|item| hostkeys::is_value_on_host(&item.sealed)) {
+    if items
+        .iter()
+        .any(|item| hostkeys::is_value_on_host(&item.sealed))
+    {
         return Err(Fault);
     }
     let host_key = decode_array::<{ hostkeys::KEY_BYTES }>(&request.host_key)?;
@@ -429,8 +432,12 @@ pub fn release_values(
             return Ok(Ok(invalidated_view(core, tx, run.id, now)?));
         };
         let checked = values.len() == items.len()
-            && items.iter().all(|item| hostkeys::is_value_on_host(&item.sealed))
-            && values.iter().all(|value| check_value(value.expose()).is_ok());
+            && items
+                .iter()
+                .all(|item| hostkeys::is_value_on_host(&item.sealed))
+            && values
+                .iter()
+                .all(|value| check_value(value.expose()).is_ok());
         if !checked {
             let note = "The values from the owner's host did not check.";
             let actor = EMBEDDED_HOST_ACTOR;

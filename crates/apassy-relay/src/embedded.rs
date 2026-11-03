@@ -22,8 +22,8 @@ use apassy::node::backend::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::api::{
-    AgentCreate, CollectionCreate, DecisionRequest, GrantCreate, NewItem, Policy, PolicyMode,
-    Role, RunStatus, Suggestion,
+    AgentCreate, CollectionCreate, DecisionRequest, GrantCreate, NewItem, Policy, PolicyMode, Role,
+    RunStatus, Suggestion,
 };
 use crate::config::{EmbeddedOptions, RelayConfig, UpstreamOptions};
 use crate::error::{RelayError, RelayResult, codes};
@@ -355,9 +355,7 @@ impl EmbeddedNode {
                             at: to_u(row.get(1)?),
                             actor: row.get(2)?,
                             action: row.get(3)?,
-                            run_id: row
-                                .get::<_, Option<i64>>(4)?
-                                .map(|id| NodeRunId(to_u(id))),
+                            run_id: row.get::<_, Option<i64>>(4)?.map(|id| NodeRunId(to_u(id))),
                             detail: row.get(5)?,
                         })
                     },
@@ -497,12 +495,7 @@ impl RunningNode for EmbeddedNode {
         .map_err(node_error)
     }
 
-    fn deny(
-        &self,
-        team: &NodeTeamId,
-        run: NodeRunId,
-        reason: &str,
-    ) -> Result<RunState, NodeError> {
+    fn deny(&self, team: &NodeTeamId, run: NodeRunId, reason: &str) -> Result<RunState, NodeError> {
         (|| -> RelayResult<RunState> {
             let core = self.core(team)?;
             let request = DecisionRequest {

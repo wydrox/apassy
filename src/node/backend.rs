@@ -277,11 +277,8 @@ pub trait RunningNode: Send + Sync {
 
     /// Makes the live catalog items of the team exactly `items`: adds the new ones,
     /// changes the ones whose fields differ, and archives the ones not in the list.
-    fn sync_items(
-        &self,
-        team: &NodeTeamId,
-        items: &[CatalogItem],
-    ) -> Result<SyncReport, NodeError>;
+    fn sync_items(&self, team: &NodeTeamId, items: &[CatalogItem])
+    -> Result<SyncReport, NodeError>;
 
     /// Makes a cloud agent that may use the listed items only.
     fn create_agent(
@@ -326,12 +323,7 @@ pub trait RunningNode: Send + Sync {
     ) -> Result<RunState, NodeError>;
 
     /// Denies a pending run. The agent sees `reason` (at most 500 bytes).
-    fn deny(
-        &self,
-        team: &NodeTeamId,
-        run: NodeRunId,
-        reason: &str,
-    ) -> Result<RunState, NodeError>;
+    fn deny(&self, team: &NodeTeamId, run: NodeRunId, reason: &str) -> Result<RunState, NodeError>;
 
     /// The run now. A timeout or a session end that is due is applied first.
     fn run_state(&self, team: &NodeTeamId, run: NodeRunId) -> Result<RunState, NodeError>;

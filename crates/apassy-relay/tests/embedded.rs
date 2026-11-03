@@ -120,7 +120,10 @@ impl Fixture {
 
     /// `http://` of the public listener (what Funnel forwards to).
     fn public(&self) -> String {
-        format!("http://{}", self.node().public_addr().expect("public listener"))
+        format!(
+            "http://{}",
+            self.node().public_addr().expect("public listener")
+        )
     }
 
     /// `http://` of the node listener (every route).
@@ -153,7 +156,12 @@ impl Fixture {
 
     /// The agent asks for a run of `items` over the public listener. Returns its id.
     fn request_run(&self, items: &[u64]) -> NodeRunId {
-        let view = tool_ok(&self.public(), &self.token, "apassy_request_run", run_args(items));
+        let view = tool_ok(
+            &self.public(),
+            &self.token,
+            "apassy_request_run",
+            run_args(items),
+        );
         assert_eq!(view["status"], "pending", "{view}");
         NodeRunId(view["run_id"].as_u64().expect("run id"))
     }
@@ -356,7 +364,10 @@ fn the_public_listener_serves_only_mcp_and_the_proxy() {
     ] {
         let (status, body) = call_url(&public, None, method, path, token, None);
         assert_eq!(status, 404, "{method} {path}: {body}");
-        assert_eq!(body["error"]["code"], "not_found", "{method} {path}: {body}");
+        assert_eq!(
+            body["error"]["code"], "not_found",
+            "{method} {path}: {body}"
+        );
     }
     // MCP works there, with no edge header.
     assert_eq!(fixture.access()[0].0, "EXAMPLE_TOKEN");
@@ -372,7 +383,10 @@ fn the_public_listener_serves_only_mcp_and_the_proxy() {
     assert_eq!(status, 200, "{text}");
     let seen = fixture.mock.requests();
     let last = seen.last().expect("the upstream got the request");
-    assert_eq!(last.header("authorization"), Some(&*format!("Bearer {CANARY}")));
+    assert_eq!(
+        last.header("authorization"),
+        Some(&*format!("Bearer {CANARY}"))
+    );
     assert!(!text.contains(CANARY), "{text}");
     // The node listener serves every route without an edge header.
     let local = fixture.local();
@@ -490,8 +504,12 @@ fn agent_items_narrow_access_and_the_runs_of_an_agent() {
         .find(|(env, _)| env == "SECOND_TOKEN")
         .expect("second")
         .1;
-    node.set_agent_items(&fixture.team, fixture.agent, std::slice::from_ref(&fixture.uid))
-        .unwrap();
+    node.set_agent_items(
+        &fixture.team,
+        fixture.agent,
+        std::slice::from_ref(&fixture.uid),
+    )
+    .unwrap();
     assert_eq!(fixture.access(), vec![("EXAMPLE_TOKEN".to_string(), first)]);
     // `check_access` refuses an item outside the list, as an unknown one.
     let text = tool_error(
@@ -511,7 +529,11 @@ fn agent_items_narrow_access_and_the_runs_of_an_agent() {
     assert_eq!(state.code.as_deref(), Some(codes::APPROVAL_INVALIDATED));
     // An item that is not in the catalog cannot be listed.
     let error = node
-        .set_agent_items(&fixture.team, fixture.agent, &[hostkeys::new_uid().unwrap()])
+        .set_agent_items(
+            &fixture.team,
+            fixture.agent,
+            &[hostkeys::new_uid().unwrap()],
+        )
         .unwrap_err();
     assert_eq!(error.code, codes::INVALID_REQUEST);
     // The sync is idempotent, and an item that leaves the list is archived.
@@ -544,13 +566,20 @@ fn release_values_is_single_use_fails_closed_and_writes_the_audit() {
     // No value for the item: denied, release_invalid. The key is used up.
     let run = fixture.request_run(&[item]);
     fixture.wait_for(run);
-    let error = node.release(&fixture.team, run, Vec::new(), None).unwrap_err();
+    let error = node
+        .release(&fixture.team, run, Vec::new(), None)
+        .unwrap_err();
     assert_eq!(error.code, codes::RELEASE_INVALID);
     let state = node.run_state(&fixture.team, run).unwrap();
     assert_eq!(state.status, RunStatus::Denied);
     assert_eq!(state.code.as_deref(), Some(codes::RELEASE_INVALID));
     let error = node
-        .release(&fixture.team, run, vec![NodeSecret::new(CANARY.to_string())], None)
+        .release(
+            &fixture.team,
+            run,
+            vec![NodeSecret::new(CANARY.to_string())],
+            None,
+        )
         .unwrap_err();
     assert_eq!(error.code, codes::RUN_NOT_PENDING);
     let rows = node.recent_audit(&fixture.team, Some(run), 50).unwrap();
@@ -570,7 +599,9 @@ fn release_values_is_single_use_fails_closed_and_writes_the_audit() {
         .release(
             &fixture.team,
             run,
-            vec![NodeSecret::new("quote\"in-a-value-0123456789abcdef".to_string())],
+            vec![NodeSecret::new(
+                "quote\"in-a-value-0123456789abcdef".to_string(),
+            )],
             None,
         )
         .unwrap_err();
@@ -592,7 +623,12 @@ fn release_values_is_single_use_fails_closed_and_writes_the_audit() {
     assert!(state.session_expires_at.is_some());
     assert_eq!(state.note, "Approved on the Mac.");
     let error = node
-        .release(&fixture.team, run, vec![NodeSecret::new(CANARY2.to_string())], None)
+        .release(
+            &fixture.team,
+            run,
+            vec![NodeSecret::new(CANARY2.to_string())],
+            None,
+        )
         .unwrap_err();
     assert_eq!(error.code, codes::RUN_NOT_PENDING);
     let rows = node.recent_audit(&fixture.team, Some(run), 50).unwrap();
@@ -600,8 +636,14 @@ fn release_values_is_single_use_fails_closed_and_writes_the_audit() {
         .iter()
         .map(|row| (row.actor.as_str(), row.action.as_str()))
         .collect();
-    assert!(actions.contains(&("host:embedded", "run_released")), "{actions:?}");
-    assert!(actions.contains(&("relay", "session_started")), "{actions:?}");
+    assert!(
+        actions.contains(&("host:embedded", "run_released")),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&("relay", "session_started")),
+        "{actions:?}"
+    );
     assert!(rows.iter().all(|row| row.run_id == Some(run)));
     assert!(rows.iter().all(|row| !row.detail.contains(CANARY2)));
     // Newest first, and at most the limit.
@@ -630,7 +672,12 @@ fn release_values_is_single_use_fails_closed_and_writes_the_audit() {
     assert_eq!(view["status"], "denied");
     // A revoked agent is 401 at its next request.
     node.revoke_agent(&fixture.team, fixture.agent).unwrap();
-    let (status, _) = mcp(&fixture.public(), &fixture.token, "apassy_list_access", json!({}));
+    let (status, _) = mcp(
+        &fixture.public(),
+        &fixture.token,
+        "apassy_list_access",
+        json!({}),
+    );
     assert_eq!(status, 401);
 }
 
@@ -729,7 +776,10 @@ fn a_personal_team_is_made_without_a_code_and_a_restart_opens_it_again() {
         .unwrap();
     let token = made.token.expose().to_string();
     // One node for each data directory.
-    let error = backend.start(node_config(dir.path())).err().expect("refused");
+    let error = backend
+        .start(node_config(dir.path()))
+        .err()
+        .expect("refused");
     assert_eq!(error.code, codes::CONFLICT);
     // No run waits: the wait ends at its timeout.
     assert!(

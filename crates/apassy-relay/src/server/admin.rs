@@ -1442,9 +1442,10 @@ pub fn agent_set_items(
         invalidate_pending(core, tx, now, &actor, "agent_items_changed", |run| {
             run.agent_id == id && run.items.iter().any(|item| !kept(item))
         })?;
-        core.sessions.end_matching(tx, now, "agent_items_changed", |s| {
-            s.agent_id == id && s.secrets.iter().any(|secret| !kept(&secret.item_id))
-        })?;
+        core.sessions
+            .end_matching(tx, now, "agent_items_changed", |s| {
+                s.agent_id == id && s.secrets.iter().any(|secret| !kept(&secret.item_id))
+            })?;
         core.audit.write_on(
             tx,
             now,

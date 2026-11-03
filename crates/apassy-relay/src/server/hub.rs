@@ -684,8 +684,11 @@ impl Hub {
         let added = new
             .store
             .tx(|tx| {
-                tx.execute("UPDATE team SET member_tokens_until = NULL WHERE id = 1", [])
-                    .map_err(db)?;
+                tx.execute(
+                    "UPDATE team SET member_tokens_until = NULL WHERE id = 1",
+                    [],
+                )
+                .map_err(db)?;
                 Ok(())
             })
             .and_then(|()| limits.stored_json(TeamKind::Operator))

@@ -940,9 +940,15 @@ mod tests {
         assert_eq!(config.approval_timeout_secs, 300);
         assert!(config.push.is_none());
         assert!(config.team_vaults);
-        assert_eq!((config.connect_teams_per_day, config.connect_teams_max), (0, 0));
+        assert_eq!(
+            (config.connect_teams_per_day, config.connect_teams_max),
+            (0, 0)
+        );
         assert!(config.auth_limiter);
-        assert_eq!(config.admin_socket_path(), PathBuf::from("/tmp/node/admin.sock"));
+        assert_eq!(
+            config.admin_socket_path(),
+            PathBuf::from("/tmp/node/admin.sock")
+        );
         assert!(RelayConfig::embedded(embedded_options(None)).is_ok());
         assert!(RelayConfig::embedded(embedded_options(Some("[::1]:49200"))).is_ok());
     }

@@ -394,29 +394,31 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(&error.message),
         },
-        Command::DowngradeSchema6 => match apassy_relay::server::rollback::downgrade_to_6(&config) {
-            Ok(teams) => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&teams).unwrap_or_default()
-                );
-                let failed = teams.iter().filter(|team| team.error.is_some()).count();
-                if failed == 0 {
-                    eprintln!(
-                        "apassy-relay: {} teams are at schema 6 or below; the image of schema 6 can open them.",
-                        teams.len()
+        Command::DowngradeSchema6 => {
+            match apassy_relay::server::rollback::downgrade_to_6(&config) {
+                Ok(teams) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&teams).unwrap_or_default()
                     );
-                    ExitCode::SUCCESS
-                } else {
-                    eprintln!(
-                        "apassy-relay: {failed} of {} teams could not go back to schema 6 (docs/OPERATIONS.md 23.3).",
-                        teams.len()
-                    );
-                    ExitCode::from(1)
+                    let failed = teams.iter().filter(|team| team.error.is_some()).count();
+                    if failed == 0 {
+                        eprintln!(
+                            "apassy-relay: {} teams are at schema 6 or below; the image of schema 6 can open them.",
+                            teams.len()
+                        );
+                        ExitCode::SUCCESS
+                    } else {
+                        eprintln!(
+                            "apassy-relay: {failed} of {} teams could not go back to schema 6 (docs/OPERATIONS.md 23.3).",
+                            teams.len()
+                        );
+                        ExitCode::from(1)
+                    }
                 }
+                Err(error) => fail(&error.message),
             }
-            Err(error) => fail(&error.message),
-        },
+        }
         Command::SnapshotCheck => match apassy_relay::server::sync::verify_restored(&config) {
             Ok(teams) => {
                 println!("Verified snapshots of {teams} teams.");
