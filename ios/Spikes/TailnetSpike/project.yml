@@ -24,6 +24,8 @@ settings:
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
     LM_SKIP_METADATA_EXTRACTION: YES
     CODE_SIGN_STYLE: Automatic
+    # The spike's own numbers, not an Apassy version (scripts/check-release-versions.py reads only
+    # ios/ApassyCompanion/project.yml).
     MARKETING_VERSION: "0.0.1"
     CURRENT_PROJECT_VERSION: "1"
     # The archives have arm64 slices only (Apple silicon Simulator).

@@ -75,10 +75,11 @@ case "$go_version" in
 esac
 say "$go_version"
 
-# cgo calls this wrapper as CC: clang of the right SDK for the iPhone or the Simulator.
+# cgo calls this wrapper as CC: clang of the right SDK for the iPhone or the Simulator, with the
+# flags of libtailscale's own swift/script/clangwrap-ios*.sh (and our deployment target).
 cat >"$work/cc-ios.sh" <<'EOF'
 #!/bin/sh
-exec "$SPIKE_CLANG" -arch arm64 -target "$SPIKE_TRIPLE" -isysroot "$SPIKE_SDK" "$@"
+exec "$SPIKE_CLANG" -arch arm64 -isysroot "$SPIKE_SDK" "$SPIKE_MIN" "$@"
 EOF
 chmod +x "$work/cc-ios.sh"
 
@@ -89,24 +90,24 @@ slice_dir() {
     esac
 }
 
-# Sets SPIKE_SDK, SPIKE_CLANG, SPIKE_TRIPLE and RUST_TARGET for a slice.
+# Sets SPIKE_SDK, SPIKE_CLANG, SPIKE_MIN and RUST_TARGET for a slice.
 use_slice() {
     local sdk
     case "$1" in
     device)
         sdk=iphoneos
-        SPIKE_TRIPLE="arm64-apple-ios$IOS_DEPLOYMENT_TARGET"
+        SPIKE_MIN="-mios-version-min=$IOS_DEPLOYMENT_TARGET"
         RUST_TARGET=aarch64-apple-ios
         ;;
     sim)
         sdk=iphonesimulator
-        SPIKE_TRIPLE="arm64-apple-ios$IOS_DEPLOYMENT_TARGET-simulator"
+        SPIKE_MIN="-mios-simulator-version-min=$IOS_DEPLOYMENT_TARGET"
         RUST_TARGET=aarch64-apple-ios-sim
         ;;
     esac
     SPIKE_SDK=$(xcrun --sdk "$sdk" --show-sdk-path)
     SPIKE_CLANG=$(xcrun --sdk "$sdk" --find clang)
-    export SPIKE_SDK SPIKE_CLANG SPIKE_TRIPLE
+    export SPIKE_SDK SPIKE_CLANG SPIKE_MIN
 }
 
 # The Rust probe has its own workspace. Its lockfile starts as a copy of the repository's, so
