@@ -39,6 +39,7 @@ def website_version(root, changelog):
 
 
 RELAY = Path("crates/apassy-relay")
+APP = Path("crates/apassy-app")
 
 
 def check(root):
@@ -53,6 +54,8 @@ def check(root):
     versions = {
         "macOS Cargo package": package_version(root / "Cargo.toml"),
         "macOS Cargo.lock": locked_version(root / "Cargo.lock", "apassy"),
+        "macOS app package": package_version(root / APP / "Cargo.toml"),
+        "macOS app Cargo.lock": locked_version(root / "Cargo.lock", "apassy-app"),
         "iOS core package": package_version(root / "ios/ApassyCore/Cargo.toml"),
         "iOS core Cargo.lock": locked_version(root / "Cargo.lock", "apassy-core"),
         "browser extension": json.loads((root / "extension/manifest.json").read_text())["version"],

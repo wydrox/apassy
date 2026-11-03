@@ -883,7 +883,8 @@ ALTER TABLE agent DROP COLUMN note;
 /// also loses the parts of the later schemas ([`SCHEMA19_ONLY`], [`SCHEMA18_ONLY`]), so
 /// the snapshot is then the snapshot of the app of that schema.
 fn set_schema(path: &Path, version: i64) {
-    assert_eq!(schema_marks(path), (25, 25));
+    let current = apassy::vault::SCHEMA_VERSION;
+    assert_eq!(schema_marks(path), (current, current));
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.pragma_update(None, "key", PASS).unwrap();
     let stored: Vec<u8> = conn
@@ -894,6 +895,14 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 26 {
+        // Schema 26: the cloud agents of the node (`src/vault/schema26.rs`).
+        conn.execute_batch(
+            "DROP TABLE cloud_node; DROP TABLE cloud_item; DROP TABLE cloud_agent;
+             ALTER TABLE agent DROP COLUMN kind;",
+        )
+        .unwrap();
+    }
     if version < 23 {
         conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values")
             .unwrap();
@@ -984,7 +993,10 @@ fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema22_with_no_edit() 
     );
     assert_eq!(apassy::sync::file_sha256(&input).unwrap(), input_sha);
     assert_eq!(schema_marks(&input), (17, 17));
-    assert_eq!(schema_marks(&output), (25, 25));
+    assert_eq!(
+        schema_marks(&output),
+        (apassy::vault::SCHEMA_VERSION, apassy::vault::SCHEMA_VERSION)
+    );
     let complete = f.complete(&prepared);
     assert_eq!(complete["state"], "ok");
     assert_eq!(complete["merged"]["inserted"], 0);
@@ -993,7 +1005,7 @@ fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema22_with_no_edit() 
 
     // The Mac and a new Mac take the output: no duplicate, no conflict.
     let report = f.mac.merge_from(&output, &SyncScope::vault()).unwrap();
-    assert_eq!(report.remote_schema, 25);
+    assert_eq!(report.remote_schema, apassy::vault::SCHEMA_VERSION);
     assert!(!report.remote_outdated());
     assert!(!report.changed_local());
     assert!(report.conflicts.is_empty());
@@ -1101,13 +1113,19 @@ fn already_connected_phone_accepts_a_released_schema16_conflict_snapshot() {
     let input_sha = apassy::sync::file_sha256(&input).unwrap();
     let prepared = f.prepare(&input, &output);
     assert_eq!(prepared["write_required"], true);
-    assert_eq!(schema_marks(&output), (25, 25));
+    assert_eq!(
+        schema_marks(&output),
+        (apassy::vault::SCHEMA_VERSION, apassy::vault::SCHEMA_VERSION)
+    );
     assert_eq!(f.titles().len(), 3);
     // Swift processes provider conflicts first, the current file last, and completes
     // only the final preparation. All recovered records must survive that chain.
     let final_prepared = f.prepare(&current_input, &final_output);
     assert_eq!(final_prepared["write_required"], true);
-    assert_eq!(schema_marks(&final_output), (25, 25));
+    assert_eq!(
+        schema_marks(&final_output),
+        (apassy::vault::SCHEMA_VERSION, apassy::vault::SCHEMA_VERSION)
+    );
     let status = f.complete(&final_prepared);
     assert_eq!(status["state"], "ok");
     assert_eq!(status["merged"]["inserted"], 0);

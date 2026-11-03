@@ -2924,6 +2924,9 @@ impl DesktopApp {
         self.ui.discard_item_changes = false;
         self.ui.discard_item_kind_change = false;
         self.files.forget();
+        // The node of cloud agents stops first, so its session rows are written while
+        // the vault is open: every session ends and the Funnel route goes off.
+        self.stop_node();
         let approvals = self.approvals();
         let result = self
             .owner_ui
@@ -2980,6 +2983,8 @@ impl DesktopApp {
         self.browser.stop();
         // The macOS passkey sheet gets "cancelled" for each request that waits.
         self.platform.stop();
+        // The node of cloud agents: sessions end, the Funnel route goes off.
+        self.stop_node();
         let approvals = self.approvals();
         let _ = self
             .owner_ui

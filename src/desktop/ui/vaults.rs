@@ -186,6 +186,8 @@ impl DesktopApp {
     /// Lock the open vault to leave it (ADR 0013). Each run that waits ends with
     /// [`ENDED_BY_SWITCH`], and each piece of state of the vault goes.
     pub(crate) fn leave_vault(&mut self, ctx: Option<&egui::Context>) {
+        // The node of cloud agents stops first, while the vault is open for its rows.
+        self.stop_node();
         let approvals = self.approvals();
         let _ = self
             .owner_ui

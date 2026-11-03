@@ -1,0 +1,32 @@
+[package]
+name = "apassy-app"
+version = "0.5.15"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+license = "Apache-2.0"
+repository = "https://github.com/wydrox/apassy"
+description = "The Apassy desktop app for macOS: the window, the owner command line, and the Mac's own node"
+
+[dependencies]
+# The core with the window and the vault. The relay depends on the core, so the core
+# cannot name the relay: this crate joins them (ADR 0037, cloud slice, decision 1).
+apassy = { path = "../..", features = ["desktop", "vault"] }
+# The embedded node behind `apassy::node::backend` (crates/apassy-relay/src/embedded.rs).
+apassy-relay = { path = "../apassy-relay" }
+eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+# Key-memory review F6: the core-dump limit of the desktop process.
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "process"] }
+tracing = "=0.1.44"
+
+# Another name than the root `apassy` target, so the two do not overwrite each other
+# in target/. scripts/build-app.sh copies it into the bundle as Contents/MacOS/apassy.
+[[bin]]
+name = "apassy-app"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

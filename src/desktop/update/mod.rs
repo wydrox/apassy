@@ -754,6 +754,8 @@ impl DesktopApp {
             BrokerState::Running(handle) => Some(Arc::clone(handle.approvals())),
             _ => None,
         };
+        // As a quit: the node stops, so the close below is not kept for cloud agents.
+        self.stop_node();
         let _ = self
             .owner_ui
             .session
