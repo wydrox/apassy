@@ -134,7 +134,7 @@ jobs:
       - name: Install artifact inspection tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends binutils file python3 curl ca-certificates
+          apt-get install -y --no-install-recommends --fix-missing binutils file python3 curl
       - name: Install the pinned Go (version and SHA-256 from pins.env)
         run: crates/apassy-tailnet/scripts/install-go.sh "$RUNNER_TEMP/go-toolchain" >> "$GITHUB_PATH"
       - name: Build the archive

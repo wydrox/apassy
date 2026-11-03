@@ -101,7 +101,7 @@ fn main() {
 
     let mut links = LinkFlags::default();
     for flag in target.default_flags() {
-        links.add_token_list(&[flag.to_owned()]);
+        links.add_token_list(&[flag.to_string()]);
     }
     links.add_token_list(&flags);
 
