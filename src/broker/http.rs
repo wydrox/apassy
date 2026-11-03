@@ -3,7 +3,9 @@
 //!
 //! `https://` uses rustls with the macOS trust store. Plain `http://` is
 //! permitted only on loopback addresses. The client sends no agent-controlled
-//! header, follows no redirect, and reads at most 64 KiB.
+//! header, follows no redirect, and reads at most 64 KiB of a JSON answer. The
+//! head-file transfers of the bouncer brain ([`put_file`], [`get_to_file`]) stream
+//! the file, with their own caps and a progress deadline.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
@@ -380,6 +382,605 @@ fn is_request_path(path: &str) -> bool {
     path.starts_with('/') && path.bytes().all(|b| (0x21..0x7f).contains(&b))
 }
 
+fn is_bearer(bearer: &str) -> bool {
+    !bearer.is_empty() && bearer.bytes().all(|b| (0x21..0x7f).contains(&b))
+}
+
+/// The methods of [`request_json`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Delete,
+}
+
+impl Method {
+    fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Get => b"GET",
+            Self::Post => b"POST",
+            Self::Delete => b"DELETE",
+        }
+    }
+}
+
+/// Send one request with a bearer token and an optional JSON body, and read the
+/// JSON response before `deadline`: name lookup, connect, TLS handshake, request,
+/// and response (ADR 0035). The bouncer brain uses it for `GET` and `DELETE` of
+/// `/v1/heads/<sha256>` and `DELETE /v1/owner`. Only `POST` has a body; a body
+/// with `GET` or `DELETE` is a protocol failure. The TLS rules and the 64 KiB
+/// cap are the ones of [`post_json`]. Unlike [`get`], the name lookup has the
+/// deadline too.
+#[allow(clippy::too_many_arguments)]
+pub fn request_json(
+    method: Method,
+    destination: &DestinationUrl,
+    path: &str,
+    bearer: &str,
+    body: Option<&[u8]>,
+    deadline: Instant,
+    tls: Option<&TlsClient>,
+) -> Result<HttpResponse, HttpFailure> {
+    request_json_with(
+        method,
+        destination,
+        path,
+        bearer,
+        body,
+        deadline,
+        tls,
+        system_resolve,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_json_with(
+    method: Method,
+    destination: &DestinationUrl,
+    path: &str,
+    bearer: &str,
+    body: Option<&[u8]>,
+    deadline: Instant,
+    tls: Option<&TlsClient>,
+    resolve: Resolve,
+) -> Result<HttpResponse, HttpFailure> {
+    if !is_request_path(path) || !is_bearer(bearer) {
+        return Err(HttpFailure::Protocol);
+    }
+    if method != Method::Post && body.is_some() {
+        return Err(HttpFailure::Protocol);
+    }
+    let host = destination.host_header();
+    let length = body.map(|body| body.len().to_string());
+    let (content_start, content_length, content_end, body): (&[u8], &[u8], &[u8], &[u8]) =
+        match (&length, body) {
+            (Some(length), Some(body)) => (
+                b"Content-Type: application/json\r\nContent-Length: ",
+                length.as_bytes(),
+                b"\r\n",
+                body,
+            ),
+            _ if method == Method::Post => (b"Content-Length: 0\r\n", b"", b"", b""),
+            _ => (b"", b"", b"", b""),
+        };
+    let request = request_bytes(&[
+        method.as_bytes(),
+        b" ",
+        path.as_bytes(),
+        b" HTTP/1.1\r\nHost: ",
+        host.as_bytes(),
+        b"\r\nAuthorization: Bearer ",
+        bearer.as_bytes(),
+        b"\r\n",
+        content_start,
+        content_length,
+        content_end,
+        b"Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
+        body,
+    ]);
+    send_before(destination, &request, deadline, tls, resolve)
+}
+
+/// Largest head file that [`put_file`] sends (contract bouncer-brain-v1 section 5).
+pub const MAX_UPLOAD_BYTES: u64 = 160 * 1024 * 1024;
+/// Largest body that [`get_to_file`] writes.
+pub const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest encoded `Apassy-Manifest` header (contract section 5).
+pub const MAX_MANIFEST_HEADER_BYTES: usize = 16 * 1024;
+/// A transfer that moves no byte for this long fails with [`HttpFailure::Timeout`].
+/// Chosen by implementation plan 0035; the owner can change it.
+pub const TRANSFER_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest time of one whole transfer. Chosen by implementation plan 0035; the
+/// owner can change it.
+pub const TRANSFER_TOTAL_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// The buffer of one read from the file or the socket during a transfer.
+const TRANSFER_BUFFER: usize = 64 * 1024;
+/// Longest chunk-size line or trailer line of a chunked download.
+const MAX_CHUNK_LINE: u64 = 1024;
+/// Most trailer lines after the last chunk of a chunked download.
+const MAX_TRAILER_LINES: usize = 32;
+
+/// The limits of one transfer. Tests use small values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransferLimits {
+    max_bytes: u64,
+    progress: Duration,
+    total: Duration,
+}
+
+impl TransferLimits {
+    const UPLOAD: Self = Self {
+        max_bytes: MAX_UPLOAD_BYTES,
+        progress: TRANSFER_PROGRESS_TIMEOUT,
+        total: TRANSFER_TOTAL_LIMIT,
+    };
+    const DOWNLOAD: Self = Self {
+        max_bytes: MAX_DOWNLOAD_BYTES,
+        progress: TRANSFER_PROGRESS_TIMEOUT,
+        total: TRANSFER_TOTAL_LIMIT,
+    };
+}
+
+/// Why a file transfer failed. None of these values contains the token.
+#[derive(Debug)]
+pub enum TransferFailure {
+    /// The transport failed. [`HttpFailure::TooLarge`]: the file or the body is
+    /// over the cap. [`HttpFailure::Timeout`]: the progress deadline or the total
+    /// limit ended.
+    Http(HttpFailure),
+    /// A download answered with a status other than 200. The body is at most
+    /// 64 KiB; no file was written.
+    Status(HttpResponse),
+    /// The downloaded bytes do not have the expected SHA-256. The file is deleted.
+    WrongHash,
+    /// The local file could not be read, created, or written.
+    File,
+}
+
+impl From<HttpFailure> for TransferFailure {
+    fn from(failure: HttpFailure) -> Self {
+        Self::Http(failure)
+    }
+}
+
+/// Upload one file with `PUT` (contract bouncer-brain-v1 section 5): the file as
+/// `application/octet-stream` with its `Content-Length`, `manifest` as the
+/// `Apassy-Manifest` header (base64url without padding), and
+/// `Expect: 100-continue`. The client sends no body byte before `100 Continue`. A
+/// final response that arrives instead is the answer, and no body byte is sent.
+/// A file over 160 MiB or an encoded manifest over 16 KiB is
+/// [`HttpFailure::TooLarge`] before any connection. The transfer fails after
+/// 30 s without a byte and after 15 min in total. If the connection ends during
+/// the body, the result is unknown: the caller checks with `GET`.
+pub fn put_file(
+    destination: &DestinationUrl,
+    path: &str,
+    bearer: &str,
+    file: &std::path::Path,
+    manifest: &[u8],
+    tls: Option<&TlsClient>,
+) -> Result<HttpResponse, TransferFailure> {
+    put_file_with(
+        destination,
+        path,
+        bearer,
+        file,
+        manifest,
+        tls,
+        TransferLimits::UPLOAD,
+        system_resolve,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn put_file_with(
+    destination: &DestinationUrl,
+    path: &str,
+    bearer: &str,
+    file: &std::path::Path,
+    manifest: &[u8],
+    tls: Option<&TlsClient>,
+    limits: TransferLimits,
+    resolve: Resolve,
+) -> Result<HttpResponse, TransferFailure> {
+    if !is_request_path(path) || !is_bearer(bearer) {
+        return Err(HttpFailure::Protocol.into());
+    }
+    let encoded = crate::sync::relay_crypto::encode_b64u(manifest);
+    if encoded.len() > MAX_MANIFEST_HEADER_BYTES {
+        return Err(HttpFailure::TooLarge.into());
+    }
+    let mut source = std::fs::File::open(file).map_err(|_| TransferFailure::File)?;
+    let size = source.metadata().map_err(|_| TransferFailure::File)?.len();
+    if size > limits.max_bytes {
+        return Err(HttpFailure::TooLarge.into());
+    }
+    let deadline = Instant::now() + limits.total;
+    let host = destination.host_header();
+    let length = size.to_string();
+    let head = request_bytes(&[
+        b"PUT ",
+        path.as_bytes(),
+        b" HTTP/1.1\r\nHost: ",
+        host.as_bytes(),
+        b"\r\nAuthorization: Bearer ",
+        bearer.as_bytes(),
+        b"\r\nContent-Type: application/octet-stream\r\nContent-Length: ",
+        length.as_bytes(),
+        b"\r\nApassy-Manifest: ",
+        encoded.as_bytes(),
+        b"\r\nExpect: 100-continue\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
+    ]);
+    let mut conn = open_before(destination, deadline, Some(limits.progress), tls, resolve)?;
+    conn.write_all(&head).map_err(|err| classify(&err))?;
+    conn.flush().map_err(|err| classify(&err))?;
+    drop(head);
+    // Wait for `100 Continue`. A final response instead is the answer.
+    let mut raw = Vec::new();
+    if let Reply::Final(response) = read_reply(&mut conn, &mut raw, true)? {
+        return Ok(response);
+    }
+    let mut buffer = vec![0u8; TRANSFER_BUFFER];
+    let mut sent: u64 = 0;
+    while sent < size {
+        let want = usize::try_from((size - sent).min(TRANSFER_BUFFER as u64))
+            .map_err(|_| TransferFailure::File)?;
+        let read = source
+            .read(&mut buffer[..want])
+            .map_err(|_| TransferFailure::File)?;
+        if read == 0 {
+            // The file became shorter than its declared length.
+            return Err(TransferFailure::File);
+        }
+        if let Err(err) = conn.write_all(&buffer[..read]) {
+            // The server may have answered and closed the connection, for
+            // example with 413. Its answer, if it arrived, is the result.
+            return match read_reply(&mut conn, &mut raw, false) {
+                Ok(Reply::Final(response)) => Ok(response),
+                _ => Err(classify(&err).into()),
+            };
+        }
+        sent += read as u64;
+    }
+    conn.flush().map_err(|err| classify(&err))?;
+    match read_reply(&mut conn, &mut raw, false)? {
+        Reply::Final(response) => Ok(response),
+        Reply::Continue => Err(HttpFailure::Protocol.into()),
+    }
+}
+
+/// What [`read_reply`] found.
+enum Reply {
+    /// `100 Continue`: the client may send the body.
+    Continue,
+    /// A final response.
+    Final(HttpResponse),
+}
+
+/// Read responses into `raw` until a final one, at most 64 KiB. Interim (1xx)
+/// responses are skipped; with `until_continue`, `100 Continue` returns
+/// [`Reply::Continue`] and leaves the bytes after it in `raw`.
+fn read_reply<S: Read>(
+    stream: &mut S,
+    raw: &mut Vec<u8>,
+    until_continue: bool,
+) -> Result<Reply, HttpFailure> {
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(head) = parse_head(raw)? {
+            if (100..200).contains(&head.status) {
+                raw.drain(..head.body_start);
+                if head.status == 100 && until_continue {
+                    return Ok(Reply::Continue);
+                }
+                continue;
+            }
+            if let Some(response) = complete_response(raw)? {
+                return Ok(Reply::Final(response));
+            }
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return finish_at_eof(raw).map(Reply::Final),
+            Ok(read) => {
+                raw.extend_from_slice(&chunk[..read]);
+                if raw.len() > MAX_RESPONSE_BYTES {
+                    return Err(HttpFailure::TooLarge);
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                return finish_at_eof(raw).map(Reply::Final);
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(classify(&err)),
+        }
+    }
+}
+
+/// A downloaded file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Downloaded {
+    /// The number of body bytes in the file.
+    pub bytes: u64,
+    /// The lowercase hex SHA-256 of the file, computed while it was read.
+    pub sha256: String,
+}
+
+/// Download the body of a `GET` with a bearer token into a new file `file`
+/// (mode 0600; it must not exist yet). The SHA-256 is computed while the body is
+/// read. With `expected_sha256`, a different hash deletes the file and is
+/// [`TransferFailure::WrongHash`]. A body over 256 MiB is
+/// [`HttpFailure::TooLarge`] and deletes the file. A status other than 200 is
+/// [`TransferFailure::Status`] and writes no file. The transfer fails after
+/// 30 s without a byte and after 15 min in total; a failure deletes the file.
+pub fn get_to_file(
+    destination: &DestinationUrl,
+    path: &str,
+    bearer: &str,
+    file: &std::path::Path,
+    expected_sha256: Option<&str>,
+    tls: Option<&TlsClient>,
+) -> Result<Downloaded, TransferFailure> {
+    get_to_file_with(
+        destination,
+        path,
+        bearer,
+        file,
+        expected_sha256,
+        tls,
+        TransferLimits::DOWNLOAD,
+        system_resolve,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn get_to_file_with(
+    destination: &DestinationUrl,
+    path: &str,
+    bearer: &str,
+    file: &std::path::Path,
+    expected_sha256: Option<&str>,
+    tls: Option<&TlsClient>,
+    limits: TransferLimits,
+    resolve: Resolve,
+) -> Result<Downloaded, TransferFailure> {
+    if !is_request_path(path) || !is_bearer(bearer) {
+        return Err(HttpFailure::Protocol.into());
+    }
+    let deadline = Instant::now() + limits.total;
+    let host = destination.host_header();
+    let request = request_bytes(&[
+        b"GET ",
+        path.as_bytes(),
+        b" HTTP/1.1\r\nHost: ",
+        host.as_bytes(),
+        b"\r\nAuthorization: Bearer ",
+        bearer.as_bytes(),
+        b"\r\nAccept: application/octet-stream, application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
+    ]);
+    let mut conn = open_before(destination, deadline, Some(limits.progress), tls, resolve)?;
+    conn.write_all(&request).map_err(|err| classify(&err))?;
+    conn.flush().map_err(|err| classify(&err))?;
+    drop(request);
+    // Read the head of the final response.
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let head = loop {
+        if let Some(head) = parse_head(&raw)? {
+            if (100..200).contains(&head.status) {
+                raw.drain(..head.body_start);
+                continue;
+            }
+            break head;
+        }
+        match conn.read(&mut chunk) {
+            Ok(0) => return Err(HttpFailure::Protocol.into()),
+            Ok(read) => {
+                raw.extend_from_slice(&chunk[..read]);
+                if raw.len() > MAX_RESPONSE_BYTES {
+                    return Err(HttpFailure::TooLarge.into());
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(HttpFailure::Protocol.into());
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(classify(&err).into()),
+        }
+    };
+    if head.status != 200 {
+        // A short error body, read with the cap of a JSON answer.
+        return match read_reply(&mut conn, &mut raw, false)? {
+            Reply::Final(response) => Err(TransferFailure::Status(response)),
+            Reply::Continue => Err(HttpFailure::Protocol.into()),
+        };
+    }
+    if let BodyKind::Length(length) = head.kind
+        && length as u64 > limits.max_bytes
+    {
+        return Err(HttpFailure::TooLarge.into());
+    }
+    let leftover = raw.split_off(head.body_start);
+    drop(raw);
+    let mut out = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(file)
+            .map_err(|_| TransferFailure::File)?
+    };
+    let mut body = io::BufReader::with_capacity(
+        TRANSFER_BUFFER,
+        Prefixed {
+            prefix: io::Cursor::new(leftover),
+            rest: &mut conn,
+        },
+    );
+    let mut sink = HashingFile {
+        file: &mut out,
+        digest: ring::digest::Context::new(&ring::digest::SHA256),
+        bytes: 0,
+        max_bytes: limits.max_bytes,
+    };
+    let copied = copy_body(&mut body, head.kind, &mut sink).and_then(|()| {
+        sink.file.sync_all().map_err(|_| TransferFailure::File)?;
+        Ok(())
+    });
+    let bytes = sink.bytes;
+    let sha256 = hex_lower(sink.digest.finish().as_ref());
+    drop(out);
+    let outcome = copied.and_then(|()| match expected_sha256 {
+        Some(expected) if expected != sha256 => Err(TransferFailure::WrongHash),
+        _ => Ok(Downloaded { bytes, sha256 }),
+    });
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(file);
+    }
+    outcome
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
+
+/// The bytes that arrived with the response head, then the rest of the stream.
+struct Prefixed<'a, S> {
+    prefix: io::Cursor<Vec<u8>>,
+    rest: &'a mut S,
+}
+
+impl<S: Read> Read for Prefixed<'_, S> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.prefix.read(buffer)?;
+        if read > 0 || buffer.is_empty() {
+            return Ok(read);
+        }
+        self.rest.read(buffer)
+    }
+}
+
+/// The download file with the running SHA-256 and the byte cap.
+struct HashingFile<'a> {
+    file: &'a mut std::fs::File,
+    digest: ring::digest::Context,
+    bytes: u64,
+    max_bytes: u64,
+}
+
+impl HashingFile<'_> {
+    fn take(&mut self, data: &[u8]) -> Result<(), TransferFailure> {
+        self.bytes += data.len() as u64;
+        if self.bytes > self.max_bytes {
+            return Err(HttpFailure::TooLarge.into());
+        }
+        self.digest.update(data);
+        self.file.write_all(data).map_err(|_| TransferFailure::File)
+    }
+}
+
+/// A read error of a download body. An early end is a protocol failure.
+fn body_failure(err: &io::Error) -> TransferFailure {
+    if err.kind() == io::ErrorKind::UnexpectedEof {
+        HttpFailure::Protocol.into()
+    } else {
+        classify(err).into()
+    }
+}
+
+/// Copy `count` body bytes into `sink`. An early end is a protocol failure.
+fn copy_exact<R: Read>(
+    body: &mut R,
+    mut count: u64,
+    sink: &mut HashingFile<'_>,
+) -> Result<(), TransferFailure> {
+    let mut buffer = vec![0u8; TRANSFER_BUFFER];
+    while count > 0 {
+        let want = usize::try_from(count.min(TRANSFER_BUFFER as u64))
+            .map_err(|_| TransferFailure::from(HttpFailure::Protocol))?;
+        match body.read(&mut buffer[..want]) {
+            Ok(0) => return Err(HttpFailure::Protocol.into()),
+            Ok(read) => {
+                sink.take(&buffer[..read])?;
+                count -= read as u64;
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(body_failure(&err)),
+        }
+    }
+    Ok(())
+}
+
+/// One CRLF-terminated line of a chunked body, at most [`MAX_CHUNK_LINE`] bytes,
+/// without the CRLF.
+fn chunk_line<R: io::BufRead>(body: &mut R) -> Result<Vec<u8>, TransferFailure> {
+    use std::io::BufRead as _;
+    let mut line = Vec::new();
+    body.by_ref()
+        .take(MAX_CHUNK_LINE)
+        .read_until(b'\n', &mut line)
+        .map_err(|err| body_failure(&err))?;
+    if !line.ends_with(b"\r\n") {
+        return Err(HttpFailure::Protocol.into());
+    }
+    line.truncate(line.len() - 2);
+    Ok(line)
+}
+
+/// Copy the body of a 200 response into `sink`, by its framing.
+fn copy_body<R: io::BufRead>(
+    body: &mut R,
+    kind: BodyKind,
+    sink: &mut HashingFile<'_>,
+) -> Result<(), TransferFailure> {
+    match kind {
+        BodyKind::Length(length) => copy_exact(body, length as u64, sink),
+        BodyKind::UntilClose => {
+            let mut buffer = vec![0u8; TRANSFER_BUFFER];
+            loop {
+                match body.read(&mut buffer) {
+                    Ok(0) => return Ok(()),
+                    Ok(read) => sink.take(&buffer[..read])?,
+                    // A server can close TLS without close_notify. Treat it as end of data.
+                    Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                    Err(err) => return Err(classify(&err).into()),
+                }
+            }
+        }
+        BodyKind::Chunked => {
+            loop {
+                let line = chunk_line(body)?;
+                let line = std::str::from_utf8(&line).map_err(|_| HttpFailure::Protocol)?;
+                let size_text = line.split(';').next().unwrap_or_default().trim();
+                let size = u64::from_str_radix(size_text, 16).map_err(|_| HttpFailure::Protocol)?;
+                if size > sink.max_bytes.saturating_sub(sink.bytes) {
+                    return Err(HttpFailure::TooLarge.into());
+                }
+                if size == 0 {
+                    break;
+                }
+                copy_exact(body, size, sink)?;
+                if !chunk_line(body)?.is_empty() {
+                    return Err(HttpFailure::Protocol.into());
+                }
+            }
+            // Trailers end with an empty line. This client ignores trailer fields.
+            for _ in 0..MAX_TRAILER_LINES {
+                if chunk_line(body)?.is_empty() {
+                    return Ok(());
+                }
+            }
+            Err(HttpFailure::Protocol.into())
+        }
+    }
+}
+
 /// A name lookup. Tests replace the system lookup, so they need no network.
 type Resolve = fn(&str, u16) -> io::Result<Vec<SocketAddr>>;
 
@@ -443,6 +1044,22 @@ fn send_before(
     tls: Option<&TlsClient>,
     resolve: Resolve,
 ) -> Result<HttpResponse, HttpFailure> {
+    let mut conn = open_before(destination, deadline, None, tls, resolve)?;
+    exchange(&mut conn, request)
+}
+
+/// Open a connection to `destination` before `deadline`: name lookup, connect,
+/// and, for `https://`, the whole TLS handshake. No request byte is sent here.
+/// With `idle`, every socket operation also stops after `idle` without a byte
+/// (the progress deadline of a transfer), and the setup stops after `idle`.
+fn open_before(
+    destination: &DestinationUrl,
+    deadline: Instant,
+    idle: Option<Duration>,
+    tls: Option<&TlsClient>,
+    resolve: Resolve,
+) -> Result<Conn, HttpFailure> {
+    let setup = idle.map_or(deadline, |idle| deadline.min(Instant::now() + idle));
     match destination {
         DestinationUrl::Loopback { addr, .. } => {
             // The fields are public. Plain http:// never leaves this computer,
@@ -450,18 +1067,28 @@ fn send_before(
             if !addr.ip().is_loopback() {
                 return Err(HttpFailure::Protocol);
             }
-            let stream = connect_before(&[*addr], deadline)?;
-            let mut stream = DeadlineStream { stream, deadline };
-            exchange(&mut stream, request)
+            let stream = connect_before(&[*addr], setup)?;
+            Ok(Conn::Plain(DeadlineStream {
+                stream,
+                deadline,
+                idle,
+            }))
         }
         DestinationUrl::Https { host, port } => {
             let tls = tls.ok_or(HttpFailure::Protocol)?;
             let name = ServerName::try_from(host.clone()).map_err(|_| HttpFailure::Protocol)?;
-            let addrs = resolve_before(host, *port, deadline, resolve)?;
-            let stream = connect_before(&addrs, deadline)?;
+            let addrs = resolve_before(host, *port, setup, resolve)?;
+            let stream = connect_before(&addrs, setup)?;
             let conn = ClientConnection::new(Arc::clone(&tls.config), name)
                 .map_err(|_| HttpFailure::Tls)?;
-            let mut stream = StreamOwned::new(conn, DeadlineStream { stream, deadline });
+            let mut stream = StreamOwned::new(
+                conn,
+                DeadlineStream {
+                    stream,
+                    deadline,
+                    idle,
+                },
+            );
             // Finish the handshake before any request byte. A failed check sends
             // no token and no body. On macOS the certificate check inside
             // `complete_io` can, in rare cases, take longer than the deadline (it
@@ -473,7 +1100,38 @@ fn send_before(
                     .complete_io(&mut stream.sock)
                     .map_err(|err| classify(&err))?;
             }
-            exchange(&mut stream, request)
+            Ok(Conn::Tls(Box::new(stream)))
+        }
+    }
+}
+
+/// An open connection: plain loopback or TLS.
+enum Conn {
+    Plain(DeadlineStream),
+    Tls(Box<StreamOwned<ClientConnection, DeadlineStream>>),
+}
+
+impl Read for Conn {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for Conn {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
         }
     }
 }
@@ -484,14 +1142,19 @@ fn send_before(
 struct DeadlineStream {
     stream: TcpStream,
     deadline: Instant,
+    /// The longest wait of one socket operation of a transfer: a transfer that
+    /// moves no byte for this long fails. `None` for a short exchange.
+    idle: Option<Duration>,
 }
 
 impl DeadlineStream {
     fn remaining(&self) -> io::Result<Duration> {
-        self.deadline
+        let left = self
+            .deadline
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
-            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+        Ok(self.idle.map_or(left, |idle| left.min(idle)))
     }
 }
 
@@ -1626,5 +2289,606 @@ mod tests {
                 .unwrap_err(),
             HttpFailure::Connect
         );
+    }
+
+    /// Small limits for the transfer tests.
+    fn test_limits(max_bytes: u64, progress: Duration, total: Duration) -> TransferLimits {
+        TransferLimits {
+            max_bytes,
+            progress,
+            total,
+        }
+    }
+
+    /// Read from `stream` until the end of a request head. Returns the head text and
+    /// the bytes that arrived after it.
+    fn read_head(stream: &mut TcpStream) -> (String, Vec<u8>) {
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            if let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&seen[..end]).into_owned();
+                return (head, seen[end + 4..].to_vec());
+            }
+            let read = stream.read(&mut buf).expect("read head");
+            assert!(read > 0, "the request ended before its head");
+            seen.extend_from_slice(&buf[..read]);
+        }
+    }
+
+    /// Bytes that arrive in `wait`, until the end of the stream or the wait.
+    fn bytes_within(stream: &mut TcpStream, wait: Duration) -> Vec<u8> {
+        stream.set_read_timeout(Some(wait)).expect("read timeout");
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        let began = Instant::now();
+        while began.elapsed() < wait {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => seen.extend_from_slice(&buf[..read]),
+            }
+        }
+        seen
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex_lower(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+    }
+
+    /// A synthetic head file: a byte pattern, no model data.
+    fn synthetic_file(dir: &std::path::Path, size: usize) -> (std::path::PathBuf, Vec<u8>) {
+        let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let path = dir.join("candidate.safetensors");
+        std::fs::write(&path, &content).expect("write file");
+        (path, content)
+    }
+
+    const MANIFEST: &[u8] = br#"{"name":"synthetic-heads","checkpoint":{"sha256":"0000"}}"#;
+    const BRAIN_KEY: &str = "synthetic-brain-key-not-a-secret";
+
+    #[test]
+    fn a_bearer_request_has_one_deadline_and_no_body_for_get_or_delete() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let destination = parse_destination(&format!("http://127.0.0.1:{port}")).expect("url");
+        let server = capture_one_request(listener);
+        let hash = "a".repeat(64);
+        let path = format!("/v1/heads/{hash}");
+        let response = request_json(
+            Method::Delete,
+            &destination,
+            &path,
+            BRAIN_KEY,
+            None,
+            Instant::now() + Duration::from_secs(5),
+            None,
+        )
+        .expect("delete");
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "DELETE {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {BRAIN_KEY}\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+            )
+        );
+        // A body with GET or DELETE, a missing bearer, or a bad path sends nothing.
+        for (method, bearer, body, path) in [
+            (Method::Get, BRAIN_KEY, Some(&b"{}"[..]), "/v1/heads/x"),
+            (Method::Delete, BRAIN_KEY, Some(&b"{}"[..]), "/v1/owner"),
+            (Method::Get, "", None, "/v1/heads/x"),
+            (Method::Get, "a b", None, "/v1/heads/x"),
+            (Method::Get, BRAIN_KEY, None, "v1/heads/x"),
+        ] {
+            assert_eq!(
+                request_json(
+                    method,
+                    &destination,
+                    path,
+                    bearer,
+                    body,
+                    Instant::now() + Duration::from_secs(5),
+                    None,
+                )
+                .unwrap_err(),
+                HttpFailure::Protocol,
+                "{method:?} {path}"
+            );
+        }
+        // The name lookup has the deadline too (unlike `get`).
+        let pki = test_tls();
+        let remote = DestinationUrl::Https {
+            host: "brain.example.invalid".to_owned(),
+            port: 443,
+        };
+        let timeout = Duration::from_millis(300);
+        let began = Instant::now();
+        assert_eq!(
+            request_json_with(
+                Method::Get,
+                &remote,
+                &path,
+                BRAIN_KEY,
+                None,
+                began + timeout,
+                Some(&pki.client),
+                resolve_slowly,
+            )
+            .unwrap_err(),
+            HttpFailure::Timeout
+        );
+        assert!(began.elapsed() < timeout + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn an_upload_sends_no_body_before_100_continue() {
+        assert_eq!(MAX_UPLOAD_BYTES, 160 * 1024 * 1024);
+        assert_eq!(MAX_MANIFEST_HEADER_BYTES, 16 * 1024);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (file, content) = synthetic_file(dir.path(), 200 * 1024);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let destination = parse_destination(&format!("http://127.0.0.1:{port}")).expect("url");
+        let size = content.len();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let (head, mut early) = read_head(&mut stream);
+            // The client waits for `100 Continue`: nothing more arrives before it.
+            early.extend(bytes_within(&mut stream, Duration::from_millis(400)));
+            stream
+                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .expect("continue");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            let mut body = early.clone();
+            let mut buf = [0u8; 16 * 1024];
+            while body.len() < size {
+                let read = stream.read(&mut buf).expect("body");
+                assert!(read > 0, "the body ended early");
+                body.extend_from_slice(&buf[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\n{}")
+                .expect("answer");
+            (head, early, body)
+        });
+        let path = format!("/v1/heads/{}", sha256_hex(&content));
+        let response = put_file_with(
+            &destination,
+            &path,
+            BRAIN_KEY,
+            &file,
+            MANIFEST,
+            None,
+            test_limits(
+                MAX_UPLOAD_BYTES,
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+            ),
+            system_resolve,
+        )
+        .expect("upload");
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body, b"{}");
+        let (head, early, body) = server.join().expect("server");
+        assert!(early.is_empty(), "{} body bytes before 100", early.len());
+        assert_eq!(body, content);
+        let manifest = crate::sync::relay_crypto::encode_b64u(MANIFEST);
+        assert_eq!(
+            head,
+            format!(
+                "PUT {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {BRAIN_KEY}\r\nContent-Type: application/octet-stream\r\nContent-Length: {size}\r\nApassy-Manifest: {manifest}\r\nExpect: 100-continue\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close"
+            )
+        );
+
+        // A file over the cap and a manifest header over 16 KiB fail before any
+        // connection: nothing listens at port 9.
+        let nowhere = parse_destination("http://127.0.0.1:9").expect("url");
+        let small = test_limits(1024, Duration::from_secs(5), Duration::from_secs(30));
+        assert!(matches!(
+            put_file_with(
+                &nowhere,
+                &path,
+                BRAIN_KEY,
+                &file,
+                MANIFEST,
+                None,
+                small,
+                system_resolve
+            ),
+            Err(TransferFailure::Http(HttpFailure::TooLarge))
+        ));
+        let large_manifest = vec![b'a'; MAX_MANIFEST_HEADER_BYTES];
+        assert!(matches!(
+            put_file(&nowhere, &path, BRAIN_KEY, &file, &large_manifest, None),
+            Err(TransferFailure::Http(HttpFailure::TooLarge))
+        ));
+        assert!(matches!(
+            put_file(
+                &nowhere,
+                &path,
+                BRAIN_KEY,
+                &dir.path().join("missing"),
+                MANIFEST,
+                None
+            ),
+            Err(TransferFailure::File)
+        ));
+    }
+
+    #[test]
+    fn an_early_final_response_stops_the_upload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (file, _) = synthetic_file(dir.path(), 512 * 1024);
+        for answer in [
+            &b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"[..],
+            &b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\n\r\n{}"[..],
+            &b"HTTP/1.1 409 Conflict\r\nContent-Length: 2\r\n\r\n{}"[..],
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let destination = parse_destination(&format!("http://127.0.0.1:{port}")).expect("url");
+            let reply = answer.to_vec();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let (_head, mut after) = read_head(&mut stream);
+                // A final response instead of `100 Continue`.
+                stream.write_all(&reply).expect("answer");
+                after.extend(bytes_within(&mut stream, Duration::from_millis(500)));
+                after
+            });
+            let response = put_file_with(
+                &destination,
+                "/v1/heads/0000",
+                BRAIN_KEY,
+                &file,
+                MANIFEST,
+                None,
+                test_limits(
+                    MAX_UPLOAD_BYTES,
+                    Duration::from_secs(5),
+                    Duration::from_secs(30),
+                ),
+                system_resolve,
+            )
+            .expect("final response");
+            let status: u16 = String::from_utf8_lossy(&answer[9..12])
+                .parse()
+                .expect("status");
+            assert_eq!(response.status, status);
+            let after = server.join().expect("server");
+            assert!(
+                after.is_empty(),
+                "status {status}: {} body bytes after the final response",
+                after.len()
+            );
+        }
+    }
+
+    /// Accept one connection, read the request head, write `answer`, and close.
+    fn answer_once(
+        listener: std::net::TcpListener,
+        answer: Vec<u8>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_head(&mut stream);
+            let _ = stream.write_all(&answer);
+        })
+    }
+
+    fn loopback_listener() -> (std::net::TcpListener, DestinationUrl) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination =
+            parse_destination(&format!("http://{}", listener.local_addr().expect("addr")))
+                .expect("url");
+        (listener, destination)
+    }
+
+    #[test]
+    fn a_download_over_the_cap_is_too_large() {
+        assert_eq!(MAX_DOWNLOAD_BYTES, 256 * 1024 * 1024);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let limits = test_limits(1024, Duration::from_secs(5), Duration::from_secs(30));
+        // A declared length over the cap, over TLS: refused before any file.
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let mut answer = b"HTTP/1.1 200 OK\r\nContent-Length: 2048\r\n\r\n".to_vec();
+        answer.resize(answer.len() + 2048, b'a');
+        let (_release, held) = mpsc::channel();
+        let server = answer_one_tls_request(listener, Arc::clone(&pki.config), Some(answer), held);
+        let target = dir.path().join("declared.bin");
+        assert!(matches!(
+            get_to_file_with(
+                &destination,
+                "/v1/train/1/result",
+                BRAIN_KEY,
+                &target,
+                None,
+                Some(&pki.client),
+                limits,
+                resolve_to_this_computer,
+            ),
+            Err(TransferFailure::Http(HttpFailure::TooLarge))
+        ));
+        let seen = String::from_utf8(server.join().expect("server")).expect("text");
+        assert!(
+            seen.starts_with("GET /v1/train/1/result HTTP/1.1\r\n"),
+            "{seen}"
+        );
+        assert!(
+            !target.exists(),
+            "no file for a declared length over the cap"
+        );
+
+        // A chunked body and a body until close that grow over the cap: the file is
+        // deleted.
+        let mut chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        for _ in 0..3 {
+            chunked.extend_from_slice(b"200\r\n");
+            chunked.resize(chunked.len() + 0x200, b'b');
+            chunked.extend_from_slice(b"\r\n");
+        }
+        chunked.extend_from_slice(b"0\r\n\r\n");
+        let mut until_close = b"HTTP/1.0 200 OK\r\n\r\n".to_vec();
+        until_close.resize(until_close.len() + 2048, b'c');
+        for (name, answer) in [("chunked", chunked), ("until close", until_close)] {
+            let (listener, destination) = loopback_listener();
+            let server = answer_once(listener, answer);
+            let target = dir.path().join(format!("{name}.bin"));
+            let result = get_to_file_with(
+                &destination,
+                "/v1/train/1/result",
+                BRAIN_KEY,
+                &target,
+                None,
+                None,
+                limits,
+                system_resolve,
+            );
+            assert!(
+                matches!(result, Err(TransferFailure::Http(HttpFailure::TooLarge))),
+                "{name}: {result:?}"
+            );
+            server.join().expect("server");
+            assert!(!target.exists(), "{name}: the partial file is deleted");
+        }
+    }
+
+    #[test]
+    fn a_download_with_a_wrong_hash_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let content = b"synthetic head file bytes, not a model".to_vec();
+        let right = sha256_hex(&content);
+        let wrong = sha256_hex(b"another synthetic file");
+        let limits = test_limits(1024, Duration::from_secs(5), Duration::from_secs(30));
+        let length_answer = {
+            let mut answer = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                content.len()
+            )
+            .into_bytes();
+            answer.extend_from_slice(&content);
+            answer
+        };
+        let chunked_answer = {
+            let mut answer = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+            let (first, second) = content.split_at(10);
+            for part in [first, second] {
+                answer.extend_from_slice(format!("{:x};x=1\r\n", part.len()).as_bytes());
+                answer.extend_from_slice(part);
+                answer.extend_from_slice(b"\r\n");
+            }
+            answer.extend_from_slice(b"0\r\nX-Trailer: 1\r\n\r\n");
+            answer
+        };
+        for (name, answer) in [("length", length_answer), ("chunked", chunked_answer)] {
+            let (listener, destination) = loopback_listener();
+            let server = answer_once(listener, answer.clone());
+            let target = dir.path().join(format!("{name}-wrong.bin"));
+            let result = get_to_file_with(
+                &destination,
+                "/v1/train/1/result",
+                BRAIN_KEY,
+                &target,
+                Some(&wrong),
+                None,
+                limits,
+                system_resolve,
+            );
+            assert!(
+                matches!(result, Err(TransferFailure::WrongHash)),
+                "{name}: {result:?}"
+            );
+            server.join().expect("server");
+            assert!(!target.exists(), "{name}: a wrong file is deleted");
+
+            let (listener, destination) = loopback_listener();
+            let server = answer_once(listener, answer);
+            let target = dir.path().join(format!("{name}-right.bin"));
+            let downloaded = get_to_file_with(
+                &destination,
+                "/v1/train/1/result",
+                BRAIN_KEY,
+                &target,
+                Some(&right),
+                None,
+                limits,
+                system_resolve,
+            )
+            .expect("download");
+            server.join().expect("server");
+            assert_eq!(
+                downloaded,
+                Downloaded {
+                    bytes: content.len() as u64,
+                    sha256: right.clone(),
+                },
+                "{name}"
+            );
+            assert_eq!(std::fs::read(&target).expect("file"), content, "{name}");
+            let mode = std::fs::metadata(&target)
+                .expect("meta")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+            // The file must be new: an existing file is not overwritten.
+            let (listener, destination) = loopback_listener();
+            let server = answer_once(
+                listener,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nother".to_vec(),
+            );
+            assert!(matches!(
+                get_to_file_with(
+                    &destination,
+                    "/v1/train/1/result",
+                    BRAIN_KEY,
+                    &target,
+                    None,
+                    None,
+                    limits,
+                    system_resolve,
+                ),
+                Err(TransferFailure::File)
+            ));
+            server.join().expect("server");
+            assert_eq!(std::fs::read(&target).expect("file"), content, "{name}");
+        }
+
+        // A status other than 200 writes no file and gives the short body.
+        let (listener, destination) = loopback_listener();
+        let server = answer_once(
+            listener,
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 25\r\n\r\n{\"detail\":{\"code\":\"x\"}}  "
+                .to_vec(),
+        );
+        let target = dir.path().join("missing.bin");
+        match get_to_file_with(
+            &destination,
+            "/v1/train/1/result",
+            BRAIN_KEY,
+            &target,
+            Some(&right),
+            None,
+            limits,
+            system_resolve,
+        ) {
+            Err(TransferFailure::Status(response)) => {
+                assert_eq!(response.status, 404);
+                assert_eq!(response.body, br#"{"detail":{"code":"x"}}  "#);
+            }
+            other => panic!("a 404 gave {other:?}"),
+        }
+        server.join().expect("server");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn a_stalled_transfer_fails_at_the_progress_deadline() {
+        assert_eq!(TRANSFER_PROGRESS_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(TRANSFER_TOTAL_LIMIT, Duration::from_secs(15 * 60));
+        let dir = tempfile::tempdir().expect("temp dir");
+        let progress = Duration::from_millis(300);
+        let limits = test_limits(1024 * 1024, progress, Duration::from_secs(30));
+
+        // A download that stops after part of its body.
+        let (listener, destination) = loopback_listener();
+        let (release, held) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_head(&mut stream);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789");
+            let _ = held.recv_timeout(Duration::from_secs(10));
+        });
+        let target = dir.path().join("stalled.bin");
+        let began = Instant::now();
+        let result = get_to_file_with(
+            &destination,
+            "/v1/train/1/result",
+            BRAIN_KEY,
+            &target,
+            None,
+            None,
+            limits,
+            system_resolve,
+        );
+        let elapsed = began.elapsed();
+        release.send(()).expect("release");
+        server.join().expect("server");
+        assert!(
+            matches!(result, Err(TransferFailure::Http(HttpFailure::Timeout))),
+            "{result:?}"
+        );
+        assert!(elapsed < progress + Duration::from_secs(1), "{elapsed:?}");
+        assert!(!target.exists(), "the partial file is deleted");
+
+        // An upload whose server never sends `100 Continue`: no body byte, a timeout.
+        let (file, _) = synthetic_file(dir.path(), 4096);
+        let (listener, destination) = loopback_listener();
+        let (release, held) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let (_head, mut after) = read_head(&mut stream);
+            after.extend(bytes_within(&mut stream, Duration::from_millis(800)));
+            let _ = held.recv_timeout(Duration::from_secs(10));
+            after
+        });
+        let began = Instant::now();
+        let result = put_file_with(
+            &destination,
+            "/v1/heads/0000",
+            BRAIN_KEY,
+            &file,
+            MANIFEST,
+            None,
+            limits,
+            system_resolve,
+        );
+        let elapsed = began.elapsed();
+        release.send(()).expect("release");
+        assert!(
+            matches!(result, Err(TransferFailure::Http(HttpFailure::Timeout))),
+            "{result:?}"
+        );
+        assert!(elapsed < progress + Duration::from_secs(1), "{elapsed:?}");
+        assert!(server.join().expect("server").is_empty(), "no body byte");
+
+        // Bytes that keep coming, each before the progress deadline, still stop at
+        // the total limit.
+        let (listener, destination) = loopback_listener();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_head(&mut stream);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n");
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(100));
+                if stream.write_all(b"x").is_err() {
+                    break;
+                }
+            }
+        });
+        let total = Duration::from_millis(700);
+        let target = dir.path().join("trickle.bin");
+        let began = Instant::now();
+        let result = get_to_file_with(
+            &destination,
+            "/v1/train/1/result",
+            BRAIN_KEY,
+            &target,
+            None,
+            None,
+            test_limits(1024 * 1024, progress, total),
+            system_resolve,
+        );
+        let elapsed = began.elapsed();
+        assert!(
+            matches!(result, Err(TransferFailure::Http(HttpFailure::Timeout))),
+            "{result:?}"
+        );
+        assert!(elapsed < total + Duration::from_secs(1), "{elapsed:?}");
+        assert!(!target.exists());
+        server.join().expect("server");
     }
 }
