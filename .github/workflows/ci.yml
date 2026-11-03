@@ -335,10 +335,18 @@ jobs:
           cache-dependency-path: crates/apassy-relay/deploy/worker/package-lock.json
       - name: Run Worker tests
         run: node --test 'test/*.test.ts'
+      # The push gateway (push-gateway-v1): the same Node test runner, no dependency.
+      - name: Run push gateway tests
+        working-directory: crates/apassy-relay/deploy/push-gateway
+        run: node --test 'test/*.test.ts'
       - name: Install typecheck dependencies
         run: npm ci --no-audit --no-fund
       - name: Check Worker types
         run: npx tsc -p tsconfig.json
+      # The gateway has no lockfile: its types are checked with the Worker's dependencies.
+      - name: Check push gateway types
+        working-directory: crates/apassy-relay/deploy/push-gateway
+        run: ../worker/node_modules/.bin/tsc -p tsconfig.json
 
   audit:
     needs: reuse-pr

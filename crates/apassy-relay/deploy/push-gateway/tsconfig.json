@@ -1,0 +1,19 @@
+{
+  // The gateway has no lockfile of its own: CI checks its types with the dependencies of
+  // ../worker (the same versions as package.json here), found through typeRoots.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "typeRoots": ["../worker/node_modules/@types", "../worker/node_modules"],
+    "types": ["@cloudflare/workers-types", "node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "test", "../worker/src/apns.ts"]
+}
