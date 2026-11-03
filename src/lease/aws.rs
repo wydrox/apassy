@@ -1038,7 +1038,7 @@ mod tests {
         ];
         for settings in &refused {
             let why = parse(&settings.to_string()).unwrap_err();
-            for value in ["123456789012", "not json", "eu-central", "EU-", "S3", "xxxx"] {
+            for value in ["123456789012", "not json", "Statement", "EU-", "S3", "xxxx"] {
                 assert!(!why.contains(value), "the reason holds no value: {why}");
             }
         }
