@@ -6,8 +6,8 @@ and [ADR 0011](../adr/0011-run-proxy-placeholders.md) stage 7. Plan:
 [implementation-plan-0037-cloud-agents.md](../design/implementation-plan-0037-cloud-agents.md), decisions 3
 to 8. The relay side (the public listener, its scope, the failed-auth limiter, the item list of an
 agent, the in-process release) is in `crates/apassy-relay` (its `docs/SPEC.md` sections 11, 12, 14, and
-30). The app side (the node, the host loop, Funnel, Settings → Cloud agents) is in work units U2 and U3
-and is not released yet. A change to this document changes the relay, the app, and the plugin in
+30). The app side (the node, the host loop, Funnel, Bouncer › Agents › Remote Access) is in work units U2 and U3
+and ships in 0.5.16. A change to this document changes the relay, the app, and the plugin in
 [`deploy/plugins/apassy-cloud/`](../../deploy/plugins/apassy-cloud/README.md) together.
 
 ## 1. Purpose and scope
@@ -43,7 +43,7 @@ reach (section 3).
 ## 3. The route
 
 - The public URL is `https://<Mac>.<tailnet>.ts.net:8443`. Port 8443, never 443. The route is off by
-  default. The owner turns it on in Settings → Cloud agents.
+  default. The owner turns it on in Bouncer › Agents › Remote Access.
 - TLS ends in `tailscaled` on the Mac. `tailscaled` connects to the public listener from the loopback.
 - The public listener serves these routes only:
   - `POST /mcp`: the MCP endpoint (section 5).

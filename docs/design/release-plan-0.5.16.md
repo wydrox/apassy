@@ -1,6 +1,10 @@
 # Release plan — 0.5.16
 
-Date: 2026-11-03. Status: PLAN for the owner. No agent starts before the owner accepts it (gate G0).
+Date: 2026-11-03. Status: IN PROGRESS. The owner widened the scope on 2026-11-03: cloud agents, the
+Bouncer section, the iPhone demo mode, the privacy manifests and the store texts are in 0.5.16 (see
+§2 "In: added by the owner"); the later stages ship as 0.5.17 and later. The owner asked to accept
+nothing in between, so gates G0, G1 and G2 are closed by that decision; G3 to G5 list what only the
+owner can do.
 
 ## 1. Outcome
 
@@ -39,12 +43,16 @@ CLI and the extension go from 0.5.14 straight to 0.5.16. The iPhone goes from th
 | F5 | Extension Node model tests fail now and then on Linux: 214 and 215 on main at fa0b3f37 (fixed by 9e94c4eb), and 203 "a credential outside the allow list is refused" on #89. | CI |
 | F6 | Nothing tests the OpenSSH form of an Ed25519 key with `ssh-keygen`. | Note of the passkey work |
 
+### In: added by the owner (2026-11-03)
+
+- **Cloud agents** (#85, #86, #87, #89, #92; vault schemas 26 and 27; Funnel on 8443), with the
+  Bouncer section (`implementation-plan-bouncer-section.md`) and the review fixes of panels A, B and
+  C.
+- **iPhone demo mode** (Try the Demo, See a Sample on the watch), **privacy manifests**, the export
+  compliance answer and the App Store texts (`docs/store/app-store/`).
+
 ### Out: 0.5.17 or later
 
-- **Cloud agents** (#85, #86, #87, #89, #92; vault schema 26; Funnel on 8443). The thread "Apassy
-  Secrets Provider for Grok Bot" owns this work. Its release unit U5 becomes 0.5.17. This plan does
-  not merge, rebase or edit those branches. After 0.5.16, that thread rebases on main and takes the
-  next version.
 - ADR 0035 waves 2 to 5, ADR 0037 stages 3 to 8, ADR 0011 stages 2 to 7, the open parts of ADR 0019
   and ADR 0022, the removal of the Wi-Fi companion (after ADR 0037 stage 2), Connect and Stripe.
 
