@@ -10,6 +10,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Changed
 
+- **Mac credential page:** a one-time password is a row of the login card, with Copy and Show like the password. Copy needs no Show first. The username has Copy. The website row shows its host, with Open for http and https addresses. A login without a website offers **Add website…**. The header names the provider and the kind, and Service and Project are labeled rows. The details of a 1Password import move to the footer, under **Import details…**.
+- **Agent Access:** a line under the title says what happens when an agent asks for the credential, also while the part is closed. "Always ask me" and "Environment" say what their state means, and "Hosts and risk" names the hosts that the bouncer knows.
+- **Mac credential list:** the selection bar appears for two or more selected credentials. Credentials with the same kind and name show their host or folder, and **Possible duplicates (N)** lists them together. Credentials in no folder are under **No folder** (the top level was called "Personal"). A selected row keeps a white edge around its tile.
+- Dates older than a week read "9 Oct 2026".
 - **iPhone and site:** The text describes the Apassy relay as sync with your Mac, not as the way for teams: the welcome and Add a vault screens offer **From your Mac · Apassy relay**, and the hosted relay no longer serves team vaults. Plans: everything self-hosted is free; only the hosted Apassy Connect is paid (`docs/product/plans.md`).
 
 ### Upgrade notes
