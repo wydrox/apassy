@@ -143,7 +143,7 @@ jobs:
       # The demo app builds without the vault feature. The steps above build only
       # with all features, so they do not see vault code that is not gated.
       - name: Check the demo build without the vault
-        run: cargo check --offline --locked --features desktop --lib
+        run: cargo check --offline --locked --features desktop --bin apassy
 
       # The app binary (crates/apassy-app) is outside the default members: it joins the
       # core with the relay crate for the Mac's own node (ADR 0037).
@@ -446,7 +446,7 @@ jobs:
           echo "APASSY_BUILD_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
           echo "APASSY_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build the release binaries
-        run: cargo build --release --locked -p apassy -p apassy-app --features apassy/desktop,apassy/vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
+        run: cargo build --release --locked -p apassy -p apassy-app --features apassy/desktop,apassy/vault --bin apassy-app --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
       - name: Install Python 3.12
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

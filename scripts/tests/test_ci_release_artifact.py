@@ -38,7 +38,9 @@ class ArtifactTests(unittest.TestCase):
             data = header + name.encode()
             if name == "apassy":
                 data += COMMIT.encode() + DATE.encode()
-            (source / name).write_bytes(data)
+            (source / artifact.BUILD_NAMES.get(name, name)).write_bytes(data)
+        # The root `apassy` target (no node) is never the shipped main executable.
+        (source / "apassy").write_bytes(header + b"root target without the node")
         self.directory = self.root / "download"
         artifact.create(self.directory, COMMIT, DATE, RUN_ID, ATTEMPT)
         for name in artifact.BINARIES:
@@ -222,6 +224,11 @@ class ArtifactTests(unittest.TestCase):
         with self.assertRaises(OSError):
             self.verify(github_env=env)
         self.assertEqual(stat.S_IMODE((self.directory / "apassy").stat().st_mode), 0o644)
+
+    def test_create_ships_the_app_crate_binary_as_apassy(self):
+        shipped = (self.directory / "apassy").read_bytes()
+        self.assertEqual(shipped, (self.root / "target" / "release" / "apassy-app").read_bytes())
+        self.assertNotIn(b"root target", shipped)
 
     def test_create_refuses_a_nonempty_output_directory(self):
         with self.assertRaises(ValueError):

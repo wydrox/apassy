@@ -73,6 +73,14 @@ rustix = { version = "=1.1.4", optional = true, default-features = false, featur
 # Main-process native menus through a safe API; no application framework or GTK.
 muda = { version = "=0.21.2", optional = true, default-features = false }
 
+# The owner command line and the window without the Mac's own node. The app bundle
+# ships `apassy-app` (crates/apassy-app) under this name; this target stays for the
+# integration tests (`CARGO_BIN_EXE_apassy`) and the demo build.
+[[bin]]
+name = "apassy"
+path = "src/main.rs"
+required-features = ["desktop"]
+
 [[bin]]
 name = "apassy-mcp"
 path = "src/bin/apassy-mcp.rs"

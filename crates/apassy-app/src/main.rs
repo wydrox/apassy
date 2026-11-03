@@ -1,4 +1,5 @@
-//! Native desktop entry for Apassy, and the `apassy` owner command line (ADR 0017).
+//! Native desktop entry for Apassy, and the `apassy` owner command line (ADR 0017): the
+//! main executable of the app bundle (`Contents/MacOS/apassy`, built as `apassy-app`).
 //!
 //! Without arguments, it opens the window. With a command, it talks to the running
 //! window over the owner socket. It never prints a secret value of an item.
@@ -11,6 +12,8 @@ use std::sync::Arc;
 use apassy::node::backend::NodeBackend;
 use rustix::process::{Resource, Rlimit, setrlimit};
 
+// The same narrow diagnostics sink as the root `apassy` target.
+#[path = "../../../src/owner_diagnostics.rs"]
 mod owner_diagnostics;
 
 fn main() -> eframe::Result {
@@ -69,6 +72,7 @@ fn disable_core_dumps() -> rustix::io::Result<()> {
     )
 }
 
+// The shipped main executable sets the limit itself: its own copy of the check.
 #[cfg(test)]
 mod tests {
     use super::*;
