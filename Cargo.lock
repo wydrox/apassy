@@ -197,8 +197,15 @@ dependencies = [
  "apassy",
  "apassy-relay",
  "eframe",
+ "rcgen",
+ "ring",
  "rustix 1.1.4",
+ "rustls",
+ "serde_json",
+ "tempfile",
  "tracing",
+ "ureq",
+ "zeroize",
 ]
 
 [[package]]

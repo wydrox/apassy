@@ -1,6 +1,7 @@
 import ApassyCompanionKit
 import Synchronization
 import ApassyVaultCore
+import ApassyVaultDemo
 import ApassyVaultKit
 import AuthenticationServices
 import Foundation
@@ -9,6 +10,9 @@ import UIKit
 
 /// Which part of the app shows: the welcome, the join flow, the companion alone, or the vault
 /// (its lock screen or its tabs). It owns the vault model and the companion model.
+///
+/// The demo ("Try the Demo", `-ApassyDemo`) is a second root of its own over `DemoAppSession`: the
+/// same screens, with a vault in memory. `AppShell` shows one root at a time.
 @MainActor
 @Observable
 final class RootModel {
@@ -28,15 +32,17 @@ final class RootModel {
     }
 
     private(set) var screen: Screen = .starting
-    let companion = AppModel()
-    let settings = VaultSettings(defaults: SharedContainer.defaults)
+    /// This root is the demo: a vault of synthetic data in memory (`DemoAppSession`).
+    let isDemo: Bool
+    let companion: AppModel
+    let settings: VaultSettings
     private(set) var vault: VaultModel?
     /// Questions through the relay of the vaults on this iPhone (contract relay-questions-v1).
     private(set) var questions: QuestionsModel?
     /// The agents that the Macs publish for the vaults on this iPhone (contract relay-feed-v1).
     private(set) var agents: AgentsModel?
     /// The answer keys of this iPhone, one per questions team: the joins and the questions use them.
-    let answerSigners: any AnswerSigners = RootModel.makeAnswerSigners()
+    let answerSigners: any AnswerSigners
     /// The owner opened the notification of a question: the vault tabs show Questions.
     var questionsRequested = false
     /// Imports from and exports to another app (Apple's credential exchange).
@@ -46,6 +52,55 @@ final class RootModel {
     /// Where Cancel of the join flow goes back to.
     @ObservationIgnored private var beforeJoin: Screen = .welcome
     @ObservationIgnored private var vaultBeforeAdd: String?
+    /// The keychain, the App Group, the core, AutoFill, and push. The demo uses only its pasteboard.
+    @ObservationIgnored private let world: any AppWorld
+    /// The models of the demo, held while this root is the demo.
+    @ObservationIgnored private let demo: DemoAppSession?
+    /// "Try the Demo" (`AppShell.openDemo`).
+    @ObservationIgnored var onTryDemo: @MainActor () -> Void = {}
+    /// "Leave Demo" (`AppShell.leaveDemo`).
+    @ObservationIgnored var onLeaveDemo: @MainActor () -> Void = {}
+
+    /// The root of the vaults on this iPhone.
+    init(world: any AppWorld) {
+        self.world = world
+        isDemo = false
+        demo = nil
+        companion = AppModel()
+        settings = VaultSettings(defaults: world.sharedSettings())
+        answerSigners = Self.makeAnswerSigners(world: world)
+    }
+
+    /// The root of the demo: its models are in memory, and the companion has no pairing.
+    init(demo: DemoAppSession, world: any AppWorld) {
+        self.world = world
+        isDemo = true
+        self.demo = demo
+        companion = AppModel(store: InMemoryPairingStore())
+        settings = demo.settings
+        answerSigners = demo.answerSigners
+        vault = demo.vault
+        questions = demo.questions
+        agents = demo.agents
+    }
+
+    /// "Not available in the demo" for an action that needs a Mac, the relay, or iOS outside the app.
+    func showNotAvailableInDemo() {
+        Toast.shared.show(DemoAppSession.notAvailableText)
+    }
+
+    /// "Try the Demo": the demo replaces this root until the owner leaves it.
+    func tryDemo() {
+        guard !isDemo else { return }
+        onTryDemo()
+    }
+
+    /// "Leave Demo": back to the first screen, and every value of the demo goes.
+    func leaveDemo() {
+        guard isDemo else { return }
+        vault?.gate.cancel()
+        onLeaveDemo()
+    }
 
     var companionIsPaired: Bool {
         if case .paired = companion.phase { return true }
@@ -82,6 +137,11 @@ final class RootModel {
 
     /// Show the vault when there is one, else the companion when it is paired, else the welcome.
     func route() {
+        if isDemo {
+            // The demo has its one vault; without it there is nothing to show.
+            if vault?.hasVault == true { screen = .vault } else { onLeaveDemo() }
+            return
+        }
         if vault?.hasVault == true {
             screen = .vault
         } else if companionIsPaired {
@@ -95,6 +155,7 @@ final class RootModel {
 
     /// "Add your vault" on the welcome, and "Add another vault" in Settings.
     func addVault() {
+        guard !isDemo else { return showNotAvailableInDemo() }
         guard let vault else { return }
         switch screen {
         case .addVault, .iCloud, .join: return
@@ -194,6 +255,7 @@ final class RootModel {
 
     /// "Only approve agent runs" on the welcome.
     func approveOnly() {
+        guard !isDemo else { return showNotAvailableInDemo() }
         screen = .companion
     }
 
@@ -222,7 +284,7 @@ final class RootModel {
     /// iOS opened Apassy to import what another app exports. The import waits for the unlock and
     /// the owner check; the token alone reads nothing.
     func receiveCredentialExchange(_ activity: NSUserActivity) {
-        guard activity.activityType == ASCredentialExchangeActivity,
+        guard !isDemo, activity.activityType == ASCredentialExchangeActivity,
             let token = activity.userInfo?[ASCredentialImportToken] as? UUID
         else { return }
         if let exchange {
@@ -245,28 +307,30 @@ final class RootModel {
 
     /// One answer key per questions team in the keychain; a team whose row holds the shared key of
     /// an earlier version keeps it (`TeamAnswerSigners`).
-    private nonisolated static func makeAnswerSigners() -> any AnswerSigners {
+    private static func makeAnswerSigners(world: any AppWorld) -> any AnswerSigners {
         #if DEBUG && targetEnvironment(simulator)
             if ProcessInfo.processInfo.arguments.contains("-ApassyPreviewVault") {
                 return TeamAnswerSigners(store: PreviewAnswerKeyStore())
             }
         #endif
-        return TeamAnswerSigners(store: KeychainAnswerKeyStore())
+        return TeamAnswerSigners(store: world.keychainAnswerKeyStore())
     }
 
     private func makeQuestions(vault: VaultModel) {
-        let push = PushRegistrar.shared
+        let push = world.pushPermission()
         let model = QuestionsModel(
             service: vault.service, signers: answerSigners, push: push,
-            deviceName: settings.deviceName ?? DeviceName.current(), defaults: SharedContainer.defaults,
+            deviceName: settings.deviceName ?? DeviceName.current(), defaults: world.sharedSettings(),
             onCompanionCode: { [weak self] code in self?.prepareCompanion(code: code) },
             onDeviceName: { [settings] name in settings.deviceName = name })
         model.follow(vault)
         questions = model
-        push.onToken = { [weak model] token in
-            Task { await model?.receivePushToken(token) }
+        if let registrar = push as? PushRegistrar {
+            registrar.onToken = { [weak model] token in
+                Task { await model?.receivePushToken(token) }
+            }
+            registrar.onOpen = { [weak self] in self?.questionsRequested = true }
         }
-        push.onOpen = { [weak self] in self?.questionsRequested = true }
         // The removals of exceptions sign with the answer key of the row in each vault's team.
         let agents = AgentsModel(
             service: vault.service, signers: answerSigners,
@@ -306,20 +370,17 @@ final class RootModel {
     private func makeVault() throws -> VaultModel {
         let service = try makeService()
         let settings = settings
+        let world = world
         let gate = OwnerGate(check: PromptTrackingOwnerCheck(inner: BiometricOwnerCheck(window: .app)), service: service)
         var hooks = VaultModel.Hooks()
-        hooks.endFaceIDWindow = { FaceIDWindow.app.end() }
-        hooks.copy = { value, secret in
-            SecureClipboard.copy(value, secret: secret, seconds: settings.clearAfter.seconds)
-            Toast.shared.show(secret ? "Copied. Clears in \(settings.clearAfter.label)." : "Copied")
-        }
-        let publisher = IdentityPublisher()
-        hooks.replaceIdentities = { identities, vaultID in publisher.replace(identities, vaultID: vaultID) }
-        hooks.removeAllIdentities = { publisher.removeAll() }
+        hooks.endFaceIDWindow = { world.endFaceIDWindow() }
+        hooks.copy = { value, secret in world.copy(value, secret: secret, clearAfter: settings.clearAfter) }
+        hooks.replaceIdentities = { identities, vaultID in await world.replaceIdentities(identities, vaultID: vaultID) }
+        hooks.removeAllIdentities = { await world.removeAllIdentities() }
         hooks.beginBackgroundWork = { BackgroundWork.begin($0) }
         return VaultModel(
             service: service, settings: settings, gate: gate,
-            passphraseStore: PromptTrackingPassphraseStore(inner: KeychainPassphraseStore(window: .app)), hooks: hooks)
+            passphraseStore: PromptTrackingPassphraseStore(inner: world.keychainPassphraseStore()), hooks: hooks)
     }
 
     private func makeService() throws -> any VaultService {
@@ -335,13 +396,48 @@ final class RootModel {
                 return PreviewVaultService(empty: false, unlocked: arguments.contains("-ApassyPreviewUnlocked"))
             }
         #endif
+        return try world.makeCoreService(deviceName: settings.deviceName)
+    }
+}
+
+/// The app as it is: the core over the App Group folder, the App Group defaults, the keychain, the
+/// AutoFill identity store, APNs, and the pasteboard (`AppWorld`).
+@MainActor
+final class LiveAppWorld: AppWorld {
+    private let publisher: IdentityPublisher
+
+    init() {
+        publisher = IdentityPublisher()
+    }
+
+    func copy(_ value: String, secret: Bool, clearAfter: ClearAfter) {
+        SecureClipboard.copy(value, secret: secret, seconds: clearAfter.seconds)
+        Toast.shared.show(secret ? "Copied. Clears in \(clearAfter.label)." : "Copied")
+    }
+
+    func makeCoreService(deviceName: String?) throws -> any VaultService {
         guard let directory = SharedContainer.dataDirectory() else {
             throw VaultError(
                 .io, "Apassy cannot open its data folder on this iPhone: the App Group of the app is missing.")
         }
-        return try CoreVaultService(
-            dataDirectory: directory, deviceName: settings.deviceName ?? DeviceName.current(), role: .app)
+        return try CoreVaultService(dataDirectory: directory, deviceName: deviceName ?? DeviceName.current(), role: .app)
     }
+
+    func sharedSettings() -> any SettingsStore { SharedContainer.defaults }
+
+    func keychainPassphraseStore() -> any PassphraseStore { KeychainPassphraseStore(window: .app) }
+
+    func keychainAnswerKeyStore() -> any AnswerKeyStore { KeychainAnswerKeyStore() }
+
+    func replaceIdentities(_ identities: IdentitySet, vaultID: String) async {
+        publisher.replace(identities, vaultID: vaultID)
+    }
+
+    func removeAllIdentities() async { publisher.removeAll() }
+
+    func pushPermission() -> any PushPermission { PushRegistrar.shared }
+
+    func endFaceIDWindow() { FaceIDWindow.app.end() }
 }
 
 /// Gives iOS the logins, passkeys, and one-time passwords for AutoFill without holding up the vault: the identity store

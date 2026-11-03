@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings > Advanced: the version of the app and of the vault core, and the licenses.
+/// Settings > Advanced: the version of the app and of the vault core, the licenses, and the demo.
 struct AdvancedSettingsView: View {
     @Environment(RootModel.self) private var root
 
@@ -17,6 +17,20 @@ struct AdvancedSettingsView: View {
             } footer: {
                 Text(
                     "The vault is encrypted on this iPhone with your passphrase. Apassy keeps no copy of the passphrase except behind Face ID, if you turn it on."
+                )
+            }
+            Section {
+                if root.isDemo {
+                    Button("Leave Demo", systemImage: "xmark.circle") { root.leaveDemo() }
+                } else {
+                    Button("Try the Demo", systemImage: "theatermasks") { root.tryDemo() }
+                        .accessibilityIdentifier("settings.tryDemo")
+                }
+            } footer: {
+                Text(
+                    root.isDemo
+                        ? "You are in the demo. Leave it to go back; nothing of it is kept."
+                        : "The demo opens a vault of sample data in memory. Your vaults stay as they are, and nothing of the demo is kept."
                 )
             }
         }

@@ -19,6 +19,19 @@ eframe = { version = "=0.36.2", default-features = false, features = ["accesskit
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "process"] }
 tracing = "=0.1.44"
 
+[dev-dependencies]
+# tests/cloud_e2e.rs: the remote agent's OAuth and MCP client (ureq, as the relay tests),
+# a TLS upstream with its own test root (rcgen, rustls), PKCE (ring), the key store in
+# memory (zeroize), and temporary directories. The pins of the workspace: all are in
+# Cargo.lock already.
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+serde_json = "=1.0.151"
+tempfile = "=3.27.0"
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+zeroize = "=1.9.0"
+
 # Another name than the root `apassy` target, so the two do not overwrite each other
 # in target/. scripts/build-app.sh copies it into the bundle as Contents/MacOS/apassy.
 [[bin]]

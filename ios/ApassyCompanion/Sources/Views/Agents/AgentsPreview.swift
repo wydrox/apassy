@@ -75,7 +75,9 @@ import SwiftUI
 
         func body(content: Content) -> some View {
             content.task {
-                guard let mode = UserDefaults.standard.string(forKey: "ApassyPreviewAgents"), let model,
+                // The demo has its own content (`DemoVault`): no fixture replaces it.
+                guard root?.isDemo != true,
+                    let mode = UserDefaults.standard.string(forKey: "ApassyPreviewAgents"), let model,
                     let service = vault?.service as? PreviewVaultService
                 else { return }
                 var feed = PreviewVaultService.sampleFeed()

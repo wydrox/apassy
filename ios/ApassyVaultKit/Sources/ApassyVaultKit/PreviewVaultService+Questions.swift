@@ -357,7 +357,7 @@ extension PreviewVaultService {
         }
         // The key derivation of the core takes a moment.
         try await Task.sleep(for: .milliseconds(100))
-        guard passphrase == Self.passphrase else {
+        guard passphrase == unlockPassphrase else {
             throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
         }
         questionsState.unlocks.append(vaultID)
