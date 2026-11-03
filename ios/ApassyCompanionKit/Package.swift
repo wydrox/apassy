@@ -1,7 +1,7 @@
 // swift-tools-version: 6.2
 // The wire kit of the Apassy iPhone companion (ADR 0020, contract companion-v1).
 // Apple frameworks only. It builds and tests on macOS with `swift test`. It also builds for
-// watchOS 26 (ADR 0039, through ApassyVaultKit); the companion keys need iOS or macOS.
+// watchOS 27 (ADR 0039, through ApassyVaultKit); the companion keys need iOS or macOS.
 
 import PackageDescription
 
@@ -10,7 +10,7 @@ let package = Package(
     platforms: [
         .iOS(.v26),
         .macOS(.v15),
-        .watchOS("26.0"),
+        .watchOS("27.0"),
     ],
     products: [
         .library(name: "ApassyCompanionKit", targets: ["ApassyCompanionKit"]),

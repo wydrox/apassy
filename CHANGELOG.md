@@ -6,7 +6,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Added
 
-- **Apple Watch:** a watch app that answers access requests only (ADR 0039). It can **Allow once** while the watch is unlocked on your wrist, or **Deny**. Connect it in Settings › Devices › Add Apple Watch on the iPhone, with the code from the Mac's Add an iPhone or a Mac…, and confirm the safety words with Touch ID on the Mac. The watch never shows run questions or vault items. Macs refuse every run answer from a watch. Apple Watch Series 9 or later, or Ultra 2 or later (arm64).
+- **Apple Watch:** a watch app that answers access requests only (ADR 0039). It can **Allow once** while the watch is unlocked on your wrist, or **Deny**. Connect it in Settings › Devices › Add Apple Watch on the iPhone, with the code from the Mac's Add an iPhone or a Mac…, and confirm the safety words with Touch ID on the Mac. The watch never shows run questions or vault items. Macs refuse every run answer from a watch. Apple Watch Series 9 or later, or Ultra 2 or later (arm64), with watchOS 27 or later.
 
 ### Upgrade notes
 

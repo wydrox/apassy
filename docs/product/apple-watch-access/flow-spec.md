@@ -31,7 +31,7 @@ Owner decisions (2026-11-03): an independent watch (its own relay membership), *
   buttons come after them, so the owner scrolls past the facts (Digital Crown) to answer. A request
   without a complete scope offers Deny only.
 - **Constraints and assumptions:**
-  - watchOS 26 or later, arm64 watches only. SwiftUI only. The vault core is Rust, and its HTTP goes
+  - watchOS 27 or later, arm64 watches only. SwiftUI only. The vault core is Rust, and its HTTP goes
     through URLSession.
   - No notification actions, no answer from a notification, no preselected answer, no swipe to approve
     (ADR 0033 §7, Defaults/trust).

@@ -301,7 +301,7 @@ The link is the text of the QR code. It is a secret for five minutes, so use a l
 
 ## The Apple Watch
 
-`ApassyWatch` (bundle ID `com.wydrox.apassy.companion.watchkitapp`, watchOS 26, arm64 watches only) answers the access requests of ADR 0033 and nothing else: **Allow once** while the watch is unlocked on the wrist, or **Deny** ([ADR 0039](../docs/adr/0039-apple-watch-access-requests.md), [flow spec](../docs/product/apple-watch-access/flow-spec.md)). It never shows run questions, feed actions, or vault items, and holds no credential. The iPhone app embeds it as its Watch content.
+`ApassyWatch` (bundle ID `com.wydrox.apassy.companion.watchkitapp`, watchOS 27, arm64 watches only) answers the access requests of ADR 0033 and nothing else: **Allow once** while the watch is unlocked on the wrist, or **Deny** ([ADR 0039](../docs/adr/0039-apple-watch-access-requests.md), [flow spec](../docs/product/apple-watch-access/flow-spec.md)). It never shows run questions, feed actions, or vault items, and holds no credential. The iPhone app embeds it as its Watch content.
 
 | Part | What it does |
 | --- | --- |
