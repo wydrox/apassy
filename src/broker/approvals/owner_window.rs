@@ -661,4 +661,47 @@ mod tests {
         w.invalidate();
         assert!(!proof.is_fresh());
     }
+
+    /// Review 0.5.16: an open window covers a token rotation of the local owner, but
+    /// never a new remote agent, whose bearer token works from the internet.
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn an_open_window_never_covers_a_new_remote_agent() {
+        use super::super::{LocalWindowSource, OwnerAction, OwnerCheck, OwnerGate};
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("synthetic.db"), "synthetic-window-pass")
+                .unwrap();
+        vault.unlock("synthetic-window-pass").unwrap();
+        let epoch = vault.epoch();
+        let shared = Arc::new(Mutex::new(Some(vault)));
+        let (w, _clock) = fixture();
+        w.configure(OwnerFrequency::UntilLock);
+        w.seed(epoch, super::super::CheckMethod::TouchId, w.generation());
+        let gate = OwnerGate::new(shared, None).with_window(w.clone());
+        let rotate = OwnerAction::RotateToken { agent_id: 3 };
+        assert!(!rotate.needs_fresh_local_check());
+        assert!(
+            gate.reuse_local(rotate, LocalWindowSource::LocalOwner)
+                .is_some(),
+            "the window is open"
+        );
+        let remote = OwnerAction::AddRemoteAgent {
+            name: "Grok Bot".into(),
+            days: 90,
+        };
+        assert!(remote.needs_fresh_local_check());
+        assert!(
+            gate.reuse_local(remote.clone(), LocalWindowSource::LocalOwner)
+                .is_none()
+        );
+        // A fresh check still gives its exact proof.
+        let proof = gate
+            .authorize(
+                remote.clone(),
+                OwnerCheck::passphrase("synthetic-window-pass"),
+            )
+            .unwrap();
+        assert_eq!(proof.check(&remote, &epoch), Ok(()));
+    }
 }

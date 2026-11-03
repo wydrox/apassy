@@ -210,6 +210,12 @@ pub struct PendingConnect {
     pub created_at: u64,
     /// When the request ends unanswered (300 s after it came).
     pub expires_at: u64,
+    /// The host of the redirect URI of the request: where the browser goes back with the
+    /// code, so the client that gets the connection. Lowercase, no port, an IPv6 address
+    /// in brackets (`[::1]`). The owner's prompts show it
+    /// (`crate::questions::envelope::connect_returns_to`; review 0.5.16). Empty when the
+    /// node did not give one.
+    pub redirect_host: String,
 }
 
 /// The owner's answer to a connect request.

@@ -256,6 +256,7 @@ A remote agent that connects to a Mac with the MCP authorization flow (ADR 0037;
 | `connect.mac_name` | the Mac that the agent connects to, as the agent's browser page shows it: 1 to 64 bytes. |
 | `connect.code` | the match code of the browser page: 1 to 16 bytes. |
 | `connect.expires_at` | when the connect request ends on the node; the relay record's `expires_at` is the same time. |
+| `connect.redirect_host` | since 0.5.16 (review 0.5.16), optional: the host of the redirect URI of the request, where the browser goes back with the code (lowercase, no port, an IPv6 address in brackets): 1 to 255 bytes of printable ASCII without a space. A Mac of 0.5.16 or later always sends it; a card of an older Mac has none. The iPhone shows "Returns to <host>", or "Returns to a program on a computer (localhost)" for `localhost`, a name under it, `127.0.0.0/8`, `[::1]`, or the unspecified address (`apassy::questions::envelope::connect_returns_to`). |
 | `digest` | the connect digest of section 8.1. |
 
 No text of `connect` holds a control character, a Unicode format character (category Cf), or a code point of the tag block U+E0000–E007F: one rule, `apassy::text::is_hidden_char`, on the Mac, on the iPhone, and for the client name of the connect page. There is no token, item, agent list, or owner name on a connect card. The asking Mac posts at most one connect card at a time (the relay keeps 10 open questions per asking device, section 15); another connect request stays on the Mac.
@@ -263,7 +264,7 @@ No text of `connect` holds a control character, a Unicode format character (cate
 The answering device checks a connect card in this order; the first failure shows "This question could not be read":
 
 1. The envelope opens (section 6.2).
-2. The JSON parses with exactly the fields above, `v` is 2, `kind` is `connect`, and the texts have the forms above.
+2. The JSON parses with exactly the fields above (`connect.redirect_host` may be missing), `v` is 2, `kind` is `connect`, and the texts have the forms above. A reader before 0.5.16 refuses a card with `redirect_host` as "update": it could not say where the code goes back.
 3. `qid` equals the relay's `qid`, and the connect digest of the card's fields is `digest`.
 4. `asker.device` is a live `trusted_device` of kind `mac` whose device number in the questions team, when set, equals the relay's `from_device_id`.
 5. The relay's `expires_at` is in the future.
@@ -326,9 +327,11 @@ text(connect.client_name)
 text(connect.mac_name)
 text(connect.code)
 u64(connect.expires_at)
+text("redirect_host")          only when the card has connect.redirect_host
+text(connect.redirect_host)    only when the card has connect.redirect_host
 ```
 
-It covers what the iPhone shows, so the device signs what it showed. `asker.name` and `created_at` are for the display only, as in card v1.
+It covers what the iPhone shows, so the device signs what it showed. A card without `redirect_host` has the digest of 0.5.15; taking the host away or changing it changes the digest. `asker.name` and `created_at` are for the display only, as in card v1.
 
 ## 9. The answer
 
@@ -804,7 +807,13 @@ allow_connect
 1790000030
 ```
 
-The suites show: the Mac's card and the iPhone's parser agree on the digest and the bytes; a card v1 reader refuses the connect card as "update"; an Allow signed with the relay key, a stale or moved answer, a run kind, and an answer of a Mac or an Apple Watch do not count; run cards are still the bytes of section 20.2.
+The same card with `"redirect_host":"grok.example"` after `expires_at` (since 0.5.16; input 201 bytes) has the connect digest `920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12`, and its plaintext is exactly 399 bytes (SHA-256 `0d8c17b5362a06c9147ab131b073af120b31940e660e0e1975a8a8a4f3757e73`):
+
+```
+{"v":2,"kind":"connect","qid":"oKGio6SlpqeoqaqrrK2urw","asker":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"Synthetic Mac mini"},"created_at":1790000000,"connect":{"id":"cr_7Hq2xN","client_name":"Grok Bot","mac_name":"Synthetic Mac mini","code":"482 913","expires_at":1790000300,"redirect_host":"grok.example"},"digest":"920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12"}
+```
+
+The suites show: the Mac's card and the iPhone's parser agree on the digest and the bytes, with and without `redirect_host`; a card v1 reader refuses the connect card as "update"; an Allow signed with the relay key, a stale or moved answer, a run kind, and an answer of a Mac or an Apple Watch do not count; run cards are still the bytes of section 20.2.
 
 ## Integrator decisions on the open questions (2026-10-12)
 

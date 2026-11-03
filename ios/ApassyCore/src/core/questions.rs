@@ -530,6 +530,15 @@ struct ConnectOut {
     code: String,
     expires_at: u64,
     digest: String,
+    /// Where the code goes back: the host of the redirect URI (review 0.5.16). `None`
+    /// for a card of a Mac before 0.5.16.
+    redirect_host: Option<String>,
+    /// The line of the card: "Returns to <host>", or "Returns to a program on a computer
+    /// (localhost)" for a loopback host. `None` without a host.
+    returns_to: Option<String>,
+    /// True when the code goes back to a program on a computer (`localhost`): the card
+    /// shows the line as a warning.
+    local_redirect: bool,
 }
 
 #[derive(Serialize)]
@@ -1001,6 +1010,22 @@ fn connect_out(card: &ConnectCard) -> ConnectOut {
         code: envelope::shown(&card.connect.code, SHOWN_NAME),
         expires_at: card.connect.expires_at,
         digest: card.digest.clone(),
+        redirect_host: card
+            .connect
+            .redirect_host
+            .as_deref()
+            .map(|host| envelope::shown(host, SHOWN_PATH)),
+        returns_to: card.connect.redirect_host.as_deref().map(|host| {
+            envelope::shown(
+                &apassy::questions::envelope::connect_returns_to(host),
+                SHOWN_PATH,
+            )
+        }),
+        local_redirect: card
+            .connect
+            .redirect_host
+            .as_deref()
+            .is_some_and(apassy::questions::envelope::is_local_redirect_host),
     }
 }
 
@@ -3190,6 +3215,7 @@ mod tests {
                 mac_name: "Synthetic Mac mini".into(),
                 code: "482 913".into(),
                 expires_at,
+                redirect_host: Some("127.0.0.1".into()),
             },
         );
         let record = sealed_record(&key, qid, expires_at, &card.to_plaintext().unwrap());
@@ -3204,6 +3230,38 @@ mod tests {
         assert_eq!(out["connect"]["id"], "cr_7Hq2xN");
         assert_eq!(out["connect"]["expires_at"], expires_at);
         assert_eq!(out["connect"]["digest"], card.digest.as_str());
+        // Where the code goes back (review 0.5.16): a loopback host is a warning.
+        assert_eq!(out["connect"]["redirect_host"], "127.0.0.1");
+        assert_eq!(
+            out["connect"]["returns_to"],
+            "Returns to a program on a computer (localhost)"
+        );
+        assert_eq!(out["connect"]["local_redirect"], true);
+        for (host, line, local) in [
+            (Some("grok.example"), Some("Returns to grok.example"), false),
+            (None, None, false),
+        ] {
+            let other = MacCard::new(
+                qid,
+                "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+                "Synthetic Mac mini",
+                expires_at - 300,
+                &CardConnect {
+                    id: "cr_7Hq2xN".into(),
+                    client_name: "Grok Bot".into(),
+                    mac_name: "Synthetic Mac mini".into(),
+                    code: "482 913".into(),
+                    expires_at,
+                    redirect_host: host.map(str::to_owned),
+                },
+            );
+            let sealed = sealed_record(&key, qid, expires_at, &other.to_plaintext().unwrap());
+            let shown =
+                serde_json::to_value(question_out("vault", "Personal", &keys, &sealed, now()))
+                    .unwrap();
+            assert_eq!(shown["connect"]["returns_to"].as_str(), line, "{host:?}");
+            assert_eq!(shown["connect"]["local_redirect"], local, "{host:?}");
+        }
         // The request history and the run answers never take it as a run.
         assert_eq!(keys.open(&record).unwrap_err(), UPDATE);
         // A connect card comes from a Mac of the vault only.

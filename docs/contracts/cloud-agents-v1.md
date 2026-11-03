@@ -30,7 +30,7 @@ reach (section 3).
 | Word | Meaning |
 | --- | --- |
 | Node | The relay inside the Apassy app on the owner's Mac, with a personal team for one vault. |
-| Public listener | The node's second listener, on `127.0.0.1:<port>`. Tailscale Funnel is its only way in. |
+| Public listener | The node's second listener, on `127.0.0.1:<port>`. Tailscale Funnel is its only way in from outside the Mac. The loopback bind does not keep the programs of the Mac away: any local program, a coding agent too, can connect to that port and run the whole flow (section 4) as any client name (review 0.5.16). The owner's prompts therefore name where the code goes back ("Returns to <host>"; a loopback redirect is "Returns to a program on a computer (localhost)", and the Mac adds "A program on this Mac can start this request."). |
 | Public URL | `https://<Mac>.<tailnet>.ts.net:8443`: the Funnel origin of the Mac. `<Mac>` is the machine name and `<tailnet>` the tailnet name of `tailscale status`. |
 | Agent token | The bearer token of one cloud agent: `apassy_tagt_<team id>_<64 hex>`. From the authorization flow it is the access token (24 h, refreshed); from the CLI fallback it lives 30 to 365 days. |
 | Connect request | A remote client's request to connect, made by `/oauth/authorize`. It waits 300 s for the owner, with a match code that the browser page and the app both show. |
@@ -92,8 +92,10 @@ registration (RFC 7591). The relay side is in its `docs/SPEC.md` section 31. The
 5. The page says "<client> wants to connect to your Mac" (never the computer name: the page is public),
    shows a match code such as `K7Q-4MD`, and reloads
    every 3 seconds. It has no button: the owner allows the request in Apassy on the Mac (Decisions, with
-   Touch ID) or on the iPhone, where the same code shows. Apassy must be open and unlocked; the request
-   ends after 300 seconds.
+   Touch ID) or on the iPhone, where the same code shows. Both say where the code goes back: "Returns
+   to <host of redirect_uri>", or for `localhost`, `127.0.0.1`, or `[::1]` "Returns to a program on a
+   computer (localhost)"; the Mac then adds "A program on this Mac can start this request." Apassy
+   must be open and unlocked; the request ends after 300 seconds.
 6. Allowed: the next reload of the page sends the browser to `<redirect_uri>?code=…&state=…&iss=<public
    URL>`, once. Denied: the page says "You denied the connection.". Not answered in time: "The request
    ended.".
@@ -410,16 +412,20 @@ and the names of the swapped variables. Never a header, a query, a body, a place
 **The failed-auth limiter.** The public listener counts its failed authentications: a bearer token that
 names no team or that the node refuses (401 `unauthenticated` or `token_expired`), and a proxy path whose
 session key names no live session. A code or refresh token that `POST /oauth/token` refuses counts for
-its client only (section 4.2). The window is 60 seconds from the first failure. With 20 failures in
-the window, every further request of the public listener in that window gets HTTP 429 `rate_limited`
-with `Retry-After: 60`, also a request with a good token. Then the window ends and the count starts
-again. The check comes after the 404 of section 3 and before the token, the body, or the proxy. The node
-writes at most one audit row in 10 seconds for it (`rate_limited`, scope `public`). The count is in
-memory only.
+its client only (section 4.2), and the routes of the authorization flow are answered before this check:
+the limiter never refuses them. Since 0.5.16 (review 0.5.16) `POST /mcp` and `/p/` count by the source
+address that Funnel forwards (the last address of `X-Forwarded-For`; an IPv6 address by its /64): with
+20 failures of one address in a window of 60 seconds from its first failure, every further request of
+that address in the window gets HTTP 429 `rate_limited` with `Retry-After: 60`, also a request with a
+good token. Requests without an address share one window with a limit of 600. The listener keeps at
+most 4096 address windows; when the table is full, a new address counts in the shared window. Then the
+window ends and the count starts again. The check comes after the 404 of section 3 and before the
+token, the body, or the proxy. The node writes at most one audit row in 10 seconds for it
+(`rate_limited`, scope `public`, bucket `source` or `shared`). The counts are in memory only.
 
-A stranger with bad tokens can hold the public listener at 429 for the rest of each window, and the
-owner's cloud agents with it. A client that gets 429 waits `Retry-After` seconds and does not send bad
-tokens in a loop.
+A stranger with bad tokens holds only their own address at 429; the owner's cloud agents from other
+addresses keep working. A stranger with thousands of addresses can fill the table and then the shared
+window. A client that gets 429 waits `Retry-After` seconds and does not send bad tokens in a loop.
 
 ## 11. Revocation, lock, and quit
 

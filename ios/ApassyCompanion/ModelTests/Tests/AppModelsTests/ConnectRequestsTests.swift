@@ -51,6 +51,10 @@ struct ConnectRequestsTests {
         #expect(connect.code == "K7Q-4MD")
         #expect(connect.id == "cr_7Hq2xN")
         #expect(connect.expiresAt == 1_790_000_300)
+        // A card of a Mac before 0.5.16 has no host and no "Returns to" line.
+        #expect(connect.redirectHost == nil)
+        #expect(connect.returnsTo == nil)
+        #expect(!connect.localRedirect)
         // A run card from the core has no `connect` key at all.
         var run = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
         run.removeValue(forKey: "connect")
@@ -80,7 +84,9 @@ struct ConnectRequestsTests {
         let fixture = Fixture()
         let question = await fixture.withConnect()
         await fixture.model.answerConnect(allow: true, for: fixture.model.questions[0])
-        #expect(fixture.signer.reasons == ["allow \"Grok Bot\" to connect to Mac mini (office)"])
+        #expect(
+            fixture.signer.reasons
+                == ["allow \"Grok Bot\", which returns to grok.example, to connect to Mac mini (office)"])
         let sent = await fixture.service.sentAnswers()
         #expect(sent.map(\.answer.kind) == [.allowConnect])
         #expect(sent[0].signature == Data("signature".utf8))
@@ -127,6 +133,29 @@ struct ConnectRequestsTests {
         #expect(await connected.service.sentAnswers().isEmpty)
         #expect(AnswerKind.allowConnect.rawValue == "allow_connect")
         #expect(RemoteAnswer(kind: .allowConnect).needsFaceID)
+    }
+
+    @Test("a connect card says where the code goes back, and localhost is a program on a computer")
+    func decodesReturnsTo() throws {
+        let json = """
+            {"asker_device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","created_at":1790000000,
+             "id":"cr_7Hq2xN","client_name":"Grok Bot","mac_name":"Mac mini (office)","code":"K7Q-4MD",
+             "expires_at":1790000300,"digest":"920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12",
+             "redirect_host":"127.0.0.1","returns_to":"Returns to a program on a computer (localhost)",
+             "local_redirect":true}
+            """
+        let connect = try JSONDecoder().decode(ConnectRequestCard.self, from: Data(json.utf8))
+        #expect(connect.redirectHost == "127.0.0.1")
+        #expect(connect.returnsTo == "Returns to a program on a computer (localhost)")
+        #expect(connect.localRedirect)
+        #expect(
+            QuestionsModel.connectFaceIDReason(
+                client: connect.clientName, mac: connect.macName, host: connect.redirectHost,
+                local: connect.localRedirect)
+                == "allow \"Grok Bot\", which returns to localhost, to connect to Mac mini (office)")
+        #expect(
+            QuestionsModel.connectFaceIDReason(client: "Grok Bot", mac: "Mac mini", host: "grok.example")
+                == "allow \"Grok Bot\", which returns to grok.example, to connect to Mac mini")
     }
 
     @Test("the Face ID text names the client and the Mac without control characters or quotes")

@@ -413,6 +413,9 @@ impl DesktopApp {
             // A batch binding has its refusals in the ticket already.
             _ => {}
         }
+        // A new remote agent always asks afresh: its token works from the internet,
+        // and a session of the command line proves no owner at the Mac.
+        let eligible = !matches!(request, OwnerRequest::AddRemoteAgent { .. });
         // Attach the reply ticket before the global window can complete the
         // action synchronously. Inherited owner sessions share this policy.
         self.prepare_owner(request, Some(ctx), false);
@@ -421,7 +424,7 @@ impl DesktopApp {
         }
         self.start_local_owner(
             crate::broker::approvals::LocalWindowSource::LocalOwner,
-            true,
+            eligible,
             ctx,
         );
         if self.owner.check.is_some() {

@@ -433,41 +433,84 @@ fn tailscale_headers_do_not_reach_the_upstream() {
     assert_eq!(last.header("x-trace"), Some("kept"));
 }
 
+/// Review 0.5.16: on `/mcp` and `/p/` the limiter counts by the source address that
+/// Funnel forwards, so a stranger with bad tokens holds only their own address at 429;
+/// the owner's agent from another address, the flow of section 31, and requests without
+/// an address keep working. Without an address the requests share a count of 600. The
+/// other paths of a listener keep the count of 20 for the whole listener.
 #[test]
-fn the_failed_auth_limiter_trips_at_the_21st_request_of_a_listener() {
+fn the_failed_auth_limiter_counts_agent_routes_by_source() {
+    use apassy_relay::server::http::{AGENT_SHARED_FAILURES_MAX, AUTH_FAILURES_MAX};
     let fixture = Fixture::start();
     let public = fixture.public();
-    for n in 0..20 {
+    let stranger = [("X-Forwarded-For", "198.51.100.66")];
+    let agent = [("X-Forwarded-For", "203.0.113.9")];
+    for n in 0..AUTH_FAILURES_MAX {
         let (status, retry, text) =
-            call_with(&public, "POST", "/mcp", Some("apassy_tagt_bad"), &[]);
+            call_with(&public, "POST", "/mcp", Some("apassy_tagt_bad"), &stranger);
         assert_eq!(status, 401, "{n}: {text}");
         assert!(retry.is_none());
     }
-    // The 21st request of the window is refused, with a good token too.
+    // The 21st request of the stranger's address is refused, with a good token too.
     for token in ["apassy_tagt_bad", fixture.token.as_str()] {
-        let (status, retry, text) = call_with(&public, "POST", "/mcp", Some(token), &[]);
+        let (status, retry, text) = call_with(&public, "POST", "/mcp", Some(token), &stranger);
         assert_eq!(status, 429, "{text}");
         assert_eq!(retry.as_deref(), Some("60"));
         let body: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(body["error"]["code"], "rate_limited");
     }
-    let (status, _, _) = call_with(&public, "GET", "/p/nothing/api.example.com/", None, &[]);
+    let path = "/p/nothing/api.example.com/";
+    let (status, _, _) = call_with(&public, "GET", path, None, &stranger);
     assert_eq!(status, 429);
-    // At most one audit row for the listener in ten seconds.
+    // The agent from another address, and a request without one, are not refused.
+    for headers in [&agent[..], &[][..]] {
+        let (status, _, text) = call_with(&public, "POST", "/mcp", Some(&fixture.token), headers);
+        assert!(status != 401 && status != 429, "{status}: {text}");
+    }
+    let access = tool_ok(&public, &fixture.token, "apassy_list_access", json!({}));
+    assert_eq!(access["items"][0]["env_name"], "EXAMPLE_TOKEN", "{access}");
+    // The flow is in no count of the listener: its metadata answers the stranger too.
+    let (status, _, text) = call_with(
+        &public,
+        "GET",
+        "/.well-known/oauth-authorization-server",
+        None,
+        &stranger,
+    );
+    assert_eq!(status, 200, "{text}");
+    // At most one audit row for the listener in ten seconds; it names the count.
     let rows: Vec<_> = relay_audit(&fixture.dir.path().join("node"))
         .into_iter()
         .filter(|(action, _)| action == "rate_limited")
         .collect();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(rows[0].1.contains("\"scope\":\"public\""), "{rows:?}");
-    // The node listener has a count of its own: bad session keys trip it.
+    assert!(rows[0].1.contains("\"bucket\":\"source\""), "{rows:?}");
+
+    // Without an address, bad tokens share one count of 600: a flood is bounded.
+    for n in 0..AGENT_SHARED_FAILURES_MAX {
+        let (status, _, text) = call_with(&public, "POST", "/mcp", Some("apassy_tagt_bad"), &[]);
+        assert_eq!(status, 401, "{n}: {text}");
+    }
+    let (status, retry, _) = call_with(&public, "POST", "/mcp", Some(&fixture.token), &[]);
+    assert_eq!((status, retry.as_deref()), (429, Some("60")));
+    // An agent whose address Funnel forwards keeps its own count.
+    let (status, _, text) = call_with(&public, "POST", "/mcp", Some(&fixture.token), &agent);
+    assert!(status != 401 && status != 429, "{status}: {text}");
+
+    // The node listener has counts of its own. Bad session keys count on `/p/` only.
     let local = fixture.local();
-    let (status, _, text) = call_with(&local, "GET", "/v1/me", Some(&fixture.token), &[]);
-    assert_eq!(status, 200, "{text}");
-    for n in 0..20 {
+    for n in 0..AUTH_FAILURES_MAX {
         let path = "/p/apassy_ses_bad/api.example.com/";
         let (status, _, text) = call_with(&local, "GET", path, None, &[]);
         assert_eq!(status, 403, "{n}: {text}");
+    }
+    let (status, _, text) = call_with(&local, "GET", "/v1/me", Some(&fixture.token), &[]);
+    assert_eq!(status, 200, "{text}");
+    // Its other paths keep the count of 20 for the whole listener.
+    for n in 0..AUTH_FAILURES_MAX {
+        let (status, _, text) = call_with(&local, "GET", "/v1/me", Some("apassy_tagt_bad"), &[]);
+        assert_eq!(status, 401, "{n}: {text}");
     }
     let (status, retry, _) = call_with(&local, "GET", "/v1/me", Some(&fixture.token), &[]);
     assert_eq!((status, retry.as_deref()), (429, Some("60")));
@@ -940,5 +983,48 @@ fn the_connect_page_of_a_node_of_the_app_says_your_mac_not_the_computer_name() {
         page.contains("<h1>Grok Bot wants to connect to your Mac</h1>"),
         "{page}"
     );
+    node.stop();
+}
+
+/// The agents of a Mac run as its user, and `<app data>/node` belongs to that user: an
+/// embedded node serves no operator socket, so no local program can suspend or delete
+/// the personal team or make a team code through it (review 0.5.16). A socket that an
+/// older version left is removed at the start.
+#[test]
+fn an_embedded_node_serves_no_operator_socket() {
+    use apassy_relay::server::operator::{self, Command};
+    let dir = tempfile::tempdir().unwrap();
+    let backend = EmbeddedRelay::default();
+    let node = backend.start(node_config(dir.path())).unwrap();
+    let team = node.create_team("Personal").unwrap();
+    let socket = dir.path().join("node").join("admin.sock");
+    assert!(!socket.exists(), "no operator socket");
+    let delete: Command =
+        serde_json::from_value(json!({"command": "delete", "team": team.0.as_str()}))
+            .expect("command");
+    let suspend: Command =
+        serde_json::from_value(json!({"command": "suspend", "team": team.0.as_str()}))
+            .expect("command");
+    for command in [
+        Command::TeamCode { hours: 1 },
+        delete,
+        suspend,
+        Command::Teams,
+    ] {
+        assert!(
+            operator::send(&socket, &command).is_err(),
+            "{command:?} is unavailable"
+        );
+    }
+    assert!(node.has_team(&team), "the team stays");
+    node.stop();
+
+    // A socket file of an older version: the next start removes it.
+    drop(std::os::unix::net::UnixListener::bind(&socket).expect("stale socket"));
+    assert!(socket.exists());
+    let node = backend.start(node_config(dir.path())).unwrap();
+    assert!(!socket.exists(), "the stale socket is gone");
+    assert!(operator::send(&socket, &Command::TeamCode { hours: 1 }).is_err());
+    assert!(node.has_team(&team));
     node.stop();
 }

@@ -53,7 +53,7 @@ allows it on the Mac (Touch ID) or the iPhone (Face ID) after comparing the code
 | Tailscale Funnel relays (ingress servers of Tailscale) | — | TLS records, the server name (SNI), client addresses, sizes, times. TLS ends on the Mac, not here | Requests, tokens, session keys, placeholders, values |
 | `tailscaled` on your Mac | The Funnel certificate and its key | Each cloud request and answer in clear, on the Mac: the token, session keys, placeholders. It ends TLS and connects to the public listener from the loopback | Values: the proxy sends them upstream on its own TLS connection, and the answers come back with placeholders. The vault |
 | Certificate Transparency logs | The Funnel certificate | The machine name and the tailnet name (`<Mac>.<tailnet>.ts.net`), for ever, once the route is on | Whether the route is on now, any traffic |
-| The public listener (`127.0.0.1:<port>`) | Nothing of its own | The cloud requests from `tailscaled` | It serves no other route: `/v1/...`, the host lane, `/healthz`, and everything else are 404. It trusts no header. After 20 failed authentications (bearer tokens, session keys) in 60 s, 429 for the rest of the window. Bad codes and refresh tokens of the flow count for their client only; clients that the owner never allowed fill no limit of the flow |
+| The public listener (`127.0.0.1:<port>`) | Nothing of its own | The cloud requests from `tailscaled`, and any request of a program on the Mac: the loopback bind keeps other computers away, not the programs of the Mac (review 0.5.16) | It serves no other route: `/v1/...`, the host lane, `/healthz`, and everything else are 404. It trusts no header for identity or authority. Failed authentications on `/mcp` and `/p/` count for each source address that Funnel forwards (`X-Forwarded-For`): after 20 in 60 s, 429 for that address only; requests without an address share a limit of 600. The flow is in neither count: bad codes and refresh tokens count for their client only; clients that the owner never allowed fill no limit of the flow |
 | The connect page (`/oauth/wait/<id>`) | Nothing | The client name that the agent registered (not verified), "your Mac" (never the computer name: anyone with the address reads the page), the match code, and the state of the request | It has no script, form, cookie, or button: nothing on it can allow a connection. Never an item, an agent list, or the owner's name. Strict CSP, no framing, no referrer, no cache |
 | A connect request | The node: its id, the OAuth client, the PKCE challenge, the match code, 300 s | — | It allows nothing by itself. Only the owner's Allow (Touch ID on the Mac, Face ID on the iPhone) connects it, always to a new agent with no credential: a client id is public, so a connect never takes over an agent that exists. At most 3 open per node and 1 per client: a new request of the client ends its waiting one, so the browser shows the code of its own request. The owner allows only when the browser page shows the same code |
 | The access and refresh tokens of the flow | The cloud agent's vendor; the node keeps only their hashes | The items that the owner chose for that agent (names, variables, hosts) and the agent's own runs | A value, another agent's items, the owner API. An access token lives 24 h; a refresh token 90 days, rotated at each use, and a reused one revokes the family. A disconnect revokes the agent, its family, and the open requests of its client at the next request |
@@ -75,11 +75,35 @@ credential.
 - A stranger who sends 20 bad codes or refresh tokens with the public id of a client holds that client's
   token requests at 429 for the rest of each 60 s window. Its access token keeps working until it ends.
 - A flood of registrations can drop a client that registered and was not allowed yet; it registers again.
+- A program on this Mac (a coding agent too) can connect to the public listener on the loopback and run
+  the whole flow as any client name ("Grok Bot"), so its card looks like a real one (review 0.5.16).
+  The owner's prompts and the iPhone card name where the code goes back: "Returns to <host of the
+  redirect URI>", or "Returns to a program on a computer (localhost)" for a loopback redirect, and the
+  Mac adds "A program on this Mac can start this request." Allow only a request that you started, whose
+  code your browser shows, and that returns to your agent's site. A program that registers an
+  `https://` redirect of a site it controls is not told apart by this line. An Allow gives a new agent
+  with no credential. Planned for 0.5.17: the listener accepts only connections of the Tailscale
+  process (a peer-process check).
+- A program on this Mac can forge `X-Forwarded-For` and so hold the shared failed-auth count, or a
+  guessed source address, at 429. A stranger with thousands of addresses can fill the source table
+  (4096) and then the shared count.
 
 The owner decides every cloud run in this release, on the Mac or the iPhone, one question of an agent
 at a time. A remote agent starts with no credential. A node has at most 20 agents that are not
 revoked, also those of the flow without a live token. The node trusts the app process: code that runs
-in it can release any run, but it can read the vault anyway.
+in it can release any run, but it can read the vault anyway. The embedded node serves no operator
+socket (`admin.sock`): its directory belongs to the Mac user, as the coding agents do, so no local
+program can suspend or delete the personal team or make team codes through it (review 0.5.16).
+
+The catalog mirror (`src/node/catalog.rs`) reads the value of each item that it mirrors with
+`Vault::reveal`, without an owner check, when the item is new to the mirror or its revision changed. It
+does this in the app process, only to run the node's `check_value` (`hostkeys::check_value`: a value
+that the proxy could not swap, such as an empty one, one over the size limit, one with a byte outside
+printable ASCII or a `"` or `\`, or one of no placeholder shape, keeps the item out of the mirror). The
+value is held in zeroizing memory (`NodeSecret`) for that check only: it is not stored in the node, not
+sent anywhere, and not logged; the node stores the marker `VALUE_ON_HOST` instead (SPEC 30.6). The owner check guards
+values that leave the vault: a release of a run, a reveal or copy in the app. This read leaves nothing
+outside the process (review 0.5.16).
 
 ## The hosted relay today (until ADR 0037 stage 7)
 

@@ -112,6 +112,19 @@ pub fn connect_name(connect: &PendingConnect) -> String {
         .unwrap_or_else(|| MCP_CLIENT_NAME.to_owned())
 }
 
+/// The line "Returns to <host>" of a connect request for the owner's prompts and cards,
+/// or "Returns to a program on a computer (localhost)" for a loopback host
+/// (`crate::questions::envelope::connect_returns_to`; review 0.5.16).
+pub fn connect_returns_to(connect: &PendingConnect) -> String {
+    crate::questions::envelope::connect_returns_to(&connect.redirect_host)
+}
+
+/// True when the code of a connect request goes back to a program on a computer
+/// (`localhost`, `127.0.0.0/8`, `[::1]`): then a program on this Mac can have started it.
+pub fn connect_is_local(connect: &PendingConnect) -> bool {
+    crate::questions::envelope::is_local_redirect_host(&connect.redirect_host)
+}
+
 /// `text` without control, format, or tag characters (`crate::text::is_hidden_char`, the
 /// rule of the connect page and the connect card), trimmed, at most [`MAX_NAME_BYTES`].
 fn clean_name(text: &str) -> String {

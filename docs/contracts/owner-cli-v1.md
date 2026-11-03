@@ -11,6 +11,13 @@ owner-check window cannot replace those checks. Restore still verifies the typed
 backup passphrase and opens the restored vault locked. This supersedes earlier
 wording below that allowed these commands using only an open CLI session.
 
+Superseded 2026-11-02 by the global window of ADR 0030: inside an open window
+these commands, `agent_rotate` and `agent_connect` complete without a
+new check. Exception (review 0.5.16, 2026-11-03): `agent_add_remote` always asks
+for a fresh local Touch ID or passphrase check, also inside an open window,
+because its bearer token works from the internet and the CLI session proves no
+owner at the Mac (`OwnerAction::needs_fresh_local_check`).
+
 
 ## 1. Transport
 
@@ -74,7 +81,7 @@ S: needs a session. C: asks for the owner check in the window, then answers.
 | `agent_list` | | S | | |
 | `agent_show` | `agent` | S | | Process grants with rules, operations, requests. |
 | `agent_add` | `name` | S | | `data.token`, one time. |
-| `agent_add_remote` | `name`, `days` | S | C | 2026-11-03, plan "Bouncer section" decision 4, the CLI fallback of the MCP authorization flow. A remote agent of this Mac's node for a client that cannot connect by itself: a vault agent of kind `cloud` with no item (`see_all` 0, `connected_with = token`) and a relay agent with a bearer token of `days` days (1 to 365, default 90). A name that another active agent has gets a number (`Grok Bot 2`). Remote access must run, else `remote_access_off` before the check. The fresh check `AddRemoteAgent` names the name and the days. `data.remote_token`, one time: the token and `mcp_url`. The window does not show the token. Every run of the agent asks the owner. `apassy agent add-remote NAME [--days N]` uses it. |
+| `agent_add_remote` | `name`, `days` | S | C | 2026-11-03, plan "Bouncer section" decision 4, the CLI fallback of the MCP authorization flow. A remote agent of this Mac's node for a client that cannot connect by itself: a vault agent of kind `cloud` with no item (`see_all` 0, `connected_with = token`) and a relay agent with a bearer token of `days` days (1 to 365, default 90). A name that another active agent has gets a number (`Grok Bot 2`). Remote access must run, else `remote_access_off` before the check. The fresh check `AddRemoteAgent` names the name and the days; an open owner-check window never covers it. `data.remote_token`, one time: the token and `mcp_url`. The window does not show the token. Every run of the agent asks the owner. `apassy agent add-remote NAME [--days N]` uses it. |
 | `agent_revoke` | `agent` | S | | |
 | `agent_rotate` | `agent` | S | C | `data.token`, one time. The window does not show it. |
 | `agent_see_all` | `agent`, `on` | S | C when `on` | |

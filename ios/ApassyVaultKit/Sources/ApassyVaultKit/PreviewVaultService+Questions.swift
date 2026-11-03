@@ -77,7 +77,8 @@ extension PreviewVaultService {
         let connect = ConnectRequestCard(
             askerDevice: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", createdAt: at, id: "cr_7Hq2xN",
             clientName: "Grok Bot", macName: "Mac mini (office)", code: "K7Q-4MD", expiresAt: at + 271,
-            digest: "414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc")
+            digest: "920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12",
+            redirectHost: "grok.example", returnsTo: "Returns to grok.example")
         return RemoteQuestion(
             qid: qid, state: .open, askerName: "Mac mini (office)", createdAt: at, expiresAt: at + 271,
             connect: connect)

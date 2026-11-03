@@ -138,7 +138,7 @@ pub fn listen(hub: Arc<Hub>, stop: Arc<AtomicBool>) -> RelayResult<JoinHandle<()
 }
 
 /// Removes a socket left by a relay that did not stop cleanly. Refuses any other file.
-fn remove_stale(path: &Path) -> RelayResult<()> {
+pub(crate) fn remove_stale(path: &Path) -> RelayResult<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_socket() => std::fs::remove_file(path)
             .map_err(|_| RelayError::internal("The old operator socket cannot be removed.")),

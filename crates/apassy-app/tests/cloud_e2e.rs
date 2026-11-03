@@ -1096,6 +1096,7 @@ impl Mac {
             id: connect.id.clone(),
             client_name: apassy::node::connect_name(connect),
             code: connect.code.clone(),
+            redirect_host: connect.redirect_host.clone(),
         });
         self.node
             .allow_connect(&self.vault, &connect.id)
