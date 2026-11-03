@@ -928,20 +928,19 @@ impl ModelServer {
     /// host a readiness question. Back on this Mac, the server starts when a run needs
     /// it, also in "With Apassy" (a lock does not start a server).
     pub fn set_remote(&self, remote: Option<BouncerClient>) {
-        {
+        let child = {
             let mut inner = self.lock();
             if remote.is_none() && inner.remote.is_none() {
                 return;
             }
-            // A start or a check of the old host in progress stops counting. A child
-            // that already runs stays for the idle stop.
+            // A start or a check of the old host in progress stops counting.
             inner.generation += 1;
             inner.launch = false;
             inner.last_probe = None;
             inner.last_failure = None;
             match remote {
                 Some(client) => {
-                    // A local server that runs stops at the idle time from now.
+                    // A local server that runs stays, and stops at the idle time from now.
                     inner.last_use = Instant::now();
                     inner.remote = Some(RemoteHost {
                         client,
@@ -952,28 +951,21 @@ impl ModelServer {
                         up: None,
                         model: None,
                     };
+                    None
                 }
                 None => {
+                    // A local server left from before the remote host stops: the next run
+                    // starts a fresh one, so two servers never share the port.
                     inner.remote = None;
-                    inner.state = match inner.settings.start {
-                        StartMode::Off => ServerState::Off,
-                        StartMode::External => ServerState::External {
-                            up: None,
-                            model: None,
-                        },
-                        _ if inner.child.is_some() => ServerState::Starting {
-                            since: Instant::now(),
-                        },
-                        _ => ServerState::Stopped,
-                    };
-                    if inner.child.is_some() {
-                        // The server of this Mac still runs: check it again.
-                        inner.launch = inner.settings.start.managed();
-                    }
+                    inner.state = base_state(inner.settings.start);
+                    inner.child.take()
                 }
             }
-        }
+        };
         self.wake.notify_all();
+        if let Some(child) = child {
+            stop_in_background(child);
+        }
     }
 
     pub fn settings(&self) -> BouncerSettings {
