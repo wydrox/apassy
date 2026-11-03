@@ -307,6 +307,14 @@ pub enum Command {
     AgentConnect {
         name: String,
     },
+    /// A remote agent of this Mac's node with a bearer token, for a client without the
+    /// MCP authorization flow (`apassy agents add-remote`). Owner check. The response has
+    /// its token, one time, with the MCP address. `days`: 1 to 365, default 90.
+    AgentAddRemote {
+        name: String,
+        #[serde(default)]
+        days: Option<u32>,
+    },
     AgentRevoke {
         agent: String,
     },
@@ -483,6 +491,13 @@ pub enum Data {
     Token {
         agent: AgentRow,
         token: SecretText,
+    },
+    /// The token of a new remote agent ([`Command::AgentAddRemote`]), one time only, and
+    /// the MCP address that the agent uses with it.
+    RemoteToken {
+        agent: AgentRow,
+        token: SecretText,
+        mcp_url: String,
     },
     Lifetime {
         days: u32,

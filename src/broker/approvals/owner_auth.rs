@@ -411,6 +411,24 @@ pub enum OwnerAction {
         relay_url: String,
         team_id: Option<String>,
     },
+    /// Connect a remote agent to this Mac: allow the connect request `id` of the MCP
+    /// authorization flow (plan "Bouncer section" decision 4). The proof names the
+    /// request, the client name, and the match code exactly as Decisions showed them. A
+    /// denial is stricter and needs no check.
+    AllowConnect {
+        id: String,
+        client_name: String,
+        code: String,
+    },
+    /// Make a remote agent with a bearer token for the command line (`apassy agents
+    /// add-remote`). The proof names the name and the token lifetime in days.
+    AddRemoteAgent {
+        name: String,
+        days: u32,
+    },
+    /// Turn remote access on: Tailscale Funnel routes the internet to the node of this
+    /// Mac. Off is stricter and needs no check.
+    TurnOnRemoteAccess,
 }
 
 /// The words for the Touch ID prompt after the relying party of a passkey. `None` is
@@ -526,7 +544,11 @@ impl OwnerAction {
             Self::CopyField { .. } => "Copy a secret",
             Self::BackupVault { .. } => "Back up Apassy",
             Self::ExportDecisions => "Export decisions",
-            Self::RegisterAgent { .. } | Self::RegisterSetupAgent { .. } => "Connect an agent",
+            Self::RegisterAgent { .. }
+            | Self::RegisterSetupAgent { .. }
+            | Self::AddRemoteAgent { .. } => "Connect an agent",
+            Self::AllowConnect { .. } => "Connect a remote agent",
+            Self::TurnOnRemoteAccess => "Turn on remote access",
             Self::ChangeOwnerFrequency { .. } => "Change owner checks",
             Self::RemoveOlderIphone { device, .. } if device.kind == TrustedDeviceKind::Watch => {
                 "Remove an Apple Watch"
@@ -706,6 +728,16 @@ impl OwnerAction {
             }
             Self::EnableRelayQuestions { .. } => {
                 "send the questions of this vault through the relay".to_owned()
+            }
+            Self::AllowConnect { client_name, .. } => {
+                format!("connect \"{}\" to this Mac", short_device_name(client_name))
+            }
+            Self::AddRemoteAgent { name, .. } => format!(
+                "add the remote agent \"{}\" and issue its token",
+                short_device_name(name)
+            ),
+            Self::TurnOnRemoteAccess => {
+                "let remote agents reach this Mac through Tailscale Funnel".to_owned()
             }
         }
     }
@@ -1900,6 +1932,16 @@ mod evaluation_tests {
                 relay_url: "https://example.invalid".into(),
                 team_id: None,
             },
+            OwnerAction::AllowConnect {
+                id: "cr_synthetic".into(),
+                client_name: "Grok Bot".into(),
+                code: "K7Q-4MD".into(),
+            },
+            OwnerAction::AddRemoteAgent {
+                name: "Grok Bot".into(),
+                days: 90,
+            },
+            OwnerAction::TurnOnRemoteAccess,
         ] {
             assert!(LocalWindowSource::LocalOwner.permits(&action), "{action:?}");
         }

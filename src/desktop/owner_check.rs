@@ -629,6 +629,23 @@ pub enum OwnerRequest {
         choice: Choice,
         action: OwnerAction,
     },
+    /// "Allow" on a connect request in Decisions (plan "Bouncer section" decision 6):
+    /// connect the remote agent of the request to this Mac. The values are the request
+    /// exactly as the card showed it; the app allows it only while the node still has it
+    /// with this code (`Node::allow_connect`).
+    AllowConnect {
+        id: String,
+        client_name: String,
+        code: String,
+    },
+    /// `apassy agents add-remote NAME [--days N]`: a remote agent with no item and a
+    /// bearer token for the command line. Only the command line asks for it.
+    AddRemoteAgent {
+        name: String,
+        days: u32,
+    },
+    /// The remote access switch on (Bouncer > Agents): Tailscale Funnel to the node.
+    TurnOnRemoteAccess,
 }
 
 impl OwnerRequest {
@@ -1023,6 +1040,20 @@ impl OwnerRequest {
                 }
             }
             Self::AnswerRemoteQuestion { action, .. } => action.clone(),
+            Self::AllowConnect {
+                id,
+                client_name,
+                code,
+            } => OwnerAction::AllowConnect {
+                id: id.clone(),
+                client_name: client_name.clone(),
+                code: code.clone(),
+            },
+            Self::AddRemoteAgent { name, days } => OwnerAction::AddRemoteAgent {
+                name: name.clone(),
+                days: *days,
+            },
+            Self::TurnOnRemoteAccess => OwnerAction::TurnOnRemoteAccess,
         }
     }
 
@@ -1413,6 +1444,18 @@ impl OwnerRequest {
                     page_text(asker)
                 )
             }
+            Self::AllowConnect {
+                client_name, code, ..
+            } => format!(
+                "Connect {} to this Mac? Allow only if the page of the agent shows the code {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you.",
+                page_text(client_name),
+                page_text(code)
+            ),
+            Self::AddRemoteAgent { name, days } => format!(
+                "Add the remote agent {} and issue its token to the command line? The token works for {days} days. The agent sees no credential until you choose some, and every run asks you.",
+                page_text(name)
+            ),
+            Self::TurnOnRemoteAccess => "Turn on remote access? Remote agents can then reach this Mac through Tailscale Funnel while it is awake and the vault is unlocked. The name of this Mac appears in public certificate logs. Every remote run still asks you.".to_owned(),
         }
     }
 }
@@ -2341,6 +2384,15 @@ impl DesktopApp {
             OwnerRequest::AnswerRemoteQuestion {
                 remote_id, choice, ..
             } => self.answer_remote_question(remote_id, choice, Some(proof)),
+            OwnerRequest::AllowConnect {
+                id,
+                client_name,
+                code,
+            } => self.complete_allow_connect(&id, &client_name, &code, proof),
+            OwnerRequest::AddRemoteAgent { name, days } => {
+                self.complete_add_remote_agent(&name, days, proof);
+            }
+            OwnerRequest::TurnOnRemoteAccess => self.complete_remote_access_on(proof),
         }
     }
 
