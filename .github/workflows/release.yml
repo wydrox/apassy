@@ -86,6 +86,13 @@ jobs:
         github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: macos-15
     timeout-minutes: 120
+    # id-token and attestations: the build provenance and SBOM attestations of the
+    # published files (docs/operations/release.md, "Attestations and SBOMs").
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
     env:
       COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
       BUCKET: apassy-downloads
@@ -373,6 +380,50 @@ jobs:
             echo "::notice::Main changed during packaging. This build will not be published."
           fi
 
+      # The proof of the published files, before they go up: the SHA-256 of each Mach-O
+      # of the app in the disk image, with and without its signature (macos-binaries.json),
+      # and an SBOM of the app and Cargo.lock. A failed attestation publishes nothing.
+      - name: Record the Mach-O files of the app in the disk image
+        if: steps.publish-head.outputs.publish == 'true'
+        env:
+          RELEASE_VERSION: ${{ needs.ready.outputs.version }}
+        run: |
+          mount="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mount" "target/dist/Apassy-$RELEASE_VERSION.dmg" >/dev/null
+          trap 'hdiutil detach "$mount" -quiet || true' EXIT
+          python3 -I scripts/macos-binaries.py "$mount/Apassy.app" \
+            --version "$RELEASE_VERSION" --commit "$COMMIT" --output target/proof/macos-binaries.json
+          rm -rf "$RUNNER_TEMP/sbom-macos"
+          mkdir -p "$RUNNER_TEMP/sbom-macos"
+          ditto "$mount/Apassy.app" "$RUNNER_TEMP/sbom-macos/Apassy.app"
+          cp Cargo.lock "$RUNNER_TEMP/sbom-macos/Cargo.lock"
+
+      - name: Attest the disk image, latest.json, and macos-binaries.json
+        if: steps.publish-head.outputs.publish == 'true'
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            target/dist/Apassy-${{ needs.ready.outputs.version }}.dmg
+            target/dist/latest.json
+            target/proof/macos-binaries.json
+          sbom-subject-path: target/dist/Apassy-${{ needs.ready.outputs.version }}.dmg
+          sbom-path: ${{ runner.temp }}/sbom-macos
+          sbom-output: target/proof/Apassy-${{ needs.ready.outputs.version }}.spdx.json
+
+      # The owner attaches these files to the GitHub release v<version>
+      # (docs/operations/release.md, "Attestations and SBOMs").
+      - name: Keep the proof files
+        if: steps.publish-head.outputs.publish == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-proof-macos-${{ needs.ready.outputs.version }}
+          path: |
+            target/proof/macos-binaries.json
+            target/proof/Apassy-${{ needs.ready.outputs.version }}.spdx.json
+            target/dist/latest.json
+          if-no-files-found: error
+          retention-days: 90
+
       # The image first, then latest.json, so latest.json never names a build
       # that is not there yet. The same image goes up twice: as Apassy-<version>.dmg,
       # and as Apassy.dmg, the only name that apps before 0.5.0 download.
@@ -468,6 +519,12 @@ jobs:
       github.event.repository.fork == false
     runs-on: macos-15
     timeout-minutes: 120
+    # The test build gets the same attestations as a release, with its branch as the
+    # source ref, so the attestation steps are tested before a release needs them.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_STRIP: "none"
@@ -662,6 +719,34 @@ jobs:
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
 
+      - name: Record the Mach-O files of the app in the disk image
+        run: |
+          dmgs=(target/dist/Apassy-*.dmg)
+          [ "${#dmgs[@]}" = 1 ] && [ -f "${dmgs[0]}" ] || { echo "::error::expected one Apassy-<version>.dmg"; exit 1; }
+          dmg="${dmgs[0]}"
+          version="${dmg#target/dist/Apassy-}"
+          version="${version%.dmg}"
+          mount="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mount" "$dmg" >/dev/null
+          trap 'hdiutil detach "$mount" -quiet || true' EXIT
+          python3 -I scripts/macos-binaries.py "$mount/Apassy.app" \
+            --version "$version" --commit "$GITHUB_SHA" --output target/proof/macos-binaries.json
+          rm -rf "$RUNNER_TEMP/sbom-macos"
+          mkdir -p "$RUNNER_TEMP/sbom-macos"
+          ditto "$mount/Apassy.app" "$RUNNER_TEMP/sbom-macos/Apassy.app"
+          cp Cargo.lock "$RUNNER_TEMP/sbom-macos/Cargo.lock"
+
+      - name: Attest the test disk image, latest.json, and macos-binaries.json
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            target/dist/Apassy-*.dmg
+            target/dist/latest.json
+            target/proof/macos-binaries.json
+          sbom-subject-path: target/dist/Apassy-*.dmg
+          sbom-path: ${{ runner.temp }}/sbom-macos
+          sbom-output: target/proof/Apassy-test.spdx.json
+
       - name: Upload the test artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -669,6 +754,9 @@ jobs:
           path: |
             target/dist/Apassy-*.dmg
             target/dist/test-build.json
+            target/dist/latest.json
+            target/proof/macos-binaries.json
+            target/proof/Apassy-test.spdx.json
           if-no-files-found: error
           retention-days: 3
           compression-level: 0

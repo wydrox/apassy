@@ -895,6 +895,23 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 32 {
+        // Schema 32: short-lived credentials and member keys (`src/vault/schema32.rs`).
+        conn.execute_batch("DROP TABLE member_key; DROP TABLE short_lived;")
+            .unwrap();
+    }
+    if version < 29 {
+        // Schema 29: the host of the bouncer brain (`src/vault/schema29.rs`).
+        conn.execute_batch(
+            "DROP TABLE bouncer_host;
+             ALTER TABLE model_candidate DROP COLUMN origin;
+             ALTER TABLE model_candidate DROP COLUMN job_host;
+             ALTER TABLE model_candidate DROP COLUMN job_id;
+             ALTER TABLE model_candidate DROP COLUMN uploaded_to;
+             ALTER TABLE model_activation DROP COLUMN heads_sha256;",
+        )
+        .unwrap();
+    }
     if version < 27 {
         // Schema 27: the Bouncer figures (`src/vault/schema27.rs`).
         conn.execute_batch(

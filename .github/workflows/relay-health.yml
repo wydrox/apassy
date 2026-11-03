@@ -1,0 +1,52 @@
+# Hourly check of the live hosted relay (copied from the archived repository
+# wydrox/apassy-relay, ADR 0037 stage 1, plan 0037 1E). It calls two public URLs only
+# and uses no secret and no token. A scheduled workflow runs from the default branch,
+# and a manual run from another branch is refused by the job condition.
+name: Relay health
+
+'on':
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: relay-health
+  cancel-in-progress: false
+
+jobs:
+  health:
+    name: Check live relay
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check health and token refusal
+        shell: bash
+        run: |
+          check_response() {
+            local expected="$1"
+            shift
+            local response attempt
+            for attempt in 1 2 3; do
+              response=''
+              if response=$("$@") && [[ "$response" == "$expected" ]]; then
+                printf '%s\n' "$response"
+                return 0
+              fi
+              printf 'Attempt %s/3: expected %s, received %s\n' \
+                "$attempt" "$expected" "${response:-no response}" >&2
+              if [[ "$attempt" -lt 3 ]]; then
+                sleep 20
+              fi
+            done
+            return 1
+          }
+
+          failed=0
+          check_response ok curl -fsS --max-time 20 \
+            https://apassy-relay.wyderka.cc/healthz || failed=1
+          check_response 401 curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+            https://apassy-relay.wyderka.cc/v1/me || failed=1
+          exit "$failed"

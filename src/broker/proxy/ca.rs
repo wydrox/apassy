@@ -22,11 +22,28 @@ use time::{Duration, OffsetDateTime};
 const CLOCK_SLACK: Duration = Duration::hours(1);
 const VALIDITY: Duration = Duration::days(1);
 
+/// The application protocols that the proxy offers to the program in the TLS
+/// handshake.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Alpn {
+    /// HTTP/1.1 only. A client that asks for HTTP/2 falls back to it.
+    #[default]
+    Http11,
+}
+
+impl Alpn {
+    fn protocols(self) -> Vec<Vec<u8>> {
+        match self {
+            Self::Http11 => vec![b"http/1.1".to_vec()],
+        }
+    }
+}
+
 pub(super) struct RunCa {
     issuer: Issuer<'static, KeyPair>,
     cert_der: CertificateDer<'static>,
     cert_pem: String,
-    configs: Mutex<HashMap<String, Arc<ServerConfig>>>,
+    configs: Mutex<HashMap<(String, Alpn), Arc<ServerConfig>>>,
 }
 
 fn error(err: impl std::fmt::Display) -> io::Error {
@@ -72,13 +89,15 @@ impl RunCa {
         &self.cert_pem
     }
 
-    /// TLS settings with a certificate for `host`, made on first use.
-    pub fn server_config(&self, host: &str) -> io::Result<Arc<ServerConfig>> {
+    /// TLS settings with a certificate for `host` and the protocols of `alpn`, made
+    /// on first use.
+    pub fn server_config(&self, host: &str, alpn: Alpn) -> io::Result<Arc<ServerConfig>> {
         let mut configs = self
             .configs
             .lock()
             .map_err(|_| io::Error::other("certificate cache"))?;
-        if let Some(config) = configs.get(host) {
+        let cache_key = (host.to_owned(), alpn);
+        if let Some(config) = configs.get(&cache_key) {
             return Ok(Arc::clone(config));
         }
         let now = OffsetDateTime::now_utc();
@@ -102,10 +121,9 @@ impl RunCa {
             .with_no_client_auth()
             .with_single_cert(chain, private)
             .map_err(error)?;
-        // HTTP/1.1 only. A client that asks for HTTP/2 falls back to it.
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = alpn.protocols();
         let config = Arc::new(config);
-        configs.insert(host.to_owned(), Arc::clone(&config));
+        configs.insert(cache_key, Arc::clone(&config));
         Ok(config)
     }
 }

@@ -6,19 +6,18 @@
 use std::collections::BTreeMap;
 
 use apassy::broker::proxy::HostRule;
+use apassy::broker::proxy::base_env;
 
 use crate::api::SessionView;
 use crate::ids::{ItemId, SessionId};
 use crate::proxy::base_url;
 use crate::secret::SecretString;
 
-/// Variable names that the relay sets itself. An item cannot use them.
-pub const RESERVED_NAMES: [&str; 4] = [
-    "STRIPE_API_BASE",
-    "OPENAI_BASE_URL",
-    "ANTHROPIC_BASE_URL",
-    "GITHUB_API_URL",
-];
+/// Variable names that the relay sets itself. An item cannot use them. The table is
+/// the core's (`apassy::broker::proxy::base_env`), shared with the run proxy.
+pub use apassy::broker::proxy::base_env::RESERVED_BASE_NAMES as RESERVED_NAMES;
+/// The name of the base URL variable of an item.
+pub use apassy::broker::proxy::base_env::base_var;
 
 /// The variable that holds the expiry of the session.
 pub const EXPIRES_VAR: &str = "APASSY_RELAY_SESSION_EXPIRES";
@@ -31,28 +30,12 @@ pub struct EnvItem {
     pub hosts: Vec<HostRule>,
 }
 
-/// The name of the base URL variable of an item.
-pub fn base_var(env_name: &str) -> String {
-    format!("APASSY_BASE_{env_name}")
-}
-
 /// The provider variables that an item with these hosts gets, without their values.
 pub fn provider_vars(hosts: &[HostRule]) -> Vec<&'static str> {
-    let covers = |host: &str| hosts.iter().any(|rule| rule.covers(host, 443));
-    let mut vars = Vec::new();
-    if covers("api.stripe.com") {
-        vars.push("STRIPE_API_BASE");
-    }
-    if covers("api.openai.com") {
-        vars.push("OPENAI_BASE_URL");
-    }
-    if covers("api.anthropic.com") {
-        vars.push("ANTHROPIC_BASE_URL");
-    }
-    if covers("api.github.com") {
-        vars.push("GITHUB_API_URL");
-    }
-    vars
+    base_env::provider_vars(hosts)
+        .into_iter()
+        .map(|var| var.name)
+        .collect()
 }
 
 /// Builds the view of a session. `placeholders[i]` is the placeholder of `items[i]`.
@@ -81,16 +64,10 @@ pub fn build(
         for host in &item.hosts {
             base_urls.insert(host.to_string(), base(host));
         }
-        for var in provider_vars(&item.hosts) {
-            let (host, suffix) = match var {
-                "STRIPE_API_BASE" => ("api.stripe.com", ""),
-                "OPENAI_BASE_URL" => ("api.openai.com", "/v1"),
-                "ANTHROPIC_BASE_URL" => ("api.anthropic.com", ""),
-                _ => ("api.github.com", ""),
-            };
-            if let Ok(rule) = HostRule::parse(host) {
-                env.entry(var.to_string())
-                    .or_insert_with(|| format!("{}{suffix}", base(&rule)));
+        for var in base_env::provider_vars(&item.hosts) {
+            if let Ok(rule) = HostRule::parse(var.host) {
+                env.entry(var.name.to_string())
+                    .or_insert_with(|| format!("{}{}", base(&rule), var.suffix));
             }
         }
     }

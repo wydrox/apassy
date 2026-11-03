@@ -1,0 +1,38 @@
+{
+  "id": "evt_SynthInvoicePaid1",
+  "object": "event",
+  "api_version": "2025-03-31.basil",
+  "created": 1790000002,
+  "data": {
+    "object": {
+      "id": "in_SynthInvoice0001",
+      "object": "invoice",
+      "amount_due": 300,
+      "amount_paid": 300,
+      "attempt_count": 1,
+      "billing_reason": "subscription_cycle",
+      "currency": "eur",
+      "customer": "cus_SynthAcc0001",
+      "livemode": false,
+      "next_payment_attempt": null,
+      "parent": {
+        "type": "subscription_details",
+        "subscription_details": {
+          "metadata": {
+            "account_id": "acc_k7m2q4x3ca"
+          },
+          "subscription": "sub_SynthAcc0001"
+        }
+      },
+      "status": "paid",
+      "total": 300
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "invoice.paid"
+}

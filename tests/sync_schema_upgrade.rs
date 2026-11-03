@@ -36,7 +36,7 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 27;
+const CURRENT: i64 = 32;
 /// Schema 18: folders, before trusted devices. Never released.
 const MID: i64 = 18;
 const OLD: i64 = 17;
@@ -193,6 +193,24 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         content_digest(&conn),
         "the test digest is the algorithm of the app"
     );
+    if version < 32 {
+        // Schema 32: short-lived credentials and member keys (`src/vault/schema32.rs`).
+        // Their sync and bouncer scope triggers go with the tables.
+        conn.execute_batch("DROP TABLE member_key; DROP TABLE short_lived;")
+            .unwrap();
+    }
+    if version < 29 {
+        // Schema 29: the host of the bouncer brain (`src/vault/schema29.rs`).
+        conn.execute_batch(
+            "DROP TABLE bouncer_host;
+             ALTER TABLE model_candidate DROP COLUMN origin;
+             ALTER TABLE model_candidate DROP COLUMN job_host;
+             ALTER TABLE model_candidate DROP COLUMN job_id;
+             ALTER TABLE model_candidate DROP COLUMN uploaded_to;
+             ALTER TABLE model_activation DROP COLUMN heads_sha256;",
+        )
+        .unwrap();
+    }
     if version < 27 {
         // Schema 27: the Bouncer figures (`src/vault/schema27.rs`).
         conn.execute_batch(
@@ -863,4 +881,285 @@ fn an_18_copy_merges_and_is_replaced_by_a_19_copy() {
     assert!(again.remote_outdated());
     assert_eq!(a.item_home(alpha).unwrap(), Some(home));
     assert_eq!(content(&b), content(&a));
+}
+
+/// The schema before schema 29 in the migration chain (`src/vault/schema29.rs`,
+/// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
+const BEFORE_29: i64 = 27;
+
+/// Schema 29 (ADR 0035, plan 0035 C2): the host of the bouncer brain is local. A pushed
+/// copy has no row of `bouncer_host` and no bearer. A copy of the previous schema merges
+/// and keeps the host of this Mac. A device refuses a copy of a later schema, as a device
+/// of the previous schema refuses a copy of 29 (`UnsupportedSchema`).
+#[test]
+fn a_pushed_copy_has_no_bouncer_host_row_and_a_later_copy_is_refused() {
+    const BEARER: &str = "SYNTH-sync-bearer-0123456789abcdef";
+    let root = TempDir::new().unwrap();
+    let mut a = Vault::create(&root.path().join("a.db"), PASS).unwrap();
+    a.unlock(PASS).unwrap();
+    a.add(item("Alpha", "SYNTH-alpha")).unwrap();
+    let host = apassy::vault::BouncerHostChange {
+        kind: apassy::vault::BouncerHostKind::OwnServer,
+        url: "https://brain.synthetic.ts.net".to_owned(),
+        bearer: Some(SecretValue::new(BEARER.to_owned())),
+        consent_version: apassy::vault::HOSTING_CONSENT_VERSION,
+    };
+    for role in apassy::vault::BouncerHostRole::ALL {
+        a.set_bouncer_host(role, &host, 1_700_000_000).unwrap();
+    }
+
+    // The pushed copy: the table is there and empty, and the bearer is in no byte of it.
+    let copy = root.path().join("a-copy.apassy");
+    a.write_sync_copy(&copy, "Mac A").unwrap();
+    assert_eq!(versions(&copy, PASS), (CURRENT, CURRENT));
+    let conn = open_raw(&copy, PASS);
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM bouncer_host", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "a pushed copy carries no host row");
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let (mut b, adopted) = Vault::adopt_sync_copy(&copy, &root.path().join("b.db"), PASS).unwrap();
+    assert!(!adopted.outdated());
+    b.unlock(PASS).unwrap();
+    for role in apassy::vault::BouncerHostRole::ALL {
+        assert_eq!(b.bouncer_host(role).unwrap(), None, "{role:?}");
+        assert!(b.bouncer_host_bearer(role).unwrap().is_none());
+    }
+    assert_eq!(titles(&b), ["Alpha"]);
+
+    // A copy of the previous schema merges; the host of this Mac stays.
+    b.add(item("Beta", "SYNTH-beta")).unwrap();
+    let old = root.path().join("b-old.apassy");
+    b.write_sync_copy(&old, "Mac B").unwrap();
+    set_schema(&old, PASS, BEFORE_29, true);
+    let report = a.merge_from(&old, &SyncScope::vault()).unwrap();
+    assert_eq!(report.remote_schema, BEFORE_29);
+    assert!(report.remote_outdated());
+    assert_eq!(titles(&a), ["Alpha", "Beta"]);
+    let kept = a
+        .bouncer_host(apassy::vault::BouncerHostRole::Hosting)
+        .unwrap()
+        .expect("the host of this Mac stays");
+    assert_eq!(kept.url, "https://brain.synthetic.ts.net");
+    assert_eq!(
+        a.bouncer_host_bearer(apassy::vault::BouncerHostRole::Hosting)
+            .unwrap()
+            .unwrap()
+            .expose(),
+        BEARER
+    );
+
+    // A copy of a later schema is refused for adoption and for a merge, and the copy
+    // does not change.
+    let later = root.path().join("later.apassy");
+    a.write_sync_copy(&later, "Mac A").unwrap();
+    set_schema(&later, PASS, CURRENT + 1, true);
+    let before = sha(&later);
+    assert_eq!(
+        Vault::adopt_sync_copy(&later, &root.path().join("c.db"), PASS)
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::UnsupportedSchema
+    );
+    assert_eq!(
+        a.merge_from(&later, &SyncScope::vault())
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::UnsupportedSchema
+    );
+    assert_eq!(sha(&later), before);
+    // A number between the previous schema and 29 belongs to no build: refused too.
+    if BEFORE_29 + 1 < CURRENT {
+        let gap = root.path().join("gap.apassy");
+        a.write_sync_copy(&gap, "Mac A").unwrap();
+        set_schema(&gap, PASS, BEFORE_29 + 1, true);
+        assert_eq!(
+            a.merge_from(&gap, &SyncScope::vault()).unwrap_err().kind(),
+            VaultErrorKind::UnsupportedSchema
+        );
+    }
+}
+
+/// The schema before schema 32 in the migration chain (`src/vault/schema32.rs`,
+/// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
+const BEFORE_32: i64 = 29;
+
+const AWS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
+const AWS_SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+
+fn aws_pair(title: &str) -> ItemDraft {
+    ItemDraft {
+        title: title.to_owned(),
+        kind: CredentialKind::ApiKey,
+        notes: String::new(),
+        tags: Vec::new(),
+        fields: vec![
+            Field {
+                name: "access_key_id".to_owned(),
+                value: SecretValue::new(AWS_KEY_ID.to_owned()),
+                secret: false,
+            },
+            Field {
+                name: "secret_access_key".to_owned(),
+                value: SecretValue::new(AWS_SECRET.to_owned()),
+                secret: true,
+            },
+        ],
+    }
+}
+
+fn id_of(vault: &Vault, title: &str) -> u64 {
+    let found = vault.search("").unwrap();
+    let matches: Vec<_> = found.iter().filter(|item| item.title == title).collect();
+    assert_eq!(matches.len(), 1, "one item {title}");
+    matches[0].id
+}
+
+/// Schema 32 (plan s6 unit D): the source rows and member keys sync with their item and
+/// hold no secret. A row that is off keeps its settings on the other Mac, and the switch
+/// syncs. A copy of the previous schema has no such rows: it merges, and this Mac keeps
+/// its source (way C stays on). The numbers between the previous schema and 32 belong to
+/// no build and are refused, as a device of the previous schema refuses a copy of 32.
+#[test]
+fn short_lived_settings_sync_and_hold_no_secret() {
+    let root = TempDir::new().unwrap();
+    let mut a = Vault::create(&root.path().join("a.db"), PASS).unwrap();
+    a.unlock(PASS).unwrap();
+    let source = a.add(aws_pair("AWS source")).unwrap().id;
+    let member = a.add(aws_pair("AWS member key")).unwrap().id;
+    let settings = r#"{"region":"eu-central-1","services":["s3"]}"#;
+    a.set_short_lived(
+        source,
+        apassy::vault::ShortLivedKind::AwsSts,
+        settings,
+        1_700_000_000,
+    )
+    .unwrap();
+    a.set_short_lived_enabled(source, false, 1_700_000_100)
+        .unwrap();
+    a.add_member_key(
+        &apassy::vault::NewMemberKey {
+            item_id: member,
+            source_item_id: source,
+            team_id: "team-synthetic".to_owned(),
+            member_id: 2,
+            manager: apassy::vault::KeyManagerKind::AwsIam,
+            remote_id: "AKIAIOSFODNN7EXAMPLE".to_owned(),
+        },
+        1_700_000_200,
+    )
+    .unwrap();
+
+    // The pushed copy has both rows, and no column of them holds the secret.
+    let copy = root.path().join("a-copy.apassy");
+    a.write_sync_copy(&copy, "Mac A").unwrap();
+    assert_eq!(versions(&copy, PASS), (CURRENT, CURRENT));
+    let conn = open_raw(&copy, PASS);
+    for sql in [
+        "SELECT kind || settings || enabled FROM short_lived",
+        "SELECT source_uuid || team_id || member_id || manager || remote_id FROM member_key",
+    ] {
+        let rows: Vec<String> = conn
+            .prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{sql}");
+        for row in rows {
+            assert!(!row.contains(AWS_SECRET), "{sql}");
+        }
+    }
+    conn.close().map_err(|(_, e)| e).unwrap();
+
+    // Mac B adopts it: the source is off with its settings, the member key is linked.
+    let (mut b, adopted) = Vault::adopt_sync_copy(&copy, &root.path().join("b.db"), PASS).unwrap();
+    assert!(!adopted.outdated());
+    b.unlock(PASS).unwrap();
+    let b_source = id_of(&b, "AWS source");
+    let b_member = id_of(&b, "AWS member key");
+    let row = b.short_lived(b_source).unwrap().expect("synced row");
+    assert!(!row.enabled);
+    assert_eq!(row.settings_json, settings);
+    let key = b.member_key(b_member).unwrap().expect("synced member key");
+    assert_eq!(key.source_item_id, Some(b_source));
+    assert_eq!(key.member_id, 2);
+    assert_eq!(content(&b), content(&a));
+
+    // The switch syncs back.
+    b.set_short_lived_enabled(b_source, true, 1_700_000_300)
+        .unwrap();
+    let back = root.path().join("b-copy.apassy");
+    b.write_sync_copy(&back, "Mac B").unwrap();
+    a.merge_from(&back, &SyncScope::vault()).unwrap();
+    assert!(a.short_lived(source).unwrap().unwrap().enabled);
+    assert_eq!(content(&a), content(&b));
+
+    // A copy of the previous schema has no rows of 32; this Mac keeps its own.
+    b.add(item("Beta", "SYNTH-beta")).unwrap();
+    let old = root.path().join("b-old.apassy");
+    b.write_sync_copy(&old, "Mac B").unwrap();
+    set_schema(&old, PASS, BEFORE_32, true);
+    let report = a.merge_from(&old, &SyncScope::vault()).unwrap();
+    assert_eq!(report.remote_schema, BEFORE_32);
+    assert!(report.remote_outdated());
+    assert!(titles(&a).contains(&"Beta".to_owned()));
+    let kept = a.short_lived(source).unwrap().expect("way C stays");
+    assert!(kept.enabled);
+    assert_eq!(kept.settings_json, settings);
+    assert!(a.member_key(member).unwrap().is_some());
+
+    // No build has a schema between the previous one and 32.
+    for gap in (BEFORE_32 + 1)..CURRENT {
+        let path = root.path().join(format!("gap-{gap}.apassy"));
+        a.write_sync_copy(&path, "Mac A").unwrap();
+        set_schema(&path, PASS, gap, true);
+        assert_eq!(
+            a.merge_from(&path, &SyncScope::vault()).unwrap_err().kind(),
+            VaultErrorKind::UnsupportedSchema,
+            "{gap}"
+        );
+    }
+}
+
+/// Way C is a safety switch: when one Mac turns it off and another Mac edits the same
+/// credential at the same time, the merge keeps it on, on both Macs, as "Always ask".
+#[test]
+fn a_concurrent_edit_keeps_way_c_on() {
+    let root = TempDir::new().unwrap();
+    let mut a = Vault::create(&root.path().join("a.db"), PASS).unwrap();
+    a.unlock(PASS).unwrap();
+    let source = a.add(aws_pair("AWS source")).unwrap().id;
+    a.set_short_lived(
+        source,
+        apassy::vault::ShortLivedKind::AwsSts,
+        "{}",
+        1_700_000_000,
+    )
+    .unwrap();
+    let copy = root.path().join("seed.apassy");
+    a.write_sync_copy(&copy, "Mac A").unwrap();
+    let (mut b, _) = Vault::adopt_sync_copy(&copy, &root.path().join("b.db"), PASS).unwrap();
+    b.unlock(PASS).unwrap();
+    let b_source = id_of(&b, "AWS source");
+
+    // Mac A turns way C off; Mac B renames the credential, without seeing A's change.
+    a.set_short_lived_enabled(source, false, 1_700_000_100)
+        .unwrap();
+    let revision = b.details(b_source).unwrap().summary.revision;
+    b.update(b_source, revision, aws_pair("AWS source renamed"))
+        .unwrap();
+
+    let from_b = root.path().join("b-copy.apassy");
+    b.write_sync_copy(&from_b, "Mac B").unwrap();
+    a.merge_from(&from_b, &SyncScope::vault()).unwrap();
+    let from_a = root.path().join("a-copy.apassy");
+    a.write_sync_copy(&from_a, "Mac A").unwrap();
+    b.merge_from(&from_a, &SyncScope::vault()).unwrap();
+
+    for (vault, id) in [(&a, source), (&b, b_source)] {
+        let row = vault.short_lived(id).unwrap().expect("the source stays");
+        assert!(row.enabled, "way C stays on after a concurrent edit");
+    }
 }

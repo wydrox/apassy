@@ -2728,7 +2728,9 @@ pub(super) fn set_environment(
         // No declaration yet: the owner sees and saves each value in its sheet, with
         // the owner check, so no value from a suggestion counts as the owner's.
         prepare_sheet(app, id, &Sheet::Declaration);
-        app.owner_ui.declaration_form.environment = environment;
+        app.owner_ui
+            .declaration_form
+            .choose_environment(environment);
         app.ui.sheet = Some(Sheet::Declaration);
         return;
     }

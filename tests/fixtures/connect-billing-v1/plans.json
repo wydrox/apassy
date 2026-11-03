@@ -1,0 +1,69 @@
+{
+  "currency": "eur",
+  "tax": "inclusive",
+  "plans": [
+    {
+      "plan": "personal",
+      "name": "Connect Personal",
+      "unit": "account",
+      "included": 1,
+      "max": 1,
+      "prices": [
+        {
+          "interval": "month",
+          "lookup_key": "connect_personal_month",
+          "amount": 300,
+          "extra": null
+        },
+        {
+          "interval": "year",
+          "lookup_key": "connect_personal_year",
+          "amount": 3000,
+          "extra": null
+        }
+      ]
+    },
+    {
+      "plan": "family",
+      "name": "Connect Family",
+      "unit": "person",
+      "included": 4,
+      "max": 10,
+      "prices": [
+        {
+          "interval": "month",
+          "lookup_key": "connect_family_month",
+          "amount": 500,
+          "extra": 100
+        },
+        {
+          "interval": "year",
+          "lookup_key": "connect_family_year",
+          "amount": 5000,
+          "extra": 1000
+        }
+      ]
+    },
+    {
+      "plan": "team",
+      "name": "Connect Team",
+      "unit": "member",
+      "included": 1,
+      "max": 250,
+      "prices": [
+        {
+          "interval": "month",
+          "lookup_key": "connect_team_month",
+          "amount": 400,
+          "extra": 400
+        },
+        {
+          "interval": "year",
+          "lookup_key": "connect_team_year",
+          "amount": 4000,
+          "extra": 4000
+        }
+      ]
+    }
+  ]
+}

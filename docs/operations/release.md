@@ -183,7 +183,7 @@ The release workflow first runs the job `ready` on `ubuntu-24.04`, then the job 
 6. It decodes the two provider profiles `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE` into private files, and sets `APASSY_REQUIRE_PROVIDER=1`. See [AutoFill provider profiles](#autofill-provider-profiles).
 7. `scripts/build-app.sh` checks the binary artifact again, builds the native helpers and the AutoFill provider, and signs the app with the hardened runtime and a secure timestamp. It runs all existing bundle and signature checks. With `APASSY_REQUIRE_PROVIDER=1`, the build stops if the provider is not in the app. The program and the signed `Info.plist` use the commit and build date from CI ([updates](updates.md)).
 8. `scripts/build-dmg.sh --notarize` checks the provider in the app and in the mounted image, notarizes the app, staples it, makes the disk image `Apassy-<version>.dmg`, signs it, notarizes it, and staples it. `spctl` must accept both. The script stops when the version of the app is not the version of `Cargo.toml`, or has build metadata (`+...`), which the image name cannot carry.
-9. It checks the head of `main` again. If the commit still matches, it reads the version of the `latest.json` in the bucket, uploads the image as `Apassy-<version>.dmg` and as `Apassy.dmg`, then uploads `latest.json`. Then it deletes the versioned image of the previous `latest.json`, unless that is the image it just uploaded. A failed delete is a warning, not a failure. The run summary names the versioned URL and shows `latest.json`.
+9. It checks the head of `main` again. If the commit still matches, it writes `macos-binaries.json` from the app in the disk image and attests the image, `latest.json`, and `macos-binaries.json`, and the SBOM of the image ([Attestations and SBOMs](#attestations-and-sboms)). A failed attestation uploads nothing. Then it reads the version of the `latest.json` in the bucket, uploads the image as `Apassy-<version>.dmg` and as `Apassy.dmg`, then uploads `latest.json`. Then it deletes the versioned image of the previous `latest.json`, unless that is the image it just uploaded. A failed delete is a warning, not a failure. The run summary names the versioned URL and shows `latest.json`.
 
 The bucket keeps only the latest build: `Apassy-<version>.dmg`, the same bytes as `Apassy.dmg`, and `latest.json`. The Worker serves only these keys. Other keys, such as `models/`, stay private. Both image keys download as `Apassy-<version>.dmg` (`Content-Disposition`). The upload sets `Cache-Control: no-cache` on each key, and the Worker passes it on, so the app and the site get a new `latest.json` at once. The redirect of `/download` has `Cache-Control: no-store`.
 
@@ -217,7 +217,7 @@ Apps from 0.5.0 accept `"file"` equal to `Apassy.dmg` or to `Apassy-<version>.dm
 
 `/download` reads the version of `latest.json` and redirects to `/download/Apassy-<version>.dmg`. When `latest.json` cannot be read, or the versioned key is not in the bucket (a release before 0.5.0), it redirects to `/download/Apassy.dmg`. The Worker serves only `/download/Apassy-MAJOR.MINOR.PATCH[-PRE].dmg`. Other names get the 404 page.
 
-Later step, not done yet: when every installed app runs 0.5.0 or later, one release can change `latest.json` to `"file": "Apassy-<version>.dmg"` (in `scripts/build-dmg.sh`). After that release, the workflow can stop uploading `Apassy.dmg`, the Worker can drop `/download/Apassy.dmg` and the fallback of `/download`, and the bucket key `Apassy.dmg` can go. An app before 0.5.0 then no longer updates itself: its owner downloads the new version from the site once.
+Later step, not done yet. Decision ([D17](../design/implementation-plan-misc.md#d17-latestjson-keeps-apassydmg-0015-1)): keep `Apassy.dmg` until the condition holds. **Condition:** no request for `/latest.json` with a user agent `Apassy/0.3.*` or `Apassy/0.4.*` for 90 days. At each release preparation, read this from Cloudflare's request analytics (read-only, aggregate; no new logging) and note the result in the release record. If the analytics cannot show 90 days, keep it. When the condition holds, one release can change `latest.json` to `"file": "Apassy-<version>.dmg"` (in `scripts/build-dmg.sh`). After that release, the workflow can stop uploading `Apassy.dmg`, the Worker can drop `/download/Apassy.dmg` and the fallback of `/download`, and the bucket key `Apassy.dmg` can go. An app before 0.5.0 then no longer updates itself: its owner downloads the new version from the site once.
 
 ## CI duration and binary artifacts
 
@@ -346,6 +346,109 @@ the exact image and backup. Historical schema-17 vault and schema-4 relay deploy
 instructions do not describe the 0.5.8 rollout. Vault schema 20 is independent of
 the relay protocol and database schema; 0.5.8 needs no relay migration.
 
+## Attestations and SBOMs
+
+Date: 2026-11-03. Decision: [ADR 0037](../adr/0037-own-relay-open-source.md) section 8 ("Proof, not
+promises"); plan: [implementation-plan-misc](../design/implementation-plan-misc.md) D11 and M20.
+
+Each release artifact gets a GitHub build provenance attestation (SLSA provenance, signed with the
+workflow's Sigstore certificate) and an SPDX JSON SBOM made by syft. The SBOM is attested to the
+artifact too. The composite action `.github/actions/attest` does the three steps: SBOM
+(`anchore/sbom-action`, syft pinned), `actions/attest-build-provenance`, and `actions/attest` with
+the SBOM. Only the jobs that attest have `id-token: write` and `attestations: write`.
+
+| Artifact | Workflow (job) | Provenance subjects | SBOM: what syft scans, attested to | Proof files (Actions artifact) |
+| --- | --- | --- | --- | --- |
+| Mac disk image | `release.yml` (`macos`, after notarization, before the R2 upload) | `Apassy-<version>.dmg`, `latest.json`, `macos-binaries.json` | the app of the disk image and `Cargo.lock`, to the image | `apassy-proof-macos-<version>`: `macos-binaries.json`, `Apassy-<version>.spdx.json`, `latest.json` (90 days) |
+| Mac test build | `release.yml` (`provider-check`) | the same, source ref is the branch | the same | in `apassy-provider-test-<sha>-<attempt>` (3 days) |
+| Relay image | `relay-image.yml` (`image`) | `relay-image.tar.gz`, `relay-image.release.json` | the image `apassy-relay:release-<version>`, to the tarball | `relay-image.spdx.json` in `relay-image` (7 days) |
+| Linux CLI | `relay-image.yml` (`linux-cli`) | `apassy-team-linux-x86_64`, `release-linux.json` | the binary and the workspace `Cargo.lock`, to the binary | `apassy-team-linux-x86_64.spdx.json` in `apassy-team-linux-x86_64` (7 days) |
+| Darwin CLI | `relay-image.yml` (`darwin-cli`) | `apassy-team-darwin-arm64`, `release-darwin.json` | the same, to the binary | `apassy-team-darwin-arm64.spdx.json` in `apassy-team-darwin-arm64` (7 days) |
+| Extension zip | `extension-package.yml` (`package`, on a change of `extension/` on `main`, or by hand) | `apassy-extension-<version>.zip` | every file of the zip with its SHA-256, to the zip | `apassy-extension-<version>`: zip, `.sha256`, `.spdx.json` (90 days) |
+| iPhone build record | `ios-build-record.yml` (by hand on `main`) | `apassy-ios-<version>-<build>.json` | the commit's `Cargo.lock` and its resolved Swift packages (none today: the app has only local packages), to the record | `apassy-ios-<version>-<build>` (90 days) |
+
+`macos-binaries.json` (`scripts/macos-binaries.py`) lists each Mach-O file of `Apassy.app` in the
+disk image with two SHA-256 values: `sha256` of the file as shipped, and `sha256_unsigned` after
+`codesign --remove-signature` on a copy. The extension workflow builds the zip twice, the second
+time at another path with another umask and time zone, and fails when the two SHA-256 values
+differ. The iPhone record is a signed claim, not a check a user can repeat: the App Store re-signs
+and encrypts the app. `scripts/ios-testflight.sh` writes it to `target/ios/build-record.json`
+(version, build, commit, Xcode, SDK, the `.ipa` SHA-256 when the export kept one, and the Mach-O
+digests of the archive). `ios-build-record.yml` accepts only the record of an uploaded build, at
+most 64 KiB, whose commit is on `main` and whose version is `MARKETING_VERSION` of that commit.
+
+A failed attestation or SBOM step stops the job. In `release.yml` that means nothing is uploaded
+to R2.
+
+### Owner steps at each release
+
+1. Upload the extension zip of the `extension-package.yml` run of the release commit to the
+   Chrome Web Store, not a local build: `gh run download RUN_ID -n apassy-extension-<version>`.
+   The local and CI zips of one commit are the same bytes, so a local build gives the same SHA-256.
+2. After the TestFlight upload, when the commit is on `main`, publish the iPhone record:
+
+   ```sh
+   gh workflow run ios-build-record.yml --ref main -f record="$(cat target/ios/build-record.json)"
+   ```
+
+3. Download the proof files (`gh run download RUN_ID -n NAME` for each Actions artifact of the
+   table; the relay and CLI artifacts expire after 7 days) and attach them, the extension zip
+   included, to the GitHub release `v<version>`:
+
+   ```sh
+   gh release upload v<version> macos-binaries.json Apassy-<version>.spdx.json \
+     apassy-extension-<version>.zip apassy-extension-<version>.spdx.json \
+     relay-image.spdx.json relay-image.release.json \
+     apassy-team-linux-x86_64.spdx.json apassy-team-darwin-arm64.spdx.json \
+     apassy-ios-<version>-<build>.json apassy-ios-<version>-<build>.spdx.json
+   ```
+
+### How a user verifies an artifact
+
+Use the GitHub CLI (`gh attestation verify`; `gh` must be logged in to any GitHub account).
+Always give the signer workflow and the
+source ref or commit. `--repo` alone also accepts a test build of a branch (`provider-check`),
+which is attested too.
+
+```sh
+# The Mac disk image, downloaded from https://apassy.wyderka.cc/download
+gh attestation verify Apassy-0.5.16.dmg --repo wydrox/apassy \
+  --signer-workflow wydrox/apassy/.github/workflows/release.yml \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+
+# latest.json and macos-binaries.json: the same command with that file.
+
+# Its SBOM: the same command with the SPDX predicate type. --format json prints the SBOM.
+gh attestation verify Apassy-0.5.16.dmg --repo wydrox/apassy \
+  --signer-workflow wydrox/apassy/.github/workflows/release.yml \
+  --source-ref refs/heads/main --predicate-type https://spdx.dev/Document/v2.3
+
+# The extension zip of the GitHub release
+gh attestation verify apassy-extension-0.5.16.zip --repo wydrox/apassy \
+  --signer-workflow wydrox/apassy/.github/workflows/extension-package.yml \
+  --source-ref refs/heads/main
+
+# The Linux CLI and the relay image tarball: the commit is in release-linux.json and
+# relay-image.release.json. The source ref is the image-* tag.
+gh attestation verify apassy-team-linux-x86_64 --repo wydrox/apassy \
+  --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
+  --source-digest COMMIT
+gh attestation verify relay-image.tar.gz --repo wydrox/apassy \
+  --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
+  --source-digest COMMIT
+
+# The iPhone build record; then compare its commit and version with the release
+gh attestation verify apassy-ios-0.5.16-BUILD.json --repo wydrox/apassy \
+  --signer-workflow wydrox/apassy/.github/workflows/ios-build-record.yml \
+  --source-ref refs/heads/main
+```
+
+To check that the notarized app contains the attested binaries: mount the disk image, and for
+each entry of the verified `macos-binaries.json`, check that `shasum -a 256` of
+`Apassy.app/<path>` in the mounted volume is `sha256`; a copy of the file after
+`codesign --remove-signature` must have `sha256_unsigned`. `scripts/verify-release.py` (plan M22)
+will run these checks, and the extension and record checks, in one command.
+
 ## One-time setup
 
 ### 1. Apple
@@ -445,7 +548,7 @@ To test the signed provider without a release, start the job `provider-check` of
 gh workflow run release.yml --ref BRANCH -f ci_run_id=provider-check
 ```
 
-The value `provider-check` of `ci_run_id` is a switch. It only works for a branch of this repository that is not `main`. The job builds the exact commit of the branch (Rust included), signs it with a private, temporary keychain, embeds the profiles, notarizes the app and the image, and keeps `Apassy-<version>.dmg` and `test-build.json` (image name, commit, SHA-256, SDK, run) as a GitHub Actions artifact for 3 days. It does not use R2, the site, or the CI artifact, and the job `macos` does not run. The artifact is test output. It is not a release, and it does not prove that macOS lists Apassy as a provider. That needs a manual check on a Mac.
+The value `provider-check` of `ci_run_id` is a switch. It only works for a branch of this repository that is not `main`. The job builds the exact commit of the branch (Rust included), signs it with a private, temporary keychain, embeds the profiles, notarizes the app and the image, attests the image like a release (with the branch as the source ref), and keeps `Apassy-<version>.dmg`, `test-build.json` (image name, commit, SHA-256, SDK, run), `latest.json`, `macos-binaries.json`, and the SBOM as a GitHub Actions artifact for 3 days. It does not use R2, the site, or the CI artifact, and the job `macos` does not run. The artifact is test output. It is not a release, and it does not prove that macOS lists Apassy as a provider. That needs a manual check on a Mac.
 
 ## App icon
 

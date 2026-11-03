@@ -1,0 +1,6 @@
+{
+  "session_id": 7,
+  "item_id": 9,
+  "scope": {"date": "20150830", "region": "us-east-1", "service": "service"},
+  "canonical_request": "GET\n/\n\nhost:example.amazonaws.com\nx-amz-date:20150830T123600Z\n\nhost;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

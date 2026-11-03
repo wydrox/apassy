@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "code": "unauthenticated",
+    "message": "a missing, expired or unknown token"
+  }
+}

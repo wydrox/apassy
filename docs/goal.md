@@ -75,7 +75,7 @@ Each item needs evidence: a passing test, a measurement in `docs/operations/`, o
 - Connectors for real services and the plugin design. A later ADR covers them, with P4a and P4b.
 - A plain-language rule interpreter (P3a) and hosted models.
 - Sharing of patterns or rule packs, and third-party packs.
-- Other operating systems.
+- Other operating systems. Windows: no port ([D19](design/implementation-plan-misc.md#d19-windows-0011-7)).
 - Distribution to other users and the five-day pilot (P7).
 
 ## Known risks

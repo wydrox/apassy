@@ -1,0 +1,54 @@
+{
+  "id": "evt_SynthSubUpdated01",
+  "object": "event",
+  "api_version": "2025-03-31.basil",
+  "created": 1792592101,
+  "data": {
+    "object": {
+      "id": "sub_SynthAcc0001",
+      "object": "subscription",
+      "cancel_at_period_end": false,
+      "customer": "cus_SynthAcc0001",
+      "ended_at": null,
+      "items": {
+        "object": "list",
+        "data": [
+          {
+            "id": "si_SynthAcc0001",
+            "object": "subscription_item",
+            "current_period_end": 1792592000,
+            "current_period_start": 1790000000,
+            "price": {
+              "id": "price_SynthPersonalMonth",
+              "object": "price",
+              "currency": "eur",
+              "lookup_key": "connect_personal_month",
+              "recurring": {
+                "interval": "month",
+                "interval_count": 1
+              },
+              "tax_behavior": "inclusive",
+              "unit_amount": 300
+            },
+            "quantity": 1
+          }
+        ]
+      },
+      "livemode": false,
+      "metadata": {
+        "account_id": "acc_k7m2q4x3ca"
+      },
+      "status": "past_due"
+    },
+    "previous_attributes": {
+      "status": "active"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "customer.subscription.updated"
+}

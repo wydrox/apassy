@@ -1,0 +1,33 @@
+{
+  "id": "evt_SynthCheckout0001",
+  "object": "event",
+  "api_version": "2025-03-31.basil",
+  "created": 1790000000,
+  "data": {
+    "object": {
+      "id": "cs_test_SynthSession0001",
+      "object": "checkout.session",
+      "client_reference_id": "acc_k7m2q4x3ca",
+      "customer": "cus_SynthAcc0001",
+      "customer_details": {
+        "email": "person@example.test",
+        "name": "Synthetic Person"
+      },
+      "livemode": false,
+      "metadata": {
+        "account_id": "acc_k7m2q4x3ca"
+      },
+      "mode": "subscription",
+      "payment_status": "paid",
+      "status": "complete",
+      "subscription": "sub_SynthAcc0001"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "checkout.session.completed"
+}

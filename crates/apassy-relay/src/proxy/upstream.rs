@@ -8,12 +8,15 @@
 //! HTTPS only, HTTP/1.1, one connection per request (`Connection: close`).
 
 use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use zeroize::Zeroizing;
+
+/// The public-address rule is the core's, shared with the run proxy.
+pub use apassy::broker::proxy::is_public_ip;
 
 use super::stream::{BodyLen, Conn};
 use crate::config::UpstreamOptions;
@@ -296,54 +299,6 @@ fn framing(
         content_length,
         encoded,
     })
-}
-
-/// True for an address on the public internet. False for loopback, private, link-local,
-/// CGNAT, unique-local, multicast, documentation, benchmark, reserved, and unspecified
-/// addresses, and for IPv6 forms that carry such an IPv4 address.
-pub fn is_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_public_v4(v4),
-        IpAddr::V6(v6) => is_public_v6(v6),
-    }
-}
-
-fn is_public_v4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    !(ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || ip.is_documentation()
-        || a == 0
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 198 && (18..=19).contains(&b))
-        || a >= 240)
-}
-
-fn is_public_v6(ip: Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return is_public_v4(v4);
-    }
-    let segments = ip.segments();
-    // 64:ff9b::/96 (NAT64) carries an IPv4 address in its last 32 bits.
-    if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-        let [.., hi, lo] = segments;
-        return is_public_v4(Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo)));
-    }
-    !(ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || (segments[0] & 0xfe00) == 0xfc00
-        || (segments[0] & 0xffc0) == 0xfe80
-        || (segments[0] & 0xffc0) == 0xfec0
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-        || segments[0] == 0x2002
-        || (segments[0] == 0x64 && segments[1] == 0xff9b && segments[2] == 1)
-        || segments[..6] == [0, 0, 0, 0, 0, 0])
 }
 
 #[cfg(test)]

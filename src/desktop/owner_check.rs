@@ -470,6 +470,25 @@ pub enum OwnerRequest {
         from: String,
         to: String,
     },
+    /// Change who hosts the bouncer brain (ADR 0035 section 1). `change` has the bearer
+    /// of an own server (redacted in `Debug`); the proof names the kind, the address and
+    /// the consent screen (`OwnerAction::ChangeBouncerHosting`). The global owner window
+    /// never covers it.
+    ChangeBouncerHosting {
+        change: crate::vault::BouncerHostChange,
+    },
+    /// Change who trains the bouncer brain (ADR 0035 section 1), with the same rules.
+    ChangeBouncerTraining {
+        change: crate::vault::BouncerHostChange,
+    },
+    /// Turn temporary credentials (way C) on or off for one source item
+    /// (`OwnerAction::ChangeDelivery`). `name` is the item title for the texts.
+    ChangeDelivery {
+        item_id: u64,
+        name: String,
+        kind: crate::vault::ShortLivedKind,
+        on: bool,
+    },
     AllowOperation {
         agent_id: u64,
         item_id: u64,
@@ -892,6 +911,21 @@ impl OwnerRequest {
             Self::RollbackModel { activation_id, .. } => OwnerAction::RollbackModel {
                 activation_id: *activation_id,
             },
+            Self::ChangeBouncerHosting { change } => crate::broker::brain_host::owner_action(
+                crate::vault::BouncerHostRole::Hosting,
+                change,
+            ),
+            Self::ChangeBouncerTraining { change } => crate::broker::brain_host::owner_action(
+                crate::vault::BouncerHostRole::Training,
+                change,
+            ),
+            Self::ChangeDelivery {
+                item_id, kind, on, ..
+            } => OwnerAction::ChangeDelivery {
+                item: *item_id,
+                kind: *kind,
+                on: *on,
+            },
             Self::AllowOperation {
                 agent_id, item_id, ..
             }
@@ -1223,6 +1257,11 @@ impl OwnerRequest {
             Self::RollbackModel { from, to, .. } => {
                 format!("Roll back the bouncer brain from {from} to {to}.")
             }
+            Self::ChangeBouncerHosting { change } => hosting_words(change),
+            Self::ChangeBouncerTraining { change } => training_words(change),
+            Self::ChangeDelivery {
+                name, kind, on, ..
+            } => delivery_words(name, *kind, *on),
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
             }
@@ -1414,6 +1453,69 @@ impl OwnerRequest {
                 )
             }
         }
+    }
+}
+
+/// The owner check text of a change of the bouncer brain host: what leaves the Mac and
+/// the trust warning (ADR 0035 sections 1, 4 and 5). No bearer.
+fn hosting_words(change: &crate::vault::BouncerHostChange) -> String {
+    use crate::vault::BouncerHostKind;
+    let url = page_text(&change.normalized_url());
+    let sent = "Each bouncer request goes there: the user request, the command, the relative folder, the purpose, the variable names and your rule. No secret value, vault path or full project path leaves this Mac, and the bouncer gate still decides on this Mac.";
+    let trust = "A server that someone else controls can make the bouncer run development commands without asking you. It can never allow production, a hard check, secret output or another host.";
+    match change.kind {
+        BouncerHostKind::ThisMac => {
+            "Run the bouncer brain on this Mac again. Bouncer requests stay on this Mac.".to_owned()
+        }
+        BouncerHostKind::OwnServer => {
+            format!("Use the bouncer brain on your server at {url}. {sent} {trust}")
+        }
+        BouncerHostKind::Connect => format!(
+            "Use the bouncer brain of Apassy Connect at {url}. {sent} Apassy keeps a request in memory only while it answers it. {trust}"
+        ),
+    }
+}
+
+/// The owner check text of a change of the bouncer brain trainer (ADR 0035 sections 1
+/// and 4). No bearer.
+/// The text of a change of the delivery of a source item. It names the item and what
+/// each run gets, never a value.
+fn delivery_words(name: &str, kind: crate::vault::ShortLivedKind, on: bool) -> String {
+    let name = dialog_cut(name);
+    let lease = match kind {
+        crate::vault::ShortLivedKind::GithubApp => "a GitHub token that is revoked after the run",
+        crate::vault::ShortLivedKind::AwsSts
+        | crate::vault::ShortLivedKind::GoogleServiceAccount => {
+            "a credential that expires in 15 minutes"
+        }
+        _ => "a credential made for that run",
+    };
+    if on {
+        format!(
+            "Use temporary credentials for \"{name}\". Each run gets {lease}; the long-lived key stays in Apassy."
+        )
+    } else {
+        format!(
+            "Stop temporary credentials for \"{name}\". Runs then get the long-lived key as the variable says (a placeholder or the value)."
+        )
+    }
+}
+
+fn training_words(change: &crate::vault::BouncerHostChange) -> String {
+    use crate::vault::BouncerHostKind;
+    let url = page_text(&change.normalized_url());
+    let sent = "For each training, the training examples go there: your past decisions with their requests, without secret values. A new head set always starts in shadow mode, and only you promote it.";
+    match change.kind {
+        BouncerHostKind::ThisMac => {
+            "Train the bouncer brain on this Mac again. Training examples stay on this Mac."
+                .to_owned()
+        }
+        BouncerHostKind::OwnServer => {
+            format!("Train the bouncer brain on your server at {url}. {sent}")
+        }
+        BouncerHostKind::Connect => format!(
+            "Train the bouncer brain at Apassy Connect ({url}). {sent} Apassy deletes the examples when the job ends, and at the latest after 24 hours."
+        ),
     }
 }
 
@@ -2111,6 +2213,18 @@ impl DesktopApp {
             OwnerRequest::RollbackModel { activation_id, .. } => {
                 super::learning_ui::roll_back_model(self, activation_id, proof);
             }
+            OwnerRequest::ChangeBouncerHosting { change } => {
+                self.change_bouncer_host(crate::vault::BouncerHostRole::Hosting, change, proof);
+            }
+            OwnerRequest::ChangeBouncerTraining { change } => {
+                self.change_bouncer_host(crate::vault::BouncerHostRole::Training, change, proof);
+            }
+            OwnerRequest::ChangeDelivery {
+                item_id,
+                name,
+                kind,
+                on,
+            } => self.complete_change_delivery(item_id, &name, kind, on, proof),
             OwnerRequest::AllowOperation {
                 agent_id,
                 item_id,
@@ -2386,9 +2500,11 @@ impl DesktopApp {
         }
     }
 
-    /// Mark the environment of an item as the answer of the owner: only the environment
-    /// and its source "owner" change (ADR 0025 §4). The project of a pasted credential
-    /// stays empty, and the other values and sources stay.
+    /// Mark the environment of an item as the answer of the owner: the environment and
+    /// its source "owner" change (ADR 0025 §4). The project of a pasted credential
+    /// stays empty, and the other sources stay. A risk or a reversibility that is only a
+    /// default follows the environment ([`crate::vault::Vault::set_declaration_environment`],
+    /// ADR 0031 of 2026-11-03); the other values stay.
     fn complete_set_environment(
         &mut self,
         item_id: u64,
@@ -2410,6 +2526,52 @@ impl DesktopApp {
                 self.reload_declaration_form(item_id);
                 self.set_ok(format!("{name} is marked as {}.", environment.as_str()));
             }
+            Some(Err(message)) => self.set_err(message),
+            None => self.set_err("The vault is locked."),
+        }
+    }
+
+    /// Turn way C on or off for a source item with `proof` (contract private-sharing-v1
+    /// rule 3). The proof must name the item, the kind of its row, and the new state; the
+    /// row keeps its kind and settings.
+    fn complete_change_delivery(
+        &mut self,
+        item_id: u64,
+        name: &str,
+        kind: crate::vault::ShortLivedKind,
+        on: bool,
+        proof: OwnerProof,
+    ) {
+        let action = OwnerAction::ChangeDelivery {
+            item: item_id,
+            kind,
+            on,
+        };
+        let result = self.owner_ui.session.with_vault(|vault| {
+            proof
+                .check(&action, &vault.epoch())
+                .map_err(|refusal| refusal.message().to_owned())?;
+            // The stored kind must be the kind that the owner confirmed.
+            match vault.short_lived(item_id) {
+                Ok(Some(row)) if row.kind == kind => {}
+                Ok(_) => return Err("The item changed. Nothing changed.".to_owned()),
+                Err(err) => return Err(format!("The delivery did not change: {err}.")),
+            }
+            vault
+                .set_short_lived_enabled(
+                    item_id,
+                    on,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |elapsed| elapsed.as_secs()),
+                )
+                .map_err(|err| format!("The delivery did not change: {err}."))
+        });
+        match result {
+            Some(Ok(())) if on => self.set_ok(format!("{name} now gives temporary credentials.")),
+            Some(Ok(())) => self.set_ok(format!(
+                "{name} no longer gives temporary credentials. Runs get its long-lived key."
+            )),
             Some(Err(message)) => self.set_err(message),
             None => self.set_err("The vault is locked."),
         }
@@ -3003,5 +3165,41 @@ impl DesktopApp {
         }
         // A local fine-tune stops with the app (goal item B9).
         self.learning.stop_training();
+    }
+}
+
+#[cfg(test)]
+mod change_delivery_tests {
+    use super::*;
+    use crate::vault::ShortLivedKind;
+
+    #[test]
+    fn the_delivery_request_names_its_exact_action_and_no_value() {
+        for on in [true, false] {
+            let request = OwnerRequest::ChangeDelivery {
+                item_id: 7,
+                name: "Synthetic AWS".to_owned(),
+                kind: ShortLivedKind::AwsSts,
+                on,
+            };
+            assert_eq!(
+                request.action(),
+                OwnerAction::ChangeDelivery {
+                    item: 7,
+                    kind: ShortLivedKind::AwsSts,
+                    on,
+                }
+            );
+            assert!(request.is_ready());
+            assert!(!request.needs_live_ticket());
+            let text = request.describe();
+            assert!(text.contains("\"Synthetic AWS\""), "{text}");
+            if on {
+                assert!(text.contains("15 minutes"), "{text}");
+            } else {
+                assert!(text.contains("long-lived key"), "{text}");
+            }
+            assert!(!text.contains("AKIA") && !text.contains("secret_access_key"));
+        }
     }
 }

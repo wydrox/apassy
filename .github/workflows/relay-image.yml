@@ -15,6 +15,12 @@ jobs:
   image:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # id-token and attestations: provenance and SBOM attestations (docs/operations/release.md,
+    # "Attestations and SBOMs"). Only a push of an image-* tag runs this workflow.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,6 +58,15 @@ jobs:
               "image_id": image["Id"], "architecture": image["Architecture"],
           }, indent=2) + "\n")
           PY
+      - name: Attest the image tarball and its record
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            relay-image.tar.gz
+            relay-image.release.json
+          sbom-subject-path: relay-image.tar.gz
+          sbom-image: ${{ env.TAG }}
+          sbom-output: relay-image.spdx.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: relay-image
@@ -61,12 +76,17 @@ jobs:
             relay-image.id
             relay-image.inspect.json
             relay-image.release.json
+            relay-image.spdx.json
           if-no-files-found: error
           retention-days: 7
 
   linux-cli:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     # Debian 11 glibc 2.31 is the oldest supported Linux runtime. Do not export
     # the CLI from the trixie relay image: that raises its glibc requirement.
     container:
@@ -111,6 +131,23 @@ jobs:
               "glibc_max": ".".join(map(str, max(versions))),
           }, indent=2) + "\n")
           PY
+      # The SBOM scans the binary and the workspace Cargo.lock: a superset of the crates
+      # in apassy-team, because the lockfile is shared by the whole workspace.
+      # A folder in the workspace: runner.temp names the host path, not the container path.
+      - name: Stage the SBOM input
+        run: |
+          rm -rf target/sbom-linux
+          mkdir -p target/sbom-linux
+          cp dist/apassy-team-linux-x86_64 Cargo.lock target/sbom-linux/
+      - name: Attest the Linux CLI
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            dist/apassy-team-linux-x86_64
+            dist/release-linux.json
+          sbom-subject-path: dist/apassy-team-linux-x86_64
+          sbom-path: target/sbom-linux
+          sbom-output: dist/apassy-team-linux-x86_64.spdx.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apassy-team-linux-x86_64
@@ -121,6 +158,10 @@ jobs:
   darwin-cli:
     runs-on: macos-15
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       CARGO_INCREMENTAL: "0"
       APASSY_RELEASE_COMMIT: ${{ github.sha }}
@@ -156,6 +197,20 @@ jobs:
               "filename": artifact.name, "sha256": digest, "platform": "darwin-arm64",
           }, indent=2) + "\n")
           PY
+      - name: Stage the SBOM input
+        run: |
+          rm -rf target/sbom-darwin
+          mkdir -p target/sbom-darwin
+          cp dist/apassy-team-darwin-arm64 Cargo.lock target/sbom-darwin/
+      - name: Attest the Apple silicon CLI
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            dist/apassy-team-darwin-arm64
+            dist/release-darwin.json
+          sbom-subject-path: dist/apassy-team-darwin-arm64
+          sbom-path: target/sbom-darwin
+          sbom-output: dist/apassy-team-darwin-arm64.spdx.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apassy-team-darwin-arm64
