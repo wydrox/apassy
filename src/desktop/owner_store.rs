@@ -1934,7 +1934,8 @@ impl OwnerSession {
     }
 
     fn row_from(&self, summary: crate::vault::ItemSummary) -> ModelResult<OwnerSummary> {
-        row_in(&self.unlocked()?, summary)
+        let vault = self.unlocked()?;
+        row_in(&vault, summary)
     }
 
     fn service_project(&self, id: u64) -> ModelResult<(String, String)> {
