@@ -1,6 +1,7 @@
 import ApassyVaultCore
 import ApassyVaultKit
 import AuthenticationServices
+import CryptoKit
 import Foundation
 import Observation
 
@@ -494,19 +495,32 @@ final class AutoFillModel {
         }
     }
 
-    /// Sign the request's hash and hand the assertion to iOS. The vault is locked first.
+    /// Sign the request's hash and hand the assertion to iOS. The vault is locked first. The
+    /// core also evaluates PRF and reads or writes the large blob of the passkey.
     private func sign(_ passkey: PasskeyCandidate) async throws {
         guard let service, let assertion, !done else { return }
+        // Raw PRF inputs (`hashed: false`), from the SDK evidence: the headers of iOS 26
+        // (ASAuthorizationPublicKeyCredentialPRFAssertionInput.h, ASPasskeyAssertionCredential-
+        // ExtensionInput.h) and the swiftinterface name them `saltInput1`/`saltInput2` and say
+        // nothing about hashing, and Chromium's iOS credential provider, which takes the same
+        // `ASPasskeyAssertionCredentialExtensionInput.prf`, passes them to
+        // `device::PRFInput::FromUnhashedInputs`, which hashes "WebAuthn PRF", 0x00, and the
+        // input itself (ios/chrome/credential_provider_extension/passkey_util.mm). So iOS hands
+        // the provider the values that the website sent, not hmac-secret salts.
+        let prf = assertion.extensions.prfInput(for: passkey.credentialID).map {
+            PasskeyPRFInput(first: $0.first, second: $0.second, hashed: false)
+        }
         let signed = try await service.passkeyAssert(
             PasskeyAssertionRequest(
                 id: passkey.id, rpID: assertion.rpID, credentialID: passkey.credentialID,
-                clientDataHash: assertion.clientDataHash))
+                clientDataHash: assertion.clientDataHash, prf: prf,
+                largeBlob: assertion.extensions.largeBlobOperation))
         await close(
             .passkeyAssertion(
                 ASPasskeyAssertionCredential(
                     userHandle: signed.userHandle, relyingParty: assertion.rpID, signature: signed.signature,
                     clientDataHash: assertion.clientDataHash, authenticatorData: signed.authenticatorData,
-                    credentialID: signed.credentialID, extensionOutput: Self.output(assertionAnswer))))
+                    credentialID: signed.credentialID, extensionOutput: Self.output(assertionAnswer, signed: signed))))
     }
 
     /// Refuse a registration whose exclude list names a passkey of the vault, then offer where to
@@ -588,11 +602,24 @@ final class AutoFillModel {
         }
     }
 
-    /// The extension outputs: only "not supported" answers, or none.
-    private static func output(_ answer: PasskeyExtensionRequest.Answer) -> ASPasskeyAssertionCredentialExtensionOutput? {
-        if answer.largeBlobReadEmpty { return ASPasskeyAssertionCredentialExtensionOutput(largeBlob: .read(data: nil)) }
-        if answer.largeBlobWriteFailed { return ASPasskeyAssertionCredentialExtensionOutput(largeBlob: .write(success: false)) }
-        return nil
+    /// The extension outputs of a sign-in: what the core answered. A large blob read that found
+    /// no blob answers without data, and a write that the core did not do (an older core, no
+    /// data) answers as failed. No PRF output without one of the core.
+    private static func output(
+        _ answer: PasskeyExtensionRequest.Answer, signed: PasskeyAssertion
+    ) -> ASPasskeyAssertionCredentialExtensionOutput? {
+        var largeBlob: ASAuthorizationPublicKeyCredentialLargeBlobAssertionOutput?
+        if answer.largeBlobReadEmpty {
+            largeBlob = .read(data: signed.largeBlob?.data)
+        } else if answer.largeBlobWriteFailed {
+            largeBlob = .write(success: signed.largeBlob?.written ?? false)
+        }
+        let prf = signed.prf.map {
+            ASAuthorizationPublicKeyCredentialPRFAssertionOutput(
+                first: SymmetricKey(data: $0.first), second: $0.second.map { SymmetricKey(data: $0) })
+        }
+        guard largeBlob != nil || prf != nil else { return nil }
+        return ASPasskeyAssertionCredentialExtensionOutput(largeBlob: largeBlob, prf: prf)
     }
 
     private static func output(_ answer: PasskeyExtensionRequest.Answer) -> ASPasskeyRegistrationCredentialExtensionOutput? {

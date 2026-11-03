@@ -24,6 +24,7 @@
 mod autofill;
 mod config;
 mod credential_export;
+mod dedup;
 mod errors;
 mod feed;
 mod generate;
@@ -569,6 +570,16 @@ impl Core {
                     vault.delete(id, revision)?;
                     Ok(ok(&Empty {}))
                 })
+            }
+            // 5.3a Duplicates: the app only.
+            "duplicates" => {
+                self.require_app()?;
+                self.with_vault(|vault| Ok(ok(&dedup::groups(vault)?)))
+            }
+            "duplicates_merge" => {
+                self.require_app()?;
+                let request: dedup::MergeIn = params(request)?;
+                self.with_vault_mut(|vault| Ok(ok(&dedup::merge(vault, request)?)))
             }
             // 5.4
             "generate" => {

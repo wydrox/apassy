@@ -19,7 +19,7 @@ struct AppWelcomeView: View {
                         .font(.largeTitle.bold())
                         .multilineTextAlignment(.center)
                     Text(
-                        "Your vault holds logins, API keys, SSH keys, and one-time passwords. Use free iCloud sync for yourself. Use the relay for teams."
+                        "Your vault holds logins, API keys, SSH keys, and one-time passwords. Sync it with your Mac through iCloud for free, or through the Apassy relay."
                     )
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
@@ -38,14 +38,14 @@ struct AppWelcomeView: View {
                 root.addVault()
                 root.addICloudVault()
             } label: {
-                Label("iCloud · Personal · Free", systemImage: "icloud").frame(maxWidth: .infinity)
+                Label("iCloud · Free", systemImage: "icloud").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             Button {
                 root.addVault()
                 root.joinTeam()
             } label: {
-                Label("Join a team · Apassy relay", systemImage: "person.2").frame(maxWidth: .infinity)
+                Label("From your Mac · Apassy relay", systemImage: "macbook.and.iphone").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glass)
             Button {

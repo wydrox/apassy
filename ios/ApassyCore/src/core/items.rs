@@ -457,6 +457,13 @@ pub fn history(vault: &Vault, id: u64) -> CoreResult<Vec<Event>> {
                 ItemEventKind::Created => "Added".to_owned(),
                 ItemEventKind::Tracked => "The history starts here".to_owned(),
                 ItemEventKind::Edited if detail.is_empty() => "Changed".to_owned(),
+                ItemEventKind::Edited if apassy::vault::merged_count(&event.detail).is_some() => {
+                    let n = apassy::vault::merged_count(&event.detail).unwrap_or(0);
+                    format!(
+                        "Merged {n} {}",
+                        if n == 1 { "duplicate" } else { "duplicates" }
+                    )
+                }
                 ItemEventKind::Edited => format!("Changed: {detail}"),
                 ItemEventKind::Revealed
                     if event.detail == apassy::vault::passkey::EXPORT_DETAIL =>
@@ -464,6 +471,9 @@ pub fn history(vault: &Vault, id: u64) -> CoreResult<Vec<Event>> {
                     "Prepared for a Credential Exchange transfer".to_owned()
                 }
                 ItemEventKind::Revealed => "Secret values shown".to_owned(),
+                ItemEventKind::Archived if event.detail == apassy::vault::MERGED_INTO_DETAIL => {
+                    "Merged into another item".to_owned()
+                }
                 ItemEventKind::Archived => "Archived".to_owned(),
                 ItemEventKind::Unarchived => "Restored from the archive".to_owned(),
                 ItemEventKind::Declaration => format!("Declaration: {detail}"),

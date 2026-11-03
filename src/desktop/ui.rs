@@ -34,6 +34,9 @@ mod decisions_tests;
 mod demo;
 #[cfg(feature = "vault")]
 mod detail_rows;
+/// Find duplicates and merge them (`src/vault/dedup.rs`).
+#[cfg(feature = "vault")]
+mod duplicates;
 #[cfg(feature = "vault")]
 pub(crate) mod files;
 /// First credential actions, with optional agent setup.
@@ -279,6 +282,9 @@ pub(crate) struct UiState {
     /// The note that the owner edits on an agent page.
     #[cfg(feature = "vault")]
     pub(crate) agents: agents::State,
+    /// The groups of the "Find duplicates" sheet. Titles and labels, no value.
+    #[cfg(feature = "vault")]
+    pub(crate) duplicates: duplicates::State,
     /// The name field of the New Folder and Rename sheets.
     #[cfg(feature = "vault")]
     pub(crate) folder_name: String,
@@ -320,6 +326,9 @@ pub(crate) struct UiState {
     /// owner picked a kind with the keyboard.
     #[cfg(feature = "vault")]
     pub(crate) focus_form_name: bool,
+    /// "Add website…" opened the edit sheet: its Website field takes the focus.
+    #[cfg(feature = "vault")]
+    pub(crate) focus_form_website: bool,
     #[cfg(feature = "vault")]
     pub(crate) discard_item_changes: bool,
     #[cfg(feature = "vault")]
@@ -449,6 +458,9 @@ pub(crate) enum Sheet {
     /// Import from 1Password.
     #[cfg(feature = "vault")]
     Import,
+    /// Find duplicates and merge them.
+    #[cfg(feature = "vault")]
+    Duplicates,
     /// Remove every paired iPhone and make a new certificate (ADR 0020).
     #[cfg(feature = "vault")]
     ResetCompanion,
@@ -571,6 +583,7 @@ pub(super) fn native_menu_context(
             items::Filter::All => 0,
             items::Filter::Conflicts => 1,
             items::Filter::Archived => 2,
+            items::Filter::Duplicates => 3,
         },
         search_all: app.ui.search_all,
         sheet: app.ui.sheet.clone(),
@@ -724,6 +737,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 app.place = crate::desktop::Place::CREDENTIALS;
             }
             app.import.forget();
+            app.ui.duplicates = Default::default();
             #[cfg(target_os = "macos")]
             super::native_menu::process(app, &ctx);
             start::draw(app, ui);
@@ -773,6 +787,10 @@ pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
             forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
         }
         Some(Sheet::Import) => app.import.forget(),
+        Some(Sheet::Duplicates) => {
+            app.ui.duplicates = Default::default();
+            app.import.forget();
+        }
         _ => {}
     }
     #[cfg(not(feature = "vault"))]
@@ -865,7 +883,8 @@ fn draw_toast(app: &mut DesktopApp, ctx: &egui::Context) {
     }
 }
 
-/// "project · service", or nothing.
+/// "project · service", or nothing. The demo list uses it.
+#[cfg(not(feature = "vault"))]
 pub(super) fn meta_line(project: &str, service: &str) -> String {
     match (project.is_empty(), service.is_empty()) {
         (true, true) => String::new(),

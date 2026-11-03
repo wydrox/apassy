@@ -6,7 +6,10 @@ use eframe::egui::{self, Label};
 use super::kit::{self, Font, Tone};
 use crate::desktop::DesktopApp;
 use crate::desktop::owner_store::{AgentActivityRow, field_label, format_utc};
-use crate::vault::{ActivityDecision, EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind};
+use crate::vault::{
+    ActivityDecision, EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind, MERGED_INTO_DETAIL,
+    merged_count,
+};
 
 /// Rows before "Show all".
 const FOLDED_ROWS: usize = 5;
@@ -19,6 +22,12 @@ pub(super) use super::kit::{now, relative_time};
 /// holds names only. A service or project change also changes the tags, so the tags
 /// show only on their own.
 fn edit_text(detail: &str) -> String {
+    // A merge of duplicates names the count, not the fields it took.
+    match merged_count(detail) {
+        Some(1) => return "Merged 1 duplicate".to_owned(),
+        Some(count) => return format!("Merged {count} duplicates"),
+        None => {}
+    }
     let changes = EditChange::parse_detail(detail);
     let labels_changed = changes.iter().any(|change| {
         matches!(change, EditChange::Field(name) if name == "service" || name == "project")
@@ -61,6 +70,11 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
             ),
             None => ("You showed the secret".to_owned(), None, Tone::Warning),
         },
+        ItemEventKind::Archived if event.detail == MERGED_INTO_DETAIL => (
+            "Merged into another item".to_owned(),
+            Some("Agents cannot use it.".to_owned()),
+            Tone::Neutral,
+        ),
         ItemEventKind::Archived => (
             "Archived".to_owned(),
             Some("Agents cannot use it.".to_owned()),

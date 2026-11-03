@@ -16,7 +16,9 @@
   const REQUEST = "apassy-passkey-request";
   const RESPONSE = "apassy-passkey-response";
   const PORT = "apassy-passkey";
-  const MAX_DETAIL = 64 * 1024;
+  // A request of the page: a large blob write of 64 KiB is about 86 KiB of
+  // base64url.
+  const MAX_DETAIL = 128 * 1024;
   const RID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const ERRORS = ["NotAllowedError", "InvalidStateError", "AbortError"];
   // At most this many open ports from one page. The service worker keeps one

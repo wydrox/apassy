@@ -7,7 +7,9 @@
 //! types has `Debug`. The password comes from the generic `reveal`, the one-time
 //! password from the shared `apassy::otp::Totp`, and the passkey key from the one
 //! dedicated vault call, `Vault::export_passkey`: the generic reveal never shows it.
-//! One history event without values records each exported item.
+//! The same call gives the algorithm of the passkey, its PRF secrets, and its large blob
+//! (schema 25), so a transfer out keeps them. One history event without values records
+//! each exported item.
 //!
 //! The scope is the active logins that are not conflict copies, and each restored
 //! conflict copy whose passkey is canonical (see `Vault::all_passkeys`): no normal
@@ -72,6 +74,29 @@ struct PasskeyExport {
     user_display_name: String,
     #[serde(serialize_with = "zeroizing")]
     key: Zeroizing<String>,
+    /// The COSE algorithm of the key: -7, -35, -8, or -257.
+    algorithm: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prf: Option<PrfExport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    large_blob: Option<LargeBlobExport>,
+}
+
+/// The two PRF secrets (Credential Exchange `credentialWithUV`, `credentialWithoutUV`).
+#[derive(Serialize)]
+struct PrfExport {
+    #[serde(serialize_with = "zeroizing")]
+    with_uv: Zeroizing<String>,
+    #[serde(serialize_with = "zeroizing")]
+    without_uv: Zeroizing<String>,
+}
+
+/// The large blob as stored: raw DEFLATE data and the uncompressed size.
+#[derive(Serialize)]
+struct LargeBlobExport {
+    #[serde(serialize_with = "zeroizing")]
+    data: Zeroizing<String>,
+    uncompressed_size: u64,
 }
 
 fn optional<S: serde::Serializer>(
@@ -181,6 +206,15 @@ fn passkey_of(vault: &Vault, id: u64) -> CoreResult<Option<PasskeyExport>> {
             user_name: export.info.user_name.clone(),
             user_display_name: export.info.user_display_name.clone(),
             key: Zeroizing::new(encode(&export.pkcs8)),
+            algorithm: export.algorithm,
+            prf: export.prf.as_ref().map(|prf| PrfExport {
+                with_uv: Zeroizing::new(encode(&*prf.with_uv)),
+                without_uv: Zeroizing::new(encode(&*prf.without_uv)),
+            }),
+            large_blob: export.large_blob.as_ref().map(|blob| LargeBlobExport {
+                data: Zeroizing::new(encode(&blob.data)),
+                uncompressed_size: blob.uncompressed_size,
+            }),
         })),
         Err(PasskeyError::Vault(error)) if error.kind() == VaultErrorKind::NotFound => Ok(None),
         // A stored key that is not a key is not exported; the other data still is.
@@ -252,7 +286,7 @@ mod tests {
     use std::fmt::Debug;
     use std::marker::PhantomData;
 
-    use super::{Export, Exported, PasskeyExport, TotpExport, label};
+    use super::{Export, Exported, LargeBlobExport, PasskeyExport, PrfExport, TotpExport, label};
 
     /// Whether `T: Debug`, decided at compile time: the inherent constant wins when the
     /// bound holds, the trait constant is the fallback.
@@ -271,6 +305,8 @@ mod tests {
         const { assert!(!Probe::<Export>::IS_DEBUG) };
         const { assert!(!Probe::<TotpExport>::IS_DEBUG) };
         const { assert!(!Probe::<PasskeyExport>::IS_DEBUG) };
+        const { assert!(!Probe::<PrfExport>::IS_DEBUG) };
+        const { assert!(!Probe::<LargeBlobExport>::IS_DEBUG) };
         // The probe sees a type that has Debug.
         const { assert!(Probe::<String>::IS_DEBUG) };
     }
