@@ -356,19 +356,22 @@ impl Vault {
             Option<String>,
         );
         let rows = stmt
-            .query_map([to_sql_time(since)?, to_sql_time(until)?], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                ))
-            })
+            .query_map(
+                [to_sql_time(since)?, to_sql_time(until)?],
+                |row| -> rusqlite::Result<Row> {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
             .map_err(storage)?;
         let mut runs: BTreeMap<u64, Run> = BTreeMap::new();
         for row in rows {
@@ -474,24 +477,27 @@ impl Vault {
             Option<String>,
         );
         let rows = stmt
-            .query_map(rusqlite::params![before, limit, project], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                    row.get(11)?,
-                    row.get(12)?,
-                    row.get(13)?,
-                ))
-            })
+            .query_map(
+                rusqlite::params![before, limit, project],
+                |row| -> rusqlite::Result<Row> {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                    ))
+                },
+            )
             .map_err(storage)?;
         let mut out: Vec<LogRow> = Vec::new();
         for row in rows {
