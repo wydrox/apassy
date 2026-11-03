@@ -40,7 +40,10 @@
 //! The Mac's own node sets a **local route** for its origin ([`set_local_route`], plan
 //! S2–S3 decision D1): a request to that origin then connects plain to the loopback
 //! address of the node and still names (and signs) the node origin. The external
-//! transport never carries a pinned request: it has no pin to check (unit N6 adds it).
+//! transport carries the pin of a pinned request ([`ExternalRequest::pin`], unit N6):
+//! the host accepts only the leaf with that pin, over TLS 1.3, and answers
+//! [`HttpError::PinMismatch`] for another certificate. It connects to the origin only:
+//! the host sets `Host` from the URL, so it tries no alternative destination.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -603,6 +606,11 @@ pub struct ExternalRequest<'a> {
     /// The whole request ends by then: the wait of a long poll and a margin, or less
     /// when the request has a deadline.
     pub timeout: Duration,
+    /// The pin of a pinned origin (node-pairing-v1 section 4), its 43-character text:
+    /// the transport accepts only the leaf certificate with this pin, over TLS 1.3, and
+    /// never the system trust store; another certificate is
+    /// [`HttpError::PinMismatch`] before any request byte. `None`: system trust.
+    pub pin: Option<String>,
 }
 
 impl std::fmt::Debug for ExternalRequest<'_> {
@@ -611,6 +619,7 @@ impl std::fmt::Debug for ExternalRequest<'_> {
             .field("id", &self.id)
             .field("method", &self.method)
             .field("timeout", &self.timeout)
+            .field("pinned", &self.pin.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -740,11 +749,6 @@ fn exchange_external(
     if request.cancel.is_some_and(Cancel::is_closed) {
         return Err(HttpError::Connect);
     }
-    // The transport has no pin to check: a pinned request never goes through it, so it
-    // never falls back to the system trust of the host (node-pairing-v1 section 4).
-    if url.pin().is_some() {
-        return Err(HttpError::Connect);
-    }
     if !request.path.starts_with('/') || request.path.bytes().any(|b| !(0x21..0x7f).contains(&b)) {
         return Err(HttpError::Protocol);
     }
@@ -768,6 +772,9 @@ fn exchange_external(
         headers,
         body,
         timeout,
+        // A pinned origin: the transport checks the pin and never falls back to the
+        // system trust of the host (node-pairing-v1 section 4).
+        pin: url.pin().map(|pin| pin.text()),
     };
     let answer = transport.send(&external);
     drop(external);
@@ -1786,6 +1793,7 @@ mod tests {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
         timeout: Duration,
+        pin: Option<String>,
     }
 
     impl FakeTransport {
@@ -1819,6 +1827,7 @@ mod tests {
                     .collect(),
                 body: request.body.map(<[u8]>::to_vec),
                 timeout: request.timeout,
+                pin: request.pin.clone(),
             });
             if self.blocks {
                 let started = Instant::now();
@@ -2326,22 +2335,42 @@ mod tests {
         );
     }
 
+    /// The watch (unit N6): a pinned request goes through the external transport with
+    /// its pin and the origin (no alternative), a hosted one without a pin, and a pin
+    /// mismatch of the host stays a pin mismatch.
     #[test]
-    fn a_pinned_request_never_goes_through_the_external_transport() {
+    fn a_pinned_request_carries_its_pin_through_the_external_transport() {
         let transport = FakeTransport::leaked(false, || external_answer(200, &[], b"{}"));
-        let url = RelayUrl::parse_with_trust("https://100.64.0.7:8444", contract_pin()).unwrap();
+        let url = RelayUrl::parse_with_trust("https://100.64.0.7:8444", contract_pin())
+            .unwrap()
+            .alternatives(&["apassy-mini.tail0123.ts.net:8444".to_owned()])
+            .unwrap();
         let request = Request::new(
             "GET",
             "/v1/questions".to_owned(),
             Some("apassy_acc_synthetic"),
         );
-        assert_eq!(
-            exchange_external(transport, &url, &request).unwrap_err(),
-            HttpError::Connect
-        );
-        assert!(transport.seen().is_empty(), "the transport got nothing");
-        // A hosted address still goes through it.
+        exchange_external(transport, &url, &request).unwrap();
+        {
+            let seen = transport.seen();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].url, "https://100.64.0.7:8444/v1/questions");
+            assert_eq!(seen[0].pin.as_deref(), Some(CONTRACT_PIN));
+        }
+        // A hosted address goes through it without a pin.
         exchange_external(transport, &loopback(), &request).unwrap();
-        assert_eq!(transport.seen().len(), 1);
+        assert_eq!(transport.seen().len(), 2);
+        assert_eq!(transport.seen()[1].pin, None);
+
+        let refusing = FakeTransport::leaked(false, || Err(HttpError::PinMismatch));
+        assert_eq!(
+            exchange_external(refusing, &url, &request).unwrap_err(),
+            HttpError::PinMismatch
+        );
+        assert_eq!(
+            refusing.seen().len(),
+            1,
+            "no alternative after a wrong certificate"
+        );
     }
 }
