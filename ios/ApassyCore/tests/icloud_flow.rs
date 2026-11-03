@@ -895,6 +895,11 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 34 {
+        // Schema 34: the key source of relay memberships (`src/vault/schema34.rs`).
+        conn.execute_batch("ALTER TABLE relay_membership DROP COLUMN key_source;")
+            .unwrap();
+    }
     if version < 29 {
         // Schema 29: the host of the bouncer brain (`src/vault/schema29.rs`).
         conn.execute_batch(

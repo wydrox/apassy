@@ -622,7 +622,7 @@ impl ConnectAccount {
             &self.signer,
             &self.state.account_id,
             challenge,
-            Some(&self.state.device_id),
+            Some(self.state.device_id.as_str()),
             now,
         ) {
             Ok((token, _)) => {
