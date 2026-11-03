@@ -219,9 +219,11 @@ pub(super) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it."
 pub(super) const RELAY_QUESTIONS_JOIN: &str = "Off. Turning it on joins the questions team of this vault, with a link from a Mac that has it on.";
 pub(super) const RELAY_QUESTIONS_REMOVED: &str =
     "Off. This Mac was removed. Turning it on again needs a link from a Mac that has it on.";
-/// The switch of the feed of the agents for the iPhone (relay-feed-v1 section 8). On by
-/// default; `ui.json` keeps it.
-pub(super) const SHOW_AGENTS: &str = "Show agents on the iPhone";
+/// The switch of the feed of the agents for the other devices of the vault (relay-feed-v1
+/// section 8). On by default; `ui.json` keeps it.
+pub(super) const SHOW_AGENTS: &str = "Show agents on my other devices";
+/// What the switch does, under it while the feed has no problem.
+pub(super) const SHOW_AGENTS_HELP: &str = "Your iPhone and your other Macs of this vault show the agents of this Mac. Only this Mac changes them.";
 /// The button that removes a device from the questions, after its confirmation.
 pub(super) const REMOVE_DEVICE: &str = "Remove…";
 /// The button that links an iPhone or another Mac to the questions team.
@@ -477,7 +479,8 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 let before = feed_shown;
                 let problem = feed_problem
                     .as_deref()
-                    .map(|problem| kit::text(problem, Font::Callout).color(Tone::Warning.text()));
+                    .map(|problem| kit::text(problem, Font::Callout).color(Tone::Warning.text()))
+                    .or_else(|| Some(rows::note(SHOW_AGENTS_HELP)));
                 g.line_note(SHOW_AGENTS, None, problem, |ui| {
                     kit::toggle(ui, &mut feed_shown, SHOW_AGENTS);
                 });

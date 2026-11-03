@@ -1,9 +1,12 @@
-//! The feed of the agents of this Mac for the iPhone (contract relay-feed-v1).
+//! The feed of the agents of this Mac for the other devices of the vault (contract
+//! relay-feed-v1).
 //!
 //! The agents of a vault, their use, and their exceptions are local rows of the Mac
 //! (`LOCAL_TABLES`): they never sync. This Mac publishes them as one sealed **feed**
-//! through the questions team of the vault, and takes one kind of **action** back from
-//! an iPhone of the vault: remove an exception of an agent.
+//! through the questions team of the vault, for the iPhones and the other Macs of the
+//! vault, and takes one kind of **action** back from an iPhone of the vault: remove an
+//! exception of an agent. The reader of the feeds of the other Macs is
+//! `super::feed_reader`.
 //!
 //! - [`build_feed`] reads the same figures as the Agents page of the Mac
 //!   (`Vault::agent_facts`, `Vault::week_counts`), names each item by its sync UUID (in
@@ -14,9 +17,10 @@
 //! - The publisher (`Shared::feed_step`) seals the feed with the question key and puts it
 //!   on the relay with `seq = max(last + 1, now)` (section 8): after a change, at most
 //!   once per 10 s, and every 15 minutes, while the vault is unlocked, the questions are
-//!   on, the vault has a live iPhone in the team, and "Show agents on the iPhone" is on.
-//!   A locked Mac publishes nothing. The feed leaves the relay when the setting goes off,
-//!   when the questions go off, and when the last iPhone goes.
+//!   on, the vault has another live device in the team (an iPhone or another Mac), and
+//!   "Show agents on my other devices" is on. A locked Mac publishes nothing. The feed
+//!   leaves the relay when the setting goes off, when the questions go off, and when the
+//!   last other device goes.
 //! - The action handler (`Shared::actions_step`) long-polls the actions to this Mac and
 //!   checks at most 20 of an answer, each id once (marked before its first check, so one
 //!   id gets one settle), as section 9.5 says, in order: it opens (an action that does
@@ -117,12 +121,12 @@ pub const UNREADABLE_LINE: &str =
 const SOME_DEVICE: &str = "a device of this vault";
 /// After an early empty answer of the action long poll: 5 s, doubling to 60 s.
 pub(super) const EARLY_WAIT_FIRST: Duration = Duration::from_secs(5);
-const EARLY_WAIT_MOST: Duration = Duration::from_secs(60);
+pub(super) const EARLY_WAIT_MOST: Duration = Duration::from_secs(60);
 /// After a `403 feed_rate` of the read-back, the feed waits this long: the relay counts
 /// the reads of a minute of its clock, and a whole minute passes the next one.
 pub(super) const FEED_RATE_WAIT: Duration = Duration::from_secs(60);
 /// After a `404` of the feed routes, the loops ask the relay again this much later.
-const UNSUPPORTED_WAIT: Duration = Duration::from_secs(5 * 60);
+pub(super) const UNSUPPORTED_WAIT: Duration = Duration::from_secs(5 * 60);
 /// `/v1/feed` answered `404`: the relay has no team schema 6 (section 14.2).
 pub const UNSUPPORTED: &str =
     "The relay does not show agents on the iPhone yet — update the relay.";
@@ -1114,7 +1118,7 @@ pub(super) struct FeedState {
     /// read-back found one.
     live: bool,
     /// The feed must leave the relay (`DELETE /v1/feed`, section 10.5): the owner turned
-    /// "Show agents on the iPhone" off, or the last iPhone left the vault.
+    /// "Show agents on my other devices" off, or the last other device left the vault.
     delete_pending: bool,
     /// The last action `seq` handled (section 10.7).
     after: u64,
@@ -1149,16 +1153,34 @@ impl FeedState {
 
 /// What the publisher reads of the vault before it decides.
 struct Look {
-    iphone: bool,
+    /// The vault has another live device in the team that reads the feed: an iPhone or
+    /// another Mac.
+    others: bool,
     changes: u64,
     epoch: [u8; 32],
 }
 
 /// A small random jitter of up to a quarter of `wait`.
-fn jitter(wait: Duration) -> Duration {
+pub(super) fn jitter(wait: Duration) -> Duration {
     let mut byte = [0u8; 1];
     let _ = getrandom::fill(&mut byte);
     wait + wait / 4 * u32::from(byte[0]) / 255
+}
+
+/// Whether `device` is another live device of the vault in the team of `active` that reads
+/// the feed of this Mac (section 8): an iPhone, or another Mac with a device number in the
+/// team (it reads with its own membership, `super::feed_reader`). An Apple Watch reads no
+/// feed (ADR 0039): it does not count.
+fn reads_the_feed(device: &TrustedDevice, active: &Active) -> bool {
+    match device.kind {
+        TrustedDeviceKind::Iphone => {
+            device.relay_devices.contains_key(&active.team_id) || device.relay_devices.is_empty()
+        }
+        TrustedDeviceKind::Mac => {
+            device.uuid != active.me.uuid && device.relay_devices.contains_key(&active.team_id)
+        }
+        TrustedDeviceKind::Watch => false,
+    }
 }
 
 impl Shared {
@@ -1173,19 +1195,19 @@ impl Shared {
         (!feed.unsupported()).then_some(active)
     }
 
-    /// Whether the vault has a live iPhone in the questions team, its change count, and
-    /// its session. `None`: the vault is locked or is another one now.
+    /// Whether the vault has another live device in the questions team that reads the
+    /// feed, its change count, and its session. `None`: the vault is locked or is another
+    /// one now.
     fn look(&self, active: &Active) -> Option<Look> {
         let mut guard = lock(&self.vault);
         let vault = Self::vault_of(&mut guard, active)?;
-        // An Apple Watch reads no feed (ADR 0039): it does not count.
-        let iphone = vault.trusted_devices().ok()?.iter().any(|device| {
-            device.kind == TrustedDeviceKind::Iphone
-                && (device.relay_devices.contains_key(&active.team_id)
-                    || device.relay_devices.is_empty())
-        });
+        let others = vault
+            .trusted_devices()
+            .ok()?
+            .iter()
+            .any(|device| reads_the_feed(device, active));
         Some(Look {
-            iphone,
+            others,
             changes: vault.change_count().ok()?,
             epoch: vault.epoch(),
         })
@@ -1206,8 +1228,8 @@ impl Shared {
             self.sleep(tick);
             return;
         };
-        if !look.iphone {
-            // The last iPhone left the vault: the feed leaves the relay.
+        if !look.others {
+            // The last other device left the vault: the feed leaves the relay.
             let mut feed = lock(&self.feed);
             if feed.live {
                 feed.delete_pending = true;
@@ -1549,7 +1571,7 @@ impl Shared {
         }
     }
 
-    /// "Show agents on the iPhone" went off or on. Off: the publisher deletes the feed
+    /// "Show agents on my other devices" went off or on. Off: the publisher deletes the feed
     /// (`DELETE /v1/feed`, section 10.5) on its own thread, so the caller never waits for
     /// the relay. On: a delete that still waits goes, and the next feed goes at once.
     pub(super) fn feed_switched(&self, on: bool) {

@@ -2683,8 +2683,9 @@ fn an_old_relay_without_questions_keeps_them_on_this_mac() {
     );
     assert!(world.queue.deny(world.queue.pending()[0].id));
     assert_eq!(settled(first).outcome, ApprovalOutcome::Denied);
-    // A second question stays here, with no post: the loops wait.
-    let bodies = world.relay.request_bodies().len();
+    // A second question stays here, with no post: the loops wait. Only the posts of
+    // questions count: the feed of this Mac still goes out for the other Mac.
+    let posts = world.relay.count("POST /v1/questions");
     let second = world.ask(world.run(contract_answers()), Duration::from_secs(60));
     while world.worker.view().local_only.is_empty() {
         assert!(start.elapsed() < Duration::from_secs(10));
@@ -2692,8 +2693,8 @@ fn an_old_relay_without_questions_keeps_them_on_this_mac() {
     }
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
-        world.relay.request_bodies().len(),
-        bodies,
+        world.relay.count("POST /v1/questions"),
+        posts,
         "no new post during the wait"
     );
     let lines: Vec<String> = world
