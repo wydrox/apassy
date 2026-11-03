@@ -978,6 +978,28 @@ pub fn item_update(
         .map_err(|_| RelayError::internal("The hosts cannot be written."))?;
     core.store.tx(|tx| {
         crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
+        let archived: Option<bool> = tx
+            .query_row(
+                "SELECT archived_at IS NOT NULL FROM item WHERE id = ?1",
+                params![to_i(id.0)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        let archived = archived.ok_or_else(|| RelayError::not_found("item"))?;
+        if archived {
+            // An item made live again counts in the team's `items` limit, as a new one.
+            let items: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM item WHERE archived_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db)?;
+            if to_u(items) >= core.limits().items {
+                return Ok(Err(core.limit_error_on(tx, now, "items")?));
+            }
+        }
         let name = core.audit.mask_text(&item.name);
         let changed = match tx.execute(
             "UPDATE item SET name = ?2, env_name = ?3, sealed = ?4, provider = ?5, hosts = ?6, \
@@ -1027,8 +1049,8 @@ pub fn item_update(
                 "environment": item.environment, "broad_hosts": item.broad_hosts
             }),
         )?;
-        Ok(())
-    })?;
+        Ok(Ok(()))
+    })??;
     core.notify.notify();
     Ok(())
 }
