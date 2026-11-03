@@ -1,6 +1,6 @@
 //! The C interface (contract section 2). The only `unsafe` code of the crate: it reads
-//! the C strings of the caller, hands out the core as an opaque pointer, and frees
-//! the answers.
+//! the C strings of the caller, hands out the core as an opaque pointer, frees the
+//! answers, and calls the external HTTP transport of the host (section 2.1).
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -8,9 +8,92 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
+use apassy::sync::{ExternalAnswer, ExternalRequest, HttpError, HttpTransport};
+
 use crate::core::{Core, HistoryKeyError, HistoryKeyProvider, error_answer};
 
 type HistoryCallback = unsafe extern "C" fn(*mut c_void, *const c_char, bool, *mut u8) -> i32;
+type HttpSend = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
+type HttpCancel = unsafe extern "C" fn(*mut c_void, u64);
+
+unsafe extern "C" {
+    /// The C allocator of the host: it allocates each answer of the transport with
+    /// `malloc` or `strdup`.
+    fn free(pointer: *mut c_void);
+}
+
+/// The external HTTP transport of the host (contract section 2.1): URLSession on the
+/// Apple Watch.
+struct NativeTransport {
+    send: HttpSend,
+    cancel: HttpCancel,
+    context: *mut c_void,
+}
+
+// SAFETY: the contract of `apassy_core_set_http_transport` requires thread-safe callbacks
+// and a context that lives as long as the process.
+unsafe impl Send for NativeTransport {}
+unsafe impl Sync for NativeTransport {}
+
+impl HttpTransport for NativeTransport {
+    fn send(&self, request: &ExternalRequest<'_>) -> Result<ExternalAnswer, HttpError> {
+        let json = crate::transport::request_json(request).ok_or(HttpError::Protocol)?;
+        // SAFETY: `json` is NUL-terminated and lives through this synchronous call; the
+        // host does not keep the pointer.
+        let answer = unsafe { (self.send)(self.context, json.as_ptr().cast()) };
+        drop(json);
+        if answer.is_null() {
+            return Err(HttpError::Broken);
+        }
+        // SAFETY: a non-NULL answer is a NUL-terminated string of the host's `malloc`,
+        // and the core owns it from here.
+        let length = unsafe { CStr::from_ptr(answer) }.to_bytes().len();
+        let result = if length > crate::transport::MAX_ANSWER_TEXT {
+            Err(HttpError::Protocol)
+        } else {
+            // SAFETY: `length` bytes before the NUL byte, as just measured.
+            let text = unsafe { std::slice::from_raw_parts(answer.cast::<u8>(), length) };
+            crate::transport::parse_answer(text)
+        };
+        // SAFETY: the answer can hold a token: erase its bytes, then free it with the C
+        // allocator that made it. Nothing borrows it any more.
+        unsafe {
+            std::ptr::write_bytes(answer, 0, length);
+            free(answer.cast());
+        }
+        result
+    }
+
+    fn cancel(&self, id: u64) {
+        // SAFETY: the host's cancel callback is thread-safe and takes only the ID.
+        unsafe { (self.cancel)(self.context, id) }
+    }
+}
+
+/// Install the external HTTP transport of this process (contract section 2.1), before
+/// the first `apassy_core_new`. A second call, or a NULL callback, changes nothing.
+///
+/// # Safety
+///
+/// `send` and `cancel` are thread-safe and stay valid, with `context`, for the life of
+/// the process. `send` returns NULL or a NUL-terminated string from `malloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn apassy_core_set_http_transport(
+    send: Option<HttpSend>,
+    cancel: Option<HttpCancel>,
+    context: *mut c_void,
+) {
+    let (Some(send), Some(cancel)) = (send, cancel) else {
+        return;
+    };
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        apassy::sync::set_http_transport(Box::new(NativeTransport {
+            send,
+            cancel,
+            context,
+        }))
+    }));
+}
 
 struct NativeHistoryProvider {
     callback: HistoryCallback,
@@ -212,5 +295,111 @@ mod tests {
         assert!(text.contains("internal"));
         assert!(!text.contains("synthetic"));
         unsafe { apassy_core_free_string(c) };
+    }
+
+    unsafe extern "C" {
+        fn strdup(text: *const c_char) -> *mut c_char;
+    }
+
+    /// A host transport for the test: it keeps the last request and answers with the
+    /// JSON in its context.
+    struct Host {
+        answer: Option<CString>,
+        seen: std::sync::Mutex<Vec<String>>,
+        cancelled: std::sync::Mutex<Vec<u64>>,
+    }
+
+    unsafe extern "C" fn host_send(context: *mut c_void, request: *const c_char) -> *mut c_char {
+        // SAFETY: the test passes a live `Host`, and the core a NUL-terminated request.
+        let host = unsafe { &*context.cast::<Host>() };
+        let request = unsafe { CStr::from_ptr(request) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        host.seen.lock().unwrap().push(request);
+        match &host.answer {
+            // SAFETY: a NUL-terminated string; `strdup` allocates with `malloc`.
+            Some(answer) => unsafe { strdup(answer.as_ptr()) },
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    unsafe extern "C" fn host_cancel(context: *mut c_void, id: u64) {
+        // SAFETY: the test passes a live `Host`.
+        let host = unsafe { &*context.cast::<Host>() };
+        host.cancelled.lock().unwrap().push(id);
+    }
+
+    fn native(host: &Host) -> NativeTransport {
+        NativeTransport {
+            send: host_send,
+            cancel: host_cancel,
+            context: std::ptr::from_ref(host).cast_mut().cast(),
+        }
+    }
+
+    fn request(body: Option<&[u8]>) -> ExternalRequest<'_> {
+        ExternalRequest {
+            id: 3,
+            method: "GET",
+            url: "https://relay.example.test/v1/questions?since=0".to_owned(),
+            headers: vec![(
+                "Authorization",
+                Zeroizing::new("Bearer apassy_acc_synthetic".to_owned()),
+            )],
+            body,
+            timeout: std::time::Duration::from_secs(30),
+        }
+    }
+
+    /// The native transport sends the request JSON, reads and frees the host's answer,
+    /// maps a NULL answer to `Broken`, and passes a cancel on.
+    #[test]
+    fn the_host_transport_gets_json_and_its_answer_is_freed() {
+        let host = Host {
+            answer: Some(
+                CString::new(r#"{"status":200,"headers":[["ETag","\"1\""]],"body_b64u":"e30"}"#)
+                    .unwrap(),
+            ),
+            seen: std::sync::Mutex::new(Vec::new()),
+            cancelled: std::sync::Mutex::new(Vec::new()),
+        };
+        let transport = native(&host);
+        let answer = transport.send(&request(Some(&b"{}"[..]))).unwrap();
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.body.as_slice(), b"{}");
+        assert_eq!(answer.headers, [("ETag".to_owned(), "\"1\"".to_owned())]);
+        let seen: serde_json::Value = serde_json::from_str(&host.seen.lock().unwrap()[0]).unwrap();
+        assert_eq!(seen["id"], 3);
+        assert_eq!(
+            seen["url"],
+            "https://relay.example.test/v1/questions?since=0"
+        );
+        assert_eq!(
+            seen["headers"],
+            serde_json::json!([["Authorization", "Bearer apassy_acc_synthetic"]])
+        );
+        assert_eq!(seen["body_b64u"], "e30");
+        assert_eq!(seen["timeout_ms"], 30000);
+        transport.cancel(9);
+        assert_eq!(*host.cancelled.lock().unwrap(), vec![9]);
+        let silent = Host {
+            answer: None,
+            seen: std::sync::Mutex::new(Vec::new()),
+            cancelled: std::sync::Mutex::new(Vec::new()),
+        };
+        assert_eq!(
+            native(&silent).send(&request(None)).err(),
+            Some(HttpError::Broken)
+        );
+        let failing = Host {
+            answer: Some(CString::new(r#"{"error":"connect"}"#).unwrap()),
+            seen: std::sync::Mutex::new(Vec::new()),
+            cancelled: std::sync::Mutex::new(Vec::new()),
+        };
+        assert_eq!(
+            native(&failing).send(&request(None)).err(),
+            Some(HttpError::Connect)
+        );
     }
 }

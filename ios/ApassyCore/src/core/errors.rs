@@ -42,6 +42,16 @@ impl CoreError {
         Self::new("not_allowed", "AutoFill cannot do this. Open Apassy.")
     }
 
+    /// A call that the Apple Watch core refuses (ADR 0039).
+    pub fn not_on_watch() -> Self {
+        Self::new("not_allowed", "Not available on Apple Watch.")
+    }
+
+    /// A call of the Apple Watch core in another role.
+    pub fn watch_only() -> Self {
+        Self::new("not_allowed", "This call is for Apple Watch only.")
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("internal", message)
     }

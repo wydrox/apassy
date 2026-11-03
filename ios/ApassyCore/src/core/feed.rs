@@ -1695,7 +1695,7 @@ impl Core {
         }
         let selected = self.feed_refresh()?;
         let using = self.feed_context(&input.vault_id, &selected)?;
-        let own = using.keys.own_row()?;
+        let own = using.keys.own_row_as(self.role)?;
         let is_selected = matches!(&selected, Selected::Unlocked(id) if *id == input.vault_id);
         let shown = |core: &Self| {
             guard(&core.questions)
@@ -1883,7 +1883,7 @@ impl Core {
         }
         let selected = self.feed_refresh()?;
         let using = self.feed_context(&input.vault_id, &selected)?;
-        let own = using.keys.own_row()?;
+        let own = using.keys.own_row_as(self.role)?;
         if !using.keys.is_removed() {
             // The newest feeds; without the relay, the ones this iPhone holds.
             let _ = self.feed_fetch_one(&using.vault_id, &using.member, Duration::ZERO, None);

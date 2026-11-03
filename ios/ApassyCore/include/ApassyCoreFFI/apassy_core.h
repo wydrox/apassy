@@ -33,6 +33,32 @@ char *_Nonnull apassy_core_call(ApassyCore *_Nonnull core, const char *_Nonnull 
 /// Erase an answer and free it.
 void apassy_core_free_string(char *_Nullable answer);
 
+/// The external HTTP transport (contract section 2.1, ADR 0039 section 5): the Apple
+/// Watch performs each relay request with URLSession.
+///
+/// `send` gets the request as JSON: {"id": u64, "method": "GET", "url": "https://...",
+/// "headers": [["name", "value"], ...], "body_b64u": "..." (absent without a body),
+/// "timeout_ms": u64}. It runs on the core's calling thread, may block until the answer,
+/// and returns {"status": u16, "headers": [["name", "value"], ...], "body_b64u": "..."}
+/// or {"error": "connect" | "broken" | "protocol"}, allocated with malloc or strdup.
+/// The core erases and frees it with free. NULL means "broken". The request holds the
+/// bearer: keep no copy of it after `send` returns.
+///
+/// `cancel` ends the request `request_id` at once: its `send` then answers
+/// {"error": "broken"}. It can come from another thread while that `send` runs, and also
+/// just before that `send` starts: then that `send` fails at once. It must not call the
+/// core.
+///
+/// Both callbacks can run on several threads at once.
+typedef char *_Nullable (*apassy_http_send)(void *_Nullable context,
+    const char *_Nonnull request_json);
+typedef void (*apassy_http_cancel)(void *_Nullable context, uint64_t request_id);
+
+/// Install the transport once per process, before apassy_core_new. A second call is
+/// ignored. The callbacks and the context stay valid for the life of the process.
+void apassy_core_set_http_transport(apassy_http_send _Nonnull send,
+    apassy_http_cancel _Nonnull cancel, void *_Nullable context);
+
 /// Lock the vault, drop the relay session, and free the core.
 void apassy_core_free(ApassyCore *_Nullable core);
 

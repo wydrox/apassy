@@ -39,6 +39,8 @@
 #[path = "access_requests.rs"]
 mod access_requests;
 pub(super) mod envelope;
+#[path = "watch.rs"]
+mod watch;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -53,7 +55,9 @@ use apassy::sync::{
     Cancel, DEFAULT_RELAY_URL, PendingJoin, RelayCallError, RelayMember, SyncError, decode_b64u,
     encode_b64u, verify_signature,
 };
-use apassy::vault::{MembershipPurpose, RelayMembership, TrustedDevice, Vault, VaultErrorKind};
+use apassy::vault::{
+    MembershipPurpose, RelayMembership, TrustedDevice, TrustedDeviceKind, Vault, VaultErrorKind,
+};
 
 use envelope::{CardRefusal, Choice};
 
@@ -93,6 +97,8 @@ pub struct State {
     pub(super) contexts: BTreeMap<String, Context>,
     /// A join of a notifications-only team that waits for the Mac.
     attach: Option<Attaching>,
+    /// The connection of an Apple Watch that waits for the Mac (`watch.rs`).
+    watch_connect: Option<watch::Connecting>,
     /// The long polls of `questions_wait` over several contexts: a drop ends them.
     pub(super) waits: Vec<Arc<Cancel>>,
     /// Counts each drop of every context. A `questions_unlock` keeps its context only when
@@ -279,6 +285,7 @@ pub(super) struct Ended {
     members: Vec<Arc<RelayMember>>,
     waits: Vec<Arc<Cancel>>,
     attach: Option<Attaching>,
+    watch_connect: Option<watch::Connecting>,
 }
 
 impl Ended {
@@ -291,6 +298,9 @@ impl Ended {
         }
         if let Some(attach) = self.attach {
             let _ = attach.pending.cancel();
+        }
+        if let Some(connecting) = self.watch_connect {
+            connecting.cancel();
         }
     }
 }
@@ -683,6 +693,37 @@ fn answer_key_changed() -> CoreError {
     )
 }
 
+/// [`answer_key_changed`] for the device of `role`.
+fn answer_key_changed_for(role: Role) -> CoreError {
+    match role {
+        Role::Watch => CoreError::new(
+            "answer_key_changed",
+            "The key of this watch changed, or a Mac registered it as another device. On a Mac, remove this watch in Settings > Devices, then connect it again.",
+        ),
+        Role::App | Role::Autofill => answer_key_changed(),
+    }
+}
+
+/// The kind of the own `trusted_device` row of the device of `role`: `watch` for the
+/// Apple Watch core, else `iphone` (ADR 0039 section 2).
+fn own_kind(role: Role) -> TrustedDeviceKind {
+    match role {
+        Role::Watch => TrustedDeviceKind::Watch,
+        Role::App | Role::Autofill => TrustedDeviceKind::Iphone,
+    }
+}
+
+/// The error of a join request (`PendingJoin::request`) for the owner.
+fn join_link_error(error: SyncError) -> CoreError {
+    match CoreError::from(error) {
+        error if matches!(error.code, "removed" | "not_found") => CoreError::new(
+            "link_invalid",
+            "This link does not work: it was used, it expired, or it is not valid. Make a new link on the Mac.",
+        ),
+        error => error,
+    }
+}
+
 /// The `device_name` of a link that carries the answer key `answer_key` (b64u, X9.63):
 /// the confirming Mac writes the row of this iPhone from it.
 pub(super) fn link_name_with_key(name: &str, answer_key: &str) -> CoreResult<String> {
@@ -794,6 +835,17 @@ impl Keys {
             None if self.removed => Err(removed()),
             None => Err(not_registered()),
         }
+    }
+
+    /// [`Self::own_row`] of the kind of the device of `role`. A row of another kind (the
+    /// relay changed the marker of the link, or the row is of another device) cannot
+    /// answer here: `answer_key_changed`.
+    pub(super) fn own_row_as(&self, role: Role) -> CoreResult<TrustedDevice> {
+        let own = self.own_row()?;
+        if own.kind != own_kind(role) {
+            return Err(answer_key_changed_for(role));
+        }
+        Ok(own)
     }
 }
 
@@ -1290,6 +1342,7 @@ impl Core {
             members,
             waits: std::mem::take(&mut state.waits),
             attach: state.attach.take(),
+            watch_connect: state.watch_connect.take(),
         }
     }
 
@@ -1309,13 +1362,14 @@ impl Core {
             members: Vec::new(),
             waits: Vec::new(),
             attach: guard(&self.questions).attach.take(),
+            watch_connect: None,
         }
     }
 
     /// Keep the context of the selected vault from `vault`, open and unlocked. Called
     /// under the vault mutex (lock order: the vault, the list, then the questions).
     pub(super) fn questions_capture(&self, vault: &Vault) -> CoreResult<()> {
-        if self.role != Role::App {
+        if self.role == Role::Autofill {
             return Ok(());
         }
         let Some(vault_id) = guard(&self.list).selected.clone() else {
@@ -1819,8 +1873,10 @@ impl Core {
                     }
                     record.answered = old.answered;
                 }
-                // Verify and journal before the 10-minute live-cache pruning below.
-                if !context.keys.is_removed()
+                // Verify and journal before the 10-minute live-cache pruning below. The
+                // Apple Watch never journals a run question: it never shows one.
+                if self.role != Role::Watch
+                    && !context.keys.is_removed()
                     && let Ok(card) = context.keys.open(&record)
                 {
                     observed.push((
@@ -2049,7 +2105,7 @@ impl Core {
     /// The answer string of `answer` at `time`, checked against the card.
     fn prepare_answer(&self, answer: &AnswerIn, time: u64) -> CoreResult<(Prepared, Ready)> {
         let using = self.context_for(&answer.qid, answer.vault_id.as_deref())?;
-        let own = using.keys.own_row()?;
+        let own = using.keys.own_row_as(self.role)?;
         let Opened { record, card } = self.opened(&answer.qid, &using)?;
         let choice = Choice::for_card_with_comment(
             &answer.kind,
@@ -2330,7 +2386,7 @@ impl Core {
             .ok_or_else(|| CoreError::invalid("The answer key is not a P-256 public key."))?;
         let selected = self.questions_refresh()?;
         let using = self.context_of(vault_id, &selected)?;
-        let own = using.keys.own_row()?;
+        let own = using.keys.own_row_as(self.role)?;
         if own.answer_key.as_deref() != Some(answer_key.as_slice()) {
             return Err(answer_key_changed());
         }
@@ -2568,15 +2624,8 @@ impl Core {
             ));
         }
         let channel = parsed.map(|(_, channel)| channel);
-        let pending = PendingJoin::request(full_link, DEFAULT_RELAY_URL, device_name).map_err(
-            |error| match CoreError::from(error) {
-                error if matches!(error.code, "removed" | "not_found") => CoreError::new(
-                    "link_invalid",
-                    "This link does not work: it was used, it expired, or it is not valid. Make a new link on the Mac.",
-                ),
-                error => error,
-            },
-        )?;
+        let pending = PendingJoin::request(full_link, DEFAULT_RELAY_URL, device_name)
+            .map_err(join_link_error)?;
         let attaching = Attaching {
             device_name: device_name.to_owned(),
             answer_key: apassy::questions::device_link::split_link_device_name(device_name).1,

@@ -72,8 +72,8 @@ auth=(
   -authenticationKeyIssuerID "$APASSY_NOTARY_ISSUER"
 )
 
-echo "ios-testflight: the vault core for the iPhone"
-scripts/build-ios-core.sh device
+echo "ios-testflight: the vault core for the iPhone and the Apple Watch"
+scripts/build-ios-core.sh device watch
 
 echo "ios-testflight: the project"
 (cd ios/ApassyCompanion && xcodegen generate --spec project.yml --quiet)

@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1). The agents of the Macs (section 5.12, contract relay-feed-v1) added 2026-10-14 (stream FD).
+Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1). The agents of the Macs (section 5.12, contract relay-feed-v1) added 2026-10-14 (stream FD). The Apple Watch (the external HTTP transport in section 2.1, the role `watch` in section 3, and its calls in section 5.13; [ADR 0039](../adr/0039-apple-watch-access-requests.md)) added 2026-11-03.
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -9,7 +9,7 @@ Status of the passkey and one-time password work (branch `feat/passkeys-totp`): 
 
 | Part | Location | Built for |
 | --- | --- | --- |
-| The core: a C interface over `apassy::vault` and `apassy::sync` (relay and encrypted iCloud snapshots) | `ios/ApassyCore` (Rust, `staticlib`) | `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-darwin` (tests) |
+| The core: a C interface over `apassy::vault` and `apassy::sync` (relay and encrypted iCloud snapshots) | `ios/ApassyCore` (Rust, `staticlib`) | `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-darwin` (tests); `aarch64-apple-watchos` and `aarch64-apple-watchos-sim` with `--no-default-features` (SQLCipher with CommonCrypto, ADR 0039 section 4) |
 | The C header and the module map | `ios/ApassyCore/include/` | |
 | The XCFramework | `ios/ApassyCore/build/ApassyCore.xcframework`, made by `scripts/build-ios-core.sh`, not committed | |
 | The Swift wrapper: typed requests, answers, errors | `ios/ApassyVaultKit` (Swift package) | iOS 26, and macOS 15 for `swift test` |
@@ -51,6 +51,31 @@ void apassy_core_free(ApassyCore *core);
 - The core counts each answer first and writes it into one buffer with room for the final NUL byte. A serializer that changes size between the two passes gives the error `internal`, so a secret never moves to a grown copy. The core erases the buffer when it is freed.
 - The core erases each answer when it is freed, and each passphrase and secret it parsed. A Swift `String` cannot be erased; the app keeps a revealed value only while it is on the screen. This is best effort, as on the Mac.
 
+### 2.1 The external HTTP transport (Apple Watch)
+
+watchOS gives this kind of app no BSD sockets: URLSession is the network API (ADR 0039 section 5). The watch app installs a transport, and the core then sends every relay request through it instead of its own TCP and TLS client. The iPhone app and the Mac install none and keep the core's client.
+
+```c
+typedef char *_Nullable (*apassy_http_send)(void *_Nullable context, const char *_Nonnull request_json);
+typedef void (*apassy_http_cancel)(void *_Nullable context, uint64_t request_id);
+void apassy_core_set_http_transport(apassy_http_send _Nonnull send, apassy_http_cancel _Nonnull cancel, void *_Nullable context);
+```
+
+- **Setup.** Call `apassy_core_set_http_transport` once per process, before `apassy_core_new`. A second call, or a NULL callback, changes nothing. The callbacks and the context stay valid for the life of the process. Both callbacks can run on several threads at once.
+- **The request** (NUL-terminated JSON): `{"id": u64, "method": "GET", "url": "https://…", "headers": [["name", "value"], …], "body_b64u": "…", "timeout_ms": u64}`.
+  - `id` is unique in the process. `url` is the relay origin and the path with its query.
+  - `headers` are `Authorization: Bearer …` (when the call signs in), `Content-Type: application/json` (with a body), the headers of the call (for example `If-Match`), and `User-Agent`. The host sets `Host` and `Content-Length`, follows no redirect, and adds no cookie.
+  - `body_b64u` is the JSON body in b64u; it is absent without a body.
+  - `timeout_ms` is the time for the whole request: the wait of a long poll plus 30 seconds, or less when the call has a deadline.
+- **The answer** (NUL-terminated JSON, from `malloc` or `strdup`): `{"status": u16, "headers": [["name", "value"], …], "body_b64u": "…"}`, or `{"error": "connect" | "broken" | "protocol"}`.
+  - `connect`: no byte of the request went out (no network, a name or TLS failure). `broken`: the request failed after it started, timed out, or was cancelled; a write may have landed. `protocol`: the answer is not valid. Another `error` text is `broken`. NULL is `broken`.
+  - `body_b64u` is absent for an empty body.
+  - The core checks the answer as one read from a socket: a final status (200 to 599), at most 100 header lines and 16 KiB of header text, header names that are HTTP tokens, values without CR, LF, or NUL, and at most 2 MiB of body. Else `protocol`. Header names are compared in lowercase.
+- **Memory and secrets.** The request holds the bearer and the body, and an answer can hold a token. The host keeps no copy after `send` returns. The core erases its request buffer after `send`, and erases the answer text before it frees it with C `free`.
+- **Threads.** `send` runs on the core's calling thread and may block until the answer.
+- **Cancel.** A lock, a suspend, or the end of a long poll calls `cancel` with the request ID; the `send` of that request then answers `{"error": "broken"}` at once. `cancel` can come from another thread while that `send` runs, and also just before that `send` starts: then that `send` fails at once. `cancel` must not call the core. A request that starts after the close never reaches the host.
+- **Not through the transport.** A snapshot upload or download fails with `protocol`: the watch never syncs.
+
 ## 3. Config
 
 ```json
@@ -61,7 +86,7 @@ void apassy_core_free(ApassyCore *core);
 - `device_name`: the name that the relay and the Macs show for this iPhone, and the name in a conflict copy. At most 64 bytes after trimming.
 - `request_history_enabled`: defaults to `false`. The native app enables it only after verifying that its local history directory is excluded from backup. Enabled history requires the key-provider constructor.
 - `request_history_required`: defaults to `false` for existing callers. The native app always sets it to `true`, including when storage initialization fails. An unavailable journal then blocks answer preparation/delivery instead of bypassing the durable duplicate-answer guard. AutoFill does not enable or require history.
-- `role`: `app` or `autofill`. The `autofill` role answers only the calls marked **R** in section 5. Every other call gets `not_allowed`. The extension never syncs and never edits an item. It records a reveal, and it can add a passkey with `passkey_register`. It cannot import, remove, or export (section 5.8).
+- `role`: `app`, `autofill`, or `watch`. The `autofill` role answers only the calls marked **R** in section 5. Every other call gets `not_allowed`. The extension never syncs and never edits an item. It records a reveal, and it can add a passkey with `passkey_register`. It cannot import, remove, or export (section 5.8). The `watch` role is the Apple Watch app (section 5.13): it answers only the calls listed there, and every other call gets `not_allowed` ("Not available on Apple Watch."). Its default `device_name` is "Apple Watch".
 
 Files in `data_dir`:
 
@@ -618,6 +643,57 @@ Errors of these calls, besides those of section 4 and section 5.10: `feed_unavai
 
 **`feed_rate`.** A `403 feed_rate` of `GET /v1/feed` (relay-feed-v1 section 10.2: the iPhone read its 16 MiB of feed text of the relay's minute) is `feed_rate`, "The relay asks this iPhone to wait a minute before it reads the agents again." The core then reads no feed of that vault for 60 seconds (a whole minute always passes the relay's next one): in that time `feed_list` and the reads of the action calls answer `feed_rate` at once, without the relay, for that vault (the call fails only when every vault failed, as above), and `feed_wait` waits within its `timeout` instead of answering at once (it answers `changed: false` at the end of the timeout, or polls with the time left once the minute passed), so the app's watch loop polls again without a busy loop. A `lock` or a `suspend` ends that wait with `locked`, and drops the pause with the context.
 
+### 5.13 The Apple Watch (role `watch`, ADR 0039)
+
+Added 2026-11-03. The watch answers ADR 0033 access requests with **Allow once** or **Deny**, and nothing else. It holds one questions-only replica vault: no item, the sync identity of the vault it answers for, its own questions membership, the question key, and the public `trusted_device` rows of the handoff. The replica never syncs, so its rows change only with a new connection. The watch never shows or answers a run question or a feed action, and the core never journals a run question on it.
+
+**The calls of the role.** `info`, `select`, `unlock` (with `keep`), `lock`, `suspend`, `resume`, `access_requests_list`, `access_requests_history`, `access_request_prepare`, `access_request_answer`, `access_request_cancel_prepared` (section 12, "ADR 0033 typed access requests"), `questions_wait` (section 5.10: the long poll while the app is active; it wakes for any change of the team, then the app calls `access_requests_list`), and the calls below. Every other call gets `not_allowed` ("Not available on Apple Watch."). The `app` and `autofill` roles get `not_allowed` ("This call is for Apple Watch only.") for the calls below.
+
+**Config.** The watch app starts the core with `apassy_core_new_with_history_key_provider` (its keys in the watch keychain), `"role": "watch"`, `request_guard_storage_ready: true` after it made `request-history/` and excluded it from backup, and `request_history_enabled: true` for the access history. It installs the transport of section 2.1 first.
+
+**The own row.** On a watch the row of this device must have the kind `watch`; in the `app` role it must have the kind `iphone`. A row of another kind gives `answer_key_changed` in every call that reads it (the access calls, and in the app role also the run-question and feed calls and `answer_key_register`).
+
+**`watch_connect_start`** `{"link": "<the Mac's Connect code, as the iPhone forwarded it>", "name": "Rafał’s Watch", "answer_key": "<b64u X9.63, 65 bytes>", "passphrase": "<32 random bytes of the app, as text>"}` answers:
+
+```json
+{"state": "waiting", "words": ["six", "safety", "words", "for", "the", "Mac"], "expires_at": 1790000600}
+```
+
+- Only a handoff link (`&handoff=`, relay-questions-v1 section 21) connects a watch. A link without it gives `link_invalid` ("This code can't connect a watch. Make a new code on the Mac."), a damaged one `link_invalid` ("This pairing code is damaged. Make a new code on the Mac.").
+- `name` is optional (default: `device_name`). The relay device name is `<name> ~W<answer key>` (`device_link::watch_link_device_name`): the name is cut to 17 bytes.
+- The relay key is a new one. The passphrase (at least 12 bytes, `MIN_PASSPHRASE_BYTES`) stays in an erasing buffer of the core only until the poll that makes the vault.
+- A watch that holds a replica gives `already_connected`: forget it first. A new start gives up the connection that waits.
+- Errors: `invalid_input` (the passphrase, the answer key), `link_invalid`, `relay_unreachable`, `rate_limited`, `safety_mismatch`, `already_connected`.
+
+**`watch_connect_poll`** answers `{"state": "waiting", "words": […], "expires_at": …}` while the Mac has not confirmed or not sent the handoff, then once:
+
+```json
+{"state": "attached", "vault": {"id": "d070dc14-a3ac-42c2-95aa-cc85d6d58900", "name": "MacBook Pro"}}
+```
+
+- When the handoff comes, the core makes a new vault file with the passphrase, gives it the handoff `vault_id` as its sync identity (`Vault::adopt_replica_identity`), adopts the handoff with the membership and the answer key, registers the vault (no `relay_url`), and keeps it selected and unlocked with its questions context.
+- The handoff must hold the row of this watch (its relay key) with this answer key and the kind `watch`. A row without an answer key gives `mac_update_needed` ("Update Apassy on your Mac to connect this watch."); another kind or another key gives `answer_key_changed`.
+- The vault is named after the first live Mac row of the handoff, else "Vault".
+- On any failure no file or list entry of the replica stays, and the device leaves the team again.
+- Errors: `invalid_input` (no connection waits), `link_invalid` (expired), `join_refused`, `relay_unreachable` (the Mac has not sent the keys yet and the read failed), `mac_update_needed`, `answer_key_changed`, `already_connected`, `io`, `storage`.
+- A `lock` or a `suspend` gives up a connection that waits.
+
+**`watch_connect_cancel`** gives up the connection that waits, best effort on the relay. `{}`.
+
+**`watch_status`** `{"answer_key": "<b64u, optional>"}`, without a relay call:
+
+```json
+{"state": "ready", "vault": {"id": "…", "name": "MacBook Pro"}, "macs": ["MacBook Pro"], "own": {"found": true, "answer_key_matches": true}}
+```
+
+- `state`: `unpaired` (no replica), `connecting` (a connection waits), `locked`, `ready`, or `removed`. `removed`: the row of this watch is removed, its relay key is removed, the last relay call found the device removed (`removed`), or the open replica has no questions team. The app then offers to forget and connect again.
+- `vault` is null while `unpaired` or `connecting`. `macs` (the names of the live Mac rows) and `own` are filled only while the replica is open; else `[]` and null.
+- `own.found`: the replica holds the row of this watch. `own.answer_key_matches`: that row has the kind `watch` and an answer key other than its relay key, and it is `answer_key` when the call gives one.
+
+**`watch_forget`** leaves the team (best effort, with the relay key of an open replica: unlock first), then deletes the replica file, its list entry, its access guards (`request-history/access-guards-v1-<vault_id>.json`), and its history. Answers `{"state": "unpaired", "vault": null, "macs": [], "own": null}`. The app deletes its history key of that vault and the passphrase from the watch keychain.
+
+New error codes: `already_connected`, `mac_update_needed`. `answer_key_changed` has a watch message.
+
 ## 6. `phone.json`
 
 ```json
@@ -725,7 +801,7 @@ The statements above come from the source of the branch. These points are open o
 
 ### ADR 0033 typed access requests (version 1)
 
-App-role-only calls leave existing strict run-question DTOs unchanged. `access_requests_list` and `access_requests_history` return `{protocol:"apassy-access-request",version:1,requests:[...]}`. A row has phone-local `vault_id`, verified `card`, exact `digest`, carrier `state`, optional verified `receipt` and registered public `answer_key`. The card contains the separate actual vault UUID. History is read-only; no call reports an available permit. Unsupported cores return the usual unknown-call error and clients offer local Mac review.
+Calls of the `app` role and, since ADR 0039, of the `watch` role (section 5.13); they leave existing strict run-question DTOs unchanged. `access_requests_list` and `access_requests_history` return `{protocol:"apassy-access-request",version:1,requests:[...]}`. A row has phone-local `vault_id`, verified `card`, exact `digest`, carrier `state`, optional verified `receipt` and registered public `answer_key`. The card contains the separate actual vault UUID. History is read-only; no call reports an available permit. Unsupported cores return the usual unknown-call error and clients offer local Mac review.
 
 `access_request_prepare` takes `{vault_id,qid,digest,kind}` where kind is `deny` or `allow_once`. It resolves exact current membership and trusted rows and returns immutable `{bytes,time,digest,needs_face_id,retry_before}`. Swift signs the returned bytes only for Allow once through the registered per-team protected key and a new Face-ID-only context. `access_request_answer` adds that original `time` and, for Allow once, DER `signature`. Deny is signed internally with the relay identity. Core verifies the signature, context, trust generation, original time and deadline before every POST. `access_request_cancel_prepared` discards preparations. Lock/suspend/vault changes discard preparations as well.
 

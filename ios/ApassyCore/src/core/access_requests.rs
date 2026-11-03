@@ -264,9 +264,10 @@ impl Core {
         if r.state != "open" || now() >= card.card.expires_at || input.digest != card.digest {
             return Err(unavailable());
         }
-        let own = using.keys.own_row()?;
-        if own.kind != TrustedDeviceKind::Iphone
-            || own.relay_devices.get(&using.keys.team_id) != Some(&using.keys.device_id)
+        // The own row is of the kind of this device: `iphone`, or `watch` on an Apple
+        // Watch (ADR 0039 section 2).
+        let own = using.keys.own_row_as(self.role)?;
+        if own.relay_devices.get(&using.keys.team_id) != Some(&using.keys.device_id)
             || own.sign_key != using.member.public_key()
             || (input.kind == access::Choice::AllowOnce
                 && own.answer_key.as_ref() == Some(&own.sign_key))
@@ -314,10 +315,9 @@ impl Core {
                                     let _ = self.save_access_guards(vault, &g, key.as_slice());
                                 }
                             }
-                            let own = context.keys.own_row().ok().filter(|d| {
-                                d.kind == TrustedDeviceKind::Iphone
-                                    && d.relay_devices.get(&context.keys.team_id)
-                                        == Some(&context.keys.device_id)
+                            let own = context.keys.own_row_as(self.role).ok().filter(|d| {
+                                d.relay_devices.get(&context.keys.team_id)
+                                    == Some(&context.keys.device_id)
                             });
                             rows.push(json!({"vault_id":vault,"card":card.card,"digest":card.digest,
                                 "state":state_of(record,now()),"receipt":receipt,
@@ -366,7 +366,7 @@ impl Core {
                     return Err(unavailable());
                 }
                 let (using, _r, card) = self.access_open(&input)?;
-                let own = using.keys.own_row()?;
+                let own = using.keys.own_row_as(self.role)?;
                 let answer = access::Answer::prepare(&card, &own.uuid, input.kind, now())
                     .map_err(|_| unavailable())?;
                 let bytes = answer.message(&card).map_err(|_| unavailable())?;
@@ -428,7 +428,7 @@ impl Core {
                     return Err(unavailable());
                 }
                 answer.check(&card, now()).map_err(|_| unavailable())?;
-                let own = using.keys.own_row()?;
+                let own = using.keys.own_row_as(self.role)?;
                 if answer.kind == access::Choice::AllowOnce {
                     answer.signature = input.signature.ok_or_else(unavailable)?;
                     answer

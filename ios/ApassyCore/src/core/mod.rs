@@ -12,6 +12,10 @@
 //! `suspend`, and `remove_vault` drop them all. The agent feeds of the Macs (section
 //! 5.12, `feed.rs`) live in the same contexts.
 //!
+//! The Apple Watch runs this core with the role `watch` (ADR 0039, section 5.13): it holds
+//! one questions-only replica vault, answers access requests only, and refuses every
+//! other call ([`WATCH_OPS`]).
+//!
 //! A vault file opens outside the vault mutex for its key derivation (`unlock`,
 //! `questions_unlock`), but only under the `opening` mutex, which `lock`, `suspend`, and
 //! `remove_vault` take first: when they return, this process holds no vault file lock
@@ -62,7 +66,31 @@ type AnswerLocks = BTreeMap<(String, String), Weak<Mutex<()>>>;
 pub enum Role {
     App,
     Autofill,
+    /// The Apple Watch app (ADR 0039): access requests only.
+    Watch,
 }
+
+/// The calls of the Apple Watch core: its replica vault, the access requests, and its
+/// connection. Every other call fails with `not_allowed`.
+const WATCH_OPS: &[&str] = &[
+    "info",
+    "select",
+    "unlock",
+    "lock",
+    "suspend",
+    "resume",
+    "access_requests_list",
+    "access_requests_history",
+    "access_request_prepare",
+    "access_request_answer",
+    "access_request_cancel_prepared",
+    "questions_wait",
+    "watch_connect_start",
+    "watch_connect_poll",
+    "watch_connect_cancel",
+    "watch_status",
+    "watch_forget",
+];
 
 #[derive(Deserialize)]
 struct ConfigWire {
@@ -248,6 +276,7 @@ impl Core {
     fn new_inner(config: &str, provider: Option<Arc<dyn HistoryKeyProvider>>) -> CoreResult<Self> {
         let config: ConfigWire = params(config)?;
         let paths = Paths::new(PathBuf::from(config.data_dir))?;
+        let role = config.role.unwrap_or(Role::App);
         let device_name = config
             .device_name
             .map(|name| {
@@ -257,7 +286,13 @@ impl Core {
                     .collect::<String>()
             })
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "iPhone".to_owned());
+            .unwrap_or_else(|| {
+                if role == Role::Watch {
+                    "Apple Watch".to_owned()
+                } else {
+                    "iPhone".to_owned()
+                }
+            });
         let device_name = truncate(&device_name, 64);
         // The name of this iPhone in the sync record and in a conflict copy.
         apassy::sync::set_device_name(&device_name);
@@ -273,7 +308,7 @@ impl Core {
             question_sending: Mutex::new(BTreeMap::new()),
             paths,
             device_name,
-            role: config.role.unwrap_or(Role::App),
+            role,
             list: Mutex::new(list),
             vault: Mutex::new(None),
             kept: Mutex::new(None),
@@ -287,8 +322,10 @@ impl Core {
             opening: Mutex::new(()),
             feed_rate_pause: feed::FEED_RATE_PAUSE,
         };
-        if core.role == Role::App {
+        if core.role != Role::Autofill {
             core.clear_unfinished_joins();
+        }
+        if core.role == Role::App {
             core.clear_unfinished_icloud_imports();
         }
         core.select_relay()?;
@@ -329,8 +366,28 @@ impl Core {
         }
     }
 
+    /// The app or the Apple Watch: not the AutoFill extension.
+    fn require_app_or_watch(&self) -> CoreResult<()> {
+        if self.role == Role::Autofill {
+            Err(CoreError::not_allowed())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_watch(&self) -> CoreResult<()> {
+        if self.role == Role::Watch {
+            Ok(())
+        } else {
+            Err(CoreError::watch_only())
+        }
+    }
+
     fn dispatch(&self, request: &str) -> CoreResult<String> {
         let Op { op } = params(request)?;
+        if self.role == Role::Watch && !WATCH_OPS.contains(&op.as_str()) {
+            return Err(CoreError::not_on_watch());
+        }
         match op.as_str() {
             // 5.1
             "info" => self.info(),
@@ -341,7 +398,7 @@ impl Core {
             }
             "unlock" => {
                 let Passphrase { passphrase, keep } = params(request)?;
-                self.unlock(passphrase.expose(), keep && self.role == Role::App)?;
+                self.unlock(passphrase.expose(), keep && self.role != Role::Autofill)?;
                 Ok(ok(&Empty {}))
             }
             "lock" => {
@@ -349,12 +406,12 @@ impl Core {
                 Ok(ok(&Empty {}))
             }
             "suspend" => {
-                self.require_app()?;
+                self.require_app_or_watch()?;
                 self.close(Closing::Suspend);
                 Ok(ok(&Empty {}))
             }
             "resume" => {
-                self.require_app()?;
+                self.require_app_or_watch()?;
                 Ok(ok(&Resumed {
                     unlocked: self.resume()?,
                 }))
@@ -597,8 +654,19 @@ impl Core {
             | "access_request_prepare"
             | "access_request_answer"
             | "access_request_cancel_prepared" => {
-                self.require_app()?;
+                self.require_app_or_watch()?;
                 self.access_call(&op, request)
+            }
+            // 5.13 The Apple Watch: the long poll of its access requests, and its
+            // connection.
+            "questions_wait" if self.role == Role::Watch => self.questions_call(&op, request),
+            "watch_connect_start"
+            | "watch_connect_poll"
+            | "watch_connect_cancel"
+            | "watch_status"
+            | "watch_forget" => {
+                self.require_watch()?;
+                self.watch_call(&op, request)
             }
             // 5.10 Questions through the relay: the app only.
             "questions_list"
@@ -725,7 +793,7 @@ impl Core {
             let mut list = guard(&self.list);
             list.selected = Some(id.to_owned());
             // The extension never writes the list.
-            if self.role == Role::App {
+            if self.role != Role::Autofill {
                 list.save(&self.paths.data_dir)?;
             }
         }
