@@ -342,9 +342,12 @@ pub struct Relay;
 pub struct RunningRelay {
     /// The bound address (useful when the config asked for port 0).
     pub addr: SocketAddr,
+    /// The bound address of the public listener (`RelayConfig::public_listen`).
+    pub public_addr: Option<SocketAddr>,
     hub: Arc<Hub>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<RelayResult<()>>>,
+    public_handle: Option<JoinHandle<RelayResult<()>>>,
     operator: Option<JoinHandle<()>>,
 }
 
@@ -352,6 +355,11 @@ impl RunningRelay {
     /// `http://<addr>`: the plain HTTP origin of the listener.
     pub fn url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    /// `http://<public addr>`: the plain HTTP origin of the public listener, if any.
+    pub fn public_listener_url(&self) -> Option<String> {
+        self.public_addr.map(|addr| format!("http://{addr}"))
     }
 
     /// The live sessions of every team, as the proxy reads them.
@@ -382,6 +390,9 @@ impl RunningRelay {
             core.notify.notify();
         }
         if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.public_handle.take() {
             let _ = handle.join();
         }
         if let Some(handle) = self.operator.take() {
@@ -585,40 +596,96 @@ impl Relay {
         Ok((config.team_path(team), row.file_key))
     }
 
-    /// Opens the directory and the active teams, binds `config.listen`, opens the
-    /// operator socket, and serves in background threads.
+    /// Opens the directory and the active teams, binds `config.listen` (and
+    /// `config.public_listen`), opens the operator socket, and serves in background
+    /// threads. A relay without the edge must listen on the loopback only
+    /// (`RelayConfig::check_listeners`).
     pub fn start(config: RelayConfig) -> RelayResult<RunningRelay> {
+        config.check_listeners()?;
         let stop = Arc::new(AtomicBool::new(false));
         let hub = Hub::open(config, stop.clone())?;
         let source: Arc<dyn SessionSource> = hub.clone();
         let proxy = Arc::new(Proxy::new(&hub.config.upstream, source)?);
-        let server = tiny_http::Server::http_with_deadlines(
-            hub.config.listen,
-            std::time::Duration::from_secs(10),
-            hub.config.request_read_timeout,
-            hub.config.request_handle_timeout,
-        )
-        .map_err(|_| RelayError::internal(format!("Cannot listen on {}.", hub.config.listen)))?;
-        let addr = server
-            .server_addr()
-            .to_ip()
-            .ok_or_else(|| RelayError::internal("The listener has no IP address."))?;
+        let bind = |listen: SocketAddr| {
+            let server = tiny_http::Server::http_with_deadlines(
+                listen,
+                std::time::Duration::from_secs(10),
+                hub.config.request_read_timeout,
+                hub.config.request_handle_timeout,
+            )
+            .map_err(|_| RelayError::internal(format!("Cannot listen on {listen}.")))?;
+            let addr = server
+                .server_addr()
+                .to_ip()
+                .ok_or_else(|| RelayError::internal("The listener has no IP address."))?;
+            Ok::<_, RelayError>((server, addr))
+        };
+        let (server, addr) = bind(hub.config.listen)?;
+        let public = hub.config.public_listen.map(bind).transpose()?;
         let operator = operator::listen(hub.clone(), stop.clone())?;
         let serving = http::Serving {
             hub: hub.clone(),
-            proxy,
+            proxy: proxy.clone(),
             server,
             stop: stop.clone(),
+            scope: http::Scope::Node,
+            limits: hub.config.limits,
         };
-        let handle = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("relay-accept".to_string())
-            .spawn(move || http::serve(serving))
-            .map_err(|_| RelayError::internal("The accept thread cannot start."))?;
+            .spawn(move || http::serve(serving));
+        let handle = match spawned {
+            Ok(handle) => handle,
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                let _ = operator.join();
+                hub.close_all();
+                return Err(RelayError::internal("The accept thread cannot start."));
+            }
+        };
+        let mut public_addr = None;
+        let mut public_handle = None;
+        if let Some((server, addr)) = public {
+            // Agents only, and a lane of its own: the public listener never takes the
+            // threads of the loopback listener of the app.
+            let serving = http::Serving {
+                hub: hub.clone(),
+                proxy,
+                server,
+                stop: stop.clone(),
+                scope: http::Scope::Public,
+                limits: crate::config::Limits {
+                    max_active: crate::config::PUBLIC_MAX_ACTIVE,
+                    member_reserve: 0,
+                    ..hub.config.limits
+                },
+            };
+            let spawned = std::thread::Builder::new()
+                .name("relay-public-accept".to_string())
+                .spawn(move || http::serve(serving));
+            match spawned {
+                Ok(spawned) => {
+                    public_addr = Some(addr);
+                    public_handle = Some(spawned);
+                }
+                Err(_) => {
+                    stop.store(true, Ordering::Relaxed);
+                    let _ = handle.join();
+                    let _ = operator.join();
+                    hub.close_all();
+                    return Err(RelayError::internal(
+                        "The accept thread of the public listener cannot start.",
+                    ));
+                }
+            }
+        }
         Ok(RunningRelay {
             addr,
+            public_addr,
             hub,
             stop,
             handle: Some(handle),
+            public_handle,
             operator: Some(operator),
         })
     }

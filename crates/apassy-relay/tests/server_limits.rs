@@ -591,7 +591,10 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     for (owner, id) in [(&a, &a_id), (&b, &b_id)] {
         let (status, body) = relay::call_url(
             &url,
-            Some(config.edge_secret.expose()),
+            config
+                .edge
+                .secret()
+                .map(apassy_relay::secret::SecretString::expose),
             "GET",
             "/v1/me",
             Some(owner),
@@ -641,7 +644,10 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     drop(conn);
     let (status, body) = relay::call_url(
         &url,
-        Some(config.edge_secret.expose()),
+        config
+            .edge
+            .secret()
+            .map(apassy_relay::secret::SecretString::expose),
         "POST",
         "/v1/teams",
         None,

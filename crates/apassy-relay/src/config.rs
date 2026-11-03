@@ -23,6 +23,11 @@
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
 //!
+//! The environment always asks for the edge secret (`EdgeMode::Required`). A Mac's own
+//! node (`RelayConfig::embedded`, docs/SPEC.md section 28) has no edge: `EdgeMode::Off`,
+//! which `RelayConfig::check_listeners` permits only when every listener is on the
+//! loopback.
+//!
 //! A `_FILE` variable names a file whose content (trailing newline removed) is the
 //! value. It wins over the plain variable.
 
@@ -75,6 +80,13 @@ pub const LEGACY_VAULT_FILE: &str = "team.db";
 pub const ADMIN_SOCKET: &str = "admin.sock";
 /// The lock file of the data directory: one relay process at a time.
 pub const LOCK_FILE: &str = "relay.lock";
+/// The session lifetime of an embedded node (docs/SPEC.md section 28).
+pub const EMBEDDED_SESSION_TTL_SECS: u64 = 600;
+/// How long a run of an embedded node waits for the owner: the broker's question wait.
+pub const EMBEDDED_APPROVAL_TIMEOUT_SECS: u64 = 300;
+/// The requests that the public listener of an embedded node handles at once. It has
+/// no member reserve: only agents use it (`Scope::Public`).
+pub const PUBLIC_MAX_ACTIVE: usize = 32;
 /// The old `team.db` after `apassy-relay migrate`. It opens with the old key only.
 pub const LEGACY_BACKUP_FILE: &str = "team.db.pre-teams";
 
@@ -213,14 +225,55 @@ impl Default for Limits {
     }
 }
 
+/// How the relay knows that a request came through its edge.
+#[derive(Debug, Clone)]
+pub enum EdgeMode {
+    /// Every request but `GET /healthz` carries `X-Apassy-Edge` with this secret: the
+    /// Worker in front of the hosted relay adds it. At least `MIN_EDGE_SECRET_BYTES`.
+    Required(SecretString),
+    /// No edge header is checked. Only for a relay whose every listener is on the
+    /// loopback (`RelayConfig::check_listeners`): an embedded node, which `tailscaled` on
+    /// the same Mac reaches from the loopback after it ends TLS.
+    Off,
+}
+
+impl EdgeMode {
+    /// The edge secret, or `None` without an edge.
+    pub fn secret(&self) -> Option<&SecretString> {
+        match self {
+            Self::Required(secret) => Some(secret),
+            Self::Off => None,
+        }
+    }
+}
+
+/// What an embedded node needs (`RelayConfig::embedded`, docs/SPEC.md section 28).
+#[derive(Debug, Clone)]
+pub struct EmbeddedOptions {
+    /// The node's own data directory, such as `<app data>/node`.
+    pub data_dir: PathBuf,
+    /// Opens `relay.db`. At least `MIN_KEY_BYTES`.
+    pub master_key: SecretString,
+    /// The origin that agents use: the Funnel origin `https://<name>:8443`. Base URLs
+    /// start with it.
+    pub public_url: String,
+    /// The loopback address of the public listener (`Scope::Public`), or `None` for no
+    /// public route.
+    pub public_listen: Option<SocketAddr>,
+}
+
 /// Everything the relay server needs to start.
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
     pub data_dir: PathBuf,
+    /// The listener of every route (`Scope::Node`).
     pub listen: SocketAddr,
+    /// A second listener that serves only `POST /mcp` and `/p/` (`Scope::Public`, an
+    /// embedded node). `None` on the hosted relay.
+    pub public_listen: Option<SocketAddr>,
     /// For example `https://apassy-relay.wyderka.cc`. Base URLs start with it.
     pub public_url: String,
-    pub edge_secret: SecretString,
+    pub edge: EdgeMode,
     /// Opens the directory `relay.db`. Each team file has its own random key, kept in
     /// the directory.
     pub master_key: SecretString,
@@ -248,6 +301,11 @@ pub struct RelayConfig {
     /// Connect teams the relay holds at once, active or suspended
     /// (`APASSY_RELAY_CONNECT_TEAMS_MAX`). At it, `POST /v1/connect` is 503 `busy`.
     pub connect_teams_max: u64,
+    /// Each listener counts bad bearer tokens and session keys: after
+    /// `http::AUTH_FAILURES_MAX` in `http::AUTH_FAILURE_WINDOW_SECS`, the listener answers
+    /// 429 `rate_limited` until the window ends (docs/SPEC.md section 28.5). On for an
+    /// embedded node; off on the hosted relay, whose edge limits callers.
+    pub auth_limiter: bool,
 }
 
 /// Where and how the relay asks the Worker to send pushes.
@@ -305,6 +363,59 @@ impl RelayConfig {
 
     pub fn admin_socket_path(&self) -> PathBuf {
         self.data_dir.join(ADMIN_SOCKET)
+    }
+
+    /// Refuses `EdgeMode::Off` unless every listener is on the loopback: without the
+    /// edge, nothing else keeps a caller from the network away.
+    pub fn check_listeners(&self) -> RelayResult<()> {
+        if matches!(self.edge, EdgeMode::Off) {
+            let loopback = std::iter::once(self.listen)
+                .chain(self.public_listen)
+                .all(|addr| addr.ip().is_loopback());
+            if !loopback {
+                return Err(RelayError::invalid(
+                    "A relay without the edge listens on loopback addresses only.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The configuration of a Mac's own node (docs/SPEC.md section 28): the node
+    /// listener on `127.0.0.1:0`, the public listener of `options`, no edge, no push,
+    /// shared team vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs
+    /// that wait `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, and the
+    /// operator socket in the data directory.
+    pub fn embedded(options: EmbeddedOptions) -> RelayResult<Self> {
+        let public_url = checked_public_url(&options.public_url)?;
+        if options.master_key.len() < MIN_KEY_BYTES {
+            return Err(RelayError::invalid(format!(
+                "The master key must have at least {MIN_KEY_BYTES} bytes."
+            )));
+        }
+        let config = Self {
+            backup_dir: options.data_dir.join("backups"),
+            data_dir: options.data_dir,
+            listen: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+            public_listen: options.public_listen,
+            public_url,
+            edge: EdgeMode::Off,
+            master_key: options.master_key,
+            session_ttl_secs: EMBEDDED_SESSION_TTL_SECS,
+            approval_timeout_secs: EMBEDDED_APPROVAL_TIMEOUT_SECS,
+            upstream: UpstreamOptions::default(),
+            limits: Limits::default(),
+            request_read_timeout: Duration::from_secs(30),
+            request_handle_timeout: Duration::from_secs(90),
+            push: None,
+            team_vaults: true,
+            questions_to_approvers: false,
+            connect_teams_per_day: 0,
+            connect_teams_max: 0,
+            auth_limiter: true,
+        };
+        config.check_listeners()?;
+        Ok(config)
     }
 
     /// Reads the process environment.
@@ -384,8 +495,9 @@ impl RelayConfig {
         Ok(Self {
             data_dir,
             listen,
+            public_listen: None,
             public_url,
-            edge_secret,
+            edge: EdgeMode::Required(edge_secret),
             master_key,
             session_ttl_secs,
             approval_timeout_secs,
@@ -419,6 +531,7 @@ impl RelayConfig {
             },
             connect_teams_per_day,
             connect_teams_max,
+            auth_limiter: false,
         })
     }
 }
@@ -581,7 +694,10 @@ mod tests {
             PathBuf::from("/data/teams/t_abcdefgh23.db")
         );
         assert_eq!(config.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
-        assert_eq!(config.edge_secret.expose(), EDGE);
+        assert_eq!(config.edge.secret().map(SecretString::expose), Some(EDGE));
+        assert!(config.public_listen.is_none());
+        assert!(!config.auth_limiter);
+        config.check_listeners().unwrap();
         assert_eq!(config.connect_teams_per_day, DEFAULT_CONNECT_TEAMS_PER_DAY);
         assert_eq!(config.connect_teams_max, DEFAULT_CONNECT_TEAMS_MAX);
         assert_eq!(
@@ -803,5 +919,51 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(config.master_key.expose(), "passphrase from a file");
+    }
+
+    fn embedded_options(public_listen: Option<&str>) -> EmbeddedOptions {
+        EmbeddedOptions {
+            data_dir: PathBuf::from("/tmp/node"),
+            master_key: SecretString::new("a synthetic node master key".into()),
+            public_url: "https://mac.example.ts.net:8443/".into(),
+            public_listen: public_listen.map(|addr| addr.parse().unwrap()),
+        }
+    }
+
+    #[test]
+    fn an_embedded_node_has_no_edge_and_listens_on_the_loopback() {
+        let config = RelayConfig::embedded(embedded_options(Some("127.0.0.1:49200"))).unwrap();
+        assert!(config.edge.secret().is_none());
+        assert_eq!(config.listen.to_string(), "127.0.0.1:0");
+        assert_eq!(config.public_url, "https://mac.example.ts.net:8443");
+        assert_eq!(config.session_ttl_secs, 600);
+        assert_eq!(config.approval_timeout_secs, 300);
+        assert!(config.push.is_none());
+        assert!(config.team_vaults);
+        assert_eq!((config.connect_teams_per_day, config.connect_teams_max), (0, 0));
+        assert!(config.auth_limiter);
+        assert_eq!(config.admin_socket_path(), PathBuf::from("/tmp/node/admin.sock"));
+        assert!(RelayConfig::embedded(embedded_options(None)).is_ok());
+        assert!(RelayConfig::embedded(embedded_options(Some("[::1]:49200"))).is_ok());
+    }
+
+    #[test]
+    fn edge_off_with_a_listener_off_the_loopback_is_refused() {
+        for public in ["0.0.0.0:49200", "192.0.2.7:49200", "[::]:49200"] {
+            let error = RelayConfig::embedded(embedded_options(Some(public))).unwrap_err();
+            assert_eq!(error.code, crate::error::codes::INVALID_REQUEST, "{public}");
+        }
+        let mut config = RelayConfig::embedded(embedded_options(None)).unwrap();
+        config.listen = "0.0.0.0:8080".parse().unwrap();
+        assert!(config.check_listeners().is_err());
+        // The same listener is fine with the edge secret.
+        config.edge = EdgeMode::Required(SecretString::new(EDGE.into()));
+        config.public_listen = Some("0.0.0.0:8443".parse().unwrap());
+        config.check_listeners().unwrap();
+        let short = RelayConfig::embedded(EmbeddedOptions {
+            master_key: SecretString::new("short".into()),
+            ..embedded_options(None)
+        });
+        assert!(short.is_err());
     }
 }
