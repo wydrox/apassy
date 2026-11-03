@@ -201,7 +201,8 @@ const LATER_SCHEMAS: [i64; 2] = [
     super::schema29::BOUNCER_HOST_SCHEMA_VERSION,
     super::schema32::SHORT_LIVED_SCHEMA_VERSION,
 ];
-const _: () = assert!(LATER_SCHEMAS[0] == super::schema32::PREVIOUS_SCHEMA_VERSION);
+// The schema before this one is the last of the later steps before it.
+const _: () = assert!(LATER_SCHEMAS[0] == UPGRADABLE_SCHEMA);
 const _: () = assert!(LATER_SCHEMAS[1] == SCHEMA_VERSION);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or

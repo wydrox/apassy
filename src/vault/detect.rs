@@ -274,7 +274,10 @@ fn aws_pair_lines(lines: &[dotenv::Line]) -> Option<(usize, usize)> {
             })
             .map(|(index, _)| index)
             .collect();
-        (matching.len() == 1).then(|| matching[0])
+        match matching.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
     };
     let id = index(&["AWS_ACCESS_KEY_ID"], is_aws_access_key_id)?;
     let secret = index(

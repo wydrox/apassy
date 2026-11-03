@@ -475,65 +475,52 @@ pub fn is_aws_service(name: &str) -> bool {
 }
 
 fn aws_settings_ok(settings: &AwsStsSettings) -> bool {
-    if let Some(arn) = &settings.role_arn {
+    let role_ok = |arn: &String| {
         let rest = arn.strip_prefix("arn:aws:iam::").unwrap_or("");
         let (account, role) = rest.split_once(":role/").unwrap_or(("", ""));
-        if !(arn.len() <= 2048
+        arn.len() <= 2048
             && account.len() == 12
             && all_chars(account, |c| c.is_ascii_digit())
-            && all_chars(role, |c| c.is_ascii_graphic()))
-        {
-            return false;
-        }
-    }
-    if let Some(policy) = &settings.policy {
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(policy);
-        if !(policy.len() <= 2048 && matches!(parsed, Ok(serde_json::Value::Object(_)))) {
-            return false;
-        }
-    }
-    if let Some(region) = &settings.region
-        && !is_aws_region(region)
-    {
-        return false;
-    }
-    if let Some(services) = &settings.services
-        && !((1..=16).contains(&services.len())
+            && all_chars(role, |c| c.is_ascii_graphic())
+    };
+    let policy_ok = |policy: &String| {
+        policy.len() <= 2048
+            && matches!(
+                serde_json::from_str::<serde_json::Value>(policy),
+                Ok(serde_json::Value::Object(_))
+            )
+    };
+    let services_ok = |services: &Vec<String>| {
+        (1..=16).contains(&services.len())
             && distinct(services)
-            && services.iter().all(|service| is_aws_service(service)))
-    {
-        return false;
-    }
-    true
+            && services.iter().all(|service| is_aws_service(service))
+    };
+    settings.role_arn.as_ref().is_none_or(role_ok)
+        && settings.policy.as_ref().is_none_or(policy_ok)
+        && settings.region.as_deref().is_none_or(is_aws_region)
+        && settings.services.as_ref().is_none_or(services_ok)
 }
 
 fn github_settings_ok(settings: &GithubAppSettings) -> bool {
-    if let Some(repositories) = &settings.repositories
-        && !((1..=500).contains(&repositories.len())
+    let repositories_ok = |repositories: &Vec<String>| {
+        (1..=500).contains(&repositories.len())
             && distinct(repositories)
             && repositories.iter().all(|name| {
                 name.len() <= 100
                     && all_chars(name, |c| {
                         c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
                     })
-            }))
-    {
-        return false;
-    }
-    if let Some(GithubPermissions(permissions)) = &settings.permissions
-        && !((1..=64).contains(&permissions.len())
+            })
+    };
+    let permissions_ok = |GithubPermissions(permissions): &GithubPermissions| {
+        (1..=64).contains(&permissions.len())
             && permissions.iter().all(|(name, _)| {
                 name.len() <= 64 && all_chars(name, |c| c.is_ascii_lowercase() || c == '_')
-            }))
-    {
-        return false;
-    }
-    if let Some(url) = &settings.api_url
-        && !is_https_url(url)
-    {
-        return false;
-    }
-    true
+            })
+    };
+    settings.repositories.as_ref().is_none_or(repositories_ok)
+        && settings.permissions.as_ref().is_none_or(permissions_ok)
+        && settings.api_url.as_deref().is_none_or(is_https_url)
 }
 
 fn is_service_account_email(email: &str) -> bool {
@@ -549,36 +536,25 @@ fn is_service_account_email(email: &str) -> bool {
 }
 
 fn google_settings_ok(settings: &GoogleSettings) -> bool {
-    if let Some(scopes) = &settings.scopes
-        && !((1..=16).contains(&scopes.len())
+    let scopes_ok = |scopes: &Vec<String>| {
+        (1..=16).contains(&scopes.len())
             && distinct(scopes)
-            && scopes.iter().all(|scope| is_https_url(scope)))
-    {
-        return false;
-    }
-    if let Some(email) = &settings.impersonate
-        && !is_service_account_email(email)
-    {
-        return false;
-    }
-    true
+            && scopes.iter().all(|scope| is_https_url(scope))
+    };
+    settings.scopes.as_ref().is_none_or(scopes_ok)
+        && settings
+            .impersonate
+            .as_deref()
+            .is_none_or(is_service_account_email)
 }
 
 fn oauth_settings_ok(settings: &OauthSettings) -> bool {
-    if !is_https_url(&settings.token_url) {
-        return false;
-    }
-    if let Some(url) = &settings.revoke_url
-        && !is_https_url(url)
-    {
-        return false;
-    }
-    if let Some(scope) = &settings.scope
-        && !(1..=1024).contains(&scope.len())
-    {
-        return false;
-    }
-    true
+    is_https_url(&settings.token_url)
+        && settings.revoke_url.as_deref().is_none_or(is_https_url)
+        && settings
+            .scope
+            .as_ref()
+            .is_none_or(|scope| (1..=1024).contains(&scope.len()))
 }
 
 // ----- fields (contract section 3.1) ----------------------------------------------------
