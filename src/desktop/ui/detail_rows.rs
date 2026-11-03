@@ -14,6 +14,7 @@ use eframe::egui::{
 };
 
 use super::kit::{self, Font, Icon};
+use crate::desktop::model::MASKED_VALUE;
 
 /// The width of the content of the page: 640 points less the 28-point margins.
 pub(super) const READING_WIDTH: f32 = 584.0;
@@ -278,17 +279,6 @@ impl Group<'_> {
             });
         })
     }
-
-    /// A row with a switch at the right.
-    pub(super) fn toggle(&mut self, label: &str, on: &mut bool) -> Response {
-        self.line(|ui| {
-            ui.label(kit::text(label, Font::Body).color(kit::LABEL));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                kit::toggle(ui, on, label)
-            })
-            .inner
-        })
-    }
 }
 
 /// A small gray button, as `.pb` of the mockup: 24 points high, 12.5-point medium text.
@@ -326,6 +316,17 @@ pub(super) fn pill_button(ui: &mut Ui, label: &str, name: &str) -> Response {
     response
 }
 
+/// The mask of a hidden value on its row: the dots of the Password row. A masked
+/// one-time password uses the same mask.
+pub(super) fn mask(ui: &mut Ui) -> Response {
+    ui.label(
+        kit::text(MASKED_VALUE, Font::Body)
+            .size(15.0)
+            .extra_letter_spacing(2.0)
+            .color(kit::LABEL),
+    )
+}
+
 /// A menu value, as `.pop` of the mockup: the value on a light gray capsule with a
 /// chevron down. A click opens a menu of `options`; a choice changes `value`. `name` is
 /// its name for VoiceOver.
@@ -336,6 +337,29 @@ pub(super) fn pop_menu<T: PartialEq + Clone>(
     shown: &str,
     name: &str,
 ) -> Response {
+    pop_menu_styled(ui, value, options, shown, name, false)
+}
+
+/// [`pop_menu`] on white with a thin border, for a menu inside a sentence, as the scope
+/// bar of Agents and Decisions.
+pub(super) fn bordered_pop_menu<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    value: &mut T,
+    options: &[(T, String)],
+    shown: &str,
+    name: &str,
+) -> Response {
+    pop_menu_styled(ui, value, options, shown, name, true)
+}
+
+fn pop_menu_styled<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    value: &mut T,
+    options: &[(T, String)],
+    shown: &str,
+    name: &str,
+    bordered: bool,
+) -> Response {
     let galley = kit::galley(ui, kit::text(shown, Font::Callout).size(12.5));
     let size = Vec2::new(galley.size().x + 31.0, 22.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -345,15 +369,28 @@ pub(super) fn pop_menu<T: PartialEq + Clone>(
         response.scroll_to_me(None);
     }
     if ui.is_rect_visible(rect) {
-        let fill = if response.is_pointer_button_down_on() {
-            BUTTON_HOVER
-        } else if response.hovered() {
-            BUTTON
+        let (pressed, hovered, rest) = if bordered {
+            (kit::FILL_PRESSED, kit::FILL, kit::SURFACE)
         } else {
-            POP
+            (BUTTON_HOVER, BUTTON, POP)
+        };
+        let fill = if response.is_pointer_button_down_on() {
+            pressed
+        } else if response.hovered() {
+            hovered
+        } else {
+            rest
         };
         let painter = ui.painter();
         painter.rect_filled(rect, 6, fill);
+        if bordered {
+            painter.rect_stroke(
+                rect,
+                6,
+                Stroke::new(1.0, kit::BORDER),
+                egui::StrokeKind::Inside,
+            );
+        }
         if response.has_focus() {
             kit::focus_ring(painter, rect, 6);
         }

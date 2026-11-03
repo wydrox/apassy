@@ -1,12 +1,15 @@
-//! Agents (ADR 0026 §2, ADR 0025 §3f): the connected agents, read-only.
+//! Agents (ADR 0026 §2, ADR 0025 §3f): the agents of every Mac of the vault, read-only.
 //!
-//! The list shows each agent, where it runs, and its uses this week. The page of an agent
-//! shows, it does not configure: its uses and projects, the kinds of action it used this
-//! week, its newest uses, an optional note for the bouncer, its exceptions, and
-//! "Disconnect…". An exception comes from an answer in Decisions;
+//! The list shows the agents of this Mac, then those of each other Mac from its feed
+//! (relay-feed-v1, [`crate::desktop::remote_feeds`]), each with its Mac and its uses this
+//! week. The scope bar ([`super::scope_bar`]) narrows it to one Mac or one project. The
+//! page of an agent shows, it does not configure: its uses and projects, the kinds of
+//! action it used this week, its newest uses, an optional note for the bouncer, its
+//! exceptions, and "Disconnect…". An exception comes from an answer in Decisions;
 //! removing one gives authority back, so it needs the owner check. Saving the note and
 //! disconnecting take no authority, so they need none. "+" opens "Connect an Agent"
-//! ([`super::agent_onboarding`]), the only setup, with one owner check.
+//! ([`super::agent_onboarding`]), the only setup, with one owner check. The page of an
+//! agent of another Mac ([`remote`]) only shows: a change is made on that Mac.
 
 use eframe::egui::{self, Align, Label, Layout};
 
@@ -16,10 +19,15 @@ use super::detail_rows as rows;
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::{Sheet, close_sheet};
 use crate::desktop::owner_check::OwnerRequest;
-use crate::desktop::owner_store::{ActionUse, AgentOverview, ExceptionRow, RecentUse, format_utc};
+use crate::desktop::owner_store::{ActionUse, AgentOverview, ExceptionRow, RecentUse};
+use crate::desktop::remote_feeds::{DeviceScope, RemoteFeedState, RemoteMac};
 use crate::desktop::{DesktopApp, Place};
 use crate::vault::AgentSummary;
 use crate::vault::exceptions::{ExceptionKind, MAX_AGENT_NOTE_BYTES};
+
+mod remote;
+
+pub(super) use remote::connected as remote_connected;
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -27,23 +35,23 @@ fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// The date part of a UTC time.
-fn date(unix: u64) -> String {
-    format_utc(unix)
-        .split(' ')
-        .next()
-        .unwrap_or_default()
-        .to_owned()
-}
-
 /// Where an agent runs. Agents reach the broker through its socket on this Mac.
 const WHERE: &str = "This Mac";
 
-/// The state of the view: the note that the owner edits.
+/// The list reads at most this many uses of an agent, as `agent_uses_this_week`.
+const LIST_USES: usize = 500;
+
+const WEEK: u64 = 7 * 24 * 3600;
+
+/// The state of the view: the note that the owner edits and the selected agent of
+/// another Mac.
 #[derive(Debug, Default)]
 pub(crate) struct State {
     /// The agent of the note field and its text.
     pub(super) note: Option<(u64, String)>,
+    /// The selected agent of another Mac: the device of the Mac and the agent's `id` in
+    /// its feed. A selected agent of this Mac (`owner_ui.selected_agent`) comes first.
+    pub(super) remote: Option<(String, String)>,
 }
 
 /// The detail column of Agents: the selected agent, or with none, an empty state. As in
@@ -55,6 +63,22 @@ pub(super) fn detail_column(
     _pending: &super::shell::Pending,
 ) {
     let selected = app.owner_ui.selected_agent;
+    if selected.is_none()
+        && let Some(key) = app.ui.agents.remote.clone()
+    {
+        if let Some(found) = remote::find(&app.remote_macs, &key) {
+            // No "⋯": its actions would change the agent on the other Mac.
+            super::columns::detail_toolbar(ui, |_| {});
+            super::columns::detail_body(ui, ("remote-agent", &key), |ui| {
+                ui.scope(|ui| super::updates::banner(app, ui));
+                ui.scope(|ui| super::sync::banner(app, ui));
+                remote::draw_agent(app, ui, &found);
+            });
+            return;
+        }
+        // The agent or its Mac is gone from the feeds.
+        app.ui.agents.remote = None;
+    }
     let agent = selected.and_then(|agent_id| {
         app.owner_ui
             .session
@@ -105,11 +129,16 @@ fn more_menu(ui: &mut egui::Ui, agent: &AgentSummary) -> bool {
 
 /// The token line of the "⋯" menu.
 fn token_words(agent: &AgentSummary, now: u64) -> String {
-    let day = short_date(agent.token_expires_at, now);
     if agent.token_expired_at(now) {
-        format!("Token expired {day}")
+        format!(
+            "Token expired {}",
+            kit::relative_time(agent.token_expires_at, now)
+        )
     } else {
-        format!("Token valid until {day}")
+        format!(
+            "Token valid until {}",
+            kit::day_month_year(agent.token_expires_at)
+        )
     }
 }
 
@@ -119,7 +148,7 @@ fn draw_empty(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let agents = app.owner_ui.session.agents().unwrap_or_default();
     let revoked = agents.iter().filter(|agent| agent.revoked).count();
     let active = agents.len() - revoked;
-    if active > 0 {
+    if active + remote::connected(&app.remote_macs) > 0 {
         super::columns::nothing_selected(
             ui,
             Icon::Agent,
@@ -299,13 +328,199 @@ fn cli_guidance(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The list column of Agents: the connected agents, then the disconnected ones, folded.
-/// "+" connects an agent.
+/// One row of the list column of Agents.
+enum Entry {
+    /// The name of a Mac over its rows, with the number of its agents, when the list
+    /// shows more than one Mac.
+    Header(String, Option<usize>),
+    /// An agent of this Mac.
+    Local {
+        id: u64,
+        name: String,
+        subtitle: String,
+        meta: Option<&'static str>,
+    },
+    /// An agent of another Mac, by the device of the Mac and its id in the feed.
+    Remote {
+        device: String,
+        id: String,
+        name: String,
+        subtitle: String,
+        meta: Option<&'static str>,
+    },
+    /// A line for a Mac whose agents do not show.
+    Note(String),
+}
+
+/// The uses this week and the projects of an agent of this Mac, from its newest
+/// [`LIST_USES`] uses.
+fn local_facts(app: &DesktopApp, agent_id: u64, now: u64) -> (usize, Vec<String>) {
+    let since = now.saturating_sub(WEEK);
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.agent_uses(agent_id, LIST_USES))
+        .and_then(Result::ok)
+        .map(|uses| {
+            let this_week = uses.iter().filter(|item_use| item_use.at >= since).count();
+            let projects = crate::vault::overview::projects_by_use(
+                uses.iter().map(|item_use| item_use.project_label.as_str()),
+            );
+            (this_week, projects)
+        })
+        .unwrap_or_default()
+}
+
+/// The agent is in the project of the scope, or the scope has all projects.
+fn in_project(projects: &[String], project: Option<&String>) -> bool {
+    project.is_none_or(|project| projects.contains(project))
+}
+
+/// The device of the scope as the lists show it: a Mac that is gone from the feeds
+/// shows as all devices.
+fn shown_device(device: &DeviceScope, macs: &[RemoteMac]) -> DeviceScope {
+    match device {
+        DeviceScope::Other(other) if !macs.iter().any(|mac| &mac.device == other) => {
+            DeviceScope::All
+        }
+        device => device.clone(),
+    }
+}
+
+/// The list column of Agents: the scope bar, the agents of this Mac, then those of each
+/// other Mac, then the disconnected agents of this Mac, folded. "+" connects an agent.
 pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let agents = app.owner_ui.session.agents();
-    let count = agents.as_ref().map_or(0, |agents| {
-        agents.iter().filter(|agent| !agent.revoked).count()
-    });
+    let now = now();
+    let (agents, error) = match app.owner_ui.session.agents() {
+        Ok(agents) => (agents, None),
+        Err(err) => (Vec::new(), Some(err.message)),
+    };
+    let (revoked, active): (Vec<_>, Vec<_>) = agents.into_iter().partition(|agent| agent.revoked);
+    let local: Vec<(AgentSummary, usize, Vec<String>)> = active
+        .into_iter()
+        .map(|agent| {
+            let (uses, projects) = local_facts(app, agent.id, now);
+            (agent, uses, projects)
+        })
+        .collect();
+
+    // The choices of the scope bar: this Mac and each other Mac, and every project.
+    let mut devices = vec![(DeviceScope::ThisMac, WHERE.to_owned())];
+    devices.extend(app.remote_macs.iter().map(|mac| {
+        (
+            DeviceScope::Other(mac.device.clone()),
+            remote::plain(&mac.name),
+        )
+    }));
+    let mut projects: Vec<String> = local
+        .iter()
+        .flat_map(|(_, _, projects)| projects.iter().cloned())
+        .chain(
+            app.remote_macs
+                .iter()
+                .filter_map(|mac| match &mac.state {
+                    RemoteFeedState::Ready(feed) => Some(&feed.agents),
+                    _ => None,
+                })
+                .flatten()
+                .flat_map(|agent| agent.projects.iter().cloned()),
+        )
+        .collect();
+    projects.sort();
+    projects.dedup();
+
+    let scope = app.ui.activity_scope.clone();
+    let device = shown_device(&scope.device, &app.remote_macs);
+    let project = scope.project.as_ref();
+    let show_local = matches!(device, DeviceScope::All | DeviceScope::ThisMac);
+
+    // The sections: this Mac first, then each other Mac in the scope.
+    let mut sections: Vec<(String, Vec<Entry>, Option<usize>)> = Vec::new();
+    let mut count = 0;
+    if show_local {
+        let rows: Vec<Entry> = local
+            .iter()
+            .filter(|(_, _, projects)| in_project(projects, project))
+            .map(|(agent, uses, _)| Entry::Local {
+                id: agent.id,
+                name: agent.name.clone(),
+                subtitle: format!(
+                    "{WHERE} · {}",
+                    super::columns::count_label(*uses, "use this week", "uses this week")
+                ),
+                meta: agent.token_expired_at(now).then_some("Token expired"),
+            })
+            .collect();
+        count += rows.len();
+        if !rows.is_empty() {
+            let shown = rows.len();
+            sections.push((WHERE.to_owned(), rows, Some(shown)));
+        }
+    }
+    for mac in &app.remote_macs {
+        let shown = match &device {
+            DeviceScope::All => true,
+            DeviceScope::ThisMac => false,
+            DeviceScope::Other(other) => *other == mac.device,
+        };
+        if !shown {
+            continue;
+        }
+        let name = remote::plain(&mac.name);
+        match &mac.state {
+            RemoteFeedState::Ready(feed) => {
+                let mut agents: Vec<_> = feed
+                    .agents
+                    .iter()
+                    .filter(|agent| in_project(&agent.projects, project))
+                    .collect();
+                // The connected agents first, each group in the order of the feed.
+                agents.sort_by_key(|agent| agent.revoked);
+                let connected = agents.iter().filter(|agent| !agent.revoked).count();
+                count += connected;
+                let rows: Vec<Entry> = agents
+                    .into_iter()
+                    .map(|agent| Entry::Remote {
+                        device: mac.device.clone(),
+                        id: agent.id.clone(),
+                        name: remote::plain(&agent.name),
+                        subtitle: format!(
+                            "{name} · {}",
+                            super::columns::count_label(
+                                usize::try_from(agent.uses_this_week).unwrap_or(usize::MAX),
+                                "use this week",
+                                "uses this week"
+                            )
+                        ),
+                        meta: if agent.revoked {
+                            Some("Disconnected")
+                        } else if now >= agent.token_expires_at {
+                            Some("Token expired")
+                        } else {
+                            None
+                        },
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    sections.push((name, rows, Some(connected)));
+                }
+            }
+            RemoteFeedState::NeedsSync => sections.push((
+                name.clone(),
+                vec![Entry::Note(format!(
+                    "Sync this vault to see the agents of {name}"
+                ))],
+                None,
+            )),
+            RemoteFeedState::NeedsUpdate => sections.push((
+                name.clone(),
+                vec![Entry::Note(format!(
+                    "Update Apassy to see the agents of {name}"
+                ))],
+                None,
+            )),
+        }
+    }
+
     let mut connect = false;
     super::columns::list_toolbar(ui, "Agents", &format!("{count} connected"), |ui| {
         connect = kit::plain_icon_button(ui, Icon::Plus, "Connect an Agent").clicked();
@@ -313,70 +528,146 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if connect {
         agent_onboarding::open(app);
     }
-    let agents = match agents {
-        Ok(agents) => agents,
-        Err(err) => {
-            kit::tone_note(ui, err.message, Tone::Critical);
-            return;
-        }
-    };
-    let now = now();
-    let (revoked, active): (Vec<_>, Vec<_>) = agents.into_iter().partition(|agent| agent.revoked);
-    let rows: Vec<(u64, String, String, Option<&'static str>)> = active
-        .iter()
-        .map(|agent| {
-            let uses = app
-                .owner_ui
-                .session
-                .agent_uses_this_week(agent.id)
-                .unwrap_or(0);
-            let subtitle = format!(
-                "{WHERE} · {}",
-                super::columns::count_label(uses, "use this week", "uses this week")
-            );
-            let meta = agent.token_expired_at(now).then_some("Token expired");
-            (agent.id, agent.name.clone(), subtitle, meta)
+    if let Some(message) = error {
+        kit::tone_note(ui, message, Tone::Critical);
+        return;
+    }
+    // The bar draws nothing with one device and no project: then no inset either.
+    let bar = devices.len() > 1
+        || scope.device != DeviceScope::All
+        || !projects.is_empty()
+        || scope.project.is_some();
+    if bar
+        && super::columns::list_inset(ui, |ui| {
+            super::scope_bar::scope_bar(ui, &mut app.ui.activity_scope, &devices, &projects)
         })
-        .collect();
-    let groups = if rows.is_empty() {
-        Vec::new()
+    {
+        ui.ctx().request_repaint();
+    }
+    // With no agent on any Mac, the list says so; else the scope leaves none.
+    let none_yet = local.is_empty()
+        && revoked.is_empty()
+        && app.remote_macs.iter().all(|mac| match &mac.state {
+            RemoteFeedState::Ready(feed) => feed.agents.is_empty(),
+            _ => true,
+        });
+
+    // The disconnected agents of this Mac, in the scope.
+    let revoked: Vec<AgentSummary> = if show_local {
+        revoked
+            .into_iter()
+            .filter(|agent| {
+                project.is_none() || in_project(&local_facts(app, agent.id, now).1, project)
+            })
+            .collect()
     } else {
-        vec![super::columns::Group {
-            title: "Connected".to_owned(),
-            rows,
-        }]
+        Vec::new()
     };
+    let headers = sections.len() > 1;
+    let mut rows = Vec::new();
+    for (title, entries, shown) in sections {
+        if headers {
+            rows.push(Entry::Header(title, shown));
+        }
+        rows.extend(entries);
+    }
+    let empty = rows.is_empty();
+    let groups = vec![super::columns::Group {
+        title: String::new(),
+        rows,
+    }];
     let selected = app.owner_ui.selected_agent;
+    let selected_remote = app.ui.agents.remote.clone();
     let mut open = None;
+    let mut open_remote = None;
     let mut expanded = app.ui.is_expanded("revoked-agents");
     super::columns::grouped_rows(
         ui,
         "agent-list",
         &groups,
         false,
-        |ui, (id, name, subtitle, meta)| {
-            let response = ui
-                .push_id(("agent-row", id), |ui| {
-                    kit::list_row(
-                        ui,
-                        &kit::ListRow {
-                            tile: kit::Tile::agent(name),
-                            title: name,
-                            subtitle,
-                            meta: *meta,
-                            production: false,
-                            selected: selected == Some(*id),
-                        },
-                    )
-                })
-                .inner;
-            if response.clicked() {
-                open = Some(*id);
+        |ui, entry| match entry {
+            Entry::Header(title, shown) => {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), kit::GROUP_HEADER),
+                    egui::Sense::hover(),
+                );
+                kit::paint_group_header(ui, rect, title, *shown);
+            }
+            Entry::Local {
+                id,
+                name,
+                subtitle,
+                meta,
+            } => {
+                let response = ui
+                    .push_id(("agent-row", id), |ui| {
+                        kit::list_row(
+                            ui,
+                            &kit::ListRow {
+                                tile: kit::Tile::agent(name),
+                                title: name,
+                                subtitle,
+                                meta: *meta,
+                                production: false,
+                                selected: selected == Some(*id),
+                            },
+                        )
+                    })
+                    .inner;
+                if response.clicked() {
+                    open = Some(*id);
+                }
+            }
+            Entry::Remote {
+                device,
+                id,
+                name,
+                subtitle,
+                meta,
+            } => {
+                let is_selected = selected.is_none()
+                    && selected_remote
+                        .as_ref()
+                        .is_some_and(|(d, i)| d == device && i == id);
+                let response = ui
+                    .push_id(("remote-agent-row", device, id), |ui| {
+                        kit::list_row(
+                            ui,
+                            &kit::ListRow {
+                                tile: kit::Tile::agent(name),
+                                title: name,
+                                subtitle,
+                                meta: *meta,
+                                production: false,
+                                selected: is_selected,
+                            },
+                        )
+                    })
+                    .inner;
+                if response.clicked() {
+                    open_remote = Some((device.clone(), id.clone()));
+                }
+            }
+            Entry::Note(text) => {
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            Label::new(kit::text(text, Font::Callout).color(kit::SECONDARY)).wrap(),
+                        );
+                    });
             }
         },
         |ui| {
-            if active.is_empty() && revoked.is_empty() {
-                super::columns::list_note(ui, "No agents yet.");
+            if empty && revoked.is_empty() {
+                let message = if none_yet {
+                    "No agents yet."
+                } else {
+                    "No agents to show."
+                };
+                super::columns::list_note(ui, message);
             }
             if !revoked.is_empty() {
                 ui.add_space(8.0);
@@ -395,7 +686,10 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             s.labeled(
                                 &agent.name,
                                 kit::text(
-                                    format!("Connected {}", date(agent.created_at)),
+                                    format!(
+                                        "Connected {}",
+                                        kit::relative_time(agent.created_at, now)
+                                    ),
                                     Font::Callout,
                                 )
                                 .color(kit::SECONDARY),
@@ -409,6 +703,11 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     app.ui.set_expanded("revoked-agents", expanded);
     if let Some(agent_id) = open {
         app.owner_ui.selected_agent = Some(agent_id);
+        app.ui.agents.remote = None;
+    }
+    if let Some(key) = open_remote {
+        app.owner_ui.selected_agent = None;
+        app.ui.agents.remote = Some(key);
     }
 }
 
@@ -424,24 +723,14 @@ fn exception_words(kind: ExceptionKind) -> &'static str {
 fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
     let agent_id = agent.id;
     let now = now();
-    // The header sits lower than the toolbar, as in the mockup.
-    ui.add_space(12.0);
-    ui.horizontal(|ui| {
-        kit::tile(ui, &kit::Tile::agent(&agent.name), 56.0);
-        ui.add_space(6.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(Label::new(kit::text(&agent.name, Font::Title).color(kit::LABEL)).wrap());
-            ui.label(
-                kit::text(
-                    format!("{WHERE} · connected {}", short_date(agent.created_at, now)),
-                    Font::Body,
-                )
-                .color(kit::SECONDARY),
-            );
-        });
-    });
-    ui.add_space(16.0);
+    header(
+        ui,
+        &agent.name,
+        &format!(
+            "{WHERE} · connected {}",
+            kit::relative_time(agent.created_at, now)
+        ),
+    );
     if agent.revoked {
         kit::notice(
             ui,
@@ -470,7 +759,7 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
             |visible| visible.map(|items| items.len()),
         );
     let reconnect = stats_group(ui, agent, &overview, visible, now);
-    actions_group(ui, &overview);
+    actions_group(ui, &overview.actions);
     recent_group(ui, &overview.recent, now);
     note_group(app, ui, agent_id, &overview);
     exceptions_group(app, ui, agent, &overview.exceptions);
@@ -496,6 +785,23 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
     }
 }
 
+/// The header of an agent page: the tile, the name, and a line under it, such as
+/// "This Mac · connected 3 days ago".
+fn header(ui: &mut egui::Ui, name: &str, line: &str) {
+    // The header sits lower than the toolbar, as in the mockup.
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        kit::tile(ui, &kit::Tile::agent(name), 56.0);
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(Label::new(kit::text(name, Font::Title).color(kit::LABEL)).wrap());
+            ui.add(Label::new(kit::text(line, Font::Body).color(kit::SECONDARY)).wrap());
+        });
+    });
+    ui.add_space(16.0);
+}
+
 /// What the agent sees, for the "Sees" row. `visible`: the number of credentials of an
 /// agent restricted to its listed ones ("only these items", ADR 0025 §3f), or `None`
 /// for an agent that sees the name of each credential.
@@ -510,30 +816,6 @@ fn sees_words(visible: Option<usize>) -> String {
     }
 }
 
-/// A day as in the mockup: "Oct 9", with the year when it is not this year.
-fn short_date(unix: u64, now: u64) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let day = date(unix);
-    let parts: Vec<&str> = day.split('-').collect();
-    let [year, month, day_of_month] = parts[..] else {
-        return day;
-    };
-    let (Ok(month), Ok(day_of_month)) = (month.parse::<usize>(), day_of_month.parse::<u32>())
-    else {
-        return day;
-    };
-    let Some(name) = month.checked_sub(1).and_then(|index| MONTHS.get(index)) else {
-        return day;
-    };
-    if date(now).starts_with(year) {
-        format!("{name} {day_of_month}")
-    } else {
-        format!("{name} {day_of_month}, {year}")
-    }
-}
-
 /// Uses, projects, and what the agent sees. An expired token adds its row with
 /// "Reconnect…": the agent cannot work until then. Returns true on "Reconnect…".
 fn stats_group(
@@ -545,56 +827,78 @@ fn stats_group(
 ) -> bool {
     let mut reconnect = false;
     kit::section(ui, None, None, |s| {
-        s.labeled(
-            "Uses this week",
-            kit::text(overview.uses_this_week.to_string(), Font::Body).color(kit::SECONDARY),
-        );
-        s.labeled(
-            "Projects",
-            kit::text(
-                if overview.projects.is_empty() {
-                    "None yet".to_owned()
-                } else {
-                    overview.projects.join(", ")
-                },
-                Font::Body,
-            )
-            .color(kit::SECONDARY),
-        );
-        s.labeled(
-            "Sees",
-            kit::text(sees_words(visible), Font::Body).color(kit::SECONDARY),
+        fact_rows(
+            s,
+            overview.uses_this_week,
+            &overview.projects,
+            &sees_words(visible),
         );
         if !agent.token_expired_at(now) {
             return;
         }
+        reconnect = token_row(
+            s,
+            &format!(
+                "Expired {}. Reconnect to give it a new one.",
+                kit::relative_time(agent.token_expires_at, now)
+            ),
+            true,
+        );
+    });
+    reconnect
+}
+
+/// The first rows of the facts of an agent: its uses this week, or with none one row
+/// "No use this week"; its projects; and what it sees.
+fn fact_rows(s: &mut kit::Section<'_>, uses: usize, projects: &[String], sees: &str) {
+    if uses == 0 {
         s.row(|ui| {
-            egui::Sides::new().shrink_left().show(
-                ui,
-                |ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(kit::text("Token", Font::Body).color(kit::LABEL));
-                        ui.add(
-                            Label::new(
-                                kit::text(
-                                    format!(
-                                        "Expired {}. Reconnect to give it a new one.",
-                                        short_date(agent.token_expires_at, now)
-                                    ),
-                                    Font::Callout,
-                                )
-                                .color(Tone::Critical.text()),
-                            )
-                            .wrap(),
-                        );
-                    });
-                },
-                |ui| {
-                    reconnect = kit::small_button(ui, "Reconnect…", Style::Prominent).clicked();
-                },
-            );
+            ui.label(kit::text("No use this week", Font::Body).color(kit::SECONDARY));
         });
+    } else {
+        s.labeled(
+            "Uses this week",
+            kit::text(uses.to_string(), Font::Body).color(kit::SECONDARY),
+        );
+    }
+    s.labeled(
+        "Projects",
+        kit::text(
+            if projects.is_empty() {
+                "None yet".to_owned()
+            } else {
+                projects.join(", ")
+            },
+            Font::Body,
+        )
+        .color(kit::SECONDARY),
+    );
+    s.labeled("Sees", kit::text(sees, Font::Body).color(kit::SECONDARY));
+}
+
+/// The row of an expired token: "Token" and `words` in red, with "Reconnect…" when
+/// `button`. Returns true on "Reconnect…".
+fn token_row(s: &mut kit::Section<'_>, words: &str, button: bool) -> bool {
+    let mut reconnect = false;
+    s.row(|ui| {
+        egui::Sides::new().shrink_left().show(
+            ui,
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(kit::text("Token", Font::Body).color(kit::LABEL));
+                    ui.add(
+                        Label::new(kit::text(words, Font::Callout).color(Tone::Critical.text()))
+                            .wrap(),
+                    );
+                });
+            },
+            |ui| {
+                if button {
+                    reconnect = kit::small_button(ui, "Reconnect…", Style::Prominent).clicked();
+                }
+            },
+        );
     });
     reconnect
 }
@@ -624,11 +928,14 @@ fn action_value(action: &ActionUse) -> (String, Option<String>) {
 
 /// "Actions this week": one row per kind of action, the most used first, with the
 /// words of Decisions ("Read", "Change", "Deploy", "Delete"). Uses that were denied,
-/// refused, or not answered in time show apart, in red.
-fn actions_group(ui: &mut egui::Ui, overview: &AgentOverview) {
+/// refused, or not answered in time show apart, in red. With no action this week, no
+/// group: the facts say "No use this week".
+fn actions_group(ui: &mut egui::Ui, actions: &[ActionUse]) {
+    if actions.is_empty() {
+        return;
+    }
     group_label(ui, "Actions this week");
-    let rows: Vec<(&str, egui::text::LayoutJob)> = overview
-        .actions
+    let rows: Vec<(&str, egui::text::LayoutJob)> = actions
         .iter()
         .map(|action| {
             let (used, refused) = action_value(action);
@@ -653,18 +960,6 @@ fn actions_group(ui: &mut egui::Ui, overview: &AgentOverview) {
         })
         .collect();
     kit::section(ui, None, None, |s| {
-        if rows.is_empty() {
-            s.row(|ui| {
-                kit::note(
-                    ui,
-                    if overview.recent.is_empty() {
-                        "No actions yet."
-                    } else {
-                        "No actions this week."
-                    },
-                );
-            });
-        }
         for (label, job) in rows {
             s.labeled(label, job);
         }
@@ -799,14 +1094,13 @@ fn exceptions_group(
     agent: &AgentSummary,
     exceptions: &[ExceptionRow],
 ) {
+    if exceptions.is_empty() {
+        no_exceptions(ui);
+        return;
+    }
     let mut remove = None;
     group_label(ui, "Exceptions");
     kit::section(ui, None, None, |s| {
-        if exceptions.is_empty() {
-            s.row(|ui| {
-                kit::note(ui, "None. Exceptions come from your answers in Decisions.");
-            });
-        }
         for row in exceptions {
             let name = row.item.as_ref().map_or_else(
                 || format!("Credential {}", row.exception.item_id),
@@ -849,6 +1143,24 @@ fn exceptions_group(
         let ctx = ui.ctx().clone();
         remove_exception(app, &ctx, agent, &exception);
     }
+}
+
+/// With no exception, one gray line takes the place of the group.
+fn no_exceptions(ui: &mut egui::Ui) {
+    page_line(
+        ui,
+        "No exceptions. They come from your answers in Decisions.",
+    );
+}
+
+/// A gray line of an agent page, under the groups, with the space of a group under it.
+fn page_line(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(-6.0);
+    ui.horizontal(|ui| {
+        ui.add_space(2.0);
+        kit::note(ui, text);
+    });
+    ui.add_space(16.0);
 }
 
 /// Remove an exception. "Never" and "Always ask" give authority back: the owner check
@@ -1252,15 +1564,6 @@ mod tests {
     }
 
     #[test]
-    fn a_short_date_has_the_year_only_for_another_year() {
-        // 2026-10-09 12:00 UTC and 2025-12-31 12:00 UTC.
-        let oct_9 = 1_791_547_200;
-        let new_year_eve = 1_767_182_400;
-        assert_eq!(short_date(oct_9, oct_9 + 86_400), "Oct 9");
-        assert_eq!(short_date(new_year_eve, oct_9), "Dec 31, 2025");
-    }
-
-    #[test]
     fn the_token_line_tells_valid_from_expired() {
         let oct_9 = 1_791_547_200;
         let agent = AgentSummary {
@@ -1271,8 +1574,16 @@ mod tests {
             token_issued_at: 0,
             token_expires_at: oct_9,
         };
-        assert_eq!(token_words(&agent, oct_9 - 60), "Token valid until Oct 9");
-        assert_eq!(token_words(&agent, oct_9 + 60), "Token expired Oct 9");
+        // The days of the page read as `kit::relative_time` does: "9 Oct 2026".
+        assert_eq!(
+            token_words(&agent, oct_9 - 60),
+            "Token valid until 9 Oct 2026"
+        );
+        assert_eq!(token_words(&agent, oct_9 + 60), "Token expired 1 min ago");
+        assert_eq!(
+            token_words(&agent, oct_9 + 8 * 86_400),
+            "Token expired 9 Oct 2026"
+        );
     }
 
     #[test]

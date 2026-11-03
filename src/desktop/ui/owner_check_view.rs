@@ -70,6 +70,7 @@ impl AccountChoice {
             request,
             accounts,
             chosen,
+            ..
         } = request
         else {
             return None;
@@ -507,6 +508,7 @@ mod tests {
             },
             accounts,
             chosen,
+            extensions: Default::default(),
         }
     }
 

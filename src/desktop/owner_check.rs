@@ -31,7 +31,7 @@ use super::{BrokerState, DesktopApp};
 use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{
     ApprovalQueue, CheckMethod, EvaluationOffer, OwnerAction, OwnerAuthError, OwnerCheck,
-    OwnerGate, OwnerProof, PendingRun, action_words, touch_id_detail,
+    OwnerGate, OwnerProof, PasskeyExtras, PendingRun, action_words, touch_id_detail,
 };
 use crate::broker::profile::REPORTING_API_V0;
 use crate::broker::project::Project;
@@ -212,6 +212,48 @@ pub struct PasskeyAccount {
 /// that a proof can name, and no check starts.
 pub(crate) const NO_ACCOUNT: usize = usize::MAX;
 
+/// The WebAuthn extensions of an assertion request, before the owner chooses an
+/// account. `prf` is the PRF input for any credential (the browser `eval`, or the PRF of
+/// the macOS sheet); `prf_by_credential` has the inputs of the browser
+/// `evalByCredential`, by credential ID, which win for their credential. The action of
+/// the chosen account names the result of
+/// [`PasskeyRequestExtensions::for_credential`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PasskeyRequestExtensions {
+    pub prf: Option<crate::vault::PasskeyPrfInput>,
+    pub prf_by_credential: Vec<(Vec<u8>, crate::vault::PasskeyPrfInput)>,
+    pub large_blob: Option<crate::vault::LargeBlobOp>,
+}
+
+impl PasskeyRequestExtensions {
+    /// The extensions of the request before the owner chooses an account: the PRF of
+    /// `eval`, or of some credential of `eval_by_credential`, and the largeBlob
+    /// operation. The dialog names them so the owner sees them before the choice.
+    pub fn for_any_credential(&self) -> crate::vault::PasskeyAssertionExtensions {
+        crate::vault::PasskeyAssertionExtensions {
+            prf: self.prf.clone().or_else(|| {
+                self.prf_by_credential
+                    .first()
+                    .map(|(_, input)| input.clone())
+            }),
+            large_blob: self.large_blob.clone(),
+        }
+    }
+
+    /// The extensions of the assertion with `credential_id`.
+    pub fn for_credential(&self, credential_id: &[u8]) -> crate::vault::PasskeyAssertionExtensions {
+        let by_credential = self
+            .prf_by_credential
+            .iter()
+            .find(|(id, _)| id.as_slice() == credential_id)
+            .map(|(_, input)| input.clone());
+        crate::vault::PasskeyAssertionExtensions {
+            prf: by_credential.or_else(|| self.prf.clone()),
+            large_blob: self.large_blob.clone(),
+        }
+    }
+}
+
 /// The part of a passkey request that every proof for it names. `origin` is the origin
 /// in the client data that the app checked and hashed; `None` for the macOS passkey
 /// sheet, where macOS checked the relying party.
@@ -327,6 +369,7 @@ pub enum OwnerRequest {
         request: PasskeyRequest,
         accounts: Vec<PasskeyAccount>,
         chosen: usize,
+        extensions: PasskeyRequestExtensions,
     },
     /// Make a passkey. The names come from the page or from macOS. `attach_name` is the
     /// title of the login that gets it, `None` for a new login.
@@ -695,7 +738,11 @@ impl OwnerRequest {
                 field: field.clone(),
                 origin: origin.clone(),
             },
-            Self::SignPasskey { request, .. } => {
+            Self::SignPasskey {
+                request,
+                extensions,
+                ..
+            } => {
                 // A request that is ready has an account. Without one the action names
                 // none, and no check starts for it ([`OwnerRequest::is_ready`]).
                 let (item_id, credential_id) =
@@ -707,6 +754,7 @@ impl OwnerRequest {
                     rid: request.rid.clone(),
                     rp_id: request.rp_id.clone(),
                     item_id,
+                    extensions: extensions.for_credential(&credential_id),
                     credential_id,
                     client_data_hash: request.client_data_hash,
                 }
@@ -1072,8 +1120,11 @@ impl OwnerRequest {
                 super::owner_store::field_label(field)
             ),
             Self::SignPasskey {
-                request, accounts, ..
-            } => describe_sign(request, accounts, self.passkey_account()),
+                request,
+                accounts,
+                extensions,
+                ..
+            } => describe_sign(request, accounts, self.passkey_account(), extensions),
             Self::CreatePasskey {
                 request,
                 user_name,
@@ -1404,32 +1455,38 @@ fn account_text(user_name: &str, display_name: &str) -> String {
 /// The dialog text of an assertion. The origin comes first: it is the origin in the
 /// signed client data. The other accounts of the site are named, so the owner knows
 /// that the check is for one of them.
+/// The text of an assertion. Besides the signature it names what the WebAuthn
+/// extensions give or store ([`PasskeyExtras::sentences`]), for the chosen account, or
+/// for any account before the choice.
 fn describe_sign(
     request: &PasskeyRequest,
     accounts: &[PasskeyAccount],
     chosen: Option<&PasskeyAccount>,
+    extensions: &PasskeyRequestExtensions,
 ) -> String {
     let Some(account) = chosen else {
+        let extras = PasskeyExtras::of(&extensions.for_any_credential()).sentences();
         return match &request.origin {
             Some(origin) => format!(
-                "For {origin}: sign in to {} with a passkey. The page gets one signature. Choose the account before you confirm.",
+                "For {origin}: sign in to {} with a passkey. The page gets one signature.{extras} Choose the account before you confirm.",
                 request.rp_id
             ),
             None => format!(
-                "macOS asks to sign in to {} with a passkey. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. Choose the account before you confirm. If you did not just sign in, click Cancel.",
+                "macOS asks to sign in to {} with a passkey. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}.{extras} Choose the account before you confirm. If you did not just sign in, click Cancel.",
                 request.rp_id, request.rp_id
             ),
         };
     };
+    let extras = PasskeyExtras::of(&extensions.for_credential(&account.credential_id)).sentences();
     let who = account_text(&account.user_name, &account.user_display_name);
     let login = page_text(&account.item_name);
     let mut text = match &request.origin {
         Some(origin) => format!(
-            "For {origin}: sign in to {} as {who} with the passkey of the login \"{login}\". The page gets one signature.",
+            "For {origin}: sign in to {} as {who} with the passkey of the login \"{login}\". The page gets one signature.{extras}",
             request.rp_id
         ),
         None => format!(
-            "macOS asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. If you did not just sign in, click Cancel.",
+            "macOS asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}.{extras} If you did not just sign in, click Cancel.",
             request.rp_id, request.rp_id
         ),
     };
@@ -2553,6 +2610,7 @@ impl DesktopApp {
         self.poll_unlock(ctx);
         self.poll_companion(ctx);
         self.questions_poll(ctx);
+        self.poll_remote_feeds();
         self.poll_remote_answers(ctx);
         self.owner_ui.session.expire_reveals();
         if let Some(left) = self.owner_ui.session.next_reveal_expiry() {
@@ -2884,6 +2942,8 @@ impl DesktopApp {
         if let Some(questions) = &self.owner.questions {
             questions.forget();
         }
+        // The feeds of the other Macs go with the session (relay-feed-v1).
+        self.forget_remote_feeds();
         self.erase_typed_secrets(ctx);
     }
 

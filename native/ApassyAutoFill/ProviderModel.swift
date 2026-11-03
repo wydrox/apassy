@@ -10,6 +10,7 @@
 
 import AppKit
 import AuthenticationServices
+import CryptoKit
 import Foundation
 import os
 
@@ -30,6 +31,8 @@ struct AssertionRequest {
     let rpID: String
     let clientDataHash: Data
     let allowed: [Data]
+    /// The prf and largeBlob inputs of the website.
+    var extensions = AssertionExtensionRequest()
 }
 
 /// A new passkey request of a website, from macOS.
@@ -295,17 +298,19 @@ final class ProviderModel: ObservableObject {
     private func sign(_ passkey: PasskeyChoice) async throws {
         guard let request = assertion else { throw ProviderFailure.failed("There is no sign-in request.") }
         let account = passkey.userName.isEmpty ? passkey.title : passkey.userName
+        let extensions = try assertionCallExtensions(request.extensions, credentialID: passkey.credentialID)
         let answer = try await call(
             PasskeyAssertCall(
                 id: passkey.itemID, rpId: request.rpID, credentialId: passkey.credentialID.base64EncodedString(),
-                clientDataHash: request.clientDataHash.base64EncodedString()),
+                clientDataHash: request.clientDataHash.base64EncodedString(), prf: extensions.prf,
+                largeBlob: extensions.largeBlob),
             as: PasskeyAssertAnswer.self,
             confirm: "Sign in to \(request.rpID) as \(account).")
-        let checked = try checkAssertion(answer, rpID: request.rpID, credentialID: passkey.credentialID)
+        let checked = try checkAssertion(answer, rpID: request.rpID, credentialID: passkey.credentialID, requested: extensions)
         complete(.passkeyAssertion(ASPasskeyAssertionCredential(
             userHandle: checked.userHandle, relyingParty: request.rpID, signature: checked.signature,
             clientDataHash: request.clientDataHash, authenticatorData: checked.authenticatorData,
-            credentialID: checked.credentialID)))
+            credentialID: checked.credentialID, extensionOutput: assertionExtensionOutput(checked))))
     }
 
     private func fill(_ login: LoginChoice, kind: ChoiceKind) async throws {
@@ -432,4 +437,21 @@ final class ProviderModel: ObservableObject {
         work = nil
         finish(outcome)
     }
+}
+
+/// The extension outputs of a checked sign-in for macOS, or nil when it has none. The PRF
+/// outputs are keys for macOS only: the extension never keeps or logs them.
+func assertionExtensionOutput(_ checked: CheckedAssertion) -> ASPasskeyAssertionCredentialExtensionOutput? {
+    let prf = checked.prf.map { output in
+        ASAuthorizationPublicKeyCredentialPRFAssertionOutput(
+            first: SymmetricKey(data: output.first), second: output.second.map { SymmetricKey(data: $0) })
+    }
+    typealias BlobOutput = ASAuthorizationPublicKeyCredentialLargeBlobAssertionOutput
+    let largeBlob: BlobOutput? = switch checked.largeBlob {
+    case .read(let blob)?: BlobOutput.read(data: blob)
+    case .written(let written)?: BlobOutput.write(success: written)
+    case nil: nil
+    }
+    guard prf != nil || largeBlob != nil else { return nil }
+    return ASPasskeyAssertionCredentialExtensionOutput(largeBlob: largeBlob, prf: prf)
 }

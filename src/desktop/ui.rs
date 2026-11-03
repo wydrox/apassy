@@ -11,6 +11,8 @@ mod agent_onboarding;
 mod agent_setup;
 #[cfg(feature = "vault")]
 mod agents;
+#[cfg(all(test, feature = "vault"))]
+mod agents_remote_tests;
 #[cfg(feature = "vault")]
 mod browser_settings;
 #[cfg(all(test, feature = "vault"))]
@@ -28,12 +30,19 @@ mod companion_tests;
 /// Decisions: the questions that wait for the owner (ADR 0026 §2).
 #[cfg(feature = "vault")]
 mod decisions;
+#[cfg(feature = "vault")]
+mod decisions_activity;
+#[cfg(all(test, feature = "vault"))]
+mod decisions_activity_tests;
 #[cfg(all(test, feature = "vault"))]
 mod decisions_tests;
 #[cfg(not(feature = "vault"))]
 mod demo;
 #[cfg(feature = "vault")]
 mod detail_rows;
+/// Find duplicates and merge them (`src/vault/dedup.rs`).
+#[cfg(feature = "vault")]
+mod duplicates;
 #[cfg(feature = "vault")]
 pub(crate) mod files;
 /// First credential actions, with optional agent setup.
@@ -62,6 +71,8 @@ mod otp_tests;
 mod owner_check_view;
 #[cfg(all(test, feature = "vault"))]
 mod owner_tests;
+#[cfg(feature = "vault")]
+mod scope_bar;
 #[cfg(feature = "vault")]
 mod settings;
 /// Settings as a view of the window (ADR 0026 §3).
@@ -242,6 +253,9 @@ pub(crate) fn default_vault_path() -> std::path::PathBuf {
 pub(crate) struct UiState {
     /// The sheet over the window, if any.
     pub(crate) sheet: Option<Sheet>,
+    /// The scope of Agents and Decisions ("Showing … in …").
+    #[cfg(feature = "vault")]
+    pub(crate) activity_scope: crate::desktop::remote_feeds::ActivityScope,
     /// The sheet closes when the owner check for its action ends with success. The
     /// value is the status sequence number at the time of the request.
     #[cfg(feature = "vault")]
@@ -279,6 +293,9 @@ pub(crate) struct UiState {
     /// The note that the owner edits on an agent page.
     #[cfg(feature = "vault")]
     pub(crate) agents: agents::State,
+    /// The groups of the "Find duplicates" sheet. Titles and labels, no value.
+    #[cfg(feature = "vault")]
+    pub(crate) duplicates: duplicates::State,
     /// The name field of the New Folder and Rename sheets.
     #[cfg(feature = "vault")]
     pub(crate) folder_name: String,
@@ -320,6 +337,9 @@ pub(crate) struct UiState {
     /// owner picked a kind with the keyboard.
     #[cfg(feature = "vault")]
     pub(crate) focus_form_name: bool,
+    /// "Add website…" opened the edit sheet: its Website field takes the focus.
+    #[cfg(feature = "vault")]
+    pub(crate) focus_form_website: bool,
     #[cfg(feature = "vault")]
     pub(crate) discard_item_changes: bool,
     #[cfg(feature = "vault")]
@@ -449,6 +469,9 @@ pub(crate) enum Sheet {
     /// Import from 1Password.
     #[cfg(feature = "vault")]
     Import,
+    /// Find duplicates and merge them.
+    #[cfg(feature = "vault")]
+    Duplicates,
     /// Remove every paired iPhone and make a new certificate (ADR 0020).
     #[cfg(feature = "vault")]
     ResetCompanion,
@@ -571,6 +594,7 @@ pub(super) fn native_menu_context(
             items::Filter::All => 0,
             items::Filter::Conflicts => 1,
             items::Filter::Archived => 2,
+            items::Filter::Duplicates => 3,
         },
         search_all: app.ui.search_all,
         sheet: app.ui.sheet.clone(),
@@ -724,6 +748,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 app.place = crate::desktop::Place::CREDENTIALS;
             }
             app.import.forget();
+            app.ui.duplicates = Default::default();
             #[cfg(target_os = "macos")]
             super::native_menu::process(app, &ctx);
             start::draw(app, ui);
@@ -773,6 +798,10 @@ pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
             forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
         }
         Some(Sheet::Import) => app.import.forget(),
+        Some(Sheet::Duplicates) => {
+            app.ui.duplicates = Default::default();
+            app.import.forget();
+        }
         _ => {}
     }
     #[cfg(not(feature = "vault"))]
@@ -865,7 +894,8 @@ fn draw_toast(app: &mut DesktopApp, ctx: &egui::Context) {
     }
 }
 
-/// "project · service", or nothing.
+/// "project · service", or nothing. The demo list uses it.
+#[cfg(not(feature = "vault"))]
 pub(super) fn meta_line(project: &str, service: &str) -> String {
     match (project.is_empty(), service.is_empty()) {
         (true, true) => String::new(),

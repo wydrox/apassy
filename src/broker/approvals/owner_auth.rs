@@ -199,7 +199,9 @@ pub enum OwnerAction {
     /// and hashed for a request of the extension. `None` is a request of the macOS
     /// passkey sheet: macOS checked the relying party, and there is no web origin. So a
     /// check for the browser never signs a request of macOS, and the other way around.
-    /// `rid` is the ID of the request.
+    /// `rid` is the ID of the request. `extensions` are the WebAuthn extensions of the
+    /// request for this credential (PRF inputs, a largeBlob read or write), so a proof
+    /// never writes a blob or makes PRF outputs that the request did not have.
     SignPasskey {
         origin: Option<String>,
         rid: String,
@@ -207,6 +209,7 @@ pub enum OwnerAction {
         item_id: u64,
         credential_id: Vec<u8>,
         client_data_hash: [u8; 32],
+        extensions: crate::vault::PasskeyAssertionExtensions,
     },
     /// Give the username and the password of one login to macOS AutoFill, for one request
     /// of the macOS AutoFill sheet (`rid`). `login` is the title as the owner saw it. A
@@ -412,6 +415,83 @@ pub enum OwnerAction {
 
 /// The words for the Touch ID prompt after the relying party of a passkey. `None` is
 /// the macOS passkey sheet.
+/// What an assertion gives beyond its signature, from its WebAuthn extensions, for the
+/// owner texts. It has no value of the request: only the length of a blob to write. An
+/// empty write stores nothing, so it is not named.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PasskeyExtras {
+    /// PRF inputs: the page gets PRF outputs, a key made from the passkey.
+    pub(crate) prf: bool,
+    /// A largeBlob read: the page gets the data stored with the passkey.
+    pub(crate) read: bool,
+    /// A largeBlob write of this many bytes, stored in the vault.
+    pub(crate) write: Option<usize>,
+}
+
+impl PasskeyExtras {
+    pub(crate) fn of(extensions: &crate::vault::PasskeyAssertionExtensions) -> Self {
+        use crate::vault::LargeBlobOp;
+        Self {
+            prf: extensions.prf.is_some(),
+            read: matches!(extensions.large_blob, Some(LargeBlobOp::Read)),
+            write: match &extensions.large_blob {
+                Some(LargeBlobOp::Write(blob)) if !blob.is_empty() => Some(blob.len()),
+                _ => None,
+            },
+        }
+    }
+
+    /// What the page gets: "a key made from the passkey", "the data stored with the
+    /// passkey", or both. `None` for neither.
+    fn gets(&self) -> Option<&'static str> {
+        match (self.prf, self.read) {
+            (true, true) => {
+                Some("a key made from the passkey and the data stored with the passkey")
+            }
+            (true, false) => Some("a key made from the passkey"),
+            (false, true) => Some("the data stored with the passkey"),
+            (false, false) => None,
+        }
+    }
+
+    fn bytes(n: usize) -> String {
+        if n == 1 {
+            "1 byte".to_owned()
+        } else {
+            format!("{n} bytes")
+        }
+    }
+
+    /// The sentences of the owner dialog, each with a leading space. Empty without
+    /// extensions.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn sentences(&self) -> String {
+        let mut text = String::new();
+        if let Some(gets) = self.gets() {
+            text.push_str(&format!(" The page also gets {gets}."));
+        }
+        if let Some(n) = self.write {
+            text.push_str(&format!(
+                " The page also stores {} with the passkey in Apassy.",
+                Self::bytes(n)
+            ));
+        }
+        text
+    }
+
+    /// The end of the Touch ID reason, with a leading comma. Empty without extensions.
+    fn reason(&self) -> String {
+        let mut text = String::new();
+        if let Some(gets) = self.gets() {
+            text.push_str(&format!(", and give the page {gets}"));
+        }
+        if let Some(n) = self.write {
+            text.push_str(&format!(", and store {} with the passkey", Self::bytes(n)));
+        }
+        text
+    }
+}
+
 fn passkey_caller(origin: Option<&String>) -> &'static str {
     match origin {
         Some(_) => " in your browser",
@@ -514,10 +594,16 @@ impl OwnerAction {
             Self::FillCode { origin, .. } => {
                 format!("fill a one-time code on {}", short_site(origin))
             }
-            Self::SignPasskey { origin, rp_id, .. } => format!(
-                "sign in to {} with a passkey{}",
+            Self::SignPasskey {
+                origin,
+                rp_id,
+                extensions,
+                ..
+            } => format!(
+                "sign in to {} with a passkey{}{}",
                 short_site(rp_id),
-                passkey_caller(origin.as_ref())
+                passkey_caller(origin.as_ref()),
+                PasskeyExtras::of(extensions).reason()
             ),
             Self::CreatePasskey { origin, rp_id, .. } => format!(
                 "create a passkey for {}{}",

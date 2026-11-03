@@ -550,7 +550,8 @@ impl OwnerSession {
 
     /// Sign the assertion that `action` names ([`OwnerAction::SignPasskey`]) with `proof`
     /// for that action. The values that sign come from the action, so they are the values
-    /// that the owner confirmed. The vault checks the item, the relying party, and the
+    /// that the owner confirmed, with the WebAuthn extensions of the action (PRF, a
+    /// largeBlob read or write). The vault checks the item, the relying party, and the
     /// credential again. User presence and verification are set only here, after the
     /// proof. The proof is used up, also on a failure.
     pub fn sign_passkey(
@@ -563,6 +564,7 @@ impl OwnerSession {
             item_id,
             credential_id,
             client_data_hash,
+            extensions,
             ..
         } = action
         else {
@@ -572,9 +574,9 @@ impl OwnerSession {
                 "The owner check was for another action. Nothing was signed.",
             ));
         };
-        let vault = self.unlocked_for(proof, action)?;
+        let mut vault = self.unlocked_for(proof, action)?;
         vault
-            .sign_passkey(*item_id, rp_id, credential_id, client_data_hash)
+            .assert_passkey(*item_id, rp_id, credential_id, client_data_hash, extensions)
             .map_err(passkey_err)
     }
 

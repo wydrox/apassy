@@ -222,7 +222,7 @@ fn a_dotenv_paste_adds_only_the_checked_lines() {
     assert!(window.text.contains("Add 3"), "{}", window.text);
     assert!(window.text.contains("RESEND_API_KEY"), "{}", window.text);
     assert!(
-        window.text.contains("Personal"),
+        window.text.contains("No folder"),
         "the top level: {}",
         window.text
     );
@@ -234,7 +234,8 @@ fn a_dotenv_paste_adds_only_the_checked_lines() {
 
     window.command_s(&mut app);
     assert_eq!(app.ui.sheet, None, "{}", app.status_text);
-    assert_eq!(app.status_text, "Added 2 credentials in Personal.");
+    // The top level is the default place: the status names no folder.
+    assert_eq!(app.status_text, "Added 2 credentials.");
     let items = app.owner_ui.session.search("").expect("list");
     let mut names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
     names.sort_unstable();

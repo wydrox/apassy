@@ -8,8 +8,13 @@
 //! - **Suggestions**: the open corrections from the use log (ADR 0025 §5).
 //!
 //! The line under the title counts the owner interactions and the automatic decisions of
-//! the week (ADR 0025 §1). When macOS cannot show a notification, one small line at the
-//! bottom of the list says so, once for the place, not in each detail.
+//! the week (ADR 0025 §1), of this Mac and of the feeds of the other Macs in the device
+//! scope. The scope bar under it chooses the devices and the project. When macOS cannot
+//! show a notification, one small line at the bottom of the list says so, once for the
+//! place, not in each detail.
+//!
+//! With nothing waiting, the list says so in one line and shows the recent decisions of
+//! the vault, and the detail shows the week ([`super::decisions_activity`]).
 //!
 //! Each row and each header has the round avatar of the agent ([`kit::avatar`]); a
 //! suggestion has the tile of its credential.
@@ -66,6 +71,7 @@ use crate::broker::server::QUESTION_WAIT;
 use crate::contracts::CredentialKind;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::desktop::owner_store::{OwnerSession, OwnerSummary};
+use crate::desktop::remote_feeds::DeviceScope;
 use crate::desktop::{BrokerState, DesktopApp};
 use crate::questions::{
     AnswerError, AnswerReceipt, Choice, RemoteEnvironment, RemoteQuestion, remote_owner_action,
@@ -155,6 +161,9 @@ pub(crate) struct State {
     routed: bool,
     activity_id: Option<u64>,
     show_activity: bool,
+    /// The past decision of the recent list that the detail shows, read-only, by its key
+    /// ([`super::decisions_activity::PastDecision::id`]).
+    past: Option<u64>,
     /// Its place in the list in the last frame. When it goes (an answer, a time-out), the
     /// decision that takes its place is selected.
     index: usize,
@@ -842,8 +851,43 @@ pub(super) fn select_key(app: &mut DesktopApp, key: Key) {
     app.ui.decisions.routed = false;
     app.ui.decisions.show_activity = false;
     app.ui.decisions.activity_id = None;
+    app.ui.decisions.past = None;
     app.ui.decisions.selected = Some(key);
     app.ui.decisions.disconnect = None;
+}
+
+/// Select a past decision of the recent list, as a click on its row does.
+#[cfg(test)]
+pub(super) fn select_past(app: &mut DesktopApp, id: u64) {
+    choose_past(&mut app.ui.decisions, id);
+}
+
+/// The past decision that the detail shows.
+#[cfg(test)]
+pub(super) fn selected_past(app: &DesktopApp) -> Option<u64> {
+    app.ui.decisions.past
+}
+
+/// Open Activity, as the button of the list does.
+#[cfg(test)]
+pub(super) fn open_activity(app: &mut DesktopApp) {
+    app.ui.decisions.forget_evaluation();
+    app.ui.decisions.selected = None;
+    app.ui.decisions.routed = true;
+    app.ui.decisions.activity_id = None;
+    app.ui.decisions.past = None;
+    app.ui.decisions.show_activity = true;
+}
+
+/// Show a past decision of the recent list in the detail.
+fn choose_past(state: &mut State, id: u64) {
+    state.forget_evaluation();
+    state.routed = false;
+    state.show_activity = false;
+    state.activity_id = None;
+    state.selected = None;
+    state.disconnect = None;
+    state.past = Some(id);
 }
 
 /// Type into the paste field of the selected request.
@@ -881,6 +925,7 @@ pub(super) fn select(app: &mut DesktopApp, run_id: u64) {
     app.ui.decisions.routed = false;
     app.ui.decisions.show_activity = false;
     app.ui.decisions.activity_id = None;
+    app.ui.decisions.past = None;
     app.ui.decisions.selected = Some(Key::Run(run_id));
     app.ui.decisions.disconnect = None;
 }
@@ -904,6 +949,7 @@ pub(super) fn route_notification(
     app.ui.decisions.routed = true;
     app.ui.decisions.activity_id = None;
     app.ui.decisions.show_activity = false;
+    app.ui.decisions.past = None;
     app.ui.decisions.selected = match destination {
         NotificationDestination::Event {
             key: EventKey::Run(id),
@@ -951,6 +997,8 @@ fn sync_selection(state: &mut State, open: &Open) {
     }
     if let Some(selected) = state.selected {
         state.index = keys.iter().position(|key| *key == selected).unwrap_or(0);
+        // What waits comes first: a past decision leaves the detail.
+        state.past = None;
     }
     if state
         .disconnect
@@ -1105,22 +1153,35 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         .as_ref()
         .and_then(|questions| questions.view().receive_problem);
     sync_selection(&mut app.ui.decisions, &open);
-    let subtitle = app
-        .owner_ui
-        .session
-        .week_counts()
+    // The whole vault: this Mac and the feeds of the other Macs, in the scope.
+    let activity = super::decisions_activity::load(app);
+    super::decisions_activity::fit_scope(&mut app.ui.activity_scope, &activity.devices);
+    let subtitle = activity
+        .week(&app.ui.activity_scope.device)
         .map(|counts| counts.line())
         .unwrap_or_default();
     let mut history = false;
     columns::list_toolbar(ui, "Decisions", &subtitle, |ui| {
         history = kit::small_button(ui, "Activity", Style::Bordered).clicked();
     });
+    let scope_changed = columns::list_inset(ui, |ui| {
+        super::scope_bar::scope_bar(
+            ui,
+            &mut app.ui.activity_scope,
+            &activity.devices,
+            &activity.projects,
+        )
+    });
+    if scope_changed {
+        app.ui.decisions.past = None;
+    }
     super::owner_check_view::browser_question(app, ui);
     if history {
         app.ui.decisions.forget_evaluation();
         app.ui.decisions.selected = None;
         app.ui.decisions.routed = true;
         app.ui.decisions.activity_id = None;
+        app.ui.decisions.past = None;
         app.ui.decisions.show_activity = true;
     }
     if app.ui.decisions.routed
@@ -1144,41 +1205,47 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
     let empty = groups.is_empty();
     let selected = app.ui.decisions.selected;
     let mut chosen = None;
+    let mut chosen_past = None;
     let mut rows_ui = ui.new_child(egui::UiBuilder::new().max_rect(rows_rect));
-    columns::grouped_rows(
-        &mut rows_ui,
-        "decisions-list",
-        &groups,
-        true,
-        |ui, row| {
-            let response = ui
-                .push_id(("decision-row", row.key), |ui| {
-                    decision_row(
-                        ui,
-                        &DecisionRow {
-                            mark: &row.mark,
-                            title: &row.title,
-                            subtitle: &row.subtitle,
-                            production: row.production,
-                            left: row.left.as_deref(),
-                            selected: selected == Some(row.key),
-                        },
-                    )
-                })
-                .inner;
-            if response.clicked() {
-                chosen = Some(row.key);
-            }
-        },
-        // With nothing open, the list says so, and the detail says "All clear", as in
-        // the mockup.
-        |ui| {
-            if empty && receive_problem.is_none() {
-                ui.add_space(40.0);
-                columns::list_note(ui, "Nothing needs you");
-            }
-        },
-    );
+    if empty {
+        // Nothing waits: one line says so, then the recent decisions of the vault. The
+        // detail shows the week.
+        chosen_past = super::decisions_activity::empty_list(
+            &mut rows_ui,
+            &activity,
+            &app.ui.activity_scope,
+            app.ui.decisions.past,
+            receive_problem.is_none(),
+        );
+    } else {
+        columns::grouped_rows(
+            &mut rows_ui,
+            "decisions-list",
+            &groups,
+            true,
+            |ui, row| {
+                let response = ui
+                    .push_id(("decision-row", row.key), |ui| {
+                        decision_row(
+                            ui,
+                            &DecisionRow {
+                                mark: &row.mark,
+                                title: &row.title,
+                                subtitle: &row.subtitle,
+                                production: row.production,
+                                left: row.left.as_deref(),
+                                selected: selected == Some(row.key),
+                            },
+                        )
+                    })
+                    .inner;
+                if response.clicked() {
+                    chosen = Some(row.key);
+                }
+            },
+            |_| {},
+        );
+    }
     if let Some(summary) = notice {
         let footer = Rect::from_min_max(Pos2::new(area.left(), footer_top), area.max);
         notifications_footer(app, ui, footer, &summary);
@@ -1191,6 +1258,9 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         app.ui.decisions.activity_id = None;
         app.ui.decisions.selected = Some(key);
         app.ui.decisions.disconnect = None;
+    }
+    if let Some(id) = chosen_past {
+        choose_past(&mut app.ui.decisions, id);
     }
 }
 
@@ -1250,6 +1320,11 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
         Mark::Agent(name) => kit::paint_avatar(ui, tile_rect, name),
         Mark::Tile(tile) => kit::paint_tile(ui, tile_rect, tile),
     }
+    let round = match row.mark {
+        Mark::Agent(_) => true,
+        Mark::Tile(tile) => tile.round,
+    };
+    kit::paint_tile_ring(painter, tile_rect, round, row.selected);
     let (title_color, sub_color, time_color, dot) = if row.selected {
         let white = egui::Color32::WHITE;
         (white, egui::Color32::from_white_alpha(210), white, white)
@@ -1295,17 +1370,33 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
     sync_selection(&mut app.ui.decisions, &open);
     if app.ui.decisions.show_activity {
         let activity_id = app.ui.decisions.activity_id;
+        let scope = app.ui.activity_scope.clone();
+        // One activity of a notification is exact: it is of this Mac, whatever the scope.
+        let this_mac = activity_id.is_some()
+            || matches!(scope.device, DeviceScope::All | DeviceScope::ThisMac);
         columns::detail_toolbar(ui, |_| {});
         columns::detail_body(ui, ("notification-activity", activity_id), |ui| {
-            let rows = app
-                .owner_ui
-                .session
-                .activity(crate::vault::MAX_ACTIVITY_ROWS)
-                .unwrap_or_default();
-            let exact: Vec<_> = rows
+            let rows = if this_mac {
+                app.owner_ui
+                    .session
+                    .activity(crate::vault::MAX_ACTIVITY_ROWS)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let mut exact: Vec<_> = rows
                 .into_iter()
                 .filter(|row| activity_id.is_none_or(|id| row.id == id))
                 .collect();
+            // The decisions of the other Macs in the scope, in time order with the log
+            // of this Mac.
+            let remote = super::decisions_activity::gather(None, &[], &app.remote_macs);
+            if activity_id.is_none() {
+                exact.extend(super::decisions_activity::remote_activity_rows(
+                    &remote, &scope,
+                ));
+                exact.sort_by_key(|row| std::cmp::Reverse(row.at));
+            }
             super::timeline::access_timeline(
                 app,
                 ui,
@@ -1315,6 +1406,14 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
                 "This activity is no longer available.",
                 true,
             );
+            if activity_id.is_none() {
+                if this_mac && scope.project.is_some() {
+                    kit::note(ui, super::decisions_activity::LOG_HAS_NO_PROJECT);
+                }
+                for note in remote.truncated_notes(&scope.device) {
+                    kit::note(ui, note);
+                }
+            }
         });
         return;
     }
@@ -1383,6 +1482,27 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         }
         None => {}
     }
+    let activity = super::decisions_activity::load(app);
+    let past = app
+        .ui
+        .decisions
+        .past
+        .filter(|_| !app.ui.decisions.routed)
+        .and_then(|id| activity.find(id, &app.ui.activity_scope).cloned());
+    if let Some(decision) = past {
+        let mut week = false;
+        columns::detail_toolbar(ui, |ui| {
+            week = kit::small_button(ui, "This Week", Style::Bordered).clicked();
+        });
+        columns::detail_body(ui, ("past-decision", decision.id), |ui| {
+            super::shell::banners(app, ui, pending);
+            super::decisions_activity::past_detail(ui, &decision);
+        });
+        if week {
+            app.ui.decisions.past = None;
+        }
+        return;
+    }
     columns::detail_toolbar(ui, |_| {});
     columns::detail_body(ui, ("decision", None::<u64>), |ui| {
         super::shell::banners(app, ui, pending);
@@ -1396,27 +1516,27 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
             kit::tone_note(ui, line, Tone::Accent);
         }
         // The list carries the receiving error; do not claim that all requests are clear.
-        if app
+        let clear = !app
             .owner
             .questions
             .as_ref()
-            .is_some_and(|questions| questions.view().receive_problem.is_some())
-        {
+            .is_some_and(|questions| questions.view().receive_problem.is_some());
+        if app.ui.decisions.routed {
+            if clear {
+                columns::nothing_selected(
+                    ui,
+                    Icon::CheckCircle,
+                    "Select a Request",
+                    "Review a current request from the list. Activity keeps completed outcomes.",
+                );
+            }
             return;
         }
-        columns::nothing_selected(
+        super::decisions_activity::week_summary(
             ui,
-            Icon::CheckCircle,
-            if app.ui.decisions.routed {
-                "Select a Request"
-            } else {
-                "All clear"
-            },
-            if app.ui.decisions.routed {
-                "Review a current request from the list. Activity keeps completed outcomes."
-            } else {
-                "Nothing waits for you. A new question also shows as a macOS notification."
-            },
+            &activity,
+            &app.ui.activity_scope.device,
+            clear,
         );
     });
 }
@@ -2760,9 +2880,9 @@ pub(super) fn apply_request(
                 Ok(item) => {
                     erase_paste(app, ctx);
                     app.set_ok(format!(
-                        "Saved {} in {} for {}. The bouncer decides each use.",
+                        "Saved {}{} for {}. The bouncer decides each use.",
                         item.title,
-                        tree.path_label(folder.as_deref()),
+                        tree.in_folder(folder.as_deref()),
                         request.agent_name
                     ));
                 }
