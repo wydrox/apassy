@@ -174,6 +174,25 @@ struct NodeMove {
     client: QuestionsClient,
     url: RelayUrl,
     name: String,
+    /// The questions went through a notifications-only team: its devices leave the
+    /// hosted relay at the end (a relay sync team keeps its devices).
+    questions_only: bool,
+    /// The Apple Watches of the vault before the move: each pairs again from its iPhone.
+    watches: Vec<String>,
+    /// The devices that joined the node team, in order.
+    joined: Vec<String>,
+}
+
+/// A move of the approvals that ended, for frames 4c and 4d of the sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Moved {
+    pub(crate) vault: String,
+    pub(crate) joined: Vec<String>,
+    /// The old devices left the hosted relay (`MoveDone::hosted_removed`).
+    pub(crate) removed: bool,
+    /// A notifications-only team whose devices did not all leave the hosted relay: 4d.
+    pub(crate) failed: bool,
+    pub(crate) watches: Vec<String>,
 }
 
 /// The state of "Send questions through the relay" in the window.
@@ -183,6 +202,11 @@ pub(crate) struct QuestionsUi {
     node_call: Option<NodeCall>,
     /// A move that waits for a device in the node team.
     node_move: Option<NodeMove>,
+    /// The last move that ended, until its sheet closes.
+    moved: Option<Moved>,
+    /// The vaults (list IDs) whose move left an old entry on the hosted relay ("Later"
+    /// of frame 4d), for the row of the This Mac group. In memory only.
+    old_hosted: BTreeSet<String>,
     pending: Option<NewTeam>,
     creating: Option<Creating>,
     /// Why the last try of the team sheet failed.
@@ -439,17 +463,100 @@ impl DesktopApp {
             })
     }
 
-    /// A device joined the team `team_id` of the vault `id` (its confirmation wrote its
-    /// row): when it is the node team of a move, the move ends now, on its own thread.
-    pub(crate) fn questions_device_joined(&mut self, id: &str, team_id: &str) {
-        let matches = self
+    /// The move sheet of the vault `id` (frame 4b): the iPhone that pairs again, and
+    /// whether the old devices leave Apassy relay now (step 3, no Cancel). `None` without
+    /// a move.
+    pub(crate) fn questions_move_sheet(&self, id: &str) -> Option<(String, bool)> {
+        let questions = &self.sync.relay.questions;
+        let moving = questions
+            .node_move
+            .as_ref()
+            .filter(|moving| moving.vault == id)?;
+        let removing = questions
+            .node_call
+            .as_ref()
+            .is_some_and(|call| call.vault == id);
+        let iphone = self
+            .owner_ui
+            .session
+            .with_vault(|vault| {
+                vault
+                    .trusted_devices()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|device| device.kind == TrustedDeviceKind::Iphone)
+                    .map(|device| device.name)
+            })
+            .flatten()
+            .or_else(|| moving.joined.first().cloned())
+            .unwrap_or_else(|| "your iPhone".to_owned());
+        Some((iphone, removing))
+    }
+
+    /// The move of the vault `id` that ended, while its sheet shows (frames 4c and 4d).
+    pub(crate) fn questions_moved(&self, id: &str) -> Option<&Moved> {
+        self.sync
+            .relay
+            .questions
+            .moved
+            .as_ref()
+            .filter(|moved| moved.vault == id)
+    }
+
+    /// The sheet of an ended move closes. `later` ("Later" of frame 4d) keeps the row
+    /// "Old entry still on Apassy relay" in the This Mac group.
+    pub(crate) fn questions_move_seen(&mut self, later: bool) {
+        let questions = &mut self.sync.relay.questions;
+        if let Some(moved) = questions.moved.take()
+            && later
+            && moved.failed
+        {
+            questions.old_hosted.insert(moved.vault);
+        }
+    }
+
+    /// Whether a move of the open vault left an old entry on the hosted relay.
+    pub(crate) fn questions_old_hosted_entry(&self) -> bool {
+        self.vault_list
+            .current
+            .as_deref()
+            .is_some_and(|id| self.sync.relay.questions.old_hosted.contains(id))
+    }
+
+    /// Cancel of the move sheet before the join: the node forgets the move
+    /// (`Node::cancel_move`), and the questions stay on the hosted team. After the join there is no cancel: the end of
+    /// the move runs.
+    pub(crate) fn questions_cancel_move(&mut self, id: &str) {
+        let questions = &mut self.sync.relay.questions;
+        let waiting = questions
+            .node_move
+            .as_ref()
+            .is_some_and(|moving| moving.vault == id && moving.joined.is_empty());
+        if !waiting || questions.node_call.is_some() {
+            return;
+        }
+        questions.node_move = None;
+        if let Some(node) = self.cloud_node() {
+            node.cancel_move();
+        }
+    }
+
+    /// The device `name` joined the team `team_id` of the vault `id` (its confirmation
+    /// wrote its row): when it is the node team of a move, the move ends now, on its own
+    /// thread.
+    pub(crate) fn questions_device_joined(&mut self, id: &str, team_id: &str, name: &str) {
+        let moving = self
             .sync
             .relay
             .questions
             .node_move
-            .as_ref()
-            .is_some_and(|moving| moving.vault == id && moving.team_id == team_id);
-        if !matches || self.sync.relay.questions.node_call.is_some() {
+            .as_mut()
+            .filter(|moving| moving.vault == id && moving.team_id == team_id);
+        let Some(moving) = moving else {
+            return;
+        };
+        moving.joined.push(name.to_owned());
+        if self.sync.relay.questions.node_call.is_some() {
             return;
         }
         let Some(node) = self.cloud_node() else {
@@ -527,12 +634,35 @@ impl DesktopApp {
                 }
             }
             Some(Ok(NodeDone::MoveStarted(start))) if open => {
+                // The questions still go through the hosted team here.
+                let (questions_only, watches) = self
+                    .owner_ui
+                    .session
+                    .with_vault(|vault| {
+                        let only = questions_membership(vault)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|membership| questions_only(&membership));
+                        let watches = vault
+                            .trusted_devices()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|device| device.kind == TrustedDeviceKind::Watch)
+                            .map(|device| device.name)
+                            .collect();
+                        (only, watches)
+                    })
+                    .unwrap_or_default();
+                self.sync.relay.questions.moved = None;
                 self.sync.relay.questions.node_move = Some(NodeMove {
                     vault: call.vault.clone(),
                     team_id: start.team_id.clone(),
                     client: start.client,
                     url: start.url,
                     name: start.name,
+                    questions_only,
+                    watches,
+                    joined: Vec::new(),
                 });
                 self.set_note("Scan the pairing code with Apassy on your iPhone. The approvals move to this Mac when you confirm it here.");
                 self.sync_open_sheet(SyncSheet::AddIphone { id: call.vault }, Some(ctx));
@@ -544,7 +674,25 @@ impl DesktopApp {
                 self.set_err("The open vault changed. The approvals stay where they are.");
             }
             Some(Ok(NodeDone::Moved(done))) => {
-                self.sync.relay.questions.node_move = None;
+                let moving = self.sync.relay.questions.node_move.take();
+                let (questions_only, watches, joined) = moving
+                    .map(|moving| (moving.questions_only, moving.watches, moving.joined))
+                    .unwrap_or_default();
+                let moved = Moved {
+                    vault: call.vault.clone(),
+                    joined,
+                    removed: done.hosted_removed,
+                    failed: questions_only && !done.hosted_removed,
+                    watches,
+                };
+                // Frames 4c and 4d show in the sheet; a closed sheet keeps only the row
+                // of an old entry.
+                let shown = self.sync.relay.add_open_for(&call.vault);
+                if shown {
+                    self.sync.relay.questions.moved = Some(moved);
+                } else if moved.failed {
+                    self.sync.relay.questions.old_hosted.insert(moved.vault);
+                }
                 self.wake_questions();
                 let questions = &mut self.sync.relay.questions;
                 questions.push.clear();
@@ -579,8 +727,6 @@ impl DesktopApp {
 
     /// "Send questions through the relay" goes off: no check, it takes authority away.
     /// Relay sync never changes.
-    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
-    #[allow(dead_code)]
     pub(crate) fn questions_turn_off(&mut self) {
         let result = self.owner_ui.session.with_vault(|vault| {
             if vault.is_locked() {
@@ -1350,8 +1496,6 @@ impl DesktopApp {
 
     /// The D14 notice of Settings > Devices ([`free_approvals_notice`]) while the
     /// questions of the open vault go through the hosted relay, or `None`.
-    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
-    #[allow(dead_code)]
     pub(crate) fn questions_free_notice(&self) -> Option<String> {
         self.owner_ui
             .session

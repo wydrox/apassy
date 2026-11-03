@@ -86,6 +86,65 @@ const WIFI_HELP: [&str; 4] = [
     "New Wi-Fi pairing is no longer possible.",
 ];
 
+/// The group of the questions through the relay, the feed, and the other Macs (the old
+/// Relay and Other Macs groups, restored inside this layout).
+pub(crate) const RELAY_GROUP: &str = "Relay";
+/// The switch of the questions through the relay, and its name for VoiceOver (ADR 0025
+/// §3e, contract relay-questions-v1). Off by default: only a relay membership with the
+/// purpose `questions` turns it on.
+pub(crate) const RELAY_QUESTIONS: &str = "Send Questions Through the Relay";
+pub(crate) const RELAY_QUESTIONS_ON: &str =
+    "End-to-end encrypted. The relay sees no command or credential.";
+pub(crate) const RELAY_QUESTIONS_OFF: &str =
+    "Off. Answer on your other devices away from this network.";
+pub(crate) const RELAY_QUESTIONS_NEW_TEAM: &str =
+    "Approve on your iPhone on any network. No account needed.";
+pub(crate) const RELAY_QUESTIONS_JOIN: &str =
+    "Off. Turning it on joins this vault's questions team.";
+pub(crate) const RELAY_QUESTIONS_REMOVED: &str =
+    "This Mac was removed. Turning it on needs a new link.";
+pub(crate) const RELAY_QUESTIONS_REMOVED_SYNC: &str =
+    "This Mac was removed from the questions of this vault.";
+/// The line under a Mac whose relay sync key was removed from the questions.
+pub(crate) const RELAY_QUESTIONS_REMOVED_SYNC_FIX: &str =
+    "Turn relay sync off, then join the vault again from another Mac.";
+pub(crate) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it.";
+/// The switch of the feed of the agents for the other devices of the vault (relay-feed-v1
+/// section 8), and its name for VoiceOver. On by default; `ui.json` keeps it.
+pub(crate) const SHOW_AGENTS: &str = "Show Agents on My Other Devices";
+pub(crate) const SHOW_AGENTS_NOTE: &str = "Only this Mac changes them.";
+/// The row of the other Macs of a synced vault.
+pub(crate) const OTHER_MACS: &str = "Other Macs";
+/// Its buttons while the vault syncs through the relay.
+pub(crate) const OTHER_MACS_DEVICES: &str = "Devices…";
+pub(crate) const ADD_MAC: &str = "Add a Mac…";
+/// The row of frame 4d after "Later": the hosted relay kept the old entry of a move.
+pub(crate) const OLD_RELAY_ENTRY: &str = "Old entry still on Apassy relay";
+
+/// The help of the relay switch.
+const RELAY_HELP: [&str; 4] = [
+    "Questions also reach your other devices of this vault.",
+    "The relay sees no command and no credential.",
+    "Turning it on needs Touch ID. Off needs none.",
+    "Relay sync of the vault does not change.",
+];
+/// The help of the feed switch.
+const SHOW_AGENTS_HELP: [&str; 3] = [
+    "Your iPhone and your other Macs of this vault show this Mac's agents.",
+    "Only this Mac changes them.",
+    "Off: Apassy deletes this Mac's feed from the relay.",
+];
+/// The help of the other Macs row.
+const OTHER_MACS_HELP: [&str; 2] = [
+    "The Macs that sync this vault.",
+    "Devices… lists them; Add a Mac… links one more.",
+];
+/// The help of the old entry row (frame 4d).
+const OLD_RELAY_ENTRY_HELP: [&str; 2] = [
+    "Approvals already go through this Mac.",
+    "Apassy relay did not answer the removal of the old devices.",
+];
+
 // ---- The view. ----
 
 /// Where a device reaches the approvals of this Mac: one of four words.
@@ -286,6 +345,59 @@ pub(crate) struct WifiView {
     pub(crate) end: WifiEnd,
 }
 
+/// The state of "Send Questions Through the Relay" for the open vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Questions {
+    On,
+    CanTurnOn,
+    NeedsTeam,
+    JoinTeam,
+    /// This Mac was removed; a new link turns it on again.
+    Removed,
+    /// The relay sync key of this Mac was removed: the switch cannot move.
+    RemovedSync,
+    /// The vault is locked or not open.
+    Locked,
+}
+
+impl Questions {
+    /// The subline of the switch, and whether the switch can move.
+    pub(crate) fn subline(self) -> (&'static str, bool) {
+        match self {
+            Self::On => (RELAY_QUESTIONS_ON, true),
+            Self::CanTurnOn => (RELAY_QUESTIONS_OFF, true),
+            Self::NeedsTeam => (RELAY_QUESTIONS_NEW_TEAM, true),
+            Self::JoinTeam => (RELAY_QUESTIONS_JOIN, true),
+            Self::Removed => (RELAY_QUESTIONS_REMOVED, true),
+            Self::RemovedSync => (RELAY_QUESTIONS_REMOVED_SYNC, false),
+            Self::Locked => (RELAY_QUESTIONS_LOCKED, false),
+        }
+    }
+}
+
+/// The other Macs of a synced vault.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OtherMacsRow {
+    /// "Through the Apassy relay", "Through iCloud Drive", "Removed from the relay".
+    pub(crate) words: String,
+    /// The vault syncs through the relay and this Mac is in its team: Devices… and Add a
+    /// Mac… work.
+    pub(crate) relay: bool,
+}
+
+/// The Relay group: the questions through the relay, the feed of the agents, the other
+/// Macs, and the end of the free approvals (ADR 0037 D14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelayView {
+    pub(crate) questions: Questions,
+    /// "Show Agents on My Other Devices": shown only while the questions are on.
+    pub(crate) feed_shown: bool,
+    pub(crate) other_macs: Option<OtherMacsRow>,
+    /// The version with which the free approvals through the hosted relay end, while the
+    /// questions of the vault go through it.
+    pub(crate) free_end: Option<String>,
+}
+
 /// Everything that Settings > Devices shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DevicesView {
@@ -299,6 +411,10 @@ pub(crate) struct DevicesView {
     /// Problems of the approvals or of the feed, one line each.
     pub(crate) notes: Vec<(String, Tone)>,
     pub(crate) wifi: Option<WifiView>,
+    /// The Relay group, while a vault is open.
+    pub(crate) relay: Option<RelayView>,
+    /// Frame 4d after "Later": the hosted relay kept the old entry of a move.
+    pub(crate) old_relay_entry: bool,
     /// Unix seconds now, for the last contact.
     pub(crate) now: u64,
 }
@@ -346,6 +462,14 @@ pub(crate) enum Action {
     RemoveWifi(String, String),
     ResetWifi,
     RetryWifi,
+    /// "Send Questions Through the Relay" moved: on runs the owner check first.
+    SetQuestions(bool),
+    /// "Show Agents on My Other Devices" moved.
+    ShowAgents(bool),
+    /// Devices… of the other Macs: the relay sync sheet of the Macs.
+    OtherMacs,
+    /// Add a Mac… of the other Macs: the relay sync link.
+    AddMac,
 }
 
 // ---- Words. ----
@@ -413,6 +537,9 @@ pub(crate) fn draw(
     let mut action = None;
     this_mac_group(ui, view, notifications, &mut action);
     devices_group(ui, view, &mut action);
+    if let Some(relay) = &view.relay {
+        relay_group(ui, relay, &mut action);
+    }
     if let Some(wifi) = &view.wifi {
         action = wifi_group(ui, wifi, view.now).or(action);
     }
@@ -565,6 +692,15 @@ fn this_mac_group(
         if view.can_move && matches!(view.node, NodeState::On { address: Some(_) }) {
             move_row(g, action);
         }
+        if view.old_relay_entry {
+            problem_line(
+                g,
+                OLD_RELAY_ENTRY,
+                Tone::Warning,
+                None,
+                Some((OLD_RELAY_ENTRY, &OLD_RELAY_ENTRY_HELP)),
+            );
+        }
         notifications(g);
     });
 }
@@ -620,7 +756,7 @@ fn on_rows(
         });
         return;
     };
-    let mono = kit::text(&address.ipv4, Font::Mono).color(kit::LABEL);
+    let mono = kit::text(&address.ipv4, Font::Mono).color(kit::palette().label);
     if value_row(g, "Address", mono, Some("Copy")) {
         *action = Some(Action::Copy(address.origin.clone()));
     }
@@ -640,7 +776,7 @@ fn on_rows(
     if let Some(words) = &address.words {
         g.line(
             "Node Words",
-            Some(kit::text(words, Font::Mono).color(kit::LABEL)),
+            Some(kit::text(words, Font::Mono).color(kit::palette().label)),
             |ui| {
                 kit::help_button(ui, "Node Words", &WORDS_HELP);
             },
@@ -659,12 +795,12 @@ fn move_row(g: &mut rows::Group<'_>, action: &mut Option<Action>) {
                 ui,
                 |ui| {
                     ui.horizontal_top(|ui| {
-                        kit::icon_tile_sized(ui, Icon::Globe, kit::ACCENT, 22.0);
+                        kit::icon_tile_sized(ui, Icon::Globe, kit::palette().accent, 22.0);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.label(
                                 kit::medium("Approvals go through Apassy relay", Font::Body)
-                                    .color(kit::LABEL),
+                                    .color(kit::palette().label),
                             );
                             ui.add(
                                 Label::new(rows::note(
@@ -694,7 +830,7 @@ fn devices_label(ui: &mut Ui, count: usize) {
             Label::new(
                 kit::text("Devices", Font::Callout)
                     .variation(b"wght", 600.0)
-                    .color(kit::SECONDARY),
+                    .color(kit::palette().secondary),
             )
             .selectable(false),
         );
@@ -703,7 +839,7 @@ fn devices_label(ui: &mut Ui, count: usize) {
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(2.0);
-            ui.label(kit::text(count.to_string(), Font::Callout).color(kit::SECONDARY));
+            ui.label(kit::text(count.to_string(), Font::Callout).color(kit::palette().secondary));
         });
     });
     ui.add_space(6.0);
@@ -755,19 +891,19 @@ fn device_glyph(ui: &mut Ui, kind: Kind) {
         return;
     }
     let painter = ui.painter();
-    painter.rect_filled(rect, 7, kit::FILL_HOVER);
+    painter.rect_filled(rect, 7, kit::palette().fill_hover);
     let inner = Rect::from_center_size(rect.center(), Vec2::splat(17.0));
-    let stroke = Stroke::new(1.4, kit::LABEL);
+    let stroke = Stroke::new(1.4, kit::palette().label);
     match kind {
-        Kind::Mac => kit::paint_icon(painter, inner, Icon::Laptop, kit::LABEL),
-        Kind::LinuxNode => kit::paint_icon(painter, inner, Icon::Terminal, kit::LABEL),
+        Kind::Mac => kit::paint_icon(painter, inner, Icon::Laptop, kit::palette().label),
+        Kind::LinuxNode => kit::paint_icon(painter, inner, Icon::Terminal, kit::palette().label),
         Kind::Iphone => {
             let body = Rect::from_center_size(inner.center(), Vec2::new(9.0, 15.0));
             painter.rect_stroke(body, 2.5, stroke, egui::StrokeKind::Middle);
             painter.hline(
                 (body.center().x - 1.5)..=(body.center().x + 1.5),
                 body.bottom() - 2.2,
-                Stroke::new(1.2, kit::LABEL),
+                Stroke::new(1.2, kit::palette().label),
             );
         }
         Kind::Watch => {
@@ -779,8 +915,8 @@ fn device_glyph(ui: &mut Ui, kind: Kind) {
                     egui::pos2(face.right() - 2.0, bottom),
                 )
             };
-            painter.rect_filled(band(inner.top(), face.top()), 1, kit::LABEL);
-            painter.rect_filled(band(face.bottom(), inner.bottom()), 1, kit::LABEL);
+            painter.rect_filled(band(inner.top(), face.top()), 1, kit::palette().label);
+            painter.rect_filled(band(face.bottom(), inner.bottom()), 1, kit::palette().label);
         }
     }
 }
@@ -841,6 +977,78 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
             );
     });
     clicked
+}
+
+/// The Relay group: "Send Questions Through the Relay" with its ⓘ, "Show Agents on My
+/// Other Devices" while it is on, the other Macs of a synced vault, and the end of the
+/// free approvals through Apassy relay.
+fn relay_group(ui: &mut Ui, relay: &RelayView, action: &mut Option<Action>) {
+    rows::group(ui, Some(RELAY_GROUP), |g| {
+        let was = relay.questions == Questions::On;
+        let (subline, enabled) = relay.questions.subline();
+        let mut on = was;
+        switch_row(
+            g,
+            RELAY_QUESTIONS,
+            Some(subline),
+            &mut on,
+            enabled,
+            Some(&RELAY_HELP),
+        );
+        if on != was {
+            *action = Some(Action::SetQuestions(on));
+        }
+        if relay.questions == Questions::RemovedSync {
+            g.note_row(RELAY_QUESTIONS_REMOVED_SYNC_FIX);
+        }
+        if was {
+            let mut shown = relay.feed_shown;
+            switch_row(
+                g,
+                SHOW_AGENTS,
+                Some(SHOW_AGENTS_NOTE),
+                &mut shown,
+                true,
+                Some(&SHOW_AGENTS_HELP),
+            );
+            if shown != relay.feed_shown {
+                *action = Some(Action::ShowAgents(shown));
+            }
+        }
+        if let Some(others) = &relay.other_macs {
+            g.line(OTHER_MACS, Some(rows::value(&others.words)), |ui| {
+                if others.relay {
+                    if kit::small_button(ui, ADD_MAC, Style::Bordered).clicked() {
+                        *action = Some(Action::AddMac);
+                    }
+                    if kit::small_button(ui, OTHER_MACS_DEVICES, Style::Bordered).clicked() {
+                        *action = Some(Action::OtherMacs);
+                    }
+                }
+                kit::help_button(ui, OTHER_MACS, &OTHER_MACS_HELP);
+            });
+        }
+        if let Some(version) = &relay.free_end {
+            let line = free_end_line(version);
+            let help = free_end_help(version);
+            let help: Vec<&str> = help.iter().map(String::as_str).collect();
+            problem_line(g, &line, Tone::Warning, None, Some((RELAY_GROUP, &help)));
+        }
+    });
+}
+
+/// The warning line of the end of the free approvals (ADR 0037 D14).
+pub(crate) fn free_end_line(version: &str) -> String {
+    format!("Free approvals through Apassy relay end with Apassy {version}.")
+}
+
+/// Its help: the notice of plan s7 unit N1, a line each.
+fn free_end_help(version: &str) -> [String; 3] {
+    [
+        format!("Free approvals through apassy-relay.wyderka.cc end with Apassy {version}."),
+        "Keep them free over Tailscale with this Mac as the node.".to_owned(),
+        "Or use Apassy Connect (paid).".to_owned(),
+    ]
 }
 
 /// The Wi-Fi Pairing group (frame 6c, 6d). Shown only while a Wi-Fi iPhone is paired.
@@ -1033,7 +1241,7 @@ pub(crate) fn linux_sheet(
             });
             g.labeled(
                 "Address",
-                kit::text(origin_host(origin), Font::Mono).color(kit::LABEL),
+                kit::text(origin_host(origin), Font::Mono).color(kit::palette().label),
             );
         });
         ui.add_space(8.0);
@@ -1066,15 +1274,20 @@ pub(crate) fn wifi_notice(ctx: &egui::Context, tailnet: bool) -> (Option<Choice>
         ui.vertical_centered(|ui| {
             kit::paint_icon_in(ui, Icon::Warning, 30.0, Tone::Warning.mark());
             ui.add_space(6.0);
-            ui.label(kit::text(WIFI_NOTICE_TITLE, Font::Title3).color(kit::LABEL));
+            ui.label(kit::text(WIFI_NOTICE_TITLE, Font::Title3).color(kit::palette().label));
             ui.add_space(4.0);
             let way = if tailnet {
                 "The iPhone app now reaches this Mac through your tailnet."
             } else {
                 "The iPhone app now reaches this Mac through Apassy relay."
             };
-            kit::paragraph(ui, way, Font::Callout, kit::SECONDARY);
-            kit::paragraph(ui, WifiEnd::NOW.line(), Font::Callout, kit::SECONDARY);
+            kit::paragraph(ui, way, Font::Callout, kit::palette().secondary);
+            kit::paragraph(
+                ui,
+                WifiEnd::NOW.line(),
+                Font::Callout,
+                kit::palette().secondary,
+            );
         });
         ui.add_space(10.0);
         kit::sheet_buttons(
@@ -1091,6 +1304,509 @@ pub(crate) fn wifi_notice(ctx: &egui::Context, tailnet: bool) -> (Option<Choice>
         );
     });
     (choice, response.escape)
+}
+
+// ---- Frames 2 and 4b–4d: the add and move sheets. ----
+//
+// The sheet of "Add an iPhone or a Mac…" and of "Move Approvals to This Mac…" is the
+// questions mode of "Add a device…" of relay sync (`sync/relay.rs`); these functions draw
+// its steps inside it, with the exact texts of the mockup, and the demo build draws them
+// from fixtures.
+
+pub(crate) const ADD_TITLE: &str = "Add a Device";
+pub(crate) const ADD_LEAD: &str = "Scan with the Apassy app on the iPhone.";
+pub(crate) const LINK_EXPIRED: &str = "The link expired.";
+pub(crate) const PASTE_ON_MAC: &str = "On a Mac, paste the link instead.";
+pub(crate) const NEW_LINK: &str = "New Link";
+pub(crate) const EXPIRES_IN: &str = "Expires In";
+pub(crate) const ADDED_LEAD: &str = "It approves runs through this Mac.";
+/// The lead of 2c for an Apple Watch: it cannot approve runs (ADR 0039).
+pub(crate) const ADDED_WATCH_LEAD: &str = "It allows access requests once, on a wrist.";
+pub(crate) const ADDED_TAILSCALE: &str = "The iPhone needs Tailscale on to reach this Mac.";
+pub(crate) const MOVE_TITLE: &str = "Move Approvals to This Mac";
+pub(crate) const MOVE_LEAD: &str = "Your iPhone pairs again, with this Mac.";
+pub(crate) const MOVE_STEP_TEAM: &str = "Approvals team made here";
+pub(crate) const MOVE_STEP_WORDS: &str = "Then check the words on both.";
+pub(crate) const MOVE_STEP_REMOVE: &str = "Remove from Apassy relay";
+pub(crate) const MOVED_TITLE: &str = "Approvals Moved";
+pub(crate) const MOVED_LEAD: &str = "Questions now go through this Mac.";
+pub(crate) const MOVED_REMOVED: &str = "Removed from Apassy relay";
+pub(crate) const OLD_ENTRY_TITLE: &str = "Old Entry Still on Relay";
+pub(crate) const OLD_ENTRY_LEAD: &str = "Approvals already use this Mac.";
+pub(crate) const OLD_ENTRY_NOTE: &str = "Apassy relay did not answer the removal.";
+
+/// "Rafal's iPhone Wants to Join".
+pub(crate) fn join_title(name: &str) -> String {
+    format!("{name} Wants to Join")
+}
+
+/// "Confirm only if the iPhone shows these words." ("the Mac" for a Mac; a watch pairs
+/// from the iPhone).
+pub(crate) fn join_lead(kind: Kind) -> String {
+    let device = match kind {
+        Kind::Mac | Kind::LinuxNode => "Mac",
+        Kind::Iphone | Kind::Watch => "iPhone",
+    };
+    format!("Confirm only if the {device} shows these words.")
+}
+
+/// "Rafal's iPhone Added".
+pub(crate) fn added_title(name: &str) -> String {
+    format!("{name} Added")
+}
+
+/// "Scan with Rafal's iPhone".
+pub(crate) fn move_scan(iphone: &str) -> String {
+    format!("Scan with {iphone}")
+}
+
+/// "Pair Rafal's Apple Watch again from the iPhone."
+pub(crate) fn pair_watch_again(watch: &str) -> String {
+    format!("Pair {watch} again from the iPhone.")
+}
+
+/// The countdown of "Expires In": "9:41".
+pub(crate) fn expires_in(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// The link field: the origin and "/link#…"; Copy copies the whole link.
+pub(crate) fn shown_link(link: &str) -> String {
+    match link.split_once('#') {
+        Some((before, _)) => format!("{before}#…"),
+        None => link.to_owned(),
+    }
+}
+
+/// What the owner chose in a step of the add or move sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepChoice {
+    Copy,
+    NewLink,
+    Cancel,
+    Refuse,
+    Confirm,
+    Done,
+    Later,
+    TryAgain,
+}
+
+/// The link of frame 2a and of step 2 of 4b.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinkStep {
+    /// Where the device goes: "via your Mac" with the route on, else "via Apassy relay".
+    pub(crate) route: Route,
+    /// The link field, for a link that may go to the pasteboard (a node link). `None`:
+    /// no field, no Copy, and no "On a Mac, paste the link instead." (hosted Connect
+    /// never copies its capability).
+    pub(crate) shown: Option<String>,
+    /// Seconds until the link expires; `None` while the link is made.
+    pub(crate) seconds_left: Option<u64>,
+}
+
+impl LinkStep {
+    pub(crate) fn expired(&self) -> bool {
+        self.seconds_left == Some(0)
+    }
+}
+
+/// The step of the move sheet (frame 4b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MovePhase {
+    /// Step 2: the iPhone scans; Cancel deletes the new node team.
+    Scan,
+    /// Step 3: the join was confirmed; the old devices leave Apassy relay. No Cancel.
+    Removing,
+}
+
+/// The route chip, on its own line.
+fn route_line(ui: &mut Ui, route: Route) {
+    ui.horizontal(|ui| {
+        route_chip(ui, route);
+    });
+}
+
+/// Frame 2a: "Add a Device", the QR code, the link, "Expires In", and Cancel; expired,
+/// "The link expired." and New Link only. `extra` draws the progress or the error of
+/// the sheet above the buttons.
+pub(crate) fn link_step(
+    ui: &mut Ui,
+    step: &LinkStep,
+    qr: impl FnOnce(&mut Ui),
+    extra: impl FnOnce(&mut Ui),
+) -> Option<StepChoice> {
+    let mut choice = None;
+    let expired = step.expired();
+    kit::sheet_title(
+        ui,
+        ADD_TITLE,
+        Some(if expired { LINK_EXPIRED } else { ADD_LEAD }),
+    );
+    route_line(ui, step.route);
+    ui.add_space(8.0);
+    if !expired && step.seconds_left.is_some() {
+        ui.vertical_centered(qr);
+        ui.add_space(10.0);
+        rows::group(ui, None, |g| {
+            if let Some(shown) = &step.shown {
+                g.line(
+                    "Link",
+                    Some(kit::text(shown, Font::Mono).color(kit::palette().label)),
+                    |ui| {
+                        if kit::small_button(ui, "Copy", Style::Bordered).clicked() {
+                            choice = Some(StepChoice::Copy);
+                        }
+                    },
+                );
+            }
+            if let Some(seconds) = step.seconds_left {
+                g.labeled(EXPIRES_IN, rows::value(expires_in(seconds)));
+            }
+        });
+        if step.shown.is_some() {
+            ui.add_space(6.0);
+            kit::note(ui, PASTE_ON_MAC);
+        }
+    }
+    extra(ui);
+    ui.add_space(8.0);
+    kit::sheet_buttons(
+        ui,
+        |_| {},
+        |ui| {
+            if expired {
+                if kit::button(ui, NEW_LINK, Style::Prominent).clicked() {
+                    choice = Some(StepChoice::NewLink);
+                }
+            } else if kit::alert_cancel(ui).clicked() {
+                choice = Some(StepChoice::Cancel);
+            }
+        },
+    );
+    choice
+}
+
+/// The safety words, large, in a box. One text, so that VoiceOver reads them in order.
+fn big_words(ui: &mut Ui, words: &str) {
+    ui.add_space(6.0);
+    ui.vertical_centered(|ui| {
+        egui::Frame::new()
+            .fill(kit::palette().window)
+            .stroke(Stroke::new(0.5, kit::palette().border))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(14, 6))
+            .show(ui, |ui| {
+                ui.label(
+                    kit::text(words, Font::Title)
+                        .variation(b"wght", 600.0)
+                        .color(kit::palette().label),
+                );
+            });
+    });
+    ui.add_space(10.0);
+}
+
+/// Frame 2b: "<Device> Wants to Join", the two safety words, Kind and Route, Refuse and
+/// Confirm…. `extra` draws a note under the rows (the limits of an Apple Watch).
+pub(crate) fn join_step(
+    ui: &mut Ui,
+    name: &str,
+    kind: Kind,
+    words: &str,
+    route: Route,
+    enabled: bool,
+    extra: impl FnOnce(&mut Ui),
+) -> Option<StepChoice> {
+    kit::sheet_title(ui, &join_title(name), Some(&join_lead(kind)));
+    big_words(ui, words);
+    rows::group(ui, None, |g| {
+        g.labeled("Kind", rows::value(kind.words()));
+        g.line("Route", None, |ui| {
+            route_chip(ui, route);
+        });
+    });
+    extra(ui);
+    ui.add_space(8.0);
+    let mut refuse = false;
+    let mut confirm = false;
+    ui.add_enabled_ui(enabled, |ui| {
+        kit::sheet_buttons(
+            ui,
+            |ui| refuse = kit::button(ui, "Refuse", Style::Destructive).clicked(),
+            |ui| confirm = kit::button(ui, "Confirm…", Style::Prominent).clicked(),
+        );
+    });
+    if confirm {
+        Some(StepChoice::Confirm)
+    } else if refuse {
+        Some(StepChoice::Refuse)
+    } else {
+        None
+    }
+}
+
+/// The centred head of a result: a glyph, the title, and its lines.
+fn result_head(ui: &mut Ui, icon: Icon, tone: Tone, title: &str, lines: &[(&str, bool)]) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(6.0);
+        kit::paint_icon_in(ui, icon, 30.0, tone.mark());
+        ui.add_space(6.0);
+        ui.label(kit::text(title, Font::Title3).color(kit::palette().label));
+        ui.add_space(4.0);
+        for (line, secondary) in lines {
+            let color = if *secondary {
+                kit::palette().secondary
+            } else {
+                kit::palette().label
+            };
+            kit::paragraph(ui, *line, Font::Callout, color);
+        }
+    });
+    ui.add_space(10.0);
+}
+
+/// Frame 2c: "<Device> Added", what it does, and for a device of this Mac's node that it
+/// needs Tailscale. `extra` draws the question about an older device of the same kind.
+pub(crate) fn added_step(
+    ui: &mut Ui,
+    name: &str,
+    watch: bool,
+    node: bool,
+    extra: impl FnOnce(&mut Ui),
+) -> Option<StepChoice> {
+    let mut choice = None;
+    let lead = if watch { ADDED_WATCH_LEAD } else { ADDED_LEAD };
+    let mut lines = vec![(lead, false)];
+    if node {
+        lines.push((ADDED_TAILSCALE, true));
+    }
+    result_head(
+        ui,
+        Icon::CheckCircle,
+        Tone::Good,
+        &added_title(name),
+        &lines,
+    );
+    extra(ui);
+    kit::sheet_buttons(
+        ui,
+        |_| {},
+        |ui| {
+            if kit::button(ui, "Done", Style::Prominent).clicked() {
+                choice = Some(StepChoice::Done);
+            }
+        },
+    );
+    choice
+}
+
+/// One step of the move: a numbered circle (a check when done), its title, its line.
+fn move_step_row(g: &mut rows::Group<'_>, number: u8, title: &str, line: Option<&str>, state: i8) {
+    g.row(|ui| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+            let painter = ui.painter();
+            let fill = match state {
+                ..0 => kit::palette().fill_hover,
+                0 => kit::palette().accent,
+                _ => Tone::Good.mark(),
+            };
+            painter.circle_filled(rect.center(), 9.0, fill);
+            if state > 0 {
+                let inner = Rect::from_center_size(rect.center(), Vec2::splat(10.0));
+                kit::paint_icon(painter, inner, Icon::Check, kit::palette().on_accent);
+            } else {
+                let color = if state == 0 {
+                    kit::palette().on_accent
+                } else {
+                    kit::palette().secondary
+                };
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    number.to_string(),
+                    egui::FontId::proportional(10.5),
+                    color,
+                );
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                let text = if state < 0 {
+                    kit::text(title, Font::Body).color(kit::palette().secondary)
+                } else {
+                    kit::medium(title, Font::Body).color(kit::palette().label)
+                };
+                ui.label(text);
+                if let Some(line) = line {
+                    ui.label(rows::note(line));
+                }
+            });
+            if state == 0 && number == 3 {
+                ui.add(egui::Spinner::new().size(12.0));
+            }
+        });
+    });
+}
+
+/// Frame 4b: "Move Approvals to This Mac", the three steps, the QR code while the iPhone
+/// scans, the route chip, and Cancel before the join (none after it). An expired link
+/// shows "The link expired." and New Link.
+pub(crate) fn move_step(
+    ui: &mut Ui,
+    iphone: &str,
+    phase: MovePhase,
+    link: Option<&LinkStep>,
+    qr: impl FnOnce(&mut Ui),
+    extra: impl FnOnce(&mut Ui),
+) -> Option<StepChoice> {
+    let mut choice = None;
+    kit::sheet_title(ui, MOVE_TITLE, Some(MOVE_LEAD));
+    let scanning = phase == MovePhase::Scan;
+    rows::group(ui, None, |g| {
+        move_step_row(g, 1, MOVE_STEP_TEAM, None, 1);
+        move_step_row(
+            g,
+            2,
+            &move_scan(iphone),
+            scanning.then_some(MOVE_STEP_WORDS),
+            if scanning { 0 } else { 1 },
+        );
+        move_step_row(g, 3, MOVE_STEP_REMOVE, None, if scanning { -1 } else { 0 });
+    });
+    ui.add_space(10.0);
+    let expired = link.is_some_and(LinkStep::expired);
+    if scanning && !expired && link.is_some_and(|link| link.seconds_left.is_some()) {
+        ui.vertical_centered(qr);
+        ui.add_space(8.0);
+    }
+    if expired {
+        kit::note(ui, LINK_EXPIRED);
+    }
+    route_line(ui, Route::Mac);
+    extra(ui);
+    ui.add_space(8.0);
+    kit::sheet_buttons(
+        ui,
+        |_| {},
+        |ui| {
+            if !scanning {
+                return;
+            }
+            if expired {
+                if kit::button(ui, NEW_LINK, Style::Prominent).clicked() {
+                    choice = Some(StepChoice::NewLink);
+                }
+            } else if kit::alert_cancel(ui).clicked() {
+                choice = Some(StepChoice::Cancel);
+            }
+        },
+    );
+    choice
+}
+
+/// Frame 4c: "Approvals Moved", each device that joined with its route, "Removed from
+/// Apassy relay" when the old devices left it, and a line for each watch that must pair
+/// again.
+pub(crate) fn moved_step(
+    ui: &mut Ui,
+    joined: &[String],
+    removed: bool,
+    watches: &[String],
+) -> Option<StepChoice> {
+    let mut choice = None;
+    result_head(
+        ui,
+        Icon::CheckCircle,
+        Tone::Good,
+        MOVED_TITLE,
+        &[(MOVED_LEAD, false)],
+    );
+    let ok = |ui: &mut Ui| {
+        kit::paint_icon_in(ui, Icon::CheckCircle, 14.0, Tone::Good.mark());
+    };
+    rows::group(ui, None, |g| {
+        for name in joined {
+            g.row(|ui| {
+                egui::Sides::new().height(rows::LINE).show(
+                    ui,
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ok(ui);
+                        ui.label(rows::label_text(name));
+                    },
+                    |ui| {
+                        route_chip(ui, Route::Mac);
+                    },
+                );
+            });
+        }
+        if removed {
+            g.row(|ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ok(ui);
+                    ui.label(rows::label_text(MOVED_REMOVED));
+                });
+            });
+        }
+    });
+    for watch in watches {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            kit::paint_icon_in(ui, Icon::Info, 13.0, Tone::Accent.text());
+            ui.add(
+                Label::new(
+                    kit::text(pair_watch_again(watch), Font::Callout).color(Tone::Accent.text()),
+                )
+                .wrap(),
+            );
+        });
+    }
+    ui.add_space(8.0);
+    kit::sheet_buttons(
+        ui,
+        |_| {},
+        |ui| {
+            if kit::button(ui, "Done", Style::Prominent).clicked() {
+                choice = Some(StepChoice::Done);
+            }
+        },
+    );
+    choice
+}
+
+/// Frame 4d: the hosted relay did not answer the removal of the old devices. Later keeps
+/// the row "Old entry still on Apassy relay" in the This Mac group. Try Again shows only
+/// with `retry`: a move that ended keeps no hosted team to ask again.
+pub(crate) fn old_entry_step(ui: &mut Ui, retry: bool) -> Option<StepChoice> {
+    let mut choice = None;
+    result_head(
+        ui,
+        Icon::Warning,
+        Tone::Warning,
+        OLD_ENTRY_TITLE,
+        &[(OLD_ENTRY_LEAD, false), (OLD_ENTRY_NOTE, true)],
+    );
+    kit::sheet_buttons(
+        ui,
+        |_| {},
+        |ui| {
+            if retry && kit::button(ui, "Try Again", Style::Prominent).clicked() {
+                choice = Some(StepChoice::TryAgain);
+            }
+            let later = if retry {
+                kit::button(ui, "Later", Style::Bordered)
+            } else {
+                kit::button(ui, "Later", Style::Prominent)
+            };
+            if later.clicked() {
+                choice = Some(StepChoice::Later);
+            }
+        },
+    );
+    choice
 }
 
 /// The state of the section in the window.
@@ -1132,16 +1848,20 @@ mod live {
 
     use eframe::egui;
 
+    use super::super::sync::SyncSheet;
     use super::{
         Action, Address, Choice, DeviceEntry, DevicesSheet, DevicesView, Kind, NodeProblem,
-        NodeState, Route, Target, WatchChoice,
+        NodeState, Questions, Route, Target, WatchChoice,
     };
     use crate::broker::approvals::{OwnerAction, OwnerProof};
     use crate::desktop::DesktopApp;
     use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
     use crate::node::NodeStatus;
     use crate::node::funnel::Tailscale;
-    use crate::relay::membership::{questions_membership, this_device};
+    use crate::relay::membership::{
+        FREE_RELAY_PATHS_END_VERSION, QuestionsAvailability, questions_availability,
+        questions_membership, this_device,
+    };
     use crate::vault::TrustedDeviceKind;
 
     /// While Settings > Devices shows, the node status is read again this often (on a
@@ -1490,7 +2210,63 @@ mod live {
             devices,
             notes,
             wifi: None,
+            relay: relay_view(app),
+            old_relay_entry: !locked && app.questions_old_hosted_entry(),
             now: crate::desktop::companion::now(),
+        }
+    }
+
+    /// The Relay group of the open vault: the state of its questions ("Unlock the vault
+    /// to change it." while locked), the feed switch, the other Macs while it syncs, and
+    /// the D14 notice while its questions go through the hosted relay.
+    fn relay_view(app: &DesktopApp) -> Option<super::RelayView> {
+        let questions = app
+            .owner_ui
+            .session
+            .with_vault(|vault| {
+                if vault.is_locked() {
+                    return None;
+                }
+                questions_availability(vault).ok()
+            })
+            .flatten();
+        let questions = match questions {
+            Some(QuestionsAvailability::On { .. }) => Questions::On,
+            Some(QuestionsAvailability::CanTurnOn { .. }) => Questions::CanTurnOn,
+            Some(QuestionsAvailability::NeedsTeam) => Questions::NeedsTeam,
+            Some(QuestionsAvailability::JoinTeam { .. }) => Questions::JoinTeam,
+            Some(QuestionsAvailability::Removed { sync: false, .. }) => Questions::Removed,
+            Some(QuestionsAvailability::Removed { sync: true, .. }) => Questions::RemovedSync,
+            None => Questions::Locked,
+        };
+        let synced = app
+            .current_vault()
+            .is_some_and(|entry| entry.sync.is_some() && entry.sync_state().is_some());
+        let other_macs = synced.then(|| {
+            let others = super::super::sync::other_macs(app);
+            super::OtherMacsRow {
+                words: others.words,
+                relay: others.relay.is_some(),
+            }
+        });
+        let free_end = app
+            .questions_free_notice()
+            .map(|_| FREE_RELAY_PATHS_END_VERSION.to_owned());
+        Some(super::RelayView {
+            questions,
+            feed_shown: !app.ui.feed_off,
+            other_macs,
+            free_end,
+        })
+    }
+
+    /// "Show Agents on My Other Devices" on or off. Off: the questions waiter deletes the
+    /// feed of this Mac from the relay on its own thread, and takes no action from the
+    /// other devices.
+    pub(crate) fn set_feed_shown(app: &mut DesktopApp, on: bool) {
+        app.ui.set_feed_off(!on);
+        if let Some(questions) = &app.owner.questions {
+            questions.set_feed(on);
         }
     }
 
@@ -1795,6 +2571,23 @@ mod live {
                     device: device.clone(),
                     vault,
                 });
+            }
+            // On is a new channel that can approve runs: the owner check first, for the
+            // relay sync team of the vault, or the sheet of a new team. Off needs no
+            // check and takes the purpose `questions` away; relay sync never changes.
+            Action::SetQuestions(true) => app.questions_turn_on(Some(ctx)),
+            Action::SetQuestions(false) => app.questions_turn_off(),
+            Action::ShowAgents(on) => set_feed_shown(app, on),
+            Action::OtherMacs | Action::AddMac => {
+                let Some(id) = super::super::sync::other_macs(app).relay else {
+                    return;
+                };
+                let sheet = if action == Action::AddMac {
+                    SyncSheet::AddMac { id }
+                } else {
+                    SyncSheet::Devices { id }
+                };
+                app.sync_open_sheet(sheet, Some(ctx));
             }
             Action::Listen(_) | Action::RemoveWifi(..) | Action::ResetWifi | Action::RetryWifi => {}
         }

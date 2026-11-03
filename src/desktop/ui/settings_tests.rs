@@ -11,8 +11,9 @@ use tempfile::TempDir;
 
 use super::super::devices::{
     self, ADD_DEVICE, Address, DeviceEntry, DevicesSheet, DevicesView, Kind, NodeProblem,
-    NodeState, ONLY_THIS_MAC, ROUTE_LOCKED, ROUTE_OFF, ROUTE_ON, ROUTE_SWITCH, Route, Target,
-    WIFI_GROUP, WIFI_LISTEN, WIFI_NOTICE_TITLE, WifiDevice, WifiEnd, WifiView,
+    NodeState, ONLY_THIS_MAC, OtherMacsRow, Questions, ROUTE_LOCKED, ROUTE_OFF, ROUTE_ON,
+    ROUTE_SWITCH, RelayView, Route, Target, WIFI_GROUP, WIFI_LISTEN, WIFI_NOTICE_TITLE, WifiDevice,
+    WifiEnd, WifiView,
 };
 use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
 use super::super::settings_view::SettingsSection;
@@ -485,6 +486,8 @@ fn frame_one() -> DevicesView {
             }],
             end: WifiEnd::TwoVersions,
         }),
+        relay: None,
+        old_relay_entry: false,
         now: NOW,
     }
 }
@@ -857,6 +860,483 @@ fn devices_sheets_draw_the_mockup() {
             assert!(text.contains(expected), "6a/6b shows {expected}: {text}");
         }
     }
+}
+
+/// The Relay group restores what the old Relay and Other Macs groups did, in the layout
+/// of the mockup: "Send Questions Through the Relay" in each state of the vault, "Show
+/// Agents on My Other Devices" only while it is on, the other Macs of a synced vault with
+/// Devices… and Add a Mac…, and the end of the free approvals (ADR 0037 D14). Frame 1 of
+/// the mockup itself has no Relay group. Frame 4d after "Later" keeps its row.
+#[test]
+fn devices_relay_group_restores_the_relay_and_the_other_macs() {
+    use devices::{
+        ADD_MAC, OLD_RELAY_ENTRY, OTHER_MACS, OTHER_MACS_DEVICES, RELAY_GROUP, RELAY_QUESTIONS,
+        RELAY_QUESTIONS_REMOVED_SYNC_FIX, SHOW_AGENTS, SHOW_AGENTS_NOTE,
+    };
+    let frame = view_texts(&frame_one());
+    for gone in [
+        RELAY_GROUP,
+        RELAY_QUESTIONS,
+        SHOW_AGENTS,
+        OTHER_MACS,
+        OLD_RELAY_ENTRY,
+    ] {
+        assert!(!frame.contains(gone), "frame 1 has no {gone}: {frame}");
+    }
+    let with = |questions: Questions, other_macs: Option<OtherMacsRow>, free: bool| DevicesView {
+        relay: Some(RelayView {
+            questions,
+            feed_shown: true,
+            other_macs,
+            free_end: free.then(|| "0.5.19".to_owned()),
+        }),
+        ..frame_one()
+    };
+    for questions in [
+        Questions::On,
+        Questions::CanTurnOn,
+        Questions::NeedsTeam,
+        Questions::JoinTeam,
+        Questions::Removed,
+        Questions::RemovedSync,
+        Questions::Locked,
+    ] {
+        let text = view_texts(&with(questions, None, false));
+        let (subline, _) = questions.subline();
+        for expected in [RELAY_GROUP, RELAY_QUESTIONS, subline] {
+            assert!(text.contains(expected), "{questions:?}: {expected}: {text}");
+        }
+        assert_eq!(
+            text.contains(SHOW_AGENTS) && text.contains(SHOW_AGENTS_NOTE),
+            questions == Questions::On,
+            "the feed switch only while the questions are on: {questions:?}: {text}"
+        );
+        assert_eq!(
+            text.contains(RELAY_QUESTIONS_REMOVED_SYNC_FIX),
+            questions == Questions::RemovedSync,
+            "{text}"
+        );
+        assert!(!text.contains(OTHER_MACS), "{text}");
+        // One add button and one blue button, as before.
+        assert_eq!(text.matches(ADD_DEVICE).count(), 1, "{text}");
+    }
+    for words in ["End-to-end encrypted.", "Off.", "No account needed."] {
+        assert!(
+            [
+                devices::RELAY_QUESTIONS_ON,
+                devices::RELAY_QUESTIONS_OFF,
+                devices::RELAY_QUESTIONS_NEW_TEAM,
+            ]
+            .iter()
+            .any(|line| line.contains(words))
+        );
+    }
+    // Each line of the group has 12 words or fewer.
+    for line in [
+        devices::RELAY_QUESTIONS_ON,
+        devices::RELAY_QUESTIONS_OFF,
+        devices::RELAY_QUESTIONS_NEW_TEAM,
+        devices::RELAY_QUESTIONS_JOIN,
+        devices::RELAY_QUESTIONS_REMOVED,
+        devices::RELAY_QUESTIONS_REMOVED_SYNC,
+        RELAY_QUESTIONS_REMOVED_SYNC_FIX,
+        devices::RELAY_QUESTIONS_LOCKED,
+        SHOW_AGENTS_NOTE,
+    ] {
+        assert!(line.split_whitespace().count() <= 12, "{line}");
+    }
+
+    // The other Macs of a vault that syncs through the relay, and the D14 notice.
+    let text = view_texts(&with(
+        Questions::On,
+        Some(OtherMacsRow {
+            words: "Through the Apassy relay".to_owned(),
+            relay: true,
+        }),
+        true,
+    ));
+    for expected in [
+        OTHER_MACS,
+        "Through the Apassy relay",
+        OTHER_MACS_DEVICES,
+        ADD_MAC,
+        devices::free_end_line("0.5.19").as_str(),
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    // A folder sync names the folder and has no relay buttons.
+    let text = view_texts(&with(
+        Questions::CanTurnOn,
+        Some(OtherMacsRow {
+            words: "Through iCloud Drive".to_owned(),
+            relay: false,
+        }),
+        false,
+    ));
+    assert!(text.contains("Through iCloud Drive"), "{text}");
+    assert!(!text.contains(ADD_MAC), "{text}");
+    assert!(!text.contains("Free approvals"), "{text}");
+
+    // Frame 4d after "Later": the row in the This Mac group.
+    let text = view_texts(&DevicesView {
+        old_relay_entry: true,
+        ..frame_one()
+    });
+    assert!(text.contains(OLD_RELAY_ENTRY), "{text}");
+}
+
+/// The texts of the steps of the add and move sheets, inside a sheet.
+fn step_texts(draw: impl Fn(&mut egui::Ui)) -> String {
+    let ctx = egui::Context::default();
+    let mut texts = Vec::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, DEFAULT)),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            super::super::kit::sheet(ui.ctx(), "test-step", 440.0, |ui| draw(ui));
+        });
+        texts.clear();
+        for clipped in &output.shapes {
+            texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
+        }
+        output.drop_without_applying_deltas();
+    }
+    joined(&texts)
+}
+
+/// Frames 2a–2c and 4b–4d use the exact texts of the mockup table.
+#[test]
+fn devices_add_and_move_sheets_use_the_mockup_texts() {
+    use devices::{LinkStep, MovePhase};
+    let node = LinkStep {
+        route: Route::Mac,
+        shown: Some(devices::shown_link(
+            "https://100.101.7.12:8444/link#code&pin=x",
+        )),
+        seconds_left: Some(9 * 60 + 41),
+    };
+    // 2a.
+    let text = step_texts(|ui| {
+        devices::link_step(ui, &node, |_| {}, |_| {});
+    });
+    for expected in [
+        "Add a Device",
+        "Scan with the Apassy app on the iPhone.",
+        "via your Mac",
+        "Link",
+        "https://100.101.7.12:8444/link#…",
+        "Copy",
+        "Expires In",
+        "9:41",
+        "On a Mac, paste the link instead.",
+        "Cancel",
+    ] {
+        assert!(text.contains(expected), "2a: {expected}: {text}");
+    }
+    assert!(!text.contains("pin=x"), "the field shows no secret: {text}");
+    // 2a through hosted Connect: the chip only changes, and nothing goes to the pasteboard.
+    let hosted = LinkStep {
+        route: Route::Relay,
+        shown: None,
+        ..node.clone()
+    };
+    let text = step_texts(|ui| {
+        devices::link_step(ui, &hosted, |_| {}, |_| {});
+    });
+    assert!(text.contains("via Apassy relay"), "{text}");
+    for gone in ["Copy", "On a Mac, paste the link instead."] {
+        assert!(!text.contains(gone), "{gone}: {text}");
+    }
+    // 2a expired: "The link expired." and New Link only.
+    let expired = LinkStep {
+        seconds_left: Some(0),
+        ..node.clone()
+    };
+    let text = step_texts(|ui| {
+        devices::link_step(ui, &expired, |_| {}, |_| {});
+    });
+    assert!(text.contains("The link expired."), "{text}");
+    assert!(text.contains("New Link"), "{text}");
+    for gone in [
+        "Cancel",
+        "Expires In",
+        "Scan with the Apassy app on the iPhone.",
+    ] {
+        assert!(!text.contains(gone), "{gone}: {text}");
+    }
+    // 2b, for an iPhone and for a Mac.
+    let text = step_texts(|ui| {
+        devices::join_step(
+            ui,
+            "Rafal's iPhone",
+            Kind::Iphone,
+            "amber falcon",
+            Route::Mac,
+            true,
+            |_| {},
+        );
+    });
+    for expected in [
+        "Rafal's iPhone Wants to Join",
+        "Confirm only if the iPhone shows these words.",
+        "amber falcon",
+        "Kind",
+        "iPhone",
+        "Route",
+        "via your Mac",
+        "Refuse",
+        "Confirm…",
+    ] {
+        assert!(text.contains(expected), "2b: {expected}: {text}");
+    }
+    assert_eq!(
+        devices::join_lead(Kind::Mac),
+        "Confirm only if the Mac shows these words."
+    );
+    // 2c: the Tailscale line only for a node device.
+    let text = step_texts(|ui| {
+        devices::added_step(ui, "Rafal's iPhone", false, true, |_| {});
+    });
+    for expected in [
+        "Rafal's iPhone Added",
+        "It approves runs through this Mac.",
+        "The iPhone needs Tailscale on to reach this Mac.",
+        "Done",
+    ] {
+        assert!(text.contains(expected), "2c: {expected}: {text}");
+    }
+    let text = step_texts(|ui| {
+        devices::added_step(ui, "Rafal's iPhone", false, false, |_| {});
+    });
+    assert!(!text.contains("Tailscale"), "{text}");
+    // 4b while the iPhone scans, and after the join (no Cancel).
+    let text = step_texts(|ui| {
+        devices::move_step(
+            ui,
+            "Rafal's iPhone",
+            MovePhase::Scan,
+            Some(&node),
+            |_| {},
+            |_| {},
+        );
+    });
+    for expected in [
+        "Move Approvals to This Mac",
+        "Your iPhone pairs again, with this Mac.",
+        "Approvals team made here",
+        "Scan with Rafal's iPhone",
+        "Then check the words on both.",
+        "Remove from Apassy relay",
+        "via your Mac",
+        "Cancel",
+    ] {
+        assert!(text.contains(expected), "4b: {expected}: {text}");
+    }
+    let text = step_texts(|ui| {
+        devices::move_step(
+            ui,
+            "Rafal's iPhone",
+            MovePhase::Removing,
+            None,
+            |_| {},
+            |_| {},
+        );
+    });
+    assert!(text.contains("Remove from Apassy relay"), "{text}");
+    assert!(!text.contains("Cancel"), "no cancel after the join: {text}");
+    // 4c.
+    let text = step_texts(|ui| {
+        devices::moved_step(
+            ui,
+            &["Rafal's iPhone".to_owned()],
+            true,
+            &["Rafal's Apple Watch".to_owned()],
+        );
+    });
+    for expected in [
+        "Approvals Moved",
+        "Questions now go through this Mac.",
+        "Rafal's iPhone",
+        "via your Mac",
+        "Removed from Apassy relay",
+        "Pair Rafal's Apple Watch again from the iPhone.",
+        "Done",
+    ] {
+        assert!(text.contains(expected), "4c: {expected}: {text}");
+    }
+    let text = step_texts(|ui| {
+        devices::moved_step(ui, &["Rafal's iPhone".to_owned()], false, &[]);
+    });
+    for gone in ["Removed from Apassy relay", "Pair "] {
+        assert!(
+            !text.contains(gone),
+            "4c without a removal or a watch: {gone}: {text}"
+        );
+    }
+    // 4d.
+    let text = step_texts(|ui| {
+        devices::old_entry_step(ui, false);
+    });
+    for expected in [
+        "Old Entry Still on Relay",
+        "Approvals already use this Mac.",
+        "Apassy relay did not answer the removal.",
+        "Later",
+    ] {
+        assert!(text.contains(expected), "4d: {expected}: {text}");
+    }
+    assert!(
+        !text.contains("Try Again"),
+        "no hosted team to ask again: {text}"
+    );
+    let text = step_texts(|ui| {
+        devices::old_entry_step(ui, true);
+    });
+    assert!(
+        text.contains("Try Again") && text.contains("Later"),
+        "{text}"
+    );
+}
+
+/// The switch with `label` in the AccessKit tree of one frame: its center, whether it
+/// is on, and whether it is disabled.
+fn switch_in(ctx: &egui::Context, app: &mut DesktopApp, label: &str) -> Option<(Pos2, bool, bool)> {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, TALL)),
+        ..Default::default()
+    };
+    let output = ctx.run_ui(input, |ui| super::super::draw(app, ui));
+    let mut found = None;
+    if let Some(update) = &output.platform_output.accesskit_update {
+        for (_, node) in &update.nodes {
+            if node.label() == Some(label)
+                && let Some(toggled) = node.toggled()
+                && let Some(bounds) = node.bounds()
+            {
+                let center = Pos2::new(
+                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                );
+                found = Some((
+                    center,
+                    toggled == egui::accesskit::Toggled::True,
+                    node.is_disabled(),
+                ));
+            }
+        }
+    }
+    output.drop_without_applying_deltas();
+    found
+}
+
+/// "Send Questions Through the Relay" in Settings > Devices: on opens the owner check
+/// for exactly the relay sync team and changes nothing before it passes; then "Show
+/// Agents on My Other Devices" shows and its switch keeps the choice; off needs no check
+/// and keeps relay sync.
+#[test]
+fn the_relay_switch_needs_the_owner_check_and_off_needs_none() {
+    use crate::relay::membership::{QuestionsAvailability, questions_availability};
+    use devices::{RELAY_QUESTIONS, SHOW_AGENTS};
+    let relay = fake_relay::FakeRelay::start();
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    super::super::open_settings(&mut app, SettingsSection::Devices);
+    let vault = app.owner_ui.session.shared_vault();
+    let key = crate::sync::DeviceKey::generate().expect("key");
+    vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .expect("open vault")
+        .set_relay_device(&crate::vault::RelayDevice {
+            relay_url: relay.url.clone(),
+            team_id: "t_7k2m5q4x3c".to_owned(),
+            device_id: 2,
+            public_key: key.public_key().to_vec(),
+            key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
+            created_at: 0,
+        })
+        .expect("relay row");
+    let availability = |app: &DesktopApp| {
+        let shared = app.owner_ui.session.shared_vault();
+        let guard = shared.lock().unwrap();
+        questions_availability(guard.as_ref().expect("open vault")).unwrap()
+    };
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut switch = None;
+    for _ in 0..3 {
+        switch = switch_in(&ctx, &mut app, RELAY_QUESTIONS);
+    }
+    let (at, on, disabled) = switch.expect("the relay switch is in the AccessKit tree");
+    assert!(!on && !disabled, "off, and it can move");
+    assert!(
+        switch_in(&ctx, &mut app, SHOW_AGENTS).is_none(),
+        "no feed switch while off"
+    );
+    click(&ctx, &mut app, TALL, at);
+    let request = app
+        .owner
+        .check
+        .as_ref()
+        .expect("on opens the owner check")
+        .request
+        .clone();
+    assert_eq!(
+        request.action(),
+        OwnerAction::EnableRelayQuestions {
+            relay_url: relay.url.clone(),
+            team_id: Some("t_7k2m5q4x3c".to_owned()),
+        }
+    );
+    assert!(
+        matches!(availability(&app), QuestionsAvailability::CanTurnOn { .. }),
+        "nothing changes before the check"
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert!(matches!(
+        availability(&app),
+        QuestionsAvailability::On { .. }
+    ));
+
+    // On: the feed switch shows, on by default; off keeps the choice.
+    let mut feed = None;
+    for _ in 0..3 {
+        feed = switch_in(&ctx, &mut app, SHOW_AGENTS);
+    }
+    let (at, shown, _) = feed.expect("the feed switch shows while the questions are on");
+    assert!(shown, "on by default");
+    assert!(!app.ui.feed_off);
+    click(&ctx, &mut app, TALL, at);
+    assert!(app.ui.feed_off, "the switch turns the feed off");
+
+    // Off needs no owner check and keeps relay sync.
+    let mut switch = None;
+    for _ in 0..3 {
+        switch = switch_in(&ctx, &mut app, RELAY_QUESTIONS);
+    }
+    let (at, on, _) = switch.expect("the relay switch");
+    assert!(on);
+    click(&ctx, &mut app, TALL, at);
+    assert!(app.owner.check.is_none(), "off needs no owner check");
+    assert!(matches!(
+        availability(&app),
+        QuestionsAvailability::CanTurnOn { .. }
+    ));
+    let guard = vault.lock().unwrap();
+    assert_eq!(
+        guard
+            .as_ref()
+            .expect("open vault")
+            .relay_device()
+            .unwrap()
+            .expect("relay sync stays")
+            .team_id,
+        "t_7k2m5q4x3c"
+    );
 }
 
 /// The route switch and every revoke go through the owner check: the requests name
