@@ -1597,7 +1597,10 @@ fn a_remote_agent_connects_by_itself_runs_through_the_proxy_and_is_disconnected(
     mac.node.sync_catalog().expect("sync");
     assert_eq!(mac.access(&found, &tokens.access), [(ENV.to_owned(), item)]);
 
-    // Step 9: a lock stops the node and Funnel; `/mcp` and `/p/` do not answer.
+    // Step 9: a lock stops the node and Funnel; `/mcp` and `/p/` do not answer. The
+    // loopback addresses come first: their port is in the vault, which then is locked.
+    let locked_mcp = mac.funnel(&found.mcp);
+    let locked_proxy = format!("{}/bearer", mac.funnel(&base1));
     mac.with_vault(|vault| vault.lock().expect("lock"));
     mac.node.stop();
     assert!(!mac.node.is_running());
@@ -1615,14 +1618,24 @@ fn a_remote_agent_connects_by_itself_runs_through_the_proxy_and_is_disconnected(
     assert!(
         send(
             "POST",
-            &mac.funnel(&found.mcp),
+            &locked_mcp,
             &[],
             Some(("application/json", b"{}".to_vec()))
         )
         .is_err(),
         "nothing listens while the vault is locked"
     );
-    assert!(mac.through_proxy(&base1, &placeholder).is_err());
+    let bearer = format!("Bearer {placeholder}");
+    assert!(
+        send(
+            "GET",
+            &locked_proxy,
+            &[("Authorization", bearer.as_str())],
+            None
+        )
+        .is_err(),
+        "the proxy does not answer while the vault is locked"
+    );
     let refused = mac
         .node
         .start(&mac.vault, mac.broker.clone())
