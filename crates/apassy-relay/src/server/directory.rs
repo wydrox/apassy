@@ -75,7 +75,7 @@ const KIND_1005: &str = "
 ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','node'));
 ";
 
-/// Version 1005 back to 1004 (`downgrade_to_1004`, docs/OPERATIONS.md section 25): the
+/// Version 1005 back to 1004 (`downgrade_to_1004`, docs/OPERATIONS.md section 25.3): the
 /// unused node codes go, so the image of 1004 cannot take one for an operator code; the
 /// column stays, and that image never reads it.
 const DOWNGRADE_1004: &str = "
@@ -686,7 +686,7 @@ impl Directory {
         Ok((from, store.user_version()?))
     }
 
-    /// `apassy-relay downgrade-directory-1004` (docs/OPERATIONS.md section 25): with the
+    /// `apassy-relay downgrade-directory-1004` (docs/OPERATIONS.md section 25.3): with the
     /// relay stopped (it takes `relay.lock`), a directory of version 1005 goes back to 1004
     /// in place, for the image before node pairing codes. The unused node codes go (the
     /// image of 1004 would take one for an operator code); used ones stay as history, and

@@ -413,7 +413,7 @@ pub fn downgrade_to_6(config: &RelayConfig) -> RelayResult<Vec<Downgraded>> {
     })
 }
 
-/// `apassy-relay downgrade-schema-7` (docs/OPERATIONS.md section 26): with the relay
+/// `apassy-relay downgrade-schema-7` (docs/OPERATIONS.md section 25.2): with the relay
 /// stopped (it takes `relay.lock`), every team file of version 8 goes back to version 7
 /// in place, for the image of schema 7. Only the version changes: the push handles stay
 /// for the next start of schema 8 (`Store::downgrade_to_v7`). A file of another version

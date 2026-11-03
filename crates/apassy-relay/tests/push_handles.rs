@@ -1,4 +1,4 @@
-//! Push handles on a node (push-gateway-v1 section 10, docs/SPEC.md section 25.9):
+//! Push handles on a node (push-gateway-v1 section 10, docs/SPEC.md section 32.5):
 //! `PUT` and `DELETE /v1/push/handle`, the gateway allow-list, the hosted relay without a
 //! gateway, the push thread in the gateway mode against a fake gateway (the proof of the
 //! contract, no token, the failed mark), the sealed summary header, and a revoked device.

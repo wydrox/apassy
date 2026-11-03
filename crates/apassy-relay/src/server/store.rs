@@ -28,7 +28,7 @@ use crate::secret::SecretString;
 /// questions, their answers, and the push tokens (docs/SPEC.md section 25). Version 6
 /// adds the feeds of the Macs and their actions (docs/SPEC.md section 27). Version 7
 /// adds the item list of an agent, `agent.items` (docs/SPEC.md section 30.4). Version 8
-/// adds the push handles of a node (`push_handle`, docs/SPEC.md section 25.9,
+/// adds the push handles of a node (`push_handle`, docs/SPEC.md section 32.5,
 /// push-gateway-v1 section 10).
 pub const SCHEMA_VERSION: i64 = 8;
 
@@ -569,7 +569,7 @@ impl Store {
     }
 
     /// The way back of version 8 in place, for the image of schema 7 (docs/OPERATIONS.md
-    /// section 26), with the relay stopped. That image does not know `push_handle` and
+    /// section 25.2), with the relay stopped. That image does not know `push_handle` and
     /// never reads it, so only the version changes: the handles stay for the next start of
     /// schema 8 (`migrate_v8`), and the devices of a node get no push until then.
     pub fn downgrade_to_v7(&self) -> RelayResult<()> {

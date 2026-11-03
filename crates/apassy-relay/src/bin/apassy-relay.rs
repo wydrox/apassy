@@ -64,12 +64,12 @@ back to 6 in place, and each agent with an item list is revoked (docs/OPERATIONS
 It exits 1 when any team failed.
 `downgrade-schema-7` runs with the relay stopped: every team file of schema 8 goes back
 to 7 in place; the push handles stay for the next start of schema 8 (docs/OPERATIONS.md
-26). It exits 1 when any team failed.
+25.2). It exits 1 when any team failed.
 `downgrade-directory-1003` runs with the relay stopped: relay.db goes from 1004 or 1005
 back to 1003 in place, and its OAuth clients, connect requests, refresh tokens, and unused
 node pairing codes are dropped (docs/OPERATIONS.md 24.3).
 `downgrade-directory-1004` runs with the relay stopped: relay.db goes from 1005 back to
-1004 in place, and its unused node pairing codes are dropped (docs/OPERATIONS.md 25).";
+1004 in place, and its unused node pairing codes are dropped (docs/OPERATIONS.md 25.3).";
 
 /// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
 /// before a deletion.
@@ -464,7 +464,7 @@ fn main() -> ExitCode {
                         ExitCode::SUCCESS
                     } else {
                         eprintln!(
-                            "apassy-relay: {failed} of {} teams could not go back to schema 7 (docs/OPERATIONS.md 26).",
+                            "apassy-relay: {failed} of {} teams could not go back to schema 7 (docs/OPERATIONS.md 25.2).",
                             teams.len()
                         );
                         ExitCode::from(1)

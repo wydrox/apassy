@@ -325,7 +325,7 @@ pub struct RelayConfig {
     /// Where `apassy-relay admin backup` writes (`APASSY_RELAY_BACKUP_DIR`).
     pub backup_dir: PathBuf,
     /// The push trigger (docs/SPEC.md section 25.6): the Worker of the hosted relay, or
-    /// the push gateway of a node (section 25.9). `None`: push is off.
+    /// the push gateway of a node (section 32.5). `None`: push is off.
     pub push: Option<PushConfig>,
     /// Shared team vaults, runs, MCP, and the proxy are served (`APASSY_RELAY_TEAM_VAULTS`).
     /// Off on the hosted relay (ADR 0037, D8): those requests are 410 `team_vaults_retired`,
@@ -401,7 +401,7 @@ pub enum PushConfig {
     },
     /// A node: the relay asks a push gateway to push to the handles of its devices, one
     /// request per handle, with the proof of push-gateway-v1 section 7 (docs/SPEC.md
-    /// section 25.9). No token reaches the node.
+    /// section 32.5). No token reaches the node.
     Gateway {
         /// The gateways that a device may name at `PUT /v1/push/handle`, as origins
         /// (`checked_gateway`): the node calls no other address.

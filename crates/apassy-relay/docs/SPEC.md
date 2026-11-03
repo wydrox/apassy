@@ -137,7 +137,7 @@ From `src/config.rs` (`RelayConfig::from_env`):
 
 `UpstreamOptions` (extra roots, fixed addresses) is not read from the environment. Tests set it in code.
 
-The environment always makes the edge required (`EdgeMode::Required`) and no public listener, so the hosted relay is as before. Three settings are set only in code: `RelayConfig.edge` (`EdgeMode::Required(secret)` or `EdgeMode::Off`), `RelayConfig.public_listen` (a second listener of `Scope::Public`), and `RelayConfig.auth_limiter` (the failed-auth limiter of each listener). `RelayConfig::embedded` sets them for a Mac's own node (section 30.1). `Relay::start` refuses `EdgeMode::Off` unless every listener address is a loopback address (`RelayConfig::check_listeners`, 400 `invalid_request`), before it opens or makes anything.
+The environment always makes the edge required (`EdgeMode::Required`) and no public listener, so the hosted relay is as before. Three settings are set only in code: `RelayConfig.edge` (`EdgeMode::Required(secret)` or `EdgeMode::Off`), `RelayConfig.public_listen` (a second listener of `Scope::Public`), and `RelayConfig.auth_limiter` (the failed-auth limiter of each listener). `RelayConfig::embedded` sets them for a Mac's own node (section 30.1). `Relay::start` refuses `EdgeMode::Off` unless every listener address is a loopback address (`RelayConfig::check_listeners`, 400 `invalid_request`), before it opens or makes anything. A node on the tailnet (section 32) has four more settings, also in code only: `tailnet_listen` (a third listener of `Scope::Tailnet`, always on the loopback), `tailnet_agents`, `sign_in_origins` (empty on the hosted relay: `public_url` alone), and `push` in the gateway form (`PushConfig::Gateway`). `from_env` makes none of them: the hosted relay keeps one listener, one sign-in origin, and the Worker push (`PushConfig::Worker`).
 
 `apassy-relay migrate` also reads `APASSY_RELAY_OLD_KEY` / `_FILE`: the passphrase of a `team.db` from before teams. `apassy-relay admin` reads only `APASSY_RELAY_DATA`.
 
@@ -1213,6 +1213,7 @@ Content-Type: application/json
 - The answer is `{"results":[{"token":"<hex>","status":200},{"token":"<hex>","status":410,"reason":"Unregistered"}]}`. A token with status 410, or 400 with reason `BadDeviceToken` or `DeviceTokenNotForTopic`, gets `failed_at = now` (only while the device still has that token) and is not used again until its device sends `PUT /v1/push/token`. Rows: `push_sent {count, environment}` per job and environment when at least one was sent; `push_failed {device_id, status, reason}` per token that APNs did not take, at most one per device and ten seconds; `push_failed {count, status, reason: "worker"}` when the Worker did not answer 200 with results (`status` 0: no answer), at most one per team and ten seconds.
 - Config (`src/config.rs`): `APASSY_RELAY_PUSH_URL` (`https://`, or `http://` to a loopback address for tests), `APASSY_RELAY_PUSH_TOPIC` (the bundle id, `com.wydrox.apassy.companion`), and `APASSY_RELAY_PUSH_SECRET` or `APASSY_RELAY_PUSH_SECRET_FILE` (at least 32 bytes; the Worker's `PUSH_SECRET`). All three: push is on. None: push is off, the relay logs one line at start, no job is made, and `PUT /v1/push/token` is 409. Some but not all, or a value out of its form: the relay refuses to start (a configuration error), so a typo does not turn push off without a word.
 - The push secret is its own secret (integrator decision 5), not the edge secret: the edge secret goes from the Worker to the relay only, and the push secret from the relay to the Worker only.
+- This is `PushConfig::Worker`, the only form `from_env` makes. A node pushes through a push gateway instead (`PushConfig::Gateway`, section 32.5); the queue, its budget, and its throttles are the same.
 
 **Worker side** (`deploy/worker/src/apns.ts`, called from `src/index.ts`):
 
@@ -1788,7 +1789,8 @@ A Mac's own node (ADR 0037, cloud slice; docs/design/implementation-plan-0037-cl
 | `master_key` | from the options, at least 16 bytes (the Keychain key of the app) |
 | `session_ttl_secs` | 600 |
 | `approval_timeout_secs` | 300 (the broker's question wait) |
-| `push` | none |
+| `push` | none; with a node origin and `push_gateway`, `PushConfig::Gateway` (section 32.5) |
+| `tailnet_listen`, `tailnet_agents`, `sign_in_origins` | none, off, empty; with `node_origin`, section 32.2 |
 | `team_vaults` | on |
 | `connect_teams_per_day`, `connect_teams_max` | 0: Connect is off |
 | `auth_limiter` | on (30.5) |

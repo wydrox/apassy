@@ -1,4 +1,4 @@
-//! The push trigger (docs/SPEC.md sections 25.6 and 25.9).
+//! The push trigger (docs/SPEC.md sections 25.6 and 32.5).
 //!
 //! After a question is posted, its handler hands the push targets of the routing set to
 //! four push senders through a bounded fair queue, and never waits for it. Two modes:
