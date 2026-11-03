@@ -412,16 +412,15 @@ pub fn redirect_matches(registered: &str, given: &str) -> bool {
     }
 }
 
-/// A client name for the page and the app: no control, format, or bidirectional
-/// character, runs of spaces as one, trimmed, at most `MAX_CLIENT_NAME` bytes (cut at a
+/// A client name for the page and the app: no control, format, or tag character (the one
+/// rule of the core, `apassy::text::is_hidden_char`, that the node and the connect card
+/// use too), runs of spaces as one, trimmed, at most `MAX_CLIENT_NAME` bytes (cut at a
 /// character). `None` when nothing is left.
 pub fn clean_name(name: &str) -> Option<String> {
     let mut out = String::new();
     let mut space = false;
     for ch in name.chars() {
-        let hidden = ch.is_control()
-            || matches!(ch, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{00AD}');
-        if hidden {
+        if apassy::text::is_hidden_char(ch) {
             continue;
         }
         if ch.is_whitespace() {
@@ -670,9 +669,11 @@ fn load_client(conn: &Connection, client_id: &str) -> RelayResult<Option<Client>
     }))
 }
 
-/// The name of a client on the page: its cleaned name, or "An MCP client".
+/// The name of a client on the page: its name, cleaned again (a client stored by an older
+/// version kept characters that `clean_name` now removes), or "An MCP client".
 fn shown_name(name: Option<&str>) -> String {
-    name.map_or_else(|| "An MCP client".to_string(), str::to_string)
+    name.and_then(clean_name)
+        .unwrap_or_else(|| "An MCP client".to_string())
 }
 
 /// Removes what no flow needs any more: connect requests older than 7 days, refresh
@@ -1925,6 +1926,18 @@ mod tests {
             Some("Grok Bot")
         );
         assert_eq!(clean_name(" \u{200B}\n"), None);
+        // The characters that the old list missed: U+061C, U+180E, U+206A–206F,
+        // U+FFF9–FFFB, and the tag block U+E0000–E007F.
+        assert_eq!(
+            clean_name("Gr\u{061C}ok\u{180E} \u{206A}\u{206F}Bot\u{FFF9}\u{FFFB}\u{E0001}\u{E0041}\u{E007F}")
+                .as_deref(),
+            Some("Grok Bot")
+        );
+        assert_eq!(clean_name("\u{E0000}\u{E0020}\u{2066}"), None);
+        // A name stored before the rule is cleaned again on the page.
+        assert_eq!(shown_name(Some("Grok\u{061C} Bot\u{E0041}")), "Grok Bot");
+        assert_eq!(shown_name(Some("\u{E0041}")), "An MCP client");
+        assert_eq!(shown_name(None), "An MCP client");
         let long = clean_name(&"é".repeat(100)).unwrap();
         assert!(long.len() <= MAX_CLIENT_NAME);
         assert_eq!(long.len(), 64);

@@ -105,9 +105,10 @@ pub fn connect_name(connect: &PendingConnect) -> String {
         .unwrap_or_else(|| MCP_CLIENT_NAME.to_owned())
 }
 
-/// `text` without control characters, trimmed, at most [`MAX_NAME_BYTES`].
+/// `text` without control, format, or tag characters (`crate::text::is_hidden_char`, the
+/// rule of the connect page and the connect card), trimmed, at most [`MAX_NAME_BYTES`].
 fn clean_name(text: &str) -> String {
-    let text: String = text.chars().filter(|c| !c.is_control()).collect();
+    let text = crate::text::strip_hidden(text);
     cut(text.trim(), MAX_NAME_BYTES).trim_end().to_owned()
 }
 

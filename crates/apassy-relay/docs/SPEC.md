@@ -1895,7 +1895,7 @@ The owner answers in the app with `RunningNode::decide_connect(id, Allow{team, a
 | `denied` | 200 "You denied the connection." |
 | `expired`, or an unknown id | 200 (404 for an unknown id) "The request ended." |
 
-`<client>` is the registered name, cleaned (no control, format, or bidirectional character; runs of spaces as one; trimmed; at most 64 bytes) and HTML-escaped, or "An MCP client". `<Mac>` is `OAuthConfig.mac_name`. The page never shows an item, an agent list, or the owner's name.
+`<client>` is the registered name, cleaned (no control character, no format character of category Cf, and no code point of the tag block U+E0000–E007F: `apassy::text::is_hidden_char` of the core, the rule of the node and of the connect card too; runs of spaces as one; trimmed; at most 64 bytes) and HTML-escaped, or "An MCP client". The page cleans a stored name again, so a client stored by an older version shows no such character either. `<Mac>` is `OAuthConfig.mac_name`. The page never shows an item, an agent list, or the owner's name.
 
 ### 31.5 Limits
 

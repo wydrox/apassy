@@ -1118,6 +1118,33 @@ fn names_of_remote_agents_are_unique_and_short() {
 }
 
 #[test]
+fn a_connect_name_has_no_format_or_tag_character() {
+    let connect = |name: &str| PendingConnect {
+        id: "cr_1".to_owned(),
+        client_id: "client_grok".to_owned(),
+        client_name: Some(name.to_owned()),
+        code: "K7Q-4MD".to_owned(),
+        created_at: fake_now(),
+        expires_at: fake_now() + 300,
+    };
+    // The characters of the security review: U+061C, U+180E, U+206A–206F, U+FFF9–FFFB,
+    // and the tag block, beside the bidirectional controls.
+    let name = super::connect_name(&connect(
+        "Gr\u{061C}ok\u{180E} \u{206A}Bot\u{FFF9}\u{202E}\u{E0041}\u{E0001}\u{E007F}",
+    ));
+    assert_eq!(name, "Grok Bot");
+    assert_eq!(
+        super::connect_name(&connect("\u{E0020}\u{200B}\u{FEFF}")),
+        super::MCP_CLIENT_NAME
+    );
+    assert_eq!(
+        unique_name(&["Grok Bot".to_owned()], "Grok\u{2066} Bot"),
+        "Grok Bot 2",
+        "a hidden character does not make a name look free"
+    );
+}
+
+#[test]
 fn a_denied_or_expired_connect_makes_nothing() {
     let fx = fixture();
     fx.running();

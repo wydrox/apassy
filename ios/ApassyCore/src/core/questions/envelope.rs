@@ -510,10 +510,11 @@ pub enum AnyCard {
     Connect(ConnectCard),
 }
 
-/// A text of a connect card: not empty, within `max` bytes, without a control or a format
-/// character (category Cf).
+/// A text of a connect card: not empty, within `max` bytes, without a control, format
+/// (category Cf), or tag character: `apassy::text::is_hidden_char`, the one rule of the
+/// connect page, the Mac's card check, and the node.
 fn connect_text(text: &str, max: usize) -> bool {
-    !text.is_empty() && text.len() <= max && shown(text, usize::MAX) == text
+    !text.is_empty() && text.len() <= max && !text.chars().any(apassy::text::is_hidden_char)
 }
 
 /// The connect digest of section 8.1, as 64 lowercase hex characters.
@@ -1775,6 +1776,25 @@ pub(crate) mod tests {
             parse_connect_card(bidi.as_bytes(), QID),
             Err(CardRefusal::Unreadable)
         );
+        // The rule of the Mac and the node (`apassy::text::is_hidden_char`): every format
+        // character and the whole tag block, its unassigned code points too.
+        for name in [
+            "Grok Bot\u{E0002}",
+            "Grok Bot\u{E0000}",
+            "Grok\u{061C}Bot",
+            "Grok\u{206A}Bot",
+        ] {
+            connect.client_name = name.into();
+            let digest = connect_digest("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect);
+            let card = CONNECT_CARD
+                .replace("Grok Bot", name)
+                .replace(CONNECT_DIGEST, &digest);
+            assert_eq!(
+                parse_connect_card(card.as_bytes(), QID),
+                Err(CardRefusal::Unreadable),
+                "{name:?}"
+            );
+        }
         connect.client_name = "Grok Bot".into();
         assert_eq!(
             connect_digest("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect),

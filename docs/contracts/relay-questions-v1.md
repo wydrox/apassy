@@ -258,7 +258,7 @@ A remote agent that connects to a Mac with the MCP authorization flow (ADR 0037;
 | `connect.expires_at` | when the connect request ends on the node; the relay record's `expires_at` is the same time. |
 | `digest` | the connect digest of section 8.1. |
 
-No text of `connect` holds a control character or a Unicode format character (category Cf). There is no token, item, agent list, or owner name on a connect card. The asking Mac posts at most one connect card at a time (the relay keeps 10 open questions per asking device, section 15); another connect request stays on the Mac.
+No text of `connect` holds a control character, a Unicode format character (category Cf), or a code point of the tag block U+E0000–E007F: one rule, `apassy::text::is_hidden_char`, on the Mac, on the iPhone, and for the client name of the connect page. There is no token, item, agent list, or owner name on a connect card. The asking Mac posts at most one connect card at a time (the relay keeps 10 open questions per asking device, section 15); another connect request stays on the Mac.
 
 The answering device checks a connect card in this order; the first failure shows "This question could not be read":
 

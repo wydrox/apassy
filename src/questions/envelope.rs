@@ -592,12 +592,13 @@ pub struct CardConnect {
 
 impl CardConnect {
     /// The forms of section 7.4: an ID of `A-Za-z0-9-_`, names and a code without a
-    /// control character, within their limits.
+    /// control, format, or tag character (`crate::text::is_hidden_char`), within their
+    /// limits.
     pub fn valid(&self) -> bool {
         let text = |value: &str, max: usize| {
             !value.is_empty()
                 && value.len() <= max
-                && !value.chars().any(|c| c.is_control() || is_format_char(c))
+                && !value.chars().any(crate::text::is_hidden_char)
         };
         !self.id.is_empty()
             && self.id.len() <= MAX_CONNECT_ID_BYTES
@@ -609,22 +610,6 @@ impl CardConnect {
             && text(&self.mac_name, MAX_MAC_NAME_BYTES)
             && text(&self.code, MAX_CODE_BYTES)
     }
-}
-
-/// A Unicode format character (category Cf) that could reorder a name on the card.
-fn is_format_char(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00AD}'
-            | '\u{061C}'
-            | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206F}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-    )
 }
 
 /// The plaintext of a connect card (card v2, `kind = connect`), with exactly the fields of
@@ -1561,6 +1546,13 @@ mod tests {
             ("client_name", "x".repeat(65)),
             ("client_name", "Grok\nBot".to_owned()),
             ("client_name", "Grok\u{202E}toB".to_owned()),
+            // Format characters that the old list missed, and the tag block.
+            ("client_name", "Grok\u{061C}Bot".to_owned()),
+            ("client_name", "Grok\u{0600}Bot".to_owned()),
+            ("client_name", "Grok\u{206A}Bot".to_owned()),
+            ("client_name", "Grok Bot\u{E0041}\u{E0042}".to_owned()),
+            ("client_name", "Grok Bot\u{E0001}".to_owned()),
+            ("mac_name", "Mac\u{1D173}".to_owned()),
             ("mac_name", String::new()),
             ("code", "1".repeat(17)),
             ("code", "48\u{0}2".to_owned()),
