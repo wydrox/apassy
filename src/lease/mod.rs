@@ -4,7 +4,10 @@
 //!
 //! The key holder (the owner's app, its node, or the team host) calls the provider with
 //! the long-lived secret of a source item and hands out only the [`Lease`]: a credential
-//! for one run that lives at most 15 minutes for AWS and Google and one hour for GitHub.
+//! for one run that claims at most 15 minutes for AWS and Google and one hour for GitHub
+//! (the real credential can live up to 300 s longer, contract section 3.3).
+//! [`holder::KeyHolder`] reads a vault source, makes its lease, and stores a rotated
+//! refresh token, one flight per item.
 //! The long-lived secret never leaves this process (contract section 2, rule 1).
 //!
 //! - [`acquire`] makes a lease from a [`LeaseSource`] after the owner's decision
@@ -84,7 +87,8 @@ pub const MIN_LEASE_SECS: u64 = 60;
 pub const NOT_RUN: &str = "No temporary credentials were made, so the command did not run.";
 
 /// How far a provider's expiry may be past `made_at + max_secs` before the answer is
-/// refused (AWS and Google: 900 s, GitHub: 3600 s). A provider refuses a request whose
+/// refused (AWS and Google: 900 s, GitHub: 3600 s; contract section 3.3, "The expiry
+/// window", which also says how long each real credential can live). A provider refuses a request whose
 /// time is far from its clock (STS: 5 minutes), so a provider that honours the lifetime
 /// stays inside this window, while one that ignores it (longer defaults) is refused. The
 /// lease never claims more than its kind allows: `expires_at = min(expiry, made_at +

@@ -1,6 +1,6 @@
 # Private sharing contract v1
 
-Date: 2026-11-03. Status: frozen for implementation (wave 1 of the plan); no code implements it yet.
+Date: 2026-11-03 (revised 2026-11-03, section 13). Status: frozen for implementation (wave 1 of the plan).
 Fixtures: [`tests/fixtures/private-sharing-v1/`](../../tests/fixtures/private-sharing-v1/), checked by
 `contracts::private_sharing_v1_*` in `tests/contracts.rs`.
 Decision: [ADR 0037](../adr/0037-own-relay-open-source.md) stage 6, section 10 steps 1 to 3, D11. Plan:
@@ -121,13 +121,28 @@ temporary credentials" (S6-14).
 
 | Kind | Call | Lifetime |
 | --- | --- | --- |
-| `aws_sts` | `AssumeRole` with `role_arn`, else `GetFederationToken`; `DurationSeconds=900`; `RoleSessionName` or `Name` = `apassy-<run id>`; SigV4 with the long-lived key, service `sts`. `GetSessionToken` MUST NOT be used. | `Expiration` at most 900 s after the request, else `lease_failed`. |
-| `github_app` | RS256 JWT (`iat` 60 s back, `exp` at most 9 minutes ahead, `iss` = `app_id`) → `POST {api_url}/app/installations/{installation_id}/access_tokens` with `repositories` and `permissions`. | GitHub's `expires_at` (one hour). Revoked at run end (section 4.2). |
-| `google_service_account` | RS256 JWT of the key → `token_uri`, which MUST be `https://oauth2.googleapis.com/token` (another `token_uri` is `lease_failed` before any call: the key JSON comes from a paste) (bootstrap token, kept on the key holder and dropped after the next call) → `iamcredentials.googleapis.com` `generateAccessToken` for `impersonate` with `scopes` and `lifetime: "900s"`. | `expireTime` at most 900 s ahead, else `lease_failed`. |
+| `aws_sts` | `AssumeRole` with `role_arn`, else `GetFederationToken`; `DurationSeconds=900`; `RoleSessionName` or `Name` = `apassy-<run id>`; SigV4 with the long-lived key, service `sts`. `GetSessionToken` MUST NOT be used. | `Expiration` at most 900 s + 300 s (clock skew) after the request, else `lease_failed`. |
+| `github_app` | RS256 JWT (`iat` 60 s back, `exp` at most 9 minutes ahead, `iss` = `app_id`) → `POST {api_url}/app/installations/{installation_id}/access_tokens` with `repositories` and `permissions`. | GitHub's `expires_at` (one hour), at most 3600 s + 300 s (clock skew) after the request, else `lease_failed`. Revoked at run end (section 4.2). |
+| `google_service_account` | RS256 JWT of the key → `token_uri`, which MUST be `https://oauth2.googleapis.com/token` (another `token_uri` is `lease_failed` before any call: the key JSON comes from a paste) (bootstrap token, kept on the key holder and dropped after the next call) → `iamcredentials.googleapis.com` `generateAccessToken` for `impersonate` with `scopes` and `lifetime: "900s"`. | `expireTime` at most 900 s + 300 s (clock skew) ahead, else `lease_failed`. |
 | `oauth_refresh` | `POST token_url` with `grant_type=refresh_token`, the client auth of `client_auth`, and `scope`. | `expires_in`, the real expiry. Without `revoke_url`: a missing `expires_in` or one over 3600 s is `lease_failed`. With `revoke_url` (revoked at run end): a longer `expires_in` is reported as it is; a missing one gives `expires_at = made_at + 3600`, and the activity row says that the expiry is unknown and the token is revoked at run end. |
 
 The whole exchange of one lease has a deadline of 20 seconds. Every secret is held in `Zeroizing`
 buffers and dropped before the process spawns.
+
+The expiry window (revision 2026-11-03). A provider refuses a request whose time is far from its clock
+(STS: 5 minutes), so the key holder accepts a provider expiry up to 300 s past `made_at` plus the
+kind's lifetime, and refuses a later one: a provider that ignores the asked lifetime (the STS defaults
+are 1 and 12 hours) is refused, while a clock that is a little off is not. The lease never claims more
+than the kind allows: `expires_at = min(provider expiry, made_at + max)`, with max 900 s for `aws_sts`
+and `google_service_account` and 3600 s for `github_app`. The real credential can therefore outlive
+`expires_at` by up to the window, and it lives as follows:
+
+| Kind | How long the real credential can live |
+| --- | --- |
+| `aws_sts` | Until its `Expiration`: 900 s, the STS minimum of `DurationSeconds`, and at most 1200 s after `made_at` by the window. STS credentials cannot be revoked one by one; they end when they expire. |
+| `github_app` | Until GitHub's `expires_at`: one hour (at most 3900 s after `made_at` by the window). The key holder revokes it at run end with `DELETE {api_url}/installation/token` (section 4.2), so it normally ends with the run. |
+| `google_service_account` | Until its `expireTime`: the asked 900 s, at most 1200 s after `made_at` by the window; Google's own limit for an access token is one hour. It is not revoked at run end. The bootstrap token (one hour) never leaves the key holder. |
+| `oauth_refresh` | Until the provider's `expires_in`; without a `revoke_url` at most one hour, with one revoked at run end (see the table above). |
 
 ## 4. The lease
 
@@ -412,4 +427,5 @@ secret scans the agent's side, the audit rows, and the activity log for it and f
 | Date | Change |
 | --- | --- |
 | 2026-11-03 | The access item field `delivery` (section 5.4) is renamed `credential_form`, with the relay column, `kinds.json`, and `access-view.json`, because stage 4 uses `delivery` for the way A switch (`collection.delivery`, `run.delivery`). The values are unchanged; a missing field still reads as `placeholder`. |
+| 2026-11-03 | Security review of units C1, C2, and D. Section 3.3: the expiry window of 300 s for clock skew is stated, with how long each kind's real credential can live; an OAuth answer without `expires_in`, or with one over 3600 s, is `lease_failed` unless the source has a `revoke_url` (then the token is revoked at run end and the real expiry is reported; a missing one shows one hour); a Google `token_uri` other than `https://oauth2.googleapis.com/token` is `lease_failed`. Section 3.2: `revoke_url` is on the host of `token_url`; without a `policy`, `services` narrows the session policy of an AWS lease. Rule 3: a change of the settings needs `OwnerAction::ChangeShortLivedSettings`. Section 4.2: a rotated refresh token of a failed answer is stored before the run fails; single flight per item, compare-and-swap, and the limit of reuse detection across two Macs. Section 4: `expires_at` of an OAuth lease without `revoke` is at most `made_at + 3600`. Detection makes `Custom` items (plan unit D). |
 | 2026-11-03 | The vault table `member_key` (section 8) stores `source_uuid`, the sync UUID of the team item, instead of `source_item_id`: a row ID is not the same on two synced copies. The vault API and the audit rows keep `source_item_id`. A `short_lived` row that is off keeps its kind and settings (a signer reads `region` and `services` from it). |

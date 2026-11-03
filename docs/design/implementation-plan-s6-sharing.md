@@ -209,7 +209,8 @@ that secret and fails if it is there.
   Deadline 20 s for the whole exchange. Every secret in `Zeroizing`. The STS request is SigV4-signed
   with the long-lived key (service `sts`, region from the settings or `us-east-1`, endpoint
   `sts.<region>.amazonaws.com`). The answer's `Expiration` must be at most 900 s after the request,
-  else `LeaseError` (a provider that ignores the duration never gives a longer lease). The session
+  plus the 300 s clock-skew window of contract section 3.3, else `LeaseError` (a provider that ignores
+  the duration never gives a longer lease); `expires_at = min(Expiration, made_at + 900)`. The session
   policy, when given, must parse as JSON and be at most 2048 bytes (the STS limit).
 - Owner: implementer (opus, high). Depends on B. Judge panel: 2× opus + 1× fable.
 - Acceptance (unit tests in the files, with a fake STS on the loopback that verifies the incoming
@@ -354,7 +355,9 @@ that secret and fails if it is there.
   `LeaseSource`, `acquire`, push each lease secret into `env` and `masks` and each plain variable into
   `env`; collisions of lease names with other bindings or `RESERVED_VARIABLES` are `invalid_request`
   before the owner is asked; a rotated refresh token is stored with `Vault::update` before the
-  process starts; after `exec` returns, `revoke` each lease, best effort; the activity reason gets
+  process starts (through `lease::holder::KeyHolder`: one flight per item, a compare-and-swap store,
+  and a rotated token of a failed answer stored before the run fails); after `exec` returns, `revoke`
+  each lease, best effort; the activity reason gets
   "temporary credentials for N minutes"; the wire answer gets `leases: [{item_id, kind, env_names,
   expires_at}]`), `src/broker/decide.rs` (`BrokerContext.providers: Arc<ProviderEndpoints>`),
   `src/broker/server.rs` (`BrokerOptions.providers`, production by default),
@@ -368,6 +371,10 @@ that secret and fails if it is there.
   item; the command does not run. The long-lived value is read into a `Zeroizing` buffer for the
   call and dropped before the process spawns. The evaluation entry point `evaluate_run` makes no
   provider call.
+- Required by the C1/C2 review (2026-11-03, judge finding 7): revoke every live lease also when the
+  vault locks and when the app quits, not only when `exec` returns; and keep what the revocation
+  needs (the token and, for a confidential OAuth client, the client credentials) in `Zeroizing`
+  buffers with the lease until it is revoked, instead of reading the source again at run end.
 - Owner: implementer (opus, high). Depends on C1, C2, D. Judge panel: 2× opus + 1× fable.
 - Acceptance (proposed `tests/short_lived_runs.rs`, a module of `tests/it.rs`, with the loopback
   fakes of a proposed `tests/support/fake_providers.rs`: `FakeSts` verifies SigV4 with the test
@@ -406,6 +413,10 @@ that secret and fails if it is there.
   stderr and refuse to start a child whose lease has expired), `docs/contracts/cloud-agents-v1.md`
   §6.1 and §8 tables, `crates/apassy-relay/docs/SPEC.md` §11, §30.3, §30.4, §30.6, the relay
   changelog.
+- Required by the C1/C2 review (2026-11-03, judge finding 7): revoke every live lease of the node's
+  sessions also when the vault locks and when the app quits, not only when a session ends; keep what
+  the revocation needs in `Zeroizing` buffers with the lease until it is revoked; store a rotated
+  refresh token through `lease::holder::KeyHolder`, as F does.
 - Owner: implementer (opus, high). Depends on A, C1, C2, D, F (for `read_secrets` shape; F owns
   `src/broker/run.rs`, G does not edit it). Judge panel: 2× opus + 1× fable.
 - Acceptance: core `node::tests::a_short_lived_item_is_released_as_a_lease` (the fake backend
