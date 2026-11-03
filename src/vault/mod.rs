@@ -20,6 +20,7 @@ mod agents;
 pub mod answers;
 pub mod bouncer_scopes;
 mod candidate;
+mod cloud;
 mod companion;
 mod connect;
 pub mod detect;
@@ -40,6 +41,7 @@ mod schema18;
 mod schema19;
 mod schema20;
 mod schema24;
+mod schema26;
 pub use connect::PendingConnect;
 mod suggestions;
 mod sync;
@@ -80,6 +82,10 @@ pub use candidate::{
     ActivationAction, CandidateRecord, CandidateState, MAX_ACTIVATIONS, MAX_CANDIDATES,
     MAX_MODEL_VERSION, MAX_SHADOW_ROWS, ModelActivation, NewCandidate, OwnerLabel, RealOutcome,
     ShadowAnswer, ShadowEntry, ShadowSummary, model_label, valid_model_version,
+};
+pub use cloud::{
+    CLOUD_PORT_MAX, CLOUD_PORT_MIN, CLOUD_TOKEN_DAYS, CloudAgent, CloudNodeSetting,
+    DEFAULT_CLOUD_TOKEN_DAYS, MAX_CLOUD_AGENT_ITEMS,
 };
 pub use companion::{
     AddDeviceError, CompanionCertificate, CompanionDevice, CompanionDeviceKeys, CompanionSetting,
@@ -1119,6 +1125,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | 21
         | 22
         | 23
+        | schema24::WATCH_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1290,6 +1297,12 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         &[]
     };
     // Schema 24 adds no table and no column: it widens the kinds of `trusted_device`.
+    // Schema 25 is not known to this build (`schema26.rs`).
+    let v26: &[&str] = if version >= schema26::CLOUD_SCHEMA_VERSION {
+        &schema26::COLUMNS
+    } else {
+        &[]
+    };
     for sql in v1
         .iter()
         .chain(v2)
@@ -1313,6 +1326,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v21)
         .chain(v22)
         .chain(v23)
+        .chain(v26)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1420,6 +1434,9 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < schema24::WATCH_SCHEMA_VERSION {
         schema24::add_schema_v24(&tx)?;
     }
+    if from < schema26::CLOUD_SCHEMA_VERSION {
+        schema26::add_schema_v26(&tx)?;
+    }
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1479,6 +1496,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     access_once::add_schema(&tx)?;
     answers::add_code_schema(&tx)?;
     schema24::add_schema_v24(&tx)?;
+    schema26::add_schema_v26(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }
