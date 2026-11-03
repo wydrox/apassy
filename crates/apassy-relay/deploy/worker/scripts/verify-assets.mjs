@@ -27,7 +27,23 @@ export function verifyAssets(directory, version, commit) {
     if (bytes.subarray(0, 4).toString('hex') !== magic) throw new Error(`Wrong binary format: ${name}`);
     expected.push(`${hash}  ${name}`);
   }
-  if (JSON.stringify(sums) !== JSON.stringify(expected.sort())) throw new Error('SHA256SUMS must verify exactly both downloads.');
+  // The Linux node packages (plan S2-S3, L3): both tarballs (gzip) and both .debs (ar).
+  const node = metadata.node;
+  const names = [`apassy-${version}-linux-x86_64.tar.gz`, `apassy-${version}-linux-aarch64.tar.gz`,
+    `apassy_${version}_amd64.deb`, `apassy_${version}_arm64.deb`];
+  if (!node || typeof node !== 'object' || JSON.stringify(Object.keys(node).sort()) !== JSON.stringify([...names].sort())) {
+    throw new Error('release.json must list exactly the four Linux node packages.');
+  }
+  for (const name of names) {
+    const bytes = read(name);
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    const asset = node[name];
+    if (asset?.sha256 !== hash || asset.size !== bytes.length || bytes.length === 0) throw new Error(`Unverified download: ${name}`);
+    const magic = name.endsWith('.deb') ? '213c617263683e0a' : '1f8b';
+    if (bytes.subarray(0, magic.length / 2).toString('hex') !== magic) throw new Error(`Wrong package format: ${name}`);
+    expected.push(`${hash}  ${name}`);
+  }
+  if (JSON.stringify(sums) !== JSON.stringify(expected.sort())) throw new Error('SHA256SUMS must verify exactly the six downloads.');
   return metadata;
 }
 
@@ -39,7 +55,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const rootVersion = readFileSync(join(worker, '../../Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)?.[1];
     if (rootVersion !== version) throw new Error('Worker and relay release versions differ.');
     verifyAssets(join(worker, 'public/dl'), version, commit);
-    console.log(`Verified both CLI downloads for ${version} at ${commit}.`);
+    console.log(`Verified both CLI downloads and the four Linux node packages for ${version} at ${commit}.`);
   } catch (error) {
     console.error(`Worker asset preflight failed: ${error.message}`);
     process.exitCode = 1;

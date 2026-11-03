@@ -47,7 +47,7 @@ async function nodeFixture(t: TestContext, arch: string, nodeArch: string, extra
   const names = [top];
   if (extra) { writeFileSync(join(tree, 'outside'), 'x'); names.push('outside'); }
   const tarball = join(f.dir, 'dl', `${top}.tar.gz`);
-  await execute('tar', ['-czf', tarball, '-C', tree, ...names]);
+  await execute('tar', ['-czf', tarball, '-C', tree, ...names], {env:{...process.env, COPYFILE_DISABLE:'1'}});
   const blob = readFileSync(tarball);
   writeFileSync(join(f.dir,'dl','SHA256SUMS'), `${createHash('sha256').update(blob).digest('hex')}  ${top}.tar.gz\n`);
   return f;

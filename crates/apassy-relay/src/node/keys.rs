@@ -38,6 +38,8 @@ pub const CREDENTIAL_NAME: &str = "apassy-node-key";
 pub const KEY_FILE: &str = "master.key";
 /// The encrypted key in the node directory (`systemd-creds --user encrypt`).
 pub const CREDENTIAL_FILE: &str = "master.key.cred";
+/// The option of `systemd-creds` that names the credential (and so binds it to it).
+const NAME_OPTION: &str = "--name=apassy-node-key";
 /// The first systemd whose user service manager decrypts credentials
 /// (`LoadCredentialEncrypted=` in a user unit, `systemd-creds --user`).
 pub const MIN_SYSTEMD_FOR_USER_CREDENTIALS: u32 = 256;
@@ -303,12 +305,7 @@ impl SystemdCreds {
     /// `systemd-creds --user --name=apassy-node-key encrypt - <output>`, the key on stdin.
     pub fn encrypt(&self, key: &str, output: &Path) -> Result<(), String> {
         let mut child = Command::new(&self.program)
-            .args([
-                "--user",
-                &format!("--name={CREDENTIAL_NAME}"),
-                "encrypt",
-                "-",
-            ])
+            .args(["--user", NAME_OPTION, "encrypt", "-"])
             .arg(output)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -339,7 +336,7 @@ impl SystemdCreds {
     /// `systemd-creds --user --name=apassy-node-key decrypt <input> -`: the key text.
     pub fn decrypt(&self, input: &Path) -> Result<Zeroizing<String>, String> {
         let output = Command::new(&self.program)
-            .args(["--user", &format!("--name={CREDENTIAL_NAME}"), "decrypt"])
+            .args(["--user", NAME_OPTION, "decrypt"])
             .arg(input)
             .arg("-")
             .stdin(Stdio::null())
@@ -458,6 +455,7 @@ mod tests {
         let bin = tempfile::tempdir().unwrap();
         let tool = fake_creds(bin.path(), 257);
         assert_eq!(tool.version(), Some(257));
+        assert_eq!(NAME_OPTION, format!("--name={CREDENTIAL_NAME}"));
         let (key, _) = load(dir.path(), None, true).unwrap();
         let source = seal(dir.path(), &tool).unwrap();
         let encrypted = dir.path().join(CREDENTIAL_FILE);

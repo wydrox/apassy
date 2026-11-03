@@ -111,7 +111,7 @@ fn wait_until_up(dir: &std::path::Path) -> Result<ServeState, NodeCliError> {
 /// The encrypted key of `source`, for `LoadCredentialEncrypted=`.
 fn credential_of(source: &KeySource) -> Option<&std::path::Path> {
     match source {
-        KeySource::Encrypted(path) => Some(path),
+        KeySource::Encrypted(path) => Some(path.as_path()),
         KeySource::Credential(_) | KeySource::File(_) => None,
     }
 }
