@@ -54,8 +54,9 @@ Connect never does the way B swap on an Apassy server and never holds a team key
   | Connect Personal | 3 | 30 |
   | Connect Family (4 people) | 5 | 50 |
   | Connect Team, per member | 4 | 40 |
+  | Connect Family, each person after 4 | 1 | 10 |
 
-  A year costs 10 times the monthly price instead of 12. The price of each further person in Connect Family is not decided (section 6, decision 4).
+  A year costs 10 times the monthly price instead of 12.
 - Account: the Connect account of ADR 0037 D3 and ADR 0035 decision 6. An account sign-in never adds a device. A new device is confirmed on an existing one with the safety words and Touch ID.
 - Purchase: on the Mac, through a web checkout (Stripe) that returns to the app. The iPhone shows the plan only. There is no In-App Purchase. (Carried over from 2026-10-13.)
 - Stripe today has the products of the old split: Personal (EUR 1 a month) and Team (EUR 2 a member a month), in the sandbox and the live account. Renaming them to Connect Personal and Connect Team, and adding Connect Family, changes the Stripe account: do it only with the owner's confirmation, before stage 7.
@@ -90,7 +91,7 @@ Connect never does the way B swap on an Apassy server and never holds a team key
 | 1 | Prices of the three plans | Decided 2026-11-03: Personal 3, Family 5 (4 people), Team 4 per member, EUR a month with VAT; a year is 10 months (section 3). |
 | 2 | Family: whether members have roles | One organizer, the others are equal members. (Decided 2026-11-03: 4 people, each further person costs extra.) |
 | 3 | The vault sync size of a free Connect team (section 4.1) | Measure the vault sizes and the VPS disk first. (Decided 2026-11-03: relay sync is free for everyone until stage 7.) |
-| 4 | The price of each further person in Connect Family | Not decided. |
+| 4 | The price of each further person in Connect Family | Decided 2026-11-03: EUR 1 a month (10 a year), VAT included. |
 
 ## 7. Follow-ups
 
