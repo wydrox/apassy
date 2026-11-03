@@ -1,6 +1,8 @@
 # ADR 0038 — Touch ID in an Apassy panel
 
-Date: 2026-11-02. Status: implemented, runtime validation pending.
+Date: 2026-11-02. Status: implemented, runtime validation pending. The first
+physical test (0.5.14, 2026-11-03) showed the system dialog for vault unlock:
+the LSUIElement keychain helper failed the accessory policy check; fixed after 0.5.14.
 
 The owner wants authentication to look like Apassy. On supported GUI sessions,
 a small AppKit panel embeds Apple's `LAAuthenticationView`, attached to the same

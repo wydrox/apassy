@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Fixed
+
+- Touch ID vault unlock now shows the Apassy panel. In 0.5.14 the keychain helper (an `LSUIElement` app) fell back to the macOS dialog, because macOS refuses to set the accessory policy that the app already has.
+
 ## [0.5.14] - 2026-11-02
 
 ### Changed
