@@ -8,10 +8,14 @@
 //! Question long polls have a lane of their own (`Limits::question_long_polls`), and feed
 //! long polls another (`Limits::feed_long_polls`), apart from `max_active`, so they never
 //! take the threads of the member reserve, and feed polls never take a question poll's.
+//!
+//! An embedded node has a second listener (`Scope::Public`) that serves only `POST /mcp`
+//! and the proxy, and each listener of a node counts failed authentications
+//! (`AuthFailures`, docs/SPEC.md section 30).
 
 use std::io::Read;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
@@ -23,6 +27,7 @@ use crate::api::{
     DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, LinkCancel, LinkRequest, NewItem, Policy,
     ReleaseRequest, RunRequest, TeamCreate, TeamCreatedRef, TeamKind, TokenRequest, paths,
 };
+use crate::config::Limits;
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, DeviceId, GrantId, ItemId, MemberId, RunId};
 use crate::now_unix;
@@ -35,6 +40,7 @@ use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{Core, admin, approvals, connect, decide, devices, host, joins, mcp, sync};
+use crate::session::SessionSource;
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
 pub const BUSY_RETRY_AFTER: &str = "2";
@@ -48,6 +54,99 @@ const LISTENER_PROBE_FAILURES: u32 = 3;
 const MAINTENANCE_SECS: u64 = 5;
 /// Seconds between two sweeps of a Connect team that had no request since its last one.
 const IDLE_MAINTENANCE_SECS: u64 = 60;
+/// Bad bearer tokens and session keys that one listener takes in one window
+/// (`AuthFailures`). One more request in the window gets 429 `rate_limited`.
+pub const AUTH_FAILURES_MAX: u32 = 20;
+/// The window of `AUTH_FAILURES_MAX`, in seconds, and the `Retry-After` of its 429.
+pub const AUTH_FAILURE_WINDOW_SECS: u64 = 60;
+
+/// What a listener serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Every route: the hosted relay, and the loopback listener of an embedded node.
+    Node,
+    /// `POST /mcp` and `/p/` only: the listener of an embedded node that Tailscale
+    /// Funnel reaches. Every other request, `/healthz` included, is 404 `not_found`.
+    Public,
+}
+
+impl Scope {
+    /// True when this scope serves `method` on `path`.
+    pub fn serves(self, method: &str, path: &str) -> bool {
+        match self {
+            Self::Node => true,
+            Self::Public => {
+                (method == "POST" && path == paths::MCP) || path.starts_with(paths::PROXY_PREFIX)
+            }
+        }
+    }
+
+    /// The kind of the audit row of a listener at its limit.
+    fn limit_kind(self) -> &'static str {
+        match self {
+            Self::Node => "auth_limit_node",
+            Self::Public => "auth_limit_public",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+            Self::Public => "public",
+        }
+    }
+}
+
+/// The failed authentications of one listener: bad bearer tokens and session keys in a
+/// fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its first failure. With
+/// `AUTH_FAILURES_MAX` of them, every request of the listener gets 429 `rate_limited`
+/// until the window ends; then the count starts again. In memory only.
+#[derive(Debug, Default)]
+pub struct AuthFailures {
+    /// The start of the window and the failures in it.
+    window: Mutex<(u64, u32)>,
+}
+
+impl AuthFailures {
+    /// True while the listener is at its limit.
+    pub fn limited(&self, now: u64) -> bool {
+        let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+        if now >= window.0.saturating_add(AUTH_FAILURE_WINDOW_SECS) {
+            *window = (now, 0);
+        }
+        window.1 >= AUTH_FAILURES_MAX
+    }
+
+    /// Counts one bad bearer token or session key.
+    pub fn record(&self, now: u64) {
+        let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+        if window.1 == 0 || now >= window.0.saturating_add(AUTH_FAILURE_WINDOW_SECS) {
+            *window = (now, 0);
+        }
+        window.1 = window.1.saturating_add(1);
+    }
+}
+
+/// One listener: what it serves, and its failed-auth count (`None` when
+/// `RelayConfig::auth_limiter` is off).
+pub struct Listener {
+    pub scope: Scope,
+    pub failures: Option<AuthFailures>,
+}
+
+impl Listener {
+    fn record_failure(&self, now: u64) {
+        if let Some(failures) = &self.failures {
+            failures.record(now);
+        }
+    }
+
+    fn limited(&self, now: u64) -> bool {
+        self.failures
+            .as_ref()
+            .is_some_and(|failures| failures.limited(now))
+    }
+}
 
 /// The endpoints of the API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +452,10 @@ pub struct Serving {
     pub proxy: Arc<Proxy>,
     pub server: tiny_http::Server,
     pub stop: Arc<AtomicBool>,
+    /// What this listener serves. Only the `Node` listener runs the maintenance.
+    pub scope: Scope,
+    /// The limits of this listener's lanes.
+    pub limits: Limits,
 }
 
 /// True for a path that agents use: the proxy, MCP, runs, and access. These
@@ -544,8 +647,13 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         proxy,
         server,
         stop,
+        scope,
+        limits,
     } = serving;
-    let limits = hub.config.limits;
+    let listener = Arc::new(Listener {
+        scope,
+        failures: hub.config.auth_limiter.then(AuthFailures::default),
+    });
     let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
     let slots = Arc::new(Slots {
         all: AtomicUsize::new(0),
@@ -556,8 +664,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         rejected: AtomicUsize::new(0),
     });
     // The maintenance of every team runs on its own thread, so many teams never slow the
-    // accept loop.
-    let maintenance = {
+    // accept loop. One for the relay: the public listener has none.
+    let maintenance = (scope == Scope::Node).then(|| {
         let (hub, stop) = (hub.clone(), stop.clone());
         std::thread::Builder::new()
             .name("relay-maintenance".to_string())
@@ -571,8 +679,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                     }
                 }
             })
-    };
-    if maintenance.is_err() {
+    });
+    if maintenance.as_ref().is_some_and(Result::is_err) {
         eprintln!("apassy-relay: the maintenance thread cannot start");
     }
     let listen = server.server_addr().to_ip();
@@ -666,7 +774,7 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                             slots.all.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    let (hub, proxy) = (hub.clone(), proxy.clone());
+                    let (hub, proxy, listener) = (hub.clone(), proxy.clone(), listener.clone());
                     let guard = SlotGuard {
                         slots: slots.clone(),
                         lane,
@@ -678,7 +786,7 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                         .name("relay-request".to_string())
                         .spawn(move || {
                             let _guard = guard;
-                            handle(&hub, &proxy, request, hold);
+                            handle(&hub, &proxy, &listener, request, hold);
                         });
                 }
             }
@@ -697,7 +805,7 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     if outcome.is_err() {
         stop.store(true, Ordering::Relaxed);
     }
-    if let Ok(handle) = maintenance {
+    if let Some(Ok(handle)) = maintenance {
         let _ = handle.join();
     }
     outcome
@@ -823,8 +931,36 @@ fn respond_ok(request: Request, result: Value) {
     respond_json(request, 200, &Envelope::success(result), false);
 }
 
+/// 429 `rate_limited` with `Retry-After` for a listener at its failed-auth limit, and a
+/// row in the relay audit at most once per ten seconds for each listener.
+fn respond_auth_limited(hub: &Hub, listener: &Listener, request: Request, now: u64) {
+    hub.refusal(
+        now,
+        listener.scope.limit_kind(),
+        "rate_limited",
+        &json!({"code": codes::RATE_LIMITED, "scope": listener.scope.name()}),
+    );
+    let error = RelayError::new(
+        codes::RATE_LIMITED,
+        "Too many requests with a bad token or session key. Try again later.",
+    );
+    respond_json_with(
+        request,
+        error.status(),
+        &error.to_envelope(),
+        false,
+        Header::from_bytes(
+            &b"Retry-After"[..],
+            AUTH_FAILURE_WINDOW_SECS.to_string().as_bytes(),
+        )
+        .ok()
+        .into_iter()
+        .collect(),
+    );
+}
+
 /// Handles one request. `hold`: a question or feed long poll may wait (its own lane).
-fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
+fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, hold: bool) {
     let now = now_unix();
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
@@ -832,6 +968,12 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (url.clone(), String::new()),
     };
+    // The public listener knows two routes. Anything else is not there, before any
+    // other check.
+    if !listener.scope.serves(&method, &path) {
+        respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
+        return;
+    }
     if method == "GET" && path == paths::HEALTH {
         // Health has no request body. Do not let destructor draining occupy its
         // reserved seats; guarded connections cannot have a pipelined successor.
@@ -851,7 +993,9 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         return;
     }
     let edge = header_value(&request, EDGE_HEADER);
-    if !auth::edge_ok(&hub.config.edge_secret, edge.as_deref()) {
+    if let Some(secret) = hub.config.edge.secret()
+        && !auth::edge_ok(secret, edge.as_deref())
+    {
         hub.refusal(
             now,
             "edge",
@@ -867,15 +1011,25 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         );
         return;
     }
+    if listener.limited(now) {
+        respond_auth_limited(hub, listener, request, now);
+        return;
+    }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
         respond_error(request, &team_vaults_retired());
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) {
-        // Parse only: the proxy still validates and finds the session itself.
-        let core = path
+        let key = path
             .strip_prefix(paths::PROXY_PREFIX)
-            .and_then(|rest| rest.split('/').next())
+            .and_then(|rest| rest.split('/').next());
+        // A key that names no live session counts against the listener. The proxy
+        // refuses it itself, with its own answer and audit row.
+        if listener.failures.is_some() && key.is_none_or(|key| hub.find(key, now).is_none()) {
+            listener.record_failure(now);
+        }
+        // Parse only: the proxy still validates and finds the session itself.
+        let core = key
             .and_then(parse_token)
             .filter(|parsed| parsed.kind == TokenKind::Session)
             .and_then(|parsed| parsed.team)
@@ -941,11 +1095,10 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         } else {
             (None, None)
         };
-        let prefix = connect::verified_prefix(
-            hub.config.edge_secret.expose(),
-            prefix.as_deref(),
-            mac.as_deref(),
-        );
+        // Without an edge there is no Worker to prove a prefix.
+        let prefix = hub.config.edge.secret().and_then(|secret| {
+            connect::verified_prefix(secret.expose(), prefix.as_deref(), mac.as_deref())
+        });
         let result = dispatch_edge(hub, endpoint, &body, prefix, now);
         let recovery = endpoint == Endpoint::ConnectChallenge
             || (endpoint == Endpoint::Connect
@@ -1008,6 +1161,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
     let authorization = header_value(&request, "Authorization");
     let token = auth::bearer(authorization.as_deref());
     let Some(core) = token.and_then(|token| hub.for_token(token)) else {
+        listener.record_failure(now);
         hub.refusal(
             now,
             "token",
@@ -1023,6 +1177,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
             // Anyone can send a token with the team's id: for a Connect team the row
             // goes to the relay audit, not the team's capped file.
             if error.code == codes::UNAUTHENTICATED || error.code == codes::TOKEN_EXPIRED {
+                listener.record_failure(now);
                 core.outside_refusal(
                     now,
                     "token",
@@ -2105,6 +2260,54 @@ mod tests {
         ] {
             assert!(!is_agent_path(url), "{url}");
         }
+    }
+
+    #[test]
+    fn the_public_scope_serves_mcp_posts_and_the_proxy_only() {
+        for (method, path) in [
+            ("POST", "/mcp"),
+            ("GET", "/p/apassy_ses_x/api.example.com/v1"),
+            ("POST", "/p/"),
+        ] {
+            assert!(Scope::Public.serves(method, path), "{method} {path}");
+            assert!(Scope::Node.serves(method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            ("GET", "/mcp"),
+            ("POST", "/mcp/x"),
+            ("GET", "/healthz"),
+            ("GET", "/"),
+            ("GET", "/v1/me"),
+            ("POST", "/v1/runs"),
+            ("GET", "/v1/host/requests"),
+            ("GET", "/px/"),
+        ] {
+            assert!(!Scope::Public.serves(method, path), "{method} {path}");
+            assert!(Scope::Node.serves(method, path), "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn the_failed_auth_limit_trips_at_the_21st_request_and_resets_after_its_window() {
+        let failures = AuthFailures::default();
+        let start = 1_000;
+        for n in 0..AUTH_FAILURES_MAX {
+            assert!(!failures.limited(start + u64::from(n)), "{n}");
+            failures.record(start + u64::from(n));
+        }
+        // The 21st request in the window is refused, bad or good.
+        assert!(failures.limited(start + 20));
+        assert!(failures.limited(start + AUTH_FAILURE_WINDOW_SECS - 1));
+        // The window started at the first failure: it ends 60 s later.
+        assert!(!failures.limited(start + AUTH_FAILURE_WINDOW_SECS));
+        failures.record(start + AUTH_FAILURE_WINDOW_SECS);
+        assert!(!failures.limited(start + AUTH_FAILURE_WINDOW_SECS + 1));
+        // Failures of an old window do not count in a new one.
+        let spread = AuthFailures::default();
+        for n in 0..AUTH_FAILURES_MAX {
+            spread.record(10 * u64::from(n));
+        }
+        assert!(!spread.limited(10 * u64::from(AUTH_FAILURES_MAX)));
     }
 
     #[test]

@@ -33,6 +33,9 @@ pub fn agent_actor(id: u64) -> String {
 }
 
 pub const RELAY_ACTOR: &str = "relay";
+/// The in-process host of an embedded node (`host::release_values`, docs/SPEC.md
+/// section 30.6): it releases and denies runs without a member token.
+pub const EMBEDDED_HOST_ACTOR: &str = "host:embedded";
 pub const EDGE_ACTOR: &str = "edge";
 
 /// Text to replace, and the variable name it hides.

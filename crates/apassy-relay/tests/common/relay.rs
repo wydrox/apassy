@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apassy_relay::config::{RelayConfig, UpstreamOptions};
+use apassy_relay::config::{EdgeMode, RelayConfig, UpstreamOptions};
 use apassy_relay::device::{self, DeviceKey};
 use apassy_relay::hostkeys::{self, Key32};
 use apassy_relay::ids::TeamId;
@@ -149,8 +149,9 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
     RelayConfig {
         data_dir: dir.join("data"),
         listen: format!("127.0.0.1:{port}").parse().expect("addr"),
+        public_listen: None,
         public_url: format!("http://127.0.0.1:{port}"),
-        edge_secret: SecretString::new(EDGE_SECRET.to_string()),
+        edge: EdgeMode::Required(SecretString::new(EDGE_SECRET.to_string())),
         master_key: SecretString::new(VAULT_KEY.to_string()),
         session_ttl_secs: 60,
         approval_timeout_secs: 5,
@@ -164,6 +165,7 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         questions_to_approvers: false,
         connect_teams_per_day: 200,
         connect_teams_max: 1000,
+        auth_limiter: false,
     }
 }
 
@@ -179,7 +181,11 @@ pub fn start_with(config: impl FnOnce(&mut RelayConfig), upstream: UpstreamOptio
     let running = start_on_free_port(&mut cfg);
     TestRelay {
         url: running.url(),
-        edge_secret: cfg.edge_secret.expose().to_string(),
+        edge_secret: cfg
+            .edge
+            .secret()
+            .map(|secret| secret.expose().to_string())
+            .unwrap_or_default(),
         team_id: team_of(owner.expose()),
         owner_token: owner.expose().to_string(),
         dir,

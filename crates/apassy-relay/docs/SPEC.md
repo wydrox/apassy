@@ -137,11 +137,13 @@ From `src/config.rs` (`RelayConfig::from_env`):
 
 `UpstreamOptions` (extra roots, fixed addresses) is not read from the environment. Tests set it in code.
 
+The environment always makes the edge required (`EdgeMode::Required`) and no public listener, so the hosted relay is as before. Three settings are set only in code: `RelayConfig.edge` (`EdgeMode::Required(secret)` or `EdgeMode::Off`), `RelayConfig.public_listen` (a second listener of `Scope::Public`), and `RelayConfig.auth_limiter` (the failed-auth limiter of each listener). `RelayConfig::embedded` sets them for a Mac's own node (section 30.1). `Relay::start` refuses `EdgeMode::Off` unless every listener address is a loopback address (`RelayConfig::check_listeners`, 400 `invalid_request`), before it opens or makes anything.
+
 `apassy-relay migrate` also reads `APASSY_RELAY_OLD_KEY` / `_FILE`: the passphrase of a `team.db` from before teams. `apassy-relay admin` reads only `APASSY_RELAY_DATA`.
 
 ## 7. Auth model
 
-- **Edge.** Every request except `GET /healthz` must carry `X-Apassy-Edge: <edge secret>`. The relay compares it with `secret::same_bytes`. A missing or wrong header gets 403 `edge_refused`, and an audit row with actor `edge` (at most one row per 10 seconds, so a scan cannot fill the audit).
+- **Edge.** Every request except `GET /healthz` must carry `X-Apassy-Edge: <edge secret>`. The relay compares it with `secret::same_bytes`. A missing or wrong header gets 403 `edge_refused`, and an audit row with actor `edge` (at most one row per 10 seconds, so a scan cannot fill the audit). An embedded node has no edge (`EdgeMode::Off`, section 30.1): no header is checked, and every listener is on the loopback.
 - **Tokens.** Every token is 32 random bytes (`getrandom`) as 64 lowercase hex characters after a prefix (`secret::new_token`). The vault stores only `sha256(token)` (`secret::token_hash`). A lookup is by hash. A token is shown once, when it is made.
 
 | Kind | Prefix | Made by | Sent as | Lifetime |
@@ -269,6 +271,8 @@ Item rules at `POST /v1/items`:
 
 Other paths: 404 `not_found`. A known path with another method: 405 `method_not_allowed`.
 
+The table is the scope `Scope::Node`: the hosted relay's one listener and an embedded node's loopback listener. The public listener of an embedded node (`Scope::Public`, section 30.5) serves `POST /mcp` and `ANY /p/...` only; every other request there, `GET /healthz`, `GET /`, `GET /mcp`, and every `/v1` path included, is 404 `not_found` before any other check.
+
 Error codes are in `src/error.rs` (`codes`). The main ones: `invalid_request` 400, `placeholder_impossible` 400, `broad_host` 400, `unauthenticated` 401, `token_expired` 401, `edge_refused` 403, `forbidden` 403, `invite_invalid` 403, `not_granted` 403, `item_archived` 403, `rule_expired` / `rule_command_not_permitted` / `rule_forbidden_word` / `rule_rate_limit` 403, `not_found` 404, `method_not_allowed` 405, `conflict` 409, `run_not_pending` 409, `payload_too_large` 413, `relay_error` 500, `busy` 503. The host-keys change adds `approve_on_host` 403 (the approve endpoint) and `release_invalid` 403 (a release that did not check). Proxy codes are in section 12. `approval_denied`, `approval_timeout`, `approval_invalidated`, and `release_invalid` appear in `RunView.code` too. A hard-rule denial and `release_invalid` are HTTP errors as well; the other three are not.
 
 `POST /v1/join`: the code must be a live invite (not used, not expired), else 403 `invite_invalid` (one message for every case). The name: 1 to 64 bytes of `[A-Za-z0-9._-]`, unique, else 409 `conflict`. The invite is marked used in the same transaction.
@@ -355,7 +359,7 @@ States of a run: `pending` → `ready` → `ended`, or `pending` → `denied` / 
 
 **Methods.** Any method except `CONNECT`. `CONNECT`, an `Upgrade` header, or `Connection: upgrade`: 501 `not_supported`.
 
-**Request headers.** Forwarded as received, except these, which are dropped: `host` (set to the upstream host), `connection`, `keep-alive`, `proxy-authorization`, `proxy-connection`, `te`, `trailer`, `transfer-encoding`, `upgrade`, `expect`, `accept-encoding`, `content-length` (set again), `x-apassy-edge`, `cdn-loop`, `x-forwarded-for`, `x-forwarded-proto`, `x-forwarded-host`, `x-real-ip`, and every `cf-*` header. `Connection: close` is added.
+**Request headers.** Forwarded as received, except these, which are dropped: `host` (set to the upstream host), `connection`, `keep-alive`, `proxy-authorization`, `proxy-connection`, `te`, `trailer`, `transfer-encoding`, `upgrade`, `expect`, `accept-encoding`, `content-length` (set again), `x-apassy-edge`, `cdn-loop`, `x-forwarded-for`, `x-forwarded-proto`, `x-forwarded-host`, `x-real-ip`, every `cf-*` header, and every `tailscale-*` header (the identity headers of Tailscale Serve, such as `Tailscale-User-Login`, `Tailscale-User-Name`, `Tailscale-User-Profile-Pic`, and `Tailscale-App-Capabilities`; the name compared without case). `Connection: close` is added.
 
 **Swap (auth positions).** A copy of core `proxy/swap.rs`, with attribution:
 - `Authorization`: the value is exactly a placeholder; or `<scheme> <placeholder>` (Bearer, token, any scheme); or `Basic <base64(user:password)>` where the user and/or the password is exactly a placeholder, re-encoded after the swap. A placeholder inside a larger Basic part is refused.
@@ -1537,7 +1541,7 @@ Relay audit: `team_created {team_id, kind: "connect"}` (no key, no key hash, no 
 
 ### 27.2 Schema version 6 (team file)
 
-`Store::open_team` migrates a version 5 file to version 6 with the copy rule of 23.2: copy to `<file>.pre-v6` (mode 0600, written as `.pre-v6.tmp`, synced, renamed; refuse to migrate when the copy cannot be made: the team stays at version 5 and does not open), then in one `BEGIN IMMEDIATE` transaction run the statements below and set `PRAGMA user_version = 6` (`migrate_v6`). The change is additive: no table is rebuilt, and the question, sync, push, and device rows are untouched. A version 2 to 4 file goes on to 6 in one start, with each copy. A new team file is made at version 6. Version 1 and versions above 6 are refused, and the version 5 image refuses a version 6 file (its `open_team` accepts 3 to 5 only). `relay.db` does not change version (1003). `remove_team_file` also removes `.pre-v6` and `.pre-v6.tmp`.
+`Store::open_team` migrates a version 5 file to version 6 with the copy rule of 23.2: copy to `<file>.pre-v6` (mode 0600, written as `.pre-v6.tmp`, synced, renamed; refuse to migrate when the copy cannot be made: the team stays at version 5 and does not open), then in one `BEGIN IMMEDIATE` transaction run the statements below and set `PRAGMA user_version = 6` (`migrate_v6`). The change is additive: no table is rebuilt, and the question, sync, push, and device rows are untouched. A version 2 to 4 file goes on to 6 in one start, with each copy. A new team file was made at version 6 until section 30 (now version 7, 30.4). Version 1 and versions above the current one are refused, and the version 5 image refuses a version 6 file (its `open_team` accepts 3 to 5 only). `relay.db` does not change version (1003). `remove_team_file` also removes `.pre-v6` and `.pre-v6.tmp`.
 
 ```sql
 ALTER TABLE team ADD COLUMN feed_change INTEGER NOT NULL DEFAULT 0;
@@ -1659,7 +1663,7 @@ No row per feed update (a Mac publishes up to every 10 s, and a Connect team nev
 - Long polls: the feed list wakes on a feed and when a feed leaves, the action list on a post, the status on a settle and on an expiry; a second poll of one kind answers at once; the three kinds of one device do not take each other's place; a counter below `since` answers at once; a revoked device's poll ends with 401. With the question share and the feed share of a team at 2, two question polls and two feed polls hold at once, each in its own lane, and a third of either kind answers at once (`/v1/me` still answers with `max_active` 2). The unfriendly order: two readers ask first, one holds and one answers at once, and the Mac's action poll then holds. With a share of 4, one member's three polls hold, its fourth answers at once, and the other member's Mac still holds its action poll. Unit tests: `kind_seats` and `member_seats`.
 - Connect: the preset's 1 MiB of feeds is not stored, the file cap is 11 MiB, four full feeds fit and a fifth does not; two readers' list polls ask first and one answers at once, then the Mac's action poll, the reader's status poll (a seat of its own), and two question polls hold with the first list poll; with `connect_long_polls` and `connect_feed_long_polls` each 1, one Connect team holds a feed poll and a question poll at once and another team's poll of either kind answers at once.
 - Rollback: `rollback::check` with the relay up names nothing but lost audit rows right after the migration; after a device, a member (with its device), and a demotion it names the three revocations by kind and id, oldest first, the `member_role` change, and `device_revoked`, `member_revoked`, and `member_role_changed` in `audit_lost`, leaves the `.pre-v6` copy byte for byte as it was, and says the same with the relay stopped; a team made after the migration has `pre_v6: false`; copying the copy back makes the device and the member live again. A stored feed limit makes the team not clean until it is set back; the team is clean right after the migration and not after the revocations, with each of their actions in `access_rows_lost`. Unit tests: the comparison for each kind of revocation and change (also an archived item, a used invite, and an agent bound to a device), rows revoked before the copy, rows made after it, and the audit by action; `is_clean` (schema 4 and 5 without a copy are clean, schema 6 without one is not), and the entry of a team whose thread stopped. The listener probe sees a listener go, also on an unspecified address. `admin delete --free-connect-key` lets the same device key make a new Connect team (the row stays, with a random hash), without the flag the key stays used, and an operator team refuses the flag. The parsers of `admin delete [--free-connect-key]` and `rollback-check`.
-- Schema 6: a version 5 file opens as version 6 with `.pre-v6` (mode 0600, encrypted, version 5) and keeps its rows; a failed copy leaves version 5 without the new tables; version 7 is refused; through the relay, a version 5 team keeps its question, then publishes, and copying `.pre-v6` back gives version 5 again.
+- Schema 6: a version 5 file opens as version 6 with `.pre-v6` (mode 0600, encrypted, version 5) and keeps its rows; a failed copy leaves version 5 without the new tables; a version above the current one (now 8) is refused; through the relay, a version 5 team keeps its question, then publishes, and copying `.pre-v6` back gives version 5 again.
 - Limits: the feed limits at the preset of each kind read in a copy of the version 5 image's `TeamLimits` (`deny_unknown_fields`), and each set away from its preset is written and refused by it; the CLI flags and their ranges.
 - The Worker: `PUT /v1/feed` of exactly 360448 bytes passes and of one more is 413 before the relay; a missing, non-numeric, or chunked length is 400; the raised cap holds for `PUT /v1/feed` only; the feed reads pass with path and query.
 - No audit row holds an `action_id`, a nonce, or a ciphertext; a second feed adds no row; a delete within the hour of the device's first row writes none, a loop of six `DELETE` and `PUT` adds no row, and maintenance an hour later adds none either (the feed is on, as the last row says); an hour later a delete writes its row at once, the start right after it is written by maintenance an hour later with the member as actor, a revocation within the hour still writes its `feed_deleted`, and a revoked device gets no late row.
@@ -1762,3 +1766,79 @@ their existing format versions; the key ownership field is additive. Old CLIs
 ignore it and can drop it when rewriting keys.json, so stop old writers before
 restarting a new host. Installer hashes continue to detect corruption, not an
 independent compromise of the download origin.
+
+
+## 30. Embedded node
+
+A Mac's own node (ADR 0037, cloud slice; docs/design/implementation-plan-0037-cloud-agents.md of the core): the relay runs as threads of the Mac app, and hosted cloud agents reach it through Tailscale Funnel. The app talks to it through the object-safe traits `NodeBackend` and `RunningNode` of the core (`src/node/backend.rs`), which use plain types only: the core cannot depend on the relay. The relay implements them in `src/embedded.rs` (`EmbeddedRelay`, `EmbeddedNode`). The hosted relay's behaviour and wire contracts do not change: everything below is reachable only through `RelayConfig::embedded` or in process, except schema 7 (30.4), the marker check of 30.6, and the dropped `tailscale-*` headers (section 12).
+
+### 30.1 Edge mode and configuration
+
+`RelayConfig.edge` is `EdgeMode::Required(secret)` (the hosted relay: `from_env` always reads the secret, as before) or `EdgeMode::Off`. `Off` is refused unless every listener (`listen` and `public_listen`) is a loopback address: `Relay::start` and `EmbeddedNode::start` check it before anything is opened or made. Funnel ends TLS in `tailscaled` on the same Mac and connects from the loopback, so the loopback bind is what keeps other callers away. With `Off`, `POST /v1/connect` verifies no client prefix (there is no Worker), and Connect is off anyway.
+
+`RelayConfig::embedded(EmbeddedOptions {data_dir, master_key, public_url, public_listen})`:
+
+| Field | Value |
+| --- | --- |
+| `listen` | `127.0.0.1:0` (the node listener, `Scope::Node`; the app's own diagnostics) |
+| `public_listen` | from the options: `127.0.0.1:<port>`, the Funnel target, or `None` |
+| `public_url` | from the options: the Funnel origin `https://<DNSName>:8443`, checked as an origin |
+| `edge` | `EdgeMode::Off` |
+| `master_key` | from the options, at least 16 bytes (the Keychain key of the app) |
+| `session_ttl_secs` | 600 |
+| `approval_timeout_secs` | 300 (the broker's question wait) |
+| `push` | none |
+| `team_vaults` | on |
+| `connect_teams_per_day`, `connect_teams_max` | 0: Connect is off |
+| `auth_limiter` | on (30.5) |
+| `backup_dir` | `<data_dir>/backups` |
+| `limits`, upstream, timeouts | the defaults of `from_env` |
+
+The operator socket is `<data_dir>/admin.sock` (mode 0600 in a 0700 directory), for diagnostics. `EmbeddedNode::start` makes an empty directory (`Relay::init_empty`) at the first start. One process at a time holds `relay.lock`: a second node on the same directory is 409 `conflict`.
+
+### 30.2 The personal team
+
+`Hub::create_personal_team(name, now) -> TeamId` makes a team without a team code: a team file with its owner member (`owner`) and the directory row, in the order of `Relay::init`, and an audit row `team_created` with `{"kind": "personal"}` in `relay.db`. The owner token is made, hashed into the member row, and dropped: nobody holds it. The node acts for the owner in process (`MemberAuth` of the owner, no device). `team.member_tokens_until` is `NULL`, so the in-process owner never meets the member-token deadline. The team is an operator team with `TeamLimits::personal()`: the defaults with `agents` 20, `runs_per_hour` 120, `pending_runs` 10, and `agent_requests` 16. A restart opens it again from `relay.db` like any team. `RunningNode::create_team` then makes the collection `cloud` (policy `ask`: every run asks) and the owner's grant on it. One team for each vault; the vault keeps the team id.
+
+### 30.3 The catalog mirror
+
+`RunningNode::sync_items(team, items)` makes the live items of `cloud` exactly `items` (`CatalogItem`: uid, name, variable, hosts, provider, declarations). Every item is checked first with the checks of `POST /v1/items` (`admin::checked_item`), so a bad item changes nothing. Then: a live item whose uid is not in the list is archived (`item_archive`: its pending runs are denied and its sessions end); a new uid is added (`admin::insert_item`, the `items` limit holds); an item whose fields differ is changed in place (`admin::item_update`: an `item_changed` row, its pending runs denied with `approval_invalidated`, its sessions ended); an archived item is made live again the same way (the `items` limit holds). A second call with the same list changes nothing. Its `sealed` is `hostkeys::VALUE_ON_HOST` (30.6): the node stores metadata only.
+
+### 30.4 Schema version 7 (team file): the item list of an agent
+
+```sql
+ALTER TABLE agent ADD COLUMN items TEXT;
+```
+
+`agent.items` is a JSON array of item ids, or `NULL`: every item of the member's grants (every agent before this version, and every agent of `POST /v1/agents`, whose wire does not change). A list narrows the grants and never widens them: `decide::check_access` (the run request, and the recheck of every release) refuses an item outside the list with the answer of an unknown item (403 `not_granted`), and `admin::access` (`GET /v1/access`, `apassy_list_access`) leaves it out. An unknown agent or a list that does not parse gives no item. Only the in-process host sets a list: `admin::insert_agent` with a list of live items (at most 500, distinct), and `admin::agent_set_items`, which in the same transaction denies the pending runs of the agent with an item that the new list leaves out (`approval_invalidated`) and ends its sessions with one (`agent_items_changed` rows).
+
+`Store::open_team` migrates a version 6 file with the copy rule of 23.2: `<file>.pre-v7` (mode 0600), then in one transaction the column (only when it is not there) and `PRAGMA user_version = 7` (`migrate_v7`). The change is additive. A version 2 to 5 file goes on to 7 in one start, with each copy. A new team file is made at version 7. Versions above 7 are refused, and the schema 6 image refuses a version 7 file. `remove_team_file` also removes `.pre-v7` and `.pre-v7.tmp`. `relay.db` stays at 1003.
+
+The way back in place: `apassy-relay downgrade-schema-6`, with the relay stopped (it takes `relay.lock`), runs `Store::downgrade_to_v6` on every team file of version 7. The schema 6 image does not know the column and would give a listed agent every item of its member's grants, so each live agent with a list is revoked (an `agent_revoked` row of the operator with `{"reason": "schema_rollback"}`) and its pending runs are denied (`approval_invalidated`); then every list is cleared and the version is set to 6. The empty column stays: the schema 6 image never reads it, and a later `migrate_v7` keeps it. The other way back is the `.pre-v7` copy (docs/OPERATIONS.md 23.3).
+
+### 30.5 The public listener, its scope, and the failed-auth limiter
+
+`RelayConfig.public_listen` binds a second `tiny_http` server, served by the thread `relay-public-accept` with `Scope::Public`. It has its own lanes: `Limits {max_active: 32, member_reserve: 0, ..}` (`config::PUBLIC_MAX_ACTIVE`), so it never takes the threads of the node listener. Only the node listener runs the maintenance sweep. `Scope::Public` serves `POST /mcp` and `ANY /p/...`; any other request is 404 `not_found` before the health answer, the edge check, the token, or the body (section 9). The public listener trusts no header: the identity headers of Tailscale Serve are not read, and the proxy drops every `tailscale-*` header (section 12). `RunningRelay::public_addr` is its bound address. `stop` joins both accept threads.
+
+With `RelayConfig.auth_limiter` (an embedded node; the hosted relay has it off), each listener counts its failed authentications (`http::AuthFailures`): a bearer that names no team or that `authenticate` refuses (401 `unauthenticated` or `token_expired`), and a proxy path whose session key names no live session. With `AUTH_FAILURES_MAX` (20) of them in a fixed window of `AUTH_FAILURE_WINDOW_SECS` (60) seconds that starts at the first one, every further request of that listener in the window, with a good token too, gets 429 `rate_limited` with `Retry-After: 60`, after the edge check and before any token, body, or proxy work. The window then ends and the count starts again. The other listener keeps its own count. Each listener at its limit writes at most one row in ten seconds to the relay audit: action `rate_limited`, kind `auth_limit_public` or `auth_limit_node`, detail `{"code": "rate_limited", "scope": "public" | "node"}`. The count is in memory only.
+
+### 30.6 The in-process host and its release
+
+The app is the owner's host in the same process: it reads pending runs with `host::embedded_requests` (the list of `GET /v1/host/requests` without `authorize_host` and without the run key), and answers with:
+
+- `host::release_values(core, run_id, values, reason, now)`: as `host::release`, the run must be pending with its key in memory (else 409 `run_not_pending`), and the key is taken out first (one use). Steps 1 and 3 are checked again (`approval_invalidated`). Then each item of the run must hold `hostkeys::VALUE_ON_HOST`, there must be exactly one value for each item, in the order of the run, and each value must pass `hostkeys::check_value`; else the run is denied with `release_invalid` (`decided_by = host`). The session is made from the values (`decide::env_items`, `sessions.create`), the run becomes `ready`, and `run_released` is written with the actor `host:embedded`, then `session_started`. There is no `authorize_host`: the caller owns the store, and no HTTP route leads here.
+- `approvals::deny` with `Denier::Embedded`: as the host's deny, with the actor `host:embedded`.
+
+`hostkeys::VALUE_ON_HOST` is the one byte `0x00`, the `sealed` of every item of an embedded node: the value stays in the owner's vault. It is shorter than `MIN_SEALED_BYTES`, so `POST /v1/items` never stores it (400), and `host::release` over HTTP fails closed for a run with such an item: the run is denied with `release_invalid`, whatever keys the release carries.
+
+At rest the node's directory holds the team metadata, item metadata, agent token hashes, run rows (masked command, purpose, user request), and the audit; never a value or an item key.
+
+### 30.7 Tests
+
+`tests/embedded.rs`, on free loopback ports and temporary directories: `EdgeMode::Off` with a listener off the loopback is refused, before any file is made; on the public listener `/v1/me`, `/healthz`, `GET /`, `GET /mcp`, `/v1/runs`, the host lane, and `/v1/teams` are 404 while `POST /mcp` and `/p/` work, and the node listener serves every route without an edge; `tailscale-*` headers do not reach the upstream; the limiter answers 401 twenty times and 429 with `Retry-After: 60` at the 21st request, with one audit row, and the node listener has its own count (bad session keys); an agent list narrows `apassy_list_access` and refuses a run outside it with `not_granted`, a narrowed list denies a waiting run, and the sync is idempotent and archives; `release_values` is single use, fails closed on a missing or bad value with `release_invalid`, writes `run_released` by `host:embedded` and `session_started`, and a denial and a revocation work; an item with the marker fails the HTTP release with `release_invalid`; a personal team is made without a code and a restart opens it again with its agent; `downgrade-schema-6` revokes a listed agent and the next start moves the file to 7 again. Unit tests: the scope (`http::tests`), the limiter window, the embedded configuration (`config::tests`), and the schema 7 migration, its copy, a failed copy, and the downgrade (`store::tests`).
+
+### 30.8 What this does not protect
+
+- The public listener is on the internet through Funnel: anyone can reach `POST /mcp` and `/p/`. A bearer token, a session key, the team limits, the public lanes, and the failed-auth limiter bound what a stranger can do. The limiter is per listener, not per caller: a stranger with bad tokens can hold the public listener at 429 for the rest of each window, and the cloud agents of the owner with it. The node listener keeps working.
+- A cloud agent holds placeholders, base URLs, and a session key, and can use the proxy until the session ends (600 s, way B). A revocation ends it at once.
+- The node trusts the app process: whoever runs code in it can release any run. The values are in the vault of the same process anyway.

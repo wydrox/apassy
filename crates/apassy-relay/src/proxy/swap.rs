@@ -78,11 +78,13 @@ pub(super) struct Swapped {
 }
 
 /// Headers that the relay never forwards: the hop-by-hop ones, the ones it sets
-/// again, the edge and proxy chain ones, and `Accept-Encoding` (the response must
-/// come back uncompressed so a real value can be found in it).
+/// again, the edge and proxy chain ones (`cf-*` of Cloudflare, `tailscale-*` of Tailscale
+/// Serve and Funnel, such as `Tailscale-User-Login`), and `Accept-Encoding` (the
+/// response must come back uncompressed so a real value can be found in it).
 pub(super) fn dropped_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.starts_with("cf-")
+        || lower.starts_with("tailscale-")
         || matches!(
             lower.as_str(),
             "host"
@@ -715,10 +717,21 @@ mod tests {
             "X-Real-IP",
             "CF-Connecting-IP",
             "cf-ray",
+            "Tailscale-User-Login",
+            "tailscale-user-name",
+            "TAILSCALE-USER-PROFILE-PIC",
+            "Tailscale-App-Capabilities",
+            "Tailscale-Anything-Else",
         ] {
             assert!(dropped_header(name), "{name}");
         }
-        for name in ["Authorization", "User-Agent", "Content-Type", "Cookie"] {
+        for name in [
+            "Authorization",
+            "User-Agent",
+            "Content-Type",
+            "Cookie",
+            "X-Tailscale-User",
+        ] {
             assert!(!dropped_header(name), "{name}");
         }
     }
