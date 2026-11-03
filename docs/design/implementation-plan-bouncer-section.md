@@ -130,7 +130,7 @@ waiting request and opens one with its own code. Bad codes and refresh tokens co
 **The page.** No script, form, cookie, or button: nothing on it can authorize. Headers: `Content-Security-Policy:
 default-src 'none'; style-src 'unsafe-inline'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
 `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`. It shows the client name (cleaned, ≤ 64 bytes, escaped),
-the Mac's name, the match code, and the state text; never an item, an agent list, or the owner's name.
+"your Mac" (never the computer name), the match code, and the state text; never an item, an agent list, or the owner's name.
 
 **Storage** in the directory `relay.db` (1003 → 1004): `oauth_client`, `connect_request`, `oauth_refresh`. Codes and
 refresh tokens are stored hashed. Rollback note in `OPERATIONS.md`.

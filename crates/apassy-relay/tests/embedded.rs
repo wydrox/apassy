@@ -22,7 +22,7 @@ use apassy_relay::error::codes;
 use apassy_relay::hostkeys;
 use apassy_relay::secret::SecretString;
 use apassy_relay::server::Relay;
-use relay::{CANARY, CANARY2, call_url, release_body, start};
+use relay::{CANARY, CANARY2, call_raw, call_url, release_body, start};
 use serde_json::{Value, json};
 use upstream::MockUpstream;
 
@@ -901,4 +901,44 @@ fn a_node_goes_back_to_schema_6_and_its_listed_agents_are_revoked() {
     let (status, _) = mcp(&public, &token, "apassy_list_access", json!({}));
     assert_eq!(status, 401);
     Box::new(node).stop();
+}
+
+/// The connect page is public: anyone with its address reads it. A node that the app
+/// starts (`EmbeddedRelay`) says "your Mac" there, never the name of the computer; only
+/// the owner's own prompts name the Mac (security review finding 5).
+#[test]
+fn the_connect_page_of_a_node_of_the_app_says_your_mac_not_the_computer_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = EmbeddedRelay::default()
+        .start(node_config(dir.path()))
+        .unwrap();
+    node.create_team("Personal").unwrap();
+    let public = format!("http://{}", node.public_addr().unwrap());
+    let (status, reply) = call_url(
+        &public,
+        None,
+        "POST",
+        "/oauth/register",
+        None,
+        Some(&json!({"redirect_uris": ["https://client.example/cb"], "client_name": "Grok Bot"})),
+    );
+    assert_eq!(status, 201, "{reply}");
+    let client = reply["client_id"].as_str().expect("client id").to_string();
+    let authorize = format!(
+        "/oauth/authorize?response_type=code&client_id={client}\
+         &redirect_uri=https%3A%2F%2Fclient.example%2Fcb\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
+    );
+    let (status, text) = call_raw(&public, None, "GET", &authorize, None, &[], None);
+    assert_eq!(status, 303, "{text}");
+    let pending = node.pending_connects().unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    let wait = format!("/oauth/wait/{}", pending[0].id);
+    let (status, page) = call_raw(&public, None, "GET", &wait, None, &[], None);
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains("<h1>Grok Bot wants to connect to your Mac</h1>"),
+        "{page}"
+    );
+    node.stop();
 }

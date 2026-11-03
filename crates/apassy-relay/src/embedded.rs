@@ -26,7 +26,7 @@ use crate::api::{
     AgentCreate, CollectionCreate, DecisionRequest, GrantCreate, NewItem, Policy, PolicyMode, Role,
     RunStatus, Suggestion,
 };
-use crate::config::{EmbeddedOptions, OAuthConfig, RelayConfig, UpstreamOptions};
+use crate::config::{EmbeddedOptions, RelayConfig, UpstreamOptions};
 use crate::error::{RelayError, RelayResult, codes};
 use crate::hostkeys;
 use crate::ids::{AgentId, CollectionId, ItemId, MemberId, RunId, TeamId};
@@ -74,8 +74,8 @@ impl NodeBackend for EmbeddedRelay {
         })
         .map_err(node_error)?;
         relay.upstream = self.upstream.clone();
-        // The connect page names this Mac.
-        relay.oauth = Some(OAuthConfig::new(&apassy::sync::device_name()));
+        // The connect page keeps `EMBEDDED_MAC_NAME` ("your Mac"): it is public, so it
+        // never shows the computer name. Only the owner's own prompts name the Mac.
         let node = EmbeddedNode::start(relay).map_err(node_error)?;
         Ok(Box::new(node))
     }

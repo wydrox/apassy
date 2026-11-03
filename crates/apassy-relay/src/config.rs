@@ -84,9 +84,10 @@ pub const LOCK_FILE: &str = "relay.lock";
 pub const EMBEDDED_SESSION_TTL_SECS: u64 = 600;
 /// How long a run of an embedded node waits for the owner: the broker's question wait.
 pub const EMBEDDED_APPROVAL_TIMEOUT_SECS: u64 = 300;
-/// The name of the Mac on the connect page until the app gives its own
-/// (`EmbeddedRelay::start` sets the computer name).
-pub const EMBEDDED_MAC_NAME: &str = "this Mac";
+/// The name of the Mac on the connect page: "your Mac". The page is public (anyone with
+/// its address reads it), so it never shows the computer name; only the owner's own
+/// prompts, on the Mac and the iPhone, name the Mac.
+pub const EMBEDDED_MAC_NAME: &str = "your Mac";
 /// The requests that the public listener of an embedded node handles at once. It has
 /// no member reserve: only agents use it (`Scope::Public`).
 pub const PUBLIC_MAX_ACTIVE: usize = 32;
@@ -319,7 +320,8 @@ pub struct RelayConfig {
 /// 31). The defaults are the product's; tests shorten the times.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthConfig {
-    /// The name of the Mac on the connect page, such as "Mac mini (office)".
+    /// The name of the Mac on the connect page: `EMBEDDED_MAC_NAME` ("your Mac") on a node
+    /// of the app. Never the computer name: the page is public.
     pub mac_name: String,
     /// The lifetime of an access token (`oauth::ACCESS_TOKEN_SECS`).
     pub access_token_secs: u64,
@@ -421,8 +423,8 @@ impl RelayConfig {
     /// listener on `127.0.0.1:0`, the public listener of `options`, no edge, no push,
     /// shared team vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs
     /// that wait `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, the MCP
-    /// authorization flow on (`OAuthConfig::new` with `EMBEDDED_MAC_NAME`; the app sets the
-    /// name of the Mac), and the operator socket in the data directory.
+    /// authorization flow on (`OAuthConfig::new` with `EMBEDDED_MAC_NAME`, "your Mac", also
+    /// for the app), and the operator socket in the data directory.
     pub fn embedded(options: EmbeddedOptions) -> RelayResult<Self> {
         let public_url = checked_public_url(&options.public_url)?;
         if options.master_key.len() < MIN_KEY_BYTES {
@@ -987,6 +989,8 @@ mod tests {
         assert!(config.auth_limiter);
         let oauth = config.oauth.as_ref().expect("an embedded node has OAuth");
         assert_eq!(oauth.mac_name, EMBEDDED_MAC_NAME);
+        // The public page never names the computer (security review finding 5).
+        assert_eq!(EMBEDDED_MAC_NAME, "your Mac");
         assert_eq!(oauth.access_token_secs, 86_400);
         assert_eq!(oauth.refresh_token_secs, 90 * 86_400);
         assert_eq!((oauth.connect_secs, oauth.code_secs), (300, 300));
