@@ -103,8 +103,8 @@ mod tests {
         vault.lock().unwrap();
         let conn = Connection::open_with_flags(&path, OPEN_EXISTING).unwrap();
         apply_key(&conn, PASS).unwrap();
-        // Schema 26 (the cloud agents of the node) first: it has tables and a column.
-        conn.execute_batch(crate::vault::schema26::DOWNGRADE_TO_25_SQL)
+        // Schemas 27 and 26 (the Bouncer figures, the cloud agents) first: they have tables and columns.
+        conn.execute_batch(&crate::vault::schema27::downgrade_to_25_sql())
             .unwrap();
         conn.execute_batch(DOWNGRADE_TO_24_SQL).unwrap();
         assert_eq!(version(&conn), 24);

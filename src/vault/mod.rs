@@ -44,6 +44,8 @@ mod schema20;
 mod schema24;
 mod schema25;
 mod schema26;
+mod schema27;
+pub mod stats;
 pub use connect::PendingConnect;
 mod suggestions;
 mod sync;
@@ -86,8 +88,9 @@ pub use candidate::{
     ShadowAnswer, ShadowEntry, ShadowSummary, model_label, valid_model_version,
 };
 pub use cloud::{
-    CLOUD_PORT_MAX, CLOUD_PORT_MIN, CLOUD_TOKEN_DAYS, CloudAgent, CloudNodeSetting,
-    DEFAULT_CLOUD_TOKEN_DAYS, MAX_CLOUD_AGENT_ITEMS,
+    CLOUD_PORT_MAX, CLOUD_PORT_MIN, CLOUD_TOKEN_DAYS, CloudAgent, CloudNodeSetting, CloudRun,
+    ConnectedWith, DEFAULT_CLOUD_TOKEN_DAYS, MAX_CLIENT_ID_BYTES, MAX_CLOUD_AGENT_ITEMS,
+    NewCloudRun,
 };
 pub use companion::{
     AddDeviceError, CompanionCertificate, CompanionDevice, CompanionDeviceKeys, CompanionSetting,
@@ -103,9 +106,10 @@ pub use history::{
 };
 pub use learning::{
     BouncerCounts, CALIBRATION_CEILING, CALIBRATION_FLOOR, CalibrationRecord, CandidateAgreement,
-    DayRate, DecidedBy, DecisionEntry, DecisionRecord, LoggedDecision, MAX_BLOCKED_PATTERNS,
-    MAX_DECISION_ROWS, MAX_KEPT_DENIALS, MAX_PATTERNS, PATTERN_APPROVALS_NEEDED, PATTERN_IDLE_DAYS,
-    PatternKey, PatternRecord, PatternState, RequestSource,
+    DayRate, DecidedBy, DecisionEntry, DecisionMeta, DecisionRecord, LoggedDecision,
+    MAX_BLOCKED_PATTERNS, MAX_DECISION_ROWS, MAX_KEPT_DENIALS, MAX_PATTERNS,
+    PATTERN_APPROVALS_NEEDED, PATTERN_IDLE_DAYS, PatternKey, PatternRecord, PatternState,
+    RequestKind, RequestSource,
 };
 pub use merge::{
     ConflictCopy, LOCAL_TABLES, MergeReport, SYNCED_EVENT_KINDS, SYNCED_TABLES, SyncScope,
@@ -120,6 +124,10 @@ pub use policy::{DeclarationSource, DeclarationSources};
 pub use questions::{QUESTION_KEY_NAME, QuestionKey, question_key_id};
 pub use relay_device::RelayDevice;
 pub use schema18::ONLY_MARKER_ITEM;
+pub use stats::{
+    ASKS_OFTEN_MIN_RUNS, ASKS_OFTEN_RATE, AgentDay, AgentStats, BOUNCER_LOG_PAGE, BouncerStats,
+    DayCount, LocalStats, LogRow, STATS_DAYS, STATS_WINDOW_SECS,
+};
 pub use suggestions::{DeclarationField, SuggestedDeclaration, SuggestionOutcome, SuggestionStats};
 pub use sync::{AdoptedCopy, CopyPassphraseError, MAX_DEVICE_NAME_BYTES, SyncCopy, SyncIdentity};
 pub(crate) use sync::{copy_hashing, hash_open_file, sync_dir, to_hex};
@@ -1311,6 +1319,11 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
+    let v27: &[&str] = if version >= schema27::STATS_SCHEMA_VERSION {
+        &schema27::COLUMNS
+    } else {
+        &[]
+    };
     for sql in v1
         .iter()
         .chain(v2)
@@ -1335,6 +1348,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v22)
         .chain(v23)
         .chain(v26)
+        .chain(v27)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1448,6 +1462,9 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < schema26::CLOUD_SCHEMA_VERSION {
         schema26::add_schema_v26(&tx)?;
     }
+    if from < schema27::STATS_SCHEMA_VERSION {
+        schema27::add_schema_v27(&tx)?;
+    }
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1509,6 +1526,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     schema24::add_schema_v24(&tx)?;
     schema25::add_schema_v25(&tx)?;
     schema26::add_schema_v26(&tx)?;
+    schema27::add_schema_v27(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

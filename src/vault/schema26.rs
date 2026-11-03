@@ -152,7 +152,8 @@ mod tests {
         vault.register_agent("Synthetic local").unwrap();
         vault.lock().unwrap();
         let conn = raw(&path);
-        conn.execute_batch(DOWNGRADE_TO_25_SQL).unwrap();
+        conn.execute_batch(&crate::vault::schema27::downgrade_to_25_sql())
+            .unwrap();
         assert_eq!(version(&conn), 25);
         assert!(!has_table(&conn, "cloud_agent"));
         assert!(conn.prepare("SELECT kind FROM agent").is_err());
@@ -167,8 +168,9 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), CLOUD_SCHEMA_VERSION);
-        assert_eq!(meta_version(conn), CLOUD_SCHEMA_VERSION);
+        // The unlock runs schema 27 after 26 (`schema27.rs`).
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
+        assert_eq!(meta_version(conn), crate::vault::SCHEMA_VERSION);
         let kinds: Vec<String> = conn
             .prepare("SELECT kind FROM agent ORDER BY id")
             .unwrap()
@@ -223,7 +225,8 @@ mod tests {
         drop(vault);
 
         let conn = raw(&path);
-        conn.execute_batch(DOWNGRADE_TO_25_SQL).unwrap();
+        conn.execute_batch(&crate::vault::schema27::downgrade_to_25_sql())
+            .unwrap();
         assert_eq!(version(&conn), 25);
         let revoked: Vec<(i64, bool)> = conn
             .prepare("SELECT id, revoked_at IS NOT NULL FROM agent ORDER BY id")
@@ -241,11 +244,14 @@ mod tests {
         );
         close_conn(conn).unwrap();
 
-        // This build moves the file to 26 again: the old cloud agent stays revoked, the
-        // local agent keeps its token, and the node settings start again.
+        // This build moves the file to 26 and 27 again: the old cloud agent stays
+        // revoked, the local agent keeps its token, and the node settings start again.
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
-        assert_eq!(version(vault.conn_ref().unwrap()), CLOUD_SCHEMA_VERSION);
+        assert_eq!(
+            version(vault.conn_ref().unwrap()),
+            crate::vault::SCHEMA_VERSION
+        );
         assert_eq!(
             vault.authenticate_agent(token.expose()).unwrap().id,
             local.id
@@ -266,8 +272,8 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), CLOUD_SCHEMA_VERSION);
-        assert_eq!(meta_version(conn), CLOUD_SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
+        assert_eq!(meta_version(conn), crate::vault::SCHEMA_VERSION);
         assert!(has_table(conn, "cloud_node"));
         for version in [16, 24, 25, CLOUD_SCHEMA_VERSION] {
             assert!(
@@ -275,10 +281,8 @@ mod tests {
                 "{version}"
             );
         }
-        assert!(!crate::vault::merge::is_mergeable_schema(
-            CLOUD_SCHEMA_VERSION + 1
-        ));
-        assert_eq!(CLOUD_SCHEMA_VERSION, crate::vault::SCHEMA_VERSION);
+        // Schema 27 (`schema27.rs`) follows 26.
+        const { assert!(CLOUD_SCHEMA_VERSION < crate::vault::SCHEMA_VERSION) };
     }
 
     #[test]
@@ -287,7 +291,7 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("new.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), CLOUD_SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
         for table in ["cloud_agent", "cloud_item", "cloud_node"] {
             assert!(has_table(conn, table), "{table}");
             assert!(

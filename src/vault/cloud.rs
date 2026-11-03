@@ -1,5 +1,6 @@
 //! Cloud agents and the node settings of this vault (schema 26, ADR 0037 cloud slice,
-//! decision 3). The tables are in `schema26.rs`.
+//! decision 3). The tables are in `schema26.rs`; the OAuth link of an agent and the
+//! cloud runs (`cloud_run`) are in `schema27.rs`.
 //!
 //! A cloud agent is a vault agent with `kind = 'cloud'`. It starts with `see_all = 0`
 //! and "only these items" with the items that the owner picked, so ADR 0012 visibility,
@@ -64,6 +65,68 @@ pub struct CloudNodeSetting {
     pub port: Option<u16>,
     /// The public route (Tailscale Funnel) is on.
     pub route_on: bool,
+}
+
+/// How a cloud agent connected (schema 27, `cloud_agent.connected_with`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConnectedWith {
+    /// The MCP authorization flow (OAuth 2.1): the agent connected by itself and the
+    /// owner allowed it.
+    OAuth,
+    /// A token that the owner gave it (`apassy agents add-remote`), and every cloud agent
+    /// made before schema 27.
+    #[default]
+    Token,
+}
+
+impl ConnectedWith {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OAuth => "oauth",
+            Self::Token => "token",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "oauth" => Some(Self::OAuth),
+            "token" => Some(Self::Token),
+            _ => None,
+        }
+    }
+}
+
+/// The longest OAuth `client_id` that the vault keeps, in bytes.
+pub const MAX_CLIENT_ID_BYTES: usize = 255;
+
+/// A cloud run to store when the node asks about it (schema 27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewCloudRun {
+    /// The run id of the node.
+    pub relay_run_id: u64,
+    /// The decision log row of the broker's decision, when it wrote one.
+    pub decision_log_id: Option<u64>,
+    /// The vault agent.
+    pub agent_id: u64,
+    /// When the node asked.
+    pub at: u64,
+}
+
+/// One stored cloud run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CloudRun {
+    pub relay_run_id: u64,
+    pub decision_log_id: Option<u64>,
+    pub agent_id: u64,
+    pub at: u64,
+    /// When its session ended. `None` while it runs, and for a denied run.
+    pub ended_at: Option<u64>,
+    /// Requests of its session that the proxy of the node forwarded.
+    pub forwarded: u64,
+    /// Requests that the proxy refused.
+    pub refused: u64,
+    /// Requests that failed upstream.
+    pub failed: u64,
 }
 
 fn storage<E>(_: E) -> super::types::VaultError {
@@ -449,6 +512,8 @@ impl Vault {
             super::learning::forget_agent(&tx, *agent)?;
         }
         tx.execute("DELETE FROM cloud_agent", []).map_err(storage)?;
+        // A new node numbers its runs again.
+        tx.execute("DELETE FROM cloud_run", []).map_err(storage)?;
         tx.execute(
             "INSERT INTO cloud_node (id, team_id, port, route_on) VALUES (1, NULL, NULL, 0)
              ON CONFLICT(id) DO UPDATE SET team_id = NULL, route_on = 0",
@@ -483,11 +548,185 @@ impl Vault {
     }
 }
 
+/// The OAuth link of the cloud agents and the cloud runs (schema 27).
+impl Vault {
+    /// Store how the cloud agent `agent_id` connected: the OAuth `client_id` of an agent
+    /// that connected by itself ([`ConnectedWith::OAuth`], a client id is required), or
+    /// none for a token agent. `InvalidInput`: an empty, long, or unprintable client id,
+    /// a client id for a token agent, or no client id for an OAuth agent. `NotFound`: no
+    /// active cloud agent `agent_id`.
+    pub fn set_cloud_agent_link(
+        &mut self,
+        agent_id: u64,
+        client_id: Option<&str>,
+        connected_with: ConnectedWith,
+    ) -> VaultResult<()> {
+        let valid = match (connected_with, client_id) {
+            (ConnectedWith::OAuth, Some(id)) => {
+                !id.is_empty()
+                    && id.len() <= MAX_CLIENT_ID_BYTES
+                    && !id.chars().any(char::is_control)
+            }
+            (ConnectedWith::Token, None) => true,
+            _ => false,
+        };
+        if !valid {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        let agent = to_sql_id(agent_id)?;
+        let changed = self
+            .conn_mut()?
+            .execute(
+                "UPDATE cloud_agent SET client_id = ?2, connected_with = ?3
+                 WHERE agent_id = ?1 AND agent_id IN (
+                     SELECT id FROM agent WHERE kind = 'cloud' AND revoked_at IS NULL)",
+                (agent, client_id, connected_with.as_str()),
+            )
+            .map_err(storage)?;
+        if changed == 0 {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        Ok(())
+    }
+
+    /// The OAuth client id and the way of connection of the cloud agent `agent_id`, also
+    /// a revoked one whose node link is still here. `None`: no such cloud agent.
+    pub fn cloud_agent_link(
+        &self,
+        agent_id: u64,
+    ) -> VaultResult<Option<(Option<String>, ConnectedWith)>> {
+        let agent = to_sql_id(agent_id)?;
+        let row: Option<(Option<String>, String)> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT client_id, connected_with FROM cloud_agent WHERE agent_id = ?1",
+                [agent],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        row.map(|(client, with)| {
+            ConnectedWith::parse(&with)
+                .map(|with| (client, with))
+                .ok_or_else(|| err(VaultErrorKind::Storage))
+        })
+        .transpose()
+    }
+
+    /// The active cloud agent that connected with the OAuth client `client_id`, if any:
+    /// the same client connects again to that agent.
+    pub fn cloud_agent_for_client(&self, client_id: &str) -> VaultResult<Option<u64>> {
+        let id: Option<i64> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT a.id FROM agent a JOIN cloud_agent c ON c.agent_id = a.id
+                 WHERE c.client_id = ?1 AND a.kind = 'cloud' AND a.revoked_at IS NULL
+                 ORDER BY a.id DESC LIMIT 1",
+                [client_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        id.map(to_public_id).transpose()
+    }
+
+    /// Store a cloud run when the broker decided it. The same run id again replaces the
+    /// row (a node numbers its runs again after a reset of the node).
+    pub fn record_cloud_run(&mut self, run: &NewCloudRun) -> VaultResult<()> {
+        let relay = to_sql_id(run.relay_run_id)?;
+        let log = run.decision_log_id.map(to_sql_id).transpose()?;
+        let agent = to_sql_id(run.agent_id)?;
+        let at = to_sql_time(run.at)?;
+        self.conn_mut()?
+            .execute(
+                "INSERT OR REPLACE INTO cloud_run
+                     (relay_run_id, decision_log_id, agent_id, at, ended_at, forwarded, refused, failed)
+                 VALUES (?1, ?2, ?3, ?4, NULL, 0, 0, 0)",
+                (relay, log, agent, at),
+            )
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Store the end of the session of a cloud run and the counts of its proxied
+    /// requests. `NotFound`: no row for `relay_run_id`.
+    pub fn end_cloud_run(
+        &mut self,
+        relay_run_id: u64,
+        ended_at: u64,
+        forwarded: u64,
+        refused: u64,
+        failed: u64,
+    ) -> VaultResult<()> {
+        let count = |n: u64| i64::try_from(n).map_err(|_| err(VaultErrorKind::InvalidInput));
+        let changed = self
+            .conn_mut()?
+            .execute(
+                "UPDATE cloud_run SET ended_at = ?2, forwarded = ?3, refused = ?4, failed = ?5
+                 WHERE relay_run_id = ?1",
+                (
+                    to_sql_id(relay_run_id)?,
+                    to_sql_time(ended_at)?,
+                    count(forwarded)?,
+                    count(refused)?,
+                    count(failed)?,
+                ),
+            )
+            .map_err(storage)?;
+        if changed == 0 {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        Ok(())
+    }
+
+    /// The cloud run `relay_run_id`, if stored.
+    pub fn cloud_run(&self, relay_run_id: u64) -> VaultResult<Option<CloudRun>> {
+        type Row = (i64, Option<i64>, i64, i64, Option<i64>, i64, i64, i64);
+        let row: Option<Row> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT relay_run_id, decision_log_id, agent_id, at, ended_at, forwarded,
+                        refused, failed
+                 FROM cloud_run WHERE relay_run_id = ?1",
+                [to_sql_id(relay_run_id)?],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some((relay, log, agent, at, ended, forwarded, refused, failed)) = row else {
+            return Ok(None);
+        };
+        let count = |n: i64| u64::try_from(n).map_err(storage);
+        Ok(Some(CloudRun {
+            relay_run_id: to_public_id(relay)?,
+            decision_log_id: log.map(to_public_id).transpose()?,
+            agent_id: to_public_id(agent)?,
+            at: from_sql_time(at)?,
+            ended_at: ended.map(from_sql_time).transpose()?,
+            forwarded: count(forwarded)?,
+            refused: count(refused)?,
+            failed: count(failed)?,
+        }))
+    }
+}
+
 /// What a restored copy keeps of the node: nothing. Its agents are revoked by
 /// `agents::prepare_restored`, its node links and team go, and its route is off, so the
 /// restored file never shares a node team with the vault it came from.
 pub(super) fn prepare_restored(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
     tx.execute("DELETE FROM cloud_agent", []).map_err(storage)?;
+    tx.execute("DELETE FROM cloud_run", []).map_err(storage)?;
     tx.execute(
         "UPDATE cloud_node SET team_id = NULL, route_on = 0 WHERE id = 1",
         [],
