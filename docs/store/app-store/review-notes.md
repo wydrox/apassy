@@ -34,7 +34,7 @@ Requests from coding agents, and the Apple Watch app, need Apassy for the Mac wi
 To try it with a Mac: install Apassy from https://apassy.wyderka.cc, make a vault, and open it on the iPhone through iCloud Drive or with "From your Mac · Apassy relay" (the Mac shows a code to scan in Add an iPhone or a Mac...).
 
 PERMISSIONS
-- Face ID: unlocks the vault and checks each show, copy, fill, and Allow Once.
+- Face ID: unlocks the vault and checks each show, copy, fill, and Allow Once (each time by default; Settings > Security > Ask for Face ID can set a time).
 - Camera: only to scan the code that the Mac shows. It saves no picture.
 - Local Network: only for the older Wi-Fi pairing with a Mac on the same network.
 - Notifications (time-sensitive): only after the owner turns them on. The alert says "A question is waiting" and has no other content. A coding agent waits for the answer, so the alert is time-sensitive.
@@ -47,7 +47,10 @@ PURCHASES
 The app has no purchase, no price, and no link or instruction to buy. All features in this app work without payment.
 
 ENCRYPTION
-The app uses standard encryption (SQLCipher for the vault, TLS, ChaCha20-Poly1305, ECDSA P-256). See the export compliance answers. The source code is public under Apache-2.0: https://github.com/wydrox/apassy
+The app includes its own standard encryption, in addition to Apple's: SQLCipher with OpenSSL for the vault, TLS with rustls, ChaCha20-Poly1305 and ECDSA P-256. Its purpose is the confidentiality of the owner's data. Only standard algorithms; no proprietary cryptography. The Info.plist says ITSAppUsesNonExemptEncryption = YES, and the export compliance answers say the same (mass market). The app is not offered in France until the ANSSI declaration is filed. The source code is public under Apache-2.0: https://github.com/wydrox/apassy
+
+PRIVACY
+No tracking. The relay that carries sync and requests keeps device ids, device names, public keys and push tokens for app functionality; the App Privacy answers declare them as linked to the user. The vault, the requests and the answers are end-to-end encrypted. Privacy policy: https://apassy.wyderka.cc/privacy
 ```
 
 ## 3. The review vault (owner)
@@ -111,5 +114,6 @@ iPhone app has no paid content, and today every feature of the iPhone app works 
 | 5.1.1(v) Account deletion | — | There is no account, so there is nothing to delete. "Remove from this iPhone" removes the local vault; removing the device on a Mac removes its relay rows |
 | 4.5.4 Push notifications | Notifications must not be required | They are optional and only after the owner turns them on |
 | AutoFill and passkeys | The extension asks for Face ID for each fill | ADR 0023 §5 |
-| 5.1.2 Data use | What is sent to the relay | [app-privacy.md](app-privacy.md) section 2 |
+| 5.1.2 Data use | What is sent to the relay | [app-privacy.md](app-privacy.md) section 2: device ids, names, public keys and push tokens, declared as linked, App Functionality; content only end-to-end encrypted |
+| Export compliance | The build says `ITSAppUsesNonExemptEncryption = YES` | [export-compliance.md](export-compliance.md) §2: standard algorithms, mass market, no France until the ANSSI declaration |
 | 2.3.10 Other platforms | The description names the Mac | The Mac app is the developer's own app; the text names it to say what the iPhone app needs |
