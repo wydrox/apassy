@@ -1,6 +1,6 @@
 # Trust model
 
-Date: 2026-11-02. Updated 2026-11-03: cloud agents through Tailscale Funnel. Decision:
+Date: 2026-11-02. Updated 2026-11-03: cloud agents through Tailscale Funnel; Apassy Connect as planned for stage 7. Decision:
 [ADR 0037](../adr/0037-own-relay-open-source.md). This page says who can see what. Update it in the
 same change as any code that changes an answer here.
 
@@ -22,7 +22,7 @@ Apache-2.0 and builds from this repository.
 | Tailscale DERP relays | — | WireGuard ciphertext, sizes, times | Traffic |
 | Push gateway (Apassy project) | The APNs key | Push handles, node IP addresses, times | Tokens of other gateways, any question data |
 | Apple (APNs, iCloud) | Push delivery; iCloud copies if folder sync is on | Push metadata; SQLCipher ciphertext of iCloud copies | Vault contents |
-| Apassy Connect (paid, optional) | Sealed envelopes and sync snapshots | TLS records, ciphertext, sizes, times | Values, vault contents, questions, answers, except the opt-in bouncer brain service below, which sees the bouncer state |
+| Apassy Connect (paid, optional) | Sealed envelopes and sync snapshots; at stage 7 the account directory, the vault stores, and the Stripe ids (section "Apassy Connect") | TLS records, ciphertext, sizes, times, device names and public keys, the account's email and plan, vault ids, node names, client addresses in memory only | Values, vault contents, questions, answers, except the opt-in bouncer brain service below, which sees the bouncer state |
 | Bouncer brain service of Apassy Connect (paid, opt-in, ADR 0035) | The shared encoder; the owner's head sets while Apassy hosting is on; the examples of a training job for at most 24 h | The state of each bouncer request (user request, command, relative directory, purpose, variable names, owner rule), in memory for one request; the examples of a training job | Values, the vault, the vault path, absolute project paths. It cannot allow a run: the bouncer gate on the Mac decides |
 | Apassy project | Release signing keys | Nothing at run time | Anything of a user |
 | Upstream API (Stripe, OpenAI, …) | — | The requests made with its credential | Other credentials |
@@ -56,6 +56,33 @@ A hosted cloud agent (first: Grok Bot) reaches the Mac's node at
 
 The owner decides every cloud run in this release, on the Mac or the iPhone. The node trusts the app
 process: code that runs in it can release any run, but it can read the vault anyway.
+
+## Apassy Connect (ADR 0037 stage 7, planned)
+
+The paid hosted service of stage 7 ([plan](../design/implementation-plan-s7-connect.md); contracts
+[connect-account-v1](../contracts/connect-account-v1.md),
+[connect-billing-v1](../contracts/connect-billing-v1.md),
+[connect-tunnel-v1](../contracts/connect-tunnel-v1.md)). Not implemented yet: this section says what
+the contracts allow, and it becomes true when units C1 to C5 ship. The security review Q1 updates it.
+
+| Part | Holds | Sees | Cannot see or do |
+| --- | --- | --- | --- |
+| Account directory (`relay.db`) | Account ids, person names, device names, platforms, device public keys, the hashes of link and recovery codes, the last-seen hour of each device, groups and roles, vault store ids and vault names, nodes (names, certificate pins, public names), tunnel grants, the public keys of the entitlement signing key | — | Private keys, link codes, recovery codes, tokens (memory only), passphrases, vault keys |
+| Plain files at rest | In `APASSY_RELAY_MODE=connect` there is no master key: `relay.db` and the vault store files are plain SQLite. They hold the directory above and, in the stores, SQLCipher snapshots under the user's passphrase, signed heads, and receipts | — | Nothing in them opens a vault. Disk encryption of the host is the owner's choice; backups go through the encrypted pull of today |
+| Vault stores (blind sync store) | One relay-sync-v1 team for each vault: the current and the previous snapshot | Ciphertext, sizes, times, which device pushed | Vault contents. The passphrase never reaches Connect |
+| Account sign-in and the safety words | Public keys and signed challenges; a 15-minute account token in memory | Which device signs in, and when | It cannot add a device: a new device needs the confirmation of a live device with six safety words and an owner check. Connect never sees the link code, so it cannot compute the words or make a key that matches them |
+| The email | A copy of the Stripe customer's email, for the devices list and support | — | Connect sends no mail in stage 7. Account deletion deletes the copy |
+| Stripe (payment processor) | The customer: email, billing address, payment method, tax id; subscriptions and invoices (kept for legal retention) | The checkout and portal sessions, and the account id in `client_reference_id` and metadata | A device key, a token, a vault id, a device name, a value. Connect never sees card data or the address |
+| The webhook | Event ids for 30 days | Stripe events, checked with the endpoint secret | A forged or replayed event changes nothing: signature, 300 s tolerance, idempotency by event id |
+| The tunnel (byte relay) | Nodes and grants; for each account and month the counts of dials and streams and the bytes | TLS records, sizes, times; the client address of a WebSocket in memory | Requests, tokens, values: TLS ends on the node, pinned for devices. It logs no stream content |
+| The SNI ingress (ports 443 and 80 of the Connect host, DNS-only, not through Cloudflare) | — | The server name `<node>.node.apassy.wyderka.cc`, the client address in memory only (never logged), the TLS records, and the plain ACME HTTP-01 challenge requests on port 80 | The cloud agent's requests, its token, session keys, placeholders, values: TLS ends on the node with its own Let's Encrypt certificate, whose key never leaves the node |
+| Certificate Transparency logs | The node certificates | The public node names, for ever, once a node gets a certificate | Traffic |
+| The Cloudflare Worker (edge) | — | The account and billing requests (public keys, names, signed messages, Stripe events) and the WebSocket upgrades; after an upgrade, the tunnel's TLS records | Values, vault contents |
+| The entitlement token | The Mac keeps it in memory (24 hours) | Account id, plan, group, features, times; it is signed by Connect | It is not a credential for Connect. A service accepts it only for the account of the device that signed in to that service |
+| Bouncer brain service, through Connect (ADR 0035; the row above) | Its own token after the device sign-in `apassy-bouncer sign-in v1`; the entitlement token | What the row above says; from Connect only `account`, the two entitlements, and `revoked` for a device (I-3), and `revoke` and `forget` events (I-4) | The account token: the Mac never sends it to the brain (I-2). Connect does not call the brain for a request |
+| Fallback F1 (not chosen) | — | If the owner chose it, Cloudflare and Connect would end the cloud agent's TLS and see its requests (the bearer token, placeholders, session keys), never values | Not in effect. Choosing it changes this table and the Funnel parity of the ingress row |
+
+The iPhone shows the plan only; it has no purchase, link, or price (connect-billing-v1 section 10).
 
 ## The hosted relay today (until ADR 0037 stage 7)
 
