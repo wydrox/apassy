@@ -41,6 +41,10 @@ use crate::vault::Vault;
 /// The one open vault in this process. The desktop app and the broker share it.
 pub type SharedVault = Arc<Mutex<Option<Vault>>>;
 
+pub use run::{
+    CLOUD_REQUEST_SOURCE, CloudApproval, CloudContext, CloudDecision, CloudRequest,
+    evaluate_cloud,
+};
 pub use server::{
     BrokerHandle, BrokerOptions, start, start_with, start_with_model_server, start_with_tls,
 };
