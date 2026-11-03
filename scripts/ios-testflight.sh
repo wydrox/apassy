@@ -29,6 +29,13 @@
 #
 # The version is MARKETING_VERSION of ios/ApassyCompanion/project.yml.
 # See ios/README.md, "TestFlight".
+#
+# It also writes target/ios/build-record.json: version, build number, commit, Xcode and
+# SDK, the SHA-256 of the .ipa when the export wrote one, and the SHA-256 of each Mach-O of
+# the archive (scripts/macos-binaries.py). The owner publishes it with the workflow
+# ios-build-record.yml, which attests it (docs/operations/release.md, "Attestations and
+# SBOMs"). The App Store re-signs and encrypts the app, so the record is a signed claim of
+# the build, not a check that a user can repeat.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -139,8 +146,52 @@ xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$options"
   -exportPath "$out/export" "${auth[@]}" -quiet
 
 version=$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$archive/Info.plist")
+
+echo "ios-testflight: the build record"
+apps=("$archive"/Products/Applications/*.app)
+[ "${#apps[@]}" = 1 ] && [ -d "${apps[0]}" ] || fail "expected one app in $archive/Products/Applications"
+record="$out/build-record.json"
+python3 -I scripts/macos-binaries.py "${apps[0]}" --version "$version" --commit "$commit" \
+  --output "$out/archive-binaries.json" >/dev/null
+xcode="$(xcodebuild -version | tr '\n' ' ' | sed 's/ *$//')"
+sdk="$(xcrun --sdk iphoneos --show-sdk-version)"
+python3 -I - "$out/archive-binaries.json" "$out/export/ApassyCompanion.ipa" "$record" \
+  "$version" "$build" "$commit" "$xcode" "$sdk" "$upload" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+binaries, ipa, record, version, build, commit, xcode, sdk, upload = sys.argv[1:]
+# With the destination "upload", the export sends the .ipa and may keep no copy.
+ipa_sha256 = None
+if Path(ipa).is_file():
+    digest = hashlib.sha256()
+    with open(ipa, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    ipa_sha256 = digest.hexdigest()
+data = {
+    "format": 1,
+    "kind": "apassy-ios-build-record",
+    "version": version,
+    "build": build,
+    "commit": commit,
+    "xcode": xcode,
+    "sdk": sdk,
+    "uploaded": upload == "1",
+    "ipa_sha256": ipa_sha256,
+    "binaries": json.loads(Path(binaries).read_text())["files"],
+}
+text = json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
+if len(text.encode()) > 64 * 1024:
+    sys.exit(f"ios-testflight: the build record has {len(text.encode())} bytes, more than 64 KiB")
+Path(record).write_text(text)
+PY
+rm -f "$out/archive-binaries.json"
+
 if [ "$upload" = 1 ]; then
   echo "ios-testflight: uploaded Apassy $version ($build). App Store Connect processes it for TestFlight in a few minutes."
+  echo "ios-testflight: when the commit is on main, publish the build record:"
+  echo "  gh workflow run ios-build-record.yml --ref main -f record=\"\$(cat $record)\""
 else
   echo "ios-testflight: $out/export/ApassyCompanion.ipa, Apassy $version ($build)"
+  echo "ios-testflight: $record (a test build: do not publish its record)"
 fi
