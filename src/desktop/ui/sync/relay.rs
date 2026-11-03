@@ -623,6 +623,19 @@ pub(crate) fn words(status: &UiStatus, received: Option<&Receipt>) -> String {
 /// change.
 pub(crate) const OLDER_COPY_WORDS: &str = "The copy on the relay uses another passphrase than this vault. It can be from before a passphrase change. Type the passphrase of that copy.";
 
+/// The notice of ADR 0037 D14 for relay sync (plan s7 unit N1): under the relay row of
+/// Settings > Vault > Sync while the vault syncs through the hosted relay. A relay that
+/// the owner runs gets no notice. Relay sync is not the paid feature (plans section 5):
+/// the hosted store becomes part of Apassy Connect, and an own node stays free.
+pub(crate) fn relay_sync_notice(relay_url: &str) -> Option<String> {
+    crate::relay::membership::on_hosted_relay(relay_url).then(|| {
+        format!(
+            "Relay sync on apassy-relay.wyderka.cc is free until Apassy {}. Then the hosted store is part of Apassy Connect; your own Mac or Linux node can be the sync home (free).",
+            crate::relay::membership::FREE_RELAY_PATHS_END_VERSION
+        )
+    })
+}
+
 /// The text of a failed relay call of an owner action.
 pub(super) fn call_error(error: SyncError) -> String {
     match error {

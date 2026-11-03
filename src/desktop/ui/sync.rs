@@ -1637,6 +1637,13 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         }
                     };
                     ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    // ADR 0037 D14: free relay sync on the hosted relay ends (plan s7 N1).
+                    if let Some(notice) = link
+                        .and_then(|link| link.relay.as_ref())
+                        .and_then(|on| relay::relay_sync_notice(&on.url))
+                    {
+                        ui.add(Label::new(super::settings::rows::note(&notice)).wrap());
+                    }
                     // The actions of a synced vault, under its state.
                     let actions = open_unlocked
                         && ((link.is_some() && !removed)

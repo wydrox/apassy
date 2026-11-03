@@ -416,6 +416,8 @@ fn other_macs_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
 /// them, and a new device.
 fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let relay_state = relay_questions_state(app);
+    // ADR 0037 D14: the free approvals through the hosted relay end (plan s7 unit N1).
+    let free_notice = app.questions_free_notice();
     let relay_devices = if matches!(relay_state, Some(QuestionsAvailability::On { .. })) {
         app.questions_devices()
     } else {
@@ -513,6 +515,9 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         "An iPhone answers the questions with Face ID, also away from this network.",
                     )
                     .clicked();
+            }
+            if let Some(notice) = &free_notice {
+                g.note_row(notice.as_str());
             }
         },
     );
