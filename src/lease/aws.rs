@@ -2,9 +2,12 @@
 //! plan s6 decision S6-4).
 //!
 //! With a `role_arn` the key holder calls `AssumeRole` (recommended: the role narrows
-//! the permissions), else `GetFederationToken` with the item's session policy, or with
-//! an allow-all policy when the item has none (the result is still the intersection with
-//! the IAM user's own permissions; without a policy `GetFederationToken` grants nothing).
+//! the permissions), else `GetFederationToken`. Both send the item's session policy;
+//! without one, an item with `services` gets a policy that allows `<service>:*` for each
+//! listed service ([`services_policy`]), so the lease is narrowed to them. Only an item
+//! with neither sends no policy to `AssumeRole` and an allow-all policy to
+//! `GetFederationToken` (the result is still the intersection with the IAM user's own
+//! permissions; without a policy `GetFederationToken` grants nothing).
 //! `DurationSeconds` is 900, the AWS minimum, and the session is `apassy-<run label>`.
 //! `GetSessionToken` is never used: it cannot be narrowed.
 //!
@@ -58,6 +61,32 @@ pub const ALLOW_ALL_POLICY: &str =
     r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
 
 const KIND: LeaseKind = LeaseKind::AwsSts;
+
+/// The session policy of an item without a `policy` and with `services`: allow
+/// `<service>:*` on every resource for each listed service, in the listed order. The
+/// names are the IAM service prefixes (`s3`, `dynamodb`, `sqs`); the settings allow only
+/// `[a-z0-9-]`, so the text needs no escape. At most 16 services keep it far below the
+/// 2048-byte STS limit.
+pub fn services_policy(services: &[String]) -> String {
+    let actions: Vec<String> = services
+        .iter()
+        .map(|service| format!("\"{service}:*\""))
+        .collect();
+    format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":[{}],"Resource":"*"}}]}}"#,
+        actions.join(",")
+    )
+}
+
+/// The session policy that the call sends: the item's `policy`, else the policy of its
+/// `services`, else none (`AssumeRole`) or [`ALLOW_ALL_POLICY`] (`GetFederationToken`).
+fn session_policy(settings: &AwsStsSettings) -> Option<String> {
+    match (&settings.policy, &settings.services) {
+        (Some(policy), _) => Some(policy.clone()),
+        (None, Some(services)) if !services.is_empty() => Some(services_policy(services)),
+        (None, _) => None,
+    }
+}
 const SERVICE: &str = "sts";
 const ACCEPT: &str = "text/xml";
 const SESSION_PREFIX: &str = "apassy-";
@@ -204,7 +233,7 @@ pub(super) fn acquire(
         expires_at,
         revoke: None,
         update_field: None,
-        lifetime_assumed: false,
+        expiry_unknown: false,
     };
     drop(answer);
     lease
@@ -216,23 +245,21 @@ pub(super) fn acquire(
 /// The form body of the call: `Action`, `Version`, then the call's own parameters.
 fn request_body(call: Call<'_>, settings: &AwsStsSettings, session: &str) -> Zeroizing<Vec<u8>> {
     let duration = DURATION_SECS.to_string();
+    let policy = session_policy(settings);
     let mut pairs: Vec<(&str, &str)> = vec![("Action", call.action()), ("Version", STS_VERSION)];
     match call {
         Call::AssumeRole { role_arn } => {
             pairs.push(("RoleArn", role_arn));
             pairs.push(("RoleSessionName", session));
             pairs.push(("DurationSeconds", duration.as_str()));
-            if let Some(policy) = settings.policy.as_deref() {
+            if let Some(policy) = policy.as_deref() {
                 pairs.push(("Policy", policy));
             }
         }
         Call::GetFederationToken => {
             pairs.push(("Name", session));
             pairs.push(("DurationSeconds", duration.as_str()));
-            pairs.push((
-                "Policy",
-                settings.policy.as_deref().unwrap_or(ALLOW_ALL_POLICY),
-            ));
+            pairs.push(("Policy", policy.as_deref().unwrap_or(ALLOW_ALL_POLICY)));
         }
     }
     http::form_body(&pairs)
@@ -723,6 +750,74 @@ mod tests {
     }
 
     #[test]
+    fn the_services_of_an_item_without_a_policy_narrow_the_lease() {
+        let services_only = json!({"services": ["s3", "dynamodb"]});
+        let expected = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*","dynamodb:*"],"Resource":"*"}]}"#;
+        let produced = services_policy(&["s3".to_owned(), "dynamodb".to_owned()]);
+        assert_eq!(produced, expected);
+        let parsed: serde_json::Value = serde_json::from_str(&produced).expect("policy JSON");
+        assert_eq!(
+            parsed["Statement"][0]["Action"],
+            json!(["s3:*", "dynamodb:*"])
+        );
+        // The largest services setting is far below the STS limit.
+        let most: Vec<String> = (0..MAX_SERVICES)
+            .map(|index| format!("{index:0>32}"))
+            .collect();
+        assert!(services_policy(&most).len() < MAX_POLICY_BYTES);
+        // GetFederationToken and AssumeRole both send it instead of allow-all or nothing.
+        for (settings, action) in [
+            (services_only.clone(), "GetFederationToken"),
+            (
+                json!({"services": ["s3", "dynamodb"], "role_arn": ROLE_ARN}),
+                "AssumeRole",
+            ),
+        ] {
+            let (endpoints, fake) = fake_sts(Answer::Credentials { lifetime: 900 });
+            acquire_at(
+                &source(settings),
+                &scope(),
+                &endpoints,
+                None,
+                deadline(),
+                NOW,
+            )
+            .expect("lease");
+            let seen = fake.join().expect("fake STS");
+            assert!(seen.signature_ok);
+            assert_eq!(form_value(&seen.form, "Action").as_deref(), Some(action));
+            assert_eq!(form_value(&seen.form, "Policy").as_deref(), Some(expected));
+        }
+        // The item's own policy wins over its services.
+        let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+        let (endpoints, fake) = fake_sts(Answer::Credentials { lifetime: 900 });
+        acquire_at(
+            &source(json!({"services": ["s3"], "policy": policy})),
+            &scope(),
+            &endpoints,
+            None,
+            deadline(),
+            NOW,
+        )
+        .expect("lease");
+        let seen = fake.join().expect("fake STS");
+        assert_eq!(form_value(&seen.form, "Policy").as_deref(), Some(policy));
+        // AssumeRole without services or a policy sends no policy.
+        let (endpoints, fake) = fake_sts(Answer::Credentials { lifetime: 900 });
+        acquire_at(
+            &source(json!({"role_arn": ROLE_ARN})),
+            &scope(),
+            &endpoints,
+            None,
+            deadline(),
+            NOW,
+        )
+        .expect("lease");
+        let seen = fake.join().expect("fake STS");
+        assert_eq!(form_value(&seen.form, "Policy"), None);
+    }
+
+    #[test]
     fn get_federation_token_sends_an_allow_all_policy_when_the_item_has_none() {
         let (endpoints, fake) = fake_sts(Answer::Credentials { lifetime: 900 });
         let lease = acquire_at(
@@ -781,6 +876,7 @@ mod tests {
             Some("AssumeRole")
         );
         assert_eq!(form_value(&seen.form, "Policy").as_deref(), Some(policy));
+        assert_eq!(form_value(&seen.form, "RoleArn").as_deref(), Some(ROLE_ARN));
         // GetSessionToken is never used.
         assert!(
             !seen

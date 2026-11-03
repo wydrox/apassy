@@ -531,7 +531,7 @@ fn an_aws_pair_becomes_one_short_lived_item() {
         let detected = one(text);
         assert_eq!(detected.short_lived, Some(ShortLivedKind::AwsSts), "{text}");
         assert_eq!(detected.provider.as_deref(), Some("aws"));
-        assert_eq!(detected.kind, CredentialKind::ApiKey);
+        assert_eq!(detected.kind, CredentialKind::Custom);
         let names: Vec<(&str, bool)> = detected
             .fields
             .iter()
@@ -558,8 +558,23 @@ fn an_aws_pair_becomes_one_short_lived_item() {
         assert_eq!(binding.delivery, EnvDelivery::Value);
         let source = vault.short_lived_source(summary.id).unwrap();
         assert_eq!(source.field("access_key_id").unwrap().expose(), id);
+        // The owner can edit the item (a `Custom` item needs no `token` field).
         let revision = vault.details(summary.id).unwrap().summary.revision;
-        vault.delete(summary.id, revision).unwrap();
+        let edited = vault
+            .update(
+                summary.id,
+                revision,
+                apassy::vault::ItemDraft {
+                    title: "Synthetic AWS edited".to_owned(),
+                    kind: CredentialKind::Custom,
+                    notes: String::new(),
+                    tags: Vec::new(),
+                    fields: detected.fields.clone(),
+                },
+            )
+            .expect("an edit of the source item");
+        assert!(vault.short_lived_source(summary.id).is_ok());
+        vault.delete(summary.id, edited.revision).unwrap();
     }
     // The first pair took the variable name of the contract.
     let summary = vault.add_detected(&one(&texts[0]), None, None).unwrap();
@@ -601,6 +616,7 @@ fn a_service_account_json_becomes_a_short_lived_item() {
         detected.short_lived,
         Some(ShortLivedKind::GoogleServiceAccount)
     );
+    assert_eq!(detected.kind, CredentialKind::Custom);
     assert_eq!(detected.provider.as_deref(), Some("gcp"));
     assert_eq!(
         detected.env_name.as_deref(),
@@ -629,6 +645,21 @@ fn a_service_account_json_becomes_a_short_lived_item() {
             .expose(),
         key
     );
+    let revision = vault.details(summary.id).unwrap().summary.revision;
+    vault
+        .update(
+            summary.id,
+            revision,
+            apassy::vault::ItemDraft {
+                title: "Synthetic service account".to_owned(),
+                kind: CredentialKind::Custom,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: detected.fields.clone(),
+            },
+        )
+        .expect("an edit of the source item");
+    assert!(vault.short_lived_source(summary.id).is_ok());
 
     let partial = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","client_email":"bot@demo-project.iam.gserviceaccount.com"}"#;
     assert_eq!(one(partial).short_lived, None);

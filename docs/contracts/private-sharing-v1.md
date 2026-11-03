@@ -1,6 +1,6 @@
 # Private sharing contract v1
 
-Date: 2026-11-03. Status: frozen for implementation (wave 1 of the plan); no code implements it yet.
+Date: 2026-11-03 (revised 2026-11-03, section 13). Status: frozen for implementation (wave 1 of the plan).
 Fixtures: [`tests/fixtures/private-sharing-v1/`](../../tests/fixtures/private-sharing-v1/), checked by
 `contracts::private_sharing_v1_*` in `tests/contracts.rs`.
 Decision: [ADR 0037](../adr/0037-own-relay-open-source.md) stage 6, section 10 steps 1 to 3, D11. Plan:
@@ -33,7 +33,11 @@ fixtures in the same change.
    row is `enabled`, in way A and in way B. Ways A and B then apply only to static keys. A run with a
    source ignores the delivery of the item's `env_binding` (S6-3).
 3. **Off only by the owner.** The owner can turn way C off for one item. The change MUST pass the owner
-   check `OwnerAction::ChangeDelivery { item, kind, on }`. Nothing else turns it off.
+   check `OwnerAction::ChangeDelivery { item, kind, on }`. Nothing else turns it off. A change of the
+   kind or the settings of an existing row (section 3.2: what a lease can do and where the long-lived
+   secret goes) MUST pass the owner check `OwnerAction::ChangeShortLivedSettings { item, kind,
+   settings_sha256 }`, where `settings_sha256` is the SHA-256 (lowercase hex) of the canonical
+   settings text; the global owner window never covers it.
 4. **No fallback.** A lease that cannot be made fails the run with `lease_failed` (section 9). The key
    holder MUST NOT deliver the long-lived value, a placeholder of it, or an older lease instead. The
    command does not start; on the relay the run is `denied` with `code` `lease_failed`.
@@ -97,9 +101,9 @@ userinfo, query, or fragment (an `http://` loopback URL is allowed only in tests
 | Kind | Setting | Type and rule | Default |
 | --- | --- | --- | --- |
 | `aws_sts` | `role_arn` | `arn:aws:iam::<12 digits>:role/<path and name>`, at most 2048 bytes. With it the key holder calls `AssumeRole` (recommended). | none: `GetFederationToken` |
-| `aws_sts` | `policy` | JSON text of an IAM session policy object, at most 2048 bytes. | none: `AssumeRole` sends no policy; `GetFederationToken` sends an allow-all policy (S6-4) |
+| `aws_sts` | `policy` | JSON text of an IAM session policy object, at most 2048 bytes. | none: with `services`, both calls send a policy that allows `<service>:*` for each listed service; without them, `AssumeRole` sends no policy and `GetFederationToken` sends an allow-all policy (S6-4) |
 | `aws_sts` | `region` | `[a-z]{2}(-[a-z]+)+-[0-9]+`, for example `eu-central-1`. The STS endpoint is `sts.<region>.amazonaws.com`. | `us-east-1` |
-| `aws_sts` | `services` | 1 to 16 distinct AWS service names, each `[a-z0-9-]{1,32}`, for example `s3`. Used by signed requests (section 7) and `AWS_ENDPOINT_URL_<SERVICE>` (section 5.3). | none: no restriction |
+| `aws_sts` | `services` | 1 to 16 distinct AWS service names, each `[a-z0-9-]{1,32}`, for example `s3`. Used by signed requests (section 7), `AWS_ENDPOINT_URL_<SERVICE>` (section 5.3), and, without a `policy`, the session policy of a lease (`{"Effect":"Allow","Action":["<service>:*", …],"Resource":"*"}`; the names are IAM service prefixes). | none: no restriction |
 | `github_app` | `repositories` | 1 to 500 distinct repository names (`[A-Za-z0-9._-]{1,100}`, without the owner). | none: every repository of the installation |
 | `github_app` | `permissions` | Object of a permission name (`[a-z_]{1,64}`) to `read`, `write`, or `admin`, 1 to 64 entries. | none: the installation's permissions |
 | `github_app` | `api_url` | URL. | `https://api.github.com` |
@@ -107,7 +111,7 @@ userinfo, query, or fragment (an `http://` loopback URL is allowed only in tests
 | `google_service_account` | `impersonate` | A service-account email `<name>@<project>.iam.gserviceaccount.com`. | the key's own `client_email` |
 | `oauth_refresh` | `token_url` | URL. **Required.** | — |
 | `oauth_refresh` | `client_auth` | `basic` (HTTP Basic, RFC 6749 §2.3.1) or `body` (`client_id` and `client_secret` in the form). **Required.** | — |
-| `oauth_refresh` | `revoke_url` | URL of an RFC 7009 endpoint. | none: no revocation |
+| `oauth_refresh` | `revoke_url` | URL of an RFC 7009 endpoint, on the host (and port) of `token_url`. | none: no revocation |
 | `oauth_refresh` | `scope` | Space-separated scopes, 1 to 1024 bytes. | none: the grant's scope |
 
 A single-field AWS item (only the key id) is not a source. Its sheet offers "Add the secret key to make
@@ -117,13 +121,28 @@ temporary credentials" (S6-14).
 
 | Kind | Call | Lifetime |
 | --- | --- | --- |
-| `aws_sts` | `AssumeRole` with `role_arn`, else `GetFederationToken`; `DurationSeconds=900`; `RoleSessionName` or `Name` = `apassy-<run id>`; SigV4 with the long-lived key, service `sts`. `GetSessionToken` MUST NOT be used. | `Expiration` at most 900 s after the request, else `lease_failed`. |
-| `github_app` | RS256 JWT (`iat` 60 s back, `exp` at most 9 minutes ahead, `iss` = `app_id`) → `POST {api_url}/app/installations/{installation_id}/access_tokens` with `repositories` and `permissions`. | GitHub's `expires_at` (one hour). Revoked at run end (section 4.2). |
-| `google_service_account` | RS256 JWT of the key → `token_uri` (bootstrap token, kept on the key holder and dropped after the next call) → `iamcredentials.googleapis.com` `generateAccessToken` for `impersonate` with `scopes` and `lifetime: "900s"`. | `expireTime` at most 900 s ahead, else `lease_failed`. |
-| `oauth_refresh` | `POST token_url` with `grant_type=refresh_token`, the client auth of `client_auth`, and `scope`. | `expires_in`; missing → 900 s assumed, and the activity row says so. |
+| `aws_sts` | `AssumeRole` with `role_arn`, else `GetFederationToken`; `DurationSeconds=900`; `RoleSessionName` or `Name` = `apassy-<run id>`; SigV4 with the long-lived key, service `sts`. `GetSessionToken` MUST NOT be used. | `Expiration` at most 900 s + 300 s (clock skew) after the request, else `lease_failed`. |
+| `github_app` | RS256 JWT (`iat` 60 s back, `exp` at most 9 minutes ahead, `iss` = `app_id`) → `POST {api_url}/app/installations/{installation_id}/access_tokens` with `repositories` and `permissions`. | GitHub's `expires_at` (one hour), at most 3600 s + 300 s (clock skew) after the request, else `lease_failed`. Revoked at run end (section 4.2). |
+| `google_service_account` | RS256 JWT of the key → `token_uri`, which MUST be `https://oauth2.googleapis.com/token` (another `token_uri` is `lease_failed` before any call: the key JSON comes from a paste) (bootstrap token, kept on the key holder and dropped after the next call) → `iamcredentials.googleapis.com` `generateAccessToken` for `impersonate` with `scopes` and `lifetime: "900s"`. | `expireTime` at most 900 s + 300 s (clock skew) ahead, else `lease_failed`. |
+| `oauth_refresh` | `POST token_url` with `grant_type=refresh_token`, the client auth of `client_auth`, and `scope`. | `expires_in`, the real expiry. Without `revoke_url`: a missing `expires_in` or one over 3600 s is `lease_failed`. With `revoke_url` (revoked at run end): a longer `expires_in` is reported as it is; a missing one gives `expires_at = made_at + 3600`, and the activity row says that the expiry is unknown and the token is revoked at run end. |
 
 The whole exchange of one lease has a deadline of 20 seconds. Every secret is held in `Zeroizing`
 buffers and dropped before the process spawns.
+
+The expiry window (revision 2026-11-03). A provider refuses a request whose time is far from its clock
+(STS: 5 minutes), so the key holder accepts a provider expiry up to 300 s past `made_at` plus the
+kind's lifetime, and refuses a later one: a provider that ignores the asked lifetime (the STS defaults
+are 1 and 12 hours) is refused, while a clock that is a little off is not. The lease never claims more
+than the kind allows: `expires_at = min(provider expiry, made_at + max)`, with max 900 s for `aws_sts`
+and `google_service_account` and 3600 s for `github_app`. The real credential can therefore outlive
+`expires_at` by up to the window, and it lives as follows:
+
+| Kind | How long the real credential can live |
+| --- | --- |
+| `aws_sts` | Until its `Expiration`: 900 s, the STS minimum of `DurationSeconds`, and at most 1200 s after `made_at` by the window. STS credentials cannot be revoked one by one; they end when they expire. |
+| `github_app` | Until GitHub's `expires_at`: one hour (at most 3900 s after `made_at` by the window). The key holder revokes it at run end with `DELETE {api_url}/installation/token` (section 4.2), so it normally ends with the run. |
+| `google_service_account` | Until its `expireTime`: the asked 900 s, at most 1200 s after `made_at` by the window; Google's own limit for an access token is one hour. It is not revoked at run end. The bootstrap token (one hour) never leaves the key holder. |
+| `oauth_refresh` | Until the provider's `expires_in`; without a `revoke_url` at most one hour, with one revoked at run end (see the table above). |
 
 ## 4. The lease
 
@@ -150,7 +169,7 @@ written to a file, a database, a log, or an audit row.
 | `secrets` | 1 to 4 variables. The first is the item's bound variable (`env_binding.env_name`). Each value is printable ASCII without `"` and `\`, 1 to 4096 bytes (`check_value`). Masked in the run output; replaced in relay answers. |
 | `plain` | 0 to 4 variables that are not secrets. Not masked. |
 | `made_at` | Unix seconds when the key holder sent the provider request. |
-| `expires_at` | Unix seconds. `made_at < expires_at`. At most `made_at + 900` for `aws_sts` and `google_service_account`; at most `made_at + 3600` for `github_app`. |
+| `expires_at` | Unix seconds. `made_at < expires_at`. At most `made_at + 900` for `aws_sts` and `google_service_account`; at most `made_at + 3600` for `github_app`, and for `oauth_refresh` without `revoke`. |
 | `revoke` | `null`, or `{"type": "github", "url": "<api_url>/installation/token"}`, or `{"type": "oauth", "url": "<revoke_url>"}`. The token to revoke is always the first secret; it is not repeated here. |
 | `update_field` | `null`, or `{"field": "refresh_token", "value": "…"}` when an OAuth answer rotated the refresh token (only `oauth_refresh`). |
 
@@ -176,9 +195,23 @@ local run, before the owner is asked, and `release_invalid` on the relay.
   each lease with a `revoke`: GitHub `DELETE /installation/token` with the token as bearer; OAuth an RFC
   7009 `POST revoke_url` with `token` and `token_type_hint=access_token`. Best effort: a failure writes
   `lease_revoke_failed` (section 10) and nothing else.
-- An `update_field` MUST be written to the item (`Vault::update`) before the lease is delivered. A failed
-  write still delivers the lease (the old token is already dead) and writes an activity row with the
-  error and "authorize again".
+- An `update_field` MUST be written to the item before the lease is delivered. A failed write still
+  delivers the lease (the old token is already dead) and writes an activity row with the error and
+  "authorize again". A token answer that rotates the refresh token but is otherwise unusable (no
+  access token, not a bearer token, a bad `expires_in`) is `lease_failed`, and its new refresh token
+  MUST be written before the run fails: the error carries it (`LeaseError.update_field`).
+- Single flight. The key holder refreshes one item at a time: one lock per item covers the read of the
+  source, the token request, and the write of a rotated refresh token, so a second run of the item
+  sends the token that the first run stored. The write is a compare-and-swap
+  (`Vault::swap_secret_field`): it stores the new token only while the field still holds the token
+  that was sent, and raises the item revision. When the field changed meanwhile (a synced copy, or the
+  owner), the newer stored token stays and the token of the answer is dropped. When the token endpoint
+  refuses the refresh token (400 or 401), the key holder reads the source once more and, when the
+  stored token differs from the one sent, tries it once.
+- Only the device that runs the lease refreshes; a synced copy never calls the token endpoint. Synced
+  copies converge by the compare-and-swap and the item revision. Limit: a provider with refresh-token
+  reuse detection can still revoke the grant when two Macs refresh the same item within the same
+  second, before either copy has synced; the owner then authorizes the item again.
 
 ## 5. Delivery on the agent's side
 
@@ -394,4 +427,5 @@ secret scans the agent's side, the audit rows, and the activity log for it and f
 | Date | Change |
 | --- | --- |
 | 2026-11-03 | The access item field `delivery` (section 5.4) is renamed `credential_form`, with the relay column, `kinds.json`, and `access-view.json`, because stage 4 uses `delivery` for the way A switch (`collection.delivery`, `run.delivery`). The values are unchanged; a missing field still reads as `placeholder`. |
+| 2026-11-03 | Security review of units C1, C2, and D. Section 3.3: the expiry window of 300 s for clock skew is stated, with how long each kind's real credential can live; an OAuth answer without `expires_in`, or with one over 3600 s, is `lease_failed` unless the source has a `revoke_url` (then the token is revoked at run end and the real expiry is reported; a missing one shows one hour); a Google `token_uri` other than `https://oauth2.googleapis.com/token` is `lease_failed`. Section 3.2: `revoke_url` is on the host of `token_url`; without a `policy`, `services` narrows the session policy of an AWS lease. Rule 3: a change of the settings needs `OwnerAction::ChangeShortLivedSettings`. Section 4.2: a rotated refresh token of a failed answer is stored before the run fails; single flight per item, compare-and-swap, and the limit of reuse detection across two Macs. Section 4: `expires_at` of an OAuth lease without `revoke` is at most `made_at + 3600`. Detection makes `Custom` items (plan unit D). |
 | 2026-11-03 | The vault table `member_key` (section 8) stores `source_uuid`, the sync UUID of the team item, instead of `source_item_id`: a row ID is not the same on two synced copies. The vault API and the audit rows keep `source_item_id`. A `short_lived` row that is off keeps its kind and settings (a signer reads `region` and `services` from it). |

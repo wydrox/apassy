@@ -9,13 +9,19 @@
 //! `body` sends `client_id` and `client_secret` in the form. A public client (no
 //! `client_secret`) sends its `client_id` in the form with either setting.
 //!
-//! The lease lives as long as the answer's `expires_in` says; without one, 900 seconds
-//! are assumed and the lease says so ([`Lease::lifetime_assumed`]). A `refresh_token`
-//! in the answer that differs from the stored one is a rotation: it is returned in
-//! [`Lease::update_field`], and the caller MUST store it with `Vault::update` before it
-//! delivers the lease; a failed write still delivers the lease (the old token is dead)
-//! and writes a loud activity row with "authorize again" (contract section 4.2). With a
-//! `revoke_url`, the access token is revoked at run end (RFC 7009).
+//! The lease lives as long as the answer's `expires_in` says (its real expiry). Without
+//! a `revoke_url`, an `expires_in` over one hour, or none, is `lease_failed`: the token
+//! would outlive the run for longer than a lease may, or for an unknown time. With a
+//! `revoke_url`, the access token is revoked at run end (RFC 7009), so a longer
+//! `expires_in` is reported as it is, and a missing one gives a lease of one hour with
+//! [`Lease::expiry_unknown`] (contract section 3.3).
+//!
+//! A `refresh_token` in the answer that differs from the stored one is a rotation: it is
+//! returned in [`Lease::update_field`], or in [`LeaseError::update_field`] when the rest
+//! of the answer is unusable, and the caller ([`super::holder::KeyHolder`]) MUST store it
+//! before it delivers the lease or fails the run; a failed write still delivers the
+//! lease (the old token is dead) and writes a loud activity row with "authorize again"
+//! (contract section 4.2).
 
 use std::fmt;
 use std::time::Instant;
@@ -35,11 +41,21 @@ use crate::vault::{OauthClientAuth, OauthSettings, SecretValue};
 pub const REFRESH_TOKEN_FIELD: &str = "refresh_token";
 /// The longest refresh token that the item stores (contract section 3.1).
 pub const MAX_REFRESH_TOKEN_BYTES: usize = 4096;
+/// The longest life of an access token that is not revoked at run end (contract section
+/// 3.3): one hour. Without a `revoke_url`, an answer with a longer `expires_in`, or with
+/// none, is `lease_failed`. With one, a lease without `expires_in` shows this lifetime
+/// and [`Lease::expiry_unknown`].
+pub const MAX_UNREVOKED_SECS: u64 = 3600;
 
 const KIND: LeaseKind = LeaseKind::OauthRefresh;
 const REFUSED_HINT: &str =
     "The token endpoint refused the refresh token or the client: authorize the item again.";
-const ROTATED_BUT_FAILED: &str = "the token endpoint gave a new refresh token but no usable access token, so the stored one may no longer work: authorize the item again.";
+/// The end of the reason of a failed answer that rotated the refresh token, before the
+/// caller stored it. [`super::holder::KeyHolder`] replaces it with [`ROTATED_STORED`]
+/// when the new token is stored.
+pub const ROTATED_NOT_STORED: &str = "It also gave a new refresh token, so the stored one may no longer work: authorize the item again.";
+/// [`ROTATED_NOT_STORED`] after the new refresh token was stored.
+pub const ROTATED_STORED: &str = "It also gave a new refresh token, which Apassy stored.";
 
 /// The client of a source: its id and, for a confidential client, its secret. `Debug`
 /// redacts the secret.
@@ -179,8 +195,8 @@ pub(super) fn acquire(
     }
     let text = std::str::from_utf8(&answer).map_err(|_| LeaseError::invalid_answer(KIND))?;
     let object = Object::parse(text).ok_or_else(|| LeaseError::invalid_answer(KIND))?;
-    // The rotation is read first, so that a failure after it says that the stored
-    // refresh token may be dead.
+    // The rotation is read first: a failure after it carries the new refresh token, which
+    // the caller stores before it fails the run (the old one may be dead already).
     let rotated = match object.text(REFRESH_TOKEN_FIELD) {
         Some(token) if token.as_str() == prepared.refresh_token.expose() => None,
         Some(token) => Some(token),
@@ -192,19 +208,26 @@ pub(super) fn acquire(
         }
         None => None,
     };
-    let failed = |why: &str| {
-        if rotated.is_some() {
-            LeaseError::invalid_answer_because(KIND, ROTATED_BUT_FAILED)
-        } else {
-            LeaseError::invalid_answer_because(KIND, why)
-        }
-    };
     if rotated
         .as_ref()
         .is_some_and(|token| !(1..=MAX_REFRESH_TOKEN_BYTES).contains(&token.len()))
     {
-        return Err(failed("the new refresh token is not 1 to 4096 bytes."));
+        return Err(LeaseError::invalid_answer_because(
+            KIND,
+            &format!("the new refresh token is not 1 to 4096 bytes. {ROTATED_NOT_STORED}"),
+        ));
     }
+    let rotation = rotated.map(|token| UpdateField {
+        field: REFRESH_TOKEN_FIELD.to_owned(),
+        value: SecretValue::new(token.as_str().to_owned()),
+    });
+    let failed = |why: &str| match &rotation {
+        Some(update) => {
+            LeaseError::invalid_answer_because(KIND, &format!("{why} {ROTATED_NOT_STORED}"))
+                .with_update_field(Some(update.clone()))
+        }
+        None => LeaseError::invalid_answer_because(KIND, why),
+    };
     let token = object
         .text("access_token")
         .filter(|token| super::is_token(token))
@@ -218,13 +241,25 @@ pub(super) fn acquire(
     {
         return Err(failed("the access token is not a bearer token."));
     }
-    let (lifetime, assumed) = if object.has("expires_in") {
+    // A token that lives longer than an hour, or for an unknown time, is used only when
+    // it is revoked at run end (contract section 3.3).
+    let revoked = settings.revoke_url.is_some();
+    let (lifetime, unknown) = if object.has("expires_in") {
         let seconds = object
             .uint("expires_in")
             .ok_or_else(|| failed("its expires_in is not a whole number of seconds."))?;
+        if seconds > MAX_UNREVOKED_SECS && !revoked {
+            return Err(failed(
+                "the access token lives longer than one hour, and the item has no revoke_url to end it when the run ends.",
+            ));
+        }
         (seconds, false)
+    } else if revoked {
+        (MAX_UNREVOKED_SECS, true)
     } else {
-        (KIND.lease_secs(), true)
+        return Err(failed(
+            "the answer does not say when the access token expires (no expires_in), and the item has no revoke_url to end it when the run ends.",
+        ));
     };
     if lifetime < super::MIN_LEASE_SECS {
         return Err(failed("the credentials expire in less than a minute."));
@@ -245,20 +280,21 @@ pub(super) fn acquire(
             .revoke_url
             .clone()
             .map(|url| super::Revoke::Oauth { url }),
-        update_field: rotated.map(|token| UpdateField {
-            field: REFRESH_TOKEN_FIELD.to_owned(),
-            value: SecretValue::new(token.as_str().to_owned()),
-        }),
-        lifetime_assumed: assumed,
+        update_field: rotation,
+        expiry_unknown: unknown,
     };
     drop(token);
     drop(object);
     drop(answer);
     if lease.check().is_err() {
-        return Err(if lease.update_field.is_some() {
-            LeaseError::invalid_answer_because(KIND, ROTATED_BUT_FAILED)
-        } else {
-            LeaseError::invalid_answer(KIND)
+        let mut lease = lease;
+        return Err(match lease.update_field.take() {
+            Some(update) => LeaseError::invalid_answer_because(
+                KIND,
+                &format!("the lease breaks the contract. {ROTATED_NOT_STORED}"),
+            )
+            .with_update_field(Some(update)),
+            None => LeaseError::invalid_answer(KIND),
         });
     }
     Ok(lease)
@@ -325,8 +361,7 @@ mod tests {
     use super::*;
     use crate::lease::testing::{Reply, Seen, deadline, endpoints, fake, untouched};
     use crate::lease::{
-        ASSUMED_LIFETIME_NOTE, LeaseCode, Revoke, RunScope, acquire_at, check_source, revoke_at,
-        scan,
+        LeaseCode, Revoke, RunScope, UNKNOWN_EXPIRY_NOTE, acquire_at, check_source, revoke_at, scan,
     };
     use crate::vault::{Field, ShortLivedSettings};
 
@@ -441,7 +476,7 @@ mod tests {
             ACCESS
         );
         assert_eq!(lease.expires_at, NOW + 3600);
-        assert!(!lease.lifetime_assumed);
+        assert!(!lease.expiry_unknown);
         assert_eq!(
             lease.revoke,
             Some(Revoke::Oauth {
@@ -463,7 +498,8 @@ mod tests {
     #[test]
     fn body_auth_a_public_client_and_an_unrotated_token() {
         // `body`: the client id and secret in the form; the same refresh token back is
-        // no rotation; no `expires_in`: 900 seconds assumed.
+        // no rotation; no `expires_in` with a `revoke_url`: one hour shown, the expiry
+        // unknown, and the token revoked at run end.
         let (result, seen) = acquire_with(
             &source(&settings("body"), Some(CLIENT_SECRET)),
             Reply::json(
@@ -482,9 +518,10 @@ mod tests {
             lease.update_field.is_none(),
             "the same token is no rotation"
         );
-        assert!(lease.lifetime_assumed);
-        assert_eq!(lease.lifetime_secs(), 900);
-        assert!(ASSUMED_LIFETIME_NOTE.contains("15 minutes"));
+        assert!(lease.expiry_unknown);
+        assert_eq!(lease.lifetime_secs(), 3600);
+        assert!(lease.revoke.is_some());
+        assert!(UNKNOWN_EXPIRY_NOTE.contains("revokes it when the run ends"));
         // A public client: its id in the form, with either setting, and no secret.
         for client_auth in ["basic", "body"] {
             let (result, seen) = acquire_with(
@@ -589,8 +626,57 @@ mod tests {
             assert_eq!(error.code, LeaseCode::LeaseFailed, "{words}");
             assert_eq!(error.status, LeaseStatus::InvalidAnswer, "{words}");
             assert!(error.message.contains(words), "{words}: {}", error.message);
+            // A rotated refresh token goes with the error, for the caller to store
+            // before it fails the run; never in the message or the Debug form.
+            let rotated = answer.get("refresh_token").is_some_and(Value::is_string);
+            assert_eq!(
+                error
+                    .update_field
+                    .as_ref()
+                    .map(|update| (update.field.as_str(), update.value.expose())),
+                rotated.then_some(("refresh_token", ROTATED)),
+                "{words}"
+            );
             scan::assert_no_secrets(format!("{error} {error:?}"), &LONG_LIVED);
         }
+    }
+
+    #[test]
+    fn a_long_or_unknown_lifetime_needs_a_revocation_at_run_end() {
+        let without = json!({"token_url": TOKEN_URL, "client_auth": "body"});
+        let cases = [
+            (json!({"access_token": ACCESS}), "no expires_in"),
+            (
+                json!({"access_token": ACCESS, "expires_in": 3601}),
+                "longer than one hour",
+            ),
+        ];
+        for (answer, words) in &cases {
+            let (result, _) = acquire_with(
+                &source(&without, Some(CLIENT_SECRET)),
+                Reply::json(200, answer),
+            );
+            let error = result.unwrap_err();
+            assert_eq!(error.code, LeaseCode::LeaseFailed, "{words}");
+            assert_eq!(error.status, LeaseStatus::InvalidAnswer, "{words}");
+            assert!(error.message.contains(words), "{words}: {}", error.message);
+            assert!(error.message.contains("revoke_url"), "{}", error.message);
+        }
+        // One hour without a revocation is fine.
+        let (result, _) = acquire_with(
+            &source(&without, Some(CLIENT_SECRET)),
+            Reply::json(200, &json!({"access_token": ACCESS, "expires_in": 3600})),
+        );
+        assert_eq!(result.expect("lease").expires_at, NOW + 3600);
+        // With a revocation, the real expiry of a longer token is reported as it is.
+        let (result, _) = acquire_with(
+            &source(&settings("body"), Some(CLIENT_SECRET)),
+            Reply::json(200, &json!({"access_token": ACCESS, "expires_in": 86_400})),
+        );
+        let lease = result.expect("lease");
+        assert_eq!(lease.expires_at, NOW + 86_400);
+        assert!(!lease.expiry_unknown);
+        assert!(lease.revoke.is_some());
     }
 
     #[test]

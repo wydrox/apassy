@@ -4,7 +4,10 @@
 //!
 //! The key holder (the owner's app, its node, or the team host) calls the provider with
 //! the long-lived secret of a source item and hands out only the [`Lease`]: a credential
-//! for one run that lives at most 15 minutes for AWS and Google and one hour for GitHub.
+//! for one run that claims at most 15 minutes for AWS and Google and one hour for GitHub
+//! (the real credential can live up to 300 s longer, contract section 3.3).
+//! [`holder::KeyHolder`] reads a vault source, makes its lease, and stores a rotated
+//! refresh token, one flight per item.
 //! The long-lived secret never leaves this process (contract section 2, rule 1).
 //!
 //! - [`acquire`] makes a lease from a [`LeaseSource`] after the owner's decision
@@ -38,6 +41,7 @@
 pub mod aws;
 pub mod github;
 pub mod google;
+pub mod holder;
 pub(crate) mod json;
 pub mod jwt;
 pub mod oauth;
@@ -83,7 +87,8 @@ pub const MIN_LEASE_SECS: u64 = 60;
 pub const NOT_RUN: &str = "No temporary credentials were made, so the command did not run.";
 
 /// How far a provider's expiry may be past `made_at + max_secs` before the answer is
-/// refused (AWS and Google: 900 s, GitHub: 3600 s). A provider refuses a request whose
+/// refused (AWS and Google: 900 s, GitHub: 3600 s; contract section 3.3, "The expiry
+/// window", which also says how long each real credential can live). A provider refuses a request whose
 /// time is far from its clock (STS: 5 minutes), so a provider that honours the lifetime
 /// stays inside this window, while one that ignores it (longer defaults) is refused. The
 /// lease never claims more than its kind allows: `expires_at = min(expiry, made_at +
@@ -179,9 +184,11 @@ pub enum Revoke {
     Oauth { url: String },
 }
 
-/// A rotated OAuth refresh token that the caller MUST store with `Vault::update` before
-/// it delivers the lease (contract section 4.2).
-#[derive(Debug)]
+/// A rotated OAuth refresh token that the caller MUST store before it delivers the lease
+/// or fails the run (contract section 4.2): [`holder::KeyHolder`] stores it with a
+/// compare-and-swap (`Vault::swap_secret_field`). `Debug` redacts the value; drop erases
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateField {
     pub field: String,
     pub value: SecretValue,
@@ -204,15 +211,15 @@ pub struct Lease {
     pub expires_at: u64,
     pub revoke: Option<Revoke>,
     pub update_field: Option<UpdateField>,
-    /// The provider did not say when the credential expires, so `expires_at` is
-    /// `made_at + 900`, assumed (contract section 3.3: an OAuth answer without
-    /// `expires_in`). The caller's activity row says so ([`ASSUMED_LIFETIME_NOTE`]).
-    pub lifetime_assumed: bool,
+    /// The provider did not say when the credential expires (an OAuth answer without
+    /// `expires_in`, contract section 3.3). Only a lease that is revoked at run end may
+    /// have it; its `expires_at` is `made_at + 3600` ([`oauth::MAX_UNREVOKED_SECS`]), not
+    /// the provider's expiry. The caller's activity row says so ([`UNKNOWN_EXPIRY_NOTE`]).
+    pub expiry_unknown: bool,
 }
 
-/// The words of the activity row of a lease whose lifetime is assumed.
-pub const ASSUMED_LIFETIME_NOTE: &str =
-    "The token endpoint did not say when the access token expires; Apassy assumes 15 minutes.";
+/// The words of the activity row of a lease whose expiry is unknown.
+pub const UNKNOWN_EXPIRY_NOTE: &str = "The token endpoint did not say when the access token expires. Apassy revokes it when the run ends.";
 
 impl Lease {
     /// The variable names: the secrets, then the plain variables, in lease order (the
@@ -280,11 +287,18 @@ impl Lease {
         {
             return Err("The lease lives longer than its kind allows.");
         }
-        if self.lifetime_assumed
+        if self.expiry_unknown
             && (self.kind != LeaseKind::OauthRefresh
-                || self.lifetime_secs() != self.kind.lease_secs())
+                || self.revoke.is_none()
+                || self.lifetime_secs() != oauth::MAX_UNREVOKED_SECS)
         {
-            return Err("Only an OAuth lease has an assumed lifetime, of 900 seconds.");
+            return Err("Only a revoked OAuth lease has an unknown expiry, shown as one hour.");
+        }
+        if self.kind == LeaseKind::OauthRefresh
+            && self.revoke.is_none()
+            && self.lifetime_secs() > oauth::MAX_UNREVOKED_SECS
+        {
+            return Err("An OAuth lease that is not revoked lives at most one hour.");
         }
         let revoke_ok = match (&self.revoke, self.kind) {
             (None, _) => true,
@@ -382,15 +396,27 @@ impl LeaseStatus {
 
 /// A lease that could not be made or revoked. The message names the provider and its
 /// status, never a provider body or a value (contract section 9).
+///
+/// `update_field` is the one secret that an error may carry: a refresh token that the
+/// token endpoint rotated in an answer that was otherwise unusable. The old token may be
+/// dead already, so the caller MUST store it (as for a lease) before it fails the run.
+/// `Debug` redacts it, and the message never holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseError {
     pub code: LeaseCode,
     pub kind: LeaseKind,
     pub status: LeaseStatus,
     pub message: String,
+    pub update_field: Option<UpdateField>,
 }
 
 impl LeaseError {
+    /// This error with the rotated refresh token `update` to store.
+    pub fn with_update_field(mut self, update: Option<UpdateField>) -> Self {
+        self.update_field = update;
+        self
+    }
+
     /// `lease_failed` with the provider's HTTP status: "AWS STS answered 403. No
     /// temporary credentials were made, so the command did not run."
     pub fn http_status(kind: LeaseKind, status: u16) -> Self {
@@ -399,6 +425,7 @@ impl LeaseError {
             kind,
             status: LeaseStatus::Http(status),
             message: format!("{} answered {status}. {NOT_RUN}", kind.provider_label()),
+            update_field: None,
         }
     }
 
@@ -440,6 +467,7 @@ impl LeaseError {
             kind,
             status,
             message,
+            update_field: None,
         }
     }
 
@@ -461,6 +489,7 @@ impl LeaseError {
             kind,
             status: LeaseStatus::InvalidAnswer,
             message,
+            update_field: None,
         }
     }
 
@@ -475,6 +504,7 @@ impl LeaseError {
                 "The {} item cannot make temporary credentials: {why} {NOT_RUN}",
                 kind.as_str()
             ),
+            update_field: None,
         }
     }
 
@@ -494,6 +524,7 @@ impl LeaseError {
                 kind.provider_label(),
                 status.detail()
             ),
+            update_field: None,
         }
     }
 }
@@ -579,8 +610,11 @@ impl ProviderEndpoints {
         Ok((destination, path.trim_end_matches('/').to_owned()))
     }
 
-    /// The destination and the path of a service-account key's `token_uri`: the default
-    /// `https://oauth2.googleapis.com/token` is [`ProviderEndpoints::google_token`].
+    /// The destination and the path of a service-account key's `token_uri`: only the
+    /// Google token endpoint `https://oauth2.googleapis.com/token`
+    /// ([`ProviderEndpoints::google_token`]). The key JSON comes from a paste, so another
+    /// URL would send a signed assertion of the key to any host (and make the key holder
+    /// call it); it is refused.
     pub fn google_token_for(
         &self,
         token_uri: &str,
@@ -588,7 +622,7 @@ impl ProviderEndpoints {
         if token_uri == google::DEFAULT_TOKEN_URI {
             return Ok((self.google_token.clone(), google::TOKEN_PATH.to_owned()));
         }
-        https_target(token_uri)
+        Err(google::OTHER_TOKEN_URI)
     }
 
     /// The destination and the path of an OAuth `token_url` or `revoke_url`.
@@ -662,7 +696,11 @@ pub(crate) fn acquire_at(
         || lease.secrets.first().map(|secret| secret.name.as_str())
             != Some(source.env_name.as_str())
     {
-        return Err(LeaseError::invalid_answer(source.kind()));
+        // A rotated refresh token goes with the error: the caller still stores it.
+        let mut lease = lease;
+        return Err(
+            LeaseError::invalid_answer(source.kind()).with_update_field(lease.update_field.take())
+        );
     }
     Ok(lease)
 }
@@ -1003,7 +1041,7 @@ mod tests {
                     field: field.to_owned(),
                     value: SecretValue::new(text(&value["update_field"]["value"])),
                 }),
-            lifetime_assumed: false,
+            expiry_unknown: false,
         }
     }
 
@@ -1432,14 +1470,34 @@ mod tests {
     }
 
     #[test]
-    fn an_assumed_lifetime_is_only_an_oauth_lease_of_900_seconds() {
+    fn an_unknown_expiry_is_only_a_revoked_oauth_lease_of_one_hour() {
         let mut oauth = lease_from(&json(LEASE_OAUTH));
-        oauth.lifetime_assumed = true;
-        assert!(oauth.check().is_err(), "3600 s is not the assumed 900 s");
-        oauth.expires_at = oauth.made_at + LeaseKind::OauthRefresh.lease_secs();
-        oauth.check().expect("assumed 900 s");
+        oauth.expiry_unknown = true;
+        oauth.check().expect("revoked, shown as one hour");
+        oauth.expires_at = oauth.made_at + 900;
+        assert!(
+            oauth.check().is_err(),
+            "an unknown expiry is shown as one hour"
+        );
+        oauth.expires_at = oauth.made_at + 3600;
+        let revoke = oauth.revoke.take();
+        assert!(
+            oauth.check().is_err(),
+            "an unknown expiry needs the revocation"
+        );
+        // Without a revocation, an OAuth lease lives at most one hour; with one, the
+        // provider's longer expiry is reported as it is.
+        oauth.expiry_unknown = false;
+        oauth.check().expect("one hour");
+        oauth.expires_at = oauth.made_at + 3601;
+        assert!(
+            oauth.check().is_err(),
+            "longer than one hour without revocation"
+        );
+        oauth.revoke = revoke;
+        oauth.check().expect("revoked at run end");
         let mut google = lease_from(&json(LEASE_GOOGLE));
-        google.lifetime_assumed = true;
+        google.expiry_unknown = true;
         assert!(google.check().is_err());
         // The two lifetimes of a kind: the catalog's (5.1) and the limit (4).
         assert_eq!(LeaseKind::OauthRefresh.lease_secs(), 900);

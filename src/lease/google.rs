@@ -36,6 +36,9 @@ use crate::vault::{GoogleSettings, SecretValue, is_https_url, is_private_key_pem
 pub const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 /// The path of [`DEFAULT_TOKEN_URI`].
 pub const TOKEN_PATH: &str = "/token";
+/// The refusal of a key whose `token_uri` is not [`DEFAULT_TOKEN_URI`].
+pub const OTHER_TOKEN_URI: &str =
+    "the token_uri of the key is not https://oauth2.googleapis.com/token.";
 /// The grant type of the bootstrap exchange (RFC 7523 section 2.1).
 pub const JWT_BEARER: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 /// The scope of the bootstrap token: enough for `generateAccessToken`.
@@ -165,6 +168,10 @@ pub(super) fn prepare(
             "the field key_json is not a service-account key: {why}"
         ))
     })?;
+    // Only Google's token endpoint, before any call (`check_source` runs this too).
+    if key.token_uri != DEFAULT_TOKEN_URI {
+        return Err(invalid(OTHER_TOKEN_URI));
+    }
     let rsa = RsaKey::from_pem(&key.private_key).map_err(invalid)?;
     let account = settings
         .impersonate
@@ -250,7 +257,7 @@ pub(super) fn acquire(
         expires_at,
         revoke: None,
         update_field: None,
-        lifetime_assumed: false,
+        expiry_unknown: false,
     };
     drop(token);
     drop(object);
@@ -628,6 +635,22 @@ mod tests {
                     ..source(&json!({}), &key_json(&pem))
                 },
                 "scopes",
+            ),
+            // Only Google's token endpoint: a key JSON from a paste cannot send the
+            // signed assertion to another host.
+            (
+                source(
+                    &json!({}),
+                    &key_json(&pem).replace(DEFAULT_TOKEN_URI, "https://169.254.169.254/token"),
+                ),
+                OTHER_TOKEN_URI,
+            ),
+            (
+                source(
+                    &json!({}),
+                    &key_json(&pem).replace(DEFAULT_TOKEN_URI, "https://oauth2.googleapis.com/x"),
+                ),
+                OTHER_TOKEN_URI,
             ),
         ];
         for (source, words) in &cases {

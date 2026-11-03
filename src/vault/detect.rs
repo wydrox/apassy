@@ -304,13 +304,15 @@ fn two_aws_values(text: &str) -> Option<(&str, &str)> {
 
 /// One item of an AWS pair, a source of `aws_sts`: the detection of the key id (title,
 /// provider, hosts, declaration), with both fields and the variable of the contract.
-/// The variable delivers the secret field when way C is off.
+/// The variable delivers the secret field when way C is off. The item is `Custom`: an
+/// `ApiKey` item needs a `token` field, and the main secret of a `Custom` item is its
+/// first secret field, `secret_access_key`, the field of the variable.
 fn aws_pair(catalog: &Catalog, id: &str, secret: &str, line: Option<usize>) -> Option<Detected> {
     if !is_aws_access_key_id(id) || !is_aws_secret_access_key(secret) {
         return None;
     }
     let mut detected = plain_value(catalog, id, Some("AWS_ACCESS_KEY_ID"), line);
-    detected.kind = CredentialKind::ApiKey;
+    detected.kind = CredentialKind::Custom;
     detected.env_name = ShortLivedKind::AwsSts
         .detected_variable()
         .map(str::to_owned);
@@ -325,7 +327,9 @@ fn aws_pair(catalog: &Catalog, id: &str, secret: &str, line: Option<usize>) -> O
 
 /// A Google service-account key JSON as a source of `google_service_account`; any other
 /// detection as it is. The item keeps the title, the provider, the hosts, and the
-/// declaration of the detection.
+/// declaration of the detection. The item is `Custom` (an `ApiKey` item needs a `token`
+/// field); its one secret field `key_json` is its main secret and the field of the
+/// variable.
 fn service_account_source(mut detected: Detected) -> Detected {
     if detected.provider.as_deref() != Some("gcp") || detected.fields.len() != 1 {
         return detected;
@@ -335,7 +339,7 @@ fn service_account_source(mut detected: Detected) -> Detected {
         return detected;
     }
     let value = field.value.clone();
-    detected.kind = CredentialKind::ApiKey;
+    detected.kind = CredentialKind::Custom;
     detected.env_name = ShortLivedKind::GoogleServiceAccount
         .detected_variable()
         .map(str::to_owned);

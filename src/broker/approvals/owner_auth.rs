@@ -384,6 +384,19 @@ pub enum OwnerAction {
         kind: crate::vault::ShortLivedKind,
         on: bool,
     },
+    /// Change the kind or the settings of the `short_lived` row of one source item
+    /// (contract private-sharing-v1 section 3.2): the role, the policy, the permissions,
+    /// the repositories, the scopes, the account to act as, and the API, token, and
+    /// revoke URLs, that is what a lease can do and where the long-lived secret goes. The
+    /// proof names the item, the new kind, and the SHA-256 (hex) of the canonical
+    /// settings text (`ShortLivedSettings::digest`), exactly as the sheet showed them.
+    /// The global owner window never covers it: a changed URL sends the long-lived
+    /// secret to another host.
+    ChangeShortLivedSettings {
+        item: u64,
+        kind: crate::vault::ShortLivedKind,
+        settings_sha256: String,
+    },
     /// Open a command-line session (ADR 0017). The session can read and change the vault
     /// like the views, but every action in this list still needs its own check.
     OpenCliSession,
@@ -644,6 +657,7 @@ impl OwnerAction {
             Self::ChangeBouncerTraining { .. } => "Change the bouncer brain training",
             Self::ChangeDelivery { on: true, .. } => "Use temporary credentials",
             Self::ChangeDelivery { on: false, .. } => "Stop temporary credentials",
+            Self::ChangeShortLivedSettings { .. } => "Change temporary credentials",
             Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
@@ -812,6 +826,10 @@ impl OwnerAction {
                 "stop {} and let agents use this item's long-lived key",
                 delivery_words(*kind)
             ),
+            Self::ChangeShortLivedSettings { kind, .. } => format!(
+                "change what {} of this item can do and where Apassy asks for them",
+                delivery_words(*kind)
+            ),
             Self::OpenCliSession => "start a command-line session".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "bind 1 environment variable".to_owned(),
@@ -897,6 +915,7 @@ impl OwnerAction {
             self,
             Self::ChangeBouncerHosting { .. }
                 | Self::ChangeBouncerTraining { .. }
+                | Self::ChangeShortLivedSettings { .. }
                 | Self::ConfirmConnectDevice { .. }
                 | Self::RevokeConnectDevice { .. }
                 | Self::DeleteConnectAccount { .. }
@@ -2319,6 +2338,66 @@ mod evaluation_tests {
         };
         assert!(on.reason().contains("15 minutes"));
         assert!(!action.needs_fresh_local_check());
+    }
+
+    #[test]
+    fn changing_short_lived_settings_needs_a_fresh_owner_check() {
+        use crate::vault::{ShortLivedKind, ShortLivedSettings};
+        let settings = |text: &str| {
+            ShortLivedSettings::parse(ShortLivedKind::OauthRefresh, text)
+                .unwrap()
+                .digest()
+        };
+        let safe =
+            settings(r#"{"token_url":"https://auth.example.test/token","client_auth":"basic"}"#);
+        let action = OwnerAction::ChangeShortLivedSettings {
+            item: 7,
+            kind: ShortLivedKind::OauthRefresh,
+            settings_sha256: safe.clone(),
+        };
+        assert!(matches!(
+            remote_choice(&action, None),
+            Err(OwnerAuthError::RemoteUnsupported)
+        ));
+        assert!(action.needs_fresh_local_check());
+        let proof = OwnerProof::issue_for_test(action.clone(), [1; 32], Instant::now());
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        // Other settings (another token URL), another item, another kind, or the on/off
+        // switch are other actions.
+        let moved = settings(
+            r#"{"token_url":"https://attacker.example.test/token","client_auth":"basic"}"#,
+        );
+        assert_ne!(moved, safe);
+        for other in [
+            OwnerAction::ChangeShortLivedSettings {
+                item: 7,
+                kind: ShortLivedKind::OauthRefresh,
+                settings_sha256: moved,
+            },
+            OwnerAction::ChangeShortLivedSettings {
+                item: 8,
+                kind: ShortLivedKind::OauthRefresh,
+                settings_sha256: safe.clone(),
+            },
+            OwnerAction::ChangeShortLivedSettings {
+                item: 7,
+                kind: ShortLivedKind::GithubApp,
+                settings_sha256: safe.clone(),
+            },
+            OwnerAction::ChangeDelivery {
+                item: 7,
+                kind: ShortLivedKind::OauthRefresh,
+                on: true,
+            },
+        ] {
+            assert_eq!(
+                proof.check(&other, &[1; 32]),
+                Err(ProofRefusal::WrongAction),
+                "{other:?}"
+            );
+        }
+        assert_eq!(action.touch_id_title(), "Change temporary credentials");
+        assert!(!action.reason().contains("attacker"));
     }
 
     #[test]
