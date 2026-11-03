@@ -10,7 +10,7 @@ use std::path::Path;
 use apassy::contracts::CredentialKind;
 use apassy::vault::passkey::ES256;
 use apassy::vault::{
-    DuplicateGroup, Field, ItemDraft, ItemEventKind, MERGED_INTO_DETAIL, MergeOutcome,
+    DuplicateGroup, ExecMode, Field, ItemDraft, ItemEventKind, MERGED_INTO_DETAIL, MergeOutcome,
     MergeRefusal, PasskeyCreate, PasskeyTarget, SecretValue, SyncScope, Vault, VaultErrorKind,
     VaultResult, merged_count,
 };
@@ -211,6 +211,51 @@ fn logins_group_by_host_and_username_across_url_forms() {
     assert!(!groups[0].identical);
     assert!(groups[0].mergeable && groups[0].reason.is_none());
     assert_no_value(&groups);
+}
+
+#[test]
+fn logins_never_group_by_a_shared_password_or_without_a_username() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir, "reuse.db");
+    // One password on two sites, and for two usernames on one site: password reuse.
+    add(
+        &mut vault,
+        login("Shop", "alice", "SYNTH-DUP-reused", &["shop.example"]),
+    );
+    add(
+        &mut vault,
+        login("Forum", "alice", "SYNTH-DUP-reused", &["forum.example"]),
+    );
+    add(
+        &mut vault,
+        login("Forum other", "bob", "SYNTH-DUP-reused", &["forum.example"]),
+    );
+    add(
+        &mut vault,
+        login("No site", "carol", "SYNTH-DUP-reused", &[]),
+    );
+    // Two passkey logins of one site without a username.
+    let keys = [
+        ("Key one", b"synthetic-user-1"),
+        ("Key two", b"synthetic-user-2"),
+    ];
+    for (title, handle) in keys {
+        vault
+            .create_passkey(PasskeyCreate {
+                rp_id: RP,
+                user_handle: handle,
+                user_name: "",
+                user_display_name: "",
+                client_data_hash: &HASH,
+                algorithms: &[ES256],
+                exclude: &[],
+                target: PasskeyTarget::NewItem {
+                    title: title.to_owned(),
+                },
+            })
+            .unwrap();
+    }
+    assert!(ids(&vault).is_empty());
 }
 
 #[test]
@@ -507,6 +552,86 @@ fn a_variable_moves_only_alone_and_with_the_same_value() {
         VaultErrorKind::InvalidInput
     );
     assert!(!vault.is_archived(two).unwrap());
+}
+
+/// Two logins of one account; the second has a variable on its hidden detail
+/// "Recovery code", which both items hold with the same value.
+fn recovery_pair(vault: &mut Vault, suffix: &str) -> (u64, u64) {
+    let username = format!("octo-{suffix}");
+    let draft = |title: &str| {
+        let mut draft = login(title, &username, "SYNTH-DUP-recovery-pw", &["github.com"]);
+        draft.fields.push(field(
+            &detail("Recovery code"),
+            "SYNTH-DUP-recovery-code",
+            true,
+        ));
+        draft
+    };
+    let kept = add(vault, draft(&format!("GitHub {suffix}")));
+    let bound = add(vault, draft(&format!("GitHub {suffix} import")));
+    let env_name = format!("GH_RECOVERY_{}", suffix.to_uppercase());
+    vault
+        .set_env_binding(bound, &env_name, &detail("Recovery code"))
+        .unwrap();
+    (kept, bound)
+}
+
+fn refused_and_unchanged(vault: &mut Vault, kept: u64, bound: u64) {
+    assert_eq!(
+        vault.merge_refusal(kept, &[bound]).unwrap(),
+        Some(MergeRefusal::UsedByAgents)
+    );
+    assert_eq!(
+        merge(vault, kept, &[bound]).unwrap_err().kind(),
+        VaultErrorKind::InvalidInput
+    );
+    assert!(!vault.is_archived(bound).unwrap());
+    assert!(vault.env_binding(kept).unwrap().is_none());
+    assert!(vault.env_binding(bound).unwrap().is_some());
+}
+
+#[test]
+fn a_variable_never_moves_when_it_changes_what_the_kept_item_gives_agents() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir, "delivery.db");
+    // The kept login delivers its password today; the variable delivers the recovery
+    // code. Moving it would give the recovery code to the agents of the kept item.
+    let (kept, bound) = recovery_pair(&mut vault, "a");
+    assert_eq!(group_of(&vault, kept).keep, bound);
+    assert_eq!(group_of(&vault, kept).keep_choices, [bound]);
+    refused_and_unchanged(&mut vault, kept, bound);
+    // Keeping the item with the variable works: nothing moves.
+    assert_eq!(vault.merge_refusal(bound, &[kept]).unwrap(), None);
+
+    // The same with a process grant of an agent on the kept item.
+    let (granted, other) = recovery_pair(&mut vault, "b");
+    let (agent, _token) = vault.register_agent("Synthetic agent").unwrap();
+    vault
+        .set_exec_grant(agent.id, granted, "/synthetic/project", ExecMode::Ask)
+        .unwrap();
+    refused_and_unchanged(&mut vault, granted, other);
+
+    // A grant on the kept item refuses a moved variable also for the field that it
+    // delivers today.
+    let keep = add(
+        &mut vault,
+        login("Site", "dora", "SYNTH-DUP-same", &["site.example"]),
+    );
+    let moved = add(
+        &mut vault,
+        login("Site import", "dora", "SYNTH-DUP-same", &["site.example"]),
+    );
+    vault
+        .set_env_binding(moved, "SITE_PASSWORD", "password")
+        .unwrap();
+    assert_eq!(vault.merge_refusal(keep, &[moved]).unwrap(), None);
+    vault
+        .set_exec_grant(agent.id, keep, "/synthetic/project", ExecMode::Ask)
+        .unwrap();
+    assert_eq!(
+        vault.merge_refusal(keep, &[moved]).unwrap(),
+        Some(MergeRefusal::UsedByAgents)
+    );
 }
 
 #[test]

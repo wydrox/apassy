@@ -197,11 +197,15 @@ final class CredentialExchangeModel {
             }
             let data = CredentialExchangeExport.data(export, vaultID: vaultID, formatVersion: format)
             let count = data.accounts.reduce(0) { $0 + $1.items.count }
+            let withheld = CredentialExchangeExport.withheldPasskeys(export)
             try await system.exportCredentials(data)
             pending = nil
             var message = "Exported \(count) \(count == 1 ? "login" : "logins")."
             if export.skipped > 0 {
                 message += " \(export.skipped) other \(export.skipped == 1 ? "item stays" : "items stay") in Apassy only: the transfer takes logins."
+            }
+            if withheld > 0 {
+                message += " \(withheld) \(withheld == 1 ? "passkey stays" : "passkeys stay") in Apassy only: \(withheld == 1 ? "it has" : "they have") PRF or large blob data, which this version of iOS cannot transfer. Update to iOS 26.4 or later to move \(withheld == 1 ? "it" : "them")."
             }
             state = .finished(message)
         } catch let error as VaultError where error.code == .locked {

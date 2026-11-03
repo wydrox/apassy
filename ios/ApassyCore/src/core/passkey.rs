@@ -296,7 +296,8 @@ pub struct AssertIn {
     large_blob: Option<LargeBlobIn>,
 }
 
-/// The PRF inputs of an assertion. `hashed: false`: WebAuthn inputs of 1 to 1024 bytes.
+/// The PRF inputs of an assertion. `hashed: false`: WebAuthn inputs of 0 to 1024 bytes
+/// (WebAuthn sets no minimum; the empty text is the empty input).
 /// `hashed: true`: hmac-secret salts of exactly 32 bytes. The iOS credential provider
 /// gets the WebAuthn inputs and sends `hashed: false`.
 #[derive(Deserialize)]
@@ -373,6 +374,10 @@ fn prf_in(prf: &PrfIn) -> CoreResult<PasskeyPrfInput> {
         } else {
             MAX_PRF_INPUT_BYTES
         };
+        // `bytes_in` refuses the empty text; an empty WebAuthn input is valid.
+        if text.is_empty() && !prf.hashed {
+            return Ok(Vec::new());
+        }
         let bytes = bytes_in(text, max, "PRF input")?;
         if prf.hashed && bytes.len() != PRF_BYTES {
             return Err(CoreError::invalid("The PRF input is not valid."));
@@ -386,10 +391,12 @@ fn prf_in(prf: &PrfIn) -> CoreResult<PasskeyPrfInput> {
     })
 }
 
-/// A write of more than 64 KiB is not refused here: the vault answers `written: false`.
+/// An empty write or a write of more than 64 KiB is not refused here: the vault
+/// answers `written: false` and stores nothing.
 fn large_blob_in(blob: &LargeBlobIn) -> CoreResult<LargeBlobOp> {
     match (blob.read, &blob.write) {
         (true, None) => Ok(LargeBlobOp::Read),
+        // The empty text is the base64 of no bytes.
         (false, Some(text)) if text.expose().is_empty() => {
             Ok(LargeBlobOp::Write(Zeroizing::new(Vec::new())))
         }

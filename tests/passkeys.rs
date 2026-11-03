@@ -946,6 +946,17 @@ fn prf_outputs_need_secrets_and_match_hmac() {
         output.second.as_ref().unwrap().as_slice(),
         hmac::sign(&key, &salt(b"two")).as_ref()
     );
+    // An empty input: a hand-computed vector (Python: hmac.new(b"\x11" * 32,
+    // sha256(b"WebAuthn PRF\x00").digest(), sha256)).
+    let assertion = vault
+        .assert_passkey(with, RP, &[1; 20], &HASH, &prf(b"", None, false))
+        .unwrap();
+    let first = &assertion.prf.as_ref().unwrap().first;
+    let hex: String = first.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(
+        hex,
+        "bd06f2afab1a7090d7b822f4ab562eb09407c66e747a5eb0b8515d2ae7ced4b7"
+    );
     // Hashed: the inputs are the salts.
     let assertion = vault
         .assert_passkey(with, RP, &[1; 20], &HASH, &prf(&[0x22; 32], None, true))
@@ -1043,7 +1054,8 @@ fn large_blobs_import_read_write_and_refuse_too_big() {
     );
     // Too big: nothing changes.
     let revision = vault.details(id).unwrap().summary.revision;
-    for too_big in [vec![0u8; 65_537], random_bytes(60_000)] {
+    // Too big, and empty: an empty write stores nothing and keeps the blob.
+    for too_big in [vec![0u8; 65_537], random_bytes(60_000), Vec::new()] {
         let assertion = vault
             .assert_passkey(id, RP, &[1; 20], &HASH, &write(&too_big))
             .unwrap();
@@ -1057,6 +1069,7 @@ fn large_blobs_import_read_write_and_refuse_too_big() {
             .write_large_blob(id, RP, &[1; 20], &vec![1u8; 65_536])
             .unwrap()
     );
+    assert!(!vault.write_large_blob(id, RP, &[1; 20], &[]).unwrap());
     // Another credential or no passkey: false.
     assert!(!vault.write_large_blob(id, RP, &[9; 20], b"x").unwrap());
     let plain = vault.add(login("Plain", Some("SYNTH-pass"))).unwrap();

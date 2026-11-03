@@ -55,10 +55,13 @@ public struct DuplicateGroup: Codable, Sendable, Hashable, Identifiable {
     /// False when the core cannot merge the group; `reason` says why.
     public var mergeable: Bool
     public var reason: String?
+    /// The IDs of the members that the core lets the owner keep (`keep_choices`). nil from an older
+    /// core: then `keepable` uses the passkey rule.
+    public var keepChoices: [UInt64]?
 
     public init(
         items: [DuplicateMember], keep: UInt64, differences: [String], identical: Bool, mergeable: Bool,
-        reason: String?
+        reason: String?, keepChoices: [UInt64]? = nil
     ) {
         self.items = items
         self.keep = keep
@@ -66,14 +69,22 @@ public struct DuplicateGroup: Codable, Sendable, Hashable, Identifiable {
         self.identical = identical
         self.mergeable = mergeable
         self.reason = reason
+        self.keepChoices = keepChoices
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case items, keep, differences, identical, mergeable, reason
+        case keepChoices = "keep_choices"
     }
 
     /// The IDs of the members, sorted: a group stays the same group across reloads.
     public var id: [UInt64] { items.map(\.id).sorted() }
 
-    /// The members that may be kept. When a member has a passkey only that member may be kept: a
-    /// passkey stays in its own item (the core refuses another choice).
+    /// The members that may be kept: the core's `keep_choices` when it sends them, in the order
+    /// of the members. An older core sends none; then, when a member has a passkey, only that
+    /// member may be kept: a passkey stays in its own item (the core refuses another choice).
     public var keepable: [DuplicateMember] {
+        if let keepChoices { return items.filter { keepChoices.contains($0.id) } }
         let withPasskey = items.filter(\.hasPasskey)
         return withPasskey.isEmpty ? items : withPasskey
     }

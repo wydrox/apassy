@@ -67,7 +67,8 @@ enum WireLimits {
     /// JSON numbers above 2^53 - 1 lose precision in many readers.
     static let maxInteger: UInt64 = (1 << 53) - 1
     static let maxErrorMessageCharacters = 1024
-    /// A PRF input of a sign-in (WebAuthn prf eval), after decoding.
+    /// A PRF input of a sign-in (WebAuthn prf eval), after decoding. WebAuthn sets no
+    /// minimum: an empty input is "".
     static let maxPrfInputBytes = 1024
     /// A hashed PRF input is a SHA-256 value (an hmac-secret salt).
     static let hashedPrfInputBytes = 32
@@ -253,8 +254,8 @@ struct FieldReader {
         return FieldReader(object)
     }
 
-    /// The PRF inputs of a sign-in: {"first", "second"?, "hashed"}. Each input has 1 to
-    /// 1024 bytes; a hashed input (an hmac-secret salt) has exactly 32.
+    /// The PRF inputs of a sign-in: {"first", "second"?, "hashed"}. Each input has 0 to
+    /// 1024 bytes ("" is empty); a hashed input (an hmac-secret salt) has exactly 32.
     func prfInput(_ name: String) throws -> JSONObject? {
         guard let inner = try object(name) else {
             return nil
@@ -266,9 +267,10 @@ struct FieldReader {
         }
         let hashed = hashedNumber.boolValue
         func input(_ key: String) throws -> String {
-            let minBytes = hashed ? WireLimits.hashedPrfInputBytes : 1
+            let minBytes = hashed ? WireLimits.hashedPrfInputBytes : 0
             let maxBytes = hashed ? WireLimits.hashedPrfInputBytes : WireLimits.maxPrfInputBytes
-            guard let text = inner.fields[key] as? String, let bytes = canonicalBase64(text, maxBytes: maxBytes),
+            guard let text = inner.fields[key] as? String,
+                  let bytes = text.isEmpty && !hashed ? Data() : canonicalBase64(text, maxBytes: maxBytes),
                   bytes.count >= minBytes
             else {
                 throw RequestError("The field \"\(name)\" has an input that is not valid base64 of the right size.")

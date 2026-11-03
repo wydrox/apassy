@@ -149,6 +149,7 @@ fn duplicates_list_labels_and_a_merge_archives_the_others() {
     assert_eq!(group["mergeable"], true);
     assert_eq!(group["reason"], Value::Null);
     assert!(members.contains(&group["keep"].as_u64().unwrap()));
+    assert_eq!(group["keep_choices"], json!([kept, import]));
 
     let merged = call(
         &phone,
@@ -230,6 +231,7 @@ fn a_merge_refuses_a_stale_revision_a_bad_group_and_a_limit() {
         .expect("group");
     assert_eq!(group["mergeable"], false);
     assert_eq!(group["reason"], "Too many fields");
+    assert_eq!(group["keep_choices"], json!([]));
     assert_eq!(
         fails(&phone, merge(many, 1, json!([{"id": more, "revision": 1}]))),
         "too_large"

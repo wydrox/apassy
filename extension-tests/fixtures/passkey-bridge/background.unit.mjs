@@ -275,7 +275,6 @@ function getExtensionCases() {
   const allow = [{ type: "public-key", id: b64u(id) }];
   const get = (extensions, extra = {}) => ({ op: "get", options: getOptions({ allowCredentials: allow, extensions, ...extra }) });
   return {
-    "an empty prf input": get({ prf: { eval: { first: "" } } }),
     "a prf input of 1025 bytes": get({ prf: { eval: { first: b64u(randomBytes(1025)) } } }),
     "a second prf input of 1025 bytes": get({ prf: { eval: { first: b64u(randomBytes(32)), second: b64u(randomBytes(1025)) } } }),
     "a prf input in standard base64": get({ prf: { eval: { first: b64(Buffer.from([0xfb, 0xff, 0xfe])) } } }),
@@ -290,7 +289,6 @@ function getExtensionCases() {
     "a largeBlob read and write": get({ largeBlob: { read: true, write: b64u(randomBytes(4)) } }),
     "a largeBlob support member": get({ largeBlob: { support: "required" } }),
     "an empty largeBlob": get({ largeBlob: {} }),
-    "an empty largeBlob write": get({ largeBlob: { write: "" } }),
     "a largeBlob write above 64 KiB": get({ largeBlob: { write: b64u(randomBytes(64 * 1024 + 1)) } }),
     "a largeBlob write without exactly one allowed credential": get({ largeBlob: { write: b64u(randomBytes(4)) } }, { allowCredentials: [] }),
     "a largeBlob write too large for the host": get({ largeBlob: { write: b64u(randomBytes(50 * 1024)) } }),
@@ -932,6 +930,34 @@ test("get with prf and largeBlob: the wire members, standard base64 values, base
   assert.equal(write.wire.prf, undefined);
 });
 
+test("get with empty prf inputs and an empty largeBlob write: the wire carries empty values", async () => {
+  const bg = setup();
+  const id = randomBytes(16);
+  const { port, wire } = await extensionRequest(bg, {
+    prf: { eval: { first: "", second: "" }, evalByCredential: { [b64u(id)]: { first: "" } } },
+    largeBlob: { write: "" },
+  }, [id]);
+  assert.deepEqual(wire.prf, { eval: { first: "", second: "" }, eval_by_credential: { [b64u(id)]: { first: "" } } });
+  assert.deepEqual(wire.large_blob, { write: "" });
+  // The chosen credential has its own (empty) first input and no second one.
+  bg.natives[0].port.postMessage(extensionAnswer(wire, { prf: { first: b64(PRF_FIRST) }, large_blob: { written: false } }));
+  await flush();
+  assert.equal(port.received[0].kind, "result");
+  assert.deepEqual(port.received[0].credential.clientExtensionResults, {
+    prf: { results: { first: b64u(PRF_FIRST) } },
+    largeBlob: { written: false },
+  });
+});
+
+test("an empty largeBlob write is answered written: false", async () => {
+  const bg = setup();
+  const { port, wire } = await extensionRequest(bg, { largeBlob: { write: "" } });
+  bg.natives[0].port.postMessage(extensionAnswer(wire, { large_blob: { written: false } }));
+  await flush();
+  assert.equal(port.received[0].kind, "result");
+  assert.deepEqual(port.received[0].credential.clientExtensionResults, { largeBlob: { written: false } });
+});
+
 test("get with prf: no inputs for any credential sends no prf", async () => {
   const bg = setup();
   const { wire } = await extensionRequest(bg, { prf: {} });
@@ -973,6 +999,8 @@ test("largeBlob outputs: data after a read, {} without data, written after a wri
     [{ largeBlob: { read: true } }, { data: b64(blob) }, { largeBlob: { blob: b64u(blob) } }],
     [{ largeBlob: { read: true } }, { data: null }, { largeBlob: {} }],
     [{ largeBlob: { read: true } }, {}, { largeBlob: {} }],
+    // A read of a passkey without a blob: the app leaves the output out.
+    [{ largeBlob: { read: true } }, undefined, { largeBlob: {} }],
     [{ largeBlob: { write: b64u(blob) } }, { written: true }, { largeBlob: { written: true } }],
     [{ largeBlob: { write: b64u(blob) } }, { written: false }, { largeBlob: { written: false } }],
     [{ largeBlob: { write: b64u(blob) } }, undefined, {}],

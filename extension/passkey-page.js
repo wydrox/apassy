@@ -147,16 +147,16 @@
     return out;
   }
 
-  // PRF inputs {first, second?}: BufferSource values of 1 to 1024 bytes, as
-  // base64url.
+  // PRF inputs {first, second?}: BufferSource values of 0 to 1024 bytes (WebAuthn
+  // sets no minimum), as base64url.
   function prfValuesOf(value) {
     if (value === null || typeof value !== "object") return unsupported();
     const first = bytesOf(value.first);
-    if (first.length < 1 || first.length > MAX_PRF_INPUT) return unsupported();
+    if (first.length > MAX_PRF_INPUT) return unsupported();
     const out = { first: base64url(first) };
     if (value.second !== undefined) {
       const second = bytesOf(value.second);
-      if (second.length < 1 || second.length > MAX_PRF_INPUT) return unsupported();
+      if (second.length > MAX_PRF_INPUT) return unsupported();
       out.second = base64url(second);
     }
     return out;
@@ -180,7 +180,8 @@
     return out;
   }
 
-  // largeBlob of a get: {read: true} or {write: BufferSource of 1 to 64 KiB}.
+  // largeBlob of a get: {read: true} or {write: BufferSource of 0 to 64 KiB}. An
+  // empty write goes to Apassy too, which answers written: false.
   // "support" (create only), or read next to write, goes to the browser, which
   // throws NotSupportedError. A read of false asks for nothing.
   function largeBlobOf(value) {
@@ -189,7 +190,7 @@
     if (value.read !== undefined && value.write !== undefined) return unsupported();
     if (value.write !== undefined) {
       const blob = bytesOf(value.write);
-      if (blob.length < 1 || blob.length > MAX_BLOB) return unsupported();
+      if (blob.length > MAX_BLOB) return unsupported();
       return { write: base64url(blob) };
     }
     return value.read !== undefined && Boolean(value.read) ? { read: true } : undefined;

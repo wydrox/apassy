@@ -1143,13 +1143,14 @@ function extensionsOk(extensions, allowed) {
     Object.values(extensions).every((value) => typeof value === "boolean");
 }
 
-// PRF inputs {first, second?}: base64url of 1 to 1024 bytes each.
+// PRF inputs {first, second?}: base64url of 0 to 1024 bytes each (WebAuthn sets
+// no minimum).
 function prfValues(value) {
   if (!isRecord(value) || !onlyKeys(value, ["first", "second"])) return null;
-  const first = fromBase64url(value.first, 1, PASSKEY_MAX_PRF_INPUT);
+  const first = fromBase64url(value.first, 0, PASSKEY_MAX_PRF_INPUT);
   if (!first) return null;
   if (value.second === undefined) return { first };
-  const second = fromBase64url(value.second, 1, PASSKEY_MAX_PRF_INPUT);
+  const second = fromBase64url(value.second, 0, PASSKEY_MAX_PRF_INPUT);
   return second ? { first, second } : null;
 }
 
@@ -1192,8 +1193,9 @@ function getExtensions(extensions, allowed) {
     if (onlyKeys(largeBlob, ["read"]) && largeBlob.read === true) {
       out.largeBlob = { read: true };
     } else if (onlyKeys(largeBlob, ["write"]) && Object.hasOwn(largeBlob, "write") && allowed.length === 1) {
-      // WebAuthn: a write names exactly one credential in the allow list.
-      const blob = fromBase64url(largeBlob.write, 1, PASSKEY_MAX_BLOB);
+      // WebAuthn: a write names exactly one credential in the allow list. An
+      // empty write goes to the app, which answers written: false.
+      const blob = fromBase64url(largeBlob.write, 0, PASSKEY_MAX_BLOB);
       if (!blob) return null;
       out.largeBlob = { write: blob };
     } else {
@@ -1312,7 +1314,7 @@ function wireRequest(request, origin, clientData, rid) {
   };
   if (request.op === "get") {
     const wire = { ...common, cmd: "passkey_get", allowed: request.allowed.map(standardBase64) };
-    const prfWire = (values) => (values.second
+    const prfWire = (values) => (values.second !== undefined
       ? { first: standardBase64(values.first), second: standardBase64(values.second) }
       : { first: standardBase64(values.first) });
     if (request.prf) {
@@ -1350,8 +1352,11 @@ const FLAG_AT = 0x40;
 // The client extension results of a get, checked against the inputs that this
 // worker sent, or null for an unexpected output. prf: 32-byte outputs, only
 // for a credential that had inputs, a second only for a second input.
-// largeBlob: {blob} or {} after a read, {written} after a write. No output from
-// the app: the member is absent, as for a client without the extension.
+// largeBlob: {blob} or {} after a read, {written} after a write. The app leaves
+// out the output of a read of a passkey without a blob: that is {} too (an app
+// without the extension refuses the request with bad_request, so this never
+// claims support that is not there). No output after a write: the member is
+// absent, as for a client without the extension.
 function getExtensionResults(expect, data, credentialId) {
   const results = {};
   if (data.prf !== undefined && data.prf !== null) {
@@ -1367,7 +1372,9 @@ function getExtensionResults(expect, data, credentialId) {
     }
     results.prf = { results: outputs };
   }
-  if (data.large_blob !== undefined && data.large_blob !== null) {
+  if ((data.large_blob === undefined || data.large_blob === null) && expect.largeBlob && expect.largeBlob.read) {
+    results.largeBlob = {};
+  } else if (data.large_blob !== undefined && data.large_blob !== null) {
     const output = data.large_blob;
     const asked = expect.largeBlob;
     if (!asked || !isRecord(output)) return null;

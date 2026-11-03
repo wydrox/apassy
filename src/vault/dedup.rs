@@ -8,11 +8,13 @@
 //! - both are logins with a shared host and the same username. The hosts of a login are
 //!   its website details and the RP ID of its passkey, without the scheme, the port, the
 //!   path, and a leading `www.`, in lowercase. The username is trimmed and compared
-//!   without regard to case. A login without a host is never a duplicate by this rule.
-//! - both have the same kind and the same secret values: the same set of (field name,
-//!   value) over the secret fields with a value. The core compares SHA-256 digests in
-//!   memory; no digest and no value leaves this module. Items without a secret value are
-//!   never duplicates by this rule.
+//!   without regard to case. A login without a host or without a username is never a
+//!   duplicate.
+//! - both have the same kind (API key, SSH key, database, or custom; not a login) and
+//!   the same secret values: the same set of (field name, value) over the secret fields
+//!   with a value. A reused password is not one account, so logins never match by
+//!   their secrets. The core compares SHA-256 digests in memory; no digest and no value
+//!   leaves this module. Items without a secret value are never duplicates by this rule.
 //!
 //! Items in different shared vaults never group. A group holds each item that a chain of
 //! these matches reaches, in ID order.
@@ -34,7 +36,9 @@
 //!   process grant, an API rule, or a connector of another item; a declaration of another
 //!   item that differs from the declaration of the kept item; a variable of another item
 //!   when the kept item has one, or two other items have one. One variable moves to a
-//!   kept item without one, only when the kept item then delivers the same value. "Always
+//!   kept item without one only when nothing that an agent of the kept item gets
+//!   changes: the kept item has no process grant, API rule, or connector, it delivers
+//!   the bound field today, and the field keeps the value of the other item. "Always
 //!   ask me" and the per-agent exceptions "never" and "always ask" of the other items
 //!   apply to the kept item too: they only make agent use stricter. Remembered answers and
 //!   "only these items" exceptions do not move: the agent is asked again.
@@ -186,6 +190,9 @@ struct AgentUse {
     declaration: Option<[String; 5]>,
     /// A process grant, an API rule, or a connector.
     fixed: bool,
+    /// The field that an agent process gets today: the bound field, else the field that
+    /// Apassy picks without the owner (`process_binding_in`).
+    delivers: Option<String>,
     /// "Always ask me".
     always_ask: bool,
 }
@@ -582,10 +589,12 @@ fn agent_use(conn: &Connection, item: i64) -> VaultResult<AgentUse> {
         )
         .optional()
         .map_err(storage)?;
+    let delivers = super::agents::process_binding_in(conn, item)?.map(|binding| binding.field);
     Ok(AgentUse {
         binding,
         declaration,
         fixed: fixed != 0,
+        delivers,
         always_ask: always_ask == Some(1),
     })
 }
@@ -852,13 +861,18 @@ fn plan(keep: &Member, others: &[&Member]) -> Result<Plan, MergeRefusal> {
     if details > MAX_DETAILS && details > kept_details {
         return Err(MergeRefusal::TooManyFields);
     }
-    // A variable moves only when the kept item delivers the same value.
+    // A variable moves only when it changes nothing that an agent of the kept item gets:
+    // the kept item has no grant, rule, or connector, it delivers the bound field today,
+    // and that field keeps the value of the other item.
     let binding_from = match binding_from {
         None => None,
         Some(from) => {
             let Some((env_name, bound_field)) = from.agent.binding.as_ref() else {
                 return Err(MergeRefusal::UsedByAgents);
             };
+            if keep.agent.fixed || keep.agent.delivers.as_deref() != Some(bound_field.as_str()) {
+                return Err(MergeRefusal::UsedByAgents);
+            }
             let value = |list: &[Field]| {
                 list.iter()
                     .find(|field| field.name == *bound_field && field.secret)
@@ -1176,6 +1190,10 @@ impl Vault {
                     .find(|field| field.name == "username")
                     .map(|field| field.value.expose().trim().to_lowercase())
                     .unwrap_or_default();
+                // A login without a username is never a duplicate by this rule.
+                if username.is_empty() {
+                    hosts.clear();
+                }
                 for host in hosts {
                     let key = (item.place.clone(), host, username.clone());
                     match by_login.get(&key) {
@@ -1186,7 +1204,11 @@ impl Vault {
                     }
                 }
             }
-            if let Some(digest) = secret_digest(item.kind, &item.fields) {
+            // Logins match by host and username only: one password on two sites or for
+            // two usernames is password reuse, not one account.
+            if item.kind != CredentialKind::Login
+                && let Some(digest) = secret_digest(item.kind, &item.fields)
+            {
                 let key = (item.place.clone(), kind_as_str(item.kind), digest);
                 match by_secret.get(&key) {
                     Some(&first) => union(&mut parent, first, index),

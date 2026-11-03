@@ -32,7 +32,9 @@ private func bridgeExtensionTests() {
            "B: the payload holds the checked PRF inputs and nothing else")
     expect(((try? check(["prf": ["first": base64(1), "hashed": false]]))?.payload["prf"] as? [String: Any])?["second"] == nil,
            "B: one PRF input of 1 byte passes without a second")
-    expectThrows("B: an empty PRF input is refused") { _ = try check(["prf": ["first": "", "hashed": false]]) }
+    let emptyInput = try? check(["prf": ["first": "", "second": "", "hashed": false]])
+    expect((emptyInput?.payload["prf"] as? [String: Any])?["first"] as? String == "", "B: empty PRF inputs pass (WebAuthn sets no minimum)")
+    expectThrows("B: an empty hashed salt is refused") { _ = try check(["prf": ["first": "", "hashed": true]]) }
     expectThrows("B: a PRF input of 1025 bytes is refused") { _ = try check(["prf": ["first": base64(1025), "hashed": false]]) }
     expectThrows("B: a second PRF input of 1025 bytes is refused") {
         _ = try check(["prf": ["first": base64(1), "second": base64(1025), "hashed": false]])
@@ -94,13 +96,23 @@ private func callExtensionTests() {
         AssertionExtensionRequest(prf: PrfRequest(all: nil, byCredential: [other: mine])), credentialID: chosen)
     expect(noInputs != nil && noInputs?.prf == nil, "X: no inputs for the chosen credential send no PRF")
     expect(prfInputsAreHashed == false, "X: the inputs of macOS go to Apassy as raw WebAuthn inputs")
-    expectThrows("X: an empty PRF input fails before the call") {
-        _ = try assertionCallExtensions(
-            AssertionExtensionRequest(prf: PrfRequest(all: PrfValues(first: Data(), second: nil), byCredential: [:])), credentialID: chosen)
+    let empty = try? assertionCallExtensions(
+        AssertionExtensionRequest(prf: PrfRequest(all: PrfValues(first: Data(), second: Data()), byCredential: [:])), credentialID: chosen)
+    expect(empty?.prf == PrfCallInput(first: "", second: "", hashed: false), "X: empty PRF inputs go to the call")
+    expect((try? encodeCall(PasskeyAssertCall(
+        id: 3, rpId: "example.com", credentialId: credential, clientDataHash: hash32, prf: empty?.prf))).flatMap { try? checkRequest($0) } != nil,
+           "X: the bridge accepts a call with empty PRF inputs")
+    let large = PrfValues(first: Data(repeating: 1, count: 1025), second: nil)
+    let otherBad = try? assertionCallExtensions(
+        AssertionExtensionRequest(prf: PrfRequest(all: all, byCredential: [other: large])), credentialID: chosen)
+    expect(otherBad?.prf == PrfCallInput(first: all.first.base64EncodedString(), second: nil, hashed: false),
+           "X: a PRF input of 1025 bytes of another credential does not stop this sign-in")
+    expectThrows("X: a PRF input of 1025 bytes of the chosen credential fails before the call") {
+        _ = try assertionCallExtensions(AssertionExtensionRequest(prf: PrfRequest(all: all, byCredential: [chosen: large])), credentialID: chosen)
     }
-    expectThrows("X: a PRF input of 1025 bytes of another credential fails before the call") {
-        let large = PrfValues(first: Data(repeating: 1, count: 1025), second: nil)
-        _ = try assertionCallExtensions(AssertionExtensionRequest(prf: PrfRequest(all: all, byCredential: [other: large])), credentialID: chosen)
+    expectThrows("X: a second PRF input of 1025 bytes for every credential fails before the call") {
+        let values = PrfValues(first: Data([1]), second: Data(repeating: 1, count: 1025))
+        _ = try assertionCallExtensions(AssertionExtensionRequest(prf: PrfRequest(all: values, byCredential: [:])), credentialID: chosen)
     }
     expectThrows("X: more than 256 credentials with PRF inputs fail before the call") {
         var many: [Data: PrfValues] = [:]
@@ -115,8 +127,8 @@ private func callExtensionTests() {
     expectThrows("X: a large blob write above 64 KiB fails before the call") {
         _ = try assertionCallExtensions(AssertionExtensionRequest(largeBlob: .write(blob + Data([0]))), credentialID: chosen)
     }
-    let empty = try? assertionCallExtensions(AssertionExtensionRequest(largeBlob: .write(Data())), credentialID: chosen)
-    expect(empty?.largeBlob == nil && empty?.skippedWrite == true, "X: an empty large blob write is not sent")
+    let emptyWrite = try? assertionCallExtensions(AssertionExtensionRequest(largeBlob: .write(Data())), credentialID: chosen)
+    expect(emptyWrite?.largeBlob == nil && emptyWrite?.skippedWrite == true, "X: an empty large blob write is not sent")
 
     // The call as the bridge reads it.
     let call = PasskeyAssertCall(
@@ -192,7 +204,8 @@ private func answerExtensionTests() {
     expect((try? check(answer(largeBlob: LargeBlobAnswer()), readCall))?.largeBlob == .read(nil), "A: a read without data gives no blob")
     expect((try? check(answer(largeBlob: LargeBlobAnswer(written: true)), writeCall))?.largeBlob == .written(true), "A: a write gives written")
     expect((try? check(answer(largeBlob: LargeBlobAnswer(written: false)), writeCall))?.largeBlob == .written(false), "A: a refused write gives not written")
-    expect((try? check(answer(), writeCall))?.largeBlob == nil, "A: an answer without a large blob output passes without it")
+    expect((try? check(answer(), writeCall))?.largeBlob == nil, "A: a write without a large blob output passes without it")
+    expect((try? check(answer(), readCall))?.largeBlob == .read(nil), "A: a read without a large blob output is a read without a blob")
     expectThrows("A: written after a read fails") { _ = try check(answer(largeBlob: LargeBlobAnswer(written: true)), readCall) }
     expectThrows("A: data after a write fails") { _ = try check(answer(largeBlob: LargeBlobAnswer(data: base64(5))), writeCall) }
     expectThrows("A: a large blob output without an operation fails") { _ = try check(answer(largeBlob: LargeBlobAnswer(data: base64(5)))) }
@@ -228,6 +241,12 @@ private func answerExtensionTests() {
         expect(blob == Data(repeating: 5, count: 5), "A: macOS gets the blob of a read")
     } else {
         expect(false, "A: macOS gets the blob of a read")
+    }
+    let noBlobOutput = (try? check(answer(), readCall)).flatMap(assertionExtensionOutput)
+    if case .read(data: let blob)? = noBlobOutput?.largeBlob?.result {
+        expect(blob == nil, "A: macOS gets a read without data for a passkey without a blob")
+    } else {
+        expect(false, "A: macOS gets a read without data for a passkey without a blob")
     }
     let writeOutput = (try? check(answer(largeBlob: LargeBlobAnswer(written: true)), writeCall)).flatMap(assertionExtensionOutput)
     if case .write(success: let success)? = writeOutput?.largeBlob?.result {

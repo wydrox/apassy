@@ -42,6 +42,11 @@ public actor PreviewVaultService: VaultService {
     var organizeState = PreviewOrganize()
     /// The agents of the Macs (`PreviewVaultService+Feed.swift`).
     var feedState = PreviewFeed()
+    /// Test support: answers that the next `passkeyImport` calls give without importing (for
+    /// example the core's "exists" for an attach target that got a passkey meanwhile).
+    var scriptedPasskeyImports: [PasskeyImportResult] = []
+    /// Test support: the accounts of each `passkeyImport` call, in order.
+    var passkeyImportCalls: [[PasskeyImportAccount]] = []
 
     /// - Parameters:
     ///   - empty: no vault on this iPhone (the setup flow).
@@ -188,6 +193,14 @@ public actor PreviewVaultService: VaultService {
     static func storesPassword(_ secrets: [String: String]) -> Bool {
         secrets["password"].map { !$0.isEmpty } == true
     }
+
+    /// Test support: the answers of the next `passkeyImport` calls (`scriptedPasskeyImports`).
+    func scriptPasskeyImportsForTesting(_ answers: [PasskeyImportResult]) {
+        scriptedPasskeyImports = answers
+    }
+
+    /// Test support: the accounts of each `passkeyImport` call.
+    func passkeyImportCallsForTesting() -> [[PasskeyImportAccount]] { passkeyImportCalls }
 
     /// Test support: a stored secret password with no value. The ordinary calls refuse it, but
     /// the core can hold one (an older import). The row follows the stored value.
@@ -743,6 +756,8 @@ public actor PreviewVaultService: VaultService {
 
     public func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult {
         try requireUnlocked()
+        passkeyImportCalls.append(accounts)
+        if !scriptedPasskeyImports.isEmpty { return scriptedPasskeyImports.removeFirst() }
         var result = PasskeyImportResult(imported: 0, skippedExisting: 0, failed: 0)
         for account in accounts {
             if items.values.contains(where: {

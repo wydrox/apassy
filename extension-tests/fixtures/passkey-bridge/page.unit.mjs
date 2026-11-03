@@ -188,7 +188,6 @@ const BROWSER_CASES = {
   "conditional mediation": () => ({ mediation: "conditional", publicKey: { challenge: new Uint8Array(randomBytes(32)) } }),
   "immediate mediation": () => ({ mediation: "immediate", publicKey: { challenge: new Uint8Array(randomBytes(32)) } }),
   "a prf input of 1025 bytes": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { prf: { eval: { first: new Uint8Array(1025) } } } } }),
-  "an empty prf input": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { prf: { eval: { first: new Uint8Array(0) } } } } }),
   "a prf input that is not a buffer": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { prf: { eval: { first: "salt" } } } } }),
   "prf evalByCredential without an allow list": () => ({ publicKey: { challenge: new Uint8Array(randomBytes(32)), extensions: { prf: { evalByCredential: { AQID: { first: new Uint8Array(32) } } } } } }),
   "prf evalByCredential of a credential outside the allow list": () => ({ publicKey: {
@@ -515,6 +514,29 @@ test("largeBlob: a write, then a read gives the blob; a read without a blob give
   assert.deepEqual(bytesOf(results.largeBlob.blob), Buffer.from(blob));
   assert.deepEqual(read.assertion.toJSON().clientExtensionResults, { largeBlob: { blob: b64u(blob) } });
   assert.equal(p.page.calls.length, 0);
+});
+
+test("empty prf inputs reach the app as empty values and give results (WebAuthn sets no minimum)", async () => {
+  const p = pipeline();
+  const { credential } = await register(p);
+  const empty = new Uint8Array(0);
+  const { assertion } = await signIn(p, credential, { prf: { eval: { first: empty, second: new ArrayBuffer(0) } } });
+  assert.deepEqual(getWire(p).prf, { eval: { first: "", second: "" } });
+  const results = assertion.getClientExtensionResults();
+  assert.deepEqual(bytesOf(results.prf.results.first), prfOf(p.authenticator, credential, empty));
+  assert.deepEqual(bytesOf(results.prf.results.second), prfOf(p.authenticator, credential, empty));
+});
+
+test("an empty largeBlob write goes to Apassy, which answers written: false", async () => {
+  const p = pipeline();
+  const { credential } = await register(p);
+  const { assertion } = await signIn(p, credential, { largeBlob: { write: new Uint8Array(0) } });
+  assert.deepEqual(getWire(p).large_blob, { write: "" });
+  assert.deepEqual(assertion.getClientExtensionResults(), { largeBlob: { written: false } });
+  assert.deepEqual(assertion.toJSON().clientExtensionResults, { largeBlob: { written: false } });
+  assert.equal(p.page.calls.length, 0);
+  const read = await signIn(p, credential, { largeBlob: { read: true } });
+  assert.deepEqual(read.assertion.getClientExtensionResults(), { largeBlob: {} }, "nothing was stored");
 });
 
 test("largeBlob read of false asks for nothing and is served", async () => {

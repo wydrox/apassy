@@ -147,6 +147,36 @@ import Testing
         try await ImportCases().importSavesEveryKindIntoTheVault()
     }
 
+    @Test func aPasskeyInTheVaultStillCompletesItsLogin() async throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else { return }
+        try await FollowUpCases().aPasskeyInTheVaultStillCompletesItsLogin()
+    }
+
+    @Test func aStoredPasswordAndCodeStayAndDifferentImportedOnesAreKept() async throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else { return }
+        try await FollowUpCases().aStoredPasswordAndCodeStayAndDifferentImportedOnesAreKept()
+    }
+
+    @Test func anAttachTargetThatGotAPasskeyMeanwhileMakesANewLogin() async throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else { return }
+        try await FollowUpCases().anAttachTargetThatGotAPasskeyMeanwhileMakesANewLogin()
+    }
+
+    @Test func untitledLoginsTakeTheHostAndPersonalItemsHideTheirCustomFields() throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else { return }
+        try FollowUpCases().untitledLoginsTakeTheHostAndPersonalItemsHideTheirCustomFields()
+    }
+
+    @Test func ed25519SSHKeysAreWrittenInTheOpenSSHFormat() throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else { return }
+        try FollowUpCases().ed25519SSHKeysAreWrittenInTheOpenSSHFormat()
+    }
+
+    @Test func anOlderSystemWithholdsPasskeysWithExtensionData() throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else { return }
+        try FollowUpCases().anOlderSystemWithholdsPasskeysWithExtensionData()
+    }
+
     @Test func theSummaryHasCountsOnly() {
         guard #available(macOS 26.0, iOS 26.0, *) else { return }
         ImportCases().theSummaryHasCountsOnly()
@@ -514,11 +544,14 @@ private struct ImportCases {
         #expect(target([row(1, conflictOf: 9)]) == nil)
         // The ones that do not match do not count against the one that does.
         #expect(target([row(1), row(2, hasPasskey: true), row(3, user: "bob")]) == 1)
-        // The basic-auth username and the website of the item match too.
+        // The basic-auth username matches too; the website of the item does not: the passkey
+        // works only on its relying party.
         let other = CredentialExchangeImport.Entry(title: "t", website: "https://login.example.org", username: "bob")
         #expect(
             CredentialExchangeImport.attachTarget(
-                for: other, passkey: account, rows: [row(5, user: "BOB", site: "login.example.org")])?.id == 5)
+                for: other, passkey: account, rows: [row(5, user: "BOB", site: "login.example.org")]) == nil)
+        #expect(
+            CredentialExchangeImport.attachTarget(for: other, passkey: account, rows: [row(6, user: "BOB")])?.id == 6)
         let nameless = PasskeyImportAccount(
             rpID: "example.com", credentialID: Data([1]), userHandle: Data([2]), userName: "", userDisplayName: "",
             key: Data(), title: "t")
@@ -545,11 +578,16 @@ private struct ImportCases {
         ])
         let report = await CredentialExchangeImport.run(CredentialExchangeImport.plan(export), service: service)
         #expect(report.attached == 1 && report.passkeys == 1 && report.imported == 0 && report.failed == 0)
+        #expect(report.keptStored == 1)
         #expect(try await service.items(archived: .all).count == before)
         let detail = try await service.item(id: login.id)
         #expect(detail.passkey?.credentialID == Data([1, 2, 3]) && detail.row.hasPasskey)
-        // The stored fields stay; the login gets what it did not have.
+        // The stored fields stay; the login gets what it did not have, and the different imported
+        // password is a hidden detail.
         #expect(try await service.reveal(id: login.id, field: "password") == "synthetic-old")
+        let imported = try #require(detail.fields.first { $0.label == "Imported password" })
+        #expect(imported.secret && imported.custom)
+        #expect(try await service.reveal(id: login.id, field: imported.name) == "synthetic-new")
         #expect(detail.fields.contains { $0.label == "Card number" && $0.secret })
         #expect(detail.row.tags == ["card"])
 
@@ -606,6 +644,15 @@ private struct ImportCases {
         var one = CredentialExchangeImport.Report()
         one.imported = 1
         #expect(one.summary == "Imported 1 item.")
+        var kept = CredentialExchangeImport.Report()
+        kept.existing = 2
+        kept.completed = 2
+        kept.keptStored = 1
+        #expect(
+            kept.summary
+                == "Imported 0 items. 2 passkeys were in the vault already. 2 logins with such passkeys got the "
+                + "fields that they lacked. 1 login kept its stored password or one-time password; the imported one "
+                + "is a hidden detail.")
     }
 }
 
@@ -658,5 +705,256 @@ private struct ExtensionCases {
         #expect(plainItem.credentials.allSatisfy { credential in
             if case .passkey(let passkey) = credential { passkey.fido2Extensions == nil } else { true }
         })
+    }
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private struct FollowUpCases {
+    private let uri = "otpauth://totp/Example:ada?secret=JBSWY3DPEHPK3PXP"
+
+    /// A passkey-only login in `service`, with the passkey that `passkey(key:)` imports.
+    private func passkeyLogin(_ service: PreviewVaultService, key: P256.Signing.PrivateKey) async throws -> UInt64 {
+        let result = try await service.passkeyImport([
+            PasskeyImportAccount(
+                rpID: "example.com", credentialID: Data([1, 2, 3]), userHandle: Data([4]), userName: "ada",
+                userDisplayName: "Ada", key: key.derRepresentation, title: "Example"),
+        ])
+        #expect(result.imported == 1)
+        return try #require(try await service.passkeys(rpID: "example.com", allowed: [Data([1, 2, 3])]).first?.id)
+    }
+
+    func aPasskeyInTheVaultStillCompletesItsLogin() async throws {
+        let service = PreviewVaultService()
+        let key = P256.Signing.PrivateKey()
+        let id = try await passkeyLogin(service, key: key)
+        let before = try await service.items(archived: .all).count
+        let export = data([
+            item(1, "Example", [
+                .basicAuthentication(.init(userName: field("ada"), password: field("synthetic-pw", .concealedString))),
+                passkey(key: key.derRepresentation), card(),
+            ]),
+        ])
+        let report = await CredentialExchangeImport.run(CredentialExchangeImport.plan(export), service: service)
+        #expect(report.existing == 1 && report.completed == 1 && report.imported == 0 && report.passkeys == 0)
+        #expect(report.failed == 0 && report.keptStored == 0)
+        #expect(try await service.items(archived: .all).count == before)
+        #expect(try await service.reveal(id: id, field: "password") == "synthetic-pw")
+        #expect(try await service.item(id: id).fields.contains { $0.label == "Card number" })
+
+        // The same import again changes nothing.
+        let again = await CredentialExchangeImport.run(CredentialExchangeImport.plan(export), service: service)
+        #expect(again.existing == 1 && again.completed == 0 && again.keptStored == 0)
+    }
+
+    func aStoredPasswordAndCodeStayAndDifferentImportedOnesAreKept() async throws {
+        let service = PreviewVaultService()
+        let key = P256.Signing.PrivateKey()
+        let id = try await passkeyLogin(service, key: key)
+        var detail = try await service.item(id: id)
+        _ = try await service.save(
+            id: id, revision: detail.row.revision,
+            draft: ItemDraft(
+                title: "Example", kind: .login, notes: "", tags: [],
+                fields: [
+                    .named("username", "ada", secret: false), .named("password", "synthetic-old", secret: true),
+                    .detail("Website", "https://example.com", secret: false),
+                    .detail("One-time password", uri, secret: true),
+                ]))
+        let otherSeed = ASImportableCredential.totp(
+            .init(secret: Data("Other!".utf8), period: 30, digits: 6, userName: "ada", algorithm: .sha1))
+        let export = data([
+            item(1, "Example", [
+                .basicAuthentication(.init(userName: field("ada"), password: field("synthetic-new", .concealedString))),
+                passkey(key: key.derRepresentation), otherSeed,
+            ]),
+        ])
+        let report = await CredentialExchangeImport.run(CredentialExchangeImport.plan(export), service: service)
+        #expect(report.existing == 1 && report.completed == 1 && report.keptStored == 1 && report.failed == 0)
+        detail = try await service.item(id: id)
+        #expect(try await service.reveal(id: id, field: "password") == "synthetic-old")
+        let password = try #require(detail.fields.first { $0.label == "Imported password" })
+        #expect(password.secret && password.custom)
+        #expect(try await service.reveal(id: id, field: password.name) == "synthetic-new")
+        let code = try #require(detail.fields.first { $0.label == "One-time password (imported)" })
+        // The label is a one-time password label (contract ios-core-v1, section 7), and the value
+        // is an otpauth URI: the core reads it as a code.
+        #expect(code.secret && code.role == .totp)
+        #expect(try await service.reveal(id: id, field: code.name).hasPrefix("otpauth://totp/"))
+        // The same import again: the imported values are there already, so nothing is added.
+        let again = await CredentialExchangeImport.run(CredentialExchangeImport.plan(export), service: service)
+        #expect(again.existing == 1 && again.completed == 0 && again.keptStored == 0)
+        #expect(try await service.item(id: id).fields.count == detail.fields.count)
+
+        // The same values: nothing new.
+        let stored = CredentialExchangeImport.Stored(password: "synthetic-new", otp: "JBSW Y3DP EE")
+        let entry = CredentialExchangeImport.Entry(
+            title: "Example", username: "ada", password: "synthetic-new",
+            otp: OTPAuthURI.make(secret: Data("Hello!".utf8), issuer: "Example", account: "ada"))
+        let made = CredentialExchangeImport.draft(entry, keeping: detail, stored: stored)
+        #expect(!made.keptStored)
+        #expect(!made.draft.fields.contains { $0.label == "Imported password 2" || $0.label == "One-time password (imported) 2" })
+        #expect(CredentialExchangeImport.sameOTP("JBSWY3DPEE", "otpauth://totp/x?secret=jbswy3dpee&digits=6"))
+        #expect(!CredentialExchangeImport.sameOTP("JBSWY3DPEE", uri))
+        #expect(!CredentialExchangeImport.sameOTP(nil, uri))
+    }
+
+    func anAttachTargetThatGotAPasskeyMeanwhileMakesANewLogin() async throws {
+        let service = PreviewVaultService()
+        let login = try await service.save(
+            id: nil, revision: nil,
+            draft: ItemDraft(
+                title: "Example", kind: .login, notes: "", tags: [],
+                fields: [
+                    .named("username", "ada", secret: false), .named("password", "synthetic-old", secret: true),
+                    .detail("Website", "https://example.com", secret: false),
+                ]))
+        // The core answers "exists" for the attach, but the passkey is not in the vault.
+        await service.scriptPasskeyImportsForTesting([PasskeyImportResult(imported: 0, skippedExisting: 1, failed: 0)])
+        let export = data([item(1, "Example", [passkey(key: P256.Signing.PrivateKey().derRepresentation)])])
+        let report = await CredentialExchangeImport.run(CredentialExchangeImport.plan(export), service: service)
+        let calls = await service.passkeyImportCallsForTesting()
+        #expect(calls.map { $0.first?.attachID } == [login.id, nil])
+        #expect(report.imported == 1 && report.passkeys == 1 && report.attached == 0 && report.existing == 0)
+        #expect(try await service.item(id: login.id).passkey == nil)
+    }
+
+    func untitledLoginsTakeTheHostAndPersonalItemsHideTheirCustomFields() throws {
+        let plain = ASImportableCredential.customFields(
+            .init(fields: [field("Ada", label: "Name"), field("eu-west-1", label: "Region")]))
+        let plan = CredentialExchangeImport.plan(
+            data([
+                item(1, "", url: "https://example.com/magic?token=synthetic-token", [
+                    .basicAuthentication(.init(userName: field("ada"), password: field("synthetic-pw", .concealedString))),
+                ]),
+                item(2, "Visa", [card(), plain]),
+                item(3, "Office", [
+                    .wifi(.init(
+                        ssid: field("Office"), networkSecurityType: nil,
+                        passphrase: field("synthetic-wifi", .concealedString))),
+                    plain,
+                ]),
+            ]))
+        #expect(plan.entries.count == 3)
+        #expect(plan.entries[0].title == "example.com")
+        #expect(!plan.entries[0].title.contains("synthetic"))
+        let visa = plan.entries[1]
+        #expect(visa.detail("Name")?.secret == true && visa.detail("Region")?.secret == true)
+        // A Wi-Fi network is not personal: a plain label stays visible.
+        let office = plan.entries[2]
+        #expect(office.detail("Name")?.secret == false && office.detail("Region")?.secret == false)
+    }
+
+    func ed25519SSHKeysAreWrittenInTheOpenSSHFormat() throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let der = Data([0x30, 0x2E, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20])
+            + key.rawRepresentation
+        let text = try #require(CredentialExchangeImport.openSSH(ed25519: der, comment: "ada@laptop"))
+        #expect(text.hasPrefix("-----BEGIN OPENSSH PRIVATE KEY-----\n"))
+        #expect(text.hasSuffix("\n-----END OPENSSH PRIVATE KEY-----\n"))
+        let lines = text.split(separator: "\n").dropFirst().dropLast()
+        #expect(lines.allSatisfy { $0.count <= 70 })
+        var reader = SSHReader(bytes: [UInt8](try #require(Data(base64Encoded: lines.joined()))))
+        let magic = reader.take(15)
+        let cipher = reader.text()
+        let kdf = reader.text()
+        let kdfOptions = reader.field()
+        let keys = reader.uint32()
+        let publicField = reader.field()
+        let secretField = reader.field()
+        #expect(magic == Array("openssh-key-v1".utf8) + [0])
+        #expect(cipher == "none" && kdf == "none" && kdfOptions == [] && keys == 1)
+        #expect(reader.atEnd)
+        let publicKey = [UInt8](key.publicKey.rawRepresentation)
+        var publicBlob = SSHReader(bytes: try #require(publicField))
+        let publicType = publicBlob.text()
+        let publicBytes = publicBlob.field()
+        #expect(publicType == "ssh-ed25519" && publicBytes == publicKey && publicBlob.atEnd)
+        let secret = try #require(secretField)
+        #expect(secret.count % 8 == 0)
+        var section = SSHReader(bytes: secret)
+        let check1 = section.uint32()
+        let check2 = section.uint32()
+        let type = section.text()
+        let sectionPublic = section.field()
+        let privateBytes = section.field()
+        let comment = section.text()
+        let padding = section.rest()
+        #expect(check1 != nil && check1 == check2)
+        #expect(type == "ssh-ed25519" && sectionPublic == publicKey)
+        #expect(privateBytes == [UInt8](key.rawRepresentation) + publicKey)
+        #expect(comment == "ada@laptop")
+        #expect(padding == (0..<padding.count).map { UInt8($0 + 1) })
+
+        // Through the import: the kind SSH key with the OpenSSH text; RSA and ECDSA stay PEM.
+        let plan = CredentialExchangeImport.plan(
+            data([
+                item(1, "Deploy", [
+                    .sshKey(.init(
+                        keyType: "ssh-ed25519", privateKey: der, keyComment: "ada@laptop", creationDate: nil,
+                        expiryDate: nil, keyGenerationSource: nil)),
+                ]),
+            ]))
+        #expect(plan.entries.first?.kind == .sshKey)
+        #expect(plan.entries.first?.main?.value.hasPrefix("-----BEGIN OPENSSH PRIVATE KEY-----") == true)
+        #expect(CredentialExchangeImport.openSSH(ed25519: rsaPKCS8, comment: "") == nil)
+        #expect(CredentialExchangeImport.openSSH(ed25519: P256.Signing.PrivateKey().derRepresentation, comment: "") == nil)
+    }
+
+    func anOlderSystemWithholdsPasskeysWithExtensionData() throws {
+        let key = P256.Signing.PrivateKey().derRepresentation
+        func passkey(_ id: UInt8, prf: Bool) -> ExportedPasskey {
+            ExportedPasskey(
+                rpID: "example.com", credentialID: Data([id]), userHandle: Data([4]), userName: "ada",
+                userDisplayName: "Ada", key: key,
+                prf: prf ? PasskeyPRFSecrets(withUV: Data(repeating: 1, count: 32), withoutUV: Data(repeating: 2, count: 32)) : nil)
+        }
+        let withPassword = ExportedItem(id: 1, title: "Example", username: "ada", password: "synthetic-pw", passkey: passkey(1, prf: true))
+        let passkeyOnly = ExportedItem(id: 2, title: "Only", passkey: passkey(2, prf: true))
+        let plain = ExportedItem(id: 3, title: "Plain", passkey: passkey(3, prf: false))
+        let export = CredentialExport(items: [withPassword, passkeyOnly, plain], skipped: 0)
+        #expect(CredentialExchangeExport.withheldPasskeys(export, carriesExtensions: false) == 2)
+        #expect(CredentialExchangeExport.withheldPasskeys(export, carriesExtensions: true) == 0)
+
+        let old = CredentialExchangeExport.data(export, vaultID: "v1", carriesExtensions: false)
+        let items = old.accounts.flatMap(\.items)
+        // The login keeps its password without the passkey; a passkey-only login is left out.
+        #expect(items.map(\.title) == ["Example", "Plain"])
+        let passkeys = items.flatMap { item in
+            item.credentials.compactMap { credential -> Data? in
+                if case .passkey(let passkey) = credential { passkey.credentialID } else { nil }
+            }
+        }
+        #expect(passkeys == [Data([3])])
+    }
+}
+
+/// Reads the SSH wire format (RFC 4251): uint32 lengths and strings.
+private struct SSHReader {
+    var bytes: [UInt8]
+    var index = 0
+
+    var atEnd: Bool { index == bytes.count }
+
+    mutating func take(_ count: Int) -> [UInt8]? {
+        guard count >= 0, index + count <= bytes.count else { return nil }
+        defer { index += count }
+        return Array(bytes[index..<(index + count)])
+    }
+
+    mutating func uint32() -> UInt32? {
+        guard let four = take(4) else { return nil }
+        return four.reduce(0) { ($0 << 8) | UInt32($1) }
+    }
+
+    mutating func field() -> [UInt8]? {
+        guard let length = uint32() else { return nil }
+        return take(Int(length))
+    }
+
+    mutating func text() -> String? { field().map { String(decoding: $0, as: UTF8.self) } }
+
+    mutating func rest() -> [UInt8] {
+        defer { index = bytes.count }
+        return Array(bytes[index...])
     }
 }

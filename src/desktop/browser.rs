@@ -97,6 +97,12 @@ fn browser_extensions(request: &PasskeyGetRequest) -> PasskeyRequestExtensions {
     }
 }
 
+/// True when the assertion wrote a large blob into the vault. The write is committed
+/// before the answer goes, so a lost answer leaves the blob stored.
+pub(crate) fn blob_written(assertion: &PasskeyAssertion) -> bool {
+    matches!(assertion.large_blob, Some(LargeBlobResult::Written(true)))
+}
+
 /// The PRF outputs and the largeBlob result of an assertion, for the browser. A read
 /// without a stored blob has no entry.
 fn browser_extension_results(
@@ -1571,6 +1577,7 @@ impl DesktopApp {
         };
         match done {
             PasskeyDone::Signed(assertion) => {
+                let stored = blob_written(&assertion);
                 let (prf, large_blob) = browser_extension_results(&assertion);
                 let delivered = ticket.send(Response::ok(
                     "Signed.",
@@ -1588,6 +1595,11 @@ impl DesktopApp {
                 ));
                 if delivered {
                     self.set_ok("You are signed in with a passkey from Apassy.");
+                } else if stored {
+                    // The write is in the vault before the answer goes: say so.
+                    self.set_err(
+                        "The browser stopped waiting. The page got no passkey. The data the page sent is stored with the passkey.",
+                    );
                 } else {
                     self.set_err("The browser stopped waiting. The page got no passkey.");
                 }

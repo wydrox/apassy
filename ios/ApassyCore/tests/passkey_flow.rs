@@ -899,12 +899,23 @@ fn prf_and_large_blob_through_the_app_and_the_extension() {
     for prf in [
         json!({"first": b64(&[0x22; 31]), "hashed": true}),
         json!({"first": b64(&[1; 1025])}),
-        json!({"first": ""}),
     ] {
         let mut request = assert_request(id, RP, b"credential-prf", 4);
         request["prf"] = prf.clone();
         assert_eq!(fails(&phone, request), "invalid_input", "{prf}");
     }
+
+    // An empty input is valid (WebAuthn sets no minimum): a hand-computed vector. Python:
+    // hmac.new(b"\x11" * 32, sha256(b"WebAuthn PRF\x00").digest(), sha256).
+    let mut request = assert_request(id, RP, b"credential-prf", 4);
+    request["prf"] = json!({"first": ""});
+    let output = unb64(call(&phone, request)["prf"]["first"].as_str().unwrap());
+    let hex: String = output.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(
+        hex,
+        "bd06f2afab1a7090d7b822f4ab562eb09407c66e747a5eb0b8515d2ae7ced4b7"
+    );
+    assert_eq!(output, prf_of(&webauthn_salt(b"")));
 
     // The imported blob reads; a passkey without one reads nothing.
     let mut request = assert_request(id, RP, b"credential-prf", 5);
@@ -935,11 +946,17 @@ fn prf_and_large_blob_through_the_app_and_the_extension() {
         unb64(assertion["large_blob"]["data"].as_str().unwrap()),
         written
     );
-    // Too big: written false, and the blob stays.
+    // Too big or empty: written false, and the blob stays.
     let mut big = assert_request(id, RP, b"credential-prf", 8);
     big["large_blob"] = json!({"write": b64(&vec![7u8; 65_537])});
     assert_eq!(
         call(&extension, big)["large_blob"],
+        json!({"written": false})
+    );
+    let mut empty = assert_request(id, RP, b"credential-prf", 8);
+    empty["large_blob"] = json!({"write": ""});
+    assert_eq!(
+        call(&extension, empty)["large_blob"],
         json!({"written": false})
     );
     let assertion = call(&extension, read);

@@ -198,8 +198,8 @@ pub const MAX_ALGORITHMS: usize = 16;
 pub const MAX_FIELD_BYTES: usize = 128;
 /// The most entries of `prf.eval_by_credential` in a `passkey_get`.
 pub const MAX_PRF_CREDENTIALS: usize = 256;
-/// The shortest and the longest PRF input (`first`, `second`), in bytes.
-pub const MIN_PRF_INPUT_BYTES: usize = 1;
+/// The longest PRF input (`first`, `second`), in bytes. WebAuthn sets no minimum: an
+/// empty input (the empty text) is valid.
 pub const MAX_PRF_INPUT_BYTES: usize = 1024;
 /// The longest largeBlob write, uncompressed, in bytes. The whole request is still at
 /// most [`MAX_REQUEST_BYTES`], so a write above about 47 KiB does not fit.
@@ -784,9 +784,7 @@ fn bad_extension(message: &str) -> WireError {
 
 impl PrfValuesPacket {
     fn values(&self) -> Result<PasskeyPrfValues, WireError> {
-        let one = |text: &str| {
-            super::webauthn::decode_bytes(text, MIN_PRF_INPUT_BYTES, MAX_PRF_INPUT_BYTES)
-        };
+        let one = |text: &str| super::webauthn::decode_bytes(text, 0, MAX_PRF_INPUT_BYTES);
         Ok(PasskeyPrfValues {
             first: one(&self.first)?,
             second: self.second.as_deref().map(one).transpose()?,

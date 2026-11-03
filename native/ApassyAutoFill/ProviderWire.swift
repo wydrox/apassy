@@ -304,7 +304,8 @@ struct AssertionExtensionRequest: Equatable {
 }
 
 enum ExtensionLimits {
-    static let minPrfInputBytes = 1
+    /// WebAuthn sets no minimum: an empty PRF input is valid.
+    static let minPrfInputBytes = 0
     static let maxPrfInputBytes = 1024
     static let maxPrfCredentials = 256
     static let prfOutputBytes = 32
@@ -333,21 +334,21 @@ struct AssertionCallExtensions: Equatable {
 }
 
 /// The extension inputs for the call of `credentialID`: the inputs of this credential if
-/// the website names it in evalByCredential, else the inputs for every credential. A
-/// value outside the limits fails with `unsupported`, before anything goes to Apassy.
+/// the website names it in evalByCredential, else the inputs for every credential. Only
+/// the inputs that the call carries are checked: a bad entry of another credential does
+/// not stop this sign-in. A value outside the limits fails with `unsupported`, before
+/// anything goes to Apassy.
 func assertionCallExtensions(_ request: AssertionExtensionRequest, credentialID: Data) throws -> AssertionCallExtensions {
     var call = AssertionCallExtensions()
     if let prf = request.prf {
         guard prf.byCredential.count <= ExtensionLimits.maxPrfCredentials else {
             throw ProviderFailure.unsupported
         }
-        let range = ExtensionLimits.minPrfInputBytes...ExtensionLimits.maxPrfInputBytes
-        for values in Array(prf.byCredential.values) + (prf.all.map { [$0] } ?? []) {
+        if let values = prf.byCredential[credentialID] ?? prf.all {
+            let range = ExtensionLimits.minPrfInputBytes...ExtensionLimits.maxPrfInputBytes
             guard range.contains(values.first.count), values.second.map({ range.contains($0.count) }) ?? true else {
                 throw ProviderFailure.unsupported
             }
-        }
-        if let values = prf.byCredential[credentialID] ?? prf.all {
             call.prf = PrfCallInput(
                 first: values.first.base64EncodedString(), second: values.second?.base64EncodedString(),
                 hashed: prfInputsAreHashed)
@@ -475,6 +476,9 @@ func checkPrfOutput(_ answer: PrfAnswer?, requested: PrfCallInput?) throws -> Ch
 
 /// The large blob output must match the operation of the call: data (or none) after a
 /// read, "written" after a write. An empty write that the call skipped is "not written".
+/// A read without an output is a read of a passkey without a blob: Apassy leaves the
+/// output out then, and an app without the extension refuses the call (bad_request), so
+/// this never reports support that is not there.
 func checkLargeBlobOutput(_ answer: LargeBlobAnswer?, requested: AssertionCallExtensions) throws -> CheckedLargeBlob? {
     if requested.skippedWrite {
         guard answer == nil else {
@@ -482,7 +486,9 @@ func checkLargeBlobOutput(_ answer: LargeBlobAnswer?, requested: AssertionCallEx
         }
         return .written(false)
     }
-    guard let answer else { return nil }
+    guard let answer else {
+        return requested.largeBlob == .read ? .read(nil) : nil
+    }
     switch requested.largeBlob {
     case .read?:
         guard answer.written == nil else { break }

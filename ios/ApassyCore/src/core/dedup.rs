@@ -27,6 +27,8 @@ pub struct Group {
     pub identical: bool,
     pub mergeable: bool,
     pub reason: Option<String>,
+    /// The items that the group can merge into, in ID order.
+    pub keep_choices: Vec<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,6 +75,7 @@ fn group(group: DuplicateGroup) -> Group {
         identical: group.identical,
         mergeable: group.mergeable,
         reason: group.reason,
+        keep_choices: group.keep_choices,
     }
 }
 

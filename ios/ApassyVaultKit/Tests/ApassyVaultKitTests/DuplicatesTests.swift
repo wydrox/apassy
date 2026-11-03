@@ -53,6 +53,36 @@ import Testing
         #expect(second.differenceSummary == "Same values")
     }
 
+    @Test func keepChoicesOfTheCoreDecideWhatMayBeKept() throws {
+        let json = """
+            {"items": [
+               {"id": 12, "title": "Example", "kind": "login", "revision": 3, "has_passkey": false, "changed_at": 1},
+               {"id": 40, "title": "Example (imported)", "kind": "login", "revision": 1, "has_passkey": true, "changed_at": 2},
+               {"id": 41, "title": "Example (copy)", "kind": "login", "revision": 1, "has_passkey": false, "changed_at": 3}],
+             "keep": 12, "differences": [], "identical": true, "mergeable": true, "reason": null,
+             "keep_choices": [41, 12]}
+            """
+        let group = try JSONDecoder().decode(DuplicateGroup.self, from: Data(json.utf8))
+        #expect(group.keepChoices == [41, 12])
+        // In the order of the members, and only the ones the core names.
+        #expect(group.keepable.map(\.id) == [12, 41])
+        #expect(group.suggestedKeep == 12)
+        var other = group
+        other.keep = 40
+        #expect(other.suggestedKeep == 12)
+
+        // An older core sends no keep_choices: the passkey rule.
+        var older = group
+        older.keepChoices = nil
+        #expect(older.keepable.map(\.id) == [40])
+        let withoutChoices = """
+            {"items": [{"id": 1, "title": "A", "kind": "login", "revision": 1}], "keep": 1, "differences": [],
+             "identical": true, "mergeable": true}
+            """
+        let decoded = try JSONDecoder().decode(DuplicateGroup.self, from: Data(withoutChoices.utf8))
+        #expect(decoded.keepChoices == nil && decoded.keepable.map(\.id) == [1] && decoded.reason == nil)
+    }
+
     @Test func theMergeResultDecodes() throws {
         let json = #"{"id": 40, "revision": 4, "archived": [12, 13]}"#
         let result = try JSONDecoder().decode(DuplicateMergeResult.self, from: Data(json.utf8))

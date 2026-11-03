@@ -92,11 +92,13 @@ Any other call answers `unsupported`: no import, no removal, and no export of a 
 
 The WebAuthn extensions of `passkey_assert` (vault schema 25) have the shape of the iPhone core ([ios-core-v1](../contracts/ios-core-v1.md), section 5.8), with byte values in standard base64:
 
-- Request `prf`: `{"first", "second" (optional), "hashed": bool (default false)}`. With `hashed: true`, the values are the 32-byte salts that macOS gives. With `hashed: false`, they are WebAuthn inputs of 1 to 1024 bytes, and the app makes each salt (SHA-256 of `"WebAuthn PRF"`, a zero byte, and the input).
+- Request `prf`: `{"first", "second" (optional), "hashed": bool (default false)}`. macOS gives the extension the WebAuthn inputs, so it sends `hashed: false` (not checked on a device yet). With `hashed: true`, the values are 32-byte hmac-secret salts. With `hashed: false`, they are WebAuthn inputs of 0 to 1024 bytes (WebAuthn sets no minimum), and the app makes each salt (SHA-256 of `"WebAuthn PRF"`, a zero byte, and the input).
 - Request `large_blob`: `{"read": true}` or `{"write": <the uncompressed blob>}`, exactly one. The request frame is at most 128 KiB, so a write of up to 65536 bytes fits.
 - Answer `algorithm`: the COSE algorithm of the passkey, -7, -35, -8, or -257.
 - Answer `prf`: `{"first", "second"}`, 32 bytes each, only when the passkey has PRF secrets (from Credential Exchange). The outputs use the secret with user verification.
-- Answer `large_blob`: `{"data"}` for a read of a stored blob (no entry without one), or `{"written": bool}` for a write. A blob over 65536 bytes, or one that does not fit a vault field after compression, gives `{"written": false}`.
+- Answer `large_blob`: `{"data"}` for a read of a stored blob (no entry without one), or `{"written": bool}` for a write. An empty blob, a blob over 65536 bytes, or one that does not fit a vault field after compression, gives `{"written": false}`, and the stored blob stays.
+- A write is stored in the vault before the answer goes to the bridge. If macOS stops waiting after the owner check, nothing is signed in, but the blob stays stored. The Apassy status then says: "macOS stopped waiting. Nothing was signed in. The data that was sent is stored with the passkey."
+- The owner dialog and the Touch ID text say what the request gets beyond the signature: a key made from the passkey (PRF), the data stored with the passkey (read), or that it stores N bytes with the passkey (write).
 - A bad extension field answers `bad_request` before the owner dialog. The owner proof names the extensions of the request, so a check without a write never writes a blob.
 The three calls without an owner check return no password, seed, or key. A fill is recorded in the history of the login as "macOS AutoFill", with no value.
 

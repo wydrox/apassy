@@ -7,7 +7,9 @@
 // It signs exactly the client_data_json bytes that the extension sent. For a
 // sign-in with prf inputs it answers HMAC-SHA-256 of a throwaway key of the
 // credential over SHA-256("WebAuthn PRF" || 0x00 || input) (the hmac-secret
-// form), and it keeps a large blob per credential in memory.
+// form), and it keeps a large blob per credential in memory. Like the app, it
+// leaves out large_blob for a read without a stored blob, and answers
+// written: false for an empty write without storing it.
 
 import { createHash, createHmac, createPrivateKey, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -115,10 +117,12 @@ export function createSyntheticAuthenticator({ file } = {}) {
       if (prfInputs && credential.prfKey) {
         const key = unb64(credential.prfKey);
         outputs.prf = { first: b64(syntheticPrf(key, unb64(prfInputs.first))) };
-        if (prfInputs.second) outputs.prf.second = b64(syntheticPrf(key, unb64(prfInputs.second)));
+        if (prfInputs.second !== undefined) outputs.prf.second = b64(syntheticPrf(key, unb64(prfInputs.second)));
       }
       if (request.large_blob && request.large_blob.read) {
-        outputs.large_blob = credential.blob ? { data: credential.blob } : {};
+        if (credential.blob) outputs.large_blob = { data: credential.blob };
+      } else if (request.large_blob && request.large_blob.write === "") {
+        outputs.large_blob = { written: false };
       } else if (request.large_blob) {
         credential.blob = request.large_blob.write;
         outputs.large_blob = { written: true };

@@ -1310,3 +1310,32 @@ fn read_file_picks_the_format_and_names_the_problem() {
     );
     assert_eq!(read_file(dir.path()).unwrap_err(), ImportError::Io);
 }
+
+#[test]
+fn a_personal_item_with_only_dates_emails_and_phones_still_imports() {
+    let data = export(vec![(
+        "Personal",
+        vec![item(
+            "004",
+            "Contact only",
+            json!({ "sections": sections(vec![
+                field("email", "email", json!({ "email": { "email_address": "SYNTH-OP-only@example.test" } })),
+                field("birthdate", "birth date", json!({ "date": 315_532_800 })),
+                field("cellphone", "cell", json!({ "phone": "SYNTH-OP-only-phone" })),
+            ]) }),
+        )],
+    )]);
+    let preview = parse_1pux_json(data.as_bytes()).expect("parse");
+    let item = find(&preview, "Contact only");
+    assert_eq!(item.kind(), Some(CredentialKind::Custom));
+    assert!(item.draft().is_some(), "{:?}", item.warnings);
+    assert!(
+        visible_details(item).is_empty(),
+        "{:?}",
+        visible_details(item)
+    );
+    let draft = item.draft().unwrap();
+    for field in draft.fields() {
+        assert!(field.secret, "{} is visible", field.name);
+    }
+}

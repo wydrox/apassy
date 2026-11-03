@@ -766,14 +766,19 @@ fn custom(mut builder: ItemBuilder, mut parts: Parts, why: Option<&str>) -> Impo
 /// `secret`; without one, the password, then the first hidden value. Every other value
 /// is hidden but the plain ones of [`PERSONAL_VISIBLE`] (a concealed one stays hidden).
 fn personal(mut builder: ItemBuilder, mut parts: Parts, label: &str) -> ImportItem {
-    let Some(main) = parts
+    let mut main = parts
         .take(personal_main(label), None)
         .or_else(|| parts.take(PASSWORD, Some(true)))
-        .or_else(|| parts.take_first_secret())
-    else {
+        .or_else(|| parts.take_first_secret());
+    parts.hide_all_but(PERSONAL_VISIBLE);
+    // An item with only an email, a date, or a phone number: those values are hidden now,
+    // so the first of them is the main value.
+    if main.is_none() {
+        main = parts.take_first_secret();
+    }
+    let Some(main) = main else {
         return builder.skip("The item has no number, password, or other secret value.");
     };
-    parts.hide_all_but(PERSONAL_VISIBLE);
     builder.warn(format!(
         "1Password category “{label}” has no Apassy kind. Apassy imports it as a custom secret, with every value hidden but the type, the country or state, the bank name, and the expiry."
     ));

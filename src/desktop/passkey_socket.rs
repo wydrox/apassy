@@ -47,7 +47,7 @@ use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
 use super::DesktopApp;
-use super::browser::PasskeyDone;
+use super::browser::{PasskeyDone, blob_written};
 use super::owner_check::{
     OwnerRequest, PasskeyAccount, PasskeyRequest, PasskeyRequestExtensions, page_text,
 };
@@ -212,8 +212,9 @@ struct AssertArgs {
     large_blob: Option<LargeBlobArgs>,
 }
 
-/// The PRF inputs of an assertion, as the iPhone core takes them: WebAuthn inputs of 1
-/// to 1024 bytes (what macOS gives the extension), or with `hashed` salts of 32 bytes.
+/// The PRF inputs of an assertion, as the iPhone core takes them: WebAuthn inputs of 0
+/// to 1024 bytes (what macOS gives the extension; WebAuthn sets no minimum), or with
+/// `hashed` salts of 32 bytes.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrfArgs {
@@ -915,7 +916,7 @@ fn prf_in(prf: &PrfArgs) -> Result<crate::vault::PasskeyPrfInput, Refusal> {
     let (min, max) = if prf.hashed {
         (32, 32)
     } else {
-        (1, MAX_PRF_INPUT_BYTES)
+        (0, MAX_PRF_INPUT_BYTES)
     };
     Ok(crate::vault::PasskeyPrfInput {
         first: bytes_in(&prf.first, min, max, "PRF input")?,
@@ -928,7 +929,8 @@ fn prf_in(prf: &PrfArgs) -> Result<crate::vault::PasskeyPrfInput, Refusal> {
     })
 }
 
-/// A write of more than 64 KiB is not refused here: the vault answers `written: false`.
+/// An empty write or a write of more than 64 KiB is not refused here: the vault answers
+/// `written: false` and stores nothing.
 fn large_blob_in(blob: &LargeBlobArgs) -> Result<crate::vault::LargeBlobOp, Refusal> {
     match (blob.read, &blob.write) {
         (true, None) => Ok(crate::vault::LargeBlobOp::Read),
@@ -1256,6 +1258,10 @@ impl DesktopApp {
             return self.answer_system_fill(ticket, filled);
         }
         let result = self.browser.passkey.take();
+        let stored = matches!(
+            &result,
+            Some(Ok(PasskeyDone::Signed(assertion))) if blob_written(assertion)
+        );
         let (delivered, created) = match result {
             Some(Ok(PasskeyDone::Signed(assertion))) => {
                 (ticket.ok(&PlatformAssertion::from(&assertion)), false)
@@ -1284,6 +1290,10 @@ impl DesktopApp {
         match (delivered, created) {
             (true, false) => self.set_ok("You are signed in with a passkey from Apassy."),
             (true, true) => self.set_ok("The new passkey is saved in Apassy."),
+            // The write is in the vault before the answer goes: say so.
+            (false, false) if stored => self.set_err(
+                "macOS stopped waiting. Nothing was signed in. The data that was sent is stored with the passkey.",
+            ),
             (false, false) => self.set_err("macOS stopped waiting. Nothing was signed in."),
             (false, true) => self.set_err(
                 "The new passkey is saved in Apassy, but macOS stopped waiting for it. Remove it in Apassy, or add the passkey again.",

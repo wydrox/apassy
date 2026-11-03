@@ -155,6 +155,13 @@ fn passkey_get_takes_prf_and_large_blob_extensions() {
     );
     let debug = format!("{request:?}");
     assert!(!debug.contains(&encode_bytes(b"first")), "{debug}");
+    // WebAuthn sets no minimum: an empty input is the empty text.
+    let empty = get(&packet(
+        &one,
+        serde_json::json!({"prf": {"eval": {"first": "", "second": ""}}}),
+    ));
+    let eval = empty.prf.unwrap().eval.unwrap();
+    assert!(eval.first.is_empty() && eval.second == Some(Vec::new()));
     // A read with any allow list, and a write with exactly one credential.
     let read = get(&packet(
         &[],
@@ -195,10 +202,6 @@ fn passkey_get_takes_prf_and_large_blob_extensions() {
         (
             &one[..],
             serde_json::json!({"prf": {"eval_by_credential": too_many}}),
-        ),
-        (
-            &one[..],
-            serde_json::json!({"prf": {"eval": {"first": ""}}}),
         ),
         (
             &one[..],

@@ -325,8 +325,9 @@ pub struct PasskeyCreated {
 /// The PRF inputs of an assertion (WebAuthn PRF extension, CTAP hmac-secret). With
 /// `hashed: false` the inputs are the WebAuthn values, and the vault makes each salt:
 /// SHA-256 of `"WebAuthn PRF"`, a zero byte, and the input. With `hashed: true` the
-/// inputs are the 32-byte salts already (the form of the macOS and iOS credential
-/// provider APIs). Debug shows only the lengths.
+/// inputs are the 32-byte hmac-secret salts already. The macOS and iOS credential
+/// provider APIs give the WebAuthn values, so their callers send `hashed: false`.
+/// Debug shows only the lengths.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PasskeyPrfInput {
     pub first: Vec<u8>,
@@ -1752,8 +1753,9 @@ impl Vault {
     /// that the item had. The item gets a new revision and a history event without
     /// values, and the change syncs like any other edit.
     ///
-    /// `Ok(false)`, and nothing changes: the blob has more than [`MAX_LARGE_BLOB_BYTES`],
-    /// its compressed base64url is longer than a field value, the item with the new
+    /// `Ok(false)`, and nothing changes: the blob is empty (there is nothing to store, and
+    /// the stored blob stays), the blob has more than [`MAX_LARGE_BLOB_BYTES`], its
+    /// compressed base64url is longer than a field value, the item with the new
     /// blob would go over the limits of an item, or the item has no canonical passkey
     /// for this RP ID and credential ID.
     pub fn write_large_blob(
@@ -1764,7 +1766,7 @@ impl Vault {
         blob: &[u8],
     ) -> PasskeyResult<bool> {
         self.require_unlocked()?;
-        if blob.len() > MAX_LARGE_BLOB_BYTES {
+        if blob.is_empty() || blob.len() > MAX_LARGE_BLOB_BYTES {
             return Ok(false);
         }
         let stored = match self.canonical_stored(item_id) {
@@ -2522,6 +2524,26 @@ mod tests {
         assert_eq!(
             to_hex(&**output.second.as_ref().unwrap()),
             "828096fb564983a3471aaf5e933b4ff0a31256b6184a53c2432521647fbeb6ac"
+        );
+        // An empty input is valid (WebAuthn sets no minimum). Python:
+        // hmac.new(b"\x11" * 32, sha256(b"WebAuthn PRF\x00").digest(), sha256).
+        assert_eq!(
+            to_hex(&prf_salt(b"", false).unwrap()),
+            "6a7e64b2aa34c92736143a062fa149aff1bd8bb3f7ee6f346885481f9414a3d3"
+        );
+        let empty = prf_output(
+            &PasskeyPrfInput {
+                first: Vec::new(),
+                second: None,
+                hashed: false,
+            },
+            Some(&secrets),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            to_hex(&*empty.first),
+            "bd06f2afab1a7090d7b822f4ab562eb09407c66e747a5eb0b8515d2ae7ced4b7"
         );
         // A hashed input is the salt.
         let hashed = prf_output(

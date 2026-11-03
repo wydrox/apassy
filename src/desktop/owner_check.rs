@@ -31,7 +31,7 @@ use super::{BrokerState, DesktopApp};
 use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{
     ApprovalQueue, CheckMethod, EvaluationOffer, OwnerAction, OwnerAuthError, OwnerCheck,
-    OwnerGate, OwnerProof, PendingRun, action_words, touch_id_detail,
+    OwnerGate, OwnerProof, PasskeyExtras, PendingRun, action_words, touch_id_detail,
 };
 use crate::broker::profile::REPORTING_API_V0;
 use crate::broker::project::Project;
@@ -226,6 +226,20 @@ pub struct PasskeyRequestExtensions {
 }
 
 impl PasskeyRequestExtensions {
+    /// The extensions of the request before the owner chooses an account: the PRF of
+    /// `eval`, or of some credential of `eval_by_credential`, and the largeBlob
+    /// operation. The dialog names them so the owner sees them before the choice.
+    pub fn for_any_credential(&self) -> crate::vault::PasskeyAssertionExtensions {
+        crate::vault::PasskeyAssertionExtensions {
+            prf: self.prf.clone().or_else(|| {
+                self.prf_by_credential
+                    .first()
+                    .map(|(_, input)| input.clone())
+            }),
+            large_blob: self.large_blob.clone(),
+        }
+    }
+
     /// The extensions of the assertion with `credential_id`.
     pub fn for_credential(&self, credential_id: &[u8]) -> crate::vault::PasskeyAssertionExtensions {
         let by_credential = self
@@ -1106,8 +1120,11 @@ impl OwnerRequest {
                 super::owner_store::field_label(field)
             ),
             Self::SignPasskey {
-                request, accounts, ..
-            } => describe_sign(request, accounts, self.passkey_account()),
+                request,
+                accounts,
+                extensions,
+                ..
+            } => describe_sign(request, accounts, self.passkey_account(), extensions),
             Self::CreatePasskey {
                 request,
                 user_name,
@@ -1438,32 +1455,38 @@ fn account_text(user_name: &str, display_name: &str) -> String {
 /// The dialog text of an assertion. The origin comes first: it is the origin in the
 /// signed client data. The other accounts of the site are named, so the owner knows
 /// that the check is for one of them.
+/// The text of an assertion. Besides the signature it names what the WebAuthn
+/// extensions give or store ([`PasskeyExtras::sentences`]), for the chosen account, or
+/// for any account before the choice.
 fn describe_sign(
     request: &PasskeyRequest,
     accounts: &[PasskeyAccount],
     chosen: Option<&PasskeyAccount>,
+    extensions: &PasskeyRequestExtensions,
 ) -> String {
     let Some(account) = chosen else {
+        let extras = PasskeyExtras::of(&extensions.for_any_credential()).sentences();
         return match &request.origin {
             Some(origin) => format!(
-                "For {origin}: sign in to {} with a passkey. The page gets one signature. Choose the account before you confirm.",
+                "For {origin}: sign in to {} with a passkey. The page gets one signature.{extras} Choose the account before you confirm.",
                 request.rp_id
             ),
             None => format!(
-                "macOS asks to sign in to {} with a passkey. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. Choose the account before you confirm. If you did not just sign in, click Cancel.",
+                "macOS asks to sign in to {} with a passkey. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}.{extras} Choose the account before you confirm. If you did not just sign in, click Cancel.",
                 request.rp_id, request.rp_id
             ),
         };
     };
+    let extras = PasskeyExtras::of(&extensions.for_credential(&account.credential_id)).sentences();
     let who = account_text(&account.user_name, &account.user_display_name);
     let login = page_text(&account.item_name);
     let mut text = match &request.origin {
         Some(origin) => format!(
-            "For {origin}: sign in to {} as {who} with the passkey of the login \"{login}\". The page gets one signature.",
+            "For {origin}: sign in to {} as {who} with the passkey of the login \"{login}\". The page gets one signature.{extras}",
             request.rp_id
         ),
         None => format!(
-            "macOS asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. If you did not just sign in, click Cancel.",
+            "macOS asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}.{extras} If you did not just sign in, click Cancel.",
             request.rp_id, request.rp_id
         ),
     };

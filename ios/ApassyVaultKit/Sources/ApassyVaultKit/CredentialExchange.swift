@@ -126,6 +126,11 @@ public enum CredentialExchangeImport {
         public var attached = 0
         /// Passkeys that the vault has already.
         public var existing = 0
+        /// Logins that had the imported passkey already and got the fields that they lacked.
+        public var completed = 0
+        /// Logins of the vault that kept their stored password or one-time password, which differs
+        /// from the imported one; the imported one is a hidden detail of the login.
+        public var keptStored = 0
         /// Entries the core refused.
         public var failed = 0
         public var unsupported = 0
@@ -143,6 +148,14 @@ public enum CredentialExchangeImport {
                     "\(attached) \(attached == 1 ? "passkey went" : "passkeys went") on a login that was in the vault already.")
             }
             if existing > 0 { parts.append("\(existing) \(existing == 1 ? "passkey was" : "passkeys were") in the vault already.") }
+            if completed > 0 {
+                parts.append(
+                    "\(completed) \(completed == 1 ? "login with such a passkey" : "logins with such passkeys") got the fields that \(completed == 1 ? "it" : "they") lacked.")
+            }
+            if keptStored > 0 {
+                parts.append(
+                    "\(keptStored) \(keptStored == 1 ? "login kept its" : "logins kept their") stored password or one-time password; the imported one is a hidden detail.")
+            }
             if invalid > 0 {
                 parts.append(
                     "\(invalid) \(invalid == 1 ? "passkey" : "passkeys") could not be used: the key or its extension data is damaged or of a kind that Apassy does not know.")
@@ -184,6 +197,8 @@ public enum CredentialExchangeImport {
         var groups: [Group] = []
         /// Custom fields, a second login, more codes: details of the item.
         var extra: [Value] = []
+        /// The indexes in `extra` of custom fields that are visible by their label.
+        var plainCustom: [Int] = []
         let title = clip(item.title.trimmingCharacters(in: .whitespacesAndNewlines), maxTitleBytes)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         for credential in item.credentials {
@@ -218,10 +233,19 @@ public enum CredentialExchangeImport {
                 var values: [Value] = []
                 add("Password", generated.password, secret: true, to: &values)
                 append(Group(title: "Generated password", values: values), to: &groups)
-            case .customFields(let fields): extra += customValues(fields)
+            case .customFields(let fields):
+                for value in customValues(fields) {
+                    if !value.secret { plainCustom.append(extra.count) }
+                    extra.append(value)
+                }
             case .itemReference: break
             @unknown default: break
             }
+        }
+        // A card or a personal item: a plain label ("Name", "Type", "Region") says nothing about
+        // what its custom fields hold, so all of them are hidden.
+        if groups.contains(where: { $0.tag == "card" || $0.tag == "identity" }) {
+            for index in plainCustom { extra[index].secret = true }
         }
         let website = item.scope?.urls.first.map(\.absoluteString)
         let username = basic?.userName?.value.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -249,7 +273,9 @@ public enum CredentialExchangeImport {
         }
 
         if !accepted.isEmpty || password != nil {
-            let loginTitle = title.isEmpty ? (accepted.first?.rpID ?? website ?? "Imported login") : title
+            // An untitled login takes the host, never the whole website: a path or a query can
+            // hold a token, and agents see titles.
+            let loginTitle = title.isEmpty ? (accepted.first?.rpID ?? website.flatMap { host($0) } ?? "Imported login") : title
             guard !accepted.isEmpty || username != nil else {
                 // A password without a username is not a login of the vault: a Custom item, as the
                 // Mac importer makes it.
@@ -480,12 +506,16 @@ public enum CredentialExchangeImport {
             kind: hasKey ? .apiKey : .custom, mainName: hasKey ? "token" : nil, title: "API key", values: values)
     }
 
-    /// An SSH key is of the kind SSH key: the vault takes any private key text, and the PEM of
-    /// the PKCS #8 key of the format ("BEGIN PRIVATE KEY") is a form that OpenSSH reads.
+    /// An SSH key is of the kind SSH key: the vault takes any private key text. An Ed25519 key
+    /// is written in the OpenSSH format, which is the only one in which OpenSSH loads it; the
+    /// other keys as the PEM of their PKCS #8 key ("BEGIN PRIVATE KEY"), which OpenSSH reads.
     private static func sshKeyGroup(_ key: ASImportableCredential.SSHKey) -> Group {
         var values: [Value] = []
         let hasKey = !key.privateKey.isEmpty
-        if hasKey { values.append(Value("Private key", pem(key.privateKey), secret: true)) }
+        if hasKey {
+            let text = openSSH(ed25519: key.privateKey, comment: key.keyComment ?? "") ?? pem(key.privateKey)
+            values.append(Value("Private key", text, secret: true))
+        }
         add("Key type", key.keyType, secret: false, to: &values)
         if let comment = key.keyComment { add("Comment", comment, secret: false, to: &values) }
         add("Created", key.creationDate, secret: false, to: &values)
@@ -500,6 +530,57 @@ public enum CredentialExchangeImport {
         "-----BEGIN PRIVATE KEY-----\n"
             + der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
             + "\n-----END PRIVATE KEY-----\n"
+    }
+
+    /// An Ed25519 PKCS #8 key in the OpenSSH private key format (openssh-key-v1, PROTOCOL.key):
+    /// no cipher, no KDF, one key, with `comment`. nil when the key is not an Ed25519 PKCS #8
+    /// key. The public key comes from CryptoKit.
+    static func openSSH(ed25519 der: Data, comment: String) -> String? {
+        guard let info = PKCS8.read(der), info.algorithm == PKCS8.ed25519, info.parameters == nil,
+            info.privateKey.count == 34, info.privateKey[0] == 0x04, info.privateKey[1] == 32,
+            let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: Data(info.privateKey[2...]))
+        else { return nil }
+        let seed = Data(info.privateKey[2...])
+        let publicKey = key.publicKey.rawRepresentation
+        func uint32(_ value: UInt32) -> Data {
+            Data([UInt8(value >> 24), UInt8((value >> 16) & 0xFF), UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)])
+        }
+        func field(_ bytes: Data) -> Data { uint32(UInt32(bytes.count)) + bytes }
+        func name(_ text: String) -> Data { field(Data(text.utf8)) }
+        let publicBlob = name("ssh-ed25519") + field(publicKey)
+        // Two equal random check numbers, the key, the comment, then padding 1, 2, 3, … to the
+        // cipher block size (8 for "none").
+        let check = UInt32.random(in: .min ... .max)
+        var secret = uint32(check)
+        secret += uint32(check)
+        secret += name("ssh-ed25519")
+        secret += field(publicKey)
+        secret += field(seed + publicKey)
+        secret += name(comment)
+        var pad: UInt8 = 1
+        while secret.count % 8 != 0 {
+            secret.append(pad)
+            pad += 1
+        }
+        var blob = Data("openssh-key-v1".utf8)
+        blob.append(0)
+        blob += name("none")  // cipher
+        blob += name("none")  // KDF
+        blob += field(Data())  // KDF options
+        blob += uint32(1)  // one key
+        blob += field(publicBlob)
+        blob += field(secret)
+        // Lines of 70 characters, as ssh-keygen writes them.
+        let encoded = blob.base64EncodedString()
+        var lines: [String] = []
+        var start = encoded.startIndex
+        while start < encoded.endIndex {
+            let end = encoded.index(start, offsetBy: 70, limitedBy: encoded.endIndex) ?? encoded.endIndex
+            lines.append(String(encoded[start..<end]))
+            start = end
+        }
+        return "-----BEGIN OPENSSH PRIVATE KEY-----\n" + lines.joined(separator: "\n")
+            + "\n-----END OPENSSH PRIVATE KEY-----\n"
     }
 
     /// Custom fields: hidden unless a field that is not concealed has a known plain label.
@@ -679,17 +760,17 @@ public enum CredentialExchangeImport {
     }
 
     /// The login of the vault that an imported passkey goes on: the one active login without a
-    /// passkey whose website is on the host of the relying party (or of the item) and whose
-    /// username is the account of the passkey (or of the item), without regard to case. nil
-    /// when no login or more than one matches.
+    /// passkey whose website is on the host of the relying party and whose username is the
+    /// account of the passkey (or of the item), without regard to case. The website of the item
+    /// does not count: the passkey works only for its relying party. nil when no login or more
+    /// than one matches.
     static func attachTarget(for entry: Entry, passkey: PasskeyImportAccount, rows: [ItemRow]) -> ItemRow? {
         let names = Set([accountName(passkey.userName), accountName(entry.username)].compactMap { $0 })
-        let hosts = Set([host(passkey.rpID), entry.website.flatMap { host($0) }].compactMap { $0 })
-        guard !names.isEmpty, !hosts.isEmpty else { return nil }
+        guard !names.isEmpty, let rpHost = host(passkey.rpID) else { return nil }
         let matches = rows.filter { row in
             row.kind == .login && !row.hasPasskey && !row.archived && row.conflictOf == nil
                 && accountName(row.subtitle).map { names.contains($0) } == true
-                && row.websites.contains { website in host(website).map { hosts.contains($0) } == true }
+                && row.websites.contains { host($0) == rpHost }
         }
         return matches.count == 1 ? matches[0] : nil
     }
@@ -709,11 +790,11 @@ public enum CredentialExchangeImport {
                 if let passkey = entry.passkey {
                     try await importPasskey(entry, passkey, service: service, rows: &rows, report: &report)
                 } else {
-                    let (body, rest) = draft(entry, keeping: nil)
-                    _ = try await service.save(id: nil, revision: nil, draft: body)
+                    let made = draft(entry, keeping: nil)
+                    _ = try await service.save(id: nil, revision: nil, draft: made.draft)
                     rows = nil
                     report.imported += 1
-                    await save(rest, title: entry.title, tags: entry.tags, service: service, report: &report)
+                    await save(made.rest, title: entry.title, tags: entry.tags, service: service, report: &report)
                 }
             } catch {
                 report.failed += 1
@@ -744,14 +825,32 @@ public enum CredentialExchangeImport {
         var account = passkey
         account.attachID = attachTarget(for: entry, passkey: passkey, rows: rows ?? [])?.id
         var result = try await service.passkeyImport([account])
-        if account.attachID != nil, result.imported == 0, result.skippedExisting == 0 {
-            // The login changed since the list, or the core did not take it: a new login.
-            account.attachID = nil
-            result = try await service.passkeyImport([account])
+        if account.attachID != nil {
+            // The login changed since the list (it got another passkey, or the core did not take
+            // it). The core answers "exists" for a login that has a passkey now, too: only a
+            // passkey that is really in the vault is one.
+            let retry: Bool
+            if result.imported == 0, result.skippedExisting == 0 {
+                retry = true
+            } else if result.skippedExisting > 0 {
+                retry = try await service.passkeys(rpID: passkey.rpID, allowed: [passkey.credentialID]).isEmpty
+            } else {
+                retry = false
+            }
+            if retry {
+                account.attachID = nil
+                result = try await service.passkeyImport([account])
+            }
         }
         rows = nil
         if result.skippedExisting > 0 {
             report.existing += 1
+            // The passkey is in a login already: that login still takes the password, the code,
+            // the website, and the details that it lacks.
+            guard entry.hasLoginData,
+                let id = try await service.passkeys(rpID: passkey.rpID, allowed: [passkey.credentialID]).first?.id
+            else { return }
+            if try await complete(id, with: entry, service: service, report: &report) { report.completed += 1 }
             return
         }
         guard result.imported > 0 else {
@@ -775,30 +874,104 @@ public enum CredentialExchangeImport {
             else { return }
             id = found
         }
+        _ = try await complete(id, with: entry, service: service, report: &report)
+    }
+
+    /// Add what the login `id` lacks from `entry`, and save what does not fit as Custom items.
+    /// A stored password or one-time password stays; a different imported one becomes a hidden
+    /// detail. True when the login changed.
+    private static func complete(
+        _ id: UInt64, with entry: Entry, service: any VaultService, report: inout Report
+    ) async throws -> Bool {
         let detail = try await service.item(id: id)
-        let (body, rest) = draft(entry, keeping: detail)
-        do {
-            _ = try await service.save(id: id, revision: detail.row.revision, draft: body)
-        } catch {
-            report.failed += 1
+        // The stored values, only to compare them with the imported ones. A value that cannot be
+        // read counts as different, so the imported one is kept.
+        var stored = Stored()
+        if entry.password != nil, detail.fields.contains(where: { $0.name == "password" && !$0.custom }) {
+            stored.password = try? await service.reveal(id: id, field: "password")
         }
-        await save(rest, title: detail.row.title, tags: entry.tags, service: service, report: &report)
+        if entry.otp != nil, let field = detail.field(.totp) {
+            stored.otp = try? await service.reveal(id: id, field: field.name)
+        }
+        // A hidden detail with the label of an imported value: read it, so the same value is not
+        // added again (an import that runs twice).
+        let labels = Set(
+            (entry.details.map(\.label) + ["Imported password", "One-time password (imported)", "Note"]).map {
+                $0.lowercased()
+            })
+        for field in detail.fields where field.custom && field.secret && labels.contains(field.label.lowercased()) {
+            if let value = try? await service.reveal(id: id, field: field.name) {
+                stored.details[field.label.lowercased()] = value
+            }
+        }
+        let made = draft(entry, keeping: detail, stored: stored)
+        var changed = false
+        if made.changed {
+            do {
+                _ = try await service.save(id: id, revision: detail.row.revision, draft: made.draft)
+                changed = true
+                if made.keptStored { report.keptStored += 1 }
+            } catch {
+                report.failed += 1
+            }
+        }
+        await save(made.rest, title: detail.row.title, tags: entry.tags, service: service, report: &report)
+        return changed || !made.rest.isEmpty
+    }
+
+    /// The stored password and one-time password of a login, read to compare them with the
+    /// imported ones.
+    struct Stored: Sendable {
+        var password: String?
+        var otp: String?
+        /// Hidden details of the login, by lowercased label.
+        var details: [String: String] = [:]
+    }
+
+    /// A draft with what it leaves over and what it did to a stored login.
+    struct Made: Sendable {
+        var draft: ItemDraft
+        /// Details that do not fit on the item.
+        var rest: [Value]
+        /// The draft adds something to the stored login (always true for a new item).
+        var changed: Bool
+        /// The stored password or one-time password stays, and the imported one, which differs,
+        /// is a hidden detail.
+        var keptStored: Bool
+    }
+
+    /// Whether two one-time password values have the same seed: the `secret` of an `otpauth://`
+    /// URI or a bare Base32 value. Values that do not parse compare as text.
+    static func sameOTP(_ stored: String?, _ imported: String) -> Bool {
+        guard let stored else { return false }
+        func seed(_ value: String) -> Data? {
+            let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.lowercased().hasPrefix("otpauth://") {
+                guard let secret = URLComponents(string: text)?.queryItems?.first(where: { $0.name.lowercased() == "secret" })?.value
+                else { return nil }
+                return OTPAuthURI.decodeBase32(secret)
+            }
+            return OTPAuthURI.decodeBase32(text.replacingOccurrences(of: "-", with: ""))
+        }
+        if let first = seed(stored), let second = seed(imported), !first.isEmpty { return first == second }
+        return stored.trimmingCharacters(in: .whitespacesAndNewlines) == imported.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The draft of an entry, and the details that do not fit on it. With `keeping` (a login),
     /// the stored fields stay as they are (a secret as nil keeps its value) and the entry adds
-    /// what the item does not have.
-    static func draft(_ entry: Entry, keeping detail: ItemDetail?) -> (draft: ItemDraft, rest: [Value]) {
+    /// what the item does not have. A password or a one-time password that differs from the
+    /// stored one (`stored`) becomes the hidden detail "Imported password" or "One-time password
+    /// (imported)", which the OTP label rules read as a code.
+    static func draft(_ entry: Entry, keeping detail: ItemDetail?, stored: Stored = Stored()) -> Made {
         guard entry.kind == .login else {
             var fields: [DraftField] = []
             if let main = entry.main { fields.append(.named(main.label, main.value, secret: true)) }
             fields += entry.details.map { DraftField.detail($0.label, $0.value, secret: $0.secret) }
-            return (
-                ItemDraft(
+            return Made(
+                draft: ItemDraft(
                     title: entry.title, kind: entry.kind, notes: entry.notes, tags: Array(entry.tags.prefix(maxTags)),
                     fields: fields),
-                []
-            )
+                rest: [], changed: true, keptStored: false)
         }
         var fields: [DraftField] = []
         var names = Set<String>()
@@ -806,6 +979,8 @@ public enum CredentialExchangeImport {
         var details = 0
         var hasWebsite = false
         var hasOTP = false
+        var changed = detail == nil
+        var keptStored = false
         for field in detail?.fields ?? [] {
             names.insert(field.name)
             if field.role == .website { hasWebsite = true }
@@ -821,10 +996,21 @@ public enum CredentialExchangeImport {
                 fields.append(.named(field.name, field.secret ? nil : field.value ?? "", secret: field.secret))
             }
         }
+        // What goes in details, the most important first.
+        var pool: [Value] = []
         let username = entry.username ?? entry.passkey?.userName.nilIfEmpty
-        if !names.contains("username"), let username { fields.append(.named("username", username, secret: false)) }
-        if !names.contains("password"), let password = entry.password {
-            fields.append(.named("password", password, secret: true))
+        if !names.contains("username"), let username {
+            fields.append(.named("username", username, secret: false))
+            changed = true
+        }
+        if let password = entry.password {
+            if !names.contains("password") {
+                fields.append(.named("password", password, secret: true))
+                changed = true
+            } else if stored.password != password {
+                pool.append(Value("Imported password", password, secret: true))
+                keptStored = true
+            }
         }
         let website = entry.website ?? entry.passkey.map { "https://\($0.rpID)" }
         if !hasWebsite, let website, details < maxDetails {
@@ -832,33 +1018,53 @@ public enum CredentialExchangeImport {
             used.insert(label.lowercased())
             details += 1
             fields.append(.detail(label, website, secret: false))
+            changed = true
         }
-        var pool = entry.details
-        if !hasOTP, let otp = entry.otp {
-            if details < maxDetails {
-                let label = uniqueLabel("One-time password", used: used)
-                used.insert(label.lowercased())
-                details += 1
-                fields.append(.detail(label, otp, secret: true))
-            } else {
-                pool.insert(Value("One-time password", otp, secret: true), at: 0)
+        if let otp = entry.otp {
+            if !hasOTP {
+                if details < maxDetails {
+                    let label = uniqueLabel("One-time password", used: used)
+                    used.insert(label.lowercased())
+                    details += 1
+                    fields.append(.detail(label, otp, secret: true))
+                    changed = true
+                } else {
+                    pool.append(Value("One-time password", otp, secret: true))
+                }
+            } else if !sameOTP(stored.otp, otp) {
+                pool.append(Value("One-time password (imported)", otp, secret: true))
+                keptStored = true
             }
         }
         var notes = [detail?.notes ?? "", entry.notes].filter { !$0.isEmpty }.joined(separator: "\n\n")
         if notes.utf8.count > maxNotesBytes, !entry.notes.isEmpty {
             notes = detail?.notes ?? ""
-            pool.insert(Value("Note", entry.notes, secret: true), at: 0)
+            pool.append(Value("Note", entry.notes, secret: true))
         }
+        if notes != (detail?.notes ?? notes) { changed = true }
+        pool += entry.details
+        // A detail that the login has already with the same label and value is not added again.
+        var current = stored.details
+        for field in detail?.fields ?? [] where field.custom && !field.secret {
+            current[field.label.lowercased()] = field.value ?? ""
+        }
+        pool.removeAll { value in
+            current[value.label.lowercased()].map { $0 == value.value || $0 == value.value.trimmingCharacters(in: .whitespacesAndNewlines) } == true
+        }
+        keptStored = keptStored && pool.contains { $0.label == "Imported password" || $0.label == "One-time password (imported)" }
         let (fitted, rest) = fit(pool, budget: max(0, maxDetails - details), used: used)
         fields += fitted.map { DraftField.detail($0.label, $0.value, secret: $0.secret) }
+        if !fitted.isEmpty { changed = true }
         var tags = detail?.row.tags ?? []
-        for tag in entry.tags where !tags.contains(tag) { tags.append(tag) }
-        return (
-            ItemDraft(
+        for tag in entry.tags where !tags.contains(tag) {
+            tags.append(tag)
+            changed = true
+        }
+        return Made(
+            draft: ItemDraft(
                 title: detail?.row.title ?? entry.title, kind: .login, notes: notes, tags: Array(tags.prefix(maxTags)),
                 fields: fields),
-            rest
-        )
+            rest: rest, changed: changed || !rest.isEmpty, keptStored: keptStored)
     }
 }
 
@@ -869,11 +1075,32 @@ public enum CredentialExchangeExport {
     public static let exporterRelyingParty = "apassy.wyderka.cc"
     public static let exporterName = "Apassy"
 
+    /// Whether this system writes the passkey extension data of the format (iOS 26.4 and later).
+    public static var carriesPasskeyExtensions: Bool {
+        if #available(iOS 26.4, macOS 26.4, *) { return true }
+        return false
+    }
+
+    /// The passkeys with PRF secrets or a large blob that an export leaves out because the system
+    /// cannot carry that data: they stay in Apassy only, with what the website stored with them.
+    public static func withheldPasskeys(_ export: CredentialExport, carriesExtensions: Bool = carriesPasskeyExtensions)
+        -> Int
+    {
+        guard !carriesExtensions else { return 0 }
+        return export.items.filter { item in item.passkey.map { hasExtensions($0) } == true }.count
+    }
+
+    static func hasExtensions(_ passkey: ExportedPasskey) -> Bool {
+        passkey.prf != nil || passkey.largeBlob != nil
+    }
+
     public static func data(
         _ export: CredentialExport, vaultID: String, formatVersion: ASExportedCredentialData.FormatVersion = .v1,
-        now: Date = Date()
+        now: Date = Date(), carriesExtensions: Bool = carriesPasskeyExtensions
     ) -> ASExportedCredentialData {
-        let items = export.items.compactMap { item(of: $0, vaultID: vaultID, now: now) }
+        let items = export.items.compactMap {
+            item(of: $0, vaultID: vaultID, now: now, carriesExtensions: carriesExtensions)
+        }
         let account = ASImportableAccount(
             id: stableID("account:\(vaultID)"), userName: "", email: "", fullName: nil, collections: [], items: items)
         return ASExportedCredentialData(
@@ -881,7 +1108,12 @@ public enum CredentialExchangeExport {
             exporterDisplayName: exporterName, timestamp: now)
     }
 
-    static func item(of item: ExportedItem, vaultID: String, now: Date) -> ASImportableItem? {
+    /// The item in the format. Without `carriesExtensions`, a passkey with PRF secrets or a large
+    /// blob is left out (the login keeps its other credentials): an export without that data
+    /// would break what the website stored with it.
+    static func item(
+        of item: ExportedItem, vaultID: String, now: Date, carriesExtensions: Bool = carriesPasskeyExtensions
+    ) -> ASImportableItem? {
         var credentials: [ASImportableCredential] = []
         if item.username != nil || item.password != nil {
             credentials.append(
@@ -890,14 +1122,14 @@ public enum CredentialExchangeExport {
                         userName: item.username.map { field(.string, $0) },
                         password: item.password.map { field(.concealedString, $0) })))
         }
-        if let passkey = item.passkey {
+        if let passkey = item.passkey, carriesExtensions || !hasExtensions(passkey) {
             var exported = ASImportableCredential.Passkey(
                 credentialID: passkey.credentialID, relyingPartyIdentifier: passkey.rpID,
                 userName: passkey.userName, userDisplayName: passkey.userDisplayName,
                 userHandle: passkey.userHandle, key: passkey.key)
             // The PRF secrets and the large blob go with the passkey, so the other app keeps what
             // the website stored with them (iOS 26.4 and later carry them).
-            if #available(iOS 26.4, macOS 26.4, *), passkey.prf != nil || passkey.largeBlob != nil {
+            if #available(iOS 26.4, macOS 26.4, *), hasExtensions(passkey) {
                 exported.fido2Extensions = ASImportableFIDO2Extensions(
                     hmacCredentials: passkey.prf.map {
                         ASImportableFIDO2HMACCredential(
