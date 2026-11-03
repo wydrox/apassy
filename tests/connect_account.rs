@@ -252,7 +252,7 @@ fn the_vectors_reproduce_the_words_hashes_and_messages() {
 fn the_account_key_refuses_every_other_tag() {
     let store = MemoryKeyStore::new();
     let signer = AccountSigner::open_or_create(&store).unwrap();
-    for refused in [
+    let refused: [&[u8]; 7] = [
         &b"apassy-relay connect v1\0https://connect.example.test\0key"[..],
         b"apassy-connect entitlement v1\0payload",
         b"apassy-connect safety v1\0acc",
@@ -260,7 +260,8 @@ fn the_account_key_refuses_every_other_tag() {
         b"apassy-relay sign-in v2\0origin",
         b"apassy-connect sign-in v1",
         b"",
-    ] {
+    ];
+    for refused in refused {
         assert_eq!(signer.sign(refused).unwrap_err(), ConnectError::TagRefused);
         assert_eq!(
             apassy::connect::sign(&signer, refused).unwrap_err(),
