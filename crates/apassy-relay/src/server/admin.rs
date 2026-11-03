@@ -1289,7 +1289,7 @@ pub struct NewAgent {
     pub expires_at: u64,
 }
 
-/// Checks the item list of an agent: 1 to `MAX_AGENT_ITEMS` distinct ids of live items.
+/// Checks the item list of an agent: at most `MAX_AGENT_ITEMS` distinct ids of live items.
 fn checked_agent_items(conn: &Connection, items: &[ItemId]) -> RelayResult<String> {
     let distinct: std::collections::HashSet<&ItemId> = items.iter().collect();
     if items.len() > MAX_AGENT_ITEMS || distinct.len() != items.len() {
