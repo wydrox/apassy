@@ -1,20 +1,23 @@
 ---
 import Page from "../layouts/Page.astro";
 import { REPO } from "../lib/site";
-// The privacy policy of the app, the browser extension (ADR 0021), and this site. The
-// Chrome Web Store listing of the extension links here. Keep it true to the code:
-// docs/operations/browser.md, docs/adr/0015-automatic-updates.md, and
-// docs/adr/0022-relay-sync.md.
-const UPDATED = "2026-10-17";
+// The privacy policy of the Mac app, the iPhone and Apple Watch apps, the browser
+// extension (ADR 0021), and this site. The Chrome Web Store listing of the extension and
+// the App Store listing of the iPhone app link here. Keep it true to the code:
+// docs/operations/browser.md, docs/adr/0015-automatic-updates.md,
+// docs/adr/0022-relay-sync.md, and docs/store/app-store/app-privacy.md (the App Privacy
+// answers must say the same as this page).
+const UPDATED = "2026-11-03";
 ---
-<Page title="Privacy · apassy" description="What Apassy, its browser extension, and this site do with your data.">
+<Page title="Privacy · apassy" description="What Apassy for the Mac, iPhone, and Apple Watch, its browser extension, its relay, and this site do with your data.">
   <main class="container">
     <header class="head">
       <p class="eyebrow">Privacy</p>
-      <h1>Your data stays on your Mac</h1>
+      <h1>Your secrets stay on your devices</h1>
       <p class="lead">
-        Apassy keeps your credentials on your Mac. There are no Apassy accounts, no analytics, and no ads. We never
-        receive your passwords, your keys, or your vault. Updated {UPDATED}.
+        Apassy keeps your credentials on your Mac, your iPhone, and your Apple Watch. There are no Apassy accounts, no
+        analytics, and no ads. Your vault, your agents' requests, and your answers leave your devices only encrypted, and
+        we cannot read them. Updated {UPDATED}.
       </p>
     </header>
 
@@ -31,9 +34,109 @@ const UPDATED = "2026-10-17";
           Apassy checks for updates: it reads <code>https://apassy.wyderka.cc/latest.json</code> after the start and then
           every 6 hours. Like any web request, it carries the IP address of your Mac. You can turn the check off in Settings.
         </li>
-        <li>The bouncer brain runs on your Mac. Agent commands and your rules are not sent anywhere.</li>
-        <li>The iPhone companion talks to your Mac on your local network only.</li>
+        <li>
+          The bouncer brain runs on your Mac. It sends no agent command and none of your rules anywhere to decide. If you
+          answer requests on your iPhone or Apple Watch, each request goes to them sealed, as described below.
+        </li>
+        <li>The iPhone and Apple Watch apps, and the Apassy relay that they use, are described in the next sections.</li>
       </ul>
+
+      <h2>The iPhone and Apple Watch apps</h2>
+      <p>
+        The iPhone app opens the same encrypted vault as your Mac and fills passwords, one-time codes, and passkeys. The
+        Apple Watch app answers the requests of your agents. Neither app has accounts, ads, analytics, crash reporting, or
+        tracking.
+      </p>
+      <ul>
+        <li>
+          <strong>Your vault on the iPhone.</strong> The vault is an encrypted file on your iPhone (SQLCipher), opened
+          with your passphrase. If you turn on Face ID unlock, the passphrase is kept in the iPhone's keychain on this
+          device only. It never goes to iCloud Keychain or to us. Apassy asks for Face ID or your passphrase before it
+          shows, copies, or fills a secret: each time, or after the time that you choose in Settings. A copied secret
+          stays on this iPhone and expires after 60 seconds by default.
+        </li>
+        <li>
+          <strong>On the iPhone only.</strong> For AutoFill, iOS keeps the username and the website host of each login
+          on the iPhone, so it can suggest them. The camera is used only to scan the code that your Mac shows, and no
+          picture is saved. When you move items to or from another app (Credential Exchange), iOS carries them between
+          the two apps on this iPhone. "Open" on a website opens it in Safari. None of this goes to us.
+        </li>
+        <li>
+          <strong>Where your vault goes.</strong> You choose iCloud Drive, the Apassy relay, or neither. In iCloud
+          Drive, Apple holds the encrypted vault file for you, under Apple's terms; we have no access to it. Through the
+          relay, Apassy sends the encrypted vault file and gets the copies of your other devices. Nobody can read a copy
+          without your passphrase, and the passphrase never leaves your devices.
+        </li>
+        <li>
+          <strong>Requests from your agents.</strong> When a coding agent on your Mac asks for a credential, your Mac
+          sends the request to your iPhone and your Apple Watch through the Apassy relay. The request, your answer, and
+          the list of agents of your Macs are sealed on your devices (ChaCha20-Poly1305) with a key that only your
+          devices have. The relay passes them on and cannot read them. The older Wi-Fi pairing with a Mac talks to your
+          Mac on your local network only, over TLS with a pinned certificate.
+        </li>
+        <li>
+          <strong>Notifications.</strong> If you turn them on, iOS gives Apassy a push token. Apassy sends it to the
+          Apassy relay, so the relay can wake your iPhone when a request waits. The relay gives the token to our push
+          service (a Cloudflare Worker), which asks Apple Push Notification service to show "A question is waiting". The
+          notification has no other content: no agent, no credential, no vault. Turn notifications off in Apassy or in
+          iOS Settings; remove the iPhone on your Mac to delete the token at the relay.
+        </li>
+        <li>
+          <strong>Apple Watch.</strong> The watch app holds no passwords. It keeps a small encrypted database with the
+          keys it needs to read and answer requests, and its own keys in the watch's Secure Enclave and keychain. To
+          connect it, your iPhone passes your Mac's code to the watch directly (WatchConnectivity) and does not keep it.
+          The watch then talks to the Apassy relay itself, over Wi-Fi or cellular. It registers no push token.
+        </li>
+      </ul>
+
+      <h2>The Apassy relay</h2>
+      <p>
+        The hosted Apassy relay runs at <code>apassy-relay.wyderka.cc</code>, behind Cloudflare. Its code is open source
+        (<a href={`${REPO}/tree/main/crates/apassy-relay`}>crates/apassy-relay</a>). It cannot read your vault copies,
+        requests, or answers. It can see their sizes and times, the ids of your devices, their names and public keys,
+        and push tokens. For each vault that uses it, it keeps:
+      </p>
+      <ul>
+        <li>
+          <strong>The encrypted vault copy</strong>, the current and the previous version, with its signed head,
+          versions, sizes, and times: until you turn relay sync off for the vault.
+        </li>
+        <li>
+          <strong>Sealed requests and answers</strong>: the sealed content until 10 minutes after the request ends; the
+          record of the request (devices, times, state) until 24 hours after it was made.
+        </li>
+        <li>
+          <strong>The sealed agent lists of your Macs</strong>: until the Mac is removed, or 30 days after the last
+          update.
+        </li>
+        <li>
+          <strong>Your devices</strong>: the name of each device (for example "iPhone", the name that you type, or the
+          name of your watch), its public keys, and the id that the relay gives it, to know which devices belong to the
+          vault and to check their signatures: until you remove the device on a Mac.
+        </li>
+        <li>
+          <strong>Push tokens</strong> of iPhones with notifications on: until you remove the iPhone on a Mac. A token
+          that Apple refuses is no longer used.
+        </li>
+        <li>
+          <strong>A log of events</strong> (device ids, versions, sizes, times; no item names and no content), for
+          security and operation. It has no fixed end date today: it stays while the vault's relay team exists, and an
+          encrypted archive of it stays when the relay deletes an unused team.
+        </li>
+        <li>
+          <strong>Backups</strong> of the relay's data (encrypted, as on the server), made each day and kept for 14 days on
+          the server, with a copy off the server.
+        </li>
+        <li>
+          <strong>The IP address and time of each request</strong>, in the usual request logs of Cloudflare and of the
+          server, to deliver and protect the service (for example rate limits).
+        </li>
+      </ul>
+      <p>
+        We use this data only to run the relay. We do not sell it, share it for advertising, or use it to profile you.
+        You can also run the relay on your own server: your Mac then links your iPhone and watch to that relay, and your
+        vault copies, requests, and answers go to your server instead of ours.
+      </p>
 
       <h2>The browser extension</h2>
       <p>
@@ -90,8 +193,8 @@ const UPDATED = "2026-10-17";
       <h2>Questions</h2>
       <p>
         Open an issue on <a href={`${REPO}/issues`}>GitHub</a>. Report a security problem privately,
-        as <a href={`${REPO}/blob/main/SECURITY.md`}>SECURITY.md</a> says. The code of the app and the extension is
-        public, so you can check each point above.
+        as <a href={`${REPO}/blob/main/SECURITY.md`}>SECURITY.md</a> says. The code of the apps, the extension, and the
+        relay is public, so you can check each point above.
       </p>
     </article>
   </main>

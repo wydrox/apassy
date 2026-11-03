@@ -360,7 +360,7 @@ When the API key has no access to cloud-managed distribution certificates (the e
 
 The build number is the minutes since 1970, so each run is higher than the last; the version is `MARKETING_VERSION` in `project.yml`. App Store Connect needs a few minutes to process a build. Internal testers of the team see it in TestFlight then. `--no-upload` writes the `.ipa` to `target/ios/export` instead.
 
-The app declares `ITSAppUsesNonExemptEncryption = NO` (ADR 0023, section 8), so a build needs no export compliance answer.
+The app and the watch app declare `ITSAppUsesNonExemptEncryption = YES` (owner, 2026-11-03; ADR 0023, section 8): the app has its own standard encryption (SQLCipher with OpenSSL, rustls, ring). Until Apple gives an `ITSEncryptionExportComplianceCode`, each processed build shows "Missing Compliance" and TestFlight holds it back from testers. Attach the app's encryption declaration to the build through the App Store Connect API (`appEncryptionDeclarations`, then its `builds` relationship), as [docs/store/app-store/export-compliance.md](../docs/store/app-store/export-compliance.md) section 2.2 describes. When the code exists, add it next to the flag in `project.yml` and later builds skip the step.
 
 ### Connect without an account
 

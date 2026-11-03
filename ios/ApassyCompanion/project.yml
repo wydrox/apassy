@@ -103,7 +103,7 @@ targets:
             LSHandlerRank: Owner
             LSItemContentTypes:
               - com.wydrox.apassy.vault
-        ITSAppUsesNonExemptEncryption: false
+        ITSAppUsesNonExemptEncryption: true
         ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         UILaunchScreen: {}
         UIApplicationSceneManifest:
@@ -223,7 +223,7 @@ targets:
         ApassyBuildCommit: $(APASSY_BUILD_COMMIT)
         WKApplication: true
         WKCompanionAppBundleIdentifier: com.wydrox.apassy.companion
-        ITSAppUsesNonExemptEncryption: false
+        ITSAppUsesNonExemptEncryption: true
     settings:
       base:
         PRODUCT_NAME: ApassyWatch

@@ -30,15 +30,18 @@ decisions (CLAUDE.md "Git i deploy", AGENTS.md "Apassy releases").
 
 ### Before the build
 
-1. **Decide the export answer** ([export-compliance.md](export-compliance.md) §2–§4): keep or change
-   `ITSAppUsesNonExemptEncryption` (today `false` for the app and the watch). If it changes, a code
-   change of `ios/ApassyCompanion/project.yml` and a new build follow.
-2. **Decide France:** ANSSI declaration, or France removed from the first version's availability.
+1. **Export answer: decided 2026-11-03** ([export-compliance.md](export-compliance.md) §2):
+   `ITSAppUsesNonExemptEncryption` is `true` for the app and the watch. Each TestFlight build needs the
+   encryption declaration attached through the API until `ITSEncryptionExportComplianceCode` is set
+   (§2.2, §2.3).
+2. **France: left out by default** of the first version's availability (§4). The owner can file the
+   ANSSI declaration and then add France.
 3. **Privacy manifest:** have `PrivacyInfo.xcprivacy` added for the app, the AutoFill extension, and
    the watch app ([app-privacy.md](app-privacy.md) note 7). A code change and a new build.
-4. **Publish the privacy page:** the iPhone and watch section of
-   [privacy-policy-ios-draft.md](privacy-policy-ios-draft.md) on `https://apassy.wyderka.cc/privacy`,
-   with the controller name, address and contact filled in. Check it live.
+4. **Publish the privacy page:** the factual iPhone, watch and relay sections are in
+   `site/src/pages/privacy.astro` (2026-11-03). Deploy the site and check them live. Add the
+   controller name, address, contact and legal bases of
+   [privacy-policy-ios-draft.md](privacy-policy-ios-draft.md) if the legal check asks for them.
 5. **Support contact:** decide whether GitHub issues alone is enough, or add an e-mail contact on the
    site ([listing.md](listing.md), "The marketing and support pages").
 6. **Physical tests that ADR 0039 still lists as pending** (the Secure Enclave key policy with wrist
@@ -51,17 +54,18 @@ decisions (CLAUDE.md "Git i deploy", AGENTS.md "Apassy releases").
    `CURRENT_PROJECT_VERSION` than every build in App Store Connect. Upload it with
    `scripts/ios-testflight.sh`. The App Store export signs `aps-environment` as production, and a
    release build registers its push token as `.production` (`PushRegistrar.environment`).
-8. Watch the build process in App Store Connect; answer the encryption questions there if asked.
+8. Watch the build process in App Store Connect. The build shows "Missing Compliance" until the
+   encryption declaration is attached ([export-compliance.md](export-compliance.md) §2.2).
 
 ### App Store Connect (the owner's account)
 
 9. **Create the App Store version** of the app record (it exists for TestFlight). Fill in from
    [listing.md](listing.md): name (check that "Apassy" is free), subtitle, categories, promotional
    text, description, keywords, support and marketing URLs, privacy policy URL, copyright.
-10. **App Privacy:** enter the answers of [app-privacy.md](app-privacy.md) §3. Decide "linked" or
-    "not linked" (note 1), and Contact Info › Name for device names (note 3). Publish the answers.
+10. **App Privacy:** enter the answers of [app-privacy.md](app-privacy.md) §3 (all linked; User ID,
+    Device ID, Other Data; App Functionality; no tracking). Publish the answers.
 11. **Age rating:** answer the questionnaire as in [listing.md](listing.md); expect 4+.
-12. **Pricing and availability:** Free; the countries (France per item 2). **Turn off "Make this app
+12. **Pricing and availability:** Free; all countries except France (item 2). **Turn off "Make this app
     available on Mac" (Apple silicon) and on Apple Vision Pro** unless wanted: the Mac has its own
     Apassy app, and an iPhone vault app on a Mac would be a second, untested Mac client.
 13. **No In-App Purchase** and no subscription group on the app record.
@@ -88,12 +92,13 @@ decisions (CLAUDE.md "Git i deploy", AGENTS.md "Apassy releases").
 
 ## Open questions (legal and policy, for the owner)
 
-1. `ITSAppUsesNonExemptEncryption = false` versus the inventory (export-compliance.md §2).
-2. The U.S. treatment of an open-source app distributed as a signed App Store binary
-   (export-compliance.md §3).
-3. France: declaration or exclusion (export-compliance.md §4).
-4. App Privacy "linked" or "not linked", User ID, and device names as Name (app-privacy.md §3 notes).
-5. The controller, address, contact, legal bases, processors (Contabo country) and retention of the
-   relay's event log in the privacy policy (privacy-policy-ios-draft.md).
-6. A third-party agent name ("Claude Code") in screenshots and the demo (screenshots.md).
-7. The link to `apassy.wyderka.cc` in the description under 3.1.3(f) (listing.md).
+Decided on 2026-11-03 ("describe the app correctly"): `ITSAppUsesNonExemptEncryption = true`, France
+left out until an ANSSI declaration, App Privacy all linked with User ID, device names as Other Data.
+
+1. The U.S. treatment of an open-source app distributed as a signed App Store binary, and whether the
+   mass-market classification needs any report (export-compliance.md §3).
+2. When to file the ANSSI declaration for France (export-compliance.md §4).
+3. The controller, address, contact, legal bases, processors (Contabo country), a retention limit for
+   the relay's event log, and the retention of the off-server backup copy (privacy-policy-ios-draft.md).
+4. A third-party agent name ("Claude Code") in screenshots and the demo (screenshots.md).
+5. The link to `apassy.wyderka.cc` in the description under 3.1.3(f) (listing.md).
