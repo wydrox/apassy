@@ -957,7 +957,8 @@ fn the_agent_page_saves_the_note_and_removes_an_exception_after_the_check() {
     for expected in [
         "CI on GitHub",
         "This Mac · connected",
-        "Uses this week",
+        // A new agent has no use: one row instead of a count and an empty group.
+        "No use this week",
         "Projects",
         "None yet",
         "Note for the bouncer",

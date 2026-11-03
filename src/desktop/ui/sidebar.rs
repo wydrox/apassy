@@ -485,14 +485,15 @@ fn decisions_badge(app: &DesktopApp, pending: &Pending) -> Badge {
     }
 }
 
-/// The agents: a neutral count of the active ones, or an orange count of the expired
-/// tokens.
+/// The agents: a neutral count of the active ones of every Mac of the vault, or an
+/// orange count of the expired tokens of this Mac.
 fn agents_count(app: &DesktopApp) -> (Option<usize>, Option<Badge>) {
     #[cfg(feature = "vault")]
     {
         let agents = app.owner_ui.session.agents().unwrap_or_default();
         let expired = super::shell::expired_tokens(&agents, kit::now());
-        let active = agents.iter().filter(|agent| !agent.revoked).count();
+        let active = agents.iter().filter(|agent| !agent.revoked).count()
+            + super::agents::remote_connected(&app.remote_macs);
         let badge = (expired > 0).then_some(Badge {
             count: expired,
             tone: Tone::Warning,
