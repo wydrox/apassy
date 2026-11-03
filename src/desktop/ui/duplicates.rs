@@ -1,4 +1,4 @@
-//! Find duplicates: Settings > Vault > Import > "Find duplicates…", and the result of a
+//! Find duplicates: Settings > Vault > Import > "Find Duplicates…", and the result of a
 //! 1Password import. A sheet lists each group of items that look like the same account,
 //! with what differs (labels only), a picker for the item to keep, and "Merge". The
 //! rules are the vault's (`src/vault/dedup.rs`): the kept item takes the fields of the
@@ -269,7 +269,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
         let state = &app.ui.duplicates;
         kit::sheet_title(
             ui,
-            "Find duplicates",
+            "Find Duplicates",
             Some(
                 "Items that look like the same account: the same website and username, or the same secret values. Merge keeps one item, adds what the others have, and archives them.",
             ),
@@ -313,7 +313,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             ui,
             |ui| {
                 ui.add_enabled_ui(identical > 0, |ui| {
-                    merge_all = kit::button(ui, "Merge all identical", Style::Bordered).clicked();
+                    merge_all = kit::button(ui, "Merge All Identical", Style::Bordered).clicked();
                 });
             },
             |ui| {
@@ -464,10 +464,10 @@ mod tests {
         let ctx = egui::Context::default();
         crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsSection::Vault);
         let text = frames(&ctx, &mut app);
-        assert!(text.contains("Find duplicates…"), "{text}");
+        assert!(text.contains("Find Duplicates…"), "{text}");
         open(&mut app);
         let text = frames(&ctx, &mut app);
-        assert!(text.contains("Find duplicates"), "{text}");
+        assert!(text.contains("Find Duplicates"), "{text}");
         assert!(text.contains("No duplicates found."), "{text}");
         close_sheet(&mut app, &ctx);
         assert_eq!(app.ui.sheet, None);
@@ -518,7 +518,7 @@ mod tests {
         open(&mut app);
         let text = frames(&ctx, &mut app);
         assert!(text.contains("API key · Same values"), "{text}");
-        assert!(text.contains("Merge all identical"), "{text}");
+        assert!(text.contains("Merge All Identical"), "{text}");
         let (merged, failed) = merge_identical(&mut app);
         assert_eq!((merged, failed), (1, None));
         assert!(archived(&app, a2) != archived(&app, a));

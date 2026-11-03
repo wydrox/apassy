@@ -45,7 +45,7 @@ struct Report {
     file: Option<PathBuf>,
     /// The result of "Delete the export file".
     deleted: Option<Result<(), String>>,
-    /// The vault has duplicates after the import: the result offers "Find duplicates…".
+    /// The vault has duplicates after the import: the result offers "Find Duplicates…".
     duplicates: bool,
 }
 
@@ -201,7 +201,7 @@ fn existing_items(
 
 // ---- Settings section. ----
 
-/// Settings > Vault > Import: one row with "Import…", and one with "Find duplicates…".
+/// Settings > Vault > Import: one row with "Import…", and one with "Find Duplicates…".
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     use super::settings::rows;
 
@@ -220,7 +220,7 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             },
         );
         g.line("Duplicates", Some(rows::value("Same account twice")), |ui| {
-            duplicates = kit::small_button(ui, "Find duplicates…", Style::Bordered)
+            duplicates = kit::small_button(ui, "Find Duplicates…", Style::Bordered)
                 .on_hover_text(
                     "Apassy lists the items with the same website and username, or the same secret values. Merge keeps one item and archives the others.",
                 )
@@ -484,7 +484,7 @@ fn report_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                     ),
                     |s| {
                         s.row(|ui| {
-                            duplicates = kit::small_button(ui, "Find duplicates…", Style::Bordered)
+                            duplicates = kit::small_button(ui, "Find Duplicates…", Style::Bordered)
                                 .clicked();
                         });
                     },
@@ -934,7 +934,7 @@ mod tests {
         app.import.select_all(true);
         assert_eq!(app.import.run(&mut app.owner_ui.session), 2);
         let text = frames(&ctx, &mut app, Vec::new());
-        assert!(text.contains("Find duplicates…"), "{text}");
+        assert!(text.contains("Find Duplicates…"), "{text}");
 
         // The duplicates sheet lists the pair. The result of the import stays for Done.
         super::super::duplicates::open(&mut app);

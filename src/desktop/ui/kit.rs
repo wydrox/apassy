@@ -2796,6 +2796,12 @@ pub(crate) enum Cell {
         text: String,
         tone: Tone,
     },
+    /// A text with a drawn chevron at the right edge of the cell: right when the row is
+    /// closed, down when it is open. The system font has no "⌄", so it is painted.
+    Disclosure {
+        value: RichText,
+        open: bool,
+    },
     Empty,
 }
 
@@ -2810,7 +2816,9 @@ impl Cell {
 
     fn words(&self) -> String {
         match self {
-            Self::Text(value) | Self::Production(value) => value.text().to_owned(),
+            Self::Text(value) | Self::Production(value) | Self::Disclosure { value, .. } => {
+                value.text().to_owned()
+            }
             Self::Status { text, .. } => text.clone(),
             Self::Agent { label, remote, .. } => {
                 if *remote {
@@ -2938,6 +2946,25 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
                 galley,
                 LABEL,
             );
+        }
+        Cell::Disclosure { value, open } => {
+            let chevron = 12.0;
+            let galley = fit(value.clone(), (rect.width() - chevron - 8.0).max(10.0));
+            painter.galley(
+                Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0),
+                galley,
+                LABEL,
+            );
+            let icon = Rect::from_center_size(
+                Pos2::new(rect.right() - chevron / 2.0, rect.center().y),
+                Vec2::splat(chevron),
+            );
+            let icon_kind = if *open {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            };
+            paint_icon(&painter, icon, icon_kind, TERTIARY);
         }
         Cell::Text(value) => {
             let galley = fit(value.clone(), rect.width());

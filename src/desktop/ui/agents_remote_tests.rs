@@ -643,6 +643,8 @@ fn the_connect_card_warns_about_a_local_redirect() {
         "Returns to a program on a computer (localhost)",
         crate::questions::envelope::LOCAL_CONNECT_WARNING,
         "Deny unless you just added Apassy to Grok Bot.",
+        // The two sentences of the warning line keep their period between them.
+        "Returns to a program on a computer (localhost). A program on this Mac",
     ] {
         assert!(window.has(expected), "{expected}: {}", window.text);
     }

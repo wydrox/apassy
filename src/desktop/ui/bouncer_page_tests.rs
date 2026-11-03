@@ -285,6 +285,8 @@ fn logs_filter_the_rows_and_open_a_cloud_run() {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(!text.contains("SECRET-PATH"), "{text}");
+    // The chevrons of the rows are drawn: SF Pro has no "⌄", which showed as a box.
+    assert!(!text.contains('⌄') && !text.contains('›'), "{text}");
 }
 
 /// Frame 14: filters that match nothing; Clear Filters is the way back.

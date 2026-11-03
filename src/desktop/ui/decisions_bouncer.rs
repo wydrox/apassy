@@ -631,7 +631,8 @@ pub(crate) fn connect_card(ui: &mut Ui, card: &ConnectCard) {
         s.labeled("Code", kit::text(&card.code, Font::Mono).color(kit::LABEL));
     });
     if card.local {
-        warning_line(ui, &format!("{} {LOCAL_CONNECT_WARNING}", card.returns_to));
+        // Two sentences, as in the Touch ID prompt of the same request.
+        warning_line(ui, &format!("{}. {LOCAL_CONNECT_WARNING}", card.returns_to));
     } else {
         ui.horizontal(|ui| {
             ui.add_space(2.0);

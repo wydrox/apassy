@@ -462,3 +462,44 @@ fn the_page_of_an_agent_of_another_mac_has_three_tiles_and_no_actions() {
 fn an_agent_that_is_gone_has_no_page() {
     assert!(AgentPage::of(&frame_2(), &other(STUDIO, "99"), None, NOW, 0).is_none());
 }
+
+/// The words that a frame of `draw` paints.
+fn painted_text(draw: impl FnMut(&mut Ui)) -> String {
+    fn collect(shape: &egui::Shape, out: &mut String) {
+        match shape {
+            egui::Shape::Text(text) => {
+                out.push_str(text.galley.text());
+                out.push('\n');
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, out)),
+            _ => {}
+        }
+    }
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, 600.0),
+        )),
+        ..Default::default()
+    };
+    let mut draw = draw;
+    let output = ctx.run_ui(input, |ui| draw(ui));
+    let mut text = String::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut text);
+    }
+    text
+}
+
+/// Frame 2: the address row of remote access has the mockup's label, "MCP address".
+#[test]
+fn the_address_row_of_remote_access_is_labeled() {
+    let on = access(true, None);
+    let text = painted_text(|ui| {
+        access_block(ui, &on, true);
+    });
+    assert!(text.contains("MCP address"), "{text}");
+    assert!(text.contains("https://mac.tail0.ts.net:8443/mcp"), "{text}");
+    assert!(text.contains("Copy"), "{text}");
+}
