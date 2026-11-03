@@ -2,9 +2,10 @@
 //! the traits of `apassy::node::backend`.
 //!
 //! The node is an ordinary relay with `RelayConfig::embedded`: no edge, every listener
-//! on the loopback, a public listener for `POST /mcp` and `/p/` that Tailscale Funnel
-//! reaches. Each vault has one personal team (`Hub::create_personal_team`) with one
-//! collection, `CATALOG_COLLECTION`, whose items hold metadata only
+//! on the loopback, a public listener for `POST /mcp`, `/p/`, and the MCP authorization
+//! flow (`server::oauth`, docs/SPEC.md section 31) that Tailscale Funnel reaches. Each
+//! vault has one personal team (`Hub::create_personal_team`) with one collection,
+//! `CATALOG_COLLECTION`, whose items hold metadata only
 //! (`hostkeys::VALUE_ON_HOST`). The app is the host, in the same process: it acts as the
 //! team's owner member without a token, and it releases a run with the values from the
 //! vault (`host::release_values`). Nothing secret is written to the node's directory.
@@ -15,9 +16,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use apassy::node::backend::{
-    self as node, AuditRow, CatalogItem, CreatedAgent, NewCloudAgent, NodeAgentId, NodeBackend,
-    NodeConfig, NodeError, NodeRunId, NodeSecret, NodeTeamId, PendingItem, PendingRun, RunState,
-    RunningNode, SyncReport,
+    self as node, AgentAccess, AuditRow, CatalogItem, ConnectDecision, CreatedAgent, NewCloudAgent,
+    NodeAgentId, NodeBackend, NodeConfig, NodeError, NodeRunId, NodeSecret, NodeTeamId,
+    PendingConnect, PendingItem, PendingRun, RunState, RunningNode, SyncReport, TokenIssue,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -25,7 +26,7 @@ use crate::api::{
     AgentCreate, CollectionCreate, DecisionRequest, GrantCreate, NewItem, Policy, PolicyMode, Role,
     RunStatus, Suggestion,
 };
-use crate::config::{EmbeddedOptions, RelayConfig, UpstreamOptions};
+use crate::config::{EmbeddedOptions, OAuthConfig, RelayConfig, UpstreamOptions};
 use crate::error::{RelayError, RelayResult, codes};
 use crate::hostkeys;
 use crate::ids::{AgentId, CollectionId, ItemId, MemberId, RunId, TeamId};
@@ -36,7 +37,7 @@ use crate::server::auth::MemberAuth;
 use crate::server::host::{self, EmbeddedRequest};
 use crate::server::hub::Hub;
 use crate::server::store::{ItemRow, db, load_item, load_live_items, to_i, to_u};
-use crate::server::{Core, Relay, RunningRelay, admin};
+use crate::server::{Core, Relay, RunningRelay, admin, oauth};
 
 /// The collection of the catalog mirror in a personal team. Its policy asks for every
 /// run, and the owner member has its grant.
@@ -73,6 +74,8 @@ impl NodeBackend for EmbeddedRelay {
         })
         .map_err(node_error)?;
         relay.upstream = self.upstream.clone();
+        // The connect page names this Mac.
+        relay.oauth = Some(OAuthConfig::new(&apassy::sync::device_name()));
         let node = EmbeddedNode::start(relay).map_err(node_error)?;
         Ok(Box::new(node))
     }
@@ -417,16 +420,32 @@ impl RunningNode for EmbeddedNode {
             let owner = owner(&core)?;
             let collection = ensure_catalog(&core, &owner, now)?;
             let items = live_ids(&core, collection, &agent.items)?;
+            let days = match agent.token {
+                TokenIssue::Now { lifetime_days } => lifetime_days,
+                // The token of the row is dropped below, before anyone sees it.
+                TokenIssue::Later => 1,
+            };
             let request = AgentCreate {
                 name: agent.name.clone(),
-                days: Some(agent.lifetime_days),
+                days: Some(days),
             };
             let made = admin::insert_agent(&core, &owner, &request, Some(&items), now)?;
-            Ok(CreatedAgent {
-                agent_id: NodeAgentId(made.id.0),
-                token: NodeSecret::new(made.token.expose().to_owned()),
-                expires_at: made.expires_at,
-            })
+            match agent.token {
+                TokenIssue::Now { .. } => Ok(CreatedAgent {
+                    agent_id: NodeAgentId(made.id.0),
+                    token: Some(NodeSecret::new(made.token.expose().to_owned())),
+                    expires_at: made.expires_at,
+                }),
+                TokenIssue::Later => {
+                    drop(made.token);
+                    oauth::drop_access(&core, made.id, "token_later", now)?;
+                    Ok(CreatedAgent {
+                        agent_id: NodeAgentId(made.id.0),
+                        token: None,
+                        expires_at: now,
+                    })
+                }
+            }
         })()
         .map_err(node_error)
     }
@@ -450,9 +469,76 @@ impl RunningNode for EmbeddedNode {
 
     fn revoke_agent(&self, team: &NodeTeamId, agent: NodeAgentId) -> Result<(), NodeError> {
         (|| -> RelayResult<()> {
+            let now = now_unix();
             let core = self.core(team)?;
             let owner = owner(&core)?;
-            admin::agent_revoke(&core, &owner, AgentId(agent.0), now_unix()).map(drop)
+            admin::agent_revoke(&core, &owner, AgentId(agent.0), now)?;
+            // Its refresh families and the open requests of its clients go too.
+            oauth::forget_agent(&self.hub, &core.team, AgentId(agent.0), now)
+        })()
+        .map_err(node_error)
+    }
+
+    fn pending_connects(&self) -> Result<Vec<PendingConnect>, NodeError> {
+        let list = oauth::pending(&self.hub, now_unix()).map_err(node_error)?;
+        Ok(list
+            .into_iter()
+            .map(|request| PendingConnect {
+                id: request.id,
+                client_id: request.client_id,
+                client_name: request.client_name,
+                code: request.match_code,
+                created_at: request.created_at,
+                expires_at: request.expires_at,
+            })
+            .collect())
+    }
+
+    fn decide_connect(&self, id: &str, decision: ConnectDecision) -> Result<(), NodeError> {
+        (|| -> RelayResult<()> {
+            let allow = match decision {
+                ConnectDecision::Allow { team, agent } => {
+                    let core = self.core(&team)?;
+                    Some((core.team.clone(), AgentId(agent.0)))
+                }
+                ConnectDecision::Deny => None,
+            };
+            oauth::decide(&self.hub, id, allow, now_unix())
+        })()
+        .map_err(node_error)
+    }
+
+    fn agent_access(
+        &self,
+        team: &NodeTeamId,
+        agent: NodeAgentId,
+    ) -> Result<AgentAccess, NodeError> {
+        (|| -> RelayResult<AgentAccess> {
+            let now = now_unix();
+            let core = self.core(team)?;
+            let row: Option<(i64, Option<i64>)> = core.store.with(|conn| {
+                conn.query_row(
+                    "SELECT expires_at, revoked_at FROM agent WHERE id = ?1",
+                    params![to_i(agent.0)],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(db)
+            })?;
+            let (expires_at, revoked_at) = row.ok_or_else(|| RelayError::not_found("agent"))?;
+            let revoked = revoked_at.is_some();
+            let connection = if revoked {
+                oauth::AgentConnection::default()
+            } else {
+                oauth::connection_of(&self.hub, &core.team, AgentId(agent.0), now)?
+            };
+            Ok(AgentAccess {
+                revoked,
+                token_expires_at: (!revoked && to_u(expires_at) > now).then(|| to_u(expires_at)),
+                client_id: connection.client_id,
+                connected_at: connection.connected_at,
+                refresh_expires_at: connection.refresh_expires_at,
+            })
         })()
         .map_err(node_error)
     }
@@ -464,11 +550,15 @@ impl RunningNode for EmbeddedNode {
     ) -> Result<Vec<PendingRun>, NodeError> {
         let core = self.core(team).map_err(node_error)?;
         let deadline = Instant::now() + timeout.min(MAX_PENDING_WAIT);
+        // The host loop also looks at the connect requests after each return.
+        let connects = oauth::pending_mark(&self.hub, now_unix()).map_err(node_error)?;
         loop {
             let seen = core.notify.current();
             let list = host::embedded_requests(&core, now_unix()).map_err(node_error)?;
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if !list.is_empty() || remaining.is_zero() || core.stopping() {
+            let changed =
+                oauth::pending_mark(&self.hub, now_unix()).map_err(node_error)? != connects;
+            if !list.is_empty() || changed || remaining.is_zero() || core.stopping() {
                 return Ok(list.into_iter().map(pending_run).collect());
             }
             core.notify

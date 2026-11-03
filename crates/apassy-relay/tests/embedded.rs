@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use apassy::node::backend::{
     CatalogItem, NewCloudAgent, NodeAgentId, NodeBackend, NodeConfig, NodeRunId, NodeSecret,
-    NodeTeamId, RunStatus, RunningNode, SyncReport,
+    NodeTeamId, RunStatus, RunningNode, SyncReport, TokenIssue,
 };
 use apassy_relay::config::{EmbeddedOptions, RelayConfig};
 use apassy_relay::embedded::{EmbeddedNode, EmbeddedRelay};
@@ -98,13 +98,19 @@ impl Fixture {
                 &NewCloudAgent {
                     name: "Grok Bot".to_string(),
                     items: vec![uid.clone()],
-                    lifetime_days: 90,
+                    token: TokenIssue::Now { lifetime_days: 90 },
                 },
             )
             .expect("agent");
-        assert!(made.token.expose().starts_with("apassy_tagt_"));
+        assert!(
+            made.token
+                .as_ref()
+                .expect("token now")
+                .expose()
+                .starts_with("apassy_tagt_")
+        );
         Self {
-            token: made.token.expose().to_string(),
+            token: made.token.as_ref().expect("token now").expose().to_string(),
             agent: made.agent_id,
             node: Some(node),
             team,
@@ -770,11 +776,11 @@ fn a_personal_team_is_made_without_a_code_and_a_restart_opens_it_again() {
             &NewCloudAgent {
                 name: "Grok Bot".to_string(),
                 items: vec![uid.clone()],
-                lifetime_days: 30,
+                token: TokenIssue::Now { lifetime_days: 30 },
             },
         )
         .unwrap();
-    let token = made.token.expose().to_string();
+    let token = made.token.as_ref().expect("token now").expose().to_string();
     // One node for each data directory.
     let error = backend
         .start(node_config(dir.path()))
@@ -834,11 +840,11 @@ fn a_node_goes_back_to_schema_6_and_its_listed_agents_are_revoked() {
             &NewCloudAgent {
                 name: "Grok Bot".to_string(),
                 items: vec![uid],
-                lifetime_days: 30,
+                token: TokenIssue::Now { lifetime_days: 30 },
             },
         )
         .unwrap();
-    let token = made.token.expose().to_string();
+    let token = made.token.as_ref().expect("token now").expose().to_string();
     Box::new(node).stop();
     let teams = apassy_relay::server::rollback::downgrade_to_6(&config).unwrap();
     let answer = serde_json::to_value(&teams).unwrap();

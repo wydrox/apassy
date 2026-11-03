@@ -555,7 +555,7 @@ fn directory_connection(config: &apassy_relay::config::RelayConfig) -> rusqlite:
 }
 
 #[test]
-fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
+fn directory_1001_migrates_to_1004_without_losing_teams_codes_or_audit() {
     let mut relay = start(UpstreamOptions::default());
     let a = relay.owner_token.clone();
     let a_id = relay.team_id.clone();
@@ -569,13 +569,14 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1003
+        1004
     );
     // Back to the directory of version 1001: no limits, no kinds, no Connect keys.
     conn.execute_batch(
         "BEGIN IMMEDIATE; ALTER TABLE team DROP COLUMN limits; ALTER TABLE team DROP COLUMN kind;
          ALTER TABLE team DROP COLUMN suspend_reason; DROP INDEX connect_key_created;
-         DROP TABLE connect_key; PRAGMA user_version = 1001; COMMIT;",
+         DROP TABLE connect_key; DROP TABLE oauth_refresh; DROP TABLE connect_request;
+         DROP TABLE oauth_client; PRAGMA user_version = 1001; COMMIT;",
     )
     .unwrap();
     let original_codes: Vec<CodeSnapshot> = conn
@@ -623,7 +624,7 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1003
+        1004
     );
     let migrated_codes: Vec<CodeSnapshot> = conn
         .prepare("SELECT id,code_hash,used_at,team_id FROM team_code ORDER BY id")
