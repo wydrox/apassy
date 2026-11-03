@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
 
 use apassy::sync::{
-    DEFAULT_RELAY_URL, JoinedDevice, PendingJoin, RelayConfig, RelayDownload, RelaySync,
+    DEFAULT_RELAY_URL, JoinedDevice, PendingJoin, RelayConfig, RelayDownload, RelaySync, RelayUrl,
     link_code_team,
 };
 
@@ -24,7 +24,8 @@ pub struct Joining {
     pending: Option<PendingJoin>,
     joined: Option<JoinedDevice>,
     download: Option<RelayDownload>,
-    relay_url: String,
+    /// The relay of the link, with the pin and the alternatives of a node.
+    url: RelayUrl,
     team_id: String,
     team: String,
     words: Vec<String>,
@@ -165,7 +166,7 @@ impl Core {
         let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name)
             .map_err(|error| join_error(error.into()))?;
         let joining = Joining {
-            relay_url: url.as_str().to_owned(),
+            url,
             team_id,
             team: pending.team.clone(),
             words: pending
@@ -268,12 +269,16 @@ impl Core {
         let temp_state = format!("new-{token}");
         let sync_dir = self.paths.data_dir.join("sync");
         let temp_state_file = sync_dir.join(format!("{temp_state}.json"));
-        let relay = RelaySync::new(RelayConfig::in_data_dir(
-            &self.paths.data_dir,
-            &temp_file,
-            &joining.relay_url,
-            &temp_state,
-        ));
+        // A node: the pin and the alternatives of the link stay with the sync of the vault.
+        let relay = RelaySync::new(
+            RelayConfig::in_data_dir(
+                &self.paths.data_dir,
+                &temp_file,
+                joining.url.as_str(),
+                &temp_state,
+            )
+            .with_url_trust(&joining.url),
+        );
         let (vault, report) = relay.adopt(joined, download, passphrase)?;
         let id = report.identity.vault_id.clone();
         drop(vault);
@@ -314,6 +319,8 @@ impl Core {
             team_id: Some(report.link.team_id.clone()),
             device_id: Some(report.link.device_id),
             added_at: now() as i64,
+            pin: report.link.pin.clone(),
+            alt: report.link.alt.clone(),
         };
         {
             let mut list = guard(&self.list);

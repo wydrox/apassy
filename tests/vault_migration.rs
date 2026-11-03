@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 27;
+const CURRENT_VERSION: i64 = 28;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -2395,8 +2395,13 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     for name in names {
         conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
     }
-    // Schema 27 (the Bouncer figures) and 26 (the cloud agents of the node) first, then
-    // 23 to 20.
+    // Schema 28 (the pinned trust of a membership), 27 (the Bouncer figures), and 26 (the
+    // cloud agents of the node) first, then 23 to 20.
+    conn.execute_batch(
+        "ALTER TABLE relay_membership DROP COLUMN alt;
+         ALTER TABLE relay_membership DROP COLUMN pin;",
+    )
+    .expect("drop schema 28");
     conn.execute_batch(
         "DROP INDEX item_use_decision; DROP INDEX cloud_run_decision; DROP TABLE cloud_run;
              ALTER TABLE cloud_agent DROP COLUMN connected_with; ALTER TABLE cloud_agent DROP COLUMN client_id;

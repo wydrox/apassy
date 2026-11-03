@@ -172,7 +172,9 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
 /// only local tables and a local column (the cloud agents of the node, `schema26.rs`):
 /// a copy has none of their rows. Schema 27 adds local columns and a local table (the
 /// figures of the Bouncer section, `schema27.rs`): a copy has none of their rows either.
-pub(super) const UPGRADABLE_SCHEMA: i64 = 26;
+/// Schema 28 adds only columns of a local table (the pin and the alternatives of a relay
+/// membership, `schema28.rs`): a copy has none of its rows either.
+pub(super) const UPGRADABLE_SCHEMA: i64 = super::schema28::PREVIOUS_SCHEMA_VERSION;
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
@@ -180,10 +182,11 @@ pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERS
 
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
 // Schemas 20 through 23 add local state only, schema 24 only widens a `CHECK` of a
-// synced table, schema 25 only adds values of reserved item fields, and schemas 26 and
-// 27 add local state only; future synced schemas require another merge step.
+// synced table, schema 25 only adds values of reserved item fields, and schemas 26,
+// 27, and 28 add local state only; future synced schemas require another merge step.
+const _: () = assert!(SCHEMA_VERSION == super::schema28::NODE_TRUST_SCHEMA_VERSION);
 const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 10);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 11);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
 /// one of the earlier schemas that it upgrades.

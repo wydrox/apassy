@@ -895,6 +895,14 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 28 {
+        // Schema 28: the pinned trust of a relay membership (`src/vault/schema28.rs`).
+        conn.execute_batch(
+            "ALTER TABLE relay_membership DROP COLUMN alt;
+             ALTER TABLE relay_membership DROP COLUMN pin;",
+        )
+        .unwrap();
+    }
     if version < 27 {
         // Schema 27: the Bouncer figures (`src/vault/schema27.rs`).
         conn.execute_batch(

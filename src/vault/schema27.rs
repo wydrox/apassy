@@ -85,12 +85,14 @@ UPDATE vault_meta SET schema_version = 26 WHERE id = 1;
 PRAGMA user_version = 26;
 ";
 
-/// [`DOWNGRADE_TO_26_SQL`] and then `schema26::DOWNGRADE_TO_25_SQL`: the way back to
-/// schema 25, which the fixtures of schema 25 and earlier start with.
+/// The way back from the current schema to schema 25, which the fixtures of schema 25
+/// and earlier start with: `schema28::downgrade_sql` (the pinned trust of a membership),
+/// [`DOWNGRADE_TO_26_SQL`], and then `schema26::DOWNGRADE_TO_25_SQL`.
 #[cfg(test)]
 pub(super) fn downgrade_to_25_sql() -> String {
     format!(
-        "{DOWNGRADE_TO_26_SQL}{}",
+        "{}{DOWNGRADE_TO_26_SQL}{}",
+        super::schema28::downgrade_sql(),
         super::schema26::DOWNGRADE_TO_25_SQL
     )
 }
@@ -204,6 +206,9 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
+        // Schema 28 (the pinned trust of a membership, `schema28.rs`) first.
+        conn.execute_batch(&crate::vault::schema28::downgrade_sql())
+            .unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
         assert_eq!(version(&conn), 26);
         assert!(!has_table(&conn, "cloud_run"));
@@ -220,8 +225,8 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), STATS_SCHEMA_VERSION);
-        assert_eq!(meta_version(conn), STATS_SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
+        assert_eq!(meta_version(conn), crate::vault::SCHEMA_VERSION);
         // The old decision is a run that waited for nobody's recorded answer time.
         let row: (String, Option<i64>) = conn
             .query_row("SELECT request, wait_ms FROM decision_log", [], |row| {
@@ -298,6 +303,9 @@ mod tests {
         drop(vault);
 
         let conn = raw(&path);
+        // Schema 28 (the pinned trust of a membership, `schema28.rs`) first.
+        conn.execute_batch(&crate::vault::schema28::downgrade_sql())
+            .unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
         assert_eq!(version(&conn), 26);
         assert_eq!(meta_version(&conn), 26);
@@ -315,7 +323,10 @@ mod tests {
         // time, the cloud agent a token agent, and the cloud runs start again.
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
-        assert_eq!(version(vault.conn_ref().unwrap()), STATS_SCHEMA_VERSION);
+        assert_eq!(
+            version(vault.conn_ref().unwrap()),
+            crate::vault::SCHEMA_VERSION
+        );
         assert_eq!(
             vault.authenticate_agent(token.expose()).unwrap().id,
             local.id
@@ -348,8 +359,8 @@ mod tests {
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), STATS_SCHEMA_VERSION);
-        assert_eq!(meta_version(conn), STATS_SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
+        assert_eq!(meta_version(conn), crate::vault::SCHEMA_VERSION);
         assert!(has_table(conn, "cloud_node"));
         assert!(has_table(conn, "cloud_run"));
         for version in [16, 25, 26, STATS_SCHEMA_VERSION] {
@@ -358,11 +369,12 @@ mod tests {
                 "{version}"
             );
         }
-        // An app of schema 26 refuses a copy of 27, and this one a copy of 28.
+        // An app of schema 26 refuses a copy of 27, and this one a copy of a later schema.
         assert!(!crate::vault::merge::is_mergeable_schema(
-            STATS_SCHEMA_VERSION + 1
+            crate::vault::SCHEMA_VERSION + 1
         ));
-        assert_eq!(STATS_SCHEMA_VERSION, crate::vault::SCHEMA_VERSION);
+        // Schema 28 (`schema28.rs`) follows 27.
+        const { assert!(STATS_SCHEMA_VERSION < crate::vault::SCHEMA_VERSION) };
     }
 
     #[test]
@@ -371,7 +383,7 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("new.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        assert_eq!(version(conn), STATS_SCHEMA_VERSION);
+        assert_eq!(version(conn), crate::vault::SCHEMA_VERSION);
         assert!(has_table(conn, "cloud_run"));
         assert!(crate::vault::merge::LOCAL_TABLES.contains(&"cloud_run"));
     }

@@ -277,6 +277,8 @@ fn confirmed_join_hands_keys_only_to_the_confirmed_device_and_preserves_revocati
         key_pkcs8: joined.key_pkcs8().unwrap(),
         purposes: std::collections::BTreeSet::from([MembershipPurpose::Questions]),
         created_at: 0,
+        pin: None,
+        alt: Vec::new(),
     };
     iphone
         .adopt_question_handoff(&handoff, &phone_membership, answer.public_key(), None)

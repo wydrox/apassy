@@ -26,11 +26,37 @@ pub struct VaultEntry {
     pub team_id: Option<String>,
     pub device_id: Option<u64>,
     pub added_at: i64,
+    /// The pin of a node relay (contract node-pairing-v1 section 9): the b64u SHA-256 of
+    /// its certificate. Missing in older lists and for a hosted relay: system trust. The
+    /// list version stays 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    /// The alternative destinations of a node relay, `host:port` each, in order. Missing
+    /// in older lists and for a hosted relay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alt: Vec<String>,
 }
 
 impl VaultEntry {
     pub fn is_icloud(&self) -> bool {
         self.sync_source.as_deref() == Some("icloud")
+    }
+
+    /// The relay sync of this vault: its relay origin with the pin and the alternatives
+    /// that the entry keeps. `None` for a vault without a relay.
+    pub fn relay_config(
+        &self,
+        data_dir: &Path,
+        vault_file: &Path,
+    ) -> CoreResult<Option<apassy::sync::RelayConfig>> {
+        let Some(url) = self.relay_url.as_deref() else {
+            return Ok(None);
+        };
+        let trust = apassy::sync::TlsTrust::from_pin_text(self.pin.as_deref())?;
+        let config = apassy::sync::RelayConfig::in_data_dir(data_dir, vault_file, url, &self.id)
+            .with_trust(trust, &self.alt);
+        config.relay_url()?;
+        Ok(Some(config))
     }
 }
 
@@ -205,6 +231,8 @@ mod tests {
             team_id: None,
             device_id: None,
             added_at: 1,
+            pin: None,
+            alt: Vec::new(),
         });
         list.save(dir.path()).unwrap();
         let read = PhoneList::load(dir.path()).unwrap();

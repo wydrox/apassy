@@ -1063,13 +1063,11 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
     Ok(Some((membership, keys)))
 }
 
+/// The device of `membership`, with the pin and the alternatives of a node relay that
+/// the membership keeps (node-pairing-v1 section 9): it never connects to a pinned
+/// node without its pin.
 fn member_of(membership: &RelayMembership) -> CoreResult<RelayMember> {
-    Ok(RelayMember::new(
-        &membership.relay_url,
-        &membership.team_id,
-        membership.device_id,
-        membership.key_pkcs8.clone(),
-    )?)
+    Ok(RelayMember::from_membership(membership)?)
 }
 
 fn settle_out(settle: envelope::Settle) -> SettleOut {
@@ -2974,6 +2972,8 @@ impl Core {
                     key_pkcs8,
                     purposes: BTreeSet::from([MembershipPurpose::Questions]),
                     created_at: 0,
+                    pin: member.url().pin().map(|pin| pin.text()),
+                    alt: member.url().alternative_list(),
                 };
                 if let Some(handoff) = &handoff {
                     let answer_key = attaching

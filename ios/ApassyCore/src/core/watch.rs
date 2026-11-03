@@ -395,6 +395,8 @@ impl Core {
                 .ok_or_else(|| CoreError::internal("The device key is missing."))?,
             purposes: BTreeSet::from([MembershipPurpose::Questions]),
             created_at: 0,
+            pin: member.url().pin().map(|pin| pin.text()),
+            alt: member.url().alternative_list(),
         };
         let passphrase = connecting.passphrase.as_str();
         let file = self.paths.vault_file(&id);
@@ -426,6 +428,8 @@ impl Core {
             team_id: None,
             device_id: None,
             added_at: now() as i64,
+            pin: None,
+            alt: Vec::new(),
         };
         let registered = (|| -> CoreResult<()> {
             {

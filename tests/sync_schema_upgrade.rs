@@ -36,7 +36,7 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 27;
+const CURRENT: i64 = 28;
 /// Schema 18: folders, before trusted devices. Never released.
 const MID: i64 = 18;
 const OLD: i64 = 17;
@@ -193,6 +193,14 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         content_digest(&conn),
         "the test digest is the algorithm of the app"
     );
+    if version < 28 {
+        // Schema 28: the pinned trust of a relay membership (`src/vault/schema28.rs`).
+        conn.execute_batch(
+            "ALTER TABLE relay_membership DROP COLUMN alt;
+             ALTER TABLE relay_membership DROP COLUMN pin;",
+        )
+        .unwrap();
+    }
     if version < 27 {
         // Schema 27: the Bouncer figures (`src/vault/schema27.rs`).
         conn.execute_batch(

@@ -148,6 +148,14 @@ pub struct RelayLink {
     pub team_id: String,
     /// The device number of this Mac on the relay.
     pub device_id: u64,
+    /// The pin of a node relay (contract node-pairing-v1 section 4): the b64u SHA-256 of
+    /// its certificate. `None` for a hosted relay (system trust) and in an older list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    /// The alternative destinations of a node relay, `host:port` each, in order. Empty
+    /// for a hosted relay and in an older list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alt: Vec<String>,
     /// Fields of a later Apassy. They stay when this version writes the list.
     #[serde(flatten)]
     extra: Map<String, Value>,
@@ -159,8 +167,19 @@ impl RelayLink {
             url: url.to_owned(),
             team_id: team_id.to_owned(),
             device_id,
+            pin: None,
+            alt: Vec::new(),
             extra: Map::new(),
         }
+    }
+
+    /// The link with the pin `pin` and the alternatives `alt` of a node relay. Only a new
+    /// pairing of the team changes them (node-pairing-v1 section 9 step 5).
+    #[must_use]
+    pub fn with_trust(mut self, pin: Option<String>, alt: Vec<String>) -> Self {
+        self.pin = pin;
+        self.alt = alt;
+        self
     }
 }
 
@@ -1129,5 +1148,47 @@ mod tests {
         assert!(matches!(registry.remove(&b), Err(RegistryError::NotFound)));
         assert_ne!(new_id(), new_id());
         assert_eq!(new_id().len(), 32);
+    }
+
+    /// Contract node-pairing-v1 section 9: the sync link of a node relay keeps its pin
+    /// and its alternatives; a hosted link writes neither, and an older list without
+    /// them loads with no pin and no alternatives.
+    #[test]
+    fn a_pinned_relay_link_round_trips_and_an_old_link_has_no_pin() {
+        const PIN: &str = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE";
+        let mut registry = Registry::new();
+        let id = registry
+            .add("Node", Path::new("/tmp/apassy-node.db"), 1)
+            .expect("add");
+        let alt = vec![
+            "apassy-mini.tail0123.ts.net:8444".to_owned(),
+            "[fd7a:115c:a1e0::7]:8444".to_owned(),
+        ];
+        registry.entry_mut(&id).expect("entry").sync = Some(SyncLink::relay(
+            &id,
+            RelayLink::new("https://100.64.0.7:8444", "t_7k2m9q4x8c", 3)
+                .with_trust(Some(PIN.to_owned()), alt.clone()),
+        ));
+        let text = registry.to_json();
+        assert!(text.contains(&format!("\"pin\": \"{PIN}\"")), "{text}");
+        let read = Registry::parse(&text).expect("parse");
+        let relay = read.get(&id).expect("entry").sync_relay().expect("relay");
+        assert_eq!(relay.pin.as_deref(), Some(PIN));
+        assert_eq!(relay.alt, alt);
+        assert_eq!(read.to_json(), text);
+
+        // A hosted link writes no pin and no alternatives.
+        let hosted = RelayLink::new("https://apassy-relay.wyderka.cc", "t_7k2m9q4x8c", 2);
+        let json = serde_json::to_string(&hosted).expect("json");
+        assert!(!json.contains("pin") && !json.contains("alt"), "{json}");
+
+        // A link of an older list has neither.
+        let old: RelayLink = serde_json::from_str(
+            r#"{"url":"https://apassy-relay.wyderka.cc","team_id":"t_7k2m9q4x8c","device_id":2}"#,
+        )
+        .expect("old link");
+        assert_eq!(old.pin, None);
+        assert!(old.alt.is_empty());
+        assert_eq!(old, hosted);
     }
 }
