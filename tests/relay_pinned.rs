@@ -219,6 +219,24 @@ fn a_pairing_link_makes_a_team_on_a_pinned_node_and_a_pinned_device_link_joins_i
     a.sync.sync(&mut vault_a).expect("sync a");
     assert_eq!(titles(&vault_a), ["Alpha", "Beta"]);
 
+    // A new relay sync of the second Mac (after a restart) has only the origin in its
+    // settings: its session takes the pin from the membership (vault schema 28).
+    let restarted = RelaySync::new(RelayConfig::in_data_dir(
+        &b.data,
+        &b.vault_path,
+        &origin,
+        "vault",
+    ));
+    vault_b.add(item("Gamma", "SYNTH-gamma")).expect("add");
+    assert!(
+        restarted
+            .sync(&mut vault_b)
+            .expect("sync after restart")
+            .pushed
+    );
+    a.sync.sync(&mut vault_a).expect("sync a");
+    assert_eq!(titles(&vault_a), ["Alpha", "Beta", "Gamma"]);
+
     // A relay sync of the stored link (`RelayConfig::for_link`) has the pin too.
     let again = RelayConfig::for_link(&b.data, &b.vault_path, &adopted.link, "vault")
         .expect("config of the link");

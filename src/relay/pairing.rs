@@ -53,7 +53,6 @@ mod secret_bytes {
         Vec::<u8>::deserialize(deserializer).map(Zeroizing::new)
     }
 }
-// Never print secret-bearing handoffs.
 /// The link code of a device link without a handoff: the fragment up to its first
 /// parameter (`&pin=…`, contract node-pairing-v1 section 5).
 fn link_code_of(raw_link: &str) -> Option<&str> {
@@ -61,6 +60,7 @@ fn link_code_of(raw_link: &str) -> Option<&str> {
     fragment.split('&').next()
 }
 
+// Never print secret-bearing handoffs.
 impl PairingChannel {
     pub fn team_id(&self) -> Option<&str> {
         crate::sync::relay_crypto::link_code_team(link_code_of(&self.raw_link)?)
