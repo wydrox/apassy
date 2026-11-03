@@ -70,7 +70,7 @@ Safari / app / Chrome --(macOS checks the origin)--> ApassyAutoFill.appex (sandb
 
 ## Protocol
 
-The implemented envelope is in `native/ApassyCredentialBridge/BridgeWire.swift` (header comment). Limits: a request frame of up to 64 KiB, an answer frame of up to 1 MiB, and an answer within 180 s.
+The implemented envelope is in `native/ApassyCredentialBridge/BridgeWire.swift` (header comment). Limits: a request frame of up to 128 KiB, an answer frame of up to 1 MiB, and an answer within 180 s.
 
 - Socket: one connection per request. The frame is a 4-byte big-endian length, then JSON.
 - Bridge to app: `ready`, `request {rid, owner_check, peer, payload}`, `cancel {rid, reason}`, `error`.
@@ -81,7 +81,7 @@ When the extension closes its connection, the app gets `cancel` (`peer_closed`).
 | Call | Owner check | App answer (`handle_platform`) |
 | --- | --- | --- |
 | `passkey_list {rp_id, allowed}` | no | `{passkeys}`: metadata |
-| `passkey_assert {id, rp_id, credential_id, client_data_hash}` | yes | the assertion |
+| `passkey_assert {id, rp_id, credential_id, client_data_hash, prf?, large_blob?}` | yes | the assertion: `{credential_id, user_handle, authenticator_data, signature, algorithm, prf?, large_blob?}` |
 | `passkey_register {rp_id, user_name, user_display_name, user_handle, client_data_hash, algorithms, excluded, attach_id?, attach_revision?, title}` | yes | the new passkey |
 | `autofill_list {domains}` | no | `{matches, others}`: logins with a password, metadata only (up to 16 domains) |
 | `autofill_credential {id}` | yes | `{username, password}`. A login without a password answers `not_found` |
@@ -89,6 +89,15 @@ When the extension closes its connection, the app gets `cancel` (`peer_closed`).
 | `credential_identities {}` | no | `{identities, passkeys, totp}`: metadata only |
 
 Any other call answers `unsupported`: no import, no removal, and no export of a key or a seed through the sheet.
+
+The WebAuthn extensions of `passkey_assert` (vault schema 25) have the shape of the iPhone core ([ios-core-v1](../contracts/ios-core-v1.md), section 5.8), with byte values in standard base64:
+
+- Request `prf`: `{"first", "second" (optional), "hashed": bool (default false)}`. With `hashed: true`, the values are the 32-byte salts that macOS gives. With `hashed: false`, they are WebAuthn inputs of 1 to 1024 bytes, and the app makes each salt (SHA-256 of `"WebAuthn PRF"`, a zero byte, and the input).
+- Request `large_blob`: `{"read": true}` or `{"write": <the uncompressed blob>}`, exactly one. The request frame is at most 128 KiB, so a write of up to 65536 bytes fits.
+- Answer `algorithm`: the COSE algorithm of the passkey, -7, -35, -8, or -257.
+- Answer `prf`: `{"first", "second"}`, 32 bytes each, only when the passkey has PRF secrets (from Credential Exchange). The outputs use the secret with user verification.
+- Answer `large_blob`: `{"data"}` for a read of a stored blob (no entry without one), or `{"written": bool}` for a write. A blob over 65536 bytes, or one that does not fit a vault field after compression, gives `{"written": false}`.
+- A bad extension field answers `bad_request` before the owner dialog. The owner proof names the extensions of the request, so a check without a write never writes a blob.
 The three calls without an owner check return no password, seed, or key. A fill is recorded in the history of the login as "macOS AutoFill", with no value.
 
 ### App routing

@@ -869,7 +869,19 @@ const PASSKEY_SCRIPTS = [
 // The page script waits 1.5 s for the bridge; the bridge sends the request at once.
 const PASSKEY_FIRST_MESSAGE_MS = 10 * 1000;
 const PASSKEY_TIMEOUT = { min: 30 * 1000, max: 180 * 1000, standard: 120 * 1000 };
-const PASSKEY_MAX_MESSAGE = 64 * 1024;
+// A request of the page: a large blob write of 64 KiB is about 86 KiB of
+// base64url.
+const PASSKEY_MAX_MESSAGE = 128 * 1024;
+// The host takes a request of at most 64 KiB (browser-v1 section 1), less room
+// for the fields that this worker adds later (bypass_nonce). A larger request,
+// a large blob write of more than about 46 KiB, stays with the browser.
+const PASSKEY_MAX_WIRE = 63 * 1024;
+// The sign-in extensions that Apassy serves: prf (WebAuthn level 3) and
+// largeBlob.
+const PASSKEY_MAX_PRF_INPUT = 1024;
+const PASSKEY_MAX_PRF_CREDENTIALS = 256;
+const PASSKEY_PRF_OUTPUT = 32;
+const PASSKEY_MAX_BLOB = 64 * 1024;
 // Answers of the app that come before any owner check.
 // Protocol errors occur before owner approval. Older apps return these for the
 // new commands, so their native browser passkeys must remain usable.
@@ -1131,6 +1143,66 @@ function extensionsOk(extensions, allowed) {
     Object.values(extensions).every((value) => typeof value === "boolean");
 }
 
+// PRF inputs {first, second?}: base64url of 1 to 1024 bytes each.
+function prfValues(value) {
+  if (!isRecord(value) || !onlyKeys(value, ["first", "second"])) return null;
+  const first = fromBase64url(value.first, 1, PASSKEY_MAX_PRF_INPUT);
+  if (!first) return null;
+  if (value.second === undefined) return { first };
+  const second = fromBase64url(value.second, 1, PASSKEY_MAX_PRF_INPUT);
+  return second ? { first, second } : null;
+}
+
+// The prf and largeBlob inputs of a get, as passkey-page.js sends them
+// (WebAuthn level 3 JSON). { prf, largeBlob } (each null when absent), or null
+// when Apassy does not serve them: the browser then does the request, with its
+// own errors for a malformed one.
+//   prf: { eval: {first, second?} | null, byCredential: Map(base64url id -> {first, second?}) }
+//   largeBlob: { read: true } | { write: bytes }
+function getExtensions(extensions, allowed) {
+  const out = { prf: null, largeBlob: null };
+  if (extensions === undefined) return out;
+  if (!isRecord(extensions) || !onlyKeys(extensions, ["prf", "largeBlob"])) return null;
+  if (extensions.prf !== undefined) {
+    const prf = extensions.prf;
+    if (!isRecord(prf) || !onlyKeys(prf, ["eval", "evalByCredential"])) return null;
+    const inputs = { eval: null, byCredential: new Map() };
+    if (prf.eval !== undefined) {
+      inputs.eval = prfValues(prf.eval);
+      if (!inputs.eval) return null;
+    }
+    if (prf.evalByCredential !== undefined) {
+      if (!isRecord(prf.evalByCredential)) return null;
+      const keys = Object.keys(prf.evalByCredential);
+      if (keys.length > PASSKEY_MAX_PRF_CREDENTIALS) return null;
+      for (const key of keys) {
+        // WebAuthn: each key is the canonical base64url ID of a credential of
+        // the allow list (an entry without an allow list is an error).
+        const id = fromBase64url(key, 1, 1023);
+        const values = prfValues(prf.evalByCredential[key]);
+        if (!id || !values || !allowed.some((item) => sameBytes(item, id))) return null;
+        inputs.byCredential.set(key, values);
+      }
+    }
+    if (inputs.eval || inputs.byCredential.size) out.prf = inputs;
+  }
+  if (extensions.largeBlob !== undefined) {
+    const largeBlob = extensions.largeBlob;
+    if (!isRecord(largeBlob)) return null;
+    if (onlyKeys(largeBlob, ["read"]) && largeBlob.read === true) {
+      out.largeBlob = { read: true };
+    } else if (onlyKeys(largeBlob, ["write"]) && Object.hasOwn(largeBlob, "write") && allowed.length === 1) {
+      // WebAuthn: a write names exactly one credential in the allow list.
+      const blob = fromBase64url(largeBlob.write, 1, PASSKEY_MAX_BLOB);
+      if (!blob) return null;
+      out.largeBlob = { write: blob };
+    } else {
+      return null;
+    }
+  }
+  return out;
+}
+
 const USER_VERIFICATION = ["required", "preferred", "discouraged"];
 
 // The request of the bridge: { op, options, mediation? }, options as JSON with
@@ -1155,11 +1227,12 @@ function parsePasskeyRequest(message, peer) {
   if (op === "get") {
     if (!onlyKeys(o, ["challenge", "timeout", "rpId", "allowCredentials", "userVerification", "hints", "extensions"])) return null;
     if (o.userVerification !== undefined && !USER_VERIFICATION.includes(o.userVerification)) return null;
-    if (!extensionsOk(o.extensions, [])) return null;
     const rpId = passkeyRpId(peer.hostname, o.rpId);
     const allowed = credentialIds(o.allowCredentials);
     if (!rpId || !allowed) return null;
-    return { op, rpId, challenge, timeout, allowed };
+    const extensions = getExtensions(o.extensions, allowed);
+    if (!extensions) return null;
+    return { op, rpId, challenge, timeout, allowed, prf: extensions.prf, largeBlob: extensions.largeBlob };
   }
 
   if (op === "create") {
@@ -1238,7 +1311,23 @@ function wireRequest(request, origin, clientData, rid) {
     rid,
   };
   if (request.op === "get") {
-    return { ...common, cmd: "passkey_get", allowed: request.allowed.map(standardBase64) };
+    const wire = { ...common, cmd: "passkey_get", allowed: request.allowed.map(standardBase64) };
+    const prfWire = (values) => (values.second
+      ? { first: standardBase64(values.first), second: standardBase64(values.second) }
+      : { first: standardBase64(values.first) });
+    if (request.prf) {
+      wire.prf = {};
+      if (request.prf.eval) wire.prf.eval = prfWire(request.prf.eval);
+      if (request.prf.byCredential.size) {
+        // Keys: base64url credential IDs without padding (the WebAuthn form).
+        wire.prf.eval_by_credential = Object.fromEntries(
+          [...request.prf.byCredential].map(([id, values]) => [id, prfWire(values)]));
+      }
+    }
+    if (request.largeBlob) {
+      wire.large_blob = request.largeBlob.read ? { read: true } : { write: standardBase64(request.largeBlob.write) };
+    }
+    return wire;
   }
   return {
     ...common,
@@ -1257,6 +1346,47 @@ function wireRequest(request, origin, clientData, rid) {
 const FLAG_UP = 0x01;
 const FLAG_UV = 0x04;
 const FLAG_AT = 0x40;
+
+// The client extension results of a get, checked against the inputs that this
+// worker sent, or null for an unexpected output. prf: 32-byte outputs, only
+// for a credential that had inputs, a second only for a second input.
+// largeBlob: {blob} or {} after a read, {written} after a write. No output from
+// the app: the member is absent, as for a client without the extension.
+function getExtensionResults(expect, data, credentialId) {
+  const results = {};
+  if (data.prf !== undefined && data.prf !== null) {
+    const inputs = expect.prf && (expect.prf.byCredential.get(base64url(credentialId)) || expect.prf.eval);
+    if (!inputs || !isRecord(data.prf) || !onlyKeys(data.prf, ["first", "second"])) return null;
+    const first = fromStandardBase64(data.prf.first, PASSKEY_PRF_OUTPUT, PASSKEY_PRF_OUTPUT);
+    if (!first) return null;
+    const outputs = { first: base64url(first) };
+    if (data.prf.second !== undefined) {
+      const second = inputs.second && fromStandardBase64(data.prf.second, PASSKEY_PRF_OUTPUT, PASSKEY_PRF_OUTPUT);
+      if (!second) return null;
+      outputs.second = base64url(second);
+    }
+    results.prf = { results: outputs };
+  }
+  if (data.large_blob !== undefined && data.large_blob !== null) {
+    const output = data.large_blob;
+    const asked = expect.largeBlob;
+    if (!asked || !isRecord(output)) return null;
+    if (asked.read) {
+      if (!onlyKeys(output, ["data"])) return null;
+      if (output.data === undefined || output.data === null || output.data === "") {
+        results.largeBlob = {};
+      } else {
+        const blob = fromStandardBase64(output.data, 1, PASSKEY_MAX_BLOB);
+        if (!blob) return null;
+        results.largeBlob = { blob: base64url(blob) };
+      }
+    } else {
+      if (!onlyKeys(output, ["written"]) || typeof output.written !== "boolean") return null;
+      results.largeBlob = { written: output.written };
+    }
+  }
+  return results;
+}
 
 // Checks the answer of the app against what this worker asked. The reply for
 // the page, or NOT_ALLOWED for anything unexpected (fail closed).
@@ -1280,9 +1410,16 @@ async function checkPasskeyAnswer(expect, answer) {
   if (expect.op === "get") {
     if (data.type !== "passkey") return NOT_ALLOWED;
     if (expect.allowed.length && !expect.allowed.some((id) => sameBytes(id, credentialId))) return NOT_ALLOWED;
+    // The signature is of the algorithm of the passkey (ES256, EdDSA, ES384,
+    // RS256); the relying party checks it with its stored public key.
     const signature = fromStandardBase64(data.signature, 8, 1024);
     const userHandle = fromStandardBase64(data.user_handle, 0, 64);
     if (!signature || !userHandle) return NOT_ALLOWED;
+    if (data.algorithm !== undefined && (!Number.isInteger(data.algorithm) || Math.abs(data.algorithm) > 0x7fffffff)) {
+      return NOT_ALLOWED;
+    }
+    const clientExtensionResults = getExtensionResults(expect, data, credentialId);
+    if (!clientExtensionResults) return NOT_ALLOWED;
     return {
       kind: "result",
       op: "get",
@@ -1292,7 +1429,7 @@ async function checkPasskeyAnswer(expect, answer) {
         authenticatorData: base64url(authData),
         signature: base64url(signature),
         userHandle: userHandle.length ? base64url(userHandle) : null,
-        clientExtensionResults: {},
+        clientExtensionResults,
       },
     };
   }
@@ -1427,6 +1564,10 @@ async function startPasskey(session, message) {
   // Only the isolated bridge can attest a browser user activation. Page data
   // never carries a window, deadline, secret, or reusable approval.
   if (message.trustedGesture === true) wire.trusted_gesture = true;
+  if (new TextEncoder().encode(JSON.stringify(wire)).length > PASSKEY_MAX_WIRE) {
+    endPasskey(session, FALLBACK);
+    return;
+  }
   session.expect = {
     op: request.op,
     rid,
@@ -1437,6 +1578,8 @@ async function startPasskey(session, message) {
     excluded: request.excluded || [],
     algorithms: request.algorithms || [],
     credProps: request.credProps === true,
+    prf: request.prf || null,
+    largeBlob: request.largeBlob || null,
   };
 
   let native;

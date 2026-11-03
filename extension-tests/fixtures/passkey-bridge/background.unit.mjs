@@ -264,8 +264,40 @@ const UNSUPPORTED = {
   "a string timeout": { op: "get", options: getOptions({ timeout: "60000" }) },
   "an unknown op": { op: "sign", options: getOptions() },
   "no options": { op: "get" },
-  "a message over 64 KiB": { op: "create", options: createOptions({ rp: { id: "example.com", name: "n".repeat(70000) } }) },
+  "a message over 128 KiB": { op: "create", options: createOptions({ rp: { id: "example.com", name: "n".repeat(140000) } }) },
+  ...getExtensionCases(),
 };
+
+// get extensions that Apassy does not serve: the browser does them, with its
+// own errors.
+function getExtensionCases() {
+  const id = randomBytes(16);
+  const allow = [{ type: "public-key", id: b64u(id) }];
+  const get = (extensions, extra = {}) => ({ op: "get", options: getOptions({ allowCredentials: allow, extensions, ...extra }) });
+  return {
+    "an empty prf input": get({ prf: { eval: { first: "" } } }),
+    "a prf input of 1025 bytes": get({ prf: { eval: { first: b64u(randomBytes(1025)) } } }),
+    "a second prf input of 1025 bytes": get({ prf: { eval: { first: b64u(randomBytes(32)), second: b64u(randomBytes(1025)) } } }),
+    "a prf input in standard base64": get({ prf: { eval: { first: b64(Buffer.from([0xfb, 0xff, 0xfe])) } } }),
+    "an unknown prf member": get({ prf: { eval: { first: b64u(randomBytes(32)) }, enabled: true } }),
+    "an unknown prf input member": get({ prf: { eval: { first: b64u(randomBytes(32)), third: "AA" } } }),
+    "prf evalByCredential without an allow list": get({ prf: { evalByCredential: { [b64u(id)]: { first: b64u(randomBytes(32)) } } } }, { allowCredentials: [] }),
+    "prf evalByCredential outside the allow list": get({ prf: { evalByCredential: { [b64u(randomBytes(16))]: { first: b64u(randomBytes(32)) } } } }),
+    "prf evalByCredential with a padded key": get({ prf: { evalByCredential: { [`${b64u(Buffer.from([1, 2]))}=`]: { first: b64u(randomBytes(32)) } } } }),
+    "257 prf evalByCredential entries": get({ prf: { evalByCredential: Object.fromEntries(Array.from({ length: 257 }, (_, i) =>
+      [b64u(Buffer.from([i & 0xff, i >> 8, 1])), { first: b64u(randomBytes(4)) }])) } }),
+    "a largeBlob read of false": get({ largeBlob: { read: false } }),
+    "a largeBlob read and write": get({ largeBlob: { read: true, write: b64u(randomBytes(4)) } }),
+    "a largeBlob support member": get({ largeBlob: { support: "required" } }),
+    "an empty largeBlob": get({ largeBlob: {} }),
+    "an empty largeBlob write": get({ largeBlob: { write: "" } }),
+    "a largeBlob write above 64 KiB": get({ largeBlob: { write: b64u(randomBytes(64 * 1024 + 1)) } }),
+    "a largeBlob write without exactly one allowed credential": get({ largeBlob: { write: b64u(randomBytes(4)) } }, { allowCredentials: [] }),
+    "a largeBlob write too large for the host": get({ largeBlob: { write: b64u(randomBytes(50 * 1024)) } }),
+    "a boolean prf (get)": get({ prf: true }),
+    "a credProps on get": get({ credProps: true }),
+  };
+}
 
 for (const [name, message] of Object.entries(UNSUPPORTED)) {
   test(`${name}: a fallback to the browser, nothing to the app`, async () => {
@@ -859,4 +891,135 @@ test("code binds only after Allow once and retries the exact packet on the same 
   assert.deepEqual(seen[1], seen[3]);
   assert.equal(seen[1].bypass_nonce, seen[2].bypass_nonce);
   assert.equal(bg.natives.length, 1);
+});
+
+// --- get extensions: prf and largeBlob --------------------------------------------------
+
+const PRF_FIRST = randomBytes(32);
+const PRF_SECOND = randomBytes(32);
+
+async function extensionRequest(bg, extensions, allowed = [randomBytes(16)]) {
+  const options = getOptions({ allowCredentials: allowed.map((id) => ({ type: "public-key", id: b64u(id) })), extensions });
+  const port = await request(bg, { op: "get", options });
+  return { port, wire: bg.natives.at(-1).sent[0] };
+}
+
+// An answer of the app for the first allowed credential of the wire.
+function extensionAnswer(wire, extra) {
+  return getAnswer(wire, { credential_id: wire.allowed[0], ...extra });
+}
+
+test("get with prf and largeBlob: the wire members, standard base64 values, base64url credential keys", async () => {
+  const bg = setup();
+  const id = randomBytes(16);
+  const first = randomBytes(32);
+  const second = randomBytes(1024);
+  const mine = randomBytes(1);
+  const { wire } = await extensionRequest(bg, {
+    prf: { eval: { first: b64u(first), second: b64u(second) }, evalByCredential: { [b64u(id)]: { first: b64u(mine) } } },
+    largeBlob: { read: true },
+  }, [id]);
+  assert.deepEqual(Object.keys(wire).sort(), ["allowed", "client_data_json", "cmd", "large_blob", "origin", "prf", "rid", "rp_id", "v"]);
+  assert.deepEqual(wire.prf, {
+    eval: { first: b64(first), second: b64(second) },
+    eval_by_credential: { [b64u(id)]: { first: b64(mine) } },
+  });
+  assert.deepEqual(wire.large_blob, { read: true });
+
+  // A write that fits the 64 KiB request of the host reaches the app.
+  const write = await extensionRequest(setup(), { largeBlob: { write: b64u(randomBytes(40 * 1024)) } });
+  assert.equal(Buffer.from(write.wire.large_blob.write, "base64").length, 40 * 1024);
+  assert.equal(write.wire.prf, undefined);
+});
+
+test("get with prf: no inputs for any credential sends no prf", async () => {
+  const bg = setup();
+  const { wire } = await extensionRequest(bg, { prf: {} });
+  assert.equal(wire.prf, undefined);
+});
+
+test("prf outputs reach the page as base64url results, with the algorithm of the passkey", async () => {
+  const bg = setup();
+  const { port, wire } = await extensionRequest(bg, { prf: { eval: { first: b64u(randomBytes(32)), second: b64u(randomBytes(32)) } } });
+  bg.natives[0].port.postMessage(extensionAnswer(wire, {
+    signature: b64(randomBytes(64)), algorithm: -8, prf: { first: b64(PRF_FIRST), second: b64(PRF_SECOND) },
+  }));
+  await flush();
+  const [reply] = port.received;
+  assert.equal(reply.kind, "result");
+  assert.deepEqual(reply.credential.clientExtensionResults, { prf: { results: { first: b64u(PRF_FIRST), second: b64u(PRF_SECOND) } } });
+  assert.equal(Buffer.from(reply.credential.signature, "base64url").length, 64);
+});
+
+test("prf outputs of evalByCredential: a second output only for a second input of that credential", async () => {
+  const id = randomBytes(16);
+  const extensions = { prf: { eval: { first: b64u(randomBytes(8)), second: b64u(randomBytes(8)) }, evalByCredential: { [b64u(id)]: { first: b64u(randomBytes(8)) } } } };
+  const good = setup();
+  const one = await extensionRequest(good, extensions, [id]);
+  good.natives[0].port.postMessage(extensionAnswer(one.wire, { prf: { first: b64(PRF_FIRST) } }));
+  await flush();
+  assert.deepEqual(one.port.received[0].credential.clientExtensionResults, { prf: { results: { first: b64u(PRF_FIRST) } } });
+
+  const bad = setup();
+  const two = await extensionRequest(bad, extensions, [id]);
+  bad.natives[0].port.postMessage(extensionAnswer(two.wire, { prf: { first: b64(PRF_FIRST), second: b64(PRF_SECOND) } }));
+  await flush();
+  assert.deepEqual(two.port.received, [{ kind: "error", name: "NotAllowedError" }]);
+});
+
+test("largeBlob outputs: data after a read, {} without data, written after a write", async () => {
+  const blob = randomBytes(1000);
+  for (const [extensions, output, expected] of [
+    [{ largeBlob: { read: true } }, { data: b64(blob) }, { largeBlob: { blob: b64u(blob) } }],
+    [{ largeBlob: { read: true } }, { data: null }, { largeBlob: {} }],
+    [{ largeBlob: { read: true } }, {}, { largeBlob: {} }],
+    [{ largeBlob: { write: b64u(blob) } }, { written: true }, { largeBlob: { written: true } }],
+    [{ largeBlob: { write: b64u(blob) } }, { written: false }, { largeBlob: { written: false } }],
+    [{ largeBlob: { write: b64u(blob) } }, undefined, {}],
+  ]) {
+    const bg = setup();
+    const { port, wire } = await extensionRequest(bg, extensions);
+    bg.natives[0].port.postMessage(extensionAnswer(wire, output === undefined ? {} : { large_blob: output }));
+    await flush();
+    assert.equal(port.received[0].kind, "result", JSON.stringify(output));
+    assert.deepEqual(port.received[0].credential.clientExtensionResults, expected);
+  }
+});
+
+const BAD_EXTENSION_ANSWERS = {
+  "prf outputs without prf inputs": [{}, { prf: { first: b64(PRF_FIRST) } }],
+  "a prf output of 31 bytes": [{ prf: { eval: { first: b64u(randomBytes(8)) } } }, { prf: { first: b64(randomBytes(31)) } }],
+  "a prf output of 64 bytes": [{ prf: { eval: { first: b64u(randomBytes(8)) } } }, { prf: { first: b64(randomBytes(64)) } }],
+  "a prf output in base64url": [{ prf: { eval: { first: b64u(randomBytes(8)) } } }, { prf: { first: b64u(Buffer.alloc(32, 0xff)) } }],
+  "a second prf output without a second input": [{ prf: { eval: { first: b64u(randomBytes(8)) } } }, { prf: { first: b64(PRF_FIRST), second: b64(PRF_SECOND) } }],
+  "an unknown prf output member": [{ prf: { eval: { first: b64u(randomBytes(8)) } } }, { prf: { first: b64(PRF_FIRST), enabled: true } }],
+  "a large blob output without a large blob input": [{}, { large_blob: { data: b64(randomBytes(4)) } }],
+  "written after a read": [{ largeBlob: { read: true } }, { large_blob: { written: true } }],
+  "data after a write": [{ largeBlob: { write: b64u(randomBytes(4)) } }, { large_blob: { data: b64(randomBytes(4)) } }],
+  "a written that is not a boolean": [{ largeBlob: { write: b64u(randomBytes(4)) } }, { large_blob: { written: "yes" } }],
+  "a blob above 64 KiB": [{ largeBlob: { read: true } }, { large_blob: { data: b64(randomBytes(64 * 1024 + 1)) } }],
+  "an algorithm that is not a number": [{}, { algorithm: "EdDSA" }],
+  "an algorithm that is a fraction": [{}, { algorithm: -7.5 }],
+};
+
+for (const [name, [extensions, overrides]] of Object.entries(BAD_EXTENSION_ANSWERS)) {
+  test(`a get answer with ${name}: NotAllowedError, nothing delivered`, async () => {
+    const bg = setup();
+    const { port, wire } = await extensionRequest(bg, Object.keys(extensions).length ? extensions : undefined);
+    bg.natives[0].port.postMessage(extensionAnswer(wire, overrides));
+    await flush();
+    assert.deepEqual(port.received, [{ kind: "error", name: "NotAllowedError" }]);
+  });
+}
+
+test("signatures of other algorithms than ES256 pass for get: EdDSA, ES384, RS256", async () => {
+  for (const [algorithm, size] of [[-8, 64], [-35, 103], [-257, 256], [-257, 512], [undefined, 70]]) {
+    const bg = setup();
+    const { port, wire } = await extensionRequest(bg, undefined);
+    bg.natives[0].port.postMessage(extensionAnswer(wire, { signature: b64(randomBytes(size)), algorithm }));
+    await flush();
+    assert.equal(port.received[0].kind, "result", `${algorithm}`);
+    assert.equal(Buffer.from(port.received[0].credential.signature, "base64url").length, size);
+    assert.deepEqual(port.received[0].credential.clientExtensionResults, {});
+  }
 });

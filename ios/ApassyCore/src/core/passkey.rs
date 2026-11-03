@@ -5,17 +5,23 @@
 //!
 //! Every byte value on the wire is standard base64 with padding, as the rest of the
 //! iOS wire. An error never quotes an identifier, a handle, or a key.
+//!
+//! WebAuthn extensions (schema 25): an import keeps the PRF secrets and the large blob
+//! of a passkey, and an assertion makes PRF outputs and reads or writes the large blob.
+//! The PRF outputs and the blob are written into erasing buffers of the answer.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use zeroize::Zeroizing;
 
 use apassy::vault::passkey::{
-    PasskeyCreate, PasskeyError, PasskeyImport, PasskeyInfo, PasskeyTarget,
+    LargeBlobOp, LargeBlobResult, MAX_LARGE_BLOB_BYTES, PRF_BYTES, PasskeyAssertionExtensions,
+    PasskeyCreate, PasskeyError, PasskeyImport, PasskeyInfo, PasskeyLargeBlob, PasskeyPrfInput,
+    PasskeyPrfSecrets, PasskeyTarget,
 };
 use apassy::vault::{Vault, VaultErrorKind};
 
 use super::errors::{CoreError, CoreResult};
-use super::wire::Secret;
+use super::wire::{Secret, zeroizing};
 
 /// The largest request of a passkey call. An import of many accounts is the largest.
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
@@ -26,8 +32,14 @@ const MAX_USER_HANDLE_BYTES: usize = 64;
 const MAX_RP_ID_BYTES: usize = 253;
 const MAX_USER_NAME_BYTES: usize = 256;
 const MAX_TITLE_BYTES: usize = 128;
-/// The size of a PKCS8 P-256 key is about 140 bytes; this is a loose bound.
-const MAX_KEY_BYTES: usize = 1024;
+/// A PKCS #8 key: about 140 bytes for P-256, 185 for P-384, 83 for Ed25519, and about
+/// 2.4 KB for RSA of 4096 bits; this is a loose bound.
+const MAX_KEY_BYTES: usize = 4096;
+/// A WebAuthn PRF input (`hashed: false`). A hashed input is a 32-byte salt.
+const MAX_PRF_INPUT_BYTES: usize = 1024;
+/// The compressed data of an imported large blob: its base64url must fit one vault
+/// field value (64 KiB of text).
+const MAX_LARGE_BLOB_DATA_BYTES: usize = 49_152;
 /// The credential IDs of an allow list or an exclude list.
 const MAX_CREDENTIALS: usize = 256;
 const MAX_ALGORITHMS: usize = 32;
@@ -278,6 +290,31 @@ pub struct AssertIn {
     rp_id: String,
     credential_id: String,
     client_data_hash: String,
+    #[serde(default)]
+    prf: Option<PrfIn>,
+    #[serde(default)]
+    large_blob: Option<LargeBlobIn>,
+}
+
+/// The PRF inputs of an assertion. `hashed: false`: WebAuthn inputs of 1 to 1024 bytes.
+/// `hashed: true`: hmac-secret salts of exactly 32 bytes. The iOS credential provider
+/// gets the WebAuthn inputs and sends `hashed: false`.
+#[derive(Deserialize)]
+struct PrfIn {
+    first: String,
+    #[serde(default)]
+    second: Option<String>,
+    #[serde(default)]
+    hashed: bool,
+}
+
+/// `{"read": true}` or `{"write": <the uncompressed blob>}`.
+#[derive(Deserialize)]
+struct LargeBlobIn {
+    #[serde(default)]
+    read: bool,
+    #[serde(default)]
+    write: Option<Secret>,
 }
 
 #[derive(Serialize)]
@@ -286,20 +323,126 @@ pub struct Asserted {
     pub user_handle: String,
     pub authenticator_data: String,
     pub signature: String,
+    /// The COSE algorithm of the passkey: -7, -35, -8, or -257.
+    pub algorithm: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prf: Option<PrfOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub large_blob: Option<LargeBlobOut>,
+}
+
+/// The PRF outputs, in erasing buffers.
+#[derive(Serialize)]
+pub struct PrfOut {
+    #[serde(serialize_with = "zeroizing")]
+    first: Zeroizing<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "optional_zeroizing"
+    )]
+    second: Option<Zeroizing<String>>,
+}
+
+/// `{"data": …}` for a read of a stored blob, `{"written": bool}` for a write.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum LargeBlobOut {
+    Data {
+        #[serde(serialize_with = "zeroizing")]
+        data: Zeroizing<String>,
+    },
+    Written {
+        written: bool,
+    },
+}
+
+fn optional_zeroizing<S: Serializer>(
+    value: &Option<Zeroizing<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(text) => serializer.serialize_str(text),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn prf_in(prf: &PrfIn) -> CoreResult<PasskeyPrfInput> {
+    let one = |text: &str| -> CoreResult<Vec<u8>> {
+        let max = if prf.hashed {
+            PRF_BYTES
+        } else {
+            MAX_PRF_INPUT_BYTES
+        };
+        let bytes = bytes_in(text, max, "PRF input")?;
+        if prf.hashed && bytes.len() != PRF_BYTES {
+            return Err(CoreError::invalid("The PRF input is not valid."));
+        }
+        Ok(bytes)
+    };
+    Ok(PasskeyPrfInput {
+        first: one(&prf.first)?,
+        second: prf.second.as_deref().map(one).transpose()?,
+        hashed: prf.hashed,
+    })
+}
+
+/// A write of more than 64 KiB is not refused here: the vault answers `written: false`.
+fn large_blob_in(blob: &LargeBlobIn) -> CoreResult<LargeBlobOp> {
+    match (blob.read, &blob.write) {
+        (true, None) => Ok(LargeBlobOp::Read),
+        (false, Some(text)) if text.expose().is_empty() => {
+            Ok(LargeBlobOp::Write(Zeroizing::new(Vec::new())))
+        }
+        (false, Some(text)) => decode(text.expose(), MAX_REQUEST_BYTES)
+            .map(LargeBlobOp::Write)
+            .ok_or_else(|| CoreError::invalid("The large blob is not valid.")),
+        _ => Err(CoreError::invalid(
+            "The large blob request needs read or write.",
+        )),
+    }
 }
 
 pub fn sign(vault: &mut Vault, request: AssertIn) -> CoreResult<Asserted> {
     rp_id_in(&request.rp_id)?;
     let credential_id = credential_id_in(&request.credential_id)?;
     let hash = client_data_hash_in(&request.client_data_hash)?;
+    let extensions = PasskeyAssertionExtensions {
+        prf: request.prf.as_ref().map(prf_in).transpose()?,
+        large_blob: request.large_blob.as_ref().map(large_blob_in).transpose()?,
+    };
     let answer = vault
-        .sign_passkey(request.id, &request.rp_id, &credential_id, &hash)
+        .assert_passkey(
+            request.id,
+            &request.rp_id,
+            &credential_id,
+            &hash,
+            &extensions,
+        )
         .map_err(map_error)?;
+    let prf = answer.prf.as_ref().map(|output| PrfOut {
+        first: Zeroizing::new(encode(&*output.first)),
+        second: output
+            .second
+            .as_ref()
+            .map(|second| Zeroizing::new(encode(&**second))),
+    });
+    let large_blob = match &answer.large_blob {
+        Some(LargeBlobResult::Read(Some(blob))) => Some(LargeBlobOut::Data {
+            data: Zeroizing::new(encode(blob)),
+        }),
+        Some(LargeBlobResult::Read(None)) | None => None,
+        Some(LargeBlobResult::Written(written)) => {
+            Some(LargeBlobOut::Written { written: *written })
+        }
+    };
     Ok(Asserted {
         credential_id: encode(&answer.credential_id),
         user_handle: encode(&answer.user_handle),
         authenticator_data: encode(&answer.authenticator_data),
         signature: encode(&answer.signature),
+        algorithm: answer.algorithm,
+        prf,
+        large_blob,
     })
 }
 
@@ -387,6 +530,52 @@ struct AccountIn {
     key: Secret,
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    prf: Option<PrfSecretsIn>,
+    #[serde(default)]
+    large_blob: Option<LargeBlobImportIn>,
+    /// A login without a passkey that gets this passkey, at its current revision.
+    #[serde(default)]
+    attach_id: Option<u64>,
+}
+
+/// The two 32-byte PRF secrets (Credential Exchange `credentialWithUV` and
+/// `credentialWithoutUV`).
+#[derive(Deserialize)]
+struct PrfSecretsIn {
+    with_uv: Secret,
+    without_uv: Secret,
+}
+
+/// The large blob as Credential Exchange gives it: raw DEFLATE data and the size.
+#[derive(Deserialize)]
+struct LargeBlobImportIn {
+    data: Secret,
+    uncompressed_size: u64,
+}
+
+fn prf_secret_in(text: &Secret) -> CoreResult<Zeroizing<[u8; PRF_BYTES]>> {
+    let bytes = decode(text.expose(), PRF_BYTES)
+        .ok_or_else(|| CoreError::invalid("The PRF secret of the passkey is not valid."))?;
+    let array: [u8; PRF_BYTES] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CoreError::invalid("The PRF secret of the passkey is not valid."))?;
+    Ok(Zeroizing::new(array))
+}
+
+fn large_blob_import_in(blob: &LargeBlobImportIn) -> CoreResult<PasskeyLargeBlob> {
+    if blob.uncompressed_size > MAX_LARGE_BLOB_BYTES as u64 {
+        return Err(CoreError::invalid(
+            "The large blob of the passkey is too large.",
+        ));
+    }
+    let data = decode(blob.data.expose(), MAX_LARGE_BLOB_DATA_BYTES)
+        .ok_or_else(|| CoreError::invalid("The large blob of the passkey is not valid."))?;
+    Ok(PasskeyLargeBlob {
+        data,
+        uncompressed_size: blob.uncompressed_size,
+    })
 }
 
 #[derive(Serialize)]
@@ -413,7 +602,22 @@ fn account(vault: &mut Vault, account: AccountIn) -> CoreResult<Outcome> {
         pkcs8: decode(account.key.expose(), MAX_KEY_BYTES)
             .ok_or_else(|| CoreError::invalid("The key of the passkey is not valid."))?,
         title: title_in(&account.title, &account.rp_id)?,
-        attach: None,
+        attach: account.attach_id,
+        prf: account
+            .prf
+            .as_ref()
+            .map(|prf| {
+                Ok::<_, CoreError>(PasskeyPrfSecrets {
+                    with_uv: prf_secret_in(&prf.with_uv)?,
+                    without_uv: prf_secret_in(&prf.without_uv)?,
+                })
+            })
+            .transpose()?,
+        large_blob: account
+            .large_blob
+            .as_ref()
+            .map(large_blob_import_in)
+            .transpose()?,
         rp_id: account.rp_id,
     };
     Ok(match vault.import_passkey(import) {
@@ -424,7 +628,9 @@ fn account(vault: &mut Vault, account: AccountIn) -> CoreResult<Outcome> {
 }
 
 /// Import each account on its own: one that fails is counted and the others go on.
-/// The answer holds counts only; nothing of a failed account is returned or logged.
+/// The answer holds counts only; nothing of a failed account is returned or logged. An
+/// account with `attach_id` goes on that login; a login that has a passkey already
+/// counts as `skipped_existing`, as the vault answers `exists` for it.
 pub fn import(vault: &mut Vault, request: ImportIn) -> CoreResult<Imported> {
     if request.accounts.len() > MAX_IMPORT_ACCOUNTS {
         return Err(CoreError::invalid("The import holds too many passkeys."));

@@ -3,8 +3,9 @@ import AuthenticationServices
 import Foundation
 import Observation
 
-/// Moving logins, one-time passwords, and passkeys between Apassy and another app with Apple's
-/// credential exchange (iOS 26). The system shows its own screens, and the data goes from app to
+/// Moving logins, one-time passwords, passkeys, and the other items (cards, Wi-Fi networks,
+/// documents, notes, keys) between Apassy and another app with Apple's credential exchange
+/// (iOS 26). The export takes logins only. The system shows its own screens, and the data goes from app to
 /// app in memory: Apassy writes no file. Each import and each export starts with its own owner
 /// check, before Apassy reads what the other app sent or reads keys out of the vault.
 @available(iOS 26.0, macOS 26.0, *)
@@ -45,7 +46,11 @@ final class CredentialExchangeModel {
     }
 
     @ObservationIgnored private var pending: PendingExport?
-    @ObservationIgnored private let vault: VaultModel
+    /// The duplicate groups of the vault after an import finished (0 before, after an export, and
+    /// when the core cannot tell): the screen then offers "Review duplicates".
+    private(set) var duplicateGroups = 0
+    /// The vault of the import and the export; the duplicates screen opens on it.
+    @ObservationIgnored let vault: VaultModel
     @ObservationIgnored private let system: System
 
     init(vault: VaultModel, system: System) {
@@ -64,18 +69,19 @@ final class CredentialExchangeModel {
     func receive(token: UUID) {
         guard !isWorking else { return }
         self.token = token
+        duplicateGroups = 0
         state = .importWaiting
     }
 
     /// The import that waits, after the owner check: read the other app's data, save the logins,
-    /// one-time passwords, and passkeys, and say what happened in counts.
+    /// one-time passwords, passkeys, and other items, and say what happened in counts.
     func importNow() async {
         guard let token, !isWorking else { return }
         guard vault.isUnlocked else {
             state = .failed("Unlock the vault first.")
             return
         }
-        guard await vault.gate.confirm(reason: "Import logins and passkeys from another app") else { return }
+        guard await vault.gate.confirm(reason: "Import passwords, passkeys, and other items from another app") else { return }
         state = .working("Importing…")
         let data: ASExportedCredentialData
         do {
@@ -89,7 +95,25 @@ final class CredentialExchangeModel {
         let plan = CredentialExchangeImport.plan(data)
         let report = await CredentialExchangeImport.run(plan, service: vault.service)
         await vault.didImport()
+        await checkDuplicates()
         state = .finished(report.summary)
+    }
+
+    /// Count the duplicate groups after an import: an import often brings items that the vault had.
+    /// An error leaves no offer; the duplicates screen says it itself.
+    func checkDuplicates() async {
+        guard vault.isUnlocked else {
+            duplicateGroups = 0
+            return
+        }
+        duplicateGroups = (try? await vault.service.duplicates().count) ?? 0
+    }
+
+    /// Count again when the owner comes back from the duplicates screen. Only an import's offer
+    /// changes: an export makes none.
+    func refreshDuplicates() async {
+        guard duplicateGroups > 0, case .finished = state else { return }
+        await checkDuplicates()
     }
 
     func cancelImport() {
@@ -109,6 +133,7 @@ final class CredentialExchangeModel {
         guard !isWorking, vault.isUnlocked, let vaultID = vault.vault?.id else { return }
         guard await vault.gate.confirm(reason: "Export your logins and passkeys to another app") else { return }
         pending = nil
+        duplicateGroups = 0
         state = .working("Waiting for the other app…")
         do {
             let format = try await system.requestExport()
@@ -202,6 +227,7 @@ final class CredentialExchangeModel {
 
     func dismiss() {
         guard !isWorking, state != .exportPaused else { return }
+        duplicateGroups = 0
         state = token == nil ? .idle : .importWaiting
     }
 

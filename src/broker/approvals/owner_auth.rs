@@ -199,7 +199,9 @@ pub enum OwnerAction {
     /// and hashed for a request of the extension. `None` is a request of the macOS
     /// passkey sheet: macOS checked the relying party, and there is no web origin. So a
     /// check for the browser never signs a request of macOS, and the other way around.
-    /// `rid` is the ID of the request.
+    /// `rid` is the ID of the request. `extensions` are the WebAuthn extensions of the
+    /// request for this credential (PRF inputs, a largeBlob read or write), so a proof
+    /// never writes a blob or makes PRF outputs that the request did not have.
     SignPasskey {
         origin: Option<String>,
         rid: String,
@@ -207,6 +209,7 @@ pub enum OwnerAction {
         item_id: u64,
         credential_id: Vec<u8>,
         client_data_hash: [u8; 32],
+        extensions: crate::vault::PasskeyAssertionExtensions,
     },
     /// Give the username and the password of one login to macOS AutoFill, for one request
     /// of the macOS AutoFill sheet (`rid`). `login` is the title as the owner saw it. A

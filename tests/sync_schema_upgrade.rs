@@ -36,7 +36,7 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 24;
+const CURRENT: i64 = 25;
 /// Schema 18: folders, before trusted devices. Never released.
 const MID: i64 = 18;
 const OLD: i64 = 17;

@@ -24,9 +24,9 @@ The export file is not encrypted. Anyone who can read it has your secrets. Secti
 6. Apassy adds each selected item. A failed item does not stop the import. The result lists it with the reason.
 7. Click "Delete the export file" (section 5).
 
-Apassy is for the credentials that agents use. So the first selection has API credentials, SSH keys, databases, and servers. Logins, passwords, secure notes, other categories, and CSV rows are not selected. "Select all" and "Select none" change the whole list.
+Apassy is for the credentials that agents use. So the first selection has API credentials, SSH keys, databases, and servers. Logins, passwords, secure notes, cards, identities, bank accounts, other categories, and CSV rows are not selected. "Select all" and "Select none" change the whole list.
 
-A matching title and kind do not prove that an account is already imported. The preview no longer marks these items as duplicates or changes their selection. Review repeat imports explicitly; the preview does not compare secret values.
+The preview does not mark duplicates: a matching title and kind do not prove that an account is already imported. After the import, the result offers "Find duplicates…" when the vault has items that look like the same account (the same website and username, or the same secret values). It is also in Settings > Vault > Import. Merge keeps one item and archives the others ([desktop UI](desktop-ui.md), "Find duplicates").
 
 An imported credential has no environment variable and no declaration. Since 0.5.0 an agent needs no grant ([ADR 0025](../adr/0025-low-friction-access.md)): each connected agent sees the name, the kind, the folder, and the visible details of an imported credential in its catalog, as for any other credential, unless an exception hides it. An agent can name it in a run, and the bouncer decides. Without a declaration, each use asks you until you set one ([declarations](declarations.md)). To keep an item away from agents, archive it.
 
@@ -42,28 +42,39 @@ An imported credential has no environment variable and no declaration. Since 0.5
 | Password | Custom | The password is the field `secret`. | No |
 | Secure Note | Custom | The note text is the hidden field `note`. The notes of the credential stay empty. | No |
 | Email Account, Software License, Wireless Router, and other categories | Custom | The password, or the first hidden value, is the field `secret`. The preview has a warning. | No |
-| Credit Card, Identity, Document, Bank Account, Driver License, Outdoor License, Membership, Passport, Reward Program, Social Security Number, Medical Record, Crypto Wallet | Not imported | The preview shows the item with the reason. | Cannot be selected |
+| Credit Card | Custom | The card number is the field `secret`. Tag `card`. Personal values are hidden (see below). | No |
+| Bank Account | Custom | The account number (else the IBAN) is the field `secret`. Tag `bank`. | No |
+| Driver License, Outdoor License, Passport, Social Security Number | Custom | The document number or the social security number is the field `secret`. Tag `identity`. | No |
+| Membership, Reward Program | Custom | The member ID is the field `secret`. Tag `card`. | No |
+| Identity, Medical Record | Custom | The first hidden value is the field `secret`. Tag `identity`. | No |
+| Crypto Wallet | Custom | The recovery phrase (else the password) is the field `secret`. Tag `wallet`. | No |
+| Document | Not imported | A document is a file. Apassy does not store files. The preview shows the item with the reason. | Cannot be selected |
 | CSV row | Login, or Custom | Username and password make a login. A password alone makes a custom secret. Another column with a value is a hidden detail. | No |
+
+The categories Credit Card, Identity, Bank Account, Driver License, Outdoor License, Membership, Passport, Reward Program, Social Security Number, Medical Record, and Crypto Wallet are personal. Their main value is the field `secret`; without it, the password, then the first hidden value. The preview has a warning. Each other value is hidden: the card number, the verification number, the PIN, the cardholder name, the account and routing numbers, the IBAN and the SWIFT code, the document numbers, names, the date of birth, the address, the social security number, the member IDs, and the recovery phrase and keys of a wallet. Only these stay visible: the card type, the issuing country or state, the document type, the bank name, and the expiry. A concealed field stays hidden, also with one of these names.
 
 The fields of an item:
 
 - A concealed field is a hidden detail. A one-time password (TOTP) is a hidden detail "One-time password".
 - A text field is a visible detail only when its name is a known plain name: username, host, server, port, database, URL, type, and a few more. Any other text field is a hidden detail, because a text field can hold a secret. You can make a detail visible later in the item form.
-- A URL, an email address, a phone number, a menu choice, a date (`YYYY-MM-DD`), and a month (`YYYY-MM`) are visible details.
+- A URL, an email address, a phone number, a menu choice, a date (`YYYY-MM-DD`), and a month (`YYYY-MM`) are visible details, except in a personal item.
+- An address is a hidden detail: its street, city, state, postal code, and country, joined with commas.
 - The websites of an item are visible details "Website", "Website 2", and so on.
 - The notes of the 1Password item are the notes of the credential. Notes are searchable. They are at most 8 KB. Longer notes are shortened, with a warning.
-- The tags are the 1Password tags and `1password`. They are searchable. An edit of the credential keeps them.
+- The tags are the 1Password tags, the tag of a personal category (`card`, `identity`, `bank`, or `wallet`), and `1password`. They are searchable. An edit of the credential keeps them.
 - The title is at most 128 bytes. A longer title is shortened, with a warning.
 - A secret never goes into the title, the notes, or the tags.
 - An item has at most 10 details. A detail label has at most 31 bytes, and two labels differ (Apassy adds " 2", " 3"). When an item has more values, Apassy leaves out visible details first, from the end, then hidden ones. The preview has a warning for each value that it leaves out. The warning names the label, never the value.
 - An item that is archived in 1Password is not selected. When you import it, Apassy archives it too.
+- A login with a passkey has the warning "The passkey is not in the 1Password export. Import it on the iPhone with Credential Exchange." The 1PUX export has only the public part of a passkey (`details.passkey`, or a field of the type `passkey`), never its private key. The login itself is imported.
 
 ## 4. What is not imported
 
 - Items in the 1Password trash.
-- The categories in the table above that Apassy does not import.
-- Attachments and documents. Apassy does not read the `files/` folder of the 1PUX archive.
-- Links to other items, addresses, and other field types that Apassy does not know. The preview has a warning.
+- Documents (the category Document). A document is a file, and Apassy does not store files.
+- Attachments. Apassy does not read the `files/` folder of the 1PUX archive.
+- Passkeys. The export has no private key of a passkey. Import passkeys on the iPhone with Credential Exchange.
+- Links to other items and other field types that Apassy does not know. The preview has a warning.
 - The password history, favorites, icons, and the vault structure. The preview shows the 1Password vault name. The credential does not keep it.
 - Web form fields of a login other than the username, the password, and password fields.
 
@@ -97,6 +108,8 @@ cargo test --locked --features desktop,vault --lib import
 | Test | What it shows |
 | --- | --- |
 | `every_category_maps_to_its_kind` (`tests/onepassword_import.rs`) | Each 1Password category, the fields, the details, the fallbacks, archived and trashed items, and the first selection. |
+| `personal_categories_import_as_hidden_custom_secrets`, `personal_secrets_never_reach_title_notes_tags_warnings_or_debug_output`, `personal_items_validate_in_a_vault_and_keep_their_tags`, `a_personal_item_keeps_the_ten_detail_limit_and_leaves_out_visible_values_first` | Each personal category: the main value, the hidden and the visible details, the tags, the detail limit, and no value in a title, notes, tags, a warning, or the debug output. |
+| `a_login_with_a_passkey_warns_once_that_the_passkey_is_not_exported` | One passkey warning for a login with a passkey. |
 | `secrets_never_reach_title_notes_tags_or_debug_output` | No synthetic secret is in a title, notes, tags, a warning, or the debug output. Each secret is a secret field. |
 | `every_ready_item_validates_in_a_vault` | The vault accepts each item. A secret is not searchable. The tags are. |
 | `too_many_fields_leave_out_visible_details_first` | At most 10 details, visible ones left out first, a warning for each. |

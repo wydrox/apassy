@@ -68,6 +68,8 @@ fn get_request(allowed: &[&[u8]]) -> PasskeyGetRequest {
         rp_id: RP.to_owned(),
         client_data_json: encode_bytes(client_json("webauthn.get", ORIGIN).as_bytes()),
         allowed: allowed.iter().map(|id| encode_bytes(id)).collect(),
+        prf: None,
+        large_blob: None,
     }
 }
 
@@ -269,10 +271,15 @@ fn a_browser_sign_in_checks_then_signs_a_valid_assertion() {
         item_id,
         credential_id,
         client_data_hash,
+        extensions,
     } = &action
     else {
         panic!("not a passkey action: {action:?}");
     };
+    assert_eq!(
+        extensions,
+        &crate::vault::PasskeyAssertionExtensions::default()
+    );
     // The proof names the origin of the signed bytes, the request, the RP, the
     // credential, and the hash that the app computed.
     assert_eq!(origin.as_deref(), Some(ORIGIN));
@@ -298,6 +305,8 @@ fn a_browser_sign_in_checks_then_signs_a_valid_assertion() {
     let data = &json["data"];
     assert_eq!(data["type"], "passkey");
     assert_eq!(data["rid"], RID);
+    assert_eq!(data["algorithm"], -7);
+    assert!(data.get("prf").is_none() && data.get("large_blob").is_none());
     assert_eq!(data["credential_id"], encode_bytes(&created.credential_id));
     assert_eq!(data["user_handle"], encode_bytes(b"handle-ada@example.com"));
     assert_eq!(
@@ -383,6 +392,7 @@ fn proofs_for_another_request_never_sign() {
         item_id: created.item_id,
         credential_id: created.credential_id.clone(),
         client_data_hash: hash,
+        extensions: Default::default(),
     };
     let change = |edit: &dyn Fn(&mut OwnerAction)| {
         let mut action = exact.clone();
@@ -438,6 +448,17 @@ fn proofs_for_another_request_never_sign() {
             change(&|a| {
                 if let OwnerAction::SignPasskey { origin, .. } = a {
                     *origin = Some("https://example.com".to_owned())
+                }
+            }),
+        ),
+        // A proof without a largeBlob write never writes one.
+        (
+            "extensions",
+            change(&|a| {
+                if let OwnerAction::SignPasskey { extensions, .. } = a {
+                    extensions.large_blob = Some(crate::vault::LargeBlobOp::Write(
+                        zeroize::Zeroizing::new(b"synthetic".to_vec()),
+                    ))
                 }
             }),
         ),
@@ -564,6 +585,85 @@ fn a_deadline_or_a_lock_and_unlock_signs_nothing() {
     app.lock_vault(Some(&ctx));
     assert!(app.owner.check.is_none());
     assert_eq!(now(&answer).code, "cancelled");
+}
+
+#[test]
+fn browser_prf_by_credential_and_large_blob_reach_the_vault() {
+    let dir = TempDir::new().unwrap();
+    let mut app = unlocked_app(&dir);
+    let ctx = egui::Context::default();
+    let credential = [0x43u8; 16];
+    add_prf_passkey(&app, &credential);
+    let request =
+        |prf: Option<crate::browser::wire::PasskeyPrfRequest>,
+         large_blob: Option<crate::browser::wire::PasskeyLargeBlobRequest>| {
+            let mut get = get_request(&[credential.as_slice()]);
+            get.prf = prf;
+            get.large_blob = large_blob;
+            Command::PasskeyGet(get)
+        };
+    let values = |first: &[u8]| crate::browser::wire::PasskeyPrfValues {
+        first: first.to_vec(),
+        second: None,
+    };
+    // `eval_by_credential` wins over `eval` for its credential.
+    let answer = ask(
+        &mut app,
+        &ctx,
+        request(
+            Some(crate::browser::wire::PasskeyPrfRequest {
+                eval: Some(values(b"any")),
+                eval_by_credential: vec![(credential.to_vec(), values(b"this one"))],
+            }),
+            None,
+        ),
+    );
+    let action = dialog_action(&app);
+    let OwnerAction::SignPasskey { extensions, .. } = &action else {
+        panic!("not a passkey action");
+    };
+    let prf = extensions.prf.as_ref().expect("PRF input");
+    assert_eq!(prf.first, b"this one");
+    assert!(!prf.hashed, "the browser sends WebAuthn inputs");
+    confirm(&mut app);
+    let response = now(&answer);
+    assert!(response.ok, "{}: {}", response.code, response.message);
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        json["data"]["prf"]["first"],
+        encode_bytes(&prf_of(&prf_salt(b"this one")))
+    );
+    assert!(json["data"]["prf"].get("second").is_none());
+    assert!(!format!("{response:?}").contains(json["data"]["prf"]["first"].as_str().unwrap()));
+    // A write, then a read.
+    let answer = ask(
+        &mut app,
+        &ctx,
+        request(
+            None,
+            Some(crate::browser::wire::PasskeyLargeBlobRequest::Write(
+                b"synthetic blob".to_vec(),
+            )),
+        ),
+    );
+    confirm(&mut app);
+    let json = serde_json::to_value(now(&answer)).unwrap();
+    assert_eq!(json["data"]["large_blob"], json!({"written": true}));
+    let answer = ask(
+        &mut app,
+        &ctx,
+        request(
+            None,
+            Some(crate::browser::wire::PasskeyLargeBlobRequest::Read),
+        ),
+    );
+    confirm(&mut app);
+    let json = serde_json::to_value(now(&answer)).unwrap();
+    assert_eq!(
+        json["data"]["large_blob"]["data"],
+        encode_bytes(b"synthetic blob")
+    );
+    assert_eq!(json["data"]["algorithm"], -7);
 }
 
 #[test]
@@ -1141,6 +1241,7 @@ fn the_sheet_lists_metadata_and_signs_after_its_own_check() {
             item_id: created.item_id,
             credential_id: created.credential_id.clone(),
             client_data_hash: hash,
+            extensions: Default::default(),
         },
     );
     app.finish_owner_check_with(browser_proof);
@@ -1174,6 +1275,156 @@ fn the_sheet_lists_metadata_and_signs_after_its_own_check() {
     )
     .verify(&message, &decode("signature"))
     .expect("the signature verifies");
+    assert_eq!(result["algorithm"], -7);
+    assert!(result.get("prf").is_none() && result.get("large_blob").is_none());
+}
+
+/// A passkey with synthetic PRF secrets (0x11 with user verification, 0x33 without),
+/// imported into the vault of the app. Returns the item.
+fn add_prf_passkey(app: &DesktopApp, credential_id: &[u8]) -> u64 {
+    use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
+    let document = EcdsaKeyPair::generate_pkcs8(
+        &ECDSA_P256_SHA256_ASN1_SIGNING,
+        &ring::rand::SystemRandom::new(),
+    )
+    .unwrap();
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault.import_passkey(crate::vault::PasskeyImport {
+                rp_id: RP.to_owned(),
+                credential_id: credential_id.to_vec(),
+                user_handle: b"prf-user".to_vec(),
+                user_name: "prf@example.com".to_owned(),
+                user_display_name: "PRF".to_owned(),
+                pkcs8: zeroize::Zeroizing::new(document.as_ref().to_vec()),
+                title: "PRF".to_owned(),
+                attach: None,
+                prf: Some(crate::vault::PasskeyPrfSecrets {
+                    with_uv: zeroize::Zeroizing::new([0x11; 32]),
+                    without_uv: zeroize::Zeroizing::new([0x33; 32]),
+                }),
+                large_blob: None,
+            })
+        })
+        .expect("open vault")
+        .expect("import passkey")
+}
+
+/// HMAC-SHA-256 with the synthetic PRF secret of user verification.
+fn prf_of(salt: &[u8; 32]) -> Vec<u8> {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &[0x11; 32]);
+    ring::hmac::sign(&key, salt).as_ref().to_vec()
+}
+
+/// The WebAuthn salt of a PRF input: SHA-256 of "WebAuthn PRF", a zero byte, the input.
+fn prf_salt(input: &[u8]) -> [u8; 32] {
+    let mut bytes = b"WebAuthn PRF\0".to_vec();
+    bytes.extend_from_slice(input);
+    sha256(&bytes)
+}
+
+#[test]
+fn the_sheet_gives_prf_outputs_and_writes_and_reads_a_large_blob() {
+    let dir = TempDir::new().unwrap();
+    let mut app = unlocked_app(&dir);
+    let ctx = egui::Context::default();
+    let item = add_prf_passkey(&app, &[0x42; 16]);
+    let hash = [0x24u8; 32];
+    let assert_with = |app: &mut DesktopApp, n: u64, extra: Value| -> Value {
+        let mut args = json!({
+            "id": item,
+            "rp_id": RP,
+            "credential_id": encode_bytes(&[0x42; 16]),
+            "client_data_hash": encode_bytes(&hash),
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        let (lines, _) = platform(app, &ctx, n, "passkey_assert", args);
+        assert!(lines.try_recv().is_err(), "no answer before the check");
+        let action = dialog_action(app);
+        let OwnerAction::SignPasskey { extensions, .. } = &action else {
+            panic!("not a passkey action");
+        };
+        let extensions = extensions.clone();
+        confirm(app);
+        let answer = line(&lines);
+        assert_eq!(answer["result"]["ok"], true, "{answer} ({extensions:?})");
+        answer["result"]["result"].clone()
+    };
+    // macOS gives hashed salts.
+    let salt = [0x22u8; 32];
+    let result = assert_with(
+        &mut app,
+        1,
+        json!({"prf": {"first": encode_bytes(&salt), "hashed": true}}),
+    );
+    assert_eq!(result["algorithm"], -7);
+    assert_eq!(result["prf"]["first"], encode_bytes(&prf_of(&salt)));
+    assert!(result["prf"].get("second").is_none());
+    // WebAuthn inputs: the app makes the salts.
+    let result = assert_with(
+        &mut app,
+        2,
+        json!({"prf": {"first": encode_bytes(b"first"), "second": encode_bytes(b"second")}}),
+    );
+    assert_eq!(
+        result["prf"]["first"],
+        encode_bytes(&prf_of(&prf_salt(b"first")))
+    );
+    assert_eq!(
+        result["prf"]["second"],
+        encode_bytes(&prf_of(&prf_salt(b"second")))
+    );
+    // A write, then a read of the same blob.
+    let blob: Vec<u8> = (0..3000u32).map(|n| (n % 7) as u8).collect();
+    let result = assert_with(
+        &mut app,
+        3,
+        json!({"large_blob": {"write": encode_bytes(&blob)}}),
+    );
+    assert_eq!(result["large_blob"], json!({"written": true}));
+    let result = assert_with(&mut app, 4, json!({"large_blob": {"read": true}}));
+    assert_eq!(result["large_blob"]["data"], encode_bytes(&blob));
+    // A blob over 64 KiB is not written; the old blob stays.
+    let big = vec![0u8; 65_537];
+    let result = assert_with(
+        &mut app,
+        5,
+        json!({"large_blob": {"write": encode_bytes(&big)}}),
+    );
+    assert_eq!(result["large_blob"], json!({"written": false}));
+    let result = assert_with(&mut app, 6, json!({"large_blob": {"read": true}}));
+    assert_eq!(result["large_blob"]["data"], encode_bytes(&blob));
+    // Bad extension inputs answer before any dialog.
+    for (n, extra) in [
+        (
+            7,
+            json!({"prf": {"first": encode_bytes(&[1; 31]), "hashed": true}}),
+        ),
+        (8, json!({"prf": {"first": ""}})),
+        (9, json!({"large_blob": {"read": false}})),
+        (
+            10,
+            json!({"large_blob": {"read": true, "write": encode_bytes(b"x")}}),
+        ),
+        (11, json!({"large_blob": {"read": true, "other": 1}})),
+    ] {
+        let mut args = json!({
+            "id": item,
+            "rp_id": RP,
+            "credential_id": encode_bytes(&[0x42; 16]),
+            "client_data_hash": encode_bytes(&hash),
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        let (lines, _) = platform(&mut app, &ctx, n, "passkey_assert", args);
+        let answer = line(&lines);
+        assert_eq!(answer["result"]["ok"], false, "{extra}");
+        assert!(app.owner.check.is_none(), "no dialog for {extra}");
+    }
 }
 
 #[test]

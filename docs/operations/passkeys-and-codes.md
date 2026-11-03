@@ -57,14 +57,14 @@ Historical results at `11ca5b6` and `2d93004` (superseded by the evidence above)
 
 | | Passkeys | One-time codes |
 | --- | --- | --- |
-| Standard | WebAuthn, ES256 (ECDSA P-256 with SHA-256) | RFC 6238 TOTP |
-| Limits | One passkey for each login. No other algorithm. | SHA-1, SHA-256, or SHA-512. 6 to 8 digits. A period of 15 to 120 seconds. |
-| Not supported | PRF, large blob, attestation other than "none" | HOTP (counter-based), Steam codes |
+| Standard | WebAuthn. New passkeys: ES256 (ECDSA P-256 with SHA-256). Imported passkeys: also ES384 (P-384), EdDSA (Ed25519), and RS256 (RSA of 2048 to 4096 bits). | RFC 6238 TOTP |
+| Limits | One passkey for each login. PRF and large blob only for an imported passkey that has the data (section 6), or a large blob that a website writes. | SHA-1, SHA-256, or SHA-512. 6 to 8 digits. A period of 15 to 120 seconds. |
+| Not supported | P-521 and other algorithms, a new passkey with PRF or large blob, attestation other than "none" | HOTP (counter-based), Steam codes |
 | iPhone | Sign in, register, remove, Credential Exchange import and export | Show a code, AutoFill a code, Credential Exchange import and export |
 | Mac | Item page (metadata and remove), AutoFill extension (see section 7) | Codes on the item page, AutoFill extension fills a code (see section 7) |
 | Browser | Extension, two verified browsers (see section 8) | Extension fills a code |
 
-A website that needs an unsupported feature gets an answer that says "not supported". Apassy never makes up a PRF value or a blob. When the website can fall back, the system or the browser handles the request with its own passkey provider.
+A website that needs an unsupported feature gets an answer that says "not supported". Apassy never makes up a PRF value or a blob: a PRF output comes only from the PRF secret of the passkey, and a read gives only a blob that a website wrote or an import brought. When the website can fall back, the system or the browser handles the request with its own passkey provider.
 
 ## 3. How a passkey is kept
 
@@ -119,8 +119,9 @@ After the first schema 17 upload, a device of schema 16 cannot sync that vault. 
 
 The iPhone app uses the Apple Credential Exchange. The data goes from app to app in memory. Apassy writes no file.
 
-- **Import** reads passwords, TOTP, and ES256 passkeys. Cards, Wi-Fi networks, documents, and notes alone are not imported. A passkey with a damaged key, another algorithm, or PRF or large blob data is not imported. The report gives counts only.
-- **Export** gives logins with their passwords, codes, and passkeys. Items of other kinds stay in Apassy.
+- **Import** reads passwords, TOTP, and passkeys of the algorithms ES256, ES384, EdDSA (Ed25519), and RS256. A passkey keeps its PRF secrets and its large blob (vault schema 25), so a website that uses them still works after the move. Apassy detects the algorithm from the key. It takes an RSA key as RS256. Cards, Wi-Fi networks, documents, and notes alone are not imported. A passkey with a damaged key, another algorithm (P-521 too), or bad PRF or large blob data is not imported. The report gives counts only.
+- **Export** gives logins with their passwords, codes, and passkeys. Each passkey goes with its algorithm, its PRF secrets, and its large blob. Items of other kinds stay in Apassy.
+- **Schema 25.** A vault with these passkeys has schema 25. A device with an older build cannot open or sync it, so update every Mac and iPhone that shares the vault first.
 - Each import and each export asks for its own owner check, before Apassy reads the data or the keys.
 - If the vault locks while you pick the other app, the export pauses and sends no credentials. Unlock the same vault to continue. Another vault cannot take its place.
 - The history shows "Prepared for a Credential Exchange transfer". This means that the export was prepared. It does not mean that the other app finished the import. Check the other app.

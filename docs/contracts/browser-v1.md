@@ -214,12 +214,31 @@ Each command has its own packet. An unknown field, a missing field, or a field o
 | `allowed`, `excluded` | At most 256 credential IDs, each 1 to 1023 bytes. `allowed` empty: any passkey of `rp_id`. |
 | `user_handle` | 1 to 64 bytes. |
 | `user_name`, `user_display_name` | From the page, untrusted: at most 256 bytes, no control character and no bidirectional format character. |
-| `algorithms` | 1 to 16 COSE algorithms. Apassy makes only ES256 (-7); without -7 the app answers `unsupported`. |
+| `algorithms` | 1 to 16 COSE algorithms. Apassy makes only ES256 (-7); without -7 the app answers `unsupported`. An imported passkey can also be ES384, EdDSA, or RS256 (section 9.3); it signs with its own algorithm. |
 | `title` | The title of the new login: 1 to 128 bytes after trim, no control character. |
 | `url`, `item` | As in `fill`. |
 | `field` | Optional label of the one-time code detail: 1 to 128 bytes, no control character. |
+| `prf` | Optional, `passkey_get` only (section 9.1.1). |
+| `large_blob` | Optional, `passkey_get` only (section 9.1.1). |
 
 Byte fields are standard base64 (RFC 4648 section 4) with padding, and canonical: no white space, no URL alphabet, padding only at the end, unused bits zero. So one byte string has one encoding. The page side (DOM `toJSON`) uses base64url; the extension converts.
+
+#### 9.1.1 WebAuthn extensions of `passkey_get`
+
+Added 2026-11-03 (vault schema 25). `passkey_get` takes two optional fields:
+
+```json
+"prf": { "eval": { "first": "<standard base64>", "second": "<standard base64>" },
+         "eval_by_credential": { "<credential ID, base64url without padding>": { "first": "…" } } },
+"large_blob": { "read": true }
+"large_blob": { "write": "<standard base64 of the uncompressed blob>" }
+```
+
+- `prf`: the raw WebAuthn inputs of `eval` and `evalByCredential`, as the page gave them. `eval`, `eval_by_credential`, and `second` are optional. Each input has 1 to 1024 bytes. `eval_by_credential` has at most 256 entries. Each key is a credential ID in base64url without padding (the WebAuthn form), 1 to 1023 bytes, and must be in `allowed`; so a non-empty `eval_by_credential` needs a non-empty `allowed`. For the credential that the owner chooses, the app takes its `eval_by_credential` entry, else `eval`. The app makes each salt, SHA-256 of `"WebAuthn PRF"`, a zero byte, and the input, as the WebAuthn client does. The extension never sends a salt.
+- `large_blob`: exactly one of `{"read": true}` and `{"write": <bytes>}`. A write needs exactly one credential in `allowed`, as in WebAuthn. A write has at most 65536 bytes, but the whole request is at most 64 KiB (section 1), so a write above about 47 KiB does not fit. The app stores the blob compressed (raw DEFLATE, the form of CTAP).
+- Anything else gets `bad_request`: an unknown field, `{"read": false}`, both `read` and `write`, a key that is not base64url or not in `allowed`, an input of 0 or more than 1024 bytes.
+
+The owner check names the extensions of the request for the chosen credential, so a proof never makes PRF outputs or writes a blob that the request did not have. A write is a passkey edit: the login gets a new revision and a history event without values.
 
 ### 9.2 Client data and relying party
 
@@ -241,9 +260,14 @@ The owner check binds the origin from these bytes, `rp_id`, the request (`rid`, 
 
 | `cmd` | C | `data` |
 | --- | :-: | --- |
-| `passkey_get` | C | `{ "type": "passkey", "rid", "credential_id", "user_handle", "authenticator_data", "signature", "client_data_json" }` |
+| `passkey_get` | C | `{ "type": "passkey", "rid", "credential_id", "user_handle", "authenticator_data", "signature", "client_data_json", "algorithm": -7, "prf": {"first", "second"}, "large_blob": {"data"} or {"written": true} }`. `algorithm` is the COSE algorithm of the passkey: -7 (ES256), -35 (ES384), -8 (EdDSA), or -257 (RS256). `signature` is DER ECDSA for -7 and -35, 64 raw bytes for -8, and RSASSA-PKCS1-v1_5 for -257. `prf` and `large_blob` are only there for a request with the extension (section 9.1.1). |
 | `passkey_create` | C | `{ "type": "passkey_created", "rid", "item": 12, "credential_id", "attestation_object", "authenticator_data", "public_key_spki", "algorithm": -7, "client_data_json" }` |
 | `fill_code` | C | `{ "type": "code", "item": 7, "origin": "https://example.com", "code": "493817", "remaining": 21 }`. `code` has 6 to 8 digits and is a secret value. |
+
+Extension results of `passkey_get`:
+
+- `prf`: the PRF outputs (32 bytes each, secret values), only when the request had PRF inputs and the passkey has PRF secrets (from Credential Exchange). `second` only with a second input. A passkey without secrets gives no `prf`. The outputs use the secret with user verification: the owner check verifies the owner.
+- `large_blob`: for a read, `{"data": <the uncompressed blob>}` when the passkey has a blob; no `large_blob` when it has none or the stored blob does not inflate to its size. For a write, `{"written": true}`, or `{"written": false}` when the blob is larger than 65536 bytes, does not fit a vault field after compression, or the vault could not store it. The sign-in itself still succeeds.
 
 Byte fields are standard base64 with padding. Before the owner dialog the app may answer `not_running`, `none_open`, `vault_locked`, `no_match`, or `unsupported`: the extension then lets the browser do the request. Protocol errors `bad_request` and `bad_version` also permit fallback. They occur before the dialog; an older app returns them for commands it does not support. After the dialog opens, every failure (`cancelled`, `owner_check_failed`, `excluded`, `refused`, `timeout`, `stopped`) is final: no fallback. An unknown code, a wrong `rid`, or another `data.type` is a failure. No secret, signature, client data, or credential ID goes to a log; `Debug` of the request and answer types hides them.
 

@@ -155,8 +155,8 @@ func requestTests() {
     expectThrows("the identity list takes no field") { _ = try check(["op": "credential_identities", "rp_id": "a.com"]) }
     expect((try? check(["op": "autofill_code", "id": 3]))?.op.needsOwnerCheck == true, "a one-time code needs the owner check")
 
-    let huge = ["op": "autofill_list", "domains": [String(repeating: "a", count: 70_000)]] as [String: Any]
-    expectThrows("a request above 64 KiB is refused") { _ = try check(huge) }
+    let huge = ["op": "autofill_list", "domains": [String(repeating: "a", count: 140_000)]] as [String: Any]
+    expectThrows("a request above 128 KiB is refused") { _ = try check(huge) }
     expectThrows("a JSON array is refused") { _ = try checkRequest(Data("[1]".utf8)) }
 }
 
@@ -473,6 +473,7 @@ requestTests()
 appLineTests()
 pathTests()
 appexWireTests()
+passkeyExtensionTests()
 await identityPublishTests()
 if CommandLine.arguments.count > 1 {
     integrationTests(binary: CommandLine.arguments[1])

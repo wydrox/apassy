@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1). The agents of the Macs (section 5.12, contract relay-feed-v1) added 2026-10-14 (stream FD). The Apple Watch (the external HTTP transport in section 2.1, the role `watch` in section 3, and its calls in section 5.13; [ADR 0039](../adr/0039-apple-watch-access-requests.md)) added 2026-11-03.
+Date: 2026-10-07. Passkey algorithms ES384, EdDSA, and RS256, and the PRF and large blob extensions (sections 5.8, 5.9, 11; vault schema 25) added 2026-11-03. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1). The agents of the Macs (section 5.12, contract relay-feed-v1) added 2026-10-14 (stream FD). The Apple Watch (the external HTTP transport in section 2.1, the role `watch` in section 3, and its calls in section 5.13; [ADR 0039](../adr/0039-apple-watch-access-requests.md)) added 2026-11-03.
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -279,6 +279,49 @@ The fields of a passkey (names that start with `passkey_`) are never in `fields`
 - A login with a valid passkey needs no password or username. A `save` without those fields keeps the passkey. A new login still needs both fields.
 - Tags: as the Mac keeps them: the service and the project first, then the given tags, without the old service and project values of an edit (at most 32, each 1 to 64 bytes).
 
+### 5.3a Duplicates
+
+Added 2026-11-03. Imports (Credential Exchange on the iPhone, 1Password on the Mac) and sync conflicts leave duplicate items. The rules are the vault's (`src/vault/dedup.rs`), the same as Settings > Vault > "Find duplicates…" on the Mac. Both calls need the unlocked vault (`locked`). A core older than this section answers each call with `invalid_input` ("This call is not known.").
+
+| Op | Role | Parameters | Result |
+| --- | --- | --- | --- |
+| `duplicates` | app | | `{"groups": [Group]}`. Every group of duplicates among the items that are not archived. `[]` when there is none. |
+| `duplicates_merge` | app | `keep` (an item ID), `keep_revision`, `others`: `[{"id": n, "revision": n}]` (at least one) | `{"id": n, "revision": n, "archived": [ids]}`: the kept item with its new revision, and the archived items in the order of `others`. |
+
+The `autofill` and `watch` roles get `not_allowed` for both calls.
+
+`Group`:
+
+```json
+{"items": [{"id": 12, "title": "GitHub", "kind": "login", "revision": 3, "has_passkey": false, "changed_at": 1791200000},
+           {"id": 31, "title": "GitHub (1Password)", "kind": "login", "revision": 1, "has_passkey": false, "changed_at": null}],
+ "keep": 12, "differences": ["Password", "Notes"], "identical": false, "mergeable": true, "reason": null}
+```
+
+- Which items are duplicates. Two items that are not archived are duplicates when both are logins with a shared host and the same username, or when both have the same kind and the same secret values. The hosts of a login are its website details and the RP ID of its passkey, in lowercase, without the scheme, the port, the path, and a leading `www.`. The username is trimmed and compared without regard to case. A login without a host is never a duplicate by the host rule. The secret values are the set of (field name, value) of the secret fields with a value; the core compares SHA-256 digests in memory and never answers them. Items without a secret value are never duplicates by this rule. A group holds each item that a chain of matches reaches. Items in different shared vaults, and read-only mirrors, never group.
+- `items`: in ID order. `kind` uses the strings of `Row`. `has_passkey`: the item holds a passkey. `changed_at`: the newest change in its history (Unix seconds), null when its history has none.
+- `keep`: the suggested item to keep: the item with the canonical passkey (section 11); else the item that agents use (a variable, a declaration, a process grant, a rule, or a connector); else the most recently changed; the lowest ID on a tie. When an item holds a passkey, the app offers only that item to keep.
+- `differences`: the labels (the `label` of a `Field`) of the fields whose values differ between the items, then "Notes", "Tags", and "Title" when those differ. Labels only, never a value.
+- `identical`: no difference but the titles. An app action "Merge all identical" merges each group that is `identical` and `mergeable`.
+- `mergeable` and `reason`: whether the group merges into `keep`; else a short reason: "Two different passkeys", "Keep the item with the passkey", "The passkey is on another item", "Used by agents", or "Too many fields". The app shows the reason and no merge button.
+
+`duplicates_merge` merges in one transaction. The IDs must be items of one current group (a part of a group is fine); the merged item syncs as an edit, and the archived items as archives.
+
+- The kept item keeps its title, kind, folder, fields, values, passkey, and agent settings. A field of another item that it lacks is added with its name and secret flag (a second main secret of a custom item becomes a detail). A field with another value stays, and the other value is added as the custom detail "Previous <label>" (at most 31 bytes, " 2", " 3" for more), with the same secret flag. Equal values are not repeated. Website details are joined without repeats.
+- Notes are joined (each distinct note once, a blank line between them); tags are joined.
+- Passkeys: when an item holds a passkey, `keep` must be the item with the canonical passkey, and each other item may hold only the same credential (a conflict copy). No passkey field is copied.
+- Agent settings: a process grant, an API rule, or a connector of another item, a declaration of another item that differs from the declaration of the kept item, or a variable of another item when the kept item has one (or two other items have one) refuses the merge. One variable of another item moves to a kept item without one only when the kept item then delivers the same value. "Always ask me" and the agent exceptions "never" and "always ask" of the other items also apply to the kept item.
+- Each other item is archived (`archive` with `archived: false` brings it back), never deleted. In `history`, the kept item gets one event of kind `edited` and each archived item one event of kind `archived`. No event names a value.
+
+Errors (nothing changes):
+
+| Code | When |
+| --- | --- |
+| `conflict` | A revision is not current. Call `duplicates` again. |
+| `not_found` | An ID is not an item. |
+| `invalid_input` | No other item, an ID twice, the items are not one current group, or the passkey or agent rules above. The message says which. |
+| `too_large` | The merged item would be over a limit of an item: notes over 8 KB, more than 32 tags, more than 10 custom details, more than 64 fields, or more than 1 MB. |
+
 ### 5.4 Passwords and Watchtower
 
 | Op | Parameters | Result |
@@ -339,16 +382,16 @@ The fields of a passkey (names that start with `passkey_`) are never in `fields`
 
 ### 5.8 Passkeys
 
-A passkey is a WebAuthn ES256 credential (P-256, SHA-256, COSE -7) on a login. The vault stores it in reserved fields and keeps the key in the encrypted vault. No generic call returns the key. Every byte value on the wire is standard base64 with padding, in canonical form: no white space, no URL alphabet, no unused bits set. A request of a passkey call is at most 4 MiB. An error never quotes an ID, a handle, or a key.
+A passkey is a WebAuthn credential on a login. A new passkey is always ES256 (P-256, SHA-256, COSE -7). An imported passkey can also be ES384 (P-384, COSE -35), EdDSA (Ed25519, COSE -8), or RS256 (RSA of 2048 to 4096 bits, RSASSA-PKCS1-v1_5 with SHA-256, COSE -257); it signs with its own algorithm (vault schema 25). The vault stores it in reserved fields and keeps the key in the encrypted vault. No generic call returns the key. Every byte value on the wire is standard base64 with padding, in canonical form: no white space, no URL alphabet, no unused bits set. A request of a passkey call is at most 4 MiB. An error never quotes an ID, a handle, or a key.
 
 The caller does a fresh owner check before each `passkey_assert`, `passkey_register`, `passkey_import`, `passkey_remove`, and `credential_export`. The core does not check the owner. It sets the flags "user present" and "user verified" in the authenticator data, because the caller did.
 
 | Op | Role | Parameters | Result |
 | --- | --- | --- | --- |
 | `passkey_list` | app, autofill | `rp_id`; `allowed` (credential IDs, at most 256, default empty = any) | `{"passkeys": [Entry]}`. The canonical passkeys of `rp_id` (section 11). |
-| `passkey_assert` | app, autofill | `id` (the item), `rp_id`, `credential_id`, `client_data_hash` (32 bytes) | `{"credential_id", "user_handle", "authenticator_data", "signature"}`. The signature is an ASN.1 DER ECDSA signature over the authenticator data and the hash. |
+| `passkey_assert` | app, autofill | `id` (the item), `rp_id`, `credential_id`, `client_data_hash` (32 bytes); optional `prf`: `{"first", "second" (optional), "hashed": bool (default false)}`; optional `large_blob`: `{"read": true}` or `{"write": <the uncompressed blob>}` | `{"credential_id", "user_handle", "authenticator_data", "signature", "algorithm": -7}`, optional `"prf": {"first", "second"}`, optional `"large_blob"`: `{"data"}` (a read of a stored blob) or `{"written": bool}` (a write). `algorithm` is -7, -35, -8, or -257. The signature is over the authenticator data and the hash: ASN.1 DER ECDSA for -7 and -35, 64 raw bytes for -8, RSASSA-PKCS1-v1_5 for -257. |
 | `passkey_register` | app, autofill | `rp_id`; `user_name`; `user_display_name` (default empty); `user_handle` (1 to 64 bytes); `client_data_hash` (32 bytes); `algorithms` (COSE numbers, at most 32, default empty); `excluded` (credential IDs, at most 256); `attach_id` and `attach_revision` (both or neither); `title` (at most 128 bytes) | `{"id": 13, "credential_id", "attestation_object"}`. "none" attestation. |
-| `passkey_import` | app | `accounts`: at most 1000 of `{"rp_id", "credential_id", "user_handle", "user_name", "user_display_name", "key", "title"}`; `key` is a P-256 PKCS #8 key in base64 | `{"imported": n, "skipped_existing": n, "failed": n}`. Counts only. |
+| `passkey_import` | app | `accounts`: at most 1000 of `{"rp_id", "credential_id", "user_handle", "user_name", "user_display_name", "key", "title"}`, each with optional `"prf": {"with_uv", "without_uv"}`, optional `"large_blob": {"data", "uncompressed_size": n}`, and optional `"attach_id": n`; `key` is a P-256, P-384, Ed25519, or RSA PKCS #8 key in base64, at most 4096 bytes | `{"imported": n, "skipped_existing": n, "failed": n}`. Counts only. |
 | `passkey_remove` | app | `id`, `revision` | `{}`. Section 11.3. |
 
 `Entry`: `{"id": 13, "title": "Example", "rp_id": "example.com", "user_name": "…", "user_display_name": "…", "credential_id": "<base64>", "user_handle": "<base64>"}`. It has no key.
@@ -359,10 +402,16 @@ Rules:
 - A credential ID has 1 to 1023 bytes. A user handle has 1 to 64 bytes. A user name or display name has at most 256 bytes, without control characters.
 - `passkey_assert`: `not_found` when the item is not an active login, its passkey is not canonical (section 11), its key does not parse, or its RP ID or credential ID differs from the request. The signature counter is always zero. The flags are user present, user verified, and backup eligible. Backup state stays clear.
 - `passkey_register`: an empty `algorithms` list means the WebAuthn default, which includes ES256. A non-empty list without -7 gives `unsupported_algorithm`. A credential of `excluded` for this RP ID in the vault gives `excluded`, also when its item is archived. The core makes a 32-byte credential ID. With `attach_id`, the passkey goes on that active login at that revision. A stale revision gives `conflict`. A login that has a passkey gives `exists`. A conflict copy, archived or restored, or an item that is not an active login gives `invalid_input`. Without `attach_id`, the core makes a new login with the title (the RP ID when the title is empty).
-- `passkey_import`: each account is a separate step. A credential that is in the vault already (a conflict copy counts) goes to `skipped_existing`. Any other failure, also a bad key, goes to `failed`. Nothing of a failed account is returned or logged. An import always makes a new login for each account. A request with more than 1000 accounts gives `invalid_input`.
+- `passkey_import`: each account is a separate step. A credential that is in the vault already (a conflict copy counts) goes to `skipped_existing`. Any other failure, also a bad key, goes to `failed`. Nothing of a failed account is returned or logged. Without `attach_id`, an import makes a new login for the account. With `attach_id`, the passkey goes on that active login at its current revision, as `PasskeyImport.attach`: a login that has a passkey already counts as `skipped_existing`; a conflict copy, an archived item, or an item that is not a login counts as `failed`. A request with more than 1000 accounts gives `invalid_input`.
+- The algorithm of an imported key comes from its PKCS #8 `AlgorithmIdentifier`, and the named curve of an EC key. An RSA key is taken as RS256: PKCS #8 does not name the signature scheme, and RS256 is the RSA algorithm of WebAuthn. A P-521 key, an RSA key under 2048 or over 4096 bits, or another algorithm counts as `failed`.
+- `prf` of an import: the two 32-byte secrets of Credential Exchange (`credentialWithUV`, `credentialWithoutUV`). Both are needed; another length counts as `failed`.
+- `large_blob` of an import: the raw DEFLATE data (RFC 1951) of Credential Exchange, at most 49152 bytes, and its uncompressed size, at most 65536. Data that does not inflate to exactly that size counts as `failed`.
 - The `autofill` role cannot call `passkey_import`, `passkey_remove`, or `credential_export`. It gets `not_allowed`.
-- The Swift wrapper adds its own checks before the core call (`PasskeyRequestCheck`): a client data hash of 32 bytes, a valid RP ID, a user handle of 1 to 64 bytes, and ES256 in a non-empty algorithm list.
-- WebAuthn extensions: the wrapper answers a PRF request with "not supported" and a large blob read or write with an empty read or a failed write. A registration that requires large blob storage fails with `unsupportedExtension`. The core never makes a PRF output or a blob.
+- The Swift wrapper adds its own checks before the core call (`PasskeyRequestCheck`): a client data hash of 32 bytes, a valid RP ID, a user handle of 1 to 64 bytes, and ES256 in a non-empty algorithm list of a registration.
+- WebAuthn extensions of `passkey_assert` (vault schema 25):
+  - `prf`: with `hashed: false`, `first` and `second` are WebAuthn inputs of 1 to 1024 bytes, and the core makes each salt: SHA-256 of `"WebAuthn PRF"`, a zero byte, and the input. With `hashed: true`, they are the salts of exactly 32 bytes (the form that the iOS credential provider gives). The output is HMAC-SHA-256 of the salt with the secret with user verification, because the core always sets "user verified". A passkey without PRF secrets (any passkey made by Apassy, or imported without them) gives no `prf` in the result. A bad input gives `invalid_input`.
+  - `large_blob`: exactly one of `{"read": true}` and `{"write": <bytes>}`, else `invalid_input`. A read gives `{"data": <the uncompressed blob>}` when the passkey has a blob, and no `large_blob` when it has none or the stored blob does not inflate to its size. A write compresses the blob with raw DEFLATE and stores it on the login: a new revision and a history event without values, as any passkey edit, and the change syncs. It gives `{"written": false}` when the blob is larger than 65536 bytes or its compressed base64url is longer than a vault field value (64 KiB), and the stored blob stays. The `autofill` role may write a blob, only as part of `passkey_assert`.
+  - A registration that requires large blob storage still fails with `unsupportedExtension` in the wrapper: a new passkey has no blob and no PRF secrets.
 
 ### 5.9 Credential Exchange export
 
@@ -380,12 +429,15 @@ The app calls it after a fresh owner check and gives the answer straight to the 
  "totp":    {"secret": "<base64 of the raw key bytes>", "period": 30, "digits": 6,
              "algorithm": "sha1", "issuer": "GitHub", "user": "octocat"},
  "passkey": {"rp_id": "…", "credential_id": "<base64>", "user_handle": "<base64>",
-             "user_name": "…", "user_display_name": "…", "key": "<base64 PKCS #8>"}}
+             "user_name": "…", "user_display_name": "…", "key": "<base64 PKCS #8>",
+             "algorithm": -7,
+             "prf": {"with_uv": "<base64, 32 bytes>", "without_uv": "<base64, 32 bytes>"},
+             "large_blob": {"data": "<base64 of the raw DEFLATE data>", "uncompressed_size": 120}}}
 ```
 
 - Scope: the active logins that are not conflict copies, and each restored conflict copy whose passkey is canonical (section 11). A restored copy goes once, as a whole login. Items of other kinds, and logins with no username, password, code, or passkey, add to `skipped`. An archived item and any other conflict copy are not counted.
 - `totp`: the first one-time password field of the item that Apassy reads as TOTP. A counter-based (HOTP) or unreadable value is not exported. `algorithm` is `sha1`, `sha256`, or `sha512`. A period or digit count that does not fit 16 bits is not exported. `issuer` and `user` come from the label and the `issuer` parameter of an `otpauth://totp` URI. A bare Base32 secret has neither.
-- `passkey`: only a canonical, parsable passkey. A stored key that does not parse is left out and the other data of the login still goes. A failure of the vault is an error: an export never drops data in silence.
+- `passkey`: only a canonical, parsable passkey. A stored key that does not parse is left out and the other data of the login still goes. A failure of the vault is an error: an export never drops data in silence. `key` is the normalized PKCS #8 form of its algorithm (section 11.1), and `algorithm` its COSE number. `prf` and `large_blob` are there only when the passkey has them; the blob is the stored compressed form, as Credential Exchange takes it.
 - One history event without values (kind `revealed`, detail "Credential Exchange export prepared") is recorded for each exported item, before the answer is returned. The event says that the owner prepared the export. It does not prove that the other app took the data.
 
 ### 5.10 Questions through the relay (contract relay-questions-v1)
@@ -757,7 +809,20 @@ Schema 17 adds the passkey fields (section 11.1). It changes no table. A field o
 
 ### 11.1 Storage
 
-A passkey is a set of reserved fields on a login: `passkey_format` (`es256-pkcs8-v1`), `passkey_rp_id`, `passkey_credential_id`, `passkey_user_handle`, `passkey_user_name`, `passkey_user_display_name`, and the secret `passkey_key` (a P-256 PKCS #8 v1 key with the public point). The stored byte values are base64url without padding. The wire (section 5.8) is standard base64 with padding. The fields sync as ordinary encrypted `item_field` rows.
+A passkey is a set of reserved fields on a login: `passkey_format`, `passkey_rp_id`, `passkey_credential_id`, `passkey_user_handle`, `passkey_user_name`, `passkey_user_display_name`, and the secret `passkey_key`. The stored byte values are base64url without padding. The wire (section 5.8) is standard base64 with padding. The fields sync as ordinary encrypted `item_field` rows.
+
+`passkey_format` names the algorithm and the one stored form of the key:
+
+| Format | Algorithm | `passkey_key` |
+| --- | --- | --- |
+| `es256-pkcs8-v1` | ES256, COSE -7 | P-256 PKCS #8 v1 with the public point, without `parameters` in `ECPrivateKey` (the form of `ring`) |
+| `es384-pkcs8-v1` (schema 25) | ES384, COSE -35 | P-384 PKCS #8 v1 with the public point, the same form |
+| `ed25519-pkcs8-v1` (schema 25) | EdDSA, COSE -8 | Ed25519 PKCS #8 v2 with the public key (RFC 8410, the form of `ring`). An import of v1 gets the public key. |
+| `rs256-pkcs8-v1` (schema 25) | RS256, COSE -257 | RSA PKCS #8 v1: `rsaEncryption` with NULL, the `RSAPrivateKey`, no attributes. 2048 to 4096 bits, public exponent at least 65537. |
+
+Optional reserved fields (schema 25): the secrets `passkey_prf_uv` and `passkey_prf_no_uv` (32 bytes each, both or neither), the secret `passkey_large_blob` (raw DEFLATE data) and the plain `passkey_large_blob_size` (the uncompressed size in decimal, at most 65536; both or neither). A bad value of an optional field counts as absent: the passkey still signs, without a PRF output or a blob. A bad key or a bad required field makes the passkey invalid. An ES256 passkey without extension data has the same rows as in schema 17.
+
+Schema 25 changes no table and no row. A device of schema 24 or earlier refuses a vault or a copy of schema 25 (`unsupported_schema`), so it never sees a format that it cannot sign with.
 
 Only the passkey code writes them. A generic add or update refuses a `passkey_` name, `details` and `reveal` hide them (`reveal` gives `not_found`), an update keeps them, and no agent path can read them. The one exception is `credential_export` (section 5.9).
 
@@ -785,11 +850,12 @@ The screen must tell the owner which of the two results happens before it asks f
 
 The app uses the Apple Credential Exchange. The data moves from app to app in memory. Apassy writes no file.
 
-- Import keeps passwords, TOTP, and ES256 passkeys with a P-256 PKCS #8 key. TOTP uses SHA-1, SHA-256, or SHA-512. A passkey of another algorithm, a damaged key, or a passkey with PRF or large blob data counts as invalid (iOS 26.4 and later give the extension data; iOS 26.0 does not). The report has counts only, with no names. Other credential types (cards, Wi-Fi, documents) count as unsupported.
+- Import keeps passwords, TOTP, and passkeys with an ES256 (P-256), ES384 (P-384), EdDSA (Ed25519), or RS256 (RSA) PKCS #8 key, with their PRF secrets and their large blob (iOS 26.4 and later give the extension data; iOS 26.0 does not). TOTP uses SHA-1, SHA-256, or SHA-512. A passkey of another algorithm (P-521 too), a damaged key, or bad PRF or large blob data counts as invalid. The report has counts only, with no names. The app keeps the other credential types (cards, Wi-Fi networks, identity documents, addresses, names, notes, API keys, SSH keys, custom fields) as Custom, API key, or SSH key items, with their values hidden. Only an item with nothing but a link to another item counts as unsupported.
 - Each import and each export starts with its own fresh owner check, before the app reads the other app's data or the keys of the vault.
 - Export has two steps: the owner picks the other app in the system sheet, and then the app reads the vault. If the vault locks or another vault opens during the pick, the export pauses and nothing is read. The resumed export is bound to the vault in which the owner started it. The owner unlocks that vault, and the app asks for the owner check again before it reads the keys.
 - The history event of an export says "prepared" (section 5.9). It is not a record that the other app finished the import.
-- Not supported: HOTP, Steam codes, PRF, large blob, and passkey algorithms other than ES256. An item type other than a login is not exported.
+- Export gives the algorithm, the PRF secrets, and the large blob of each passkey (section 5.9), so a transfer out keeps them.
+- Not supported: HOTP, Steam codes, and passkey algorithms other than ES256, ES384, EdDSA (Ed25519), and RS256. An item type other than a login is not exported.
 
 ## 12. Not confirmed yet
 

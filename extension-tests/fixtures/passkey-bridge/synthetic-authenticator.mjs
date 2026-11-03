@@ -4,9 +4,12 @@
 // will, so that the extension can be checked against an independent verifier
 // (@simplewebauthn/server). A pass here says nothing about the real app.
 //
-// It signs exactly the client_data_json bytes that the extension sent.
+// It signs exactly the client_data_json bytes that the extension sent. For a
+// sign-in with prf inputs it answers HMAC-SHA-256 of a throwaway key of the
+// credential over SHA-256("WebAuthn PRF" || 0x00 || input) (the hmac-secret
+// form), and it keeps a large blob per credential in memory.
 
-import { createHash, createPrivateKey, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
+import { createHash, createHmac, createPrivateKey, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { isoCBOR } from "@simplewebauthn/server/helpers";
 
@@ -19,6 +22,12 @@ const FLAG_AT = 0x40;
 const sha256 = (data) => createHash("sha256").update(data).digest();
 const b64 = (bytes) => Buffer.from(bytes).toString("base64");
 const unb64 = (text) => Buffer.from(text, "base64");
+
+// The PRF output of a throwaway key for one raw WebAuthn input.
+export function syntheticPrf(key, input) {
+  const salt = sha256(Buffer.concat([Buffer.from("WebAuthn PRF"), Buffer.from([0]), Buffer.from(input)]));
+  return createHmac("sha256", key).update(salt).digest();
+}
 
 function authData({ rpId, flags, signCount, attested }) {
   const counter = Buffer.alloc(4);
@@ -71,7 +80,7 @@ export function createSyntheticAuthenticator({ file } = {}) {
         ["fmt", "none"], ["attStmt", new Map()], ["authData", new Uint8Array(data)],
       ]));
       credentials.set(b64(credentialId), {
-        rpId: request.rp_id, privateKey, userHandle: request.user_handle, counter: 0,
+        rpId: request.rp_id, privateKey, userHandle: request.user_handle, counter: 0, prfKey: b64(randomBytes(32)),
       });
       nextItem += 1;
       save();
@@ -100,6 +109,21 @@ export function createSyntheticAuthenticator({ file } = {}) {
       const data = authData({ rpId: request.rp_id, flags: FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS, signCount: credential.counter });
       const signer = createSign("sha256");
       signer.update(Buffer.concat([data, sha256(unb64(request.client_data_json))]));
+      const outputs = {};
+      const prfInputs = request.prf &&
+        ((request.prf.eval_by_credential || {})[unb64(id).toString("base64url")] || request.prf.eval);
+      if (prfInputs && credential.prfKey) {
+        const key = unb64(credential.prfKey);
+        outputs.prf = { first: b64(syntheticPrf(key, unb64(prfInputs.first))) };
+        if (prfInputs.second) outputs.prf.second = b64(syntheticPrf(key, unb64(prfInputs.second)));
+      }
+      if (request.large_blob && request.large_blob.read) {
+        outputs.large_blob = credential.blob ? { data: credential.blob } : {};
+      } else if (request.large_blob) {
+        credential.blob = request.large_blob.write;
+        outputs.large_blob = { written: true };
+      }
+      save();
       return {
         type: "passkey",
         rid: request.rid,
@@ -107,7 +131,9 @@ export function createSyntheticAuthenticator({ file } = {}) {
         user_handle: credential.userHandle,
         authenticator_data: b64(data),
         signature: b64(signer.sign(credential.privateKey)),
+        algorithm: -7,
         client_data_json: request.client_data_json,
+        ...outputs,
       };
     },
   };

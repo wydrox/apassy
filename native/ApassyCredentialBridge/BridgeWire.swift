@@ -67,6 +67,12 @@ enum WireLimits {
     /// JSON numbers above 2^53 - 1 lose precision in many readers.
     static let maxInteger: UInt64 = (1 << 53) - 1
     static let maxErrorMessageCharacters = 1024
+    /// A PRF input of a sign-in (WebAuthn prf eval), after decoding.
+    static let maxPrfInputBytes = 1024
+    /// A hashed PRF input is a SHA-256 value (an hmac-secret salt).
+    static let hashedPrfInputBytes = 32
+    /// A large blob that a sign-in writes.
+    static let maxLargeBlobBytes = 64 * 1024
 }
 
 // MARK: - Requests of the extension
@@ -89,11 +95,17 @@ func checkRequest(_ body: Data) throws -> CheckedRequest {
         payload["rp_id"] = try reader.rpId("rp_id")
         payload["allowed"] = try reader.base64List("allowed", maxBytes: WireLimits.maxCredentialIdBytes, optional: true)
     case .passkeyAssert:
-        try reader.only(["op", "id", "rp_id", "credential_id", "client_data_hash"])
+        try reader.only(["op", "id", "rp_id", "credential_id", "client_data_hash", "prf", "large_blob"])
         payload["id"] = try reader.integer("id")
         payload["rp_id"] = try reader.rpId("rp_id")
         payload["credential_id"] = try reader.base64("credential_id", minBytes: 1, maxBytes: WireLimits.maxCredentialIdBytes)
         payload["client_data_hash"] = try reader.base64("client_data_hash", minBytes: 32, maxBytes: 32)
+        if let prf = try reader.prfInput("prf") {
+            payload["prf"] = prf
+        }
+        if let largeBlob = try reader.largeBlobInput("large_blob") {
+            payload["large_blob"] = largeBlob
+        }
     case .passkeyRegister:
         try reader.only([
             "op", "rp_id", "user_name", "user_display_name", "user_handle", "client_data_hash", "algorithms",
@@ -228,6 +240,65 @@ struct FieldReader {
             }
             return number.int64Value
         }
+    }
+
+    /// An optional object, or nil when the field is absent.
+    func object(_ name: String) throws -> FieldReader? {
+        guard let raw = fields[name] else {
+            return nil
+        }
+        guard let object = raw as? JSONObject else {
+            throw RequestError("The field \"\(name)\" must be an object.")
+        }
+        return FieldReader(object)
+    }
+
+    /// The PRF inputs of a sign-in: {"first", "second"?, "hashed"}. Each input has 1 to
+    /// 1024 bytes; a hashed input (an hmac-secret salt) has exactly 32.
+    func prfInput(_ name: String) throws -> JSONObject? {
+        guard let inner = try object(name) else {
+            return nil
+        }
+        guard Set(inner.fields.keys).isSubset(of: ["first", "second", "hashed"]),
+              let hashedNumber = inner.fields["hashed"] as? NSNumber, isBoolean(hashedNumber)
+        else {
+            throw RequestError("The field \"\(name)\" must have \"first\", an optional \"second\", and \"hashed\".")
+        }
+        let hashed = hashedNumber.boolValue
+        func input(_ key: String) throws -> String {
+            let minBytes = hashed ? WireLimits.hashedPrfInputBytes : 1
+            let maxBytes = hashed ? WireLimits.hashedPrfInputBytes : WireLimits.maxPrfInputBytes
+            guard let text = inner.fields[key] as? String, let bytes = canonicalBase64(text, maxBytes: maxBytes),
+                  bytes.count >= minBytes
+            else {
+                throw RequestError("The field \"\(name)\" has an input that is not valid base64 of the right size.")
+            }
+            return text
+        }
+        let first = try input("first")
+        var checked: JSONObject = ["first": first, "hashed": hashed]
+        if inner.fields["second"] != nil {
+            checked["second"] = try input("second")
+        }
+        return checked
+    }
+
+    /// The large blob operation of a sign-in: {"read": true} or {"write": bytes}, with
+    /// 1 byte to 64 KiB.
+    func largeBlobInput(_ name: String) throws -> JSONObject? {
+        guard let inner = try object(name) else {
+            return nil
+        }
+        let keys = Set(inner.fields.keys)
+        if keys == ["read"], let read = inner.fields["read"] as? NSNumber, isBoolean(read), read.boolValue {
+            return ["read": true]
+        }
+        if keys == ["write"], let text = inner.fields["write"] as? String,
+           canonicalBase64(text, maxBytes: WireLimits.maxLargeBlobBytes) != nil
+        {
+            return ["write": text]
+        }
+        throw RequestError("The field \"\(name)\" must be {\"read\": true} or a write of at most 64 KiB.")
     }
 
     func domains(_ name: String) throws -> [String] {

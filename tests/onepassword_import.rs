@@ -375,11 +375,23 @@ fn every_category_maps_to_its_kind() {
     assert_eq!(note.draft().unwrap().notes(), "");
     assert!(!note.selected_by_default());
 
-    for (title, needle) in [("Visa", "Credit Card"), ("Scan", "file")] {
-        let skipped = find(&preview, title);
-        assert!(!skipped.can_import(), "{title}");
-        assert!(skipped.skip_reason().unwrap().contains(needle), "{title}");
-    }
+    // A credit card is a custom secret: the card number is the secret, not selected.
+    let card = find(&preview, "Visa");
+    assert_eq!(card.category, Category::Personal);
+    assert_eq!(card.kind(), Some(CredentialKind::Custom));
+    assert_eq!(value(card, "secret"), ("SYNTH-OP-4111", true));
+    assert_eq!(card.draft().unwrap().tags(), ["work", "card", "1password"]);
+    assert!(card.warnings.iter().any(|w| w.contains("Credit Card")));
+    assert!(!card.selected_by_default());
+
+    // A document is a file.
+    let scan = find(&preview, "Scan");
+    assert_eq!(scan.category, Category::Document);
+    assert!(!scan.can_import());
+    assert_eq!(
+        scan.skip_reason(),
+        Some("A document is a file. Apassy does not store files.")
+    );
 
     let license = find(&preview, "IDE license");
     assert_eq!(license.kind(), Some(CredentialKind::Custom));
@@ -446,7 +458,7 @@ fn every_ready_item_validates_in_a_vault() {
         assert!(details.tags.iter().any(|tag| tag == "1password"));
         added += 1;
     }
-    assert_eq!(added, 11);
+    assert_eq!(added, 12);
     let found = vault.search("Stripe test key").unwrap();
     assert_eq!(
         vault.reveal(found[0].id, "token").unwrap().expose(),
@@ -456,6 +468,406 @@ fn every_ready_item_validates_in_a_vault() {
     assert!(vault.search("SYNTH-OP").unwrap().is_empty());
     // The 1Password tags are searchable.
     assert_eq!(vault.search("dev").unwrap().len(), 1);
+}
+
+// ---- Personal categories. ----
+
+const PASSKEY_WARNING: &str =
+    "The passkey is not in the 1Password export. Import it on the iPhone with Credential Exchange.";
+
+/// One item of each personal category, a document, and logins with a passkey. Every
+/// personal value is a `SYNTH-OP-` canary. The plain values (the type, the country, the
+/// state, the bank name, the expiry) are not.
+fn personal_export() -> String {
+    let address = json!({ "address": {
+        "street": "SYNTH-OP-street 1", "city": "SYNTH-OP-city", "state": "", "zip": "SYNTH-OP-zip", "country": "pl",
+    } });
+    let mut passkey_login = item(
+        "001",
+        "Passkey site",
+        json!({
+            "loginFields": [
+                { "value": "octo", "name": "username", "fieldType": "T", "designation": "username" },
+                { "value": "SYNTH-OP-pk-pass", "name": "password", "fieldType": "P", "designation": "password" },
+            ],
+            "passkey": {
+                "credentialId": "SYNTH-OP-credential-id",
+                "rpId": "example.test",
+                "userHandle": "SYNTH-OP-user-handle",
+            },
+            "sections": sections(vec![field(
+                "pk",
+                "passkey",
+                json!({ "passkey": { "credentialId": "SYNTH-OP-credential-id" } }),
+            )]),
+        }),
+    );
+    passkey_login["overview"]["url"] = json!("https://example.test");
+    let passkey_only = item(
+        "001",
+        "Passkey only",
+        json!({ "passkey": { "credentialId": "SYNTH-OP-only-id", "rpId": "example.test" } }),
+    );
+    export(vec![(
+        "Wallet",
+        vec![
+            item(
+                "002",
+                "Gold card",
+                json!({
+                    "notesPlain": "Plain note.",
+                    "sections": sections(vec![
+                        field("cardholder", "cardholder name", json!({ "string": "SYNTH-OP-holder" })),
+                        field("type", "type", json!({ "creditCardType": "visa" })),
+                        field("ccnum", "number", json!({ "creditCardNumber": "SYNTH-OP-ccnum" })),
+                        field("cvv", "verification number", json!({ "concealed": "SYNTH-OP-cvv" })),
+                        field("expiry", "expiry date", json!({ "monthYear": 203_012 })),
+                        field("validFrom", "valid from", json!({ "monthYear": 202_401 })),
+                        field("bank", "issuing bank", json!({ "string": "Synthetic Bank" })),
+                        field("pin", "PIN", json!({ "concealed": "SYNTH-OP-pin" })),
+                        // A concealed value stays hidden, also with a plain name.
+                        field("x1", "type", json!({ "concealed": "SYNTH-OP-hidden-type" })),
+                    ]),
+                }),
+            ),
+            item(
+                "004",
+                "Me",
+                json!({ "sections": sections(vec![
+                    field("firstname", "first name", json!({ "string": "SYNTH-OP-first" })),
+                    field("lastname", "last name", json!({ "string": "SYNTH-OP-last" })),
+                    field("sex", "sex", json!({ "gender": "SYNTH-OP-gender" })),
+                    field("birthdate", "birth date", json!({ "date": 315_532_800 })),
+                    field("address", "address", address.clone()),
+                    field("email", "email", json!({ "email": { "email_address": "SYNTH-OP-me@example.test" } })),
+                    field("cellphone", "cell", json!({ "phone": "SYNTH-OP-phone" })),
+                ]) }),
+            ),
+            item(
+                "101",
+                "Checking",
+                json!({ "sections": sections(vec![
+                    field("bankName", "bank name", json!({ "string": "Synthetic Bank" })),
+                    field("owner", "name on account", json!({ "string": "SYNTH-OP-owner" })),
+                    field("accountType", "type", json!({ "menu": "checking" })),
+                    field("routingNo", "routing number", json!({ "string": "SYNTH-OP-routing" })),
+                    field("accountNo", "account number", json!({ "string": "SYNTH-OP-account" })),
+                    field("swift", "SWIFT", json!({ "string": "SYNTH-OP-swift" })),
+                    field("iban", "IBAN", json!({ "string": "SYNTH-OP-iban" })),
+                    field("telephonePin", "PIN", json!({ "concealed": "SYNTH-OP-tpin" })),
+                ]) }),
+            ),
+            item(
+                "103",
+                "Licence A",
+                json!({ "sections": sections(vec![
+                    field("fullname", "full name", json!({ "string": "SYNTH-OP-driver" })),
+                    field("address", "address", address.clone()),
+                    field("birthdate", "date of birth", json!({ "date": 315_532_800 })),
+                    field("number", "number", json!({ "string": "SYNTH-OP-dl" })),
+                    field("class", "license class", json!({ "string": "SYNTH-OP-class" })),
+                    field("state", "state", json!({ "string": "Synthetic State" })),
+                    field("country", "country", json!({ "string": "PL" })),
+                    field("expiry_date", "expiry date", json!({ "monthYear": 203_001 })),
+                ]) }),
+            ),
+            item(
+                "104",
+                "Hunt",
+                json!({ "sections": sections(vec![
+                    field("name", "full name", json!({ "string": "SYNTH-OP-angler" })),
+                    field("game", "approved wildlife", json!({ "string": "SYNTH-OP-trout" })),
+                    field("expires", "expires", json!({ "date": 1_893_456_000 })),
+                    field("country", "country", json!({ "string": "PL" })),
+                ]) }),
+            ),
+            item(
+                "105",
+                "Club",
+                json!({ "sections": sections(vec![
+                    field("org_name", "group", json!({ "string": "SYNTH-OP-club" })),
+                    field("member_name", "member name", json!({ "string": "SYNTH-OP-name" })),
+                    field("membership_no", "member ID", json!({ "string": "SYNTH-OP-member" })),
+                    field("pin", "PIN", json!({ "concealed": "SYNTH-OP-club-pin" })),
+                    field("expiry_date", "expiry date", json!({ "monthYear": 202_912 })),
+                ]) }),
+            ),
+            item(
+                "106",
+                "Travel doc",
+                json!({ "sections": sections(vec![
+                    field("type", "type", json!({ "string": "P" })),
+                    field("issuing_country", "issuing country", json!({ "string": "PL" })),
+                    field("number", "number", json!({ "string": "SYNTH-OP-passport" })),
+                    field("fullname", "full name", json!({ "string": "SYNTH-OP-traveller" })),
+                    field("nationality", "nationality", json!({ "string": "SYNTH-OP-nation" })),
+                    field("birthdate", "date of birth", json!({ "date": 315_532_800 })),
+                    field("expiry_date", "expiry date", json!({ "date": 1_893_456_000 })),
+                ]) }),
+            ),
+            item(
+                "107",
+                "Miles",
+                json!({ "sections": sections(vec![
+                    field("company_name", "company name", json!({ "string": "SYNTH-OP-airline" })),
+                    field("member_name", "member name", json!({ "string": "SYNTH-OP-flyer" })),
+                    field("membership_no", "member ID", json!({ "string": "SYNTH-OP-miles" })),
+                    field("pin", "PIN", json!({ "concealed": "SYNTH-OP-miles-pin" })),
+                ]) }),
+            ),
+            item(
+                "108",
+                "SSN",
+                json!({ "sections": sections(vec![
+                    field("name", "name", json!({ "string": "SYNTH-OP-ssn-name" })),
+                    field("number", "number", json!({ "concealed": "SYNTH-OP-ssn" })),
+                ]) }),
+            ),
+            item(
+                "113",
+                "Clinic",
+                json!({ "sections": sections(vec![
+                    field("date", "date", json!({ "date": 1_700_000_000 })),
+                    field("patient", "patient", json!({ "string": "SYNTH-OP-patient" })),
+                    field("reason", "reason for visit", json!({ "string": "SYNTH-OP-reason" })),
+                ]) }),
+            ),
+            item(
+                "115",
+                "Cold storage",
+                json!({ "sections": sections(vec![
+                    field("walletAddress", "wallet address", json!({ "string": "SYNTH-OP-address" })),
+                    field("recoveryPhrase", "recovery phrase", json!({ "concealed": "SYNTH-OP-seed" })),
+                    field("password", "password", json!({ "concealed": "SYNTH-OP-wallet-pass" })),
+                ]) }),
+            ),
+            item(
+                "006",
+                "Scan",
+                json!({ "documentAttributes": { "fileName": "SYNTH-OP-scan.pdf" } }),
+            ),
+            passkey_login,
+            passkey_only,
+        ],
+    )])
+}
+
+fn personal_preview() -> ImportPreview {
+    parse_1pux_json(personal_export().as_bytes()).expect("parse")
+}
+
+/// The labels of the visible details, in order.
+fn visible_details(item: &ImportItem) -> Vec<String> {
+    let draft = item.draft().expect("ready");
+    draft
+        .detail_labels()
+        .into_iter()
+        .filter(|label| !draft.detail(label).expect("detail").secret)
+        .collect()
+}
+
+#[test]
+fn personal_categories_import_as_hidden_custom_secrets() {
+    let preview = personal_preview();
+    let personal = [
+        ("Gold card", "Credit Card", "SYNTH-OP-ccnum", "card"),
+        ("Me", "Identity", "SYNTH-OP-first", "identity"),
+        ("Checking", "Bank Account", "SYNTH-OP-account", "bank"),
+        ("Licence A", "Driver License", "SYNTH-OP-dl", "identity"),
+        ("Hunt", "Outdoor License", "SYNTH-OP-angler", "identity"),
+        ("Club", "Membership", "SYNTH-OP-member", "card"),
+        ("Travel doc", "Passport", "SYNTH-OP-passport", "identity"),
+        ("Miles", "Reward Program", "SYNTH-OP-miles", "card"),
+        ("SSN", "Social Security Number", "SYNTH-OP-ssn", "identity"),
+        ("Clinic", "Medical Record", "SYNTH-OP-patient", "identity"),
+        ("Cold storage", "Crypto Wallet", "SYNTH-OP-seed", "wallet"),
+    ];
+    for (title, label, main, tag) in personal {
+        let item = find(&preview, title);
+        assert_eq!(item.category, Category::Personal, "{title}");
+        assert_eq!(item.category_label, label, "{title}");
+        assert_eq!(item.kind(), Some(CredentialKind::Custom), "{title}");
+        assert_eq!(value(item, "secret"), (main, true), "{title}");
+        assert!(!item.selected_by_default(), "{title}");
+        let draft = item.draft().unwrap();
+        assert_eq!(draft.tags(), ["work", tag, "1password"], "{title}");
+        assert!(item.warnings.iter().any(|w| w.contains(label)), "{title}");
+        // Every value with a canary is hidden.
+        for field in draft.fields() {
+            if field.value.expose().contains(CANARY) {
+                assert!(field.secret, "{title}: {} is visible", field.name);
+            }
+        }
+    }
+
+    let card = find(&preview, "Gold card");
+    assert_eq!(detail(card, "Type"), ("visa", false));
+    assert_eq!(detail(card, "Expiry date"), ("2030-12", false));
+    assert_eq!(detail(card, "Issuing bank"), ("Synthetic Bank", false));
+    assert_eq!(detail(card, "Valid from"), ("2024-01", true));
+    assert_eq!(detail(card, "Cardholder name"), ("SYNTH-OP-holder", true));
+    assert_eq!(detail(card, "Verification number"), ("SYNTH-OP-cvv", true));
+    assert_eq!(detail(card, "PIN"), ("SYNTH-OP-pin", true));
+    assert_eq!(detail(card, "Type 2"), ("SYNTH-OP-hidden-type", true));
+    assert_eq!(card.draft().unwrap().notes(), "Plain note.");
+
+    let me = find(&preview, "Me");
+    assert!(visible_details(me).is_empty(), "{:?}", visible_details(me));
+    assert_eq!(
+        detail(me, "Address"),
+        ("SYNTH-OP-street 1, SYNTH-OP-city, SYNTH-OP-zip, pl", true)
+    );
+    assert_eq!(detail(me, "Birth date"), ("1980-01-01", true));
+    assert!(!me.warnings.iter().any(|w| w.contains("does not import")));
+
+    let bank = find(&preview, "Checking");
+    assert_eq!(visible_details(bank), ["Bank name", "Type"]);
+    for label in ["Name on account", "Routing number", "SWIFT", "IBAN", "PIN"] {
+        assert!(detail(bank, label).1, "{label}");
+    }
+
+    let licence = find(&preview, "Licence A");
+    assert_eq!(
+        visible_details(licence),
+        ["State", "Country", "Expiry date"]
+    );
+    assert_eq!(detail(licence, "Expiry date"), ("2030-01", false));
+    let passport = find(&preview, "Travel doc");
+    assert_eq!(
+        visible_details(passport),
+        ["Type", "Issuing country", "Expiry date"]
+    );
+    let hunt = find(&preview, "Hunt");
+    assert_eq!(visible_details(hunt), ["Expires", "Country"]);
+    assert_eq!(visible_details(find(&preview, "Club")), ["Expiry date"]);
+    assert!(visible_details(find(&preview, "SSN")).is_empty());
+    assert!(visible_details(find(&preview, "Clinic")).is_empty());
+    let wallet = find(&preview, "Cold storage");
+    assert!(visible_details(wallet).is_empty());
+    assert_eq!(detail(wallet, "Password"), ("SYNTH-OP-wallet-pass", true));
+    assert_eq!(detail(wallet, "Wallet address"), ("SYNTH-OP-address", true));
+
+    let scan = find(&preview, "Scan");
+    assert_eq!(scan.category, Category::Document);
+    assert!(!scan.can_import());
+    assert!(scan.skip_reason().unwrap().contains("does not store files"));
+}
+
+#[test]
+fn a_login_with_a_passkey_warns_once_that_the_passkey_is_not_exported() {
+    let preview = personal_preview();
+    let login = find(&preview, "Passkey site");
+    assert_eq!(login.kind(), Some(CredentialKind::Login));
+    assert_eq!(value(login, "password"), ("SYNTH-OP-pk-pass", true));
+    // One warning, also with the passkey in the details and in a field. The field is
+    // not a field of an unknown type.
+    assert_eq!(login.warnings, [PASSKEY_WARNING]);
+    for field in login.draft().unwrap().fields() {
+        assert!(!field.value.expose().contains("credential-id"));
+    }
+
+    // A login with only a passkey has nothing to import, and says why.
+    let only = find(&preview, "Passkey only");
+    assert!(!only.can_import());
+    assert_eq!(only.warnings, [PASSKEY_WARNING]);
+
+    // A login without a passkey has no such warning.
+    let full = self::preview();
+    let github = find(&full, "GitHub");
+    assert!(!github.warnings.iter().any(|w| w.contains("passkey")));
+}
+
+#[test]
+fn personal_secrets_never_reach_title_notes_tags_warnings_or_debug_output() {
+    let preview = personal_preview();
+    for item in &preview.items {
+        assert!(!item.title.contains(CANARY));
+        for warning in &item.warnings {
+            assert!(!warning.contains(CANARY), "{warning}");
+        }
+        if let Some(reason) = item.skip_reason() {
+            assert!(!reason.contains(CANARY), "{reason}");
+        }
+        let Some(draft) = item.draft() else {
+            continue;
+        };
+        assert!(!draft.title().contains(CANARY));
+        assert!(!draft.notes().contains(CANARY), "{}", item.title);
+        assert!(draft.tags().iter().all(|tag| !tag.contains(CANARY)));
+    }
+    let debug = format!("{preview:?}");
+    assert!(!debug.contains(CANARY), "Debug shows a value");
+    assert!(!debug.contains("Synthetic Bank"), "Debug shows a value");
+}
+
+#[test]
+fn personal_items_validate_in_a_vault_and_keep_their_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("personal.db");
+    let mut vault = Vault::create(&path, "import-test-pass").unwrap();
+    vault.unlock("import-test-pass").unwrap();
+    let mut preview = personal_preview();
+    let mut added = 0;
+    for item in &mut preview.items {
+        let Some(draft) = item.take_draft() else {
+            continue;
+        };
+        vault
+            .add(draft.into_vault_draft())
+            .unwrap_or_else(|err| panic!("{}: {err}", item.title));
+        added += 1;
+    }
+    // The eleven personal items and the login with a passkey.
+    assert_eq!(added, 12);
+    assert!(vault.search("SYNTH-OP").unwrap().is_empty());
+    let tags = [
+        ("card", "Gold card"),
+        ("bank", "Checking"),
+        ("wallet", "Cold storage"),
+        ("identity", "Travel doc"),
+    ];
+    for (tag, title) in tags {
+        let found = vault.search(tag).unwrap();
+        assert!(found.iter().any(|row| row.title == title), "{tag}");
+    }
+}
+
+#[test]
+fn a_personal_item_keeps_the_ten_detail_limit_and_leaves_out_visible_values_first() {
+    let mut fields = vec![
+        field(
+            "ccnum",
+            "number",
+            json!({ "creditCardNumber": "SYNTH-OP-main" }),
+        ),
+        field("type", "type", json!({ "creditCardType": "visa" })),
+    ];
+    for index in 0..11 {
+        fields.push(field(
+            &format!("c{index}"),
+            &format!("Code {index}"),
+            json!({ "string": format!("SYNTH-OP-c{index}") }),
+        ));
+    }
+    let data = export(vec![(
+        "Wallet",
+        vec![item("002", "Card", json!({ "sections": sections(fields) }))],
+    )]);
+    let preview = parse_1pux_json(data.as_bytes()).unwrap();
+    let card = &preview.items[0];
+    assert_eq!(value(card, "secret"), ("SYNTH-OP-main", true));
+    let labels = card.draft().unwrap().detail_labels();
+    assert_eq!(labels.len(), MAX_DETAILS);
+    // The visible type goes first, then the last hidden value.
+    assert!(!labels.contains(&"Type".to_owned()), "{labels:?}");
+    assert!(!labels.contains(&"Code 10".to_owned()), "{labels:?}");
+    let dropped: Vec<_> = card
+        .warnings
+        .iter()
+        .filter(|w| w.contains("did not fit"))
+        .collect();
+    assert_eq!(dropped.len(), 2, "{dropped:?}");
+    assert!(dropped.iter().all(|w| !w.contains(CANARY)));
 }
 
 #[test]
@@ -624,7 +1036,9 @@ fn lenient_json_and_errors_without_values() {
     assert_eq!(detail(item, "Count"), ("42", true));
     assert_eq!(detail(item, "When"), ("2025-12", false));
     assert_eq!(detail(item, "Email"), ("a@example.test", false));
-    assert!(item.warnings.iter().any(|w| w.contains("Addr")));
+    // An address is a hidden detail since the personal categories import.
+    assert_eq!(detail(item, "Addr"), ("x", true));
+    assert!(!item.warnings.iter().any(|w| w.contains("Addr")));
 
     for bad in [
         r#"{"accounts": [ {"vaults": "SYNTH-OP-leak"} ]}"#,

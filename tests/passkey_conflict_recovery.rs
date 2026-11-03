@@ -221,6 +221,8 @@ fn a_passkey_lost_to_a_later_password_edit_signs_from_the_restored_copy() {
         pkcs8: Zeroizing::new(pkcs8.to_vec()),
         title: String::new(),
         attach: None,
+        prf: None,
+        large_blob: None,
     };
     let mut fresh = vault(&dir, "fresh.db");
     let imported = fresh.import_passkey(import(&export.pkcs8)).unwrap();
@@ -267,6 +269,8 @@ fn a_passkey_lost_to_a_later_password_edit_signs_from_the_restored_copy() {
             pkcs8: Zeroizing::new(export.pkcs8.to_vec()),
             title: String::new(),
             attach: None,
+            prf: None,
+            large_blob: None,
         })
         .unwrap();
     assert!(signs_with(&other, imported, &credential_id, &point));
@@ -391,6 +395,8 @@ fn a_normal_item_with_the_credential_has_priority_active_or_archived() {
             pkcs8: Zeroizing::new(export.pkcs8.to_vec()),
             title: "Imported".to_owned(),
             attach: None,
+            prf: None,
+            large_blob: None,
         })
         .unwrap();
     assert_eq!(c.passkey_info(normal).unwrap().credential_id, credential_id);
@@ -460,6 +466,8 @@ fn no_passkey_goes_on_a_conflict_copy() {
         pkcs8: Zeroizing::new(document.as_ref().to_vec()),
         title: String::new(),
         attach: Some(attach),
+        prf: None,
+        large_blob: None,
     };
     for restored in [false, true] {
         a.set_archived(copy, !restored).unwrap();

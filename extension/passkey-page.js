@@ -32,7 +32,16 @@
   const ACK_MS = 1500;
   // The service worker ends each request after at most 180 s.
   const LIMIT_MS = 200 * 1000;
-  const MAX_DETAIL = 64 * 1024;
+  // A request to the bridge (a large blob write of 64 KiB is about 86 KiB of
+  // base64url), and an answer from it (a large blob read).
+  const MAX_REQUEST = 128 * 1024;
+  const MAX_ANSWER = 256 * 1024;
+  // The sign-in extensions that Apassy serves: prf (WebAuthn level 3) and
+  // largeBlob. Values outside these limits go to the browser.
+  const MAX_PRF_INPUT = 1024;
+  const MAX_PRF_CREDENTIALS = 256;
+  const PRF_OUTPUT = 32;
+  const MAX_BLOB = 64 * 1024;
 
   // The page may change built-ins after it loads. Keep the ones used here.
   const nativeCreate = Container.prototype.create;
@@ -121,8 +130,9 @@
     return { type: string(item.type), id: base64url(bytesOf(item.id)) };
   }
 
-  // Only credProps is supported (create). Any other extension, also an unknown
-  // one, goes to the browser: no made-up output for prf, largeBlob, or appid.
+  // Only credProps is supported for create. Any other extension, also an
+  // unknown one, goes to the browser: no made-up output for prf, largeBlob, or
+  // appid at registration.
   function extensionsOf(value, allowed) {
     if (value === undefined) return undefined;
     if (value === null || typeof value !== "object") return unsupported();
@@ -133,6 +143,75 @@
       if (key === "enforceCredentialProtectionPolicy" && value[key] === false) continue;
       if (!allowed.includes(key)) return unsupported();
       out[key] = Boolean(value[key]);
+    }
+    return out;
+  }
+
+  // PRF inputs {first, second?}: BufferSource values of 1 to 1024 bytes, as
+  // base64url.
+  function prfValuesOf(value) {
+    if (value === null || typeof value !== "object") return unsupported();
+    const first = bytesOf(value.first);
+    if (first.length < 1 || first.length > MAX_PRF_INPUT) return unsupported();
+    const out = { first: base64url(first) };
+    if (value.second !== undefined) {
+      const second = bytesOf(value.second);
+      if (second.length < 1 || second.length > MAX_PRF_INPUT) return unsupported();
+      out.second = base64url(second);
+    }
+    return out;
+  }
+
+  // prf of a get: eval and evalByCredential (keys: base64url credential IDs,
+  // checked against the allow list by the service worker).
+  function prfOf(value) {
+    if (value === null || typeof value !== "object") return unsupported();
+    const out = {};
+    if (value.eval !== undefined) out.eval = prfValuesOf(value.eval);
+    const byCredential = value.evalByCredential;
+    if (byCredential !== undefined) {
+      if (byCredential === null || typeof byCredential !== "object") return unsupported();
+      const keys = objectKeys(byCredential);
+      if (keys.length > MAX_PRF_CREDENTIALS) return unsupported();
+      const entries = objectCreate(null);
+      for (const key of keys) entries[key] = prfValuesOf(byCredential[key]);
+      out.evalByCredential = entries;
+    }
+    return out;
+  }
+
+  // largeBlob of a get: {read: true} or {write: BufferSource of 1 to 64 KiB}.
+  // "support" (create only), or read next to write, goes to the browser, which
+  // throws NotSupportedError. A read of false asks for nothing.
+  function largeBlobOf(value) {
+    if (value === null || typeof value !== "object") return unsupported();
+    if (value.support !== undefined) return unsupported();
+    if (value.read !== undefined && value.write !== undefined) return unsupported();
+    if (value.write !== undefined) {
+      const blob = bytesOf(value.write);
+      if (blob.length < 1 || blob.length > MAX_BLOB) return unsupported();
+      return { write: base64url(blob) };
+    }
+    return value.read !== undefined && Boolean(value.read) ? { read: true } : undefined;
+  }
+
+  // The extensions of a get: prf and largeBlob. Any other one goes to the
+  // browser.
+  function requestExtensionsOf(value) {
+    if (value === undefined) return undefined;
+    if (value === null || typeof value !== "object") return unsupported();
+    const out = {};
+    for (const key of objectKeys(value)) {
+      if (value[key] === undefined) continue;
+      if (key === "enforceCredentialProtectionPolicy" && value[key] === false) continue;
+      if (key === "prf") {
+        out.prf = prfOf(value.prf);
+      } else if (key === "largeBlob") {
+        const largeBlob = largeBlobOf(value.largeBlob);
+        if (largeBlob) out.largeBlob = largeBlob;
+      } else {
+        return unsupported();
+      }
     }
     return out;
   }
@@ -184,8 +263,17 @@
     if (pk.timeout !== undefined) out.timeout = Number(pk.timeout);
     if (pk.userVerification !== undefined) out.userVerification = string(pk.userVerification);
     if (pk.hints !== undefined) out.hints = list(pk.hints).map(string);
-    const extensions = extensionsOf(pk.extensions, []);
-    if (extensions) out.extensions = extensions;
+    const extensions = requestExtensionsOf(pk.extensions);
+    if (extensions) {
+      // WebAuthn: each evalByCredential key names a credential of the allow
+      // list, and a large blob write names exactly one. Else the browser
+      // throws its own error.
+      const ids = out.allowCredentials.map((item) => item.id);
+      const byCredential = extensions.prf && extensions.prf.evalByCredential;
+      if (byCredential && objectKeys(byCredential).some((key) => !ids.includes(key))) return unsupported();
+      if (extensions.largeBlob && extensions.largeBlob.write !== undefined && ids.length !== 1) return unsupported();
+      out.extensions = extensions;
+    }
     return out;
   }
 
@@ -208,6 +296,8 @@
       const json = op === "create" ? creationJSON(options.publicKey) : requestJSON(options.publicKey);
       const message = { op, options: json };
       if (mediation !== undefined) message.mediation = mediation;
+      // The bridge drops a larger request; the browser does it at once.
+      if (stringify(message).length > MAX_REQUEST) return null;
       return message;
     } catch (_) {
       // Unsupported, or a value that the browser rejects with its own error.
@@ -228,16 +318,75 @@
     defineProperty(target, name, { value: holder[name], enumerable: true, configurable: true, writable: true });
   }
 
-  // Only {} or {credProps: {rk: true}}.
-  function extensionResults(op, value) {
-    if (value === null || typeof value !== "object") throw new TypeError("bad results");
+  const isObject = (value) => value !== null && typeof value === "object" && !isArray(value);
+  const onlyKeys = (value, allowed) => objectKeys(value).every((key) => allowed.includes(key));
+
+  // The client extension results, checked against what the request asked:
+  // create gives {} or {credProps: {rk: true}}; get gives prf results (32-byte
+  // outputs) and largeBlob outputs only for a prf or largeBlob input. Without
+  // an output from Apassy the member is absent, as for a client that does not
+  // support the extension. results() gives new ArrayBuffers on each call,
+  // json() the base64url form of toJSON.
+  function extensionResults(op, value, asked) {
+    if (!isObject(value)) throw new TypeError("bad results");
     const keys = objectKeys(value);
-    if (keys.length === 0) return () => ({});
-    if (op === "create" && keys.length === 1 && keys[0] === "credProps" &&
-        value.credProps && objectKeys(value.credProps).length === 1 && value.credProps.rk === true) {
-      return () => ({ credProps: { rk: true } });
+    if (op === "create") {
+      if (keys.length === 0) return { results: () => ({}), json: () => ({}) };
+      if (keys.length === 1 && keys[0] === "credProps" &&
+          isObject(value.credProps) && objectKeys(value.credProps).length === 1 && value.credProps.rk === true) {
+        return { results: () => ({ credProps: { rk: true } }), json: () => ({ credProps: { rk: true } }) };
+      }
+      throw new TypeError("bad results");
     }
-    throw new TypeError("bad results");
+    const request = isObject(asked) ? asked : {};
+    let prf = null;
+    let largeBlob = null;
+    for (const key of keys) {
+      if (key === "prf" && request.prf) {
+        const output = value.prf;
+        if (!isObject(output) || !onlyKeys(output, ["results"]) || !isObject(output.results) ||
+            !onlyKeys(output.results, ["first", "second"])) throw new TypeError("bad results");
+        const { first, second } = output.results;
+        bufferOf(first, PRF_OUTPUT, PRF_OUTPUT);
+        if (second !== undefined) bufferOf(second, PRF_OUTPUT, PRF_OUTPUT);
+        prf = second === undefined ? { first } : { first, second };
+      } else if (key === "largeBlob" && request.largeBlob) {
+        const output = value.largeBlob;
+        if (!isObject(output)) throw new TypeError("bad results");
+        const names = objectKeys(output);
+        if (request.largeBlob.read === true && names.length === 0) {
+          largeBlob = {};
+        } else if (request.largeBlob.read === true && names.length === 1 && names[0] === "blob") {
+          bufferOf(output.blob, 1, MAX_BLOB);
+          largeBlob = { blob: output.blob };
+        } else if (request.largeBlob.write !== undefined && names.length === 1 && names[0] === "written" &&
+            typeof output.written === "boolean") {
+          largeBlob = { written: output.written };
+        } else {
+          throw new TypeError("bad results");
+        }
+      } else {
+        throw new TypeError("bad results");
+      }
+    }
+    const results = () => {
+      const out = {};
+      if (prf) {
+        out.prf = { results: { first: bufferOf(prf.first, PRF_OUTPUT, PRF_OUTPUT) } };
+        if (prf.second !== undefined) out.prf.results.second = bufferOf(prf.second, PRF_OUTPUT, PRF_OUTPUT);
+      }
+      if (largeBlob) {
+        out.largeBlob = largeBlob.blob !== undefined ? { blob: bufferOf(largeBlob.blob, 1, MAX_BLOB) } : { ...largeBlob };
+      }
+      return out;
+    };
+    const json = () => {
+      const out = {};
+      if (prf) out.prf = { results: { ...prf } };
+      if (largeBlob) out.largeBlob = { ...largeBlob };
+      return out;
+    };
+    return { results, json };
   }
 
   const TRANSPORTS = ["internal", "hybrid"];
@@ -245,12 +394,15 @@
   // A PublicKeyCredential: instanceof and the prototype chain hold, the
   // attributes are own properties, and toJSON gives the base64url JSON of
   // WebAuthn level 3.
-  function credentialFrom(op, c) {
+  // `asked`: the extensions of the request (get), for the results check. The
+  // signature of a get is opaque bytes of the algorithm of the passkey (ES256,
+  // EdDSA, ES384, or RS256): the relying party checks it with its stored key.
+  function credentialFrom(op, c, asked) {
     if (c === null || typeof c !== "object") throw new TypeError("bad credential");
     const rawId = bufferOf(c.id, 1, 1023);
     const id = c.id;
     const clientDataJSON = bufferOf(c.clientDataJSON, 1, 4096);
-    const results = extensionResults(op, c.clientExtensionResults);
+    const results = extensionResults(op, c.clientExtensionResults, asked);
     let response;
     let responseJSON;
     if (op === "create") {
@@ -292,13 +444,13 @@
     }
     const credential = objectCreate(PublicKey.prototype);
     own(credential, { id, rawId, type: "public-key", response, authenticatorAttachment: "platform" });
-    method(credential, "getClientExtensionResults", results);
+    method(credential, "getClientExtensionResults", results.results);
     method(credential, "toJSON", () => ({
       id,
       rawId: id,
       response: responseJSON(),
       authenticatorAttachment: "platform",
-      clientExtensionResults: results(),
+      clientExtensionResults: results.json(),
       type: "public-key",
     }));
     return credential;
@@ -323,7 +475,7 @@
 
   apply(listen, window, [RESPONSE, (event) => {
     const detail = event.detail;
-    if (typeof detail !== "string" || detail.length > MAX_DETAIL) return;
+    if (typeof detail !== "string" || detail.length > MAX_ANSWER) return;
     let message;
     try {
       message = parse(detail);
@@ -380,7 +532,7 @@
           toBrowser();
         } else if (answer.kind === "result" && answer.op === op) {
           try {
-            resolve(credentialFrom(op, answer.credential));
+            resolve(credentialFrom(op, answer.credential, request.options.extensions));
           } catch (_) {
             reject(errorFrom("NotAllowedError"));
           }

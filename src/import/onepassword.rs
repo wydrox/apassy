@@ -108,6 +108,11 @@ impl<'de> Deserialize<'de> for Secret {
     }
 }
 
+/// True for any value but `null` or a missing key. The value itself is not kept.
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Option::<IgnoredAny>::deserialize(deserializer).map(|value| value.is_some())
+}
+
 /// `null` becomes the default value.
 fn nullable<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -186,6 +191,11 @@ struct Details {
     password: Secret,
     #[serde(deserialize_with = "nullable")]
     sections: Vec<SectionJson>,
+    /// 1Password 8 writes the public part of a passkey of a login here (the
+    /// credential ID, the relying party, the user handle), never its private key.
+    /// Only the presence counts.
+    #[serde(deserialize_with = "present")]
+    passkey: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -271,6 +281,61 @@ impl<'de> Deserialize<'de> for EmailJson {
     }
 }
 
+/// An address value: a string, or `{"street", "city", "state", "zip", "country"}`. The
+/// parts that have text, joined with ", ".
+#[derive(Default)]
+struct AddressJson(Secret);
+
+impl<'de> Deserialize<'de> for AddressJson {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct AddressVisitor;
+        impl<'de> Visitor<'de> for AddressVisitor {
+            type Value = AddressJson;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an address")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<AddressJson, E> {
+                Ok(AddressJson(Secret(Zeroizing::new(value.to_owned()))))
+            }
+
+            fn visit_string<E: de::Error>(self, value: String) -> Result<AddressJson, E> {
+                Ok(AddressJson(Secret(Zeroizing::new(value))))
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<AddressJson, E> {
+                Ok(AddressJson::default())
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<AddressJson, A::Error> {
+                const ORDER: [&str; 5] = ["street", "city", "state", "zip", "country"];
+                let mut parts: [Secret; 5] = Default::default();
+                while let Some(key) = map.next_key::<Text>()? {
+                    if let Some(index) = ORDER.iter().position(|name| *name == key.as_str()) {
+                        parts[index] = map.next_value::<Secret>()?;
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                let mut joined = Zeroizing::new(String::new());
+                for part in &parts {
+                    let text = part.0.trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if !joined.is_empty() {
+                        joined.push_str(", ");
+                    }
+                    joined.push_str(text);
+                }
+                Ok(AddressJson(Secret(joined)))
+            }
+        }
+        deserializer.deserialize_any(AddressVisitor)
+    }
+}
+
 /// The typed value of a section field: `{"concealed": "..."}`, `{"date": 1700000000}`,
 /// `{"sshKey": {...}}`, and so on.
 #[derive(Default)]
@@ -332,6 +397,8 @@ impl<'de> Deserialize<'de> for FieldValue {
                         out = FieldValue::Text(kind, map.next_value::<Secret>()?);
                     } else if key == "email" {
                         out = FieldValue::Text("email", map.next_value::<EmailJson>()?.0);
+                    } else if key == "address" {
+                        out = FieldValue::Text("address", map.next_value::<AddressJson>()?.0);
                     } else if key == "date" {
                         out = FieldValue::Number("date", map.next_value::<Text>()?);
                     } else if key == "monthYear" {
@@ -382,7 +449,7 @@ fn category(uuid: &str) -> (Category, &'static str) {
         "003" => (Category::SecureNote, "Secure Note"),
         "004" => (Category::Personal, "Identity"),
         "005" => (Category::Password, "Password"),
-        "006" => (Category::Personal, "Document"),
+        "006" => (Category::Document, "Document"),
         "100" => (Category::Other, "Software License"),
         "101" => (Category::Personal, "Bank Account"),
         "102" => (Category::Database, "Database"),
@@ -410,6 +477,82 @@ const DATABASE: &[&str] = &["database"];
 const TOKEN: &[&str] = &["credential", "token", "api key", "api_key", "secret", "key"];
 const PRIVATE_KEY: &[&str] = &["private_key"];
 const PUBLIC_KEY: &[&str] = &["public_key"];
+
+/// The values of a personal item (a card, an identity, an account, a document number)
+/// that stay visible: the card type, the issuing country or state, the document type,
+/// the bank name, and the expiry. Every other value of such an item is hidden: numbers,
+/// codes, PINs, names, dates of birth, addresses, member IDs, and wallet keys.
+const PERSONAL_VISIBLE: &[&str] = &[
+    "type",
+    "card type",
+    "cardtype",
+    "document type",
+    "document_type",
+    "issuing country",
+    "issuing_country",
+    "issuing state",
+    "issuing_state",
+    "country",
+    "state",
+    "bank",
+    "bank name",
+    "bank_name",
+    "bankname",
+    "expiry",
+    "expiry date",
+    "expiry_date",
+    "expires",
+    "expiration",
+    "expiration date",
+    "expiration_date",
+];
+
+/// The warning on a login with a passkey: the 1PUX export has no private key.
+const PASSKEY_WARNING: &str =
+    "The passkey is not in the 1Password export. Import it on the iPhone with Credential Exchange.";
+
+/// The main value of a personal item, the field `secret`: the number of a card, an
+/// account, or a document, a social security number, or a recovery phrase. Without
+/// one, the password, then the first hidden value.
+fn personal_main(label: &str) -> &'static [&'static str] {
+    match label {
+        "Credit Card" => &["ccnum", "card number", "cardnumber", "number"],
+        "Bank Account" => &["accountno", "account number", "account_number", "iban"],
+        "Crypto Wallet" => &[
+            "recoveryphrase",
+            "recovery phrase",
+            "recovery_phrase",
+            "seed phrase",
+            "mnemonic",
+        ],
+        "Membership" | "Reward Program" => &[
+            "membership_no",
+            "membership number",
+            "member id",
+            "member_id",
+            "member number",
+            "number",
+        ],
+        "Driver License" | "Outdoor License" | "Passport" | "Social Security Number" => &[
+            "number",
+            "document number",
+            "license number",
+            "passport number",
+            "ssn",
+        ],
+        _ => &[],
+    }
+}
+
+/// The searchable tag of a personal category, next to the 1Password tags.
+fn personal_tag(label: &str) -> &'static str {
+    match label {
+        "Credit Card" | "Membership" | "Reward Program" => "card",
+        "Bank Account" => "bank",
+        "Crypto Wallet" => "wallet",
+        _ => "identity",
+    }
+}
 
 /// Text fields that stay visible. Any other text field becomes a hidden detail.
 const PLAIN_KEYS: &[&str] = &[
@@ -453,12 +596,8 @@ fn map_item(item: ItemJson, vault: &str) -> ImportItem {
     if matches!(state.as_str(), "trashed" | "deleted") || trashed.as_str() == "true" {
         return builder.skip("In the 1Password trash.");
     }
-    if category == Category::Personal {
-        return builder.skip(if label == "Document" {
-            "A document is a file. Apassy does not import files.".to_owned()
-        } else {
-            format!("Apassy does not import {label} items. They are not credentials for agents.")
-        });
+    if category == Category::Document {
+        return builder.skip("A document is a file. Apassy does not store files.");
     }
 
     let Details {
@@ -466,7 +605,11 @@ fn map_item(item: ItemJson, vault: &str) -> ImportItem {
         notes_plain,
         password,
         sections,
+        passkey,
     } = details;
+    if passkey {
+        warn_passkey(&mut builder);
+    }
     let mut parts = Parts::new();
     for login in login_fields {
         let designation = login.designation.as_str().trim().to_ascii_lowercase();
@@ -498,10 +641,17 @@ fn map_item(item: ItemJson, vault: &str) -> ImportItem {
             false,
         ));
     }
+    let personal_item = category == Category::Personal;
     for section in sections {
         for field in section.fields {
-            push_section_field(&mut builder, &mut parts, field);
+            push_section_field(&mut builder, &mut parts, field, personal_item);
         }
+    }
+
+    if personal_item {
+        builder.set_notes(notes_plain.0);
+        builder.add_tag(personal_tag(label));
+        return personal(builder, parts, label);
     }
 
     if category == Category::SecureNote {
@@ -612,6 +762,39 @@ fn custom(mut builder: ItemBuilder, mut parts: Parts, why: Option<&str>) -> Impo
     )
 }
 
+/// A personal item as a custom secret. The main value of the category is the field
+/// `secret`; without one, the password, then the first hidden value. Every other value
+/// is hidden but the plain ones of [`PERSONAL_VISIBLE`] (a concealed one stays hidden).
+fn personal(mut builder: ItemBuilder, mut parts: Parts, label: &str) -> ImportItem {
+    let Some(main) = parts
+        .take(personal_main(label), None)
+        .or_else(|| parts.take(PASSWORD, Some(true)))
+        .or_else(|| parts.take_first_secret())
+    else {
+        return builder.skip("The item has no number, password, or other secret value.");
+    };
+    parts.hide_all_but(PERSONAL_VISIBLE);
+    builder.warn(format!(
+        "1Password category “{label}” has no Apassy kind. Apassy imports it as a custom secret, with every value hidden but the type, the country or state, the bank name, and the expiry."
+    ));
+    builder.finish(
+        CredentialKind::Custom,
+        vec![(super::CUSTOM_FIELD, main, true)],
+        parts,
+    )
+}
+
+/// One passkey warning per item.
+fn warn_passkey(builder: &mut ItemBuilder) {
+    if !builder
+        .warnings
+        .iter()
+        .any(|known| known == PASSKEY_WARNING)
+    {
+        builder.warn(PASSKEY_WARNING);
+    }
+}
+
 /// The label of a field of the 1Password type `totp`. The type says it is a one-time
 /// password, so the label must say it too, or the app shows a plain secret. A title that
 /// the app does not read as a one-time password stays in the label:
@@ -626,20 +809,32 @@ fn totp_label(title: &str) -> String {
     }
 }
 
-fn push_section_field(builder: &mut ItemBuilder, parts: &mut Parts, field: FieldJson) {
+/// `personal_item`: a field of a personal item. Its text is visible only for a key of
+/// [`PERSONAL_VISIBLE`]; [`personal`] hides the other values.
+fn push_section_field(
+    builder: &mut ItemBuilder,
+    parts: &mut Parts,
+    field: FieldJson,
+    personal_item: bool,
+) {
     let FieldJson { title, id, value } = field;
     let id = id.as_str().trim();
     let title = title.as_str().trim();
     let label = if title.is_empty() { id } else { title };
     let keys = [id, title];
+    let plain = if personal_item {
+        PERSONAL_VISIBLE
+    } else {
+        PLAIN_KEYS
+    };
     let plain_key = keys
         .iter()
-        .any(|key| PLAIN_KEYS.contains(&key.to_lowercase().as_str()));
+        .any(|key| plain.contains(&key.to_lowercase().as_str()));
     match value {
         FieldValue::Empty => {}
         FieldValue::Text(kind, value) => {
             let hidden = match kind {
-                "concealed" | "totp" | "creditCardNumber" => true,
+                "concealed" | "totp" | "creditCardNumber" | "address" => true,
                 "string" => !plain_key,
                 _ => false,
             };
@@ -702,6 +897,7 @@ fn push_section_field(builder: &mut ItemBuilder, parts: &mut Parts, field: Field
                 false,
             ));
         }
+        FieldValue::Unsupported(kind) if kind == "passkey" => warn_passkey(builder),
         FieldValue::Unsupported(kind) => {
             let label = super::detail_label(label);
             builder.warn(match kind.as_str() {

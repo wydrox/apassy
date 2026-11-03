@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use apassy_core::Core;
+use ring::hmac;
 use ring::rand::SystemRandom;
 use ring::signature::{
     ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair,
@@ -719,4 +720,298 @@ fn identities_hold_passkeys_and_codes_without_secrets() {
 
 fn core_raw(core: &Core, request: &Value) -> String {
     core.call(&request.to_string())
+}
+
+/// Synthetic RSA and P-521 keys made with `openssl genpkey` for the tests only.
+const RSA_2048: &[u8] = include_bytes!("../../../tests/fixtures/passkeys/rsa2048-synthetic.pk8");
+const P521: &[u8] = include_bytes!("../../../tests/fixtures/passkeys/p521-synthetic.pk8");
+
+/// Raw DEFLATE of `blob` in one stored block (RFC 1951, section 3.2.4).
+fn stored_deflate(blob: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(blob.len()).unwrap();
+    let mut data = vec![0x01];
+    data.extend_from_slice(&len.to_le_bytes());
+    data.extend_from_slice(&(!len).to_le_bytes());
+    data.extend_from_slice(blob);
+    data
+}
+
+/// The ID of the passkey with `credential` of `rp`.
+fn passkey_id(core: &Core, rp: &str, credential: &[u8]) -> u64 {
+    call(
+        core,
+        json!({"op": "passkey_list", "rp_id": rp, "allowed": [b64(credential)]}),
+    )["passkeys"][0]["id"]
+        .as_u64()
+        .expect("listed")
+}
+
+fn assert_request(id: u64, rp: &str, credential: &[u8], byte: u8) -> Value {
+    json!({"op": "passkey_assert", "id": id, "rp_id": rp,
+           "credential_id": b64(credential), "client_data_hash": hash(byte)})
+}
+
+#[test]
+fn imported_es384_eddsa_and_rs256_keys_sign_and_p521_fails() {
+    use ring::signature::{
+        ECDSA_P384_SHA384_ASN1, ECDSA_P384_SHA384_ASN1_SIGNING, ED25519, Ed25519KeyPair,
+        RSA_PKCS1_2048_8192_SHA256, RsaKeyPair,
+    };
+    let (_root, _dir, phone) = phone();
+    let rng = SystemRandom::new();
+    let p384 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, &rng).unwrap();
+    let p384_public =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, p384.as_ref(), &rng)
+            .unwrap()
+            .public_key()
+            .as_ref()
+            .to_vec();
+    let ed = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    let ed_public = Ed25519KeyPair::from_pkcs8(ed.as_ref())
+        .unwrap()
+        .public_key()
+        .as_ref()
+        .to_vec();
+    let rsa_public = RsaKeyPair::from_pkcs8(RSA_2048)
+        .unwrap()
+        .public()
+        .as_ref()
+        .to_vec();
+    let accounts = json!([
+        account("p384.example", b"credential-384", &b64(p384.as_ref())),
+        account("ed.example", b"credential-ed", &b64(ed.as_ref())),
+        account("rsa.example", b"credential-rsa", &b64(RSA_2048)),
+        account("p521.example", b"credential-521", &b64(P521)),
+    ]);
+    let counts = call(
+        &phone,
+        json!({"op": "passkey_import", "accounts": accounts}),
+    );
+    assert_eq!(
+        counts,
+        json!({"imported": 3, "skipped_existing": 0, "failed": 1})
+    );
+    type Case<'a> = (
+        &'a str,
+        &'a [u8],
+        i64,
+        &'static dyn ring::signature::VerificationAlgorithm,
+        &'a [u8],
+    );
+    let cases: [Case<'_>; 3] = [
+        (
+            "p384.example",
+            b"credential-384",
+            -35,
+            &ECDSA_P384_SHA384_ASN1,
+            &p384_public,
+        ),
+        ("ed.example", b"credential-ed", -8, &ED25519, &ed_public),
+        (
+            "rsa.example",
+            b"credential-rsa",
+            -257,
+            &RSA_PKCS1_2048_8192_SHA256,
+            &rsa_public,
+        ),
+    ];
+    for (n, (rp, credential, algorithm, verify_with, public)) in cases.into_iter().enumerate() {
+        let id = passkey_id(&phone, rp, credential);
+        let byte = 20 + n as u8;
+        let assertion = call(&phone, assert_request(id, rp, credential, byte));
+        assert_eq!(assertion["algorithm"], algorithm, "{rp}");
+        assert!(assertion.get("prf").is_none() && assertion.get("large_blob").is_none());
+        let mut message = unb64(assertion["authenticator_data"].as_str().unwrap());
+        message.extend_from_slice(&unb64(&hash(byte)));
+        UnparsedPublicKey::new(verify_with, public)
+            .verify(&message, &unb64(assertion["signature"].as_str().unwrap()))
+            .expect("the signature checks");
+    }
+    let empty = call(
+        &phone,
+        json!({"op": "passkey_list", "rp_id": "p521.example", "allowed": []}),
+    );
+    assert_eq!(empty["passkeys"], json!([]));
+}
+
+#[test]
+fn prf_and_large_blob_through_the_app_and_the_extension() {
+    let (_root, dir, phone) = phone();
+    let (pkcs8, _) = synthetic_key();
+    let blob = b"synthetic imported blob";
+    let mut with_data = account(RP, b"credential-prf", &b64(&pkcs8));
+    with_data["prf"] = json!({"with_uv": b64(&[0x11; 32]), "without_uv": b64(&[0x33; 32])});
+    with_data["large_blob"] =
+        json!({"data": b64(&stored_deflate(blob)), "uncompressed_size": blob.len()});
+    let mut bad_blob = account(RP, b"credential-bad-blob", &b64(&pkcs8));
+    bad_blob["large_blob"] =
+        json!({"data": b64(&stored_deflate(blob)), "uncompressed_size": blob.len() + 1});
+    let mut bad_prf = account(RP, b"credential-bad-prf", &b64(&pkcs8));
+    bad_prf["prf"] = json!({"with_uv": b64(&[0x11; 31]), "without_uv": b64(&[0x33; 32])});
+    let plain = account(RP, b"credential-plain", &b64(&pkcs8));
+    let counts = call(
+        &phone,
+        json!({"op": "passkey_import", "accounts": [with_data, bad_blob, bad_prf, plain]}),
+    );
+    assert_eq!(
+        counts,
+        json!({"imported": 2, "skipped_existing": 0, "failed": 2})
+    );
+    let id = passkey_id(&phone, RP, b"credential-prf");
+    let plain_id = passkey_id(&phone, RP, b"credential-plain");
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &[0x11; 32]);
+    let prf_of = |salt: &[u8]| -> Vec<u8> { hmac::sign(&key, salt).as_ref().to_vec() };
+    let webauthn_salt = |input: &[u8]| -> Vec<u8> {
+        let mut bytes = b"WebAuthn PRF\0".to_vec();
+        bytes.extend_from_slice(input);
+        ring::digest::digest(&ring::digest::SHA256, &bytes)
+            .as_ref()
+            .to_vec()
+    };
+
+    // PRF with WebAuthn inputs, and with hashed salts.
+    let mut request = assert_request(id, RP, b"credential-prf", 1);
+    request["prf"] = json!({"first": b64(b"one"), "second": b64(b"two")});
+    let assertion = call(&phone, request);
+    assert_eq!(
+        unb64(assertion["prf"]["first"].as_str().unwrap()),
+        prf_of(&webauthn_salt(b"one"))
+    );
+    assert_eq!(
+        unb64(assertion["prf"]["second"].as_str().unwrap()),
+        prf_of(&webauthn_salt(b"two"))
+    );
+    let mut request = assert_request(id, RP, b"credential-prf", 2);
+    request["prf"] = json!({"first": b64(&[0x22; 32]), "hashed": true});
+    let assertion = call(&phone, request);
+    assert_eq!(
+        unb64(assertion["prf"]["first"].as_str().unwrap()),
+        prf_of(&[0x22; 32])
+    );
+    assert!(assertion["prf"].get("second").is_none());
+    // No secrets: no output, and the assertion still signs.
+    let mut request = assert_request(plain_id, RP, b"credential-plain", 3);
+    request["prf"] = json!({"first": b64(b"one")});
+    let assertion = call(&phone, request);
+    assert!(assertion.get("prf").is_none());
+    assert!(!assertion["signature"].as_str().unwrap().is_empty());
+    // Bad PRF inputs.
+    for prf in [
+        json!({"first": b64(&[0x22; 31]), "hashed": true}),
+        json!({"first": b64(&[1; 1025])}),
+        json!({"first": ""}),
+    ] {
+        let mut request = assert_request(id, RP, b"credential-prf", 4);
+        request["prf"] = prf.clone();
+        assert_eq!(fails(&phone, request), "invalid_input", "{prf}");
+    }
+
+    // The imported blob reads; a passkey without one reads nothing.
+    let mut request = assert_request(id, RP, b"credential-prf", 5);
+    request["large_blob"] = json!({"read": true});
+    let assertion = call(&phone, request.clone());
+    assert_eq!(
+        unb64(assertion["large_blob"]["data"].as_str().unwrap()),
+        blob
+    );
+    let mut empty = assert_request(plain_id, RP, b"credential-plain", 5);
+    empty["large_blob"] = json!({"read": true});
+    assert!(call(&phone, empty).get("large_blob").is_none());
+
+    // The AutoFill extension writes a new blob as part of its assertion.
+    let revision = row(&phone, id)["revision"].as_u64().unwrap();
+    call(&phone, json!({"op": "lock"}));
+    let extension = core(&dir, "autofill");
+    call(&extension, json!({"op": "unlock", "passphrase": PASS}));
+    let written = b"a blob that the extension wrote".repeat(40);
+    let mut write = assert_request(id, RP, b"credential-prf", 6);
+    write["large_blob"] = json!({"write": b64(&written)});
+    let assertion = call(&extension, write);
+    assert_eq!(assertion["large_blob"], json!({"written": true}));
+    let mut read = assert_request(id, RP, b"credential-prf", 7);
+    read["large_blob"] = json!({"read": true});
+    let assertion = call(&extension, read.clone());
+    assert_eq!(
+        unb64(assertion["large_blob"]["data"].as_str().unwrap()),
+        written
+    );
+    // Too big: written false, and the blob stays.
+    let mut big = assert_request(id, RP, b"credential-prf", 8);
+    big["large_blob"] = json!({"write": b64(&vec![7u8; 65_537])});
+    assert_eq!(
+        call(&extension, big)["large_blob"],
+        json!({"written": false})
+    );
+    let assertion = call(&extension, read);
+    assert_eq!(
+        unb64(assertion["large_blob"]["data"].as_str().unwrap()),
+        written
+    );
+    // Bad largeBlob requests.
+    for blob in [
+        json!({"read": false}),
+        json!({"read": true, "write": b64(b"x")}),
+        json!({}),
+    ] {
+        let mut request = assert_request(id, RP, b"credential-prf", 9);
+        request["large_blob"] = blob.clone();
+        assert_eq!(fails(&extension, request), "invalid_input", "{blob}");
+    }
+    call(&extension, json!({"op": "lock"}));
+
+    // The write is a passkey edit: a new revision and a history event without values.
+    call(&phone, json!({"op": "unlock", "passphrase": PASS}));
+    assert_eq!(row(&phone, id)["revision"].as_u64().unwrap(), revision + 1);
+    let history = call(&phone, json!({"op": "history", "id": id})).to_string();
+    assert!(!history.contains(&b64(&written)) && !history.contains("extension wrote"));
+    // The generic calls never show the extension fields.
+    let detail = call(&phone, json!({"op": "item", "id": id}));
+    for field in detail["fields"].as_array().unwrap() {
+        assert!(!field["name"].as_str().unwrap().starts_with("passkey_"));
+    }
+    for field in [
+        "passkey_prf_uv",
+        "passkey_prf_no_uv",
+        "passkey_large_blob",
+        "passkey_large_blob_size",
+    ] {
+        let request = json!({"op": "reveal", "id": id, "field": field});
+        assert_eq!(answer(&phone, &request)["ok"], false, "{field}");
+    }
+}
+
+#[test]
+fn an_import_attaches_to_an_existing_login() {
+    let (_root, _dir, phone) = phone();
+    let saved = call(
+        &phone,
+        json!({"op": "save", "id": null, "revision": null, "item": {
+            "title": "Existing", "kind": "login", "fields": [
+                {"name": "username", "value": "existing-user", "secret": false},
+                {"name": "password", "value": "synthetic-password", "secret": true}]}}),
+    );
+    let id = saved["id"].as_u64().unwrap();
+    let (pkcs8, point) = synthetic_key();
+    let mut first = account(RP, b"credential-attach", &b64(&pkcs8));
+    first["attach_id"] = json!(id);
+    let mut second = account(RP, b"credential-attach-2", &b64(&pkcs8));
+    second["attach_id"] = json!(id);
+    let counts = call(
+        &phone,
+        json!({"op": "passkey_import", "accounts": [first, second]}),
+    );
+    // The second account finds a passkey on the login.
+    assert_eq!(
+        counts,
+        json!({"imported": 1, "skipped_existing": 1, "failed": 0})
+    );
+    assert_eq!(passkey_id(&phone, RP, b"credential-attach"), id);
+    assert_eq!(row(&phone, id)["has_passkey"], true);
+    let value = call(
+        &phone,
+        json!({"op": "reveal", "id": id, "field": "password"}),
+    );
+    assert_eq!(value["value"], "synthetic-password");
+    let assertion = call(&phone, assert_request(id, RP, b"credential-attach", 9));
+    verify(&point, &assertion, &hash(9));
 }
