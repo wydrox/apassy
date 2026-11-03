@@ -17,17 +17,14 @@
 
 use std::time::Instant;
 
-use serde::Deserialize;
-use serde_json::Value;
 use zeroize::Zeroizing;
 
 use super::sigv4::{self, ClientRequest};
 use super::{
-    Lease, LeaseError, LeaseKind, LeasePlain, LeaseSecret, LeaseSource, MIN_LEASE_SECS,
-    ProviderEndpoints, RunScope,
+    Lease, LeaseError, LeaseKind, LeasePlain, LeaseSecret, LeaseSource, ProviderEndpoints, RunScope,
 };
 use crate::broker::http::{self, Body, HttpRequest, Method, TlsClient};
-use crate::vault::{Field, SecretValue};
+use crate::vault::{AwsStsSettings, SecretValue};
 
 /// The plain field with the IAM user's key id (`AKIA…`).
 pub const ACCESS_KEY_ID_FIELD: &str = "access_key_id";
@@ -43,18 +40,19 @@ pub const STS_VERSION: &str = "2011-06-15";
 /// `DurationSeconds` of every call: the AWS minimum, the 15 minutes of the ADR.
 pub const DURATION_SECS: u64 = 900;
 /// How far the answer's `Expiration` may be past `made_at + 900` before the answer is
-/// refused. STS refuses a request whose `X-Amz-Date` is more than 5 minutes from its
-/// clock, so a provider that honours `DurationSeconds` stays inside this window, while
-/// one that ignores it (the defaults are 1 and 12 hours) is refused. The lease never
-/// claims more than 900 seconds: `expires_at = min(Expiration, made_at + 900)`.
-pub const MAX_CLOCK_SKEW_SECS: u64 = 300;
+/// refused ([`super::MAX_CLOCK_SKEW_SECS`]). STS refuses a request whose `X-Amz-Date` is
+/// more than 5 minutes from its clock, so a provider that honours `DurationSeconds` stays
+/// inside this window, while one that ignores it (the defaults are 1 and 12 hours) is
+/// refused. The lease never claims more than 900 seconds: `expires_at = min(Expiration,
+/// made_at + 900)`.
+pub const MAX_CLOCK_SKEW_SECS: u64 = super::MAX_CLOCK_SKEW_SECS;
 /// The STS limit of a session policy (contract section 3.2).
 pub const MAX_POLICY_BYTES: usize = 2048;
 pub const MAX_ROLE_ARN_BYTES: usize = 2048;
 /// Most entries of the `services` setting.
 pub const MAX_SERVICES: usize = 16;
 /// The region when the settings name none.
-pub const DEFAULT_REGION: &str = "us-east-1";
+pub const DEFAULT_REGION: &str = AwsStsSettings::DEFAULT_REGION;
 /// The session policy of `GetFederationToken` for an item without a policy (S6-4).
 pub const ALLOW_ALL_POLICY: &str =
     r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
@@ -66,122 +64,20 @@ const SESSION_PREFIX: &str = "apassy-";
 /// `GetFederationToken`'s `Name` has at most 32 characters: 7 for `apassy-`, 25 for the
 /// label. `AssumeRole`'s `RoleSessionName` (64) gets the same name.
 const MAX_SESSION_LABEL_CHARS: usize = 25;
-const MAX_REGION_BYTES: usize = 32;
-const MAX_SERVICE_NAME_BYTES: usize = 32;
-const ASIA_REFUSED: &str =
-    "the access key id is already temporary (ASIA). Use the IAM user's long-lived AKIA key.";
 
-/// The settings of an `aws_sts` source (contract section 3.2). Strict: an unknown field,
-/// a duplicate field (in [`AwsSettings::parse_text`]), or a wrong type is refused.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AwsSettings {
-    /// `arn:aws:iam::<12 digits>:role/<path and name>`: `AssumeRole`.
-    pub role_arn: Option<String>,
-    /// The JSON text of an IAM session policy object, at most 2048 bytes.
-    pub policy: Option<String>,
-    /// `[a-z]{2}(-[a-z]+)+-[0-9]+`; [`DEFAULT_REGION`] when missing.
-    pub region: Option<String>,
-    /// 1 to 16 distinct service names (`[a-z0-9-]{1,32}`), for signed requests.
-    pub services: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SettingsWire {
-    #[serde(default)]
-    role_arn: Option<String>,
-    #[serde(default)]
-    policy: Option<String>,
-    #[serde(default)]
-    region: Option<String>,
-    #[serde(default)]
-    services: Option<Vec<String>>,
-}
-
-impl AwsSettings {
-    /// Read a settings object (the `LeaseSource.settings` value).
-    pub fn parse(settings: &Value) -> Result<Self, &'static str> {
-        if !settings.is_object() {
-            return Err("the AWS settings are not a JSON object.");
-        }
-        let wire = SettingsWire::deserialize(settings)
-            .map_err(|_| "the AWS settings have an unknown field or a field of the wrong type.")?;
-        Self::checked(wire)
-    }
-
-    /// Read the stored settings text; a duplicate field is refused here too.
-    pub fn parse_text(text: &str) -> Result<Self, &'static str> {
-        const BAD: &str =
-            "the AWS settings are not a JSON object of known, distinct fields of the right types.";
-        let value: Value = serde_json::from_str(text).map_err(|_| BAD)?;
-        if !value.is_object() {
-            return Err(BAD);
-        }
-        let wire: SettingsWire = serde_json::from_str(text).map_err(|_| BAD)?;
-        Self::checked(wire)
-    }
-
-    fn checked(wire: SettingsWire) -> Result<Self, &'static str> {
-        if wire
-            .role_arn
-            .as_deref()
-            .is_some_and(|arn| !is_role_arn(arn))
-        {
-            return Err("the role_arn setting is not arn:aws:iam::<12 digits>:role/<name>.");
-        }
-        if let Some(policy) = &wire.policy {
-            if policy.len() > MAX_POLICY_BYTES {
-                return Err("the policy setting is longer than 2048 bytes.");
-            }
-            if !matches!(serde_json::from_str::<Value>(policy), Ok(Value::Object(_))) {
-                return Err("the policy setting is not the JSON text of a policy object.");
-            }
-        }
-        if wire
-            .region
-            .as_deref()
-            .is_some_and(|region| !is_region(region))
-        {
-            return Err("the region setting is not an AWS region such as eu-central-1.");
-        }
-        if let Some(services) = &wire.services {
-            let distinct = services
-                .iter()
-                .enumerate()
-                .all(|(index, name)| !services[..index].contains(name));
-            if !(1..=MAX_SERVICES).contains(&services.len())
-                || !distinct
-                || !services.iter().all(|name| is_service_name(name))
-            {
-                return Err("the services setting is not 1 to 16 distinct AWS service names.");
-            }
-        }
-        Ok(Self {
-            role_arn: wire.role_arn,
-            policy: wire.policy,
-            region: wire.region,
-            services: wire.services,
-        })
-    }
-
-    /// The region of the STS endpoint and of the signing scope.
-    pub fn region(&self) -> &str {
-        self.region.as_deref().unwrap_or(DEFAULT_REGION)
-    }
-}
-
-/// Check the values of the two fields (after [`super::check_fields`]): an `AKIA` key id
-/// of 20 characters and a 40-character secret access key. An `ASIA` key is refused.
-/// The text names the field, never its value.
-pub fn check_key(fields: &[Field]) -> Result<(), String> {
-    let id = super::field(fields, ACCESS_KEY_ID_FIELD)
-        .ok_or_else(|| format!("the item has no field {ACCESS_KEY_ID_FIELD}."))?;
-    let secret = super::field(fields, SECRET_ACCESS_KEY_FIELD)
-        .ok_or_else(|| format!("the item has no field {SECRET_ACCESS_KEY_FIELD}."))?;
-    check_access_key_id(id.value.expose()).map_err(str::to_owned)?;
-    if !is_secret_access_key(secret.value.expose()) {
-        return Err(format!(
-            "the field {SECRET_ACCESS_KEY_FIELD} is not 40 characters of A-Z, a-z, 0-9, / and +."
+/// The settings and the values of the two fields are checked by the vault's rules
+/// before this module sees a source (`lease::check_common`): the strict settings of
+/// contract section 3.2 ([`AwsStsSettings`], [`crate::vault::ShortLivedSettings::check`])
+/// and the `AKIA` key id and the 40-character secret of section 3.1
+/// ([`crate::vault::check_kind_fields`]; an `ASIA` key is refused there). This checks
+/// the one rule of the kind that needs the binding: the bound variable is not one of the
+/// fixed names of the lease.
+pub(super) fn check_names(source: &LeaseSource) -> Result<(), LeaseError> {
+    if [SECRET_ACCESS_KEY, SESSION_TOKEN, CREDENTIAL_EXPIRATION].contains(&source.env_name.as_str())
+    {
+        return Err(LeaseError::invalid_source(
+            KIND,
+            "its variable is one of the fixed names AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, and AWS_CREDENTIAL_EXPIRATION.",
         ));
     }
     Ok(())
@@ -221,6 +117,7 @@ impl Call<'_> {
 /// answer, and check the lifetime. `now` is the Unix time of the request (`made_at`).
 pub(super) fn acquire(
     source: &LeaseSource,
+    settings: &AwsStsSettings,
     scope: &RunScope,
     endpoints: &ProviderEndpoints,
     tls: Option<&TlsClient>,
@@ -228,15 +125,7 @@ pub(super) fn acquire(
     now: u64,
 ) -> Result<Lease, LeaseError> {
     let invalid = |why: &str| LeaseError::invalid_source(KIND, why);
-    let settings = AwsSettings::parse(&source.settings).map_err(invalid)?;
-    super::check_fields(KIND, &source.fields).map_err(|why| invalid(why.as_str()))?;
-    check_key(&source.fields).map_err(|why| invalid(why.as_str()))?;
-    if [SECRET_ACCESS_KEY, SESSION_TOKEN, CREDENTIAL_EXPIRATION].contains(&source.env_name.as_str())
-    {
-        return Err(invalid(
-            "its variable is one of the fixed names AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, and AWS_CREDENTIAL_EXPIRATION.",
-        ));
-    }
+    check_names(source)?;
     let (Some(id), Some(secret)) = (
         super::field(&source.fields, ACCESS_KEY_ID_FIELD),
         super::field(&source.fields, SECRET_ACCESS_KEY_FIELD),
@@ -250,7 +139,7 @@ pub(super) fn acquire(
         None => Call::GetFederationToken,
     };
     let session = session_name(&scope.run_label);
-    let body = request_body(call, &settings, &session);
+    let body = request_body(call, settings, &session);
     let host = destination.host_header();
     let request = ClientRequest {
         method: "POST",
@@ -315,6 +204,7 @@ pub(super) fn acquire(
         expires_at,
         revoke: None,
         update_field: None,
+        lifetime_assumed: false,
     };
     drop(answer);
     lease
@@ -324,7 +214,7 @@ pub(super) fn acquire(
 }
 
 /// The form body of the call: `Action`, `Version`, then the call's own parameters.
-fn request_body(call: Call<'_>, settings: &AwsSettings, session: &str) -> Zeroizing<Vec<u8>> {
+fn request_body(call: Call<'_>, settings: &AwsStsSettings, session: &str) -> Zeroizing<Vec<u8>> {
     let duration = DURATION_SECS.to_string();
     let mut pairs: Vec<(&str, &str)> = vec![("Action", call.action()), ("Version", STS_VERSION)];
     match call {
@@ -369,20 +259,7 @@ fn session_name(label: &str) -> String {
 /// The lease's `expires_at` for an answer that expires at `expiration` (STS clock) for a
 /// request sent at `made_at` (this clock). See [`MAX_CLOCK_SKEW_SECS`].
 fn lease_expiry(expiration: u64, made_at: u64) -> Result<u64, LeaseError> {
-    if expiration > made_at + DURATION_SECS + MAX_CLOCK_SKEW_SECS {
-        return Err(LeaseError::invalid_answer_because(
-            KIND,
-            "the credentials would live longer than 15 minutes.",
-        ));
-    }
-    let expires_at = expiration.min(made_at + DURATION_SECS);
-    if expires_at < made_at + MIN_LEASE_SECS {
-        return Err(LeaseError::invalid_answer_because(
-            KIND,
-            "the credentials expire in less than a minute.",
-        ));
-    }
-    Ok(expires_at)
+    super::capped_expiry(KIND, expiration, made_at, DURATION_SECS)
 }
 
 /// The four values of an STS answer. The slices point into the erased answer buffer.
@@ -419,12 +296,9 @@ fn scan_credentials<'a>(answer: &'a [u8], call: Call<'_>) -> Option<StsCredentia
     let secret_access_key = leaf(credentials, "SecretAccessKey")?;
     let session_token = leaf(credentials, "SessionToken")?;
     let expiration = super::parse_rfc3339(leaf(credentials, "Expiration")?)?;
-    let token_like = |value: &str| {
-        super::is_lease_value(value) && value.bytes().all(|byte| byte.is_ascii_graphic())
-    };
     if !is_session_key_id(access_key_id)
-        || !token_like(secret_access_key)
-        || !token_like(session_token)
+        || !super::is_token(secret_access_key)
+        || !super::is_token(session_token)
     {
         return None;
     }
@@ -476,29 +350,6 @@ fn leaf<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     (!content.is_empty() && !content.contains(['<', '>', '&'])).then_some(content)
 }
 
-fn check_access_key_id(id: &str) -> Result<(), &'static str> {
-    if id.starts_with("ASIA") {
-        return Err(ASIA_REFUSED);
-    }
-    let body_ok = id.len() == 20
-        && id.starts_with("AKIA")
-        && id[4..]
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
-    if body_ok {
-        Ok(())
-    } else {
-        Err("the field access_key_id is not an IAM user key (AKIA and 16 characters A-Z, 0-9).")
-    }
-}
-
-fn is_secret_access_key(secret: &str) -> bool {
-    secret.len() == 40
-        && secret
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'/' || byte == b'+')
-}
-
 /// `ASIA` and 12 to 124 characters `A-Z0-9`: a temporary key id of an STS answer.
 fn is_session_key_id(id: &str) -> bool {
     (16..=128).contains(&id.len())
@@ -506,46 +357,6 @@ fn is_session_key_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-}
-
-/// `arn:aws:iam::<12 digits>:role/<path and name>`, at most 2048 bytes; the role part is
-/// printable ASCII without spaces.
-fn is_role_arn(arn: &str) -> bool {
-    let Some(rest) = arn.strip_prefix("arn:aws:iam::") else {
-        return false;
-    };
-    let Some((account, role)) = rest.split_once(":role/") else {
-        return false;
-    };
-    arn.len() <= MAX_ROLE_ARN_BYTES
-        && account.len() == 12
-        && account.bytes().all(|byte| byte.is_ascii_digit())
-        && !role.is_empty()
-        && role.bytes().all(|byte| byte.is_ascii_graphic())
-}
-
-/// `[a-z]{2}(-[a-z]+)+-[0-9]+`, at most 32 bytes.
-fn is_region(region: &str) -> bool {
-    let parts: Vec<&str> = region.split('-').collect();
-    let letters =
-        |part: &&str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_lowercase());
-    region.len() <= MAX_REGION_BYTES
-        && parts.len() >= 3
-        && parts[0].len() == 2
-        && letters(&parts[0])
-        && parts[1..parts.len() - 1].iter().all(letters)
-        && parts
-            .last()
-            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-}
-
-/// `[a-z0-9-]{1,32}`.
-fn is_service_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_SERVICE_NAME_BYTES
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 #[cfg(test)]
@@ -558,9 +369,12 @@ mod tests {
     use ring::{digest, hmac};
     use serde_json::json;
 
+    use serde_json::Value;
+
     use super::*;
     use crate::broker::http::parse_destination;
     use crate::lease::{LeaseCode, LeaseStatus, acquire_at, check_source, scan};
+    use crate::vault::{Field, ShortLivedSettings};
 
     /// The long-lived key of the source: the published example key of the AWS
     /// documentation, also the canary of `sources.json`. Not a real key.
@@ -805,13 +619,27 @@ mod tests {
         ]
     }
 
+    /// The settings of a JSON object, read by the vault's strict parser.
+    fn settings(settings: &Value) -> ShortLivedSettings {
+        ShortLivedSettings::parse_checked(LeaseKind::AwsSts, &settings.to_string())
+            .expect("valid AWS settings")
+    }
+
     fn source(settings: Value) -> LeaseSource {
+        typed(self::settings(&settings))
+    }
+
+    /// A source with settings that were not parsed (they may break the rules).
+    fn typed(settings: ShortLivedSettings) -> LeaseSource {
         LeaseSource {
-            kind: LeaseKind::AwsSts,
             env_name: "AWS_ACCESS_KEY_ID".to_owned(),
             fields: fields(KEY_ID, SECRET),
             settings,
         }
+    }
+
+    fn unchecked(settings: AwsStsSettings) -> LeaseSource {
+        typed(ShortLivedSettings::AwsSts(settings))
     }
 
     fn scope() -> RunScope {
@@ -1101,7 +929,10 @@ mod tests {
         fake.join().expect("fake STS");
         let (idle, _listener) = untouched();
         let bad_source = acquire_at(
-            &source(json!({"region": "Mars"})),
+            &unchecked(AwsStsSettings {
+                region: Some("Mars".to_owned()),
+                ..AwsStsSettings::default()
+            }),
             &scope(),
             &idle,
             None,
@@ -1129,8 +960,9 @@ mod tests {
         assert_eq!(error.status, LeaseStatus::InvalidSource);
         assert!(error.message.contains("already temporary"));
         assert!(!error.message.contains("ASIAIOSFODNN7EXAMPLE"));
-        let why = check_source(LeaseKind::AwsSts, &asia.fields, &json!({})).unwrap_err();
-        assert!(why.contains("already temporary"));
+        let why = check_source(&asia).unwrap_err();
+        assert_eq!(why.status, LeaseStatus::InvalidSource);
+        assert!(why.message.contains("already temporary"));
         // Other bad sources also stop before the call.
         let mut cases = Vec::new();
         let mut not_akia = source(json!({}));
@@ -1145,29 +977,37 @@ mod tests {
         let mut bad_name = source(json!({}));
         bad_name.env_name = "aws key".to_owned();
         cases.push(bad_name);
-        cases.push(source(json!({"policy": "not json"})));
-        cases.push(source(json!({"unknown": 1})));
+        cases.push(unchecked(AwsStsSettings {
+            policy: Some("not json".to_owned()),
+            ..AwsStsSettings::default()
+        }));
+        cases.push(unchecked(AwsStsSettings {
+            services: Some(Vec::new()),
+            ..AwsStsSettings::default()
+        }));
         for case in &cases {
             let error = acquire_at(case, &scope(), &endpoints, None, deadline(), NOW).unwrap_err();
             assert_eq!(error.status, LeaseStatus::InvalidSource, "{case:?}");
+            assert_eq!(check_source(case).unwrap_err(), error, "{case:?}");
         }
+        // Settings with an unknown field never become a source.
+        assert!(ShortLivedSettings::parse_checked(LeaseKind::AwsSts, r#"{"unknown": 1}"#).is_err());
         assert!(listener.accept().is_err(), "no provider call was made");
     }
 
     #[test]
     fn aws_settings_are_strict() {
+        let parse = |text: &str| ShortLivedSettings::parse_checked(LeaseKind::AwsSts, text);
+        let aws = |text: &str| match parse(text) {
+            Ok(ShortLivedSettings::AwsSts(settings)) => Ok(settings),
+            Ok(_) => panic!("another kind"),
+            Err(why) => Err(why),
+        };
         let fixture = include_str!("../../tests/fixtures/private-sharing-v1/settings-aws-sts.json");
-        let parsed = AwsSettings::parse_text(fixture).expect("fixture");
+        let parsed = aws(fixture).expect("fixture");
         assert_eq!(parsed.region(), "eu-central-1");
         assert_eq!(parsed.services.as_deref(), Some(&["s3".to_owned()][..]));
-        assert_eq!(
-            AwsSettings::parse(&serde_json::from_str(fixture).expect("JSON")),
-            Ok(parsed)
-        );
-        assert_eq!(
-            AwsSettings::parse(&json!({})).expect("empty").region(),
-            DEFAULT_REGION
-        );
+        assert_eq!(aws("{}").expect("empty").region(), DEFAULT_REGION);
         let long_policy = format!(
             r#"{{"Version":"2012-10-17","Statement":[],"Pad":"{}"}}"#,
             "x".repeat(MAX_POLICY_BYTES)
@@ -1189,6 +1029,7 @@ mod tests {
             json!({"region": "EU-central-1"}),
             json!({"region": "eu--1"}),
             json!({"region": "e-central-1"}),
+            json!({"region": format!("eu-{}-1", "a".repeat(28))}),
             json!({"services": []}),
             json!({"services": ["s3", "s3"]}),
             json!({"services": ["S3"]}),
@@ -1196,19 +1037,24 @@ mod tests {
             json!({"services": "s3"}),
         ];
         for settings in &refused {
-            assert!(AwsSettings::parse(settings).is_err(), "{settings}");
+            let why = parse(&settings.to_string()).unwrap_err();
+            for value in ["123456789012", "not json", "Statement", "EU-", "S3", "xxxx"] {
+                assert!(!why.contains(value), "the reason holds no value: {why}");
+            }
         }
-        assert!(
-            AwsSettings::parse_text(r#"{"region":"eu-central-1","region":"us-east-1"}"#).is_err()
+        assert!(parse(r#"{"region":"eu-central-1","region":"us-east-1"}"#).is_err());
+        assert!(parse(r#"["arn"]"#).is_err());
+        assert!(parse(r#"{"region":"eu-central-1"} x"#).is_err());
+        assert_eq!(
+            parse(r#"{"region":"Mars-1"}"#).unwrap_err(),
+            "the region setting is not an AWS region such as eu-central-1."
         );
-        assert!(AwsSettings::parse_text(r#"["arn"]"#).is_err());
-        assert!(AwsSettings::parse_text(r#"{"region":"eu-central-1"} x"#).is_err());
         // A 2048-byte policy is the limit, not over it.
         let mut exact = String::from(r#"{"Version":"2012-10-17","Pad":""#);
         exact.push_str(&"x".repeat(MAX_POLICY_BYTES - exact.len() - 2));
         exact.push_str(r#""}"#);
         assert_eq!(exact.len(), MAX_POLICY_BYTES);
-        AwsSettings::parse(&json!({"policy": exact})).expect("2048 bytes");
+        aws(&json!({"policy": exact}).to_string()).expect("2048 bytes");
     }
 
     #[test]
@@ -1312,7 +1158,10 @@ mod tests {
     #[test]
     fn the_production_endpoint_is_the_regional_sts_host() {
         let endpoints = ProviderEndpoints::production();
-        let settings = AwsSettings::parse(&json!({"region": "ap-southeast-2"})).expect("settings");
+        let ShortLivedSettings::AwsSts(settings) = settings(&json!({"region": "ap-southeast-2"}))
+        else {
+            panic!("AWS settings");
+        };
         assert_eq!(
             endpoints
                 .sts_for(settings.region())

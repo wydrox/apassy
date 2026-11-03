@@ -195,13 +195,43 @@ impl ShortLivedKind {
         }
     }
 
-    /// The longest life of a lease of this kind, in seconds (contract section 4):
-    /// 900, or 3600 for a GitHub installation token. An OAuth lease lives as long as the
-    /// provider says; 900 is the value assumed when it says nothing.
+    /// The lifetime of a lease of this kind as the catalog shows it, in seconds
+    /// (`lease_secs` of `apassy_list_access`, contract section 5.1): 900, or 3600 for a
+    /// GitHub installation token. For OAuth it is also the lifetime assumed when the
+    /// token endpoint gives no `expires_in` (section 3.3). It is not a limit: see
+    /// [`ShortLivedKind::max_secs`].
     pub fn lease_secs(self) -> u64 {
         match self {
             Self::GithubApp => 3600,
             _ => 900,
+        }
+    }
+
+    /// The longest lease of the kind in seconds (`expires_at - made_at`), when the
+    /// contract fixes one (section 4): 900 for AWS and Google, 3600 for GitHub. `None`
+    /// for OAuth, whose lease lives as long as the provider's `expires_in` says, and for
+    /// the reserved kinds.
+    pub fn max_secs(self) -> Option<u64> {
+        match self {
+            Self::AwsSts | Self::GoogleServiceAccount => Some(900),
+            Self::GithubApp => Some(3600),
+            Self::OauthRefresh
+            | Self::CloudflareToken
+            | Self::PlanetscalePassword
+            | Self::NeonRole => None,
+        }
+    }
+
+    /// The provider as the lease messages name it ("AWS STS answered 403. ...").
+    pub fn provider_label(self) -> &'static str {
+        match self {
+            Self::AwsSts => "AWS STS",
+            Self::GithubApp => "GitHub",
+            Self::GoogleServiceAccount => "Google",
+            Self::OauthRefresh => "The OAuth token endpoint",
+            Self::CloudflareToken => "Cloudflare",
+            Self::PlanetscalePassword => "PlanetScale",
+            Self::NeonRole => "Neon",
         }
     }
 }
@@ -366,14 +396,23 @@ pub enum ShortLivedSettings {
     OauthRefresh(OauthSettings),
 }
 
+/// The refusal of a reserved kind (unit K defines its fields and settings later).
+const RESERVED: &str = "this kind is reserved for a later version of Apassy.";
+
 impl ShortLivedSettings {
     /// Parse and check the settings text of `kind` (contract section 3.2): strict (an
     /// unknown field, a duplicate field, or a wrong type is refused), and each value in
     /// its form. `InvalidInput` for a reserved kind, a text over
     /// [`MAX_SETTINGS_BYTES`], or any refusal.
     pub fn parse(kind: ShortLivedKind, text: &str) -> VaultResult<Self> {
+        Self::parse_checked(kind, text).map_err(|_| invalid())
+    }
+
+    /// [`ShortLivedSettings::parse`] with the reason of a refusal. The reason names the
+    /// setting, never its value.
+    pub fn parse_checked(kind: ShortLivedKind, text: &str) -> Result<Self, &'static str> {
         if text.len() > MAX_SETTINGS_BYTES {
-            return Err(invalid());
+            return Err("the settings are longer than 16384 bytes.");
         }
         let settings = match kind {
             ShortLivedKind::AwsSts => Self::AwsSts(strict(text)?),
@@ -382,13 +421,10 @@ impl ShortLivedSettings {
             ShortLivedKind::OauthRefresh => Self::OauthRefresh(strict(text)?),
             ShortLivedKind::CloudflareToken
             | ShortLivedKind::PlanetscalePassword
-            | ShortLivedKind::NeonRole => return Err(invalid()),
+            | ShortLivedKind::NeonRole => return Err(RESERVED),
         };
-        if settings.is_valid() {
-            Ok(settings)
-        } else {
-            Err(invalid())
-        }
+        settings.check()?;
+        Ok(settings)
     }
 
     /// The kind of these settings.
@@ -414,24 +450,30 @@ impl ShortLivedSettings {
         text.unwrap_or_else(|_| "{}".to_owned())
     }
 
-    fn is_valid(&self) -> bool {
+    /// Check each value of the settings against its rule of contract section 3.2. The
+    /// parsers call it; a key holder calls it again for settings that it did not parse
+    /// (the fields of the types are public). The reason names the setting, never its
+    /// value.
+    pub fn check(&self) -> Result<(), &'static str> {
         match self {
-            Self::AwsSts(settings) => aws_settings_ok(settings),
-            Self::GithubApp(settings) => github_settings_ok(settings),
-            Self::GoogleServiceAccount(settings) => google_settings_ok(settings),
-            Self::OauthRefresh(settings) => oauth_settings_ok(settings),
+            Self::AwsSts(settings) => check_aws_settings(settings),
+            Self::GithubApp(settings) => check_github_settings(settings),
+            Self::GoogleServiceAccount(settings) => check_google_settings(settings),
+            Self::OauthRefresh(settings) => check_oauth_settings(settings),
         }
     }
 }
 
-fn strict<T: serde::de::DeserializeOwned>(text: &str) -> VaultResult<T> {
+fn strict<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, &'static str> {
+    const BAD: &str =
+        "the settings are not a JSON object of known, distinct fields of the right types.";
     // serde refuses an unknown field (`deny_unknown_fields`), a duplicate field of a
     // struct, and a wrong type; trailing text is refused by `from_str`. A struct also
     // reads from a JSON array, so the settings must be an object.
     if !text.trim_start().starts_with('{') {
-        return Err(invalid());
+        return Err(BAD);
     }
-    serde_json::from_str(text).map_err(|_| invalid())
+    serde_json::from_str(text).map_err(|_| BAD)
 }
 
 fn distinct(list: &[String]) -> bool {
@@ -454,10 +496,12 @@ pub fn is_https_url(url: &str) -> bool {
         && rest.chars().all(|c| c.is_ascii_graphic())
 }
 
-/// `[a-z]{2}(-[a-z]+)+-[0-9]+`, for example `eu-central-1`.
+/// `[a-z]{2}(-[a-z]+)+-[0-9]+`, for example `eu-central-1`, at most 32 bytes (the
+/// region of a SigV4 scope, contract section 7.2).
 pub fn is_aws_region(region: &str) -> bool {
     let parts: Vec<&str> = region.split('-').collect();
-    parts.len() >= 3
+    region.len() <= 32
+        && parts.len() >= 3
         && parts[0].len() == 2
         && all_chars(parts[0], |c| c.is_ascii_lowercase())
         && all_chars(parts[parts.len() - 1], |c| c.is_ascii_digit())
@@ -474,34 +518,52 @@ pub fn is_aws_service(name: &str) -> bool {
         })
 }
 
-fn aws_settings_ok(settings: &AwsStsSettings) -> bool {
-    let role_ok = |arn: &String| {
-        let rest = arn.strip_prefix("arn:aws:iam::").unwrap_or("");
-        let (account, role) = rest.split_once(":role/").unwrap_or(("", ""));
-        arn.len() <= 2048
-            && account.len() == 12
-            && all_chars(account, |c| c.is_ascii_digit())
-            && all_chars(role, |c| c.is_ascii_graphic())
-    };
+/// `arn:aws:iam::<12 digits>:role/<path and name>`, at most 2048 bytes; the role part
+/// is printable ASCII without spaces.
+pub fn is_aws_role_arn(arn: &str) -> bool {
+    let rest = arn.strip_prefix("arn:aws:iam::").unwrap_or("");
+    let (account, role) = rest.split_once(":role/").unwrap_or(("", ""));
+    arn.len() <= 2048
+        && account.len() == 12
+        && all_chars(account, |c| c.is_ascii_digit())
+        && all_chars(role, |c| c.is_ascii_graphic())
+}
+
+fn check_aws_settings(settings: &AwsStsSettings) -> Result<(), &'static str> {
     let policy_ok = |policy: &String| {
-        policy.len() <= 2048
-            && matches!(
-                serde_json::from_str::<serde_json::Value>(policy),
-                Ok(serde_json::Value::Object(_))
-            )
+        matches!(
+            serde_json::from_str::<serde_json::Value>(policy),
+            Ok(serde_json::Value::Object(_))
+        )
     };
     let services_ok = |services: &Vec<String>| {
         (1..=16).contains(&services.len())
             && distinct(services)
             && services.iter().all(|service| is_aws_service(service))
     };
-    settings.role_arn.as_ref().is_none_or(role_ok)
-        && settings.policy.as_ref().is_none_or(policy_ok)
-        && settings.region.as_deref().is_none_or(is_aws_region)
-        && settings.services.as_ref().is_none_or(services_ok)
+    if !settings.role_arn.as_deref().is_none_or(is_aws_role_arn) {
+        return Err("the role_arn setting is not arn:aws:iam::<12 digits>:role/<name>.");
+    }
+    if settings
+        .policy
+        .as_ref()
+        .is_some_and(|policy| policy.len() > 2048)
+    {
+        return Err("the policy setting is longer than 2048 bytes.");
+    }
+    if !settings.policy.as_ref().is_none_or(policy_ok) {
+        return Err("the policy setting is not the JSON text of a policy object.");
+    }
+    if !settings.region.as_deref().is_none_or(is_aws_region) {
+        return Err("the region setting is not an AWS region such as eu-central-1.");
+    }
+    if !settings.services.as_ref().is_none_or(services_ok) {
+        return Err("the services setting is not 1 to 16 distinct AWS service names.");
+    }
+    Ok(())
 }
 
-fn github_settings_ok(settings: &GithubAppSettings) -> bool {
+fn check_github_settings(settings: &GithubAppSettings) -> Result<(), &'static str> {
     let repositories_ok = |repositories: &Vec<String>| {
         (1..=500).contains(&repositories.len())
             && distinct(repositories)
@@ -517,13 +579,27 @@ fn github_settings_ok(settings: &GithubAppSettings) -> bool {
             && permissions.iter().all(|(name, _)| {
                 name.len() <= 64 && all_chars(name, |c| c.is_ascii_lowercase() || c == '_')
             })
+            && permissions
+                .iter()
+                .enumerate()
+                .all(|(index, (name, _))| !permissions[..index].iter().any(|(n, _)| n == name))
     };
-    settings.repositories.as_ref().is_none_or(repositories_ok)
-        && settings.permissions.as_ref().is_none_or(permissions_ok)
-        && settings.api_url.as_deref().is_none_or(is_https_url)
+    if !settings.repositories.as_ref().is_none_or(repositories_ok) {
+        return Err("the repositories setting is not 1 to 500 distinct repository names.");
+    }
+    if !settings.permissions.as_ref().is_none_or(permissions_ok) {
+        return Err("the permissions setting is not 1 to 64 distinct GitHub permission names.");
+    }
+    if !settings.api_url.as_deref().is_none_or(is_https_url) {
+        return Err(
+            "the api_url setting is not an https:// URL without userinfo, query, or fragment.",
+        );
+    }
+    Ok(())
 }
 
-fn is_service_account_email(email: &str) -> bool {
+/// `<name>@<project>.iam.gserviceaccount.com`, at most 254 bytes, without white space.
+pub fn is_service_account_email(email: &str) -> bool {
     let (name, domain) = email.split_once('@').unwrap_or(("", ""));
     let project = domain
         .strip_suffix(".iam.gserviceaccount.com")
@@ -535,43 +611,96 @@ fn is_service_account_email(email: &str) -> bool {
         && !project.contains('@')
 }
 
-fn google_settings_ok(settings: &GoogleSettings) -> bool {
+fn check_google_settings(settings: &GoogleSettings) -> Result<(), &'static str> {
     let scopes_ok = |scopes: &Vec<String>| {
         (1..=16).contains(&scopes.len())
             && distinct(scopes)
             && scopes.iter().all(|scope| is_https_url(scope))
     };
-    settings.scopes.as_ref().is_none_or(scopes_ok)
-        && settings
-            .impersonate
-            .as_deref()
-            .is_none_or(is_service_account_email)
+    if !settings.scopes.as_ref().is_none_or(scopes_ok) {
+        return Err("the scopes setting is not 1 to 16 distinct https:// scope URLs.");
+    }
+    if !settings
+        .impersonate
+        .as_deref()
+        .is_none_or(is_service_account_email)
+    {
+        return Err(
+            "the impersonate setting is not a service-account email (<name>@<project>.iam.gserviceaccount.com).",
+        );
+    }
+    Ok(())
 }
 
-fn oauth_settings_ok(settings: &OauthSettings) -> bool {
-    is_https_url(&settings.token_url)
-        && settings.revoke_url.as_deref().is_none_or(is_https_url)
-        && settings
-            .scope
-            .as_ref()
-            .is_none_or(|scope| (1..=1024).contains(&scope.len()))
+fn check_oauth_settings(settings: &OauthSettings) -> Result<(), &'static str> {
+    if !is_https_url(&settings.token_url) {
+        return Err(
+            "the token_url setting is not an https:// URL without userinfo, query, or fragment.",
+        );
+    }
+    if !settings.revoke_url.as_deref().is_none_or(is_https_url) {
+        return Err(
+            "the revoke_url setting is not an https:// URL without userinfo, query, or fragment.",
+        );
+    }
+    if !settings
+        .scope
+        .as_ref()
+        .is_none_or(|scope| (1..=1024).contains(&scope.len()))
+    {
+        return Err("the scope setting is not 1 to 1024 bytes.");
+    }
+    Ok(())
 }
 
 // ----- fields (contract section 3.1) ----------------------------------------------------
 
 /// Whether `value` has the form of the field `name` of `kind` (contract section 3.1).
 pub fn field_value_ok(kind: ShortLivedKind, name: &str, value: &str) -> bool {
+    field_value_problem(kind, name, value).is_none()
+}
+
+/// Why `value` does not have the form of the field `name` of `kind` (contract section
+/// 3.1), or `None` when it has. The reason names the field, never its value.
+pub fn field_value_problem(kind: ShortLivedKind, name: &str, value: &str) -> Option<String> {
+    let problem = |ok: bool, why: &str| (!ok).then(|| why.to_owned());
     match (kind, name) {
-        (ShortLivedKind::AwsSts, "access_key_id") => is_aws_access_key_id(value),
-        (ShortLivedKind::AwsSts, "secret_access_key") => is_aws_secret_access_key(value),
-        (ShortLivedKind::GithubApp, "app_id" | "installation_id") => is_positive_decimal(value),
-        (ShortLivedKind::GithubApp, "private_key") => is_private_key_pem(value),
-        (ShortLivedKind::GoogleServiceAccount, "key_json") => is_service_account_key(value),
-        (ShortLivedKind::OauthRefresh, "client_id" | "client_secret") => {
-            (1..=512).contains(&value.len())
+        (ShortLivedKind::AwsSts, "access_key_id") if value.starts_with("ASIA") => Some(
+            "the access key id is already temporary (ASIA). Use the IAM user's long-lived AKIA key."
+                .to_owned(),
+        ),
+        (ShortLivedKind::AwsSts, "access_key_id") => problem(
+            is_aws_access_key_id(value),
+            "the field access_key_id is not an IAM user key (AKIA and 16 characters A-Z, 0-9).",
+        ),
+        (ShortLivedKind::AwsSts, "secret_access_key") => problem(
+            is_aws_secret_access_key(value),
+            "the field secret_access_key is not 40 characters of A-Z, a-z, 0-9, / and +.",
+        ),
+        (ShortLivedKind::GithubApp, "app_id" | "installation_id") => {
+            (!is_positive_decimal(value))
+                .then(|| format!("the field {name} is not a decimal number of at least 1."))
         }
-        (ShortLivedKind::OauthRefresh, "refresh_token") => (1..=4096).contains(&value.len()),
-        _ => false,
+        (ShortLivedKind::GithubApp, "private_key") => problem(
+            is_private_key_pem(value),
+            "the field private_key is not a PEM RSA PRIVATE KEY or PRIVATE KEY.",
+        ),
+        (ShortLivedKind::GoogleServiceAccount, "key_json") => {
+            crate::lease::google::ServiceAccountKey::read(value)
+                .err()
+                .map(|why| format!("the field key_json is not a service-account key: {why}"))
+        }
+        (ShortLivedKind::OauthRefresh, "client_id" | "client_secret") => {
+            (!(1..=512).contains(&value.len()))
+                .then(|| format!("the field {name} is not 1 to 512 bytes."))
+        }
+        (ShortLivedKind::OauthRefresh, "refresh_token") => problem(
+            (1..=4096).contains(&value.len()),
+            "the field refresh_token is not 1 to 4096 bytes.",
+        ),
+        _ => Some(format!(
+            "the field {name} is not a field of the kind {kind}."
+        )),
     }
 }
 
@@ -600,7 +729,7 @@ fn is_positive_decimal(value: &str) -> bool {
 }
 
 /// A PEM `RSA PRIVATE KEY` (PKCS#1) or `PRIVATE KEY` (PKCS#8). Only the armor is checked
-/// here; the key holder parses the key.
+/// here; the key holder parses the key (`lease::jwt::RsaKey::from_pem`).
 pub fn is_private_key_pem(value: &str) -> bool {
     let text = value.trim();
     ["RSA PRIVATE KEY", "PRIVATE KEY"].iter().any(|label| {
@@ -611,38 +740,57 @@ pub fn is_private_key_pem(value: &str) -> bool {
 }
 
 /// A service-account key JSON: an object with `"type": "service_account"` and the text
-/// fields `client_email`, `private_key`, and `token_uri` (contract section 3.1).
+/// fields `client_email`, `private_key` (PEM), and `token_uri` (`https://`) (contract
+/// section 3.1). It is read by `lease::google::ServiceAccountKey::read`, which copies
+/// the private key only into an erased buffer.
 pub fn is_service_account_key(value: &str) -> bool {
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(value)
-    else {
-        return false;
-    };
-    let text = |name: &str| map.get(name).and_then(|value| value.as_str());
-    text("type") == Some("service_account")
-        && text("client_email").is_some_and(|email| !email.is_empty())
-        && text("private_key").is_some_and(is_private_key_pem)
-        && text("token_uri").is_some_and(is_https_url)
+    crate::lease::google::ServiceAccountKey::read(value).is_ok()
 }
 
-/// Check that `fields` hold what `kind` reads: each required field once, each field of
-/// the kind with its `secret` flag, and each value in its form. Other fields are ignored.
-fn check_fields<'a>(
+/// Check that `fields` hold what `kind` reads (contract section 3.1): each field of the
+/// kind at most once, each required field present, each field with its `secret` flag,
+/// and each value in its form. Other fields are ignored. The first problem names a field,
+/// never a value. The vault (when a row is written and when a source is read) and the
+/// key holder (before a lease) use this one check.
+pub fn check_kind_fields<'a>(
     kind: ShortLivedKind,
     fields: impl Iterator<Item = (&'a str, &'a str, bool)> + Clone,
-) -> VaultResult<()> {
+) -> Result<(), String> {
     if kind.is_reserved() {
-        return Err(invalid());
+        return Err(RESERVED.to_owned());
     }
     for rule in kind.fields() {
         let mut matching = fields.clone().filter(|(name, _, _)| *name == rule.name);
         match (matching.next(), matching.next()) {
-            (None, _) if !rule.required => {}
-            (Some((_, value, secret)), None)
-                if secret == rule.secret && field_value_ok(kind, rule.name, value) => {}
-            _ => return Err(invalid()),
+            (Some(_), Some(_)) => {
+                return Err(format!("the item has two fields named {}.", rule.name));
+            }
+            (None, _) if rule.required => {
+                return Err(format!("the item has no field {}.", rule.name));
+            }
+            (None, _) => {}
+            (Some((_, value, secret)), None) => {
+                if secret != rule.secret {
+                    return Err(if rule.secret {
+                        format!("the field {} must be secret.", rule.name)
+                    } else {
+                        format!("the field {} must not be secret.", rule.name)
+                    });
+                }
+                if let Some(problem) = field_value_problem(kind, rule.name, value) {
+                    return Err(problem);
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn check_fields<'a>(
+    kind: ShortLivedKind,
+    fields: impl Iterator<Item = (&'a str, &'a str, bool)> + Clone,
+) -> VaultResult<()> {
+    check_kind_fields(kind, fields).map_err(|_| invalid())
 }
 
 /// Check the fields of a draft for `kind`: what detection and the new-credential sheet
@@ -1546,9 +1694,12 @@ mod tests {
         );
         assert_eq!(
             vault.member_keys_of_member("team-synthetic", 4).unwrap(),
-            [row.clone()]
+            std::slice::from_ref(&row)
         );
-        assert_eq!(vault.member_keys_of_source(source).unwrap(), [row.clone()]);
+        assert_eq!(
+            vault.member_keys_of_source(source).unwrap(),
+            std::slice::from_ref(&row)
+        );
         assert!(
             vault
                 .member_keys_of_member("team-synthetic", 5)

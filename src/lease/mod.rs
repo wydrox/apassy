@@ -12,33 +12,58 @@
 //!   ([`LEASE_DEADLINE`]). A lease that cannot be made is a [`LeaseError`] with the code
 //!   `lease_failed`; the caller MUST NOT fall back to the long-lived value (rule 4).
 //! - [`revoke`] ends a lease that has a [`Revoke`] when the run ends (section 4.2).
-//! - [`check_source`] checks the fields and the settings of a source when its
-//!   `short_lived` row is written (unit D): a problem there is `invalid_request`.
+//! - [`check_source`] runs every check that [`acquire`] runs before its first provider
+//!   call.
+//! - [`LeaseSource::from_vault`] is the one mapping of a vault source
+//!   ([`crate::vault::ShortLivedSource`]) to a lease source.
 //! - [`sigv4`] is the AWS Signature Version 4 code that the STS call, the signing
 //!   proxies (E1, E2), and the sign endpoint (H) share.
 //! - [`scan`] is the no-secret scan of every test of the plan (section 11).
 //!
-//! The kinds: [`aws`] (`aws_sts`, unit C1). Unit C2 adds `jwt`, `github`, `google`, and
-//! `oauth` next to it and fills the `github_app`, `google_service_account`, and
-//! `oauth_refresh` arms of [`acquire`], [`revoke`], and [`check_source`]; unit K adds
-//! `cloudflare`, `planetscale`, and `neon` for the reserved kinds.
+//! The kinds, their fields, and their settings are the vault's types
+//! ([`crate::vault::ShortLivedKind`], re-exported here as [`LeaseKind`], and
+//! [`crate::vault::ShortLivedSettings`]); the vault and the key holder use one check of
+//! the fields ([`crate::vault::check_kind_fields`]) and of the settings
+//! ([`crate::vault::ShortLivedSettings::check`]). The providers: [`aws`] (`aws_sts`,
+//! unit C1), [`github`] (`github_app`), [`google`] (`google_service_account`), and
+//! [`oauth`] (`oauth_refresh`) of unit C2, with [`jwt`] for RS256. Unit K adds
+//! `cloudflare`, `planetscale`, and `neon` for the reserved kinds, with their settings
+//! variants.
 //!
 //! Every secret is held in a [`SecretValue`] or a `Zeroizing` buffer, and the provider's
-//! answer is erased after it is read. No error, `Debug` output, or message holds a
+//! answer is erased after it is read (JSON answers through [`json`], which copies a
+//! string only into an erased buffer). No error, `Debug` output, or message holds a
 //! secret, a lease value, or a provider body (rule 6).
 
 pub mod aws;
+pub mod github;
+pub mod google;
+pub(crate) mod json;
+pub mod jwt;
+pub mod oauth;
 pub mod scan;
 pub mod sigv4;
+#[cfg(test)]
+pub(crate) mod testing;
 
 use std::fmt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
 use crate::broker::http::{DestinationUrl, HttpFailure, TlsClient, parse_destination};
-use crate::vault::{Field, SecretValue};
+use crate::vault::{Field, SecretValue, ShortLivedSettings, ShortLivedSource, is_https_url};
+
+/// One row of the field table of contract section 3.1 (the vault's type).
+pub use crate::vault::KindField;
+/// The kind of a source and of its lease: the vault's [`crate::vault::ShortLivedKind`]
+/// (contract section 3), the one definition of the kinds, their fields
+/// ([`LeaseKind::fields`]), and their lifetimes ([`LeaseKind::max_secs`],
+/// [`LeaseKind::lease_secs`]).
+pub use crate::vault::ShortLivedKind as LeaseKind;
+/// Check the item's fields against the table of contract section 3.1 (the vault's
+/// check): each field of the kind at most once, a required one present, its `secret`
+/// flag as in the table, and its value in its form. The text names the field, never a
+/// value.
+pub use crate::vault::check_kind_fields;
 
 /// The deadline of one lease: name lookup, connect, TLS, and every provider call of the
 /// kind (contract section 3.3).
@@ -57,147 +82,64 @@ pub const MIN_LEASE_SECS: u64 = 60;
 /// The end of every `lease_failed` message (contract section 9).
 pub const NOT_RUN: &str = "No temporary credentials were made, so the command did not run.";
 
-/// The way C kinds of contract section 3. The last three are reserved for unit K.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LeaseKind {
-    AwsSts,
-    GithubApp,
-    GoogleServiceAccount,
-    OauthRefresh,
-    CloudflareToken,
-    PlanetscalePassword,
-    NeonRole,
-}
+/// How far a provider's expiry may be past `made_at + max_secs` before the answer is
+/// refused (AWS and Google: 900 s, GitHub: 3600 s). A provider refuses a request whose
+/// time is far from its clock (STS: 5 minutes), so a provider that honours the lifetime
+/// stays inside this window, while one that ignores it (longer defaults) is refused. The
+/// lease never claims more than its kind allows: `expires_at = min(expiry, made_at +
+/// max_secs)`.
+pub const MAX_CLOCK_SKEW_SECS: u64 = 300;
 
-impl LeaseKind {
-    /// Every kind, in the order of contract section 3.
-    pub const ALL: [Self; 7] = [
-        Self::AwsSts,
-        Self::GithubApp,
-        Self::GoogleServiceAccount,
-        Self::OauthRefresh,
-        Self::CloudflareToken,
-        Self::PlanetscalePassword,
-        Self::NeonRole,
-    ];
-
-    /// The stored and wire name (`aws_sts`, …).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AwsSts => "aws_sts",
-            Self::GithubApp => "github_app",
-            Self::GoogleServiceAccount => "google_service_account",
-            Self::OauthRefresh => "oauth_refresh",
-            Self::CloudflareToken => "cloudflare_token",
-            Self::PlanetscalePassword => "planetscale_password",
-            Self::NeonRole => "neon_role",
-        }
-    }
-
-    /// The kind of a stored or wire name.
-    pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == name)
-    }
-
-    /// Reserved for unit K: until its contract section exists, writing a row of such a
-    /// kind is `invalid_request` (contract section 3).
-    pub fn is_reserved(self) -> bool {
-        matches!(
-            self,
-            Self::CloudflareToken | Self::PlanetscalePassword | Self::NeonRole
-        )
-    }
-
-    /// The longest lease of the kind in seconds (`expires_at - made_at`), when the
-    /// contract fixes one: 900 for AWS and Google, 3600 for GitHub.
-    pub fn max_secs(self) -> Option<u64> {
-        match self {
-            Self::AwsSts | Self::GoogleServiceAccount => Some(900),
-            Self::GithubApp => Some(3600),
-            Self::OauthRefresh
-            | Self::CloudflareToken
-            | Self::PlanetscalePassword
-            | Self::NeonRole => None,
-        }
-    }
-
-    /// The provider as the messages name it ("AWS STS answered 403. …").
-    pub fn provider_label(self) -> &'static str {
-        match self {
-            Self::AwsSts => "AWS STS",
-            Self::GithubApp => "GitHub",
-            Self::GoogleServiceAccount => "Google",
-            Self::OauthRefresh => "The OAuth token endpoint",
-            Self::CloudflareToken => "Cloudflare",
-            Self::PlanetscalePassword => "PlanetScale",
-            Self::NeonRole => "Neon",
-        }
-    }
-
-    /// The fields that the key holder reads (contract section 3.1). Empty for a
-    /// reserved kind.
-    pub fn fields(self) -> &'static [FieldRule] {
-        const fn rule(name: &'static str, secret: bool, required: bool) -> FieldRule {
-            FieldRule {
-                name,
-                secret,
-                required,
-            }
-        }
-        const AWS: [FieldRule; 2] = [
-            rule(aws::ACCESS_KEY_ID_FIELD, false, true),
-            rule(aws::SECRET_ACCESS_KEY_FIELD, true, true),
-        ];
-        const GITHUB: [FieldRule; 3] = [
-            rule("app_id", false, true),
-            rule("installation_id", false, true),
-            rule("private_key", true, true),
-        ];
-        const GOOGLE: [FieldRule; 1] = [rule("key_json", true, true)];
-        const OAUTH: [FieldRule; 3] = [
-            rule("client_id", false, true),
-            rule("client_secret", true, false),
-            rule("refresh_token", true, true),
-        ];
-        match self {
-            Self::AwsSts => &AWS,
-            Self::GithubApp => &GITHUB,
-            Self::GoogleServiceAccount => &GOOGLE,
-            Self::OauthRefresh => &OAUTH,
-            Self::CloudflareToken | Self::PlanetscalePassword | Self::NeonRole => &[],
-        }
-    }
-}
-
-impl fmt::Display for LeaseKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// One row of the field table of contract section 3.1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FieldRule {
-    pub name: &'static str,
-    /// The `secret` flag that the item's field must have.
-    pub secret: bool,
-    pub required: bool,
-}
-
-/// A source item as the key holder reads it for one lease (plan unit D builds it from
-/// the vault: `short_lived_source(item)`). `fields` hold the long-lived secret; `Debug`
-/// shows their names only.
+/// A source item as the key holder reads it for one lease ([`LeaseSource::from_vault`]
+/// builds it from the vault). `fields` hold the long-lived secret; `Debug` shows their
+/// names only. The kind is the kind of the settings, so the two cannot differ.
 #[derive(Debug)]
 pub struct LeaseSource {
-    pub kind: LeaseKind,
     /// The item's bound variable (`env_binding.env_name`): the name of the lease's first
     /// secret (contract section 4.1).
     pub env_name: String,
     /// The item's fields. Only the fields of [`LeaseKind::fields`] are read.
     pub fields: Vec<Field>,
-    /// The `short_lived.settings` object of the kind (contract section 3.2).
-    pub settings: Value,
+    /// The `short_lived.settings` of the source (contract section 3.2).
+    pub settings: ShortLivedSettings,
+}
+
+impl LeaseSource {
+    /// The kind of the source: the kind of its settings.
+    pub fn kind(&self) -> LeaseKind {
+        self.settings.kind()
+    }
+
+    /// The lease source of a vault source whose item is bound to `env_name`: the one
+    /// mapping of [`ShortLivedSource`] to [`LeaseSource`]. The fields move; no value is
+    /// copied. A source whose way C is off is refused (`lease_failed`): its item is a
+    /// static key, and a caller that asks for a lease of it has a fault.
+    pub fn from_vault(source: ShortLivedSource, env_name: &str) -> Result<Self, LeaseError> {
+        let ShortLivedSource {
+            kind,
+            settings,
+            enabled,
+            fields,
+            ..
+        } = source;
+        if settings.kind() != kind {
+            return Err(LeaseError::invalid_source(
+                kind,
+                "its settings are of another kind.",
+            ));
+        }
+        if !enabled {
+            return Err(LeaseError::invalid_source(
+                kind,
+                "temporary credentials are off for this item.",
+            ));
+        }
+        Ok(Self {
+            env_name: env_name.to_owned(),
+            fields,
+            settings,
+        })
+    }
 }
 
 /// The run that a lease is for.
@@ -262,7 +204,15 @@ pub struct Lease {
     pub expires_at: u64,
     pub revoke: Option<Revoke>,
     pub update_field: Option<UpdateField>,
+    /// The provider did not say when the credential expires, so `expires_at` is
+    /// `made_at + 900`, assumed (contract section 3.3: an OAuth answer without
+    /// `expires_in`). The caller's activity row says so ([`ASSUMED_LIFETIME_NOTE`]).
+    pub lifetime_assumed: bool,
 }
+
+/// The words of the activity row of a lease whose lifetime is assumed.
+pub const ASSUMED_LIFETIME_NOTE: &str =
+    "The token endpoint did not say when the access token expires; Apassy assumes 15 minutes.";
 
 impl Lease {
     /// The variable names: the secrets, then the plain variables, in lease order (the
@@ -330,10 +280,18 @@ impl Lease {
         {
             return Err("The lease lives longer than its kind allows.");
         }
+        if self.lifetime_assumed
+            && (self.kind != LeaseKind::OauthRefresh
+                || self.lifetime_secs() != self.kind.lease_secs())
+        {
+            return Err("Only an OAuth lease has an assumed lifetime, of 900 seconds.");
+        }
         let revoke_ok = match (&self.revoke, self.kind) {
             (None, _) => true,
-            (Some(Revoke::Github { url }), LeaseKind::GithubApp)
-            | (Some(Revoke::Oauth { url }), LeaseKind::OauthRefresh) => !url.is_empty(),
+            (Some(Revoke::Github { url }), LeaseKind::GithubApp) => url
+                .strip_suffix(github::REVOKE_PATH)
+                .is_some_and(is_https_url),
+            (Some(Revoke::Oauth { url }), LeaseKind::OauthRefresh) => is_https_url(url),
             (Some(_), _) => false,
         };
         if !revoke_ok {
@@ -444,6 +402,19 @@ impl LeaseError {
         }
     }
 
+    /// `lease_failed` with the provider's HTTP status and a hint for the owner that holds
+    /// no value: "Google answered 403. The service account needs … No temporary
+    /// credentials were made, so the command did not run."
+    pub fn http_status_because(kind: LeaseKind, status: u16, hint: &str) -> Self {
+        Self {
+            message: format!(
+                "{} answered {status}. {hint} {NOT_RUN}",
+                kind.provider_label()
+            ),
+            ..Self::http_status(kind, status)
+        }
+    }
+
     /// `lease_failed` for a request that did not get an answer.
     pub fn from_http(kind: LeaseKind, failure: HttpFailure) -> Self {
         let label = kind.provider_label();
@@ -507,6 +478,11 @@ impl LeaseError {
         }
     }
 
+    /// `lease_revoke_failed` for a request that did not get an answer.
+    pub fn revoke_failed_http(kind: LeaseKind, failure: HttpFailure) -> Self {
+        Self::revoke_failed(kind, Self::from_http(kind, failure).status)
+    }
+
     /// `lease_revoke_failed` (an activity or audit row only, never a run error).
     pub fn revoke_failed(kind: LeaseKind, status: LeaseStatus) -> Self {
         Self {
@@ -551,6 +527,9 @@ pub struct ProviderEndpoints {
     pub planetscale: DestinationUrl,
     /// `console.neon.tech` (unit K).
     pub neon: DestinationUrl,
+    /// `None`: the `token_url` and `revoke_url` hosts of each OAuth source. A test sends
+    /// every OAuth call to one destination, with the path of the URL.
+    pub oauth: Option<DestinationUrl>,
 }
 
 impl ProviderEndpoints {
@@ -569,6 +548,7 @@ impl ProviderEndpoints {
             aws_iam: https("iam.amazonaws.com"),
             planetscale: https("api.planetscale.com"),
             neon: https("console.neon.tech"),
+            oauth: None,
         }
     }
 
@@ -582,11 +562,42 @@ impl ProviderEndpoints {
             cloudflare: destination.clone(),
             aws_iam: destination.clone(),
             planetscale: destination.clone(),
-            neon: destination,
+            neon: destination.clone(),
+            oauth: Some(destination),
         }
     }
 
-    /// The STS destination for `region` (already checked by [`aws::AwsSettings`]).
+    /// The destination and the path prefix (no trailing `/`) of a GitHub `api_url`: the
+    /// default `https://api.github.com` is [`ProviderEndpoints::github`]; another URL (a
+    /// GitHub Enterprise Server, `https://ghe.example.com/api/v3`) is its own host.
+    pub fn github_api(&self, api_url: &str) -> Result<(DestinationUrl, String), &'static str> {
+        let api_url = api_url.trim_end_matches('/');
+        if api_url == github::DEFAULT_API_URL {
+            return Ok((self.github.clone(), String::new()));
+        }
+        let (destination, path) = https_target(api_url)?;
+        Ok((destination, path.trim_end_matches('/').to_owned()))
+    }
+
+    /// The destination and the path of a service-account key's `token_uri`: the default
+    /// `https://oauth2.googleapis.com/token` is [`ProviderEndpoints::google_token`].
+    pub fn google_token_for(
+        &self,
+        token_uri: &str,
+    ) -> Result<(DestinationUrl, String), &'static str> {
+        if token_uri == google::DEFAULT_TOKEN_URI {
+            return Ok((self.google_token.clone(), google::TOKEN_PATH.to_owned()));
+        }
+        https_target(token_uri)
+    }
+
+    /// The destination and the path of an OAuth `token_url` or `revoke_url`.
+    pub fn oauth_for(&self, url: &str) -> Result<(DestinationUrl, String), &'static str> {
+        let (destination, path) = https_target(url)?;
+        Ok((self.oauth.clone().unwrap_or(destination), path))
+    }
+
+    /// The STS destination for `region` (already checked by the settings).
     pub fn sts_for(&self, region: &str) -> Result<DestinationUrl, &'static str> {
         match &self.sts {
             Some(fixed) => Ok(fixed.clone()),
@@ -631,118 +642,184 @@ pub(crate) fn acquire_at(
     deadline: Instant,
     now: u64,
 ) -> Result<Lease, LeaseError> {
-    if !is_variable_name(&source.env_name) {
-        return Err(LeaseError::invalid_source(
-            source.kind,
-            "its variable name is not valid.",
-        ));
-    }
-    let lease = match source.kind {
-        LeaseKind::AwsSts => aws::acquire(source, scope, endpoints, tls, deadline, now)?,
-        // Unit C2 replaces this arm with GitHub, Google, and OAuth refresh; unit K adds
-        // the reserved kinds.
-        kind => {
-            return Err(LeaseError::invalid_source(
-                kind,
-                "this kind of temporary credentials is not available in this version.",
-            ));
+    check_common(source)?;
+    let lease = match &source.settings {
+        ShortLivedSettings::AwsSts(settings) => {
+            aws::acquire(source, settings, scope, endpoints, tls, deadline, now)?
+        }
+        ShortLivedSettings::GithubApp(settings) => {
+            github::acquire(source, settings, endpoints, tls, deadline, now)?
+        }
+        ShortLivedSettings::GoogleServiceAccount(settings) => {
+            google::acquire(source, settings, endpoints, tls, deadline, now)?
+        }
+        ShortLivedSettings::OauthRefresh(settings) => {
+            oauth::acquire(source, settings, endpoints, tls, deadline, now)?
         }
     };
-    if lease.kind != source.kind
+    if lease.kind != source.kind()
         || lease.check().is_err()
         || lease.secrets.first().map(|secret| secret.name.as_str())
             != Some(source.env_name.as_str())
     {
-        return Err(LeaseError::invalid_answer(source.kind));
+        return Err(LeaseError::invalid_answer(source.kind()));
     }
     Ok(lease)
 }
 
-/// End a lease that has a [`Revoke`] (contract section 4.2), best effort. A lease
-/// without one ends when it expires: `Ok`. An error is `lease_revoke_failed`, for an
-/// activity or audit row only.
+/// End a lease that has a [`Revoke`] (contract section 4.2), best effort, within
+/// [`LEASE_DEADLINE`]. A lease without one ends when it expires: `Ok`. An error is
+/// `lease_revoke_failed`, for an activity or audit row only.
+///
+/// `source` is the lease's source, read again from the vault at run end (the key holder
+/// drops it before the process spawns). GitHub needs none: the token revokes itself. An
+/// RFC 7009 revocation authenticates a confidential client as the token request did
+/// (`client_auth`); without the source it sends the token alone, which is enough for a
+/// public client and for a provider that does not authenticate revocations.
 pub fn revoke(
     lease: &Lease,
+    source: Option<&LeaseSource>,
     endpoints: &ProviderEndpoints,
     tls: Option<&TlsClient>,
 ) -> Result<(), LeaseError> {
-    match &lease.revoke {
-        None => Ok(()),
-        // Unit C2 replaces this arm with the GitHub and OAuth revocations, which use the
-        // endpoints, the TLS client, and a deadline of `LEASE_DEADLINE`.
-        Some(Revoke::Github { .. } | Revoke::Oauth { .. }) => {
-            let _ = (endpoints, tls);
-            Err(LeaseError::revoke_failed(
-                lease.kind,
-                LeaseStatus::InvalidSource,
-            ))
+    revoke_at(
+        lease,
+        source,
+        endpoints,
+        tls,
+        Instant::now() + LEASE_DEADLINE,
+    )
+}
+
+/// [`revoke`] with the deadline given.
+pub(crate) fn revoke_at(
+    lease: &Lease,
+    source: Option<&LeaseSource>,
+    endpoints: &ProviderEndpoints,
+    tls: Option<&TlsClient>,
+    deadline: Instant,
+) -> Result<(), LeaseError> {
+    let Some(revoke) = &lease.revoke else {
+        return Ok(());
+    };
+    let refused = || LeaseError::revoke_failed(lease.kind, LeaseStatus::InvalidSource);
+    let token = lease.secrets.first().ok_or_else(refused)?;
+    match (revoke, lease.kind) {
+        (Revoke::Github { url }, LeaseKind::GithubApp) => {
+            github::revoke(url, &token.value, endpoints, tls, deadline)
         }
+        (Revoke::Oauth { url }, LeaseKind::OauthRefresh) => {
+            let source = match source {
+                Some(source) => match &source.settings {
+                    ShortLivedSettings::OauthRefresh(settings) => Some((source, settings)),
+                    _ => return Err(refused()),
+                },
+                None => None,
+            };
+            oauth::revoke(url, &token.value, source, endpoints, tls, deadline)
+        }
+        _ => Err(refused()),
     }
 }
 
-/// Check the fields and the settings of a source when its `short_lived` row is written
-/// (plan unit D). An error is `invalid_request`; its text names the field or the setting,
-/// never a value.
-pub fn check_source(kind: LeaseKind, fields: &[Field], settings: &Value) -> Result<(), String> {
-    if kind.is_reserved() {
-        return Err(format!(
-            "the kind {kind} is reserved for a later version of Apassy."
-        ));
-    }
-    check_fields(kind, fields)?;
-    check_settings(kind, settings)?;
-    match kind {
-        LeaseKind::AwsSts => aws::check_key(fields),
-        // Unit C2 adds the value checks of its kinds (the PEM key, the key JSON).
-        _ => Ok(()),
-    }
-}
-
-/// Check a settings object of `kind` (contract section 3.2): strict, no secret.
-pub fn check_settings(kind: LeaseKind, settings: &Value) -> Result<(), String> {
-    match kind {
-        LeaseKind::AwsSts => aws::AwsSettings::parse(settings)
-            .map(drop)
-            .map_err(str::to_owned),
-        _ if kind.is_reserved() => Err(format!(
-            "the kind {kind} is reserved for a later version of Apassy."
-        )),
-        // Until unit C2 adds the strict readers of its kinds, their settings are checked
-        // only as a JSON object here; C2 replaces this arm, and its `acquire` refuses a
-        // settings object that breaks the contract.
-        _ if settings.is_object() => Ok(()),
-        _ => Err("the settings must be a JSON object.".to_owned()),
+/// Run every check that [`acquire`] runs before its first provider call: the variable
+/// name, the settings, the fields of the kind, and the kind's own checks (the AWS fixed
+/// names, the RSA key of a GitHub App, the service-account key and the account it acts
+/// as). An error is `lease_failed` with [`LeaseStatus::InvalidSource`]; its text names
+/// the field or the setting, never a value. The vault checks the form when a row is
+/// written (`Vault::set_short_lived`); this also parses the keys.
+pub fn check_source(source: &LeaseSource) -> Result<(), LeaseError> {
+    check_common(source)?;
+    match &source.settings {
+        ShortLivedSettings::AwsSts(_) => aws::check_names(source),
+        ShortLivedSettings::GithubApp(_) => github::prepare(source).map(drop),
+        ShortLivedSettings::GoogleServiceAccount(settings) => {
+            google::prepare(source, settings).map(drop)
+        }
+        ShortLivedSettings::OauthRefresh(_) => oauth::prepare(source).map(drop),
     }
 }
 
-/// Check the item's fields against the table of contract section 3.1: each field of the
-/// kind at most once, a required one present, and its `secret` flag as in the table.
+/// The checks of every kind: the variable name, the settings, and the fields.
+fn check_common(source: &LeaseSource) -> Result<(), LeaseError> {
+    let kind = source.kind();
+    let invalid = |why: &str| LeaseError::invalid_source(kind, why);
+    if !is_variable_name(&source.env_name) {
+        return Err(invalid("its variable name is not valid."));
+    }
+    source.settings.check().map_err(invalid)?;
+    check_fields(kind, &source.fields).map_err(|why| invalid(&why))
+}
+
+/// [`check_kind_fields`] for a list of fields.
 pub fn check_fields(kind: LeaseKind, fields: &[Field]) -> Result<(), String> {
-    for rule in kind.fields() {
-        let mut found = fields.iter().filter(|field| field.name == rule.name);
-        match (found.next(), found.next()) {
-            (Some(_), Some(_)) => {
-                return Err(format!("the item has two fields named {}.", rule.name));
-            }
-            (None, _) if rule.required => {
-                return Err(format!("the item has no field {}.", rule.name));
-            }
-            (Some(field), None) if field.secret != rule.secret => {
-                return Err(if rule.secret {
-                    format!("the field {} must be secret.", rule.name)
-                } else {
-                    format!("the field {} must not be secret.", rule.name)
-                });
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    check_kind_fields(
+        kind,
+        fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.value.expose(), field.secret)),
+    )
 }
 
 /// The one field `name` of `fields`, after [`check_fields`].
 pub fn field<'a>(fields: &'a [Field], name: &str) -> Option<&'a Field> {
     fields.iter().find(|field| field.name == name)
+}
+
+/// The destination and the path of an `https://` URL of a source (contract section
+/// 3.2: a host, no userinfo, query, or fragment). The path is `/` when the URL has none.
+pub fn https_target(url: &str) -> Result<(DestinationUrl, String), &'static str> {
+    const BAD: &str = "the URL is not an https:// URL without userinfo, query, or fragment.";
+    if !is_https_url(url) {
+        return Err(BAD);
+    }
+    let rest = &url["https://".len()..];
+    let (authority, path) = match rest.find('/') {
+        Some(at) => (&rest[..at], &rest[at..]),
+        None => (rest, "/"),
+    };
+    let destination = parse_destination(&format!("https://{authority}")).map_err(|_| BAD)?;
+    Ok((destination, path.to_owned()))
+}
+
+/// The lease's `expires_at` for a provider expiry `expiry` (its clock) of a request sent
+/// at `made_at` (this clock), for a kind whose lease lives at most `max_secs`: refused
+/// when more than [`MAX_CLOCK_SKEW_SECS`] past `made_at + max_secs` (a provider that
+/// ignores the asked lifetime), capped at `made_at + max_secs`, and refused when less
+/// than [`MIN_LEASE_SECS`] remain.
+pub(crate) fn capped_expiry(
+    kind: LeaseKind,
+    expiry: u64,
+    made_at: u64,
+    max_secs: u64,
+) -> Result<u64, LeaseError> {
+    if expiry > made_at + max_secs + MAX_CLOCK_SKEW_SECS {
+        return Err(LeaseError::invalid_answer_because(
+            kind,
+            &format!(
+                "the credentials would live longer than {} minutes.",
+                max_secs / 60
+            ),
+        ));
+    }
+    let expires_at = expiry.min(made_at + max_secs);
+    if expires_at < made_at + MIN_LEASE_SECS {
+        return Err(LeaseError::invalid_answer_because(
+            kind,
+            "the credentials expire in less than a minute.",
+        ));
+    }
+    Ok(expires_at)
+}
+
+/// A token of a provider answer: a lease value ([`is_lease_value`]) without spaces.
+pub(crate) fn is_token(value: &str) -> bool {
+    is_lease_value(value) && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Whether a `token_type` of an answer is `Bearer` (any case, RFC 6749 section 7.1).
+pub(crate) fn is_bearer_type(token_type: &str) -> bool {
+    token_type.eq_ignore_ascii_case("bearer")
 }
 
 /// `[A-Z_][A-Z0-9_]{0,127}` (contract section 4).
@@ -861,6 +938,8 @@ pub(crate) fn unix_from_parts(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
 
     const KINDS: &str = include_str!("../../tests/fixtures/private-sharing-v1/kinds.json");
@@ -924,6 +1003,7 @@ mod tests {
                     field: field.to_owned(),
                     value: SecretValue::new(text(&value["update_field"]["value"])),
                 }),
+            lifetime_assumed: false,
         }
     }
 
@@ -1127,17 +1207,37 @@ mod tests {
         let tests = ProviderEndpoints::all_at(fake.clone());
         assert_eq!(tests.sts_for("us-east-1"), Ok(fake.clone()));
         assert_eq!(tests.neon, fake);
+        assert_eq!(
+            production.oauth, None,
+            "each OAuth source names its own hosts"
+        );
+        assert_eq!(tests.oauth, Some(fake));
+    }
+
+    fn fixture_source(kind: &str, settings: &str) -> LeaseSource {
+        let sources = json(SOURCES);
+        LeaseSource {
+            env_name: sources[kind]["env_name"]
+                .as_str()
+                .expect("env_name")
+                .to_owned(),
+            fields: fixture_fields(kind),
+            settings: ShortLivedSettings::parse_checked(
+                LeaseKind::parse(kind).expect("kind"),
+                settings,
+            )
+            .expect("settings"),
+        }
     }
 
     #[test]
     fn the_field_table_is_enforced() {
         let aws = fixture_fields("aws_sts");
         check_fields(LeaseKind::AwsSts, &aws).expect("fixture fields");
-        let settings = json(include_str!(
-            "../../tests/fixtures/private-sharing-v1/settings-aws-sts.json"
-        ));
-        check_source(LeaseKind::AwsSts, &aws, &settings).expect("fixture source");
-        check_source(LeaseKind::AwsSts, &aws, &json("{}")).expect("no settings");
+        let settings =
+            include_str!("../../tests/fixtures/private-sharing-v1/settings-aws-sts.json");
+        check_source(&fixture_source("aws_sts", settings)).expect("fixture source");
+        check_source(&fixture_source("aws_sts", "{}")).expect("no settings");
         let missing: Vec<Field> = aws.iter().take(1).cloned().collect();
         assert!(check_fields(LeaseKind::AwsSts, &missing).is_err());
         let mut flipped = aws.clone();
@@ -1153,15 +1253,52 @@ mod tests {
         check_fields(LeaseKind::OauthRefresh, &oauth).expect("public client");
         oauth.retain(|field| field.name != "refresh_token");
         assert!(check_fields(LeaseKind::OauthRefresh, &oauth).is_err());
-        assert!(check_source(LeaseKind::NeonRole, &[], &json("{}")).is_err());
-        assert!(check_settings(LeaseKind::GithubApp, &json("[]")).is_err());
+        // A reserved kind has no fields and no settings yet.
+        assert!(check_fields(LeaseKind::NeonRole, &[]).is_err());
+        assert!(ShortLivedSettings::parse_checked(LeaseKind::NeonRole, "{}").is_err());
+        assert!(ShortLivedSettings::parse_checked(LeaseKind::GithubApp, "[]").is_err());
         // No error text holds a field value.
         let secret = aws[1].value.expose();
+        let mut bad_region = fixture_source("aws_sts", "{}");
+        bad_region.settings = ShortLivedSettings::AwsSts(crate::vault::AwsStsSettings {
+            region: Some("x".to_owned()),
+            ..crate::vault::AwsStsSettings::default()
+        });
         for why in [
             check_fields(LeaseKind::AwsSts, &flipped).unwrap_err(),
-            check_source(LeaseKind::AwsSts, &aws, &json(r#"{"region": "x"}"#)).unwrap_err(),
+            check_source(&bad_region).unwrap_err().message,
         ] {
             assert!(!why.contains(secret));
+        }
+    }
+
+    #[test]
+    fn a_vault_source_maps_to_a_lease_source_only_when_on() {
+        let on = ShortLivedSource {
+            item_id: 4,
+            kind: LeaseKind::GithubApp,
+            settings: ShortLivedSettings::parse_checked(LeaseKind::GithubApp, "{}")
+                .expect("settings"),
+            enabled: true,
+            fields: fixture_fields("github_app"),
+        };
+        let off = ShortLivedSource {
+            enabled: false,
+            ..on.clone()
+        };
+        let mixed = ShortLivedSource {
+            kind: LeaseKind::AwsSts,
+            ..on.clone()
+        };
+        let source = LeaseSource::from_vault(on, "GITHUB_TOKEN").expect("on");
+        assert_eq!(source.kind(), LeaseKind::GithubApp);
+        assert_eq!(source.env_name, "GITHUB_TOKEN");
+        let names: Vec<&str> = source.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["app_id", "installation_id", "private_key"]);
+        for refused in [off, mixed] {
+            let error = LeaseSource::from_vault(refused, "GITHUB_TOKEN").unwrap_err();
+            assert_eq!(error.code, LeaseCode::LeaseFailed);
+            assert_eq!(error.status, LeaseStatus::InvalidSource);
         }
     }
 
@@ -1211,41 +1348,300 @@ mod tests {
     }
 
     #[test]
-    fn the_kinds_of_unit_c2_and_k_fail_without_a_provider_call() {
-        // Until C2 and K land, `acquire` refuses their kinds before any connection.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.set_nonblocking(true).expect("nonblocking");
-        let fake = parse_destination(&format!(
-            "http://127.0.0.1:{}",
-            listener.local_addr().expect("addr").port()
-        ))
-        .expect("loopback");
-        let endpoints = ProviderEndpoints::all_at(fake);
-        for kind in [
-            LeaseKind::GithubApp,
-            LeaseKind::GoogleServiceAccount,
-            LeaseKind::OauthRefresh,
-            LeaseKind::CloudflareToken,
+    fn the_fixture_sources_of_unit_c2_are_checked_before_any_call() {
+        // The fixture keys are synthetic armor, not RSA keys: the checks stop them
+        // before any connection, with a reason that names the key and holds no value.
+        let (endpoints, listener) = testing::untouched();
+        let scope = RunScope {
+            run_label: "7".to_owned(),
+            ttl_wanted: 900,
+        };
+        for (kind, settings) in [
+            (
+                "github_app",
+                include_str!("../../tests/fixtures/private-sharing-v1/settings-github-app.json"),
+            ),
+            (
+                "google_service_account",
+                include_str!(
+                    "../../tests/fixtures/private-sharing-v1/settings-google-service-account.json"
+                ),
+            ),
         ] {
-            let source = LeaseSource {
-                kind,
-                env_name: "SOME_TOKEN".to_owned(),
-                fields: Vec::new(),
-                settings: json("{}"),
-            };
-            let scope = RunScope {
-                run_label: "7".to_owned(),
-                ttl_wanted: 900,
-            };
+            let source = fixture_source(kind, settings);
             let error = acquire(&source, &scope, &endpoints, None).unwrap_err();
-            assert_eq!(error.code, LeaseCode::LeaseFailed);
-            assert_eq!(error.status, LeaseStatus::InvalidSource);
+            assert_eq!(error.code, LeaseCode::LeaseFailed, "{kind}");
+            assert_eq!(error.status, LeaseStatus::InvalidSource, "{kind}");
+            assert!(
+                error.message.contains("RSA key"),
+                "{kind}: {}",
+                error.message
+            );
+            assert_eq!(check_source(&source).unwrap_err(), error);
         }
+        let oauth = fixture_source(
+            "oauth_refresh",
+            include_str!("../../tests/fixtures/private-sharing-v1/settings-oauth-refresh.json"),
+        );
+        check_source(&oauth).expect("the OAuth fixture is a valid source");
         assert!(listener.accept().is_err(), "no provider call");
-        let lease = lease_from(&json(LEASE_GITHUB));
-        let error = revoke(&lease, &endpoints, None).unwrap_err();
-        assert_eq!(error.code, LeaseCode::LeaseRevokeFailed);
+        // A lease without a revocation ends when it expires.
         let aws = lease_from(&json(LEASE_AWS));
-        assert_eq!(revoke(&aws, &endpoints, None), Ok(()));
+        assert_eq!(revoke(&aws, None, &endpoints, None), Ok(()));
+        // A lease whose revocation does not fit its kind is refused without a call.
+        let mut odd = lease_from(&json(LEASE_GITHUB));
+        odd.kind = LeaseKind::GoogleServiceAccount;
+        let error = revoke(&odd, None, &endpoints, None).unwrap_err();
+        assert_eq!(error.code, LeaseCode::LeaseRevokeFailed);
+        assert!(listener.accept().is_err(), "no provider call");
+    }
+
+    #[test]
+    fn https_targets_split_the_host_and_the_path() {
+        let (destination, path) =
+            https_target("https://auth.example.test/oauth/token").expect("target");
+        assert_eq!(destination.host_header(), "auth.example.test");
+        assert_eq!(path, "/oauth/token");
+        let (destination, path) = https_target("https://auth.example.test:8443").expect("target");
+        assert_eq!(destination.host_header(), "auth.example.test:8443");
+        assert_eq!(path, "/");
+        for refused in [
+            "http://auth.example.test/token",
+            "https://user@auth.example.test/token",
+            "https://auth.example.test/token?x=1",
+            "https://auth.example.test/token#f",
+            "https://",
+        ] {
+            assert!(https_target(refused).is_err(), "{refused}");
+        }
+        let production = ProviderEndpoints::production();
+        assert_eq!(
+            production.google_token_for(google::DEFAULT_TOKEN_URI),
+            Ok((production.google_token.clone(), "/token".to_owned()))
+        );
+        assert_eq!(
+            production.oauth_for("https://auth.example.test/oauth/revoke"),
+            https_target("https://auth.example.test/oauth/revoke")
+        );
+        let fake = parse_destination("http://127.0.0.1:4555").expect("loopback");
+        assert_eq!(
+            ProviderEndpoints::all_at(fake.clone())
+                .oauth_for("https://auth.example.test/oauth/revoke"),
+            Ok((fake, "/oauth/revoke".to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_assumed_lifetime_is_only_an_oauth_lease_of_900_seconds() {
+        let mut oauth = lease_from(&json(LEASE_OAUTH));
+        oauth.lifetime_assumed = true;
+        assert!(oauth.check().is_err(), "3600 s is not the assumed 900 s");
+        oauth.expires_at = oauth.made_at + LeaseKind::OauthRefresh.lease_secs();
+        oauth.check().expect("assumed 900 s");
+        let mut google = lease_from(&json(LEASE_GOOGLE));
+        google.lifetime_assumed = true;
+        assert!(google.check().is_err());
+        // The two lifetimes of a kind: the catalog's (5.1) and the limit (4).
+        assert_eq!(LeaseKind::OauthRefresh.lease_secs(), 900);
+        assert_eq!(LeaseKind::OauthRefresh.max_secs(), None);
+        assert_eq!(LeaseKind::GithubApp.lease_secs(), 3600);
+        assert_eq!(LeaseKind::GithubApp.max_secs(), Some(3600));
+        // A GitHub revocation is `<api_url>/installation/token` over https.
+        let mut github = lease_from(&json(LEASE_GITHUB));
+        github.revoke = Some(Revoke::Github {
+            url: "https://api.github.com/installation".to_owned(),
+        });
+        assert!(github.check().is_err());
+    }
+
+    /// The no-secret scan over the three kinds of unit C2 (contract sections 2 rule 6
+    /// and 11): what the agent's side gets of a lease (its variables and values) and
+    /// every `Debug` and error text hold no long-lived value, no bootstrap token, and no
+    /// JWT; the long-lived key never goes over the wire.
+    #[test]
+    fn no_long_lived_secret_in_any_lease_or_error() {
+        use serde_json::json;
+
+        use crate::lease::jwt::tests::pkcs1_pem;
+        use crate::lease::testing::{Reply, Seen, deadline, endpoints, fake};
+
+        const BOOTSTRAP: &str = "ya29.FakeBootstrapTokenThatNeverLeaves0002";
+        const CLIENT_SECRET: &str = "synthetic-oauth-client-secret-scan-0002";
+        const REFRESH: &str = "synthetic-refresh-token-long-lived-scan-0002";
+        const ROTATED: &str = "synthetic-refresh-token-rotated-scan-0003";
+        let pem = pkcs1_pem();
+        let mut long_lived: Vec<String> = pem
+            .lines()
+            .filter(|line| !line.starts_with("-----") && line.len() >= 16)
+            .map(str::to_owned)
+            .collect();
+        long_lived.extend([CLIENT_SECRET, REFRESH, ROTATED].map(str::to_owned));
+        let pkcs8 = crate::lease::jwt::tests::pkcs8_pem();
+        long_lived.extend(
+            pkcs8
+                .lines()
+                .filter(|line| !line.starts_with("-----") && line.len() >= 16)
+                .map(str::to_owned),
+        );
+        let field = |name: &str, value: &str, secret: bool| Field {
+            name: name.to_owned(),
+            value: SecretValue::new(value.to_owned()),
+            secret,
+        };
+        let settings = |kind: LeaseKind, text: &str| {
+            ShortLivedSettings::parse_checked(kind, text).expect("settings")
+        };
+        let key_json = json!({
+            "type": "service_account",
+            "private_key": pkcs8,
+            "client_email": "scan@synthetic-project.iam.gserviceaccount.com",
+            "token_uri": "https://oauth2.googleapis.com/token"
+        })
+        .to_string();
+        let sources = [
+            LeaseSource {
+                env_name: "GITHUB_TOKEN".to_owned(),
+                fields: vec![
+                    field("app_id", "123456", false),
+                    field("installation_id", "7654321", false),
+                    field("private_key", &pem, true),
+                ],
+                settings: settings(LeaseKind::GithubApp, "{}"),
+            },
+            LeaseSource {
+                env_name: "CLOUDSDK_AUTH_ACCESS_TOKEN".to_owned(),
+                fields: vec![field("key_json", &key_json, true)],
+                settings: settings(LeaseKind::GoogleServiceAccount, "{}"),
+            },
+            LeaseSource {
+                env_name: "EXAMPLE_ACCESS_TOKEN".to_owned(),
+                fields: vec![
+                    field("client_id", "synthetic-client-id", false),
+                    field("client_secret", CLIENT_SECRET, true),
+                    field("refresh_token", REFRESH, true),
+                ],
+                settings: settings(
+                    LeaseKind::OauthRefresh,
+                    r#"{"token_url":"https://auth.example.test/token","client_auth":"basic","revoke_url":"https://auth.example.test/revoke"}"#,
+                ),
+            },
+        ];
+        // Each provider echoes every secret it was sent in its error bodies.
+        let echo = |seen: &Seen| -> String { String::from_utf8_lossy(&seen.raw).into_owned() };
+        let scope = RunScope {
+            run_label: "7".to_owned(),
+            ttl_wanted: 900,
+        };
+        let mut texts = Vec::new();
+        for source in &sources {
+            let kind = source.kind();
+            // A lease: one call, or two for Google.
+            let calls = if kind == LeaseKind::GoogleServiceAccount {
+                2
+            } else {
+                1
+            };
+            let (destination, server) = fake(calls, move |index, _: &Seen| match (kind, index) {
+                (LeaseKind::GithubApp, _) => Reply::json(
+                    201,
+                    &json!({"token": "ghs_ScanInstallationToken00000000000001", "expires_at": "2026-11-03T11:00:00Z"}),
+                ),
+                (LeaseKind::GoogleServiceAccount, 0) => {
+                    Reply::json(200, &json!({"access_token": BOOTSTRAP, "expires_in": 3599}))
+                }
+                (LeaseKind::GoogleServiceAccount, _) => Reply::json(
+                    200,
+                    &json!({"accessToken": "ya29.ScanShortLivedToken0001", "expireTime": "2026-11-03T10:15:00Z"}),
+                ),
+                _ => Reply::json(
+                    200,
+                    &json!({"access_token": "scan-access-token-0001", "refresh_token": ROTATED}),
+                ),
+            });
+            let lease = acquire_at(
+                source,
+                &scope,
+                &endpoints(destination),
+                None,
+                deadline(),
+                1_793_700_000,
+            )
+            .expect("lease");
+            let seen = server.join().expect("fake provider");
+            assert_eq!(seen.len(), calls);
+            for request in &seen {
+                // The private key and the client secret in the clear never go out;
+                // the refresh token goes only to the token endpoint, in the form.
+                for secret in long_lived.iter().filter(|secret| {
+                    !(kind == LeaseKind::OauthRefresh
+                        && (secret.as_str() == REFRESH || secret.as_str() == CLIENT_SECRET))
+                }) {
+                    scan::assert_no_secret(&request.raw, secret);
+                }
+                if kind == LeaseKind::GoogleServiceAccount
+                    && request.path.contains("generateAccessToken")
+                {
+                    assert_eq!(request.bearer(), Some(BOOTSTRAP));
+                }
+            }
+            let mut agent_side = String::new();
+            for secret in &lease.secrets {
+                agent_side.push_str(&format!("{}={}\n", secret.name, secret.value.expose()));
+            }
+            for plain in &lease.plain {
+                agent_side.push_str(&format!("{}={}\n", plain.name, plain.text));
+            }
+            texts.push(agent_side);
+            texts.push(format!("{lease:?} {source:?}"));
+            for secret in &lease.secrets {
+                assert!(!format!("{lease:?}").contains(secret.value.expose()));
+            }
+            if kind == LeaseKind::OauthRefresh {
+                assert_eq!(
+                    lease
+                        .update_field
+                        .as_ref()
+                        .map(|update| update.value.expose()),
+                    Some(ROTATED),
+                    "the rotation is for the caller, not the agent's side"
+                );
+            }
+            // An error whose body echoes the request.
+            let (destination, server) =
+                fake(1, move |_, seen: &Seen| Reply::text(400, &echo(seen)));
+            let error = acquire_at(
+                source,
+                &scope,
+                &endpoints(destination),
+                None,
+                deadline(),
+                1_793_700_000,
+            )
+            .unwrap_err();
+            server.join().expect("fake provider");
+            texts.push(format!("{error} {error:?}"));
+            // A revocation that fails with an echoing body.
+            if lease.revoke.is_some() {
+                let (destination, server) =
+                    fake(1, move |_, seen: &Seen| Reply::text(500, &echo(seen)));
+                let error = revoke_at(
+                    &lease,
+                    Some(source),
+                    &endpoints(destination),
+                    None,
+                    deadline(),
+                )
+                .unwrap_err();
+                server.join().expect("fake provider");
+                assert_eq!(error.code, LeaseCode::LeaseRevokeFailed);
+                texts.push(format!("{error} {error:?}"));
+            }
+        }
+        for text in &texts {
+            for secret in &long_lived {
+                scan::assert_no_secret(text, secret);
+            }
+            scan::assert_no_secret(text, BOOTSTRAP);
+        }
     }
 }
