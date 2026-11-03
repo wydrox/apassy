@@ -345,9 +345,9 @@ The Simulator has no Secure Enclave, no wrist, and no passcode: a Simulator buil
 
 ## TestFlight
 
-`scripts/ios-testflight.sh` archives the app with its AutoFill extension and uploads the build to App Store Connect. Xcode signs with automatic signing and makes the certificates and profiles it needs with the API key.
+`scripts/ios-testflight.sh` archives the app with its AutoFill extension and the Apple Watch app and uploads the build to App Store Connect. Xcode signs with automatic signing and makes the certificates and profiles it needs with the API key.
 
-Once, in App Store Connect: Apps > + > New App, platform iOS, bundle ID `com.wydrox.apassy.companion` (the API cannot make the record). The bundle IDs `com.wydrox.apassy.companion` and `com.wydrox.apassy.companion.autofill` are registered in team 7S3F9767BM.
+Once, in App Store Connect: Apps > + > New App, platform iOS, bundle ID `com.wydrox.apassy.companion` (the API cannot make the record). The bundle IDs `com.wydrox.apassy.companion`, `com.wydrox.apassy.companion.autofill` and `com.wydrox.apassy.companion.watchkitapp` are registered in team 7S3F9767BM. The watch app has no App Store Connect record of its own: it ships inside the iPhone app.
 
 ```
 APASSY_TEAM=7S3F9767BM \
@@ -356,7 +356,7 @@ APASSY_NOTARY_KEY_ID=<key id> APASSY_NOTARY_ISSUER=<issuer id> \
 scripts/ios-testflight.sh
 ```
 
-When the API key has no access to cloud-managed distribution certificates (the export says so), make App Store profiles with the "Apple Distribution" certificate of the Mac in App Store Connect (or through the API) for both bundle IDs, install them, and name them in `APASSY_IOS_PROFILE` and `APASSY_IOS_AUTOFILL_PROFILE`: the export then signs manually. In team 7S3F9767BM they are "Apassy iOS App Store" and "Apassy iOS AutoFill App Store".
+When the API key has no access to cloud-managed distribution certificates (the export says so), make App Store profiles with the "Apple Distribution" certificate of the Mac in App Store Connect (or through the API) for the three bundle IDs, install them, and name them in `APASSY_IOS_PROFILE`, `APASSY_IOS_AUTOFILL_PROFILE` and `APASSY_IOS_WATCH_PROFILE`: the export then signs manually. In team 7S3F9767BM they are "Apassy iOS App Store", "Apassy iOS AutoFill App Store" and "Apassy Watch App Store".
 
 The build number is the minutes since 1970, so each run is higher than the last; the version is `MARKETING_VERSION` in `project.yml`. App Store Connect needs a few minutes to process a build. Internal testers of the team see it in TestFlight then. `--no-upload` writes the `.ipa` to `target/ios/export` instead.
 
