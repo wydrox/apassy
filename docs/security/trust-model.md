@@ -1,7 +1,8 @@
 # Trust model
 
-Date: 2026-11-02. Decision: [ADR 0037](../adr/0037-own-relay-open-source.md). This page says who can see
-what. Update it in the same change as any code that changes an answer here.
+Date: 2026-11-02. Updated 2026-11-03: cloud agents through Tailscale Funnel. Decision:
+[ADR 0037](../adr/0037-own-relay-open-source.md). This page says who can see what. Update it in the
+same change as any code that changes an answer here.
 
 ## The rule
 
@@ -34,7 +35,26 @@ Apache-2.0 and builds from this repository.
 - Physical attacks on a confidential VM's memory are out of scope of SEV-SNP and TDX (TEE.fail,
   2025).
 - Tailscale Funnel, when a user turns it on, exposes the node's agent endpoints to the internet,
-  behind agent tokens.
+  behind agent tokens (next section).
+
+## Cloud agents through Tailscale Funnel
+
+A hosted cloud agent (first: Grok Bot) reaches the Mac's node at
+`https://<Mac>.<tailnet>.ts.net:8443`, only `POST /mcp` and `/p/`
+([contract](../contracts/cloud-agents-v1.md)). The route is off by default.
+
+| Part | Holds | Sees | Cannot see or do |
+| --- | --- | --- | --- |
+| Tailscale Funnel relays (ingress servers of Tailscale) | — | TLS records, the server name (SNI), client addresses, sizes, times. TLS ends on the Mac, not here | Requests, tokens, session keys, placeholders, values |
+| `tailscaled` on your Mac | The Funnel certificate and its key | Each cloud request and answer in clear, on the Mac: the token, session keys, placeholders. It ends TLS and connects to the public listener from the loopback | Values: the proxy sends them upstream on its own TLS connection, and the answers come back with placeholders. The vault |
+| Certificate Transparency logs | The Funnel certificate | The machine name and the tailnet name (`<Mac>.<tailnet>.ts.net`), for ever, once the route is on | Whether the route is on now, any traffic |
+| The public listener (`127.0.0.1:<port>`) | Nothing of its own | The cloud requests from `tailscaled` | It serves no other route: `/v1/...`, the host lane, `/healthz`, and everything else are 404. It trusts no header. After 20 failed authentications in 60 s, 429 for the rest of the window |
+| The cloud agent token (`apassy_tagt_…`) | The cloud agent's vendor holds it, in its MCP server setting | The items that the owner picked for that agent (names, variables, hosts) and the agent's own runs | A value, another agent's items, the owner API. It lives 30, 90, or 365 days; a revocation counts at the next request |
+| The cloud agent's vendor (xAI, …) | The token; for a ready run, the session key, placeholders, and base URLs, until the session ends (at most 600 s) | Its runs, and the API answers with the placeholders back in them | A value. The node puts a placeholder back where the API echoes the value |
+| The node's store at rest (`<data dir>/node`, SQLCipher under a Keychain key) | Team and item metadata (names, variables, hosts, declarations), agent token hashes, run rows (masked command, purpose, user request), the audit | — | It never holds a value or an item key: the value stays in the vault and goes into a session only in memory |
+
+The owner decides every cloud run in this release, on the Mac or the iPhone. The node trusts the app
+process: code that runs in it can release any run, but it can read the vault anyway.
 
 ## The hosted relay today (until ADR 0037 stage 7)
 
