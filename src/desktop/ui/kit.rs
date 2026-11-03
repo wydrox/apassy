@@ -190,8 +190,9 @@ pub(crate) fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// "just now", "5 min ago", "3 h ago", "yesterday", "4 days ago", or the date. Lists
-/// show this form; the exact UTC time goes in a tooltip or a detail sheet.
+/// "just now", "5 min ago", "3 h ago", "yesterday", "4 days ago", or from 7 days the
+/// day, as "9 Oct 2026". Lists and labels for the owner show this form; the exact UTC
+/// time goes in a tooltip or a detail sheet.
 #[cfg(feature = "vault")]
 pub(crate) fn relative_time(at: u64, now: u64) -> String {
     let age = now.saturating_sub(at);
@@ -201,11 +202,49 @@ pub(crate) fn relative_time(at: u64, now: u64) -> String {
         3_600..86_400 => format!("{} h ago", age / 3_600),
         86_400..172_800 => "yesterday".to_owned(),
         172_800..604_800 => format!("{} days ago", age / 86_400),
-        _ => crate::vault::format_utc(at)
-            .split(' ')
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
+        _ => day_month_year(at),
+    }
+}
+
+/// The UTC day of `at` with the English month abbreviation: "9 Oct 2026".
+#[cfg(feature = "vault")]
+fn day_month_year(at: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let utc = crate::vault::format_utc(at);
+    let day = utc.split(' ').next().unwrap_or_default();
+    let parts: Vec<&str> = day.split('-').collect();
+    let [year, month, day_of_month] = parts[..] else {
+        return day.to_owned();
+    };
+    let (Ok(month), Ok(day_of_month)) = (month.parse::<usize>(), day_of_month.parse::<u32>())
+    else {
+        return day.to_owned();
+    };
+    match month.checked_sub(1).and_then(|index| MONTHS.get(index)) {
+        Some(name) => format!("{day_of_month} {name} {year}"),
+        None => day.to_owned(),
+    }
+}
+
+#[cfg(all(test, feature = "vault"))]
+mod time_tests {
+    use super::relative_time;
+
+    /// From 7 days, the day reads as "9 Oct 2026", in UTC; before that, the age.
+    #[test]
+    fn an_old_time_reads_as_day_month_and_year() {
+        // 2026-10-09 12:00 UTC.
+        let oct_9 = 1_791_547_200;
+        let day = 86_400;
+        assert_eq!(relative_time(oct_9, oct_9 + 6 * day), "6 days ago");
+        assert_eq!(relative_time(oct_9, oct_9 + 7 * day), "9 Oct 2026");
+        assert_eq!(relative_time(oct_9, oct_9 + 400 * day), "9 Oct 2026");
+        // 2025-12-31 23:59:59 UTC stays in its UTC day and year.
+        assert_eq!(relative_time(1_767_225_599, oct_9), "31 Dec 2025");
+        assert_eq!(relative_time(0, oct_9), "1 Jan 1970");
+        assert_eq!(relative_time(oct_9 - 30, oct_9), "just now");
     }
 }
 
