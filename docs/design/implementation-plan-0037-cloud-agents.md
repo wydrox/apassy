@@ -19,6 +19,31 @@ Mac and the iPhone, not the Watch (ADR 0039 §3); every cloud run asks the owner
 remembered; if window reopen is not reliable, this release says "keep the window open or minimized";
 token lifetime 90 days, session TTL 600 s, limits as in decision 3.
 
+## Owner feedback on the first mockup (2026-11-03) — replaces decision 6 and the token part of decision 3
+
+The owner refused "Settings → Cloud agents → Add a cloud agent". The owner never adds an agent by
+hand, local or remote. The model is T3 Code's environments:
+
+- **Sidebar.** The section "Agents" is renamed **Bouncer**. It holds **Overview** (stats: runs,
+  automatic allows, questions to the owner, denials, answer times, per agent and per environment),
+  **Decisions** (open and history), **Agents** (local and remote agents of every environment), and
+  **Logs** (the activity log).
+- **Environments.** Each Mac is an environment. The scope bar of PR #88 selects **All environments** or
+  one Mac (and a project), on every Bouncer page. Data of other Macs comes from relay-feed-v1, read-only.
+- **Remote agents connect by themselves.** The owner gives the agent only the MCP address. The MCP
+  endpoint speaks the MCP authorization flow (OAuth 2.1 with PKCE, dynamic client registration,
+  protected-resource and authorization-server metadata). Grok Bot shows "Authorize"; the browser page on
+  the Mac's public route says "Approve on your Mac"; the Mac shows a connect decision in Decisions
+  ("Grok Bot wants to connect", Allow with Touch ID / Deny), also on the iPhone. After Allow, the agent
+  is a remote agent of that environment and appears in Agents like a local agent. Visibility follows the
+  same rules as a local agent (ADR 0012); every run still asks the owner. A bearer token made with the
+  CLI stays as a fallback for clients without OAuth.
+- **Remote access switch.** The public route (Tailscale Funnel) is switched on the Agents page of this
+  Mac's environment, next to the MCP address; it is not a Settings page.
+
+Effect on the units: U1 gets the OAuth endpoints on the public scope and pending connect requests; U2
+replaces "add agent" with connect requests decided like runs; U3 draws the Bouncer section.
+
 ## Outcome
 
 A hosted cloud agent (first: xAI Grok Bot) adds one MCP server by HTTPS URL and a bearer header. It
