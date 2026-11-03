@@ -108,6 +108,12 @@ impl CliHost {
     pub(crate) fn session_count(&self) -> usize {
         self.sessions.len()
     }
+
+    /// The token of a new remote agent went to its ticket: none waits in the window.
+    #[cfg(test)]
+    pub(crate) fn fresh_remote_is_empty(&self) -> bool {
+        self.fresh_remote.is_none()
+    }
 }
 
 struct CliSession {
