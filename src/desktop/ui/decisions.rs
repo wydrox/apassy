@@ -386,7 +386,7 @@ pub(super) fn primary(question: &QuestionInfo) -> Option<Primary> {
             AnswerKind::CorrectEnvironment => Some(Primary::Correct),
             _ => None,
         })
-        .filter(|_| question.items.iter().any(|item| item.unconfirmed))
+        .filter(|_| question.classifiable_item().is_some())
     })
 }
 
@@ -2056,7 +2056,9 @@ fn prepare_evaluation(app: &mut DesktopApp, run_id: u64) {
 
 /// The bar at the bottom: Deny on the left; a caption; Allow Once; the main answer.
 fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) {
-    let unknown = run.question.items.iter().find(|item| item.unconfirmed);
+    // Only a run with exactly one unconfirmed item offers "Allow as dev/prod" (review
+    // of 0.5.16, finding 1): the label names that one item.
+    let unknown = run.question.classifiable_item();
     ui.horizontal_wrapped(|ui| {
         if let Some(item) = unknown {
             if bar_button(ui, "Allow as dev", Bar::Main).clicked() {

@@ -435,12 +435,10 @@ pub fn state_text(request: &BouncerRequest) -> String {
             request.purpose.trim()
         ));
     }
-    if !request.task_provenance.trim().is_empty() {
-        state.push_str(&format!(
-            " Task provenance: {}.",
-            request.task_provenance.trim()
-        ));
-    }
+    // The provenance of the task (for example "Agent SDK turn") is shown on the card and in
+    // the log, but not sent to the brain: the owner's own messages in T3 Code and other SDK
+    // hosts are Agent SDK turns, and a sentence that the training states never had would
+    // lower the task match of exactly those runs.
     if !request.instruction.trim().is_empty() {
         state.push_str(&format!(" Owner rule: {}", request.instruction.trim()));
     }
@@ -909,19 +907,14 @@ mod tests {
                 .unwrap_or_default()
                 .ends_with("Owner rule: Staging only.")
         );
-        // Finding 4 of the 0.5.16 review: an Agent SDK turn is named in the state; the
-        // state of any other request is as before.
+        // Finding 4 of the 0.5.16 review: the provenance of an Agent SDK turn goes to the
+        // card and the log, never into the state of the brain.
         assert!(!state.contains("Task provenance"));
         let sdk = BouncerRequest {
             task_provenance: "Agent SDK turn".to_owned(),
             ..request("")
         };
-        let sdk_state = state_text(&sdk);
-        assert!(sdk_state.starts_with("User request: \"Apply the staging migration\""));
-        assert!(
-            sdk_state.ends_with(" Task provenance: Agent SDK turn."),
-            "{sdk_state}"
-        );
+        assert_eq!(state_text(&sdk), state);
     }
 
     #[test]
