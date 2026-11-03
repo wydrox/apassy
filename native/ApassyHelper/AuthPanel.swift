@@ -29,7 +29,10 @@ func prepareAuthPanelApplication() -> Bool {
         return false
     }
     let app = NSApplication.shared
-    guard app.setActivationPolicy(.accessory) else {
+    // ApassyKeychain.app declares LSUIElement, so it starts as an accessory.
+    // There setActivationPolicy(.accessory) returns false although the policy is
+    // already correct; only the unbundled helper starts as .prohibited.
+    guard app.activationPolicy() == .accessory || app.setActivationPolicy(.accessory) else {
         logAuthPanelFallback("accessory application setup failed")
         return false
     }

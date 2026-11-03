@@ -4,6 +4,17 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-11-03
+
+### Fixed
+
+- Touch ID vault unlock now shows the Apassy panel. In 0.5.14 the keychain helper (an `LSUIElement` app) fell back to the macOS dialog, because macOS refuses to set the accessory policy that the app already has.
+
+### Upgrade notes
+
+- No vault schema change: schema stays at 23. The Touch ID helper protocol stays at version 1.
+- Coordinated release: macOS, iOS (TestFlight), browser extension (Chrome Web Store), relay, Linux CLI and website move to 0.5.15 together. iOS, the extension, the relay and the Linux CLI have no functional change. Relay team schema 6 and directory schema 1003 do not change.
+
 ## [0.5.14] - 2026-11-02
 
 ### Changed

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.15] - 2026-11-03
+
+Version alignment with the coordinated Apassy 0.5.15 release. No functional,
+protocol or schema change.
+
 ## [0.5.14] - 2026-11-02
 
 The relay moves into the Apassy workspace as `crates/apassy-relay` under
