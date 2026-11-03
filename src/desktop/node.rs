@@ -4,15 +4,17 @@
 //! (`RunOptions::node`); a build without it has no node. The lifecycle follows the
 //! iPhone listener (`companion.rs`):
 //!
-//! - [`DesktopApp::sync_node`] compares what the vault wants with what runs, once a
-//!   second: a start needs an unlocked vault with the public route on and an active
-//!   cloud agent (`Node::wanted`); a running node goes on while the vault is unlocked
-//!   with the route on (`Node::may_run`), and a new session of the same vault file (a
-//!   passphrase change, a backup) is taken over (`Node::adopt`). It starts
-//!   the node on a worker thread (Touch ID for the node key, the Tailscale command
-//!   line), or stops it. The window calls it from `logic`, so it runs also while the
-//!   window is minimized. A start that failed is not tried again until the vault session
-//!   changes or the owner asks ([`DesktopApp::retry_node`]).
+//! - [`DesktopApp::sync_node`] compares what the vault wants with what runs: in a frame
+//!   at most once a second, at once after a new vault session, and with no frame every
+//!   [`IDLE_SYNC_INTERVAL`] while the vault is unlocked. A start needs an unlocked vault
+//!   with the public route on and an active cloud agent (`Node::wanted`); a running
+//!   node goes on while the vault is unlocked with the route on (`Node::may_run`), and
+//!   a new session of the same vault file (a passphrase change, a backup) is taken
+//!   over (`Node::adopt`). It starts the node on a worker thread (Touch ID for the node
+//!   key, the Tailscale command line), or stops it. The window calls it from `logic`,
+//!   so it runs also while the window is minimized. A start that failed is not tried
+//!   again until the vault session changes or the owner asks
+//!   ([`DesktopApp::retry_node`]).
 //! - [`DesktopApp::stop_node`] stops it at once: the node (every session ends), the
 //!   Funnel route off, the host thread joined. The app calls it on lock, on quit, before
 //!   an update restart, and before it leaves a vault for another one. After an open, a
@@ -34,8 +36,13 @@ use super::{BrokerState, DesktopApp};
 use crate::node::backend::NodeBackend;
 use crate::node::{Node, NodeOptions};
 
-/// How often the window compares the node with the vault.
+/// The frames of a window in use compare the node with the vault at most this often.
 const SYNC_INTERVAL: Duration = Duration::from_secs(1);
+/// With no other frame, an unlocked vault is compared again after this long. The node
+/// changes only through the window (a start, a stop, the route check below, and
+/// [`DesktopApp::node_changed`], which wakes the window), so this only catches a vault
+/// change that nothing reported. It is not a poll that keeps the window busy.
+pub(crate) const IDLE_SYNC_INTERVAL: Duration = Duration::from_secs(10);
 /// How often a running node checks its route (tailnet name, Funnel handler).
 const MAINTAIN_INTERVAL: Duration = Duration::from_secs(60);
 /// The note when a close keeps the app open.
@@ -64,7 +71,11 @@ pub(crate) struct NodeFlows {
     /// A start that failed, for that vault session, and why.
     pub(crate) failed: Option<([u8; 32], String)>,
     synced_at: Option<Instant>,
+    /// The vault session of the last comparison: a new one is compared at once.
+    synced_epoch: Option<[u8; 32]>,
     maintained_at: Option<Instant>,
+    /// Wakes the window for [`DesktopApp::node_changed`]. Set by the first comparison.
+    repaint: Option<egui::Context>,
 }
 
 impl NodeFlows {
@@ -101,10 +112,13 @@ impl DesktopApp {
     }
 
     /// The owner changed something of the cloud agents (the route, an agent): compare
-    /// at the next frame, and try a failed start again.
+    /// at the next frame, which this asks for, and try a failed start again.
     pub fn node_changed(&mut self) {
         self.node.synced_at = None;
         self.node.failed = None;
+        if let Some(repaint) = &self.node.repaint {
+            repaint.request_repaint();
+        }
     }
 
     /// Try a start that failed again.
@@ -133,6 +147,9 @@ impl DesktopApp {
         let Some(node) = self.node.node.clone() else {
             return;
         };
+        if self.node.repaint.is_none() {
+            self.node.repaint = Some(ctx.clone());
+        }
         if let Some(Starting { epoch, task }) = &self.node.starting {
             let epoch = *epoch;
             match task.poll() {
@@ -149,15 +166,23 @@ impl DesktopApp {
             self.node.starting = None;
         }
         self.poll_maintain(&node, ctx);
-        if self
-            .node
-            .synced_at
-            .is_some_and(|at| at.elapsed() < SYNC_INTERVAL)
+        // A frame between two comparisons asks for no frame of its own: a new vault
+        // session (an unlock, another vault) is compared at once, and the idle look below
+        // catches a change that no frame reported.
+        let epoch = self.owner_ui.session.epoch();
+        if epoch == self.node.synced_epoch
+            && self
+                .node
+                .synced_at
+                .is_some_and(|at| at.elapsed() < SYNC_INTERVAL)
         {
             return;
         }
         self.node.synced_at = Some(Instant::now());
-        ctx.request_repaint_after(SYNC_INTERVAL);
+        self.node.synced_epoch = epoch;
+        if epoch.is_some() {
+            ctx.request_repaint_after(IDLE_SYNC_INTERVAL);
+        }
         // What runs decides, not what the window started: the node can stop by itself
         // (the route went off, the tailnet name changed), and "Add a cloud agent" starts
         // it from Settings.
@@ -218,13 +243,16 @@ impl DesktopApp {
             }
             self.node.maintaining = None;
         }
-        if self.node.running_for.is_none()
-            || self
-                .node
-                .maintained_at
-                .is_some_and(|at| at.elapsed() < MAINTAIN_INTERVAL)
-        {
+        if self.node.running_for.is_none() {
             return;
+        }
+        if let Some(at) = self.node.maintained_at {
+            let since = at.elapsed();
+            if since < MAINTAIN_INTERVAL {
+                // The window wakes for the next check, also while it is minimized.
+                ctx.request_repaint_after(MAINTAIN_INTERVAL - since);
+                return;
+            }
         }
         self.node.maintained_at = Some(Instant::now());
         let node = Arc::clone(node);
@@ -237,6 +265,7 @@ impl DesktopApp {
         self.node.running_for = None;
         self.node.failed = None;
         self.node.synced_at = None;
+        self.node.synced_epoch = None;
         if let Some(node) = &self.node.node {
             node.stop();
         }

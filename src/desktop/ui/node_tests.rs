@@ -220,3 +220,66 @@ fn without_a_backend_there_is_no_node_and_a_close_quits() {
     assert!(!commands.contains(&ViewportCommand::CancelClose));
     assert!(!app.node_running());
 }
+
+/// The delay of the next frame that one comparison of the node asks for, after two
+/// empty frames that settle egui. `Duration::MAX`: no frame.
+fn asked_repaint(ctx: &egui::Context, app: &mut DesktopApp) -> Duration {
+    for _ in 0..2 {
+        ctx.run_ui(RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+    }
+    let output = ctx.run_ui(RawInput::default(), |ui| app.sync_node(ui.ctx()));
+    let delay = output.viewport_output[&ViewportId::ROOT].repaint_delay;
+    output.drop_without_applying_deltas();
+    delay
+}
+
+/// The node woke the window each second to compare it with the vault, also while the
+/// window was minimized. A frame between two comparisons now asks for no frame of its
+/// own; with no frame the window looks again after `IDLE_SYNC_INTERVAL` while the vault
+/// is unlocked, and not at all while it is locked. A new vault session is compared at
+/// once, and `node_changed` wakes the window.
+#[test]
+fn the_node_wakes_an_idle_window_only_rarely() {
+    use crate::desktop::node::IDLE_SYNC_INTERVAL;
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    // A node of fakes, with the route off: it does not start.
+    app.node = NodeFlows::with_node(Arc::new(Node::new(NodeOptions {
+        backend: Arc::new(FakeBackend::default()),
+        keys: Arc::new(FakeKeys::empty()),
+        cli: Arc::new(FakeCli::connected(serve_443_only())),
+        data_dir: dir.path().join("node"),
+    })));
+    let ctx = egui::Context::default();
+    let idle = |delay: Duration| {
+        delay > IDLE_SYNC_INTERVAL - Duration::from_secs(1) && delay <= IDLE_SYNC_INTERVAL
+    };
+    let delay = asked_repaint(&ctx, &mut app);
+    assert!(idle(delay), "the first comparison: {delay:?}");
+    assert_eq!(
+        asked_repaint(&ctx, &mut app),
+        Duration::MAX,
+        "a frame between two comparisons"
+    );
+
+    // A lock is a new session: compared at once, and nothing is asked while locked.
+    app.lock_vault(Some(&ctx));
+    assert_eq!(asked_repaint(&ctx, &mut app), Duration::MAX, "locked");
+    assert_eq!(asked_repaint(&ctx, &mut app), Duration::MAX, "still locked");
+
+    // An unlock is compared at once, also within a second of the last comparison.
+    app.owner_ui.session.unlock(PASS).expect("unlock");
+    let delay = asked_repaint(&ctx, &mut app);
+    assert!(idle(delay), "after the unlock: {delay:?}");
+
+    // A change of the owner wakes the window at once.
+    app.node_changed();
+    let output = ctx.run_ui(RawInput::default(), |_| {});
+    assert_eq!(
+        output.viewport_output[&ViewportId::ROOT].repaint_delay,
+        Duration::ZERO
+    );
+    output.drop_without_applying_deltas();
+    assert!(!app.node_running());
+}
