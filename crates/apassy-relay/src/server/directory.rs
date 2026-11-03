@@ -202,7 +202,7 @@ impl TeamLimits {
         }
     }
 
-    /// The limits of the personal team of an embedded node (docs/SPEC.md section 28.2):
+    /// The limits of the personal team of an embedded node (docs/SPEC.md section 30.2):
     /// 20 agents, 120 runs an hour, 10 pending runs, and 16 agent requests at once, since
     /// its agents reach it from the internet. The other fields are the defaults.
     pub fn personal() -> Self {

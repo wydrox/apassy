@@ -671,7 +671,7 @@ impl Hub {
         Ok((id, owner_id, device_id))
     }
 
-    /// The personal team of an embedded node (docs/SPEC.md section 28.2): a team file
+    /// The personal team of an embedded node (docs/SPEC.md section 30.2): a team file
     /// with its owner member, without a team code. The owner token is made, hashed into
     /// the member row, and dropped here: nobody holds it, and the node acts for the owner
     /// in process. The team has no member-token deadline (`team.member_tokens_until` is

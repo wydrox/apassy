@@ -401,7 +401,7 @@ pub fn release(
     finish(core, result, created)
 }
 
-/// The release of the in-process host of an embedded node (docs/SPEC.md section 28.6).
+/// The release of the in-process host of an embedded node (docs/SPEC.md section 30.6).
 /// The values come from the owner's vault in the same process, `values[i]` for the i-th
 /// item of the run. As `release`: the run key is taken out first (one use), and steps 1
 /// and 3 are checked again (`approval_invalidated`). Then every item must hold its

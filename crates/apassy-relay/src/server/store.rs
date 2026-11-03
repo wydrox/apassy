@@ -27,7 +27,7 @@ use crate::secret::SecretString;
 /// the heads and receipts of vault sync (docs/SPEC.md section 24). Version 5 adds the
 /// questions, their answers, and the push tokens (docs/SPEC.md section 25). Version 6
 /// adds the feeds of the Macs and their actions (docs/SPEC.md section 27). Version 7
-/// adds the item list of an agent, `agent.items` (docs/SPEC.md section 28.4).
+/// adds the item list of an agent, `agent.items` (docs/SPEC.md section 30.4).
 pub const SCHEMA_VERSION: i64 = 7;
 
 /// `max_page_count` without a cap: SQLite clamps it to its own largest value.

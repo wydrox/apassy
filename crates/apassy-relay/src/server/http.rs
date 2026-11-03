@@ -11,7 +11,7 @@
 //!
 //! An embedded node has a second listener (`Scope::Public`) that serves only `POST /mcp`
 //! and the proxy, and each listener of a node counts failed authentications
-//! (`AuthFailures`, docs/SPEC.md section 28).
+//! (`AuthFailures`, docs/SPEC.md section 30).
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

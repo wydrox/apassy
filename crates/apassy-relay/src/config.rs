@@ -24,7 +24,7 @@
 //! configuration error, so a typo does not turn push off without a word.
 //!
 //! The environment always asks for the edge secret (`EdgeMode::Required`). A Mac's own
-//! node (`RelayConfig::embedded`, docs/SPEC.md section 28) has no edge: `EdgeMode::Off`,
+//! node (`RelayConfig::embedded`, docs/SPEC.md section 30) has no edge: `EdgeMode::Off`,
 //! which `RelayConfig::check_listeners` permits only when every listener is on the
 //! loopback.
 //!
@@ -80,7 +80,7 @@ pub const LEGACY_VAULT_FILE: &str = "team.db";
 pub const ADMIN_SOCKET: &str = "admin.sock";
 /// The lock file of the data directory: one relay process at a time.
 pub const LOCK_FILE: &str = "relay.lock";
-/// The session lifetime of an embedded node (docs/SPEC.md section 28).
+/// The session lifetime of an embedded node (docs/SPEC.md section 30).
 pub const EMBEDDED_SESSION_TTL_SECS: u64 = 600;
 /// How long a run of an embedded node waits for the owner: the broker's question wait.
 pub const EMBEDDED_APPROVAL_TIMEOUT_SECS: u64 = 300;
@@ -247,7 +247,7 @@ impl EdgeMode {
     }
 }
 
-/// What an embedded node needs (`RelayConfig::embedded`, docs/SPEC.md section 28).
+/// What an embedded node needs (`RelayConfig::embedded`, docs/SPEC.md section 30).
 #[derive(Debug, Clone)]
 pub struct EmbeddedOptions {
     /// The node's own data directory, such as `<app data>/node`.
@@ -303,7 +303,7 @@ pub struct RelayConfig {
     pub connect_teams_max: u64,
     /// Each listener counts bad bearer tokens and session keys: after
     /// `http::AUTH_FAILURES_MAX` in `http::AUTH_FAILURE_WINDOW_SECS`, the listener answers
-    /// 429 `rate_limited` until the window ends (docs/SPEC.md section 28.5). On for an
+    /// 429 `rate_limited` until the window ends (docs/SPEC.md section 30.5). On for an
     /// embedded node; off on the hosted relay, whose edge limits callers.
     pub auth_limiter: bool,
 }
@@ -381,7 +381,7 @@ impl RelayConfig {
         Ok(())
     }
 
-    /// The configuration of a Mac's own node (docs/SPEC.md section 28): the node
+    /// The configuration of a Mac's own node (docs/SPEC.md section 30): the node
     /// listener on `127.0.0.1:0`, the public listener of `options`, no edge, no push,
     /// shared team vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs
     /// that wait `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, and the

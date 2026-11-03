@@ -480,7 +480,7 @@ pub enum Denier<'a> {
     Approver(&'a MemberAuth),
     /// The owner's host, on `POST /v1/host/requests/{id}/deny`.
     Host(&'a MemberAuth),
-    /// The in-process host of an embedded node (docs/SPEC.md section 28.6). No HTTP
+    /// The in-process host of an embedded node (docs/SPEC.md section 30.6). No HTTP
     /// route leads here: the caller owns the store.
     Embedded,
 }

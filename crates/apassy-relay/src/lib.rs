@@ -10,7 +10,7 @@
 //! safety words), `decision` (the pure part of the
 //! decision per run, used by the relay and by the owner's host), `sync_head` (the
 //! signed head of a vault snapshot, docs/SPEC.md section 24), `embedded` (the Mac's own
-//! node behind `apassy::node::backend`, docs/SPEC.md section 28).
+//! node behind `apassy::node::backend`, docs/SPEC.md section 30).
 //! Track modules: `server` (track server), `proxy` (track proxy), `cli` (track client).
 #![forbid(unsafe_code)]
 

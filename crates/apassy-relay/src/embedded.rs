@@ -1,4 +1,4 @@
-//! The embedded node (docs/SPEC.md section 28): the relay inside the Mac app, behind
+//! The embedded node (docs/SPEC.md section 30): the relay inside the Mac app, behind
 //! the traits of `apassy::node::backend`.
 //!
 //! The node is an ordinary relay with `RelayConfig::embedded`: no edge, every listener
@@ -88,6 +88,8 @@ impl EmbeddedNode {
     /// Starts a node with `config` (normally `RelayConfig::embedded`). The first start
     /// makes the directory `relay.db` with no team.
     pub fn start(config: RelayConfig) -> RelayResult<Self> {
+        // Before anything is made in the data directory.
+        config.check_listeners()?;
         if std::fs::symlink_metadata(config.directory_path()).is_err() {
             Relay::init_empty(&config)?;
         }

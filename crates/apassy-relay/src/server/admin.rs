@@ -964,7 +964,7 @@ pub fn item_matches(core: &Core, row: &ItemRow, item: &CheckedItem) -> bool {
 }
 
 /// Changes the fields of item `id` (live or archived) to those of `item` and makes it
-/// live, for an embedded node's catalog sync (docs/SPEC.md section 28.3). Its uid stays.
+/// live, for an embedded node's catalog sync (docs/SPEC.md section 30.3). Its uid stays.
 /// Its pending runs are denied (`approval_invalidated`) and its sessions end: they were
 /// decided with the old hosts and declarations.
 pub fn item_update(
