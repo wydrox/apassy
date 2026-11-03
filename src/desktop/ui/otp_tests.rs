@@ -364,6 +364,22 @@ fn stored_otp_labels(app: &DesktopApp, item_id: u64) -> Vec<String> {
 
 // ---- The code on the screen. ----
 
+/// A shown code changes only with the whole second of the clock, so the page redraws
+/// once a second, just after the second changes, and not four times a second.
+#[test]
+fn a_shown_code_redraws_once_a_second_just_after_the_second_changes() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let base = Duration::from_secs(1_790_000_000);
+    for (into, wait) in [(0, 1_040), (250, 790), (999, 41)] {
+        let now = UNIX_EPOCH + base + Duration::from_millis(into);
+        assert_eq!(
+            super::otp::until_next_second(now),
+            Duration::from_millis(wait),
+            "{into} ms into the second"
+        );
+    }
+}
+
 #[test]
 fn the_code_has_the_digits_and_the_seconds_of_the_period() {
     // RFC 6238 appendix B, SHA-1, at 59 seconds.

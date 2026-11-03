@@ -258,14 +258,19 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
 }
 
 /// Runs that wait for the owner. A new run asks macOS for attention. A broker thread
-/// can add a run at any time, so the window checks again soon.
+/// adds a run at any time: the notifier of the notification center wakes the window
+/// then. A waiting run can also end on its own (a timeout, the agent stops), so the
+/// window looks again each second while one waits. Without the notification center
+/// nothing wakes it, so it looks each second.
 #[cfg(feature = "vault")]
 fn watch_approvals(app: &mut DesktopApp, ctx: &egui::Context) -> Pending {
     let crate::desktop::BrokerState::Running(handle) = &app.broker else {
         return Vec::new();
     };
-    ctx.request_repaint_after(std::time::Duration::from_millis(500));
     let pending = handle.approvals().pending();
+    if !pending.is_empty() || app.owner.notifications.is_none() {
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
     if pending
         .iter()
         .any(|run| !app.owner_ui.signaled_runs.contains(&run.id))
