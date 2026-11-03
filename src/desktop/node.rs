@@ -37,13 +37,21 @@ const MAINTAIN_INTERVAL: Duration = Duration::from_secs(60);
 /// The note when a close keeps the app open.
 pub(crate) const KEPT_OPEN: &str = "Apassy stays open for your cloud agents: the window is in the Dock. Quit Apassy to stop them.";
 
+/// A start of the node on a worker thread.
+struct Starting {
+    /// The vault session that it was made for.
+    epoch: [u8; 32],
+    /// The message of the node error when it fails.
+    task: Task<Result<(), String>>,
+}
+
 /// The node of the window.
 #[derive(Default)]
 pub(crate) struct NodeFlows {
     /// `None`: this build has no node (tests, the demo).
     pub(crate) node: Option<Arc<Node>>,
     /// A start on its way, for the vault session it was made for.
-    starting: Option<([u8; 32], Task<Result<(), String>>)>,
+    starting: Option<Starting>,
     /// A route check on its way.
     maintaining: Option<Task<bool>>,
     /// The vault session that the running node serves.
@@ -109,7 +117,7 @@ impl DesktopApp {
         let Some(node) = self.node.node.clone() else {
             return;
         };
-        if let Some((epoch, task)) = &self.node.starting {
+        if let Some(Starting { epoch, task }) = &self.node.starting {
             let epoch = *epoch;
             match task.poll() {
                 TaskPoll::Waiting => {
@@ -168,14 +176,14 @@ impl DesktopApp {
         let context = broker.context();
         let vault = self.owner_ui.session.shared_vault();
         let starter = Arc::clone(&node);
-        self.node.starting = Some((
+        self.node.starting = Some(Starting {
             epoch,
-            Task::spawn(Some(ctx.clone()), move || {
+            task: Task::spawn(Some(ctx.clone()), move || {
                 starter
                     .start(&vault, context)
                     .map_err(|error| error.message)
             }),
-        ));
+        });
     }
 
     /// Check the route of a running node once a minute, on a worker thread.

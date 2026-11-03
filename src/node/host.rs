@@ -478,11 +478,15 @@ fn decide(shared: &Shared, run: &PendingRun) {
 }
 
 fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
-    // 1. The run in the vault.
-    let mapped = shared.with_vault(|vault| {
+    // 1. The run in the vault. A refusal is boxed: an `Outcome` is large.
+    let mapped = shared.with_vault(|vault| -> Result<(u64, Vec<u64>), Box<Outcome>> {
         let Ok(Some(agent_id)) = vault.cloud_agent_for_relay(run.agent_id.0) else {
             let reason = "This agent is not a cloud agent of the vault that is open now.";
-            return Err(deny(reason, Some(refused_row(run, None, reason)), Vec::new()));
+            return Err(Box::new(deny(
+                reason,
+                Some(refused_row(run, None, reason)),
+                Vec::new(),
+            )));
         };
         let mut items = Vec::with_capacity(run.items.len());
         for item in &run.items {
@@ -490,11 +494,11 @@ fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
                 Ok(Some(id)) => items.push(id),
                 _ => {
                     let reason = "An item of this run is not in the vault that is open now.";
-                    return Err(deny(
+                    return Err(Box::new(deny(
                         reason,
                         Some(refused_row(run, Some(agent_id), reason)),
                         items,
-                    ));
+                    )));
                 }
             }
         }
@@ -502,7 +506,7 @@ fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
     });
     let (agent_id, items) = match mapped {
         None => return deny("The vault is locked.", None, Vec::new()),
-        Some(Err(outcome)) => return outcome,
+        Some(Err(outcome)) => return *outcome,
         Some(Ok(mapped)) => mapped,
     };
     if items.iter().collect::<BTreeSet<_>>().len() != items.len() {
