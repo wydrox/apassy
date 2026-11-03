@@ -1776,7 +1776,7 @@ A Mac's own node (ADR 0037, cloud slice; docs/design/implementation-plan-0037-cl
 
 ### 30.1 Edge mode and configuration
 
-`RelayConfig.edge` is `EdgeMode::Required(secret)` (the hosted relay: `from_env` always reads the secret, as before) or `EdgeMode::Off`. `Off` is refused unless every listener (`listen` and `public_listen`) is a loopback address: `Relay::start` and `EmbeddedNode::start` check it before anything is opened or made. Funnel ends TLS in `tailscaled` on the same Mac and connects from the loopback, so the loopback bind is what keeps other callers away. With `Off`, `POST /v1/connect` verifies no client prefix (there is no Worker), and Connect is off anyway.
+`RelayConfig.edge` is `EdgeMode::Required(secret)` (the hosted relay: `from_env` always reads the secret, as before) or `EdgeMode::Off`. `Off` is refused unless every listener (`listen`, `public_listen`, and `tailnet_listen`, section 32.1) is a loopback address: `Relay::start` and `EmbeddedNode::start` check it before anything is opened or made. Funnel ends TLS in `tailscaled` on the same Mac and connects from the loopback, so the loopback bind is what keeps other callers away. With `Off`, `POST /v1/connect` verifies no client prefix (there is no Worker), and Connect is off anyway.
 
 `RelayConfig::embedded(EmbeddedOptions {data_dir, master_key, public_url, public_listen})`:
 
@@ -1816,9 +1816,9 @@ ALTER TABLE agent ADD COLUMN items TEXT;
 
 `agent.items` is a JSON array of item ids, or `NULL`: every item of the member's grants (every agent before this version, and every agent of `POST /v1/agents`, whose wire does not change). A list narrows the grants and never widens them: `decide::check_access` (the run request, and the recheck of every release) refuses an item outside the list with the answer of an unknown item (403 `not_granted`), and `admin::access` (`GET /v1/access`, `apassy_list_access`) leaves it out. An unknown agent or a list that does not parse gives no item. Only the in-process host sets a list: `admin::insert_agent` with a list of live items (at most 500, distinct), and `admin::agent_set_items`, which in the same transaction denies the pending runs of the agent with an item that the new list leaves out (`approval_invalidated`) and ends its sessions with one (`agent_items_changed` rows).
 
-`Store::open_team` migrates a version 6 file with the copy rule of 23.2: `<file>.pre-v7` (mode 0600), then in one transaction the column (only when it is not there) and `PRAGMA user_version = 7` (`migrate_v7`). The change is additive. A version 2 to 5 file goes on to 7 in one start, with each copy. A new team file is made at version 7. Versions above 7 are refused, and the schema 6 image refuses a version 7 file. `remove_team_file` also removes `.pre-v7` and `.pre-v7.tmp`. `relay.db` stays at 1003 (until section 31, which makes it 1004).
+`Store::open_team` migrates a version 6 file with the copy rule of 23.2: `<file>.pre-v7` (mode 0600), then in one transaction the column (only when it is not there) and `PRAGMA user_version = 7` (`migrate_v7`). The change is additive. A version 2 to 5 file goes on to 7 in one start, with each copy. A new team file was made at version 7 until section 32 (now version 8, 32.5). Versions above the current one are refused, and the schema 6 image refuses a version 7 file. `remove_team_file` also removes `.pre-v7` and `.pre-v7.tmp`. `relay.db` stays at 1003 (until section 31, which makes it 1004).
 
-The way back in place: `apassy-relay downgrade-schema-6`, with the relay stopped (it takes `relay.lock`), runs `Store::downgrade_to_v6` on every team file of version 7. The schema 6 image does not know the column and would give a listed agent every item of its member's grants, so each live agent with a list is revoked (an `agent_revoked` row of the operator with `{"reason": "schema_rollback"}`) and its pending runs are denied (`approval_invalidated`); then every list is cleared and the version is set to 6. The empty column stays: the schema 6 image never reads it, and a later `migrate_v7` keeps it. The other way back is the `.pre-v7` copy (docs/OPERATIONS.md 23.3).
+The way back in place: `apassy-relay downgrade-schema-6`, with the relay stopped (it takes `relay.lock`), runs `Store::downgrade_to_v6` on every team file of version 7 (or 8, section 32.5). The schema 6 image does not know the column and would give a listed agent every item of its member's grants, so each live agent with a list is revoked (an `agent_revoked` row of the operator with `{"reason": "schema_rollback"}`) and its pending runs are denied (`approval_invalidated`); then every list is cleared and the version is set to 6. The empty column stays: the schema 6 image never reads it, and a later `migrate_v7` keeps it. The other way back is the `.pre-v7` copy (docs/OPERATIONS.md 23.3).
 
 ### 30.5 The public listener, its scope, and the failed-auth limiter
 
@@ -1968,3 +1968,130 @@ PRAGMA user_version = 1004;
 - An allowed request's code reaches whichever browser loads the page first. PKCE keeps it useless to anyone but the client that made the challenge.
 - Revoking a family or the agent ends the access token at the next request; a session that was released before it lives until it ends (at most 600 s, section 30).
 
+
+## 32. A node on the tailnet: the tailnet listener, sign-in origins, teams of devices, push handles, and node pairing codes
+
+ADR 0037 stage 2 and 3 (docs/design/implementation-plan-s2-s3.md of the core, unit N1; contracts `node-pairing-v1` and `push-gateway-v1` of the core). A node (the relay inside the Mac app, or later `apassy serve` on Linux) serves the devices of its teams on its own tailnet address, behind a TLS front with a pinned, self-signed certificate (unit N2 of the core). The front does not parse HTTP: it forwards bytes to a third loopback listener of the relay. Everything here is reachable only through `RelayConfig::embedded` with a node origin, or in process. The hosted relay keeps one listener, one sign-in origin, and the Worker push; the only change it sees is team schema 8 (32.5) and directory 1005 (32.6), both additive, and 409 `push_unavailable` at `PUT`/`DELETE /v1/push/handle`.
+
+### 32.1 The tailnet listener and its scope
+
+`RelayConfig.tailnet_listen` binds a third `tiny_http` server, served by the thread `relay-tailnet-accept` with `Scope::Tailnet { agents: RelayConfig.tailnet_agents }`. It is always on the loopback (`check_listeners` refuses any other address in every edge mode, 400 `invalid_request`): only the TLS front reaches it. It has the lanes and limits of the node listener (`RelayConfig.limits`) but threads and a failed-auth count of its own (30.5; its audit kind is `auth_limit_tailnet`, scope `tailnet`). It runs no maintenance. `RunningRelay::tailnet_addr` is its bound address, `tailnet_listener_url()` its `http://` origin; `stop` joins its accept thread with the others.
+
+`Scope::Tailnet` serves, as an exact path or a path below it:
+
+| Kind | Paths |
+| --- | --- |
+| Always | `/healthz`, `/v1/join`, `/v1/teams`, `/v1/me`, `/v1/leave`, `/v1/invites`; `/v1/auth/…`, `/v1/devices…`, `/v1/joins…`, `/v1/members…`, `/v1/sync/…`, `/v1/questions…`, `/v1/push/…`, `/v1/feed…` |
+| With `agents` (the Linux node) | `/v1/access`, `/v1/audit`, `/mcp`; `/v1/collections…`, `/v1/items…`, `/v1/grants…`, `/v1/agents…`, `/v1/approvals…`, `/v1/runs…`, `/v1/host/…`, `/p/…` |
+
+"Below" means the prefix followed by `/` or nothing: `/v1/mex` and `/v1/devicesx` are not served. Every other request is 404 `not_found` before the health answer, the token, or the body, as on the public listener: `/v1/connect…`, the operator routes, and the MCP authorization flow (section 31) are never served there, also with `RelayConfig.oauth` set (`Scope::serves_oauth` is false), and a 401 of `POST /mcp` on this listener carries no `WWW-Authenticate`. The listener trusts no header of the front: no peer address, no Tailscale identity. A Tailscale identity is never authorization (ADR 0037 §3); the token is.
+
+The Mac node uses `agents: false`: an agent token is 404 on its tailnet listener, and cloud agents keep the public listener (section 30). The app's own clients reach the node through the loopback node listener (`Scope::Node`, every route) and sign the node origin there too.
+
+### 32.2 Configuration
+
+`EmbeddedOptions` gains `node_origin: Option<String>`, `tailnet_listen: Option<SocketAddr>`, `tailnet_agents: bool`, and `push_gateway: Option<String>`. `RelayConfig::embedded` checks:
+
+- `node_origin` with `config::checked_node_origin` (node-pairing-v1 section 3): `https://<host>:<port>`, a lowercase host of letters, digits, `.`, and `-` (the Tailscale IPv4 in practice), an explicit port 1 to 65535 without a leading zero that is not 443, and nothing else (no path, user, query, or trailing slash). The text is kept as it is: devices sign it.
+- `node_origin` and `tailnet_listen` go together; `tailnet_agents` and `push_gateway` need them. Else 400 `invalid_request`.
+- `push_gateway` with `config::checked_gateway`: an origin `https://<host>[:<port>]` in lowercase with no path (or `http://127.0.0.1` / `http://localhost` with a port, for tests). It becomes `PushConfig::Gateway { gateways: [push_gateway], timeout: 10 s }` (32.5). `config::DEFAULT_PUSH_GATEWAY` is `https://push.apassy.wyderka.cc`, the default that the app passes; `config::DEFAULT_NODE_PORT` is 8444.
+
+| Field of `RelayConfig` | Without `node_origin` | With it |
+| --- | --- | --- |
+| `tailnet_listen`, `tailnet_agents` | `None`, off | from the options |
+| `sign_in_origins` | empty: `public_url` alone (30.1) | the node origin, then `public_url` when `public_listen` is set and differs (32.3) |
+| `push` | `None` | `PushConfig::Gateway` with `push_gateway`, or `None` without it |
+
+`RelayConfig::is_node()` is true when `tailnet_listen` is set; only a node takes a node pairing code (32.6). `from_env` sets none of these: `tailnet_listen` `None`, `sign_in_origins` empty, and `push` only in the Worker form.
+
+The core starts a node on the tailnet with `NodeBackend::start_on_tailnet(NodeConfig, Some(NodeTailnet {node_origin, tailnet_listen, tailnet_agents, push_gateway}))`; `start(config)` is `start_on_tailnet(config, None)`. The default of the trait method answers `not_supported` for `Some`, so the fakes of the core compile unchanged.
+
+### 32.3 Sign-in origins
+
+`RelayConfig::sign_in_origins()` is `sign_in_origins`, or `[public_url]` when it is empty (the hosted relay, and a node without the tailnet route). `POST /v1/auth/token` verifies the signature of section 23.2 (`apassy-relay sign-in v1\0<origin>\0<team>\0<key>\0<nonce>`, unchanged) against each origin of the set and accepts the first that matches; one signed with any other origin is 401 `unauthenticated`, as a bad signature. The hosted relay therefore accepts exactly `public_url`, as before.
+
+`POST /v1/auth/challenge` names one origin in its answer: the one whose authority (`<host>:<port>` after the scheme) equals the request's `Host`, compared without case after trimming, else the first of the set (`devices::challenge_origin`). Only the name in the answer depends on `Host`; the token step accepts any origin of the set, so a client that knows its origin (it stored it from the link) signs it whatever the challenge said. `devices::challenge(core, request, now)` keeps its form: it is `challenge_for(core, request, None, now)`.
+
+### 32.4 Teams of devices on a node
+
+A node hosts several teams side by side (ADR 0037 §2): the personal team of section 30.2 and teams of devices, such as the questions team of a vault (plan decision D6 of the core).
+
+`Hub::create_device_team(name, device_name, public_key, now) -> (TeamId, DeviceId)` is the bootstrap of `POST /v1/teams` (section 23) in process, without a team code: a team file with its owner member (`owner`) and the first device `device_name` with the P-256 public key `public_key` (b64u of 65 bytes), which holds the team's keys; no member token. The names and the key are checked as at `POST /v1/teams` (400 `invalid_request`), before any file is made. The team is an operator team with `TeamLimits::default()`. The relay audit row is `team_created {team_id, kind: "device"}`. A failure after the file was made removes it again. A restart opens the team from `relay.db` like any team. The device signs in through the tailnet listener (or the node listener) with the node origin like any device, and then makes device links (`POST /v1/devices/links`, section 23) for the other devices of the owner.
+
+`RunningNode` (core `src/node/backend.rs`, implemented by `EmbeddedNode`) gains, each with a default of a node without the route (`None` or `not_supported`):
+
+| Method | Does |
+| --- | --- |
+| `tailnet_addr() -> Option<SocketAddr>` | The bound tailnet listener: the target of the front. |
+| `create_device_team(name, device_name, public_key_b64u) -> (NodeTeamId, u64)` | `Hub::create_device_team`; returns the team and the device id. |
+| `devices(team) -> Vec<NodeDevice>` | The live devices of the team, oldest first: `id`, `name`, `member_id`, `member_name`, `role`, `key_holder`, `created_at`, `last_seen_at`, `push` (a push handle that has not failed). The relay keeps no device kind. |
+| `revoke_device(team, id)` | `devices::revoke` as the team's owner device (the key holder first): its tokens stop, its push token and handle go, its feed goes (27.5). The last device of the last owner is 409 `conflict`. |
+| `make_node_code(minutes) -> NodeCode {code, expires_at}` | A node pairing code of 32.6; `not_supported` on a node without the tailnet route. |
+
+### 32.5 Push through the gateway: team schema 8
+
+A node never holds an APNs token. A device exchanges its token for a **handle** and a **secret** at the push gateway (`push-gateway-v1` sections 5 and 6) and gives the node those (`PUT /v1/push/handle`); for each question the node asks the gateway to push to the handle, with a proof made from the secret. `PushConfig` is an enum: `Worker { url, topic, secret, timeout, backoff_unit }` (section 25.6, the hosted relay, the only form of `from_env`) or `Gateway { gateways, timeout, backoff_unit }` (`PushConfig::gateway(list)`, each checked with `checked_gateway`, at least one). `Push::status()` names the mode: `off`, `worker`, or `gateway`.
+
+**Schema version 8 (team file).**
+
+```sql
+CREATE TABLE push_handle (
+  device_id INTEGER PRIMARY KEY REFERENCES device(id), gateway TEXT NOT NULL,
+  handle BLOB NOT NULL, secret BLOB NOT NULL, updated_at INTEGER NOT NULL, failed_at INTEGER);
+```
+
+`Store::open_team` migrates a version 7 file with the copy rule of 23.2: `<file>.pre-v8` (mode 0600), then in one transaction the table and `PRAGMA user_version = 8` (`migrate_v8`). The change is additive: `push_token` and every other table are untouched. A version 2 to 6 file goes on to 8 in one start, with each copy. A new team file is made at version 8; versions above 8 are refused, and the schema 7 image refuses a version 8 file. `remove_team_file` also removes `.pre-v8` and `.pre-v8.tmp`. A file that came back from 8 (below) has the table already: `migrate_v8` keeps it and deletes the handles of the devices and members revoked meanwhile (the image of schema 7 does not delete them at a revocation). The team file is SQLCipher; the handle and the secret never go to a log or an audit row.
+
+The way back in place: `apassy-relay downgrade-schema-7` (`rollback::downgrade_to_7`, `Store::downgrade_to_v7`), with the relay stopped (it takes `relay.lock`): every team file of version 8 is set to version 7 and nothing else changes; the schema 7 image never reads `push_handle`. The devices of a node get no push until the next start of schema 8. `downgrade-schema-6` takes a file of version 7 or 8 to 6 (30.4). The other way back is the `.pre-v8` copy (docs/OPERATIONS.md 25.3).
+
+**Endpoints** (`Need::Member`, then the handler requires `MemberAuth.device`, as `PUT /v1/push/token`; served on the node, tailnet, and hosted listeners):
+
+| Endpoint | Body | Answer |
+| --- | --- | --- |
+| `PUT /v1/push/handle` | `PushHandlePut {v: 1, gateway, handle, secret}`, exactly these fields | `{device_id, updated_at}`; one handle per device, replaced on each call, which also clears `failed_at`. Row `push_handle_set {device_id}` only when the gateway, handle, or secret changes (as `push_token_set`, section 26.4). |
+| `DELETE /v1/push/handle` | none | `{device_id}`; removes the caller's handle. Row `push_handle_removed {device_id}` when there was one. |
+
+In order: a relay that does not push through a gateway (the hosted relay, a node without `push_gateway`) is 409 `push_unavailable`; `v` other than 1, an unknown or missing field, a `gateway` that is not an origin of `checked_gateway` form (also with spaces around it), a `handle` that is not canonical b64u of 16 to 1024 bytes, or a `secret` that is not 43 characters of canonical b64u of 32 bytes is 400 `invalid_request`; a `gateway` that is not exactly one of the node's gateways is 409 `push_gateway_refused` (new in `src/error.rs`), so a device cannot make the node call an arbitrary address. The node never opens a handle. A device of a node uses these routes; `PUT /v1/push/token` there is 409 `push_unavailable` (a gateway node has no topic). Revoking a device (`devices::revoke`) or a member (`admin::revoke_member`) deletes its handles in the same transaction.
+
+**The sealed summary.** In the gateway mode, `POST /v1/questions` reads the optional header `X-Apassy-Push-Summary` (`push::SUMMARY_HEADER`; push-gateway-v1 section 12): exactly 720 characters of canonical b64u that decode to 540 bytes, else 400 `invalid_request` before the token is checked. The node keeps it in memory with the push job only, never stores or logs it, and does not open it. Other relays ignore the header. A job made at a restart (`questions::recover_push`) has no summary.
+
+**The push thread in the gateway mode.** After the commit of `POST /v1/questions`, the handles of the routing set (25.6) with `failed_at IS NULL` go to the same bounded fair queue, budget, and throttles as the Worker mode. Before the push each handle is read again: the question is open, unanswered, and not expired, the device is in its routing set, and its stored handle and gateway are still those of the job. A handle whose gateway is not one of the node's is skipped. For each handle, one `POST <gateway>/v1/push` (`ureq`, no redirects, timeout 10 s or the time to the question's end if less) with the body, fields in this order:
+
+```json
+{"v":1,"handle":"<b64u>","at":<now>,"expires_at":<the question's>,"collapse_id":"apassy-question","proof":"<b64u 43>"}
+```
+
+and `,"summary":"<720>"` after `proof` when the job has one. `proof = b64u(HMAC-SHA256(secret, "apassy-push-v1" 0 handle 0 at 0 expires_at 0 collapse_id [0 summary]))` (`push::proof`; the numbers decimal, the handle and summary as sent). The body never holds a token or the secret. A gateway push is sent once: no retry.
+
+| Answer of the gateway | The node |
+| --- | --- |
+| 200 `{"v":1,"status":200}` | counts it; one `push_sent {count, via: "gateway"}` per job |
+| 200 with status 410, or 400 with reason `BadDeviceToken` or `DeviceTokenNotForTopic` | `failed_at = now` (only while the device still has that handle) |
+| 403 `handle_invalid`, `handle_expired`, or `proof_invalid` | `failed_at = now`, the same way |
+| 403 `stale_request` | the handle stays; `push_failed {reason: "clock"}`, at most one per team and ten seconds |
+| Anything else (another 200 status, a 400 of another version, 409, 429, a 5xx, no answer) | the push is dropped, the handle stays |
+
+Except the clock row, each push that did not go writes `push_failed {device_id, status, reason}` (`reason` the APNs word, the gateway's code, or `gateway`), at most one per device and ten seconds. A failed handle is not used again until its device sends `PUT /v1/push/handle`.
+
+### 32.6 Directory version 1005: node pairing codes
+
+```sql
+ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','node'));
+```
+
+`Directory::open` moves a 1004 file to 1005 in one transaction (and 1001 to 1003 through 1004 to 1005 in the same one); a failure leaves the file at its version and stops the start. The change is additive: every existing code is `operator`. New directories are made at 1005; versions above it are refused, and the 1004 image refuses a 1005 file.
+
+A **node pairing code** (node-pairing-v1 section 6) is a team code of kind `node`: `apassy_tcd_<64 hex>`, one use, 1 to 10 minutes (`directory::MAX_NODE_CODE_MINUTES`), made by `Directory::new_node_code(minutes, now)` with the relay audit row `node_code_created {code_id, expires_at}`. Callers: `RunningNode::make_node_code` (in process) and the operator command `node_code {minutes}` (`apassy-relay admin node-code [--minutes <n>]`, default 10; `apassy pair` on the Linux node, later). `POST /v1/teams` (section 23) takes it like an operator code only on a node (`RelayConfig::is_node`); elsewhere it is 403 `invite_invalid`, as an unknown code, and stays unused. The `team_created` row names `code_kind`. A used or expired code is 403 `invite_invalid`.
+
+The way back in place: `apassy-relay downgrade-directory-1004` (`Directory::downgrade_to_1004`), with the relay stopped: the unused node codes are deleted (the 1004 image would take one for an operator code) and the version is 1004 again, in one transaction; used codes stay as history, and the column stays (the 1004 image never reads it, and the next open of 1005 keeps it). A 1004 file is left as it is; another version exits 1. `downgrade-directory-1003` takes a 1004 or 1005 file to 1003, with the same step first (docs/OPERATIONS.md 25.3).
+
+### 32.7 Tests
+
+`tests/tailnet_scope.rs`, `tests/node_teams.rs`, and `tests/push_handles.rs`, on free loopback ports and temporary directories (`tests/common/node.rs` starts a node with a tailnet listener, the node origin `https://100.64.0.7:8444`, and optionally the team routes and a push gateway; the tests call the tailnet listener as the front would): the tailnet listener serves `/healthz` and the device routes and is 404 for the team routes, the proxy, Connect, the OAuth paths, and any other path, while the node and public listeners serve the OAuth metadata; with `agents` it serves `/mcp`, `/v1/runs`, `/v1/access`, and the host lane, and a 401 of `/mcp` there has no `WWW-Authenticate`; it stops with the node. A device team is made in process, its device signs in with the node origin, gets `owner`, makes links, survives a restart, and is listed and revoked (the last owner device is `conflict`); a sign-in signed with the Funnel origin passes, one with an unknown origin is 401, a node without the public route takes only its node origin, and the hosted relay accepts exactly `public_url`; a node code makes a team once, is refused after its minutes, and makes no team on a relay that is not a node. `PUT /v1/push/handle` stores the decoded handle and secret, writes one row per change and no handle or secret in the audit, refuses a gateway off the list (409) and every bad form (400); the hosted relay and a node without a gateway answer 409; a post makes one call per handle of the routing set (not the asker's) with six fields, the proof of `push::proof`, and no token; a 410 marks the handle, the next post skips it, a new `PUT` clears it, `handle_expired` marks it, `stale_request` writes the clock row and keeps it, a 503 drops the push; a summary goes into the body and the proof, and a bad one is 400; a revoked device loses its handle. Unit tests: the proofs of the contract's vectors and the body form, the actions of each gateway answer, the summary form, and the modes (`push::tests`); the scope (`http::tests`); the challenge origin (`devices::tests`); the configuration and the origin and gateway forms (`config::tests`); schema 7 ↔ 8 with the copy and a revoked device in between (`store::tests`); directory 1004 ↔ 1005 with the codes (`directory::tests`); the new commands (`bin` tests).
+
+### 32.8 What this does not protect
+
+- Whoever reaches the tailnet listener can call every device route, as on the hosted relay; a device token, the team limits, and the failed-auth limiter bound what they can do. The listener is on the loopback, so the TLS front (unit N2 of the core) is what decides who reaches it.
+- A device of a team can make the node call its gateway (one of the node's), once per question, with a handle of its choosing. The gateway allow-list keeps it from making the node call anything else.
+- A node that held a handle can push the fixed notification to that device until the handle expires at the gateway (180 days), also after the device left the team (push-gateway-v1 section 17).
+- The sign-in origin set widens what a signature is good for to the origins of one node; a signature for another node's origin, or the hosted relay's, is refused.
