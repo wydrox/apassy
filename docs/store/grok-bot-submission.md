@@ -38,13 +38,15 @@ each run on your Mac or iPhone.
 Apassy is an open source password and API key manager for people who work with AI agents. With this
 plugin, Grok Bot can call an API with your key, but it never sees the key.
 
-- You pick which credentials the Bot may use, in Apassy on your Mac.
+- You give the Bot only the MCP address of your Mac. It connects by itself (Authorize), and you allow
+  the connection on your Mac or iPhone after you compare a short code. No token to copy.
+- You pick which credentials the Bot may use, in Apassy on your Mac. It starts with none.
 - The Bot asks for a run with the exact command, its purpose, and your request.
 - Apassy asks you on your Mac or iPhone. Nothing runs until you allow it.
 - The Bot gets placeholders and a base URL, not the values. Your Mac puts the real value into the API
   request, only for the API hosts of that credential, and puts the placeholder back in the answer.
 - No Apassy server is on the path. The Bot connects to your own Mac through Tailscale Funnel. You can
-  turn the route off, or revoke the Bot, at any time.
+  turn remote access off, or disconnect the Bot, at any time.
 
 You need a Mac with Apassy and Tailscale. Apache-2.0. Source: https://github.com/wydrox/apassy
 
@@ -70,17 +72,19 @@ Text for the form:
 >    name `httpbin test`, value `httpbin-test-7f3a9c1e5b2d4f60a8e1c3b5d7f9a2c4`, variable
 >    `HTTPBIN_TOKEN`, host `httpbingo.org`. If Apassy says that `httpbingo.org` is a whole domain, allow it
 >    for this test item.
-> 3. In Apassy → Settings → Cloud agents, turn on **Public route (Tailscale Funnel)**. Click
->    **Add a cloud agent…**, name it `Grok Bot`, kind Grok Bot, pick only `httpbin test`, and click
->    **Copy setup**. Keep Apassy open and the vault unlocked during the test.
+> 3. In Apassy → Bouncer → Agents, turn on **Remote access** (Touch ID or the passphrase) and click
+>    **Copy** next to the MCP address. Keep Apassy open and the vault unlocked during the test.
 >
 > **In Grok Bot**
 >
-> 1. Prompt: `Add a custom MCP server named "apassy" with the URL <the MCP URL from Copy setup> and the
->    header Authorization with the value "Bearer <the token from Copy setup>".`
->    Expected: the Bot adds the server and lists the tools `apassy_list_access`, `apassy_request_run`,
->    and `apassy_run_status`.
-> 2. Prompt: `Use Apassy: list the credentials that you can use.`
+> 1. Prompt: `Add a custom MCP server named "apassy" with the URL <the MCP address from Apassy>.`
+>    Press **Authorize** when the Bot offers it. Expected: a browser page shows `Grok Bot`, "this Mac",
+>    and a code such as `K7Q-4MD`; Apassy → Bouncer → Decisions shows "Grok Bot wants to connect" with
+>    the same code. Click **Allow** and confirm with Touch ID. The page says "Connected", and the Bot
+>    lists the tools `apassy_list_access`, `apassy_request_run`, and `apassy_run_status`.
+> 2. In Apassy → Bouncer → Agents, open `Grok Bot` (it has a **Remote** cap and no credentials), click
+>    **Choose Credentials…**, and pick only `httpbin test`.
+>    Prompt: `Use Apassy: list the credentials that you can use.`
 >    Expected: exactly one item, `httpbin test`, variable `HTTPBIN_TOKEN`, host `httpbingo.org`. No value.
 > 3. Prompt: `Use Apassy to call https://httpbingo.org/bearer with my HTTPBIN_TOKEN as a bearer token,
 >    and show me the response body.`
@@ -92,8 +96,10 @@ Text for the form:
 >    Expected: the Bot runs the command. The response is `{"authenticated": true, "token": "…"}`, and the
 >    token in it is a placeholder: the same length as the synthetic value, but not
 >    `httpbin-test-7f3a9c1e5b2d4f60a8e1c3b5d7f9a2c4`. The synthetic value never appears in the chat.
-> 5. Optional: in Apassy, click **Revoke…** next to `Grok Bot`, and repeat prompt 2.
+> 5. Optional: in Apassy, click **Disconnect…** on the page of `Grok Bot`, and repeat prompt 2.
 >    Expected: the call fails with `unauthenticated` (HTTP 401).
+> 6. Optional: press Authorize again in the Bot, and click **Deny** in Apassy. Expected: the page says
+>    "You denied the connection."
 >
 > Every run asks the owner in this release, also a safe command. If no one answers in 5 minutes, the
 > run times out and the Bot says so.
@@ -105,6 +111,9 @@ Text for the form:
 - [ ] The public mirror repository of `deploy/plugins/apassy-cloud/` exists, with the full Apache-2.0
       `LICENSE` and the released `version` in `.cursor-plugin/plugin.json`.
 - [ ] The interpolation of `mcp.json` is checked in Cursor, or the README says what works.
+- [ ] Grok Bot's OAuth client works with the node: registration, Authorize, the code exchange, and a
+      refresh after the access token ends (plan "Bouncer section", end-to-end steps 3, 7, and 8). If it
+      does not, the README's token fallback (`apassy agent add-remote`) is the documented path.
 - [ ] The logo URL is public and 1:1.
 - [ ] The owner read the Publisher Terms.
 - [ ] The owner says yes.
