@@ -12,9 +12,9 @@
 //! open never stands in for this browser's. The owner allows the request in the app
 //! (`RunningNode::decide_connect`), which names the agent of the personal team (always a
 //! new one, made for this request); the next refresh of the page sends the browser back
-//! to the client with a one-time code. `POST /oauth/token` trades the code (with its PKCE verifier) for an
-//! access token, which is the relay agent token of that agent (so `/mcp` auth does not
-//! change), and a refresh token.
+//! to the client with a one-time code. `POST /oauth/token` trades the code (with its PKCE
+//! verifier) for an access token, which is the relay agent token of that agent (so `/mcp`
+//! auth does not change), and a refresh token.
 //!
 //! Every state is in the directory `relay.db` (version 1004): `oauth_client`,
 //! `connect_request`, `oauth_refresh`. Codes and refresh tokens are stored as SHA-256
@@ -1242,9 +1242,14 @@ impl Flow<'_> {
             New,
             Same(String),
             Busy,
+            Gone,
         }
         let opened = self.hub.directory.store.tx(|tx| {
             prune(tx, now)?;
+            // A client that was never allowed and is an hour old went just now.
+            if load_client(tx, client_id)?.is_none() {
+                return Ok(Opened::Gone);
+            }
             expire_requests(tx, now)?;
             let waiting: Option<(String, String, String, Option<String>)> = tx
                 .query_row(
@@ -1331,6 +1336,7 @@ impl Flow<'_> {
                 location: format!("{}{open}", paths::WAIT_PREFIX),
             },
             Opened::Busy => Reply::page(429, Page::busy()),
+            Opened::Gone => Reply::page(400, Page::invalid()),
         })
     }
 
