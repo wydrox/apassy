@@ -120,7 +120,7 @@ temporary credentials" (S6-14).
 | `aws_sts` | `AssumeRole` with `role_arn`, else `GetFederationToken`; `DurationSeconds=900`; `RoleSessionName` or `Name` = `apassy-<run id>`; SigV4 with the long-lived key, service `sts`. `GetSessionToken` MUST NOT be used. | `Expiration` at most 900 s after the request, else `lease_failed`. |
 | `github_app` | RS256 JWT (`iat` 60 s back, `exp` at most 9 minutes ahead, `iss` = `app_id`) → `POST {api_url}/app/installations/{installation_id}/access_tokens` with `repositories` and `permissions`. | GitHub's `expires_at` (one hour). Revoked at run end (section 4.2). |
 | `google_service_account` | RS256 JWT of the key → `token_uri` (bootstrap token, kept on the key holder and dropped after the next call) → `iamcredentials.googleapis.com` `generateAccessToken` for `impersonate` with `scopes` and `lifetime: "900s"`. | `expireTime` at most 900 s ahead, else `lease_failed`. |
-| `oauth_refresh` | `POST token_url` with `grant_type=refresh_token`, the client auth of `client_auth`, and `scope`. | `expires_in`; missing → 900 s assumed, and the activity row says so. |
+| `oauth_refresh` | `POST token_url` with `grant_type=refresh_token`, the client auth of `client_auth`, and `scope`. | `expires_in`, the real expiry. Without `revoke_url`: a missing `expires_in` or one over 3600 s is `lease_failed`. With `revoke_url` (revoked at run end): a longer `expires_in` is reported as it is; a missing one gives `expires_at = made_at + 3600`, and the activity row says that the expiry is unknown and the token is revoked at run end. |
 
 The whole exchange of one lease has a deadline of 20 seconds. Every secret is held in `Zeroizing`
 buffers and dropped before the process spawns.
@@ -150,7 +150,7 @@ written to a file, a database, a log, or an audit row.
 | `secrets` | 1 to 4 variables. The first is the item's bound variable (`env_binding.env_name`). Each value is printable ASCII without `"` and `\`, 1 to 4096 bytes (`check_value`). Masked in the run output; replaced in relay answers. |
 | `plain` | 0 to 4 variables that are not secrets. Not masked. |
 | `made_at` | Unix seconds when the key holder sent the provider request. |
-| `expires_at` | Unix seconds. `made_at < expires_at`. At most `made_at + 900` for `aws_sts` and `google_service_account`; at most `made_at + 3600` for `github_app`. |
+| `expires_at` | Unix seconds. `made_at < expires_at`. At most `made_at + 900` for `aws_sts` and `google_service_account`; at most `made_at + 3600` for `github_app`, and for `oauth_refresh` without `revoke`. |
 | `revoke` | `null`, or `{"type": "github", "url": "<api_url>/installation/token"}`, or `{"type": "oauth", "url": "<revoke_url>"}`. The token to revoke is always the first secret; it is not repeated here. |
 | `update_field` | `null`, or `{"field": "refresh_token", "value": "…"}` when an OAuth answer rotated the refresh token (only `oauth_refresh`). |
 

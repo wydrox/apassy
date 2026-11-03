@@ -197,9 +197,8 @@ impl ShortLivedKind {
 
     /// The lifetime of a lease of this kind as the catalog shows it, in seconds
     /// (`lease_secs` of `apassy_list_access`, contract section 5.1): 900, or 3600 for a
-    /// GitHub installation token. For OAuth it is also the lifetime assumed when the
-    /// token endpoint gives no `expires_in` (section 3.3). It is not a limit: see
-    /// [`ShortLivedKind::max_secs`].
+    /// GitHub installation token. It is not a limit: see [`ShortLivedKind::max_secs`].
+    /// The OAuth lease lives as long as the answer's `expires_in` says (section 3.3).
     pub fn lease_secs(self) -> u64 {
         match self {
             Self::GithubApp => 3600,
@@ -209,8 +208,9 @@ impl ShortLivedKind {
 
     /// The longest lease of the kind in seconds (`expires_at - made_at`), when the
     /// contract fixes one (section 4): 900 for AWS and Google, 3600 for GitHub. `None`
-    /// for OAuth, whose lease lives as long as the provider's `expires_in` says, and for
-    /// the reserved kinds.
+    /// for OAuth, whose lease lives as long as the provider's `expires_in` says (at most
+    /// one hour unless it is revoked at run end, `lease::oauth::MAX_UNREVOKED_SECS`),
+    /// and for the reserved kinds.
     pub fn max_secs(self) -> Option<u64> {
         match self {
             Self::AwsSts | Self::GoogleServiceAccount => Some(900),

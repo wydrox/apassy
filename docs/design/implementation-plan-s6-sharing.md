@@ -229,7 +229,9 @@ that secret and fails if it is there.
 - Design: as S6-5, S6-6, S6-7. GitHub: `api_url` default `https://api.github.com`; the answer's
   `token` (`ghs_…`) and `expires_at`; `Revoke::Github { token }`. Google: the bootstrap token is
   dropped after the second call; `expireTime` of the answer must be at most 900 s ahead. OAuth:
-  `expires_in` missing → 900 s assumed and the activity row says so; `Revoke::Oauth { revoke_url,
+  `expires_in` is the real expiry; without a revoke URL, a missing `expires_in` or one over 3600 s
+  is `lease_failed`, and with one a missing `expires_in` shows one hour and the activity row says the
+  expiry is unknown (C1/C2 security review, 2026-11-03); `Revoke::Oauth { revoke_url,
   token }` when the item has a revoke URL. A rotated refresh token is returned in
   `Lease.update_field: Option<(field, value)>` for the caller to store (F and G store it before
   delivery).

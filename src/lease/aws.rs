@@ -204,7 +204,7 @@ pub(super) fn acquire(
         expires_at,
         revoke: None,
         update_field: None,
-        lifetime_assumed: false,
+        expiry_unknown: false,
     };
     drop(answer);
     lease

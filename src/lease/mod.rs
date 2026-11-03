@@ -207,15 +207,15 @@ pub struct Lease {
     pub expires_at: u64,
     pub revoke: Option<Revoke>,
     pub update_field: Option<UpdateField>,
-    /// The provider did not say when the credential expires, so `expires_at` is
-    /// `made_at + 900`, assumed (contract section 3.3: an OAuth answer without
-    /// `expires_in`). The caller's activity row says so ([`ASSUMED_LIFETIME_NOTE`]).
-    pub lifetime_assumed: bool,
+    /// The provider did not say when the credential expires (an OAuth answer without
+    /// `expires_in`, contract section 3.3). Only a lease that is revoked at run end may
+    /// have it; its `expires_at` is `made_at + 3600` ([`oauth::MAX_UNREVOKED_SECS`]), not
+    /// the provider's expiry. The caller's activity row says so ([`UNKNOWN_EXPIRY_NOTE`]).
+    pub expiry_unknown: bool,
 }
 
-/// The words of the activity row of a lease whose lifetime is assumed.
-pub const ASSUMED_LIFETIME_NOTE: &str =
-    "The token endpoint did not say when the access token expires; Apassy assumes 15 minutes.";
+/// The words of the activity row of a lease whose expiry is unknown.
+pub const UNKNOWN_EXPIRY_NOTE: &str = "The token endpoint did not say when the access token expires. Apassy revokes it when the run ends.";
 
 impl Lease {
     /// The variable names: the secrets, then the plain variables, in lease order (the
@@ -283,11 +283,18 @@ impl Lease {
         {
             return Err("The lease lives longer than its kind allows.");
         }
-        if self.lifetime_assumed
+        if self.expiry_unknown
             && (self.kind != LeaseKind::OauthRefresh
-                || self.lifetime_secs() != self.kind.lease_secs())
+                || self.revoke.is_none()
+                || self.lifetime_secs() != oauth::MAX_UNREVOKED_SECS)
         {
-            return Err("Only an OAuth lease has an assumed lifetime, of 900 seconds.");
+            return Err("Only a revoked OAuth lease has an unknown expiry, shown as one hour.");
+        }
+        if self.kind == LeaseKind::OauthRefresh
+            && self.revoke.is_none()
+            && self.lifetime_secs() > oauth::MAX_UNREVOKED_SECS
+        {
+            return Err("An OAuth lease that is not revoked lives at most one hour.");
         }
         let revoke_ok = match (&self.revoke, self.kind) {
             (None, _) => true,
@@ -1026,7 +1033,7 @@ mod tests {
                     field: field.to_owned(),
                     value: SecretValue::new(text(&value["update_field"]["value"])),
                 }),
-            lifetime_assumed: false,
+            expiry_unknown: false,
         }
     }
 
@@ -1455,14 +1462,25 @@ mod tests {
     }
 
     #[test]
-    fn an_assumed_lifetime_is_only_an_oauth_lease_of_900_seconds() {
+    fn an_unknown_expiry_is_only_a_revoked_oauth_lease_of_one_hour() {
         let mut oauth = lease_from(&json(LEASE_OAUTH));
-        oauth.lifetime_assumed = true;
-        assert!(oauth.check().is_err(), "3600 s is not the assumed 900 s");
-        oauth.expires_at = oauth.made_at + LeaseKind::OauthRefresh.lease_secs();
-        oauth.check().expect("assumed 900 s");
+        oauth.expiry_unknown = true;
+        oauth.check().expect("revoked, shown as one hour");
+        oauth.expires_at = oauth.made_at + 900;
+        assert!(oauth.check().is_err(), "an unknown expiry is shown as one hour");
+        oauth.expires_at = oauth.made_at + 3600;
+        let revoke = oauth.revoke.take();
+        assert!(oauth.check().is_err(), "an unknown expiry needs the revocation");
+        // Without a revocation, an OAuth lease lives at most one hour; with one, the
+        // provider's longer expiry is reported as it is.
+        oauth.expiry_unknown = false;
+        oauth.check().expect("one hour");
+        oauth.expires_at = oauth.made_at + 3601;
+        assert!(oauth.check().is_err(), "longer than one hour without revocation");
+        oauth.revoke = revoke;
+        oauth.check().expect("revoked at run end");
         let mut google = lease_from(&json(LEASE_GOOGLE));
-        google.lifetime_assumed = true;
+        google.expiry_unknown = true;
         assert!(google.check().is_err());
         // The two lifetimes of a kind: the catalog's (5.1) and the limit (4).
         assert_eq!(LeaseKind::OauthRefresh.lease_secs(), 900);

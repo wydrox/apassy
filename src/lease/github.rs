@@ -194,7 +194,7 @@ pub(super) fn acquire(
         expires_at,
         revoke: Some(super::Revoke::Github { url: revoke_url }),
         update_field: None,
-        lifetime_assumed: false,
+        expiry_unknown: false,
     };
     drop(token);
     drop(object);
@@ -388,7 +388,7 @@ mod tests {
                 url: "https://api.github.com/installation/token".to_owned()
             })
         );
-        assert!(lease.update_field.is_none() && !lease.lifetime_assumed);
+        assert!(lease.update_field.is_none() && !lease.expiry_unknown);
         revoke_at(&lease, None, &both, None, deadline()).expect("revoked");
         let seen = server.join().expect("fake GitHub");
         assert_eq!(
