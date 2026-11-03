@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "apassy": {
+      "url": "${APASSY_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${APASSY_TOKEN}"
+      }
+    }
+  }
+}
