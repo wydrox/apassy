@@ -76,6 +76,8 @@ use crate::vault::{
 use crate::vaults::VaultEntry;
 
 /// How often Devices asks the relay for the push state of the devices.
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 const DEVICES_EVERY: Duration = Duration::from_secs(30);
 /// How often a Mac that joins the questions team asks whether the other Mac confirmed.
 const JOIN_POLL_EVERY: Duration = Duration::from_secs(2);
@@ -234,6 +236,8 @@ impl QuestionsUi {
 
 /// What Devices shows of one trusted device of the vault: its kind, how it answers, and
 /// its push state when the relay tells it.
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 pub(crate) fn device_words(device: &TrustedDevice, this_mac: bool, push: Option<bool>) -> String {
     let mut words = match (device.kind, this_mac) {
         (TrustedDeviceKind::Mac, true) => "This Mac".to_owned(),
@@ -267,6 +271,8 @@ pub(crate) fn device_label(device: &TrustedDevice) -> String {
 }
 
 /// One row of the devices of the questions.
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceRow {
     pub(crate) name: String,
@@ -573,6 +579,8 @@ impl DesktopApp {
 
     /// "Send questions through the relay" goes off: no check, it takes authority away.
     /// Relay sync never changes.
+    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+    #[allow(dead_code)]
     pub(crate) fn questions_turn_off(&mut self) {
         let result = self.owner_ui.session.with_vault(|vault| {
             if vault.is_locked() {
@@ -1145,6 +1153,8 @@ impl DesktopApp {
 
     /// The devices of the questions of the open vault, for Devices: each trusted device
     /// with its words. Asks the relay for the push state every 30 seconds while it shows.
+    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+    #[allow(dead_code)]
     pub(crate) fn questions_devices(&mut self) -> Vec<DeviceRow> {
         let found = self.owner_ui.session.with_vault(|vault| {
             if vault.is_locked() {
@@ -1193,6 +1203,8 @@ impl DesktopApp {
     }
 
     /// "Remove…" of a device in Devices: its confirmation first.
+    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+    #[allow(dead_code)]
     pub(crate) fn questions_ask_remove(&mut self, uuid: &str, ctx: Option<&egui::Context>) {
         match self.vault_list.current.clone() {
             Some(id) => self.sync_open_sheet(
@@ -1338,6 +1350,8 @@ impl DesktopApp {
 
     /// The D14 notice of Settings > Devices ([`free_approvals_notice`]) while the
     /// questions of the open vault go through the hosted relay, or `None`.
+    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+    #[allow(dead_code)]
     pub(crate) fn questions_free_notice(&self) -> Option<String> {
         self.owner_ui
             .session

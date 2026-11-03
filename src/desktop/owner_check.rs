@@ -677,6 +677,14 @@ pub enum OwnerRequest {
         group_id: String,
         change: crate::broker::approvals::ConnectGroupChange,
     },
+    /// Turn the tailnet route of this Mac's node on or off (Settings > Devices, plan
+    /// S2–S3, unit N7). The node checks nothing itself: the caller asks first.
+    SetTailnetRoute {
+        on: bool,
+    },
+    /// Revoke… in Settings > Devices (unit N7): a device of the node team, a device of
+    /// another relay, or a Linux node, as the sheet named it.
+    RevokeNodeDevice(super::ui::devices::RevokeRequest),
 }
 
 impl OwnerRequest {
@@ -1121,6 +1129,8 @@ impl OwnerRequest {
                 group_id: group_id.clone(),
                 change: change.clone(),
             },
+            Self::SetTailnetRoute { on } => OwnerAction::SetTailnetRoute { on: *on },
+            Self::RevokeNodeDevice(request) => request.action(),
         }
     }
 
@@ -1549,6 +1559,16 @@ impl OwnerRequest {
                     "Change your Apassy Connect plan to {quantity} people or seats? Stripe charges the difference."
                 ),
             },
+            Self::SetTailnetRoute { on: true } => "Make this Mac reachable on your tailnet. Your iPhone and Macs then reach it directly over Tailscale. Only devices on your tailnet can connect, and each signs in with its own key.".to_owned(),
+            Self::SetTailnetRoute { on: false } => "Stop the tailnet route of this Mac. Approvals then go through Apassy relay.".to_owned(),
+            Self::RevokeNodeDevice(request) if request.linux_vault.is_some() => format!(
+                "Revoke \"{}\". This Mac stops syncing through it. Its copy stays there.",
+                page_text(&request.device_name)
+            ),
+            Self::RevokeNodeDevice(request) => format!(
+                "Revoke \"{}\". It can no longer see or answer questions. To use it again, pair it again.",
+                page_text(&request.device_name)
+            ),
         }
     }
 }
@@ -2564,6 +2584,8 @@ impl DesktopApp {
             | OwnerRequest::ChangeConnectGroup { .. } => {
                 self.owner.connect_proof = Some(proof);
             }
+            OwnerRequest::SetTailnetRoute { on } => self.devices_set_route(on, proof),
+            OwnerRequest::RevokeNodeDevice(request) => self.devices_revoke(&request, proof),
         }
     }
 

@@ -470,6 +470,20 @@ pub enum OwnerAction {
         group_id: String,
         change: ConnectGroupChange,
     },
+    /// Turn the tailnet route of this Mac's node on or off (plan S2–S3, unit N7): the
+    /// iPhone and the other Macs reach the approvals of this Mac directly, or no longer.
+    SetTailnetRoute {
+        on: bool,
+    },
+    /// Revoke devices in Settings > Devices (plan S2–S3, unit N7): devices of the team
+    /// `team_id` (on this Mac's node or another relay) by their relay numbers, or this Mac
+    /// leaves the team of a Linux node. The proof names the team, the devices, and the
+    /// name that the sheet showed.
+    RevokeNodeDevice {
+        team_id: String,
+        device_ids: Vec<u64>,
+        device_name: String,
+    },
 }
 
 /// A change of a Connect group that needs the owner check (connect-billing-v1 section 6).
@@ -634,6 +648,9 @@ impl OwnerAction {
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
+            Self::SetTailnetRoute { on: true } => "Reach this Mac on your tailnet",
+            Self::SetTailnetRoute { on: false } => "Stop the tailnet route",
+            Self::RevokeNodeDevice { .. } => "Revoke a device",
             _ => "Confirm with Touch ID",
         }
     }
@@ -856,6 +873,16 @@ impl OwnerAction {
                     format!("change your Apassy Connect plan to {quantity} people or seats")
                 }
             },
+            Self::SetTailnetRoute { on: true } => {
+                "let your iPhone and Macs reach this Mac directly on your tailnet".to_owned()
+            }
+            Self::SetTailnetRoute { on: false } => {
+                "stop the tailnet route of this Mac; approvals go through Apassy relay".to_owned()
+            }
+            Self::RevokeNodeDevice { device_name, .. } => format!(
+                "revoke the device \"{}\"; it can no longer see or answer questions",
+                short_device_name(device_name)
+            ),
         }
     }
 
@@ -2136,19 +2163,18 @@ mod evaluation_tests {
                 .ends_with("both devices show: blaze cable flute board seal tiger")
         );
         // Another join, key, or set of words is another action.
+        let confirm_with =
+            |join_id: u64, public_key: Vec<u8>, words: &str| OwnerAction::ConfirmConnectDevice {
+                account_id: "acc_k7m2q4x3ca".into(),
+                join_id,
+                device_name: "iPhone".into(),
+                public_key,
+                words: words.into(),
+            };
         for other in [
-            OwnerAction::ConfirmConnectDevice {
-                join_id: 5,
-                ..confirm.clone()
-            },
-            OwnerAction::ConfirmConnectDevice {
-                public_key: vec![5; 65],
-                ..confirm.clone()
-            },
-            OwnerAction::ConfirmConnectDevice {
-                words: "blaze cable flute board seal tile".into(),
-                ..confirm.clone()
-            },
+            confirm_with(5, vec![4; 65], "blaze cable flute board seal tiger"),
+            confirm_with(4, vec![5; 65], "blaze cable flute board seal tiger"),
+            confirm_with(4, vec![4; 65], "blaze cable flute board seal tile"),
         ] {
             assert_ne!(other, confirm);
         }

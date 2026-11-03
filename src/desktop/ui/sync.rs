@@ -204,6 +204,8 @@ pub(crate) enum SyncSheet {
     /// safety words and the owner check, as "Add a device…".
     AddIphone { id: String },
     /// "Remove…" of a device of the questions in Devices: its confirmation.
+    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+    #[allow(dead_code)]
     RemoveQuestionsDevice { id: String, uuid: String },
 }
 
@@ -336,6 +338,8 @@ pub(super) fn method_words(app: &DesktopApp, entry: &VaultEntry) -> String {
 }
 
 /// How the open vault reaches the other Macs, for Settings > Devices.
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 pub(super) struct OtherMacs {
     /// The way in a few words.
     pub(super) words: String,
@@ -344,6 +348,8 @@ pub(super) struct OtherMacs {
     pub(super) relay: Option<String>,
 }
 
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 pub(super) fn other_macs(app: &DesktopApp) -> OtherMacs {
     let entry = app
         .vault_list

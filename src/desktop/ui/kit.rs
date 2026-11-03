@@ -863,6 +863,8 @@ pub(crate) fn small_button(ui: &mut Ui, label: &str, style: Style) -> Response {
 /// A small borderless button ([`Style::Link`] or [`Style::Destructive`]) at the trailing
 /// edge of a row: its text ends at the edge, as the switches of the rows above do. Its
 /// hover fill reaches past the edge by [`BORDERLESS_SMALL_PAD`], into the row's padding.
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 pub(crate) fn trailing_small_button(ui: &mut Ui, label: &str, style: Style) -> Response {
     debug_assert!(matches!(style, Style::Link | Style::Destructive));
     button_named(
@@ -3534,7 +3536,6 @@ pub(crate) enum Icon {
     /// Three dots: the menu of rare actions.
     More,
     /// A laptop: Settings > Devices.
-    #[cfg(feature = "vault")]
     Laptop,
     /// An arrow down in a circle: Settings > Updates.
     #[cfg(feature = "vault")]
@@ -3762,7 +3763,6 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
                 painter.circle_filled(p(x, 0.5), stroke.width * 1.1, color);
             }
         }
-        #[cfg(feature = "vault")]
         Icon::Laptop => {
             painter.rect_stroke(
                 Rect::from_min_max(p(0.2, 0.22), p(0.8, 0.66)),
