@@ -8,8 +8,12 @@ import { DOWNLOAD, REPO, VERSION } from "../lib/site";
 interface Props {
   title: string;
   description: string;
+  /** Keep the page out of search results: drafts and the pages of a checkout. */
+  noindex?: boolean;
+  /** Send no Referer from this page (the pages that carry a checkout session or an invite). */
+  noReferrer?: boolean;
 }
-const { title, description } = Astro.props;
+const { title, description, noindex = false, noReferrer = false } = Astro.props;
 ---
 <!doctype html>
 <html lang="en">
@@ -21,6 +25,8 @@ const { title, description } = Astro.props;
     <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
     <title>{title}</title>
     <meta name="description" content={description} />
+    {noindex && <meta name="robots" content="noindex" />}
+    {noReferrer && <meta name="referrer" content="no-referrer" />}
     <link rel="canonical" href={new URL(Astro.url.pathname, Astro.site)} />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
@@ -39,6 +45,7 @@ const { title, description } = Astro.props;
         <a href="/" class="brand" aria-label="apassy home"><Lockup class="lockup" /></a>
         <nav aria-label="Main">
           <a href="/#browser" class="navlink">Extension</a>
+          <a href="/pricing" class="navlink">Pricing</a>
           <a href="/changelog" class="navlink">Changelog</a>
           <a href={DOWNLOAD} class="navlink" data-download>Download</a>
           <a href={REPO} class="pill"><GitHubIcon /> GitHub</a>
@@ -59,6 +66,7 @@ const { title, description } = Astro.props;
         <nav class="foot-links" aria-label="Footer">
           <a href={REPO}>GitHub</a>
           <a href="/changelog">Changelog</a>
+          <a href="/pricing">Pricing</a>
           <a href="/#browser">Browser extension</a>
           <a href={DOWNLOAD} data-download>Download</a>
           <a href={`${REPO}/tree/main/docs`}>Docs</a>

@@ -1,16 +1,17 @@
 name: Site
 
 # Build apassy.wyderka.cc (site/) on each change of the site or of a file that it
-# builds from (the installer, the version, the changelog, the screenshots). On
+# builds from or checks against (the installer, the version, the changelog, the
+# screenshots, the plans and their prices). On
 # main, deploy the Worker and its assets only for a released version. The disk image comes from
 # release.yml.
 # See docs/operations/release.md.
 
 on:
   push:
-    paths: ["site/**", "scripts/install.sh", "Cargo.toml", "CHANGELOG.md", "docs/images/**", ".github/workflows/site.yml"]
+    paths: ["site/**", "scripts/install.sh", "scripts/check-site-plans.py", "docs/product/plans.md", "tests/fixtures/connect-billing-v1/**", "Cargo.toml", "CHANGELOG.md", "docs/images/**", ".github/workflows/site.yml"]
   pull_request:
-    paths: ["site/**", "scripts/install.sh", "Cargo.toml", "CHANGELOG.md", "docs/images/**", ".github/workflows/site.yml"]
+    paths: ["site/**", "scripts/install.sh", "scripts/check-site-plans.py", "docs/product/plans.md", "tests/fixtures/connect-billing-v1/**", "Cargo.toml", "CHANGELOG.md", "docs/images/**", ".github/workflows/site.yml"]
   workflow_dispatch:
 
 permissions:
@@ -39,6 +40,9 @@ jobs:
         run: >-
           python3 ../scripts/ci-release-ready.py --cargo ../Cargo.toml
           --changelog ../CHANGELOG.md --github-output "$GITHUB_OUTPUT"
+
+      - name: Check the prices of the site against the plans
+        run: python3 ../scripts/check-site-plans.py
 
       - name: Install Node.js 22
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
