@@ -529,45 +529,58 @@ fn a_classification_labels_only_the_one_unconfirmed_item() {
     std::fs::create_dir_all(cwd.join(".git")).unwrap();
     let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-classify-pass").unwrap();
     vault.unlock("synthetic-classify-pass").unwrap();
-    let add = |vault: &mut Vault, title: &str, kind, field: &str, env_name: &str| {
-        let item = vault
-            .add(ItemDraft {
-                title: title.into(),
-                kind,
-                notes: String::new(),
-                tags: vec![],
-                fields: vec![Field {
-                    name: field.into(),
-                    value: SecretValue::new(format!("FAKE-{env_name}-only")),
-                    secret: true,
-                }],
-            })
-            .unwrap();
-        vault.set_env_binding(item.id, env_name, field).unwrap();
-        // No signal: production only by default, every value a default.
-        let unlabeled = Declaration {
-            project: "project".to_owned(),
-            environment: providers::DEFAULT_ENVIRONMENT,
-            risk: providers::DEFAULT_RISK,
-            scope: providers::DEFAULT_SCOPE,
-            reversibility: providers::DEFAULT_REVERSIBILITY,
+    let add =
+        |vault: &mut Vault, title: &str, kind: CredentialKind, field: &str, env_name: &str| {
+            let mut fields = vec![Field {
+                name: field.into(),
+                value: SecretValue::new(format!("FAKE-{env_name}-only")),
+                secret: true,
+            }];
+            // A login needs its username too.
+            if kind == CredentialKind::Login {
+                fields.insert(
+                    0,
+                    Field {
+                        name: "username".into(),
+                        value: SecretValue::new("synthetic-shop-user".to_owned()),
+                        secret: false,
+                    },
+                );
+            }
+            let item = vault
+                .add(ItemDraft {
+                    title: title.into(),
+                    kind,
+                    notes: String::new(),
+                    tags: vec![],
+                    fields,
+                })
+                .unwrap();
+            vault.set_env_binding(item.id, env_name, field).unwrap();
+            // No signal: production only by default, every value a default.
+            let unlabeled = Declaration {
+                project: "project".to_owned(),
+                environment: providers::DEFAULT_ENVIRONMENT,
+                risk: providers::DEFAULT_RISK,
+                scope: providers::DEFAULT_SCOPE,
+                reversibility: providers::DEFAULT_REVERSIBILITY,
+            };
+            vault
+                .save_declaration(item.id, &unlabeled, None, None)
+                .unwrap();
+            vault
+                .set_declaration_sources(
+                    item.id,
+                    &DeclarationSources {
+                        environment: DeclarationSource::Default,
+                        risk: DeclarationSource::Default,
+                        scope: DeclarationSource::Default,
+                        reversibility: DeclarationSource::Default,
+                    },
+                )
+                .unwrap();
+            item.id
         };
-        vault
-            .save_declaration(item.id, &unlabeled, None, None)
-            .unwrap();
-        vault
-            .set_declaration_sources(
-                item.id,
-                &DeclarationSources {
-                    environment: DeclarationSource::Default,
-                    risk: DeclarationSource::Default,
-                    scope: DeclarationSource::Default,
-                    reversibility: DeclarationSource::Default,
-                },
-            )
-            .unwrap();
-        item.id
-    };
     let dev_key = add(
         &mut vault,
         "Synthetic dev key",
