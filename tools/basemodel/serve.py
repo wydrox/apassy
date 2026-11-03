@@ -26,6 +26,12 @@ sets; default `$APASSY_LAYA_DIR/heads`, else
 `APASSY_HEADS_CACHE` (loaded uploaded head sets, default 4), `APASSY_HEADS_MAX`
 (stored uploaded head sets, default 16).
 
+Training jobs (contract bouncer-brain-v2 section 4, `jobs.py`) run when
+`tools/finetune/local_train.py` is next to this folder: `APASSY_JOBS=0` turns them off,
+`APASSY_JOBS_DIR` (default: `jobs` next to the heads folder), `APASSY_JOB_DEADLINE`
+(seconds, at most 10800), `APASSY_JOB_MEMORY_MB` (the trainer's memory cap and start
+rule, default 4096; 0: none).
+
 The server refuses to start on an address other than loopback without
 `LAYA_API_KEY`, and serves the head routes that write only with a token.
 
@@ -51,6 +57,7 @@ _WRITE_BYTECODE = sys.dont_write_bytecode
 sys.dont_write_bytecode = True
 import common  # noqa: E402
 import heads_cache  # noqa: E402
+import jobs  # noqa: E402
 import app as brain_app  # noqa: E402
 
 sys.dont_write_bytecode = _WRITE_BYTECODE
@@ -466,6 +473,7 @@ def main():
                                               os.environ.get("LAYA_DEVICE") or None,
                                               heads_dir=heads_dir, cache_limit=limit,
                                               max_stored=max_stored)
+    job_manager = jobs.from_env(router.cache, args.checkpoint, heads_dir, log=brain_app.LOG)
     log_level = os.environ.get("LAYA_LOG_LEVEL", "warning")
     # Counts, latency, status and head hashes only (app.py); never a state or an answer.
     handler = logging.StreamHandler()
@@ -477,9 +485,12 @@ def main():
           "%d stored at most)" % (
               version, host, os.environ["LAYA_PORT"], ", ".join(zero_shot) or "none",
               router.cache.heads_dir, router.cache.limit, router.cache.max_stored), flush=True)
+    print("training jobs: %s" % (job_manager.jobs_dir if job_manager is not None else "off"), flush=True)
+    if job_manager is not None:
+        job_manager.start()
     # h11 refuses a request head over 16 KiB with its own 400; allow more, so the
     # 16 KiB limit of the Apassy-Manifest header answers 413 (app.py).
-    uvicorn.run(brain_app.create_app(router, router.cache), host=host, port=_resolve_port(),
+    uvicorn.run(brain_app.create_app(router, router.cache, jobs=job_manager), host=host, port=_resolve_port(),
                 log_level=log_level, h11_max_incomplete_event_size=64 * 1024)
 
 
