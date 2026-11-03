@@ -22,9 +22,15 @@
 //! agent has one live access token and one live refresh family at a time. A second use of
 //! a code or of a rotated refresh token revokes the family and drops the access token.
 //!
-//! The limits are per node: Funnel forwards no client identity.
+//! The limits are per node: Funnel forwards no client identity. A client that the owner
+//! never allowed costs a stranger nothing to make, so it never fills a limit that a real
+//! client needs: only clients allowed at least once count toward `MAX_CLIENTS` and the
+//! registration window, a full table drops the oldest client that was never allowed, and
+//! such a client is pruned an hour after its registration. Bad codes and refresh tokens
+//! count for their client only (`ClientFailures`), never for the whole listener.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 
 use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -60,14 +66,26 @@ pub const MAX_REDIRECT_URIS: usize = 8;
 pub const MAX_CLIENT_NAME: usize = 64;
 /// The longest `state`.
 pub const MAX_STATE: usize = 512;
-/// Registrations in `REGISTRATION_WINDOW_SECS`, at most.
+/// Registrations in `REGISTRATION_WINDOW_SECS` of clients that the owner then allowed, at
+/// most. A client that was never allowed does not count.
 pub const REGISTRATIONS_PER_WINDOW: u64 = 10;
 /// The window of `REGISTRATIONS_PER_WINDOW`: 10 minutes.
 pub const REGISTRATION_WINDOW_SECS: u64 = 600;
-/// Stored clients, at most. A client unused for `UNUSED_CLIENT_SECS` is pruned first.
+/// Stored clients, at most. Only clients that the owner allowed at least once can fill it:
+/// at the limit, a registration drops the oldest client that was never allowed (one with
+/// no waiting request first), with its requests.
 pub const MAX_CLIENTS: u64 = 100;
 /// A client with no live connection and no use in 7 days is pruned.
 pub const UNUSED_CLIENT_SECS: u64 = 7 * 86_400;
+/// A client that the owner never allowed is pruned this long after its registration, with
+/// its requests: 1 hour. An authorize does not renew it.
+pub const NEVER_ALLOWED_CLIENT_SECS: u64 = 3_600;
+/// Bad codes and refresh tokens of one client in `CLIENT_FAILURE_WINDOW_SECS`, at most.
+pub const CLIENT_FAILURES_MAX: u32 = 20;
+/// The window of `CLIENT_FAILURES_MAX`, in seconds, and the `Retry-After` of its 429.
+pub const CLIENT_FAILURE_WINDOW_SECS: u64 = 60;
+/// Clients whose failures are kept in memory, at most.
+const MAX_FAILING_CLIENTS: usize = 1_024;
 /// Connect requests that wait for the owner at once, on the whole node.
 pub const OPEN_CONNECTS: u64 = 3;
 /// The `Refresh` of the waiting page, in seconds.
@@ -147,7 +165,8 @@ pub enum Reply {
     Json {
         status: u16,
         body: Value,
-        /// A bad code or refresh token: it counts in the failed-auth limiter.
+        /// A bad code or refresh token: it counts for its client (`ClientFailures`), not
+        /// in the failed-auth limiter of the listener.
         auth_failed: bool,
         retry_after: Option<u64>,
     },
@@ -179,7 +198,7 @@ impl Reply {
         )
     }
 
-    /// `invalid_grant` that counts in the failed-auth limiter.
+    /// `invalid_grant` that counts for its client (`ClientFailures`).
     fn bad_grant(description: &str) -> Self {
         Self::Json {
             status: 400,
@@ -290,6 +309,54 @@ fn params_of(body: &[u8], content_type: Option<&str>) -> Option<HashMap<String, 
             .collect();
     }
     decode_form(std::str::from_utf8(body).ok()?)
+}
+
+// ---- Bad codes and refresh tokens ----
+
+/// The bad codes and refresh tokens of each registered client (`invalid_grant` of `POST
+/// /oauth/token`), in a fixed window of `CLIENT_FAILURE_WINDOW_SECS` that starts at its
+/// first failure. With `CLIENT_FAILURES_MAX` of them, every token request of that client
+/// is 429 `rate_limited` until the window ends; no other client and no other endpoint is
+/// refused. Codes and refresh tokens are 256 random bits: this only slows a client that
+/// sends bad ones in a loop. In memory only, in the hub.
+#[derive(Debug, Default)]
+pub struct ClientFailures {
+    /// For each client: the start of its window and the failures in it.
+    windows: Mutex<HashMap<String, (u64, u32)>>,
+}
+
+impl ClientFailures {
+    /// True while `client_id` is at its limit.
+    pub fn limited(&self, client_id: &str, now: u64) -> bool {
+        let windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        windows.get(client_id).is_some_and(|&(start, count)| {
+            now < start.saturating_add(CLIENT_FAILURE_WINDOW_SECS) && count >= CLIENT_FAILURES_MAX
+        })
+    }
+
+    /// Counts one bad code or refresh token of `client_id`.
+    pub fn record(&self, client_id: &str, now: u64) {
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        if windows.len() >= MAX_FAILING_CLIENTS && !windows.contains_key(client_id) {
+            windows.retain(|_, &mut (start, _)| {
+                now < start.saturating_add(CLIENT_FAILURE_WINDOW_SECS)
+            });
+            if windows.len() >= MAX_FAILING_CLIENTS {
+                let oldest = windows
+                    .iter()
+                    .min_by_key(|(_, window)| window.0)
+                    .map(|(id, _)| id.clone());
+                if let Some(oldest) = oldest {
+                    windows.remove(&oldest);
+                }
+            }
+        }
+        let window = windows.entry(client_id.to_string()).or_insert((now, 0));
+        if window.1 == 0 || now >= window.0.saturating_add(CLIENT_FAILURE_WINDOW_SECS) {
+            *window = (now, 0);
+        }
+        window.1 = window.1.saturating_add(1);
+    }
 }
 
 // ---- The form decoder ----
@@ -677,9 +744,32 @@ fn shown_name(name: Option<&str>) -> String {
         .unwrap_or_else(|| "An MCP client".to_string())
 }
 
+/// The SQL test that the `oauth_client` row of the outer query was allowed at least once:
+/// a request of it was allowed (only an allow sets `team_id`), or it has a refresh token.
+const ALLOWED_ONCE: &str = "(EXISTS (SELECT 1 FROM connect_request a \
+     WHERE a.client_id = oauth_client.client_id AND a.team_id IS NOT NULL) \
+     OR EXISTS (SELECT 1 FROM oauth_refresh f WHERE f.client_id = oauth_client.client_id))";
+
+/// Deletes the client `client_id` and every connect request of it. Only for a client that
+/// was never allowed: it has no team, no agent, and no refresh token.
+fn delete_client(conn: &Connection, client_id: &str) -> RelayResult<()> {
+    conn.execute(
+        "DELETE FROM connect_request WHERE client_id = ?1",
+        params![client_id],
+    )
+    .map_err(db)?;
+    conn.execute(
+        "DELETE FROM oauth_client WHERE client_id = ?1",
+        params![client_id],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
 /// Removes what no flow needs any more: connect requests older than 7 days, refresh
-/// tokens past their end, and clients that have no live connection, no open request,
-/// and no use in `UNUSED_CLIENT_SECS`.
+/// tokens past their end, clients that the owner never allowed `NEVER_ALLOWED_CLIENT_SECS`
+/// after their registration (with their requests), and clients that have no live
+/// connection, no open request, and no use in `UNUSED_CLIENT_SECS`.
 fn prune(conn: &Connection, now: u64) -> RelayResult<()> {
     let old = to_i(now.saturating_sub(UNUSED_CLIENT_SECS));
     conn.execute(
@@ -690,6 +780,20 @@ fn prune(conn: &Connection, now: u64) -> RelayResult<()> {
     conn.execute(
         "DELETE FROM oauth_refresh WHERE expires_at <= ?1",
         params![to_i(now)],
+    )
+    .map_err(db)?;
+    let never_allowed = to_i(now.saturating_sub(NEVER_ALLOWED_CLIENT_SECS));
+    conn.execute(
+        &format!(
+            "DELETE FROM connect_request WHERE client_id IN (SELECT client_id FROM oauth_client \
+             WHERE created_at < ?1 AND NOT {ALLOWED_ONCE})"
+        ),
+        params![never_allowed],
+    )
+    .map_err(db)?;
+    conn.execute(
+        &format!("DELETE FROM oauth_client WHERE created_at < ?1 AND NOT {ALLOWED_ONCE}"),
+        params![never_allowed],
     )
     .map_err(db)?;
     conn.execute(
@@ -934,20 +1038,67 @@ impl Flow<'_> {
         };
         let client_id = format!("c_{}", random_hex::<16>()?);
         let now = self.now;
-        let limited = self.hub.directory.store.tx(|tx| {
+        // `None`: at a limit. `Some(woke)`: registered; `woke` when a dropped client had
+        // a waiting request, so the host loops look again.
+        let registered = self.hub.directory.store.tx(|tx| {
             prune(tx, now)?;
+            // Only clients that the owner allowed count: a stranger's registrations fill
+            // nothing that a real client needs.
             let recent: i64 = tx
                 .query_row(
-                    "SELECT count(*) FROM oauth_client WHERE created_at > ?1",
+                    &format!(
+                        "SELECT count(*) FROM oauth_client WHERE created_at > ?1 AND {ALLOWED_ONCE}"
+                    ),
                     params![to_i(now.saturating_sub(REGISTRATION_WINDOW_SECS))],
                     |row| row.get(0),
                 )
                 .map_err(db)?;
+            let allowed: i64 = tx
+                .query_row(
+                    &format!("SELECT count(*) FROM oauth_client WHERE {ALLOWED_ONCE}"),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db)?;
+            if to_u(recent) >= REGISTRATIONS_PER_WINDOW || to_u(allowed) >= MAX_CLIENTS {
+                return Ok(None);
+            }
+            // A full table: the oldest clients that were never allowed go, those with no
+            // waiting request first, with their requests.
             let all: i64 = tx
                 .query_row("SELECT count(*) FROM oauth_client", [], |row| row.get(0))
                 .map_err(db)?;
-            if to_u(recent) >= REGISTRATIONS_PER_WINDOW || to_u(all) >= MAX_CLIENTS {
-                return Ok(true);
+            let over = to_u(all).saturating_add(1).saturating_sub(MAX_CLIENTS);
+            let mut woke = false;
+            if over > 0 {
+                let mut statement = tx
+                    .prepare(&format!(
+                        "SELECT client_id, EXISTS(SELECT 1 FROM connect_request p \
+                         WHERE p.client_id = oauth_client.client_id AND p.status = 'pending') AS waits \
+                         FROM oauth_client WHERE NOT {ALLOWED_ONCE} \
+                         ORDER BY waits, created_at, rowid LIMIT ?1"
+                    ))
+                    .map_err(db)?;
+                let evicted = statement
+                    .query_map(params![to_i(over)], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+                    })
+                    .map_err(db)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(db)?;
+                drop(statement);
+                for (old_client, waits) in evicted {
+                    delete_client(tx, &old_client)?;
+                    woke |= waits;
+                    self.hub.directory.audit.write_on(
+                        tx,
+                        now,
+                        OAUTH_ACTOR,
+                        "oauth_client_evicted",
+                        None,
+                        &json!({"client_id": old_client}),
+                    )?;
+                }
             }
             tx.execute(
                 "INSERT INTO oauth_client (client_id, client_name, redirect_uris, created_at) \
@@ -968,13 +1119,17 @@ impl Flow<'_> {
                 None,
                 &json!({"client_id": client_id}),
             )?;
-            Ok(false)
+            Ok(Some(woke))
         })?;
-        if limited {
-            return Ok(Reply::limited(
-                "Too many clients registered on this Mac. Try again later.",
-                REGISTRATION_WINDOW_SECS,
-            ));
+        match registered {
+            None => {
+                return Ok(Reply::limited(
+                    "Too many clients registered on this Mac. Try again later.",
+                    REGISTRATION_WINDOW_SECS,
+                ));
+            }
+            Some(true) => wake_hosts(self.hub),
+            Some(false) => {}
         }
         let mut answer = json!({
             "client_id": client_id,
@@ -1131,11 +1286,8 @@ impl Flow<'_> {
                 ],
             )
             .map_err(db)?;
-            tx.execute(
-                "UPDATE oauth_client SET used_at = ?2 WHERE client_id = ?1",
-                params![client_id, to_i(now)],
-            )
-            .map_err(db)?;
+            // No `used_at`: an authorize renews no client. A client that is never allowed
+            // goes `NEVER_ALLOWED_CLIENT_SECS` after its registration.
             self.hub.directory.audit.write_on(
                 tx,
                 now,
@@ -1265,6 +1417,35 @@ impl Flow<'_> {
                 "client_id is required.",
             ));
         };
+        let failures = &self.hub.oauth_failures;
+        if failures.limited(client_id, self.now) {
+            return Ok(Reply::limited(
+                "Too many bad codes or refresh tokens from this client. Try again later.",
+                CLIENT_FAILURE_WINDOW_SECS,
+            ));
+        }
+        let reply = self.grant_of(form, client_id)?;
+        if let Reply::Json {
+            auth_failed: true, ..
+        } = reply
+        {
+            // Only a registered client is counted, so the map holds no made-up ids.
+            let known = self
+                .hub
+                .directory
+                .store
+                .with(|conn| load_client(conn, client_id))?
+                .is_some();
+            if known {
+                failures.record(client_id, self.now);
+            }
+        }
+        Ok(reply)
+    }
+
+    /// The grant of a token request of `client_id`.
+    fn grant_of(&self, form: &HashMap<String, String>, client_id: &str) -> RelayResult<Reply> {
+        let get = |name: &str| form.get(name).map(String::as_str);
         match get("grant_type") {
             Some("authorization_code") => {
                 let (Some(code), Some(verifier)) = (get("code"), get("code_verifier")) else {
@@ -1986,6 +2167,29 @@ mod tests {
         assert_eq!(distinct.len(), 24);
         assert!(request_id_ok(&random_hex::<16>().unwrap()));
         assert!(!request_id_ok("../../etc"));
+    }
+
+    #[test]
+    fn bad_grants_limit_their_client_only_and_the_window_ends() {
+        let failures = ClientFailures::default();
+        let start = 1_000;
+        for n in 0..CLIENT_FAILURES_MAX {
+            assert!(!failures.limited("c_a", start + u64::from(n)), "{n}");
+            failures.record("c_a", start + u64::from(n));
+        }
+        assert!(failures.limited("c_a", start + 20));
+        assert!(!failures.limited("c_b", start + 20), "another client");
+        assert!(failures.limited("c_a", start + CLIENT_FAILURE_WINDOW_SECS - 1));
+        assert!(!failures.limited("c_a", start + CLIENT_FAILURE_WINDOW_SECS));
+        failures.record("c_a", start + CLIENT_FAILURE_WINDOW_SECS);
+        assert!(!failures.limited("c_a", start + CLIENT_FAILURE_WINDOW_SECS + 1));
+        // The map stays bounded: old windows go first, then the oldest one.
+        let many = ClientFailures::default();
+        for n in 0..MAX_FAILING_CLIENTS + 10 {
+            many.record(&format!("c_{n}"), start);
+        }
+        let held = many.windows.lock().unwrap().len();
+        assert!(held <= MAX_FAILING_CLIENTS, "{held}");
     }
 
     #[test]

@@ -112,11 +112,15 @@ stays until the owner disconnects it.
   its refresh token and its access token stop working, and the client must start at step 4 again.
 - The access token lives 24 hours. The refresh token lives 90 days from its last use. One access token
   is live for each agent: a new one replaces the old one.
-- Each bad code or refresh token counts in the failed-auth limiter (section 10).
+- Bad codes and refresh tokens count for their client only: after 20 `invalid_grant` answers for one
+  client in 60 seconds, its token requests get 429 `rate_limited` with `Retry-After: 60` until the
+  window ends. They never count in the failed-auth limiter of the listener (section 10).
 - `POST /oauth/revoke` (RFC 7009) with the refresh or the access token ends the connection. It answers 200
   always.
 - Limits of the node, not of a caller (Funnel forwards no client identity): 10 registrations in 10
-  minutes and 100 stored clients (429, `Retry-After: 600`); 3 connect requests waiting at once (429 page
+  minutes and 100 stored clients (429, `Retry-After: 600`), counting only clients that the owner allowed
+  at least once. A client that was never allowed fills no limit: when 100 clients are stored the oldest
+  of those goes, and each goes 1 hour after its registration (an authorize does not renew it); 3 connect requests waiting at once (429 page
   "Too many connection requests wait. Deny requests on your Mac that you did not start, then connect
   again."); 1 of each client, and a new one replaces it (step 4).
 - The node stores only hashes of codes and refresh tokens, and of the access token.
@@ -398,9 +402,9 @@ and the names of the swapped variables. Never a header, a query, a body, a place
 | `wait_secs` of one status call | 0 to 25 s | The call returns. |
 
 **The failed-auth limiter.** The public listener counts its failed authentications: a bearer token that
-names no team or that the node refuses (401 `unauthenticated` or `token_expired`), a proxy path whose
-session key names no live session, and a code or refresh token that `POST /oauth/token` refuses
-(`invalid_grant`). The window is 60 seconds from the first failure. With 20 failures in
+names no team or that the node refuses (401 `unauthenticated` or `token_expired`), and a proxy path whose
+session key names no live session. A code or refresh token that `POST /oauth/token` refuses counts for
+its client only (section 4.2). The window is 60 seconds from the first failure. With 20 failures in
 the window, every further request of the public listener in that window gets HTTP 429 `rate_limited`
 with `Retry-After: 60`, also a request with a good token. Then the window ends and the count starts
 again. The check comes after the 404 of section 3 and before the token, the body, or the proxy. The node
@@ -469,7 +473,7 @@ A message never holds a value, a placeholder, a token, or a session key.
 | --- | --- | --- |
 | 401 | `unauthenticated`, `token_expired` | `/mcp`: the bearer token, with `WWW-Authenticate` (section 4) |
 | 400 | `invalid_request`, `invalid_grant`, `unsupported_grant_type`, `invalid_target`, `invalid_redirect_uri`, `invalid_client_metadata` | `/oauth/token`, `/oauth/register`: an OAuth error object `{"error", "error_description"}`, not the envelope |
-| 429 | `rate_limited` | `/oauth/register` at its limit, `Retry-After: 600` (OAuth error object) |
+| 429 | `rate_limited` | `/oauth/register` at its limit, `Retry-After: 600`; `/oauth/token` for a client with 20 bad codes or refresh tokens in 60 s, `Retry-After: 60` (OAuth error object) |
 | 403 | `forbidden` | `/mcp`: an `Origin` header that is not the public URL |
 | 403 | `session_invalid`, `host_not_in_session`, `wrong_host`, `misplaced_placeholder`, `placeholder_in_body` | `/p/` |
 | 404 | `not_found` | Any route outside section 3 |

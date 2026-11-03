@@ -122,9 +122,10 @@ reuse revokes the family. Redirect URIs: `https://…`, or `http://localhost|127
 exact match otherwise; ≤ 512 bytes. `resource`, when sent, must equal `<origin>/mcp`. One live access token per agent.
 
 **Limits on the public listener.** Registrations 10 per 10 min and 100 stored clients (unused clients pruned after
-7 days). Open connect requests ≤ 3 per node and 1 per client: a new authorize of a client with other parameters ends its
-waiting request and opens one with its own code. Bad codes and refresh tokens count in the failed-auth
-limiter. Funnel forwards no client identity, so every limit is per node.
+7 days), counting only clients that the owner allowed at least once: a full table drops the oldest client that was never
+allowed, and such a client is pruned 1 h after its registration (an authorize does not renew it). Open connect requests ≤ 3 per node and 1 per client: a new authorize of a client with other parameters ends its
+waiting request and opens one with its own code. Bad codes and refresh tokens count for their client only (20 in
+60 s, then 429 for that client), never in the listener's failed-auth limiter. Funnel forwards no client identity, so every limit is per node.
 
 **The page.** No script, form, cookie, or button: nothing on it can authorize. Headers: `Content-Security-Policy:
 default-src 'none'; style-src 'unsafe-inline'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,

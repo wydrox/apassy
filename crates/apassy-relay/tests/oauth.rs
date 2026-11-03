@@ -1,7 +1,8 @@
 //! The MCP authorization flow of an embedded node (docs/SPEC.md section 31): metadata,
 //! registration, the connect request and its page, the code with PKCE, refresh
-//! rotation, family revocation, a second request of a client, the limits, the failed-auth
-//! limiter, `WWW-Authenticate` on `/mcp`, the hosted relay without OAuth, and the
+//! rotation, family revocation, a second request of a client, the limits and the clients
+//! that were never allowed, the per-client limit of bad codes and refresh tokens,
+//! `WWW-Authenticate` on `/mcp`, the hosted relay without OAuth, and the
 //! directory 1003 ↔ 1004. Each node listens on free loopback ports and keeps its data in
 //! a temporary directory. Synthetic names and values only.
 
@@ -176,6 +177,48 @@ fn query_of(location: &str) -> HashMap<String, String> {
 
 fn sha256(text: &str) -> Vec<u8> {
     Sha256::digest(text.as_bytes()).to_vec()
+}
+
+fn unix_now() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after 1970")
+        .as_secs();
+    i64::try_from(secs).expect("in range")
+}
+
+/// Stores a client that the owner allowed (a redeemed request with its team), registered
+/// at `created_at`, straight in the directory of a running node.
+fn insert_allowed_client(conn: &rusqlite::Connection, client_id: &str, created_at: i64) {
+    conn.execute(
+        "INSERT INTO oauth_client (client_id, client_name, redirect_uris, created_at) \
+         VALUES (?1, 'Allowed', ?2, ?3)",
+        rusqlite::params![client_id, format!("[\"{REDIRECT}\"]"), created_at],
+    )
+    .expect("client");
+    conn.execute(
+        "INSERT INTO connect_request (id, client_id, redirect_uri, code_challenge, match_code, \
+         status, created_at, expires_at, decided_at, team_id, agent_id) \
+         VALUES (?1, ?2, ?3, ?4, 'K7Q-4MD', 'redeemed', ?5, ?5, ?5, 't_synthetic1', 1)",
+        rusqlite::params![
+            format!("r_{client_id}"),
+            client_id,
+            REDIRECT,
+            CHALLENGE,
+            created_at
+        ],
+    )
+    .expect("request");
+}
+
+/// The stored clients with this id (0 or 1).
+fn clients_with(conn: &rusqlite::Connection, client_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT count(*) FROM oauth_client WHERE client_id = ?1",
+        [client_id],
+        |row| row.get(0),
+    )
+    .expect("count")
 }
 
 /// A running node with a personal team, as the app makes them.
@@ -906,9 +949,15 @@ fn registration_is_checked_and_limited() {
     let name = answer.json()["client_name"].as_str().unwrap().to_string();
     assert!(name.starts_with("Grok Bot"));
     assert!(name.len() <= 64);
-    // Ten registrations in ten minutes (the one above counts).
-    for _ in 1..10 {
+    // Clients that the owner never allowed do not count in the window: a stranger's
+    // registrations never stop a real client (security review finding 2).
+    for _ in 1..15 {
         node.register(Some("Grok Bot"), REDIRECT);
+    }
+    // Ten clients registered in ten minutes and allowed: the window is full.
+    let conn = directory(&node.config);
+    for i in 0..10 {
+        insert_allowed_client(&conn, &format!("c_allowed_{i}"), unix_now());
     }
     let answer = post_json(
         &node.public(),
@@ -917,10 +966,104 @@ fn registration_is_checked_and_limited() {
     );
     assert_eq!(answer.status, 429, "{}", answer.text);
     assert_eq!(answer.header("retry-after"), Some("600"));
-    let stored: i64 = directory(&node.config)
+    let stored: i64 = conn
         .query_row("SELECT count(*) FROM oauth_client", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(stored, 10);
+    assert_eq!(stored, 25);
+}
+
+/// A stranger can register any number of clients, and they never fill the table: at
+/// `MAX_CLIENTS` the oldest client that was never allowed goes (one with no waiting
+/// request first, then one with its request). Only clients that the owner allowed fill it
+/// (security review finding 2).
+#[test]
+fn a_full_client_table_drops_the_oldest_client_that_was_never_allowed() {
+    let node = Node::start();
+    let conn = directory(&node.config);
+    // 98 allowed clients, registered a day ago (outside the window of 10 minutes).
+    for i in 0..98 {
+        insert_allowed_client(&conn, &format!("c_allowed_{i:03}"), unix_now() - 86_400);
+    }
+    let waiting = node.register(Some("Waiting"), REDIRECT);
+    let wait = node.authorize(&waiting);
+    let idle = node.register(Some("Idle"), REDIRECT);
+    // 100 stored: the next one drops "Idle", the oldest that has no waiting request.
+    let third = node.register(Some("Third"), REDIRECT);
+    assert_eq!(clients_with(&conn, &idle), 0);
+    assert_eq!(clients_with(&conn, &waiting), 1);
+    assert_eq!(clients_with(&conn, &third), 1);
+    assert_eq!(node.pending_one().client_id, waiting);
+    // One more allowed client: two never-allowed clients go, "Third" and then "Waiting"
+    // with its request.
+    insert_allowed_client(&conn, "c_allowed_098", unix_now() - 86_400);
+    let fourth = node.register(Some("Fourth"), REDIRECT);
+    assert_eq!(clients_with(&conn, &third), 0);
+    assert_eq!(clients_with(&conn, &waiting), 0);
+    assert_eq!(clients_with(&conn, &fourth), 1);
+    assert!(node.node().pending_connects().unwrap().is_empty());
+    let page = get(&node.public(), &wait);
+    assert!(page.text.contains("The request ended."), "{}", page.text);
+    let stored: i64 = conn
+        .query_row("SELECT count(*) FROM oauth_client", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(stored, 100);
+    let evicted: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM audit WHERE action = 'oauth_client_evicted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(evicted, 3);
+    // 100 allowed clients: the table is full for real.
+    insert_allowed_client(&conn, "c_allowed_099", unix_now() - 86_400);
+    let answer = post_json(
+        &node.public(),
+        "/oauth/register",
+        &json!({"redirect_uris": [REDIRECT]}),
+    );
+    assert_eq!(answer.status, 429, "{}", answer.text);
+    assert_eq!(answer.header("retry-after"), Some("600"));
+}
+
+/// A client that the owner never allowed goes an hour after its registration, with its
+/// requests, and an authorize does not renew it. A client that was allowed stays.
+#[test]
+fn a_client_that_was_never_allowed_is_pruned_after_an_hour() {
+    let node = Node::start();
+    let allowed = node.connect("Allowed");
+    let client = node.register(Some("Grok Bot"), REDIRECT);
+    let wait = node.authorize(&client);
+    let conn = directory(&node.config);
+    let used: Option<i64> = conn
+        .query_row(
+            "SELECT used_at FROM oauth_client WHERE client_id = ?1",
+            [&client],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(used, None, "an authorize renews no client");
+    // Both registered an hour ago.
+    for id in [&client, &allowed.client_id] {
+        conn.execute(
+            "UPDATE oauth_client SET created_at = created_at - 3601 WHERE client_id = ?1",
+            [id],
+        )
+        .unwrap();
+    }
+    // The next registration prunes.
+    node.register(Some("Later"), REDIRECT);
+    assert_eq!(clients_with(&conn, &client), 0);
+    assert_eq!(clients_with(&conn, &allowed.client_id), 1);
+    assert!(node.node().pending_connects().unwrap().is_empty());
+    let page = get(&node.public(), &wait);
+    assert!(page.text.contains("The request ended."), "{}", page.text);
+    let answer = node.authorize_raw(&client, &[]);
+    assert_eq!(answer.status, 400);
+    assert!(answer.text.contains("This connection link is not valid."));
+    // The allowed client still refreshes.
+    let answer = node.token_refresh(&allowed.client_id, &allowed.refresh);
+    assert_eq!(answer.status, 200, "{}", answer.text);
 }
 
 #[test]
@@ -1029,9 +1172,13 @@ fn a_new_authorize_of_the_same_client_ends_the_waiting_request_and_shows_its_own
     assert_eq!(replaced, 1);
 }
 
+/// Codes and refresh tokens are 256 random bits. A stranger who sends bad ones slows only
+/// the client whose id they send: never another client, and never the listener (security
+/// review finding 2).
 #[test]
-fn bad_codes_and_refresh_tokens_count_in_the_failed_auth_limiter() {
+fn bad_codes_and_refresh_tokens_count_for_their_client_only() {
     let node = Node::start();
+    let other = node.connect("Other");
     let client_id = node.register(Some("Grok Bot"), REDIRECT);
     for i in 0..20 {
         let answer = if i % 2 == 0 {
@@ -1042,15 +1189,28 @@ fn bad_codes_and_refresh_tokens_count_in_the_failed_auth_limiter() {
         assert_eq!(answer.status, 400, "{i}: {}", answer.text);
         assert_eq!(answer.json()["error"], "invalid_grant");
     }
-    // The listener is at its limit: every request of it waits, the metadata too.
-    let answer = get(&node.public(), "/.well-known/oauth-authorization-server");
-    assert_eq!(answer.status, 429);
+    // That client is at its limit for the window.
+    let answer = node.token_refresh(&client_id, "bad-refresh-20");
+    assert_eq!(answer.status, 429, "{}", answer.text);
+    assert_eq!(answer.json()["error"], "rate_limited");
     assert_eq!(answer.header("retry-after"), Some("60"));
-    // The node listener keeps its own count.
-    assert_eq!(
-        get(&node.local(), "/.well-known/oauth-authorization-server").status,
-        200
-    );
+    // Another client is not refused: its refresh works.
+    let answer = node.token_refresh(&other.client_id, &other.refresh);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    let access = answer.json()["access_token"]
+        .as_str()
+        .expect("access")
+        .to_string();
+    // The listener is not at a limit: metadata, registration, and `/mcp` answer.
+    let answer = get(&node.public(), "/.well-known/oauth-authorization-server");
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    node.register(Some("New"), REDIRECT);
+    assert_eq!(mcp_list(&node.public(), &access).status, 200);
+    // A client id that nobody registered is never counted, and never refused.
+    for i in 0..25 {
+        let answer = node.token_code("c_unknown", &format!("bad-code-{i}"), VERIFIER);
+        assert_eq!(answer.status, 400, "{i}: {}", answer.text);
+    }
 }
 
 #[test]

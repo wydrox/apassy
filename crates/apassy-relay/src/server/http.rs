@@ -1026,7 +1026,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         return;
     }
     if let Some(route) = oauth_route {
-        respond_oauth(hub, listener, request, route, &method, &path, &query, now);
+        respond_oauth(hub, request, route, &method, &path, &query, now);
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
@@ -1655,12 +1655,11 @@ fn respond_auth_error(
 }
 
 /// One request of the MCP authorization flow (`oauth::handle`): its body (at most
-/// `oauth::MAX_BODY`), its answer, and a bad code or refresh token counted in the
-/// listener's failed-auth limiter.
+/// `oauth::MAX_BODY`) and its answer. A bad code or refresh token counts for its client
+/// (`oauth::ClientFailures`), not in the listener's failed-auth limiter.
 #[allow(clippy::too_many_arguments)]
 fn respond_oauth(
     hub: &Hub,
-    listener: &Listener,
     mut request: Request,
     route: oauth::Route,
     method: &str,
@@ -1686,13 +1685,9 @@ fn respond_oauth(
         Vec::new()
     };
     let content_type = header_value(&request, "Content-Type");
+    // A bad code or refresh token counts for its client only (`oauth::ClientFailures`),
+    // never in the listener's limiter: one stranger must not lock every client out.
     let reply = oauth::handle(hub, route, path, query, &body, content_type.as_deref(), now);
-    if let oauth::Reply::Json {
-        auth_failed: true, ..
-    } = reply
-    {
-        listener.record_failure(now);
-    }
     write_oauth(request, reply, false);
 }
 

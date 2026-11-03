@@ -371,6 +371,9 @@ pub struct Hub {
     connect_polls: Arc<AtomicUsize>,
     /// The feed long polls that Connect teams hold, all of them together.
     connect_feed_polls: Arc<AtomicUsize>,
+    /// The bad codes and refresh tokens of each OAuth client of an embedded node, in
+    /// memory only (docs/SPEC.md section 31.5).
+    pub(crate) oauth_failures: crate::server::oauth::ClientFailures,
 }
 
 impl Hub {
@@ -409,6 +412,7 @@ impl Hub {
             connect_recovery_rate: connect::RequestRate::default(),
             connect_polls: Arc::new(AtomicUsize::new(0)),
             connect_feed_polls: Arc::new(AtomicUsize::new(0)),
+            oauth_failures: crate::server::oauth::ClientFailures::default(),
         });
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
