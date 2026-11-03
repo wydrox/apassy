@@ -9,7 +9,7 @@ to S6-14).
 
 This contract defines short-lived credentials ("way C"), remote SigV4 signing, and the wire and storage
 shapes that the units C1, C2, D, E1, E2, F, G, H, I, J1, K, and L share: the kinds and their fields and
-settings, the lease, the session view additions, the access item delivery, the sign endpoint, the
+settings, the lease, the session view additions, the access item credential form, the sign endpoint, the
 codes, and the audit and activity rows. MUST and MUST NOT are requirements on every implementation. A
 change to a field, a name, a code, or a rule of this document needs a dated revision here and the
 fixtures in the same change.
@@ -239,11 +239,13 @@ For a session served by the public listener, each signer item with `services` ge
 proxy verifies and re-signs (section 7.1). `AWS_ENDPOINT_URL` is never set. A session for a member's node
 has no such variable: the member's own run proxy signs through `POST /v1/sign` (unit L).
 
-### 5.4 `AccessItem.delivery` and `ItemView.delivery`
+### 5.4 `AccessItem.credential_form` and `ItemView.credential_form`
 
-`AccessItem` (`GET /v1/access`, `apassy_list_access`) and `ItemView` gain `delivery`, always serialized; a
-client reads a missing field as `placeholder`. The relay item gets the column `delivery TEXT NOT NULL
-DEFAULT 'placeholder'` (team schema 8, or the next free number at merge).
+`AccessItem` (`GET /v1/access`, `apassy_list_access`) and `ItemView` gain `credential_form`, always
+serialized; a client reads a missing field as `placeholder`. The relay item gets the column
+`credential_form TEXT NOT NULL DEFAULT 'placeholder'` (team schema 8, or the next free number at merge).
+The name is not `delivery`: stage 4 uses `delivery` for another thing (`collection.delivery`,
+`run.delivery`, the way A switch).
 
 | Value | Meaning | `env_name` holds | `base_url_vars` |
 | --- | --- | --- | --- |
@@ -326,8 +328,10 @@ the payload hash (S6-9). It MUST NOT store or log any of them except the audit r
 ## 8. Keys per member (units J1, J2)
 
 A member key is a new vault item of the team host, linked by the synced table `member_key` (vault
-schema 32): `item_id`, `source_item_id`, `team_id`, `member_id`, `manager` (`cloudflare_token` or
-`aws_iam`), `remote_id` (the provider's id of the key, not a secret), `created_at`. The member's catalog
+schema 32): `item_id`, `source_uuid`, `team_id`, `member_id`, `manager` (`cloudflare_token` or
+`aws_iam`), `remote_id` (the provider's id of the key, not a secret), `created_at`. `source_uuid` is the
+sync UUID of the team item, because row IDs differ between synced copies (as `item_home.home_uuid`); the
+vault API reads it back as the local `source_item_id`, which the audit rows of section 10 carry. The member's catalog
 shows the member key item instead of the team item. An AWS member key is itself an `aws_sts` source.
 Removing the member, revoking the grant, or archiving the source deletes the remote key and archives the
 item; a failed delete stays listed with "Replace now".
@@ -379,8 +383,15 @@ secret scans the agent's side, the audit rows, and the activity log for it and f
 | `settings-<kind>.json` | One settings object per kind of section 3.2. |
 | `lease-<kind>.json` | One lease per kind of section 4. |
 | `session-view.json` | A `SessionView` of the member's-node form (section 5.3: no `AWS_ENDPOINT_URL_<SERVICE>`) with a placeholder item, a `github_app` lease, and a signer. |
-| `access-view.json` | An `AccessView` with one item of each `delivery`. |
+| `access-view.json` | An `AccessView` with one item of each `credential_form`. |
 | `sign-request.json`, `sign-answer.json` | The AWS `get-vanilla` vector as a sign request and its answer (secret `wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY`, the published test-suite value). |
 | `error-lease-failed.json`, `error-sign-refused-*.json` | The error answers of sections 7.2 and 9. |
 | `run-lease-failed.json` | A `RunView` denied with `code` `lease_failed`. |
 | `audit-rows.json` | One audit row of each action of section 10. |
+
+## 13. Revisions
+
+| Date | Change |
+| --- | --- |
+| 2026-11-03 | The access item field `delivery` (section 5.4) is renamed `credential_form`, with the relay column, `kinds.json`, and `access-view.json`, because stage 4 uses `delivery` for the way A switch (`collection.delivery`, `run.delivery`). The values are unchanged; a missing field still reads as `placeholder`. |
+| 2026-11-03 | The vault table `member_key` (section 8) stores `source_uuid`, the sync UUID of the team item, instead of `source_item_id`: a row ID is not the same on two synced copies. The vault API and the audit rows keep `source_item_id`. A `short_lived` row that is off keeps its kind and settings (a signer reads `region` and `services` from it). |

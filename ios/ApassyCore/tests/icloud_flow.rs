@@ -895,6 +895,11 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 32 {
+        // Schema 32: short-lived credentials and member keys (`src/vault/schema32.rs`).
+        conn.execute_batch("DROP TABLE member_key; DROP TABLE short_lived;")
+            .unwrap();
+    }
     if version < 29 {
         // Schema 29: the host of the bouncer brain (`src/vault/schema29.rs`).
         conn.execute_batch(

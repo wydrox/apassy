@@ -86,12 +86,14 @@ PRAGMA user_version = 26;
 ";
 
 /// The way back from the current schema to schema 25, which the fixtures of schema 25
-/// and earlier start with: `schema29::downgrade_sql` (the host of the bouncer brain),
-/// [`DOWNGRADE_TO_26_SQL`], and then `schema26::DOWNGRADE_TO_25_SQL`.
+/// and earlier start with: `schema32::downgrade_sql` (short-lived credentials),
+/// `schema29::downgrade_sql` (the host of the bouncer brain), [`DOWNGRADE_TO_26_SQL`],
+/// and then `schema26::DOWNGRADE_TO_25_SQL`.
 #[cfg(test)]
 pub(super) fn downgrade_to_25_sql() -> String {
     format!(
-        "{}{DOWNGRADE_TO_26_SQL}{}",
+        "{}{}{DOWNGRADE_TO_26_SQL}{}",
+        super::schema32::downgrade_sql(),
         super::schema29::downgrade_sql(),
         super::schema26::DOWNGRADE_TO_25_SQL
     )
@@ -206,7 +208,10 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
-        // Schema 29 (the host of the bouncer brain, `schema29.rs`) first.
+        // Schema 32 (short-lived credentials, `schema32.rs`) and 29 (the host of the
+        // bouncer brain, `schema29.rs`) first.
+        conn.execute_batch(&crate::vault::schema32::downgrade_sql())
+            .unwrap();
         conn.execute_batch(&crate::vault::schema29::downgrade_sql())
             .unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
@@ -303,7 +308,10 @@ mod tests {
         drop(vault);
 
         let conn = raw(&path);
-        // Schema 29 (the host of the bouncer brain, `schema29.rs`) first.
+        // Schema 32 (short-lived credentials, `schema32.rs`) and 29 (the host of the
+        // bouncer brain, `schema29.rs`) first.
+        conn.execute_batch(&crate::vault::schema32::downgrade_sql())
+            .unwrap();
         conn.execute_batch(&crate::vault::schema29::downgrade_sql())
             .unwrap();
         conn.execute_batch(DOWNGRADE_TO_26_SQL).unwrap();
