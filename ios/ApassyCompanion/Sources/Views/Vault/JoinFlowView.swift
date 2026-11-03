@@ -147,6 +147,12 @@ struct JoinFlowView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
+                        if let words = model.nodeWordsLine {
+                            Text(words)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("join.nodeWords")
+                        }
                     }
                     .multilineTextAlignment(.center)
                     .accessibilityElement(children: .combine)
@@ -242,6 +248,13 @@ struct JoinFlowView: View {
                 PairingHero(
                     symbol: "checkmark.seal.fill", tint: .green, title: "“\(vault.name)” is on this iPhone",
                     message: model.syncLine(for: vault))
+                if let words = model.nodeWordsLine {
+                    Text(words)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("join.doneNodeWords")
+                }
                 if let message = model.passphraseMessage {
                     CalloutView(symbol: "exclamationmark.triangle.fill", text: message)
                 }

@@ -56,6 +56,9 @@ pub struct JoinNode {
     /// The node's display name from the link, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The six node words of the pin (node-pairing-v1 section 4a), for a visual check
+    /// against the words that the Mac shows. Never the trust.
+    pub node_words: String,
 }
 
 impl Joining {
@@ -69,9 +72,10 @@ impl Joining {
             team: self.team.clone(),
             words: self.words.clone(),
             expires_at: self.expires_at,
-            node: self.url.pin().map(|_| JoinNode {
+            node: self.url.pin().map(|pin| JoinNode {
                 origin: self.url.as_str().to_owned(),
                 name: self.node_name.clone(),
+                node_words: pin.words(),
             }),
         }
     }

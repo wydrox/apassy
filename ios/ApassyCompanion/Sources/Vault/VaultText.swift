@@ -191,6 +191,13 @@ enum DeviceRoute: Equatable {
         return "Through Tailscale to your Mac."
     }
 
+    /// The line with the node words, or nil: "Node words: noodle monkey dinner sled guitar garden".
+    /// The owner compares it with the words that the Mac shows for its node. A check for a person,
+    /// never the trust (contract node-pairing-v1 section 4a).
+    static func nodeWordsLine(_ node: NodeInfo?) -> String? {
+        node?.nodeWords.map { "Node words: \($0)" }
+    }
+
     /// The route of the sync of `vault`, or nil for a vault without relay sync (only on this
     /// iPhone, or in iCloud Drive).
     static func of(_ vault: VaultEntry) -> DeviceRoute? {

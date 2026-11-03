@@ -140,10 +140,20 @@ public struct NodeInfo: Codable, Sendable, Equatable {
     public var origin: String
     /// The node's display name from its link, a label only. Nil when the link had none.
     public var name: String?
+    /// The six node words of the node's certificate pin (contract node-pairing-v1 section 4a),
+    /// computed by the core: the Mac shows the same words. A visual check, never the trust. Nil
+    /// when the core gave none.
+    public var nodeWords: String?
 
-    public init(origin: String, name: String? = nil) {
+    public init(origin: String, name: String? = nil, nodeWords: String? = nil) {
         self.origin = origin
         self.name = name
+        self.nodeWords = nodeWords
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case origin, name
+        case nodeWords = "node_words"
     }
 }
 

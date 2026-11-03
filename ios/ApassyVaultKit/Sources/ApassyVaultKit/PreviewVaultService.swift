@@ -388,7 +388,10 @@ public actor PreviewVaultService: VaultService {
             if kv[0] == "name" { name = kv[1].removingPercentEncoding }
         }
         guard let pin else { return (nil, nil) }
-        return (NodeInfo(origin: origin, name: name), pin)
+        // The preview never hashes: it knows the node words of the contract's synthetic pin only
+        // (node-pairing-v1 section 4a). The real core computes them for every pin.
+        let words = pin == "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE" ? "noodle monkey dinner sled guitar garden" : nil
+        return (NodeInfo(origin: origin, name: name, nodeWords: words), pin)
     }
 
     public func joinPoll() async throws -> JoinInfo {

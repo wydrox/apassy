@@ -57,10 +57,10 @@ struct QuestionsStateRow: View {
         if routes.isEmpty {
             LabeledContent("Questions", value: state)
         } else if routes.count == 1, let only = routes.first {
-            route(title: "Questions", only.route)
+            route(title: "Questions", only.route, words: only.nodeWordsLine)
         } else {
             ForEach(routes) { item in
-                route(title: "Questions of “\(item.vault.vaultName)”", item.route)
+                route(title: "Questions of “\(item.vault.vaultName)”", item.route, words: item.nodeWordsLine)
             }
         }
         if let line = root.questions?.tailscaleOffLine {
@@ -78,11 +78,16 @@ struct QuestionsStateRow: View {
         }
     }
 
-    private func route(title: String, _ route: DeviceRoute) -> some View {
+    private func route(title: String, _ route: DeviceRoute, words: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             LabeledContent(title, value: route.text)
             if let detail = route.detail {
                 Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if let words {
+                Text(words)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

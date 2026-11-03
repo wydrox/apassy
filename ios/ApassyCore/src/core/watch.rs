@@ -593,6 +593,8 @@ mod tests {
             devices: own.iter().cloned().collect(),
             own,
             removed: false,
+            node_origin: None,
+            node_words: None,
             questions_only: true,
         }
     }

@@ -42,6 +42,14 @@ struct DeviceRouteTests {
         #expect(FreeRelayNotice.relaySyncLine(for: Self.entry(relay: Self.origin, pin: Self.pin)) == nil)
     }
 
+    @Test("the node words line shows the words of the core, and nothing for a hosted team")
+    func nodeWordsLine() {
+        let words = "noodle monkey dinner sled guitar garden"
+        #expect(DeviceRoute.nodeWordsLine(NodeInfo(origin: Self.origin, nodeWords: words)) == "Node words: \(words)")
+        #expect(DeviceRoute.nodeWordsLine(NodeInfo(origin: Self.origin)) == nil)
+        #expect(DeviceRoute.nodeWordsLine(nil) == nil)
+    }
+
     @Test("the route of a questions team takes the node's name from the entry of its origin")
     func questionRoutes() {
         let entries = [

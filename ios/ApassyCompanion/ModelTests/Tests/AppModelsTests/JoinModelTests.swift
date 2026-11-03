@@ -304,7 +304,9 @@ struct JoinModelTests {
             Issue.record("expected the waiting step, got \(fixture.model.step)")
             return
         }
-        #expect(join.node == NodeInfo(origin: "https://100.64.0.7:8444", name: "Mac mini"))
+        #expect(join.node == NodeInfo(origin: "https://100.64.0.7:8444", name: "Mac mini", nodeWords: "noodle monkey dinner sled guitar garden"))
+        // The node words of the contract vector (node-pairing-v1 section 4a), for the visual check.
+        #expect(fixture.model.nodeWordsLine == "Node words: noodle monkey dinner sled guitar garden")
         #expect(fixture.model.routeText == "via your Mac")
         #expect(fixture.model.nodeLine == "Through Tailscale to Mac mini.")
         #expect(await waitUntil { fixture.model.step == .passphrase(team: "Personal") })
@@ -327,6 +329,7 @@ struct JoinModelTests {
         #expect(await fixture.toPassphrase(link: link))
         #expect(fixture.model.routeText == nil)
         #expect(fixture.model.nodeLine == nil)
+        #expect(fixture.model.nodeWordsLine == nil)
         await fixture.model.finish(passphrase: PreviewVaultService.passphrase)
         guard case .done(let vault) = fixture.model.step else {
             Issue.record("expected the done step, got \(fixture.model.step)")
