@@ -25,9 +25,6 @@ use std::sync::{Arc, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use rustls::crypto::ring::sign::any_ecdsa_type;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 use super::control::{ControllerParts, PairingController};
@@ -214,30 +211,13 @@ fn refused(kind: io::ErrorKind, text: &str) -> io::Error {
 }
 
 /// The TLS configuration: TLS 1.3 only, the certificate of the vault, no client
-/// authentication, HTTP/1.1 only, no tickets, no early data.
+/// authentication, HTTP/1.1 only, no tickets, no early data. It is the configuration
+/// of the node's TLS front (`crate::net::tls_front::server_config`, unit N2).
 ///
 /// The key is parsed from the erasing buffer of the vault by reference, so the code
-/// makes no other copy of the PKCS#8 bytes. `rustls-pki-types` does not erase an owned
-/// key when it drops, and `with_single_cert` takes an owned one. The parsed key inside
-/// `ring` is out of reach and is not erased.
+/// makes no other copy of the PKCS#8 bytes.
 fn tls_config(certificate: &CompanionCertificate) -> io::Result<Arc<ServerConfig>> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(&certificate.key[..]));
-    let signing_key = any_ecdsa_type(&key).map_err(io::Error::other)?;
-    let certified = CertifiedKey::new(
-        vec![CertificateDer::from(certificate.der.clone())],
-        signing_key,
-    );
-    certified.keys_match().map_err(io::Error::other)?;
-    let mut config = ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(io::Error::other)?
-        .with_no_client_auth()
-        .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified)));
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    config.send_tls13_tickets = 0;
-    config.max_early_data_size = 0;
-    Ok(Arc::new(config))
+    crate::net::tls_front::server_config(&certificate.der, &certificate.key)
 }
 
 /// Start the listener. It fails when the vault is locked, when the companion setting is

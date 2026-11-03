@@ -16,9 +16,13 @@
 //!
 //! Nothing here binds `0.0.0.0` or `::`.
 
+pub mod certificate;
 pub mod limits;
 pub mod pin;
 pub mod sealed_key;
 pub mod tailnet;
+pub mod tls_front;
 
+pub use certificate::NodeCertificate;
 pub use pin::Pin;
+pub use tls_front::{Front, FrontError, FrontHandle, FrontLimits, FrontOptions};
