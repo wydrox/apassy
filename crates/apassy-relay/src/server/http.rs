@@ -1278,6 +1278,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         );
         respond_auth_error(
             hub,
+            listener.scope,
             endpoint,
             request,
             &RelayError::unauthenticated(),
@@ -1299,7 +1300,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
                     &json!({"code": error.code, "path_kind": endpoint_kind(endpoint)}),
                 );
             }
-            respond_auth_error(hub, endpoint, request, &error, true);
+            respond_auth_error(hub, listener.scope, endpoint, request, &error, true);
             return;
         }
     };
@@ -1357,7 +1358,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         match authenticate(&core, need, token, after_body) {
             Ok(principal) => principal,
             Err(error) => {
-                respond_auth_error(hub, endpoint, request, &error, true);
+                respond_auth_error(hub, listener.scope, endpoint, request, &error, true);
                 return;
             }
         }
@@ -1382,7 +1383,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         now
     };
     if endpoint == Endpoint::Mcp {
-        respond_mcp(hub, &core, request, principal, &body);
+        respond_mcp(hub, listener.scope, &core, request, principal, &body);
         return;
     }
     match dispatch(
@@ -1687,6 +1688,7 @@ fn feed_length(request: &Request) -> RelayResult<()> {
 
 fn respond_mcp(
     hub: &Hub,
+    scope: Scope,
     core: &Core,
     request: Request,
     principal: Option<Principal>,
@@ -1705,6 +1707,7 @@ fn respond_mcp(
     let Some(Principal::Agent(agent)) = principal else {
         respond_auth_error(
             hub,
+            scope,
             Endpoint::Mcp,
             request,
             &RelayError::unauthenticated(),
@@ -1730,15 +1733,17 @@ fn respond_mcp(
 /// An error answer that may be a 401 of `POST /mcp`: on a relay with OAuth it carries
 /// `WWW-Authenticate` with the address of the resource metadata (RFC 9728 section 5.1),
 /// so a client can start the authorization flow. `token_sent`: the request had a bearer
-/// token.
+/// token. Never on the tailnet listener, which does not serve the flow
+/// (`Scope::serves_oauth`).
 fn respond_auth_error(
     hub: &Hub,
+    scope: Scope,
     endpoint: Endpoint,
     request: Request,
     error: &RelayError,
     token_sent: bool,
 ) {
-    let challenge = (endpoint == Endpoint::Mcp && error.status() == 401)
+    let challenge = (endpoint == Endpoint::Mcp && error.status() == 401 && scope.serves_oauth())
         .then(|| oauth::www_authenticate(&hub.config, token_sent))
         .flatten()
         .and_then(|value| Header::from_bytes(&b"WWW-Authenticate"[..], value.as_bytes()).ok());

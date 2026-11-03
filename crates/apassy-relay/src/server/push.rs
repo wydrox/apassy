@@ -1232,15 +1232,6 @@ fn push_unavailable() -> RelayError {
     )
 }
 
-/// The number of push handles of a team, for the operator (`questions::counts`).
-pub fn handle_count(conn: &Connection) -> RelayResult<u64> {
-    conn.query_row("SELECT count(*) FROM push_handle", [], |row| {
-        row.get::<_, i64>(0)
-    })
-    .map(to_u)
-    .map_err(db)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

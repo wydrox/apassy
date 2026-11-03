@@ -591,7 +591,7 @@ impl RelayConfig {
             .is_some_and(|addr| !addr.ip().is_loopback())
         {
             return Err(RelayError::invalid(
-                "The tailnet listener is on a loopback address: the TLS front forwards to it.",
+                "The tailnet listener must be on a loopback address: only the TLS front forwards to it.",
             ));
         }
         if matches!(self.edge, EdgeMode::Off) {

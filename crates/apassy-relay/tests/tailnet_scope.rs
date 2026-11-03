@@ -20,6 +20,28 @@ fn status(node: &Node, base: &str, method: &str, path: &str) -> u16 {
     node.call(base, method, path, None, body.as_ref()).0
 }
 
+/// `POST /mcp` without a token: the status and the `WWW-Authenticate` header, if any.
+fn mcp_challenge(base: &str) -> (u16, Option<String>) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .build()
+        .into();
+    let request = ureq::http::Request::builder()
+        .method("POST")
+        .uri(format!("{base}/mcp"))
+        .header("Content-Type", "application/json")
+        .body(b"{}".to_vec())
+        .unwrap();
+    let response = agent.run(request).unwrap();
+    let challenge = response
+        .headers()
+        .get("www-authenticate")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    (response.status().as_u16(), challenge)
+}
+
 /// A cloud agent with a bearer token now, in a personal team of the node.
 fn agent_token(node: &Node) -> String {
     let team = node.node().create_team("Personal").unwrap();
@@ -140,6 +162,16 @@ fn with_agents_the_tailnet_listener_serves_mcp_runs_and_the_host_lane() {
     let token = agent_token(&node);
     let access = node.ok(&base, "GET", "/v1/access", Some(&token), None);
     assert!(access["items"].as_array().is_some(), "{access}");
+    // A 401 of `/mcp` names the authorization flow only where it is served: never on the
+    // tailnet listener.
+    let (got, challenge) = mcp_challenge(&base);
+    assert_eq!((got, challenge), (401, None));
+    let (got, challenge) = mcp_challenge(&node.local());
+    assert_eq!(got, 401);
+    assert!(
+        challenge.is_some_and(|value| value.contains("resource_metadata=")),
+        "the app's listener names the flow"
+    );
     // Still never Connect or the OAuth flow.
     for (method, path) in [
         ("POST", "/v1/connect"),
