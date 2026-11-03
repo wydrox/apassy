@@ -181,7 +181,10 @@ struct DecisionsView: View {
         let waiting = waitingRows(now: now)
         let access = accessRows
         let relayAccess = questions?.access.requests ?? []
-        let hasUnavailableVaults = questions?.contexts.contains { $0.error != nil } ?? false
+        // A node that does not answer is no unavailable vault: one quiet line says it (`notices`).
+        let hasUnavailableVaults = questions.map { model in
+            model.contexts.contains { $0.error != nil && !model.isUnreachableNode($0) }
+        } ?? false
         return RequestsList {
             if waiting.isEmpty && access.isEmpty && relayAccess.isEmpty && (questions?.lockedVaults.isEmpty ?? true) && !hasUnavailableVaults {
                 emptyWaiting
@@ -268,7 +271,7 @@ struct DecisionsView: View {
                 }
             }
             // ADR 0028 stage 1: the state of the Mac on Wi-Fi shows only in Settings › Devices.
-            if let questions, let error = questions.refreshError, !waiting.isEmpty {
+            if let questions, let error = questions.refreshError, !waiting.isEmpty, questions.unreachableNodes.isEmpty {
                 Section {
                     Label("Couldn’t refresh", systemImage: "exclamationmark.triangle")
                     Text(error).font(.subheadline).foregroundStyle(.secondary)
@@ -366,7 +369,7 @@ struct DecisionsView: View {
                         .accessibilityIdentifier("requests.wifiOnly")
                 }
             }
-            ForEach(questions.contexts.filter { $0.error != nil }) { vault in
+            ForEach(questions.contexts.filter { $0.error != nil && !questions.isUnreachableNode($0) }) { vault in
                 Section {
                     Label("\(vault.vaultName) is unavailable", systemImage: "exclamationmark.triangle")
                     if let error = vault.error {
@@ -375,6 +378,15 @@ struct DecisionsView: View {
                     Button("Retry") { Task { await questions.refresh() } }
                         .frame(minHeight: 44)
                         .accessibilityLabel("Retry \(vault.vaultName) requests")
+                }
+            }
+            // Plan S2–S3 unit N6: a node on the tailnet that does not answer (Tailscale is off on this
+            // iPhone) is one quiet footer line, never a card.
+            if let line = questions.tailscaleOffLine {
+                Section {
+                    Text(line)
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("requests.tailscaleOff")
                 }
             }
             if questions.phase == .ready {

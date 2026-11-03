@@ -76,10 +76,15 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
     public var registered: Bool
     /// Whether the owner removed this iPhone on a Mac. Then the list has no questions.
     public var removed: Bool
+    /// The node of the questions team (a pinned origin, node-pairing-v1): the questions come
+    /// "via your Mac" over the tailnet. Nil for a hosted relay and from an older core. The core
+    /// names the origin only; the app takes the name from the vault entry of that origin.
+    public var node: NodeInfo?
 
     public init(
         enabled: Bool, teamID: String? = nil, relayDeviceID: UInt64? = nil, deviceUUID: String? = nil,
-        answerKey: Data? = nil, hasKey: Bool = false, registered: Bool = false, removed: Bool = false
+        answerKey: Data? = nil, hasKey: Bool = false, registered: Bool = false, removed: Bool = false,
+        node: NodeInfo? = nil
     ) {
         self.enabled = enabled
         self.teamID = teamID
@@ -89,6 +94,7 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
         self.hasKey = hasKey
         self.registered = registered
         self.removed = removed
+        self.node = node
     }
 
     public static let off = QuestionsStatus(enabled: false)
@@ -102,6 +108,7 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
         case hasKey = "has_key"
         case registered
         case removed
+        case node
     }
 
     public init(from decoder: any Decoder) throws {
@@ -114,6 +121,8 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
         hasKey = try container.decode(Bool.self, forKey: .hasKey)
         registered = try container.decodeIfPresent(Bool.self, forKey: .registered) ?? false
         removed = try container.decodeIfPresent(Bool.self, forKey: .removed) ?? false
+        // A node this app cannot read is left out: the questions still show.
+        node = try? container.decodeIfPresent(NodeInfo.self, forKey: .node)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -126,6 +135,7 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
         try container.encode(hasKey, forKey: .hasKey)
         try container.encode(registered, forKey: .registered)
         try container.encode(removed, forKey: .removed)
+        try container.encodeIfPresent(node, forKey: .node)
     }
 }
 

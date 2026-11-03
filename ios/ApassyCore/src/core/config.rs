@@ -35,6 +35,11 @@ pub struct VaultEntry {
     /// in older lists and for a hosted relay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alt: Vec<String>,
+    /// The display name of a pinned node from its link (node-pairing-v1 section 7), for
+    /// "via your Mac" in Settings: a label, never an authority. Missing for a hosted relay,
+    /// for a link without `name`, and in older lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
 }
 
 impl VaultEntry {
@@ -233,6 +238,7 @@ mod tests {
             added_at: 1,
             pin: None,
             alt: Vec::new(),
+            node_name: None,
         });
         list.save(dir.path()).unwrap();
         let read = PhoneList::load(dir.path()).unwrap();
@@ -261,6 +267,7 @@ mod tests {
             added_at: 1,
             pin: Some(PIN.into()),
             alt: vec!["apassy-mini.tail0123.ts.net:8444".into()],
+            node_name: Some("Mac mini “Studio”".into()),
         };
         list.put(entry.clone());
         list.save(dir.path()).unwrap();
@@ -285,6 +292,7 @@ mod tests {
         let read = PhoneList::load(dir.path()).unwrap();
         assert_eq!(read.vaults[0].pin, None);
         assert!(read.vaults[0].alt.is_empty());
+        assert_eq!(read.vaults[0].node_name, None);
         let hosted = read.vaults[0]
             .relay_config(dir.path(), &vault_file)
             .unwrap()
@@ -295,6 +303,7 @@ mod tests {
         );
         let written = serde_json::to_string(&read.vaults[0]).unwrap();
         assert!(!written.contains("\"pin\"") && !written.contains("\"alt\""));
+        assert!(!written.contains("\"node_name\""));
 
         // A damaged pin is an error, never system trust.
         let mut damaged = entry;

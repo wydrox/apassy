@@ -12,8 +12,18 @@ public struct VaultEntry: Codable, Sendable, Hashable, Identifiable {
     public var deviceID: UInt64?
     public var addedAt: Int64
     public var syncSource: String?
+    /// The pin of a node relay (contract node-pairing-v1 section 9): the relay is the one in a Mac
+    /// (or a Linux node) on the tailnet, reached only with this certificate. Nil for a hosted relay.
+    public var pin: String?
+    /// The alternative destinations of a node relay, `host:port` each. Empty for a hosted relay.
+    public var alt: [String]
+    /// The node's display name from the pairing link, a label only (node-pairing-v1 section 7).
+    public var nodeName: String?
 
-    public init(id: String, name: String, relayURL: String?, teamID: String?, deviceID: UInt64?, addedAt: Int64, syncSource: String? = nil) {
+    public init(
+        id: String, name: String, relayURL: String?, teamID: String?, deviceID: UInt64?, addedAt: Int64,
+        syncSource: String? = nil, pin: String? = nil, alt: [String] = [], nodeName: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.relayURL = relayURL
@@ -21,21 +31,56 @@ public struct VaultEntry: Codable, Sendable, Hashable, Identifiable {
         self.deviceID = deviceID
         self.addedAt = addedAt
         self.syncSource = syncSource
+        self.pin = pin
+        self.alt = alt
+        self.nodeName = nodeName
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name
+        case id, name, pin, alt
         case relayURL = "relay_url"
         case teamID = "team_id"
         case deviceID = "device_id"
         case addedAt = "added_at"
         case syncSource = "sync_source"
+        case nodeName = "node_name"
+    }
+
+    /// `pin`, `alt`, and `node_name` are absent in older lists and for a hosted relay.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        relayURL = try container.decodeIfPresent(String.self, forKey: .relayURL)
+        teamID = try container.decodeIfPresent(String.self, forKey: .teamID)
+        deviceID = try container.decodeIfPresent(UInt64.self, forKey: .deviceID)
+        addedAt = try container.decode(Int64.self, forKey: .addedAt)
+        syncSource = try container.decodeIfPresent(String.self, forKey: .syncSource)
+        pin = try container.decodeIfPresent(String.self, forKey: .pin)
+        alt = try container.decodeIfPresent([String].self, forKey: .alt) ?? []
+        nodeName = try container.decodeIfPresent(String.self, forKey: .nodeName)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(relayURL, forKey: .relayURL)
+        try container.encodeIfPresent(teamID, forKey: .teamID)
+        try container.encodeIfPresent(deviceID, forKey: .deviceID)
+        try container.encode(addedAt, forKey: .addedAt)
+        try container.encodeIfPresent(syncSource, forKey: .syncSource)
+        try container.encodeIfPresent(pin, forKey: .pin)
+        if !alt.isEmpty { try container.encode(alt, forKey: .alt) }
+        try container.encodeIfPresent(nodeName, forKey: .nodeName)
     }
 
     /// Whether the vault uses its encrypted file in iCloud Drive.
     public var isICloud: Bool { syncSource == "icloud" }
     public var isRelay: Bool { !isICloud && relayURL != nil }
     public var syncs: Bool { isICloud || isRelay }
+    /// Whether the vault syncs through a node on the tailnet (a pinned relay): "via your Mac".
+    public var isNode: Bool { isRelay && pin != nil }
 }
 
 /// The answer of `info`.
@@ -70,17 +115,35 @@ public struct JoinInfo: Codable, Sendable, Equatable {
     /// The two safety words. The Mac shows the same words for this iPhone.
     public var words: [String]
     public var expiresAt: Int64
+    /// The node of a pinned link (contract node-pairing-v1): the vault comes from a Mac (or a Linux
+    /// node) over the tailnet. Nil for a link of a hosted relay.
+    public var node: NodeInfo?
 
-    public init(state: State, team: String, words: [String], expiresAt: Int64) {
+    public init(state: State, team: String, words: [String], expiresAt: Int64, node: NodeInfo? = nil) {
         self.state = state
         self.team = team
         self.words = words
         self.expiresAt = expiresAt
+        self.node = node
     }
 
     enum CodingKeys: String, CodingKey {
-        case state, team, words
+        case state, team, words, node
         case expiresAt = "expires_at"
+    }
+}
+
+/// A node relay as the app shows it: the relay inside a Mac app (or `apassy serve` on Linux) on the
+/// tailnet, behind a pinned certificate (contract node-pairing-v1).
+public struct NodeInfo: Codable, Sendable, Equatable {
+    /// The origin that this iPhone stores and signs: `https://<Tailscale IPv4>:<port>`.
+    public var origin: String
+    /// The node's display name from its link, a label only. Nil when the link had none.
+    public var name: String?
+
+    public init(origin: String, name: String? = nil) {
+        self.origin = origin
+        self.name = name
     }
 }
 

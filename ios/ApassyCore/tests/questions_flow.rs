@@ -37,6 +37,8 @@ fn an_iphone_attaches_reads_a_card_and_answers_with_face_id_and_without() {
     let uuid = attach(&setup);
     let list = call(&setup.core, json!({"op": "questions_list"}));
     assert_eq!(list["status"]["answer_key"], ANSWER_PUBLIC);
+    // A team without a pin is no node: the status names none (unit N6).
+    assert!(list["status"].get("node").is_none(), "{list}");
     assert_eq!(list["questions"].as_array().unwrap().len(), 0);
     // A second attach of the same vault is refused.
     let (link, _) = setup.relay.link();

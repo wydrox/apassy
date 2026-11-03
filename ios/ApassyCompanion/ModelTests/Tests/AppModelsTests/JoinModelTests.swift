@@ -285,4 +285,99 @@ struct JoinModelTests {
         }
         #expect(try await !fixture.service.info().unlocked)
     }
+
+    // MARK: A node on the tailnet (plan S2–S3 unit N6, contract node-pairing-v1)
+
+    private static let pin = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE"
+    private static let nodeCode = "apassy_lnk_t_7k2m5q4x3c_" + String(repeating: "0123456789abcdef", count: 4)
+    /// The Mac's device link of its node: the origin, the code, the pin, and the name.
+    private static let nodeLink = "https://100.64.0.7:8444/link#\(nodeCode)&pin=\(pin)&name=Mac%20mini"
+
+    @Test("a node link joins via your Mac with the node's name, and the vault keeps the pin")
+    func nodeLink() async throws {
+        let fixture = Fixture(biometry: .none)
+        fixture.model.handleCode(Self.nodeLink)
+        #expect(fixture.model.step == .name(link: Self.nodeLink))
+        #expect(fixture.model.scanNote == nil)
+        await fixture.model.start()
+        guard case .waiting(let join) = fixture.model.step else {
+            Issue.record("expected the waiting step, got \(fixture.model.step)")
+            return
+        }
+        #expect(join.node == NodeInfo(origin: "https://100.64.0.7:8444", name: "Mac mini"))
+        #expect(fixture.model.routeText == "via your Mac")
+        #expect(fixture.model.nodeLine == "Through Tailscale to Mac mini.")
+        #expect(await waitUntil { fixture.model.step == .passphrase(team: "Personal") })
+        await fixture.model.finish(passphrase: PreviewVaultService.passphrase)
+        guard case .done(let vault) = fixture.model.step else {
+            Issue.record("expected the done step, got \(fixture.model.step)")
+            return
+        }
+        #expect(vault.isNode)
+        #expect(vault.relayURL == "https://100.64.0.7:8444")
+        #expect(vault.pin == Self.pin)
+        #expect(vault.nodeName == "Mac mini")
+        #expect(fixture.model.syncLine(for: vault) == "Apassy syncs it with Mac mini over Tailscale. Keep Tailscale on to sync.")
+        #expect(DeviceRoute.of(vault) == .viaYourMac(name: "Mac mini"))
+    }
+
+    @Test("a hosted link says nothing of a Mac on the tailnet")
+    func hostedLinkHasNoRoute() async {
+        let fixture = Fixture(biometry: .none)
+        #expect(await fixture.toPassphrase(link: link))
+        #expect(fixture.model.routeText == nil)
+        #expect(fixture.model.nodeLine == nil)
+        await fixture.model.finish(passphrase: PreviewVaultService.passphrase)
+        guard case .done(let vault) = fixture.model.step else {
+            Issue.record("expected the done step, got \(fixture.model.step)")
+            return
+        }
+        #expect(!vault.isNode)
+        #expect(fixture.model.syncLine(for: vault) == "Apassy syncs it with your Mac through the relay.")
+        #expect(DeviceRoute.of(vault) == .viaApassyRelay)
+    }
+
+    @Test("a node that does not answer asks for Tailscale on this iPhone")
+    func nodeUnreachable() async {
+        let fixture = Fixture()
+        await fixture.service.failNextJoin(VaultError(.relayUnreachable, "The relay cannot be reached."))
+        fixture.model.handleCode(Self.nodeLink)
+        await fixture.model.start()
+        #expect(
+            fixture.model.step
+                == .failed(
+                    title: "Your Mac does not answer",
+                    message: "Turn on Tailscale on this iPhone to reach your Mac, then try again."))
+
+        // A hosted relay that does not answer keeps its own words.
+        let hosted = Fixture()
+        await hosted.service.failNextJoin(VaultError(.relayUnreachable, "The relay cannot be reached."))
+        hosted.model.handleCode(link)
+        await hosted.model.start()
+        #expect(hosted.model.step == .failed(title: "The relay does not answer", message: "The relay cannot be reached."))
+    }
+
+    @Test("a node with another certificate than the pin of the link ends the join")
+    func pinMismatch() async {
+        let fixture = Fixture()
+        let message = "This node's certificate changed. Pair again."
+        await fixture.service.failNextJoin(VaultError(.pinMismatch, message))
+        fixture.model.handleCode(Self.nodeLink)
+        await fixture.model.start()
+        #expect(fixture.model.step == .failed(title: "The certificate does not match", message: message))
+        #expect(VaultError.Code(rawValue: "pin_mismatch") == .pinMismatch)
+    }
+
+    @Test("a node pairing code is for a Mac: the scanner says so and goes on")
+    func nodePairingCode() {
+        let fixture = Fixture()
+        fixture.model.showScanner()
+        let pair = "https://100.64.0.7:8444/pair#apassy_tcd_\(String(repeating: "0123456789abcdef", count: 4))&pin=\(Self.pin)"
+        fixture.model.handleCode(pair)
+        #expect(fixture.model.step == .scan)
+        #expect(fixture.model.scanNote == JoinModel.nodePairingNote)
+        #expect(VaultText.isPinnedLink(Self.nodeLink))
+        #expect(!VaultText.isPinnedLink(link))
+        #expect(VaultText.linkTeam(Self.nodeLink) == "t_7k2m5q4x3c")
+    }
 }
