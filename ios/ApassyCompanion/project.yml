@@ -59,6 +59,9 @@ targets:
         product: ApassyVaultCore
       - target: ApassyAutoFill
         embed: true
+      # Opens the sealed summary of a push (push-gateway-v1 section 12).
+      - target: ApassyNotifications
+        embed: true
       # The watch app, as the Watch content of the iPhone app.
       - target: ApassyWatch
         embed: true
@@ -71,6 +74,8 @@ targets:
         keychain-access-groups:
           - $(AppIdentifierPrefix)com.wydrox.apassy.companion
           - $(AppIdentifierPrefix)com.wydrox.apassy.shared
+          # The summary keys of the questions teams, shared with ApassyNotifications only.
+          - $(AppIdentifierPrefix)com.wydrox.apassy.push
         com.apple.developer.authentication-services.autofill-credential-provider: true
         # Questions through the relay (contract relay-questions-v1, section 14.2). Xcode writes
         # `production` into an App Store or TestFlight export. Both need the Push Notifications and
@@ -186,6 +191,41 @@ targets:
         INFOPLIST_FILE: AutoFill/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         APPLICATION_EXTENSION_API_ONLY: YES
+  # The Notification Service Extension of the iPhone app (push-gateway-v1 section 12): it opens the
+  # sealed summary of a push of a node with a summary key from the Keychain group
+  # com.wydrox.apassy.push and shows its title and body; on any failure the fixed text stays. No
+  # network, no vault, no App Group, no log. Apple frameworks and ApassyVaultKit only (no Rust core).
+  ApassyNotifications:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Notifications
+    dependencies:
+      - package: ApassyVaultKit
+        product: ApassyVaultKit
+    entitlements:
+      path: Notifications/ApassyNotifications.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.wydrox.apassy.push
+    info:
+      path: Notifications/Info.plist
+      properties:
+        CFBundleDisplayName: Apassy
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ApassyBuildCommit: $(APASSY_BUILD_COMMIT)
+        ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        PRODUCT_NAME: ApassyNotifications
+        PRODUCT_BUNDLE_IDENTIFIER: com.wydrox.apassy.companion.notifications
+        INFOPLIST_FILE: Notifications/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
   # The Apple Watch app (ADR 0039): access requests only, Allow once while the watch is unlocked on
   # the wrist. arm64 watches only: stable Rust has no arm64_32 standard library. The vault core
   # needs its watchOS slices (scripts/build-ios-core.sh watch watchsim).
@@ -201,12 +241,23 @@ targets:
         product: ApassyVaultKit
       - package: ApassyVaultKit
         product: ApassyVaultCore
+      # Opens the sealed summary of the watch's own push (push-gateway-v1 sections 11 and 12).
+      - target: ApassyWatchNotifications
+        embed: true
     entitlements:
       path: Watch/ApassyWatch.entitlements
       properties:
-        # The answer keys and the replica passphrase stay in a group of the watch only.
+        # The answer keys and the replica passphrase stay in a group of the watch only (the first
+        # group is the default); the summary key of its questions team goes in a group shared with
+        # ApassyWatchNotifications only.
         keychain-access-groups:
           - $(AppIdentifierPrefix)com.wydrox.apassy.watch
+          - $(AppIdentifierPrefix)com.wydrox.apassy.watch.push
+        # "Notifications on this watch" (push-gateway-v1 section 11): the watch's own APNs token for
+        # a handle of the push gateway. Xcode writes `production` into an App Store or TestFlight
+        # export. Needs Push Notifications and Time Sensitive Notifications on the watch App ID.
+        aps-environment: development
+        com.apple.developer.usernotifications.time-sensitive: true
     info:
       path: Watch/Info.plist
       properties:
@@ -214,6 +265,8 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ApassyBuildCommit: $(APASSY_BUILD_COMMIT)
+        # The team prefix of the Keychain group of the summary key (KeychainPushSummaryKeyStore).
+        ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         WKApplication: true
         WKCompanionAppBundleIdentifier: com.wydrox.apassy.companion
         ITSAppUsesNonExemptEncryption: false
@@ -236,6 +289,47 @@ targets:
         # Archived inside the iPhone app, not as a product of its own.
         SKIP_INSTALL: YES
     scheme: {}
+  # The Notification Service Extension of the watch app (push-gateway-v1 sections 11 and 12): the
+  # same as ApassyNotifications, with the Keychain group com.wydrox.apassy.watch.push; a run
+  # question shows "Answer on your iPhone or Mac". arm64 only, as the watch app.
+  ApassyWatchNotifications:
+    type: app-extension
+    platform: watchOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Watch/Notifications
+    dependencies:
+      - package: ApassyVaultKit
+        product: ApassyVaultKit
+    entitlements:
+      path: Watch/Notifications/ApassyWatchNotifications.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.wydrox.apassy.watch.push
+    info:
+      path: Watch/Notifications/Info.plist
+      properties:
+        CFBundleDisplayName: Apassy
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ApassyBuildCommit: $(APASSY_BUILD_COMMIT)
+        ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        PRODUCT_NAME: ApassyWatchNotifications
+        PRODUCT_BUNDLE_IDENTIFIER: com.wydrox.apassy.companion.watchkitapp.notifications
+        INFOPLIST_FILE: Watch/Notifications/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
+        TARGETED_DEVICE_FAMILY: "4"
+        WATCHOS_DEPLOYMENT_TARGET: "27.0"
+        ARCHS[sdk=watchos*]: arm64
+        EXCLUDED_ARCHS[sdk=watchos*]: arm64_32
+        EXCLUDED_ARCHS[sdk=watchsimulator*]: x86_64
+        SKIP_INSTALL: YES
   # Checks of the screens in the Simulator, with the synthetic preview vault only (the launch
   # arguments in ios/README.md). Not a part of the app.
   ApassyCompanionUITests:

@@ -1581,7 +1581,7 @@ impl Core {
         }
     }
 
-    /// Write [`PUSH_FILE`]. The app only; a failure leaves the old list (the core tries
+    /// Write [`PUSH_FILE`]. The app and the watch; a failure leaves the old list (the core tries
     /// again at the next change).
     fn save_push(&self, state: &State) {
         // The AutoFill extension pushes nothing; the watch keeps its own handle.

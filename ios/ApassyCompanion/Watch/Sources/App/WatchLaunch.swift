@@ -20,6 +20,19 @@ enum WatchLaunch {
         #endif
     }
 
+    /// The model of the app and of "Notifications on this watch".
+    @MainActor
+    static func makeModels() -> (WatchAppModel, WatchNotificationsModel) {
+        let model = makeModel()
+        let notifications = WatchNotificationsModel(
+            service: notificationService, permission: WatchPushRegistrar.shared,
+            keys: KeychainPushSummaryKeyStore.forThisApp(watch: true))
+        return (model, notifications)
+    }
+
+    /// The core of the app, for the notifications: nil in a preview or when it did not start.
+    @MainActor private static var notificationService: (any WatchService)?
+
     @MainActor
     static func makeModel() -> WatchAppModel {
         #if DEBUG || targetEnvironment(simulator)
@@ -38,6 +51,7 @@ enum WatchLaunch {
         do {
             let service = try WatchCoreService(
                 dataDirectory: try dataDirectory(), deviceName: WatchConnectLink.defaultName(deviceName: name))
+            notificationService = service
             return WatchAppModel(service: service, keys: keys, replica: replica, deviceName: name, launchLink: launchLink)
         } catch {
             return WatchAppModel(

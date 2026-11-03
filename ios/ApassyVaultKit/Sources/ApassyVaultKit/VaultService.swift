@@ -213,6 +213,9 @@ public protocol VaultService: Sendable {
     /// Remove the token from the relay, as `pushTokenSet` reaches it. `pending`: the vaults whose
     /// team keeps it until they open (a core that keeps every unlocked vault; else empty).
     func pushTokenClear() async throws -> PushCleared
+    /// The summary key of the questions team of each unlocked vault (push-gateway-v1 section
+    /// 12), for the Keychain group of the Notification Service Extension.
+    func pushSummaryKeys() async throws -> [PushSummaryKey]
     /// Join the notifications-only team of the selected vault with the device link of the Mac.
     /// `answerKey`: the answer key of this iPhone (X9.63), which goes to the Mac that confirms.
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo

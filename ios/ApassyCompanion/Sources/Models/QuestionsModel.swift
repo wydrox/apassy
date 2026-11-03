@@ -207,6 +207,8 @@ final class QuestionsModel {
     @ObservationIgnored private let service: any VaultService
     @ObservationIgnored private let signers: any AnswerSigners
     @ObservationIgnored private weak var push: (any PushPermission)?
+    /// The summary keys for the Notification Service Extension (push-gateway-v1 section 12).
+    @ObservationIgnored private let summaryKeys: (any PushSummaryKeyStore)?
     @ObservationIgnored private let defaults: UserDefaults
     /// Keeps the name of a connection for the next one.
     @ObservationIgnored private let onDeviceName: @MainActor (String) -> Void
@@ -248,6 +250,7 @@ final class QuestionsModel {
         service: any VaultService, signers: any AnswerSigners, push: (any PushPermission)?, deviceName: String,
         defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
+        summaryKeys: (any PushSummaryKeyStore)? = KeychainPushSummaryKeyStore.forThisApp(watch: false),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
             "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."
         },
@@ -257,6 +260,7 @@ final class QuestionsModel {
         self.signers = signers
         self.access = AccessRequestsModel(service:service,signers:signers)
         self.push = push
+        self.summaryKeys = summaryKeys
         self.deviceName = deviceName
         self.onDeviceName = onDeviceName
         self.defaults = defaults
@@ -1335,6 +1339,7 @@ final class QuestionsModel {
             notificationsOn = false
             defaults.set(false, forKey: Self.notificationsKey)
             push?.unregisterForPushes()
+            summaryKeys?.removeAll()
             pushToken = nil
             registrationFailure = nil
             defaults.set(true, forKey: Self.pushClearKey)
@@ -1380,7 +1385,21 @@ final class QuestionsModel {
     private func updatePushToken() async {
         await clearPushToken()
         await sendPushToken()
+        await syncSummaryKeys()
         updateNotificationStatus()
+    }
+
+    /// Keep the summary key of each questions team for the Notification Service Extension while
+    /// notifications are on (push-gateway-v1 section 12); a team that was left loses its key, and
+    /// all go when notifications are off. The extension shows the fixed text without a key.
+    private func syncSummaryKeys() async {
+        guard let summaryKeys else { return }
+        guard notificationsOn else {
+            summaryKeys.removeAll()
+            return
+        }
+        guard let keys = try? await service.pushSummaryKeys() else { return }
+        summaryKeys.sync(keys, known: Set(contexts.compactMap(\.status.teamID)))
     }
 
     /// Send the token to the teams of the list that do not have it in this launch. A core that keeps

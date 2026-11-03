@@ -639,6 +639,8 @@ public extension VaultService {
 
     func pushTokenClear() async throws -> PushCleared { PushCleared() }
 
+    func pushSummaryKeys() async throws -> [PushSummaryKey] { [] }
+
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
         throw VaultError(.notAllowed, "This service cannot connect to the relay.")
     }
