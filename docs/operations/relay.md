@@ -16,9 +16,9 @@ The relay is a separate private repository, `wydrox/apassy-relay` (FSL-1.1-ALv2)
 
 The relay moved from a container on the owner's Mac on 2026-10-01. The Mac container `apassy-relay` and its volume `apassy-relay-data-v2` are stopped and kept for a rollback.
 
-## The free paths end with 0.5.18 (ADR 0037 D14)
+## The free paths end with 0.5.19 (ADR 0037 D14)
 
-From Apassy 0.5.16 the apps say that the free approvals without a team code (the questions-only Connect path of [ADR 0032](../adr/0032-connect-onboarding.md)) and free relay sync on `apassy-relay.wyderka.cc` end with Apassy 0.5.18 (`FREE_RELAY_PATHS_END_VERSION` in `src/relay/membership.rs`; the iPhone has the same number in `VaultText.swift`). The choices that the apps name: Tailscale with the user's Mac as the node (free), an own sync home on a Mac or Linux node (free, stage 4), or Apassy Connect (paid). Until 0.5.18 the hosted relay keeps relay sync, questions, feed, and push as they are. A slip of the date changes the constant and needs the owner's word ([implementation plan s7](../design/implementation-plan-s7-connect.md), section 5).
+From Apassy 0.5.17 the apps say that the free approvals without a team code (the questions-only Connect path of [ADR 0032](../adr/0032-connect-onboarding.md)) and free relay sync on `apassy-relay.wyderka.cc` end with Apassy 0.5.19 (`FREE_RELAY_PATHS_END_VERSION` in `src/relay/membership.rs`; the iPhone has the same number in `VaultText.swift`). The choices that the apps name: Tailscale with the user's Mac as the node (free), an own sync home on a Mac or Linux node (free, stage 4), or Apassy Connect (paid). Until 0.5.19 the hosted relay keeps relay sync, questions, feed, and push as they are. A slip of the date changes the constant and needs the owner's word ([implementation plan s7](../design/implementation-plan-s7-connect.md), section 5).
 
 ## Inspect
 
