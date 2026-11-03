@@ -507,8 +507,10 @@ pub struct ConnectCard {
     pub digest: String,
 }
 
-/// A card of either kind: a run (card v1) or a connect request (card v2).
+/// A card of either kind: a run (card v1) or a connect request (card v2). One card at a
+/// time, just opened: the size of the `Run` variant does not matter.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum AnyCard {
     Run(Card),
     Connect(ConnectCard),

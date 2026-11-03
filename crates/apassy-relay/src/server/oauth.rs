@@ -92,6 +92,35 @@ pub const OPEN_CONNECTS: u64 = 3;
 pub const PAGE_REFRESH_SECS: u64 = 3;
 /// The `NodeError` code of `decide_connect` for a request that does not wait any more.
 pub const CONNECT_NOT_PENDING: &str = "connect_not_pending";
+/// A connect request for its page (`wait`): status, redirect URI, state, match code,
+/// client, end, decision time, and whether its code was sent.
+type WaitRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    i64,
+    Option<i64>,
+    bool,
+);
+
+/// A connect request found by its code (`redeem_code`): id, client, redirect URI,
+/// challenge, status, end of the code, team, and agent.
+type CodeRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+);
+
+/// A refresh token (`redeem_refresh`): family, client, team, agent, end, use, and revocation.
+type RefreshRow = (String, String, String, i64, i64, Option<i64>, Option<i64>);
+
 /// The actor of the audit rows of this module.
 pub const OAUTH_ACTOR: &str = "oauth";
 /// The headers of every page and redirect of this module.
@@ -1376,7 +1405,7 @@ impl Flow<'_> {
         let origin = self.origin;
         self.hub.directory.store.tx(|tx| {
             expire_requests(tx, now)?;
-            let row: Option<(String, String, Option<String>, String, String, i64, Option<i64>, bool)> = tx
+            let row: Option<WaitRow> = tx
                 .query_row(
                     "SELECT r.status, r.redirect_uri, r.state, r.match_code, r.client_id, \
                      r.expires_at, r.decided_at, r.code_hash IS NOT NULL \
@@ -1537,16 +1566,7 @@ impl Flow<'_> {
         let now = self.now;
         let refresh_secs = self.oauth.refresh_token_secs;
         let redeemed = self.hub.directory.store.tx(|tx| {
-            let row: Option<(
-                String,
-                String,
-                String,
-                String,
-                String,
-                Option<i64>,
-                Option<String>,
-                Option<i64>,
-            )> = tx
+            let row: Option<CodeRow> = tx
                 .query_row(
                     "SELECT id, client_id, redirect_uri, code_challenge, status, code_expires_at, \
                      team_id, agent_id FROM connect_request WHERE code_hash = ?1",
@@ -1663,7 +1683,7 @@ impl Flow<'_> {
         let refresh_secs = self.oauth.refresh_token_secs;
         let hash = hash_of(refresh);
         let redeemed = self.hub.directory.store.tx(|tx| {
-            let row: Option<(String, String, String, i64, i64, Option<i64>, Option<i64>)> = tx
+            let row: Option<RefreshRow> = tx
                 .query_row(
                     "SELECT family, client_id, team_id, agent_id, expires_at, used_at, revoked_at \
                      FROM oauth_refresh WHERE token_hash = ?1",
