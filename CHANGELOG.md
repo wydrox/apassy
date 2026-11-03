@@ -8,6 +8,13 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - **Apple Watch:** a watch app that answers access requests only (ADR 0039). It can **Allow once** while the watch is unlocked on your wrist, or **Deny**. Connect it in Settings › Devices › Add Apple Watch on the iPhone, with the code from the Mac's Add an iPhone or a Mac…, and confirm the safety words with Touch ID on the Mac. The watch never shows run questions or vault items. Macs refuse every run answer from a watch. Apple Watch Series 9 or later, or Ultra 2 or later (arm64), with watchOS 27 or later.
 
+### Changed
+
+- **Mac credential page:** a one-time password is a row of the login card, with Copy and Show like the password. Copy needs no Show first. The username has Copy. The website row shows its host, with Open for http and https addresses. A login without a website offers **Add website…**. The header names the provider and the kind, and Service and Project are labeled rows. The details of a 1Password import move to the footer, under **Import details…**.
+- **Agent Access:** a line under the title says what happens when an agent asks for the credential, also while the part is closed. "Always ask me" and "Environment" say what their state means, and "Hosts and risk" names the hosts that the bouncer knows.
+- **Mac credential list:** the selection bar appears for two or more selected credentials. Credentials with the same kind and name show their host or folder, and **Possible duplicates (N)** lists them together. Credentials in no folder are under **No folder** (the top level was called "Personal"). A selected row keeps a white edge around its tile.
+- Dates older than a week read "9 Oct 2026".
+
 ### Upgrade notes
 
 - Vault schema 24: `trusted_device` accepts the device kind `watch`. Apps at schema 23 or older refuse schema-24 copies until they update.

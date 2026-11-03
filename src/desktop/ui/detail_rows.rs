@@ -279,17 +279,6 @@ impl Group<'_> {
             });
         })
     }
-
-    /// A row with a switch at the right.
-    pub(super) fn toggle(&mut self, label: &str, on: &mut bool) -> Response {
-        self.line(|ui| {
-            ui.label(kit::text(label, Font::Body).color(kit::LABEL));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                kit::toggle(ui, on, label)
-            })
-            .inner
-        })
-    }
 }
 
 /// A small gray button, as `.pb` of the mockup: 24 points high, 12.5-point medium text.
