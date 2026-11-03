@@ -163,6 +163,12 @@ pub const ACTIVITY_HELP: &str = "\
   apassy decisions export [--output FILE]
                               All bouncer decisions as JSON Lines. They hold commands and
                               user requests, no secret values. FILE gets mode 0600.
+  apassy decisions log [--asked] [--limit N] [--file FILE]
+                              Why the bouncer asked you: the counts of the last 7 days
+                              by reason, with what to change, and the last N decisions
+                              (default 20). No session needed. It reads
+                              ~/Library/Logs/Apassy/bouncer-decisions.log, which has
+                              no commands, user requests, or secret values.
 ";
 
 pub const VAULT_HELP: &str = "\
@@ -1738,8 +1744,14 @@ pub fn activity(cli: &Cli, mut args: Args) -> Outcome {
 
 pub fn decisions(cli: &Cli, mut args: Args) -> Outcome {
     let action = args.positional().unwrap_or_else(|| "export".to_owned());
-    if action != "export" {
-        return Err(Failure::Usage(usage("Use apassy decisions export.")));
+    match action.as_str() {
+        "export" => {}
+        "log" => return decisions_log(cli, args),
+        _ => {
+            return Err(Failure::Usage(usage(
+                "Use apassy decisions export or apassy decisions log.",
+            )));
+        }
     }
     let output = args.value(&["--output", "-o"])?;
     args.finish()?;
@@ -1779,6 +1791,233 @@ pub fn decisions(cli: &Cli, mut args: Args) -> Outcome {
         }
     }
     Ok(())
+}
+
+/// The days of the summary of `apassy decisions log`.
+const LOG_SUMMARY_DAYS: u64 = 7;
+
+/// `apassy decisions log`: why the bouncer asked you, from the decision log file. It
+/// needs no session and no running window: the file has no command, user request, or
+/// secret value ([`crate::decision_log`]).
+fn decisions_log(cli: &Cli, mut args: Args) -> Outcome {
+    use crate::decision_log::{self, Line};
+    let limit: usize = args.number(&["--limit", "-n"])?.unwrap_or(20);
+    let asked_only = args.flag(&["--asked"]);
+    let file = args.value(&["--file"])?;
+    args.finish()?;
+    let path = file.map_or_else(decision_log::default_path, std::path::PathBuf::from);
+    let lines = decision_log::read(&path);
+    let shown: Vec<&Line> = lines
+        .iter()
+        .filter(|line| !asked_only || line.asked())
+        .collect();
+    let recent = &shown[shown.len().saturating_sub(limit)..];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let since = now.saturating_sub(LOG_SUMMARY_DAYS * 86_400);
+    let summary = LogSummary::of(lines.iter().filter(|line| line.at >= since));
+    if cli.json {
+        print_json(&serde_json::json!({
+            "ok": true,
+            "code": "ok",
+            "data": {
+                "file": path.display().to_string(),
+                "summary": {
+                    "days": LOG_SUMMARY_DAYS,
+                    "requests": summary.requests,
+                    "by_bouncer": summary.by_bouncer,
+                    "remembered": summary.remembered,
+                    "asked": summary.asked,
+                    "refused": summary.refused,
+                    "asked_reasons": summary.reasons.iter().map(|(reason, count)| serde_json::json!({
+                        "reason": reason,
+                        "count": count,
+                        "advice": decision_log::advice(reason),
+                    })).collect::<Vec<_>>(),
+                },
+                "lines": recent,
+            }
+        }));
+        return Ok(());
+    }
+    if lines.is_empty() {
+        println!(
+            "No decisions in {} yet. Apassy writes a line there for each agent request.",
+            path.display()
+        );
+        return Ok(());
+    }
+    println!(
+        "Last {LOG_SUMMARY_DAYS} days: {} requests. The bouncer decided {}, remembered answers and patterns {}, you were asked {}, refused {}.",
+        summary.requests, summary.by_bouncer, summary.remembered, summary.asked, summary.refused
+    );
+    if !summary.reasons.is_empty() {
+        println!();
+        println!("Why Apassy asked you:");
+        for (reason, count) in &summary.reasons {
+            let headline = lines
+                .iter()
+                .rev()
+                .find(|line| &line.reason == reason)
+                .map_or(reason.as_str(), |line| line.headline.as_str());
+            println!("  {count:>4}  {}", clean(headline));
+            let advice = decision_log::advice(reason);
+            if !advice.is_empty() {
+                println!("        {advice}");
+            }
+        }
+    }
+    println!();
+    println!(
+        "{} of {} decisions{}, oldest first ({}):",
+        recent.len(),
+        shown.len(),
+        if asked_only { " that asked you" } else { "" },
+        path.display()
+    );
+    for line in recent {
+        print_log_line(line);
+    }
+    Ok(())
+}
+
+/// The counts of `apassy decisions log`.
+#[derive(Default)]
+struct LogSummary {
+    requests: u64,
+    by_bouncer: u64,
+    remembered: u64,
+    asked: u64,
+    refused: u64,
+    /// The reason kinds of the questions, most first.
+    reasons: Vec<(String, u64)>,
+}
+
+impl LogSummary {
+    fn of<'a>(lines: impl Iterator<Item = &'a crate::decision_log::Line>) -> Self {
+        let mut summary = Self::default();
+        let mut reasons = std::collections::BTreeMap::<String, u64>::new();
+        for line in lines {
+            summary.requests += 1;
+            match line.route.as_str() {
+                "Owner" => {
+                    summary.asked += 1;
+                    *reasons.entry(line.reason.clone()).or_default() += 1;
+                }
+                "Answer" | "Pattern" => summary.remembered += 1,
+                "Refused" => summary.refused += 1,
+                _ => summary.by_bouncer += 1,
+            }
+        }
+        summary.reasons = reasons.into_iter().collect();
+        summary
+            .reasons
+            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        summary
+    }
+}
+
+/// One decision of `apassy decisions log` in three or four lines.
+fn print_log_line(line: &crate::decision_log::Line) {
+    let items = line
+        .items
+        .iter()
+        .map(|item| {
+            if item.name.is_empty() {
+                format!("#{}", item.id)
+            } else {
+                format!("{} (#{})", item.name, item.id)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut head = format!("{}  {} · {}", print::time(line.at), line.agent, items);
+    if !line.project.is_empty() {
+        let _ = write!(head, " · {}", line.project);
+    }
+    if !line.action.is_empty() {
+        let _ = write!(head, " · {}", line.action);
+    }
+    println!("{}", clean(&head));
+    let route = match line.route.as_str() {
+        "Owner" => "Asked you",
+        "Bouncer" => "The bouncer allowed it",
+        "Connector" => "Allowed by the connector rules",
+        "Answer" => "Your remembered answer allowed it",
+        "Pattern" => "A remembered pattern allowed it",
+        "Refused" => "Refused",
+        other => other,
+    };
+    let mut result = format!("  {route}");
+    if !line.outcome.is_empty() && line.route == "Owner" {
+        let _ = write!(result, ", {}", line.outcome.replace('_', " "));
+    }
+    if !line.answered_on.is_empty() {
+        let _ = write!(result, " on {}", line.answered_on);
+    }
+    if !line.code.is_empty() {
+        let _ = write!(result, " ({})", line.code);
+    }
+    let _ = write!(result, " in {:.1} s.", line.millis as f64 / 1_000.0);
+    if line.route == "Owner" && !line.headline.is_empty() {
+        let _ = write!(result, " {}", line.headline);
+    }
+    println!("{}", clean(&result));
+    if !line.why.is_empty() {
+        println!("  {}", clean(&line.why));
+    }
+    let mut facts = Vec::new();
+    if !line.task_source.is_empty() {
+        facts.push(format!(
+            "Task: {}",
+            match line.task_source.as_str() {
+                "host" => "from the prompt hook",
+                "agent" => "from the agent",
+                "none" => "none",
+                other => other,
+            }
+        ));
+    }
+    if !line.flags.is_empty() {
+        facts.push(format!("Flags: {}", line.flags.join(", ")));
+    }
+    if !line.brain.is_empty() {
+        // The order of the questions of the bouncer, then any other answer.
+        const ORDER: [&str; 6] = [
+            "task_match",
+            "writes",
+            "remote",
+            "leak",
+            "destroy",
+            "rule_break",
+        ];
+        let mut answers: Vec<(&String, &f64)> = line.brain.iter().collect();
+        answers.sort_by_key(|(name, _)| {
+            ORDER
+                .iter()
+                .position(|known| known == name)
+                .unwrap_or(ORDER.len())
+        });
+        let answers = answers
+            .into_iter()
+            .map(|(name, p)| format!("{name} {:.0}%", p * 100.0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        facts.push(format!("Brain: {answers}"));
+    }
+    if !line.brain_error.is_empty() {
+        facts.push(format!("Brain: {}", line.brain_error));
+    }
+    if line.default_source {
+        facts.push("Default classification: task_match needs 80%".to_owned());
+    }
+    if !line.hosts.is_empty() {
+        facts.push(format!("Hosts: {}", line.hosts.join(", ")));
+    }
+    if !facts.is_empty() {
+        println!("  {}", clean(&facts.join(". ")));
+    }
 }
 
 // ---- Vault ----

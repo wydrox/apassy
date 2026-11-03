@@ -1490,13 +1490,19 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         .filter(|_| !app.ui.decisions.routed)
         .and_then(|id| activity.find(id, &app.ui.activity_scope).cloned());
     if let Some(decision) = past {
+        // The decision log entry of a decision of this Mac says why it went as it did.
+        let why = decision
+            .decision_log_id
+            .filter(|_| decision.source == super::decisions_activity::Source::ThisMac)
+            .and_then(|id| app.owner_ui.session.decision_record(id).ok().flatten())
+            .map(|record| super::decisions_activity::PastWhy::of(&record.entry));
         let mut week = false;
         columns::detail_toolbar(ui, |ui| {
             week = kit::small_button(ui, "This Week", Style::Bordered).clicked();
         });
         columns::detail_body(ui, ("past-decision", decision.id), |ui| {
             super::shell::banners(app, ui, pending);
-            super::decisions_activity::past_detail(ui, &decision);
+            super::decisions_activity::past_detail(ui, &decision, why.as_ref());
         });
         if week {
             app.ui.decisions.past = None;

@@ -200,6 +200,14 @@ Tests for steps 3 and 6 (dev round 4): `trace_settings_and_personal_data_reads_a
 
 Tests for step 4a: `learning_replaces_only_the_model_step` and `calibration_changes_only_the_task_match_level` in `src/broker/bouncer.rs`. `an_active_pattern_never_overrides_the_earlier_steps` in `tests/learning.rs` runs the broker with an active pattern: a forbidden word, an expired rule, and the hourly limit deny (step 1); a production item, a rule flag, a missing user request, and a missing declaration wait for the owner (steps 2 to 4); the model is not called.
 
+### 3.0a Why a run asked you
+
+Each decision has one reason kind (`src/broker/route_diagnostics.rs`, `ReasonKind`): the first hard rule that asked, else the bouncer brain step (`LowTaskMatch`, `ModelUnsure`, `ModelUnavailable`, `ModelTimeout`). Three places show it:
+
+- Decisions: a past decision of this Mac has "Why Apassy asked you" (or "Why it ran"): the reason of the question, the task and its source (prompt hook or agent), the rule flags, and the bouncer brain answers.
+- `apassy decisions log`: the questions of the last 7 days by reason, with what to change, and the last decisions. It reads `~/Library/Logs/Apassy/bouncer-decisions.log` and needs no session ([learning](learning.md), section 1a).
+- Settings > Bouncer: the counts since Apassy started.
+
 ### 3.1 Uncertain commands and project scripts
 
 Unknown commands and project scripts remain uncertain for production action

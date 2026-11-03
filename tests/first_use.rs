@@ -717,6 +717,77 @@ fn default_classification_needs_eighty_percent_even_for_a_safe_command() {
     assert_eq!(code(&handle.join().unwrap()), "approval_denied");
 }
 
+/// A question is in the decision log file with its reason kind and the brain answers,
+/// and without the command or the user request; the use of the run names its decision
+/// log entry, so Decisions can show why it asked.
+#[test]
+fn a_question_is_in_the_decision_log_file_and_its_use_names_the_entry() {
+    use apassy::vault::{DeclarationSource, DeclarationSources};
+    let fx = fixture_model(
+        Some(declaration(Environment::Staging, RiskLevel::Medium)),
+        true,
+        Duration::from_secs(10),
+        common::fake_bouncer(&[("task_match", 0.42)]),
+    );
+    with_vault(&fx, |v| {
+        v.set_declaration_sources(
+            fx.item_id,
+            &DeclarationSources {
+                environment: DeclarationSource::Default,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    });
+    let log = fx
+        .dir
+        .path()
+        .join("Logs")
+        .join(apassy::decision_log::FILE_NAME);
+    // nextest runs each test in its own process, so this file is only this test's.
+    apassy::decision_log::enable(log.clone());
+    let handle = run_later(&fx, &fx.project, &sentry_call());
+    let run = waiting(&fx);
+    owner(&fx, OwnerAction::ApproveRun(run)).expect("approved");
+    assert_eq!(decided_by(&handle.join().expect("run")), "Owner approved");
+
+    let lines = apassy::decision_log::read(&log);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    assert_eq!(line.request, "run");
+    assert_eq!(line.route, "Owner");
+    assert_eq!(line.reason, "LowTaskMatch");
+    assert_eq!(line.outcome, "approved");
+    assert_eq!(line.task_source, "agent");
+    assert!(line.default_source);
+    assert_eq!(line.items[0].id, fx.item_id);
+    assert_eq!(line.items[0].name, "Synthetic Sentry key");
+    assert_eq!(line.brain.get("task_match"), Some(&0.42));
+    assert!(
+        line.why.contains("task_match 42% (needs 80%)"),
+        "{}",
+        line.why
+    );
+    assert_eq!(line.hosts, ["sentry.io"]);
+    let text = std::fs::read_to_string(&log).expect("log file");
+    for hidden in [
+        SECRET,
+        ENV_NAME,
+        "curl",
+        "Check the synthetic Sentry project",
+    ] {
+        assert!(!text.contains(hidden), "{hidden} in {text}");
+    }
+
+    with_vault(&fx, |v| {
+        let uses = v.agent_uses(fx.agent_id, 10).expect("uses");
+        let id = uses[0].decision_log_id.expect("the use names its entry");
+        let record = v.decision(id).expect("read").expect("entry");
+        assert!(record.entry.asked);
+        assert!(record.entry.note.contains("task_match 42%"));
+    });
+}
+
 /// "Allow once" remembers nothing. Each new question is counted once, also when the owner
 /// answers it with an owner check (ADR 0025 §1, Gate 1 C §1).
 #[test]

@@ -42,7 +42,7 @@ pub(super) fn actions(group: &str) -> &'static [&'static str] {
         "request" => &["list", "grant", "deny"],
         "runs" => &["list", "approve", "deny"],
         "pattern" => &["list", "remove"],
-        "decisions" => &["export"],
+        "decisions" => &["export", "log"],
         "vault" => &["backup", "change-passphrase", "restore", "lock", "unlock"],
         "setup" => &["claude", "codex", "browser"],
         "completions" => &["zsh", "bash", "fish"],

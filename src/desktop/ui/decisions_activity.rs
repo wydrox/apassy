@@ -40,6 +40,8 @@ const SHOWN_NAME: usize = 40;
 const SHOWN_PROJECT: usize = 120;
 /// The longest command summary.
 const SHOWN_COMMAND: usize = 600;
+/// The longest task of "Why".
+const SHOWN_TASK: usize = 400;
 /// The height of a row of a decision: three lines.
 const ROW_HEIGHT: f32 = 64.0;
 
@@ -92,6 +94,69 @@ pub(super) struct PastDecision {
     pub(super) decided_by: String,
     /// The device that answered, or empty.
     pub(super) answered_on: String,
+    /// The decision log entry of a decision of this Mac, for "Why". `None` for another
+    /// Mac and for an older use.
+    pub(super) decision_log_id: Option<u64>,
+}
+
+/// Why a past decision of this Mac went as it did: its decision log entry, which the
+/// question showed you as the reason.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct PastWhy {
+    /// The run waited for you.
+    pub(super) asked: bool,
+    /// The reason of the question, or the note of the bouncer.
+    pub(super) note: String,
+    /// The task that the bouncer compared the command with, and where it came from.
+    pub(super) task: String,
+    pub(super) flags: Vec<String>,
+    /// The answers of the bouncer brain, from 0 to 1.
+    pub(super) brain: Vec<(String, f64)>,
+}
+
+impl PastWhy {
+    pub(super) fn of(entry: &crate::vault::DecisionEntry) -> Self {
+        use crate::vault::RequestSource;
+        let request = entry.user_request.trim();
+        let task = match entry.user_request_source {
+            _ if request.is_empty() => "The agent sent no task.".to_owned(),
+            RequestSource::Host => format!(
+                "From the prompt hook: \u{201c}{}\u{201d}",
+                shown_path(request, SHOWN_TASK)
+            ),
+            RequestSource::Agent | RequestSource::None => format!(
+                "Sent by the agent: \u{201c}{}\u{201d}",
+                shown_path(request, SHOWN_TASK)
+            ),
+        };
+        Self {
+            asked: entry.asked,
+            note: entry.note.trim().to_owned(),
+            task,
+            flags: entry.rule_flags.clone(),
+            brain: entry.model_facts.clone(),
+        }
+    }
+
+    /// "fits the task 69% · changes state 6%". Empty: the brain did not answer.
+    pub(super) fn brain_line(&self) -> String {
+        self.brain
+            .iter()
+            .map(|(name, p)| {
+                let label = match name.as_str() {
+                    "task_match" => "fits the task",
+                    "writes" => "changes state",
+                    "remote" => "remote",
+                    "leak" => "shows a secret",
+                    "destroy" => "destroys data",
+                    "rule_break" => "breaks your rule",
+                    other => other,
+                };
+                format!("{label} {:.0}%", p * 100.0)
+            })
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ")
+    }
 }
 
 impl PastDecision {
@@ -341,6 +406,7 @@ fn remote_decision(source: &Source, agent: &FeedAgent, item_use: &FeedUse) -> Pa
         outcome: item_use.outcome.clone(),
         decided_by: item_use.decided_by.clone(),
         answered_on: shown_path(&item_use.answered_on, SHOWN_NAME),
+        decision_log_id: None,
     }
 }
 
@@ -381,6 +447,7 @@ pub(super) fn gather(
                 outcome: item_use.outcome.as_str().to_owned(),
                 decided_by: item_use.decided_by.as_str().to_owned(),
                 answered_on: item_use.answered_on.clone(),
+                decision_log_id: item_use.decision_log_id,
             });
         }
     }
@@ -790,7 +857,7 @@ pub(super) fn week_summary(
 }
 
 /// The facts of one past decision, read-only.
-pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision) {
+pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision, why: Option<&PastWhy>) {
     let now = kit::now();
     let when = kit::relative_time(decision.at, now);
     ui.horizontal(|ui| {
@@ -829,6 +896,28 @@ pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision) {
         s.labeled("Decided", decision.decided_detail());
         s.labeled("Time", format!("{when} ({})", format_utc(decision.at)));
     });
+    if let Some(why) = why {
+        let title = if why.asked {
+            "Why Apassy asked you"
+        } else {
+            "Why it ran"
+        };
+        kit::section(ui, Some(title), None, |s| {
+            if !why.note.is_empty() {
+                s.row(|ui| {
+                    ui.add(Label::new(kit::text(&why.note, Font::Body).color(kit::LABEL)).wrap());
+                });
+            }
+            s.labeled("Task", why.task.as_str());
+            if !why.flags.is_empty() {
+                s.labeled("Rule flags", why.flags.join(", "));
+            }
+            let brain = why.brain_line();
+            if !brain.is_empty() {
+                s.labeled("Bouncer brain", brain);
+            }
+        });
+    }
     if !decision.command.is_empty() {
         kit::section(ui, Some("Command"), None, |s| {
             s.row(|ui| {

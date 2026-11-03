@@ -229,10 +229,12 @@ apassy pattern list
 apassy pattern remove 3
 apassy activity --agent "Claude Code" --limit 20
 apassy decisions export --output decisions.jsonl     # mode 0600
+apassy decisions log --asked --limit 10              # why the bouncer asked you; no session
 ```
 
 - `apassy request` lists and closes the notes of `apassy_request_access`. An agent does not need them, and the app does not show them. `apassy request grant ID` still saves a process grant and closes the request; like `grant set`, it gives the agent nothing that the bouncer does not decide.
 - `apassy runs approve` is "Allow Once". The command line cannot give "Allow ACTION in PROJECT" or a production allowance: answer in Decisions.
+- `apassy decisions log` reads `~/Library/Logs/Apassy/bouncer-decisions.log`, the decision log file of the window ([learning](learning.md), section 1a). It needs no session and no running window. It prints the questions of the last 7 days by reason, with what to change so that the next run does not ask, and the last decisions (`--limit N`, default 20; `--asked` for questions only; `--file` for another file). Each decision has its route, reason, the reason that the question showed, the rule flags, where the task came from, the bouncer brain answers, the hosts, and the outcome. `--json` gives the summary and the lines.
 - `--remember` is the only way left to teach a pattern ([learning](learning.md), section 2). The app shows only the number of patterns (Settings > Bouncer > Calibration and learning). `apassy pattern list` shows each pattern, and `apassy pattern remove` removes one.
 
 ## 7. Vault
