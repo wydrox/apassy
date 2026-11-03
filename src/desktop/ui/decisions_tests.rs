@@ -1276,7 +1276,7 @@ fn a_request_shows_its_facts_and_counts_in_the_badge() {
         where_to_get,
         "Apassy opens no link. Check the domain before you sign in.",
         "Saves to",
-        "Personal",
+        "No folder",
         "Key",
         "Not Now",
         "Save",
@@ -1345,8 +1345,7 @@ fn save_adds_the_item_with_the_request_origin_and_settles_the_request() {
     let details = app.owner_ui.session.details(item_id).expect("details");
     assert_eq!(details.name, "Stripe test key");
     assert!(
-        app.status_text
-            .contains("Saved Stripe test key in Personal for Codex"),
+        app.status_text.contains("Saved Stripe test key for Codex."),
         "{}",
         app.status_text
     );

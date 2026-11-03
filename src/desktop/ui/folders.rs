@@ -15,6 +15,13 @@ use super::{Sheet, close_sheet, save_pressed};
 use crate::desktop::{DesktopApp, Place};
 use crate::vault::{Folder, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES, VaultError, VaultErrorKind};
 
+/// The label of the top level for a credential: it is in no folder. Display only: the
+/// vault stores no name for the top level. "Personal" stays the name of the vault.
+pub(crate) const NO_FOLDER: &str = "No folder";
+
+/// The label of the top level for a folder, in Move Folder.
+pub(crate) const TOP_LEVEL: &str = "Top level";
+
 /// The folders of the open vault and the folder of each credential, read once for a
 /// frame.
 #[derive(Debug, Default, Clone)]
@@ -85,15 +92,27 @@ impl FolderTree {
         names
     }
 
-    /// "Work › Acme", or "Personal" for the top level.
+    /// The label of the folder of a credential: "Work › Acme", or [`NO_FOLDER`] for the
+    /// top level and for a folder that is gone.
     pub(crate) fn path_label(&self, uuid: Option<&str>) -> String {
         match uuid {
             Some(uuid) if self.get(uuid).is_some() => self.path(uuid).join(" › "),
-            _ => "Personal".to_owned(),
+            _ => NO_FOLDER.to_owned(),
         }
     }
 
-    /// The places of a folder menu: "Personal" (the top level), then each folder in
+    /// The folder in a status sentence: " in Work › Acme", as in "Added GitHub in
+    /// Work.", or nothing for the top level, where a new credential goes by default.
+    pub(crate) fn in_folder(&self, uuid: Option<&str>) -> String {
+        match uuid {
+            Some(uuid) if self.get(uuid).is_some() => {
+                format!(" in {}", self.path_label(Some(uuid)))
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The places of a folder menu: [`NO_FOLDER`] (the top level), then each folder in
     /// tree order with its path, such as "Work › Acme".
     pub(crate) fn choices(&self) -> Vec<(Option<String>, String)> {
         std::iter::once((None, self.path_label(None)))
@@ -265,11 +284,19 @@ pub(crate) fn delete(app: &mut DesktopApp, uuid: &str) -> bool {
             }
             app.ui.open_folders.remove(uuid);
             let place = tree.path_label(parent.as_deref());
-            app.set_ok(match moved {
-                0 => format!("The folder “{name}” is deleted."),
-                1 => format!("The folder “{name}” is deleted. Its credential is in {place}."),
-                _ => format!(
+            app.set_ok(match (moved, parent.is_some()) {
+                (0, _) => format!("The folder “{name}” is deleted."),
+                (1, true) => {
+                    format!("The folder “{name}” is deleted. Its credential is in {place}.")
+                }
+                (1, false) => {
+                    format!("The folder “{name}” is deleted. Its credential is not in a folder now.")
+                }
+                (_, true) => format!(
                     "The folder “{name}” is deleted. Its {moved} credentials are in {place}."
+                ),
+                (_, false) => format!(
+                    "The folder “{name}” is deleted. Its {moved} credentials are not in a folder now."
                 ),
             });
             true
@@ -297,8 +324,15 @@ pub(crate) fn move_items(app: &mut DesktopApp, ids: &[u64], folder: Option<&str>
             app.ui.selected_items.clear();
             app.ui.selection_anchor = None;
             app.selected_item_id = None;
-            let place = FolderTree::load(app).path_label(folder);
-            app.set_ok(format!("Moved {count} credentials to {place}."));
+            let tree = FolderTree::load(app);
+            let what = match count {
+                1 => "1 credential".to_owned(),
+                _ => format!("{count} credentials"),
+            };
+            app.set_ok(match folder.filter(|uuid| tree.get(uuid).is_some()) {
+                Some(uuid) => format!("Moved {what} to {}.", tree.path_label(Some(uuid))),
+                None => format!("Moved {what} out of folders."),
+            });
             true
         }
         Err(error) => {
@@ -355,6 +389,7 @@ pub(super) fn move_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, ids: &[
         ctx,
         &format!("Move {} Credentials", ids.len()),
         None,
+        NO_FOLDER,
         |app, target| move_items(app, ids, target),
     )
 }
@@ -370,6 +405,7 @@ pub(super) fn move_folder_sheet(app: &mut DesktopApp, ctx: &egui::Context, uuid:
         ctx,
         &format!("Move Folder “{name}”"),
         Some(&excluded),
+        TOP_LEVEL,
         |app, target| match app.owner_ui.session.move_folder(uuid, target) {
             Ok(()) => {
                 let fresh = FolderTree::load(app);
@@ -396,6 +432,7 @@ fn destination_sheet(
     ctx: &egui::Context,
     title: &str,
     excluded: Option<&BTreeSet<String>>,
+    top: &str,
     apply: impl FnOnce(&mut DesktopApp, Option<&str>) -> bool,
 ) -> bool {
     let tree = FolderTree::load(app);
@@ -406,6 +443,10 @@ fn destination_sheet(
             !uuid
                 .as_ref()
                 .is_some_and(|id| excluded.is_some_and(|set| set.contains(id)))
+        })
+        .map(|(uuid, label)| match uuid {
+            None => (None, top.to_owned()),
+            Some(_) => (uuid, label),
         })
         .collect();
     let mut choice = app.ui.move_target.clone();
@@ -453,11 +494,14 @@ pub(super) fn new_folder_sheet(
     parent: Option<&str>,
 ) -> bool {
     let tree = FolderTree::load(app);
-    let place = tree.path_label(parent);
+    let place = match parent.filter(|uuid| tree.get(uuid).is_some()) {
+        Some(uuid) => format!("In {}.", tree.path_label(Some(uuid))),
+        None => "At the top level.".to_owned(),
+    };
     let mut create_now = false;
     let mut cancel = false;
     let response = kit::sheet(ctx, "new-folder", 400.0, |ui| {
-        kit::sheet_title(ui, "New Folder", Some(&format!("In {place}.")));
+        kit::sheet_title(ui, "New Folder", Some(&place));
         name_field(app, ui);
         ui.add_space(8.0);
         kit::sheet_buttons(
@@ -533,16 +577,26 @@ pub(super) fn delete_sheet(app: &mut DesktopApp, ctx: &egui::Context, uuid: &str
         close_sheet(app, ctx);
         return false;
     };
-    let parent = tree.path_label(folder.parent.as_deref());
+    let moves = match folder
+        .parent
+        .as_deref()
+        .filter(|uuid| tree.get(uuid).is_some())
+    {
+        Some(parent) => format!(
+            "Its credentials and subfolders move to {}.",
+            tree.path_label(Some(parent))
+        ),
+        None => {
+            "Its credentials move out of folders, and its subfolders to the top level.".to_owned()
+        }
+    };
     let mut confirm = false;
     let mut cancel = false;
     let response = kit::sheet(ctx, "delete-folder", 400.0, |ui| {
         kit::sheet_title(
             ui,
             &format!("Delete “{}”?", folder.name),
-            Some(&format!(
-                "Its credentials and subfolders move to {parent}. No credential is deleted."
-            )),
+            Some(&format!("{moves} No credential is deleted.")),
         );
         kit::sheet_buttons(
             ui,
@@ -563,8 +617,8 @@ pub(super) fn delete_sheet(app: &mut DesktopApp, ctx: &egui::Context, uuid: &str
     response.escape
 }
 
-/// "Move to Folder": the top level and each folder, indented by level. Returns true on
-/// Escape.
+/// "Move to Folder": [`NO_FOLDER`] (the top level), then each folder, indented by its
+/// level. Returns true on Escape.
 pub(super) fn move_sheet(app: &mut DesktopApp, ctx: &egui::Context, item_id: u64) -> bool {
     let Ok(details) = app.owner_ui.session.details(item_id) else {
         close_sheet(app, ctx);
@@ -583,12 +637,13 @@ pub(super) fn move_sheet(app: &mut DesktopApp, ctx: &egui::Context, item_id: u64
         );
         kit::sheet_body(ui, |ui| {
             kit::section(ui, None, None, |s| {
-                let options = std::iter::once((None, "Personal".to_owned(), 0)).chain(
+                // A folder is not inside "No folder": the top folders line up with it.
+                let options = std::iter::once((None, NO_FOLDER.to_owned(), 0)).chain(
                     tree.folders.iter().map(|folder| {
                         (
                             Some(folder.uuid.clone()),
                             folder.name.clone(),
-                            tree.level(&folder.uuid) + 1,
+                            tree.level(&folder.uuid),
                         )
                     }),
                 );
@@ -646,4 +701,46 @@ fn ui_selected(response: &egui::Response, selected: bool) {
     response
         .ctx
         .accesskit_node_builder(response.id, |node| node.set_selected(selected));
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    fn folder(uuid: &str, parent: Option<&str>, name: &str) -> Folder {
+        Folder {
+            uuid: uuid.to_owned(),
+            parent: parent.map(str::to_owned),
+            name: name.to_owned(),
+            position: 0,
+        }
+    }
+
+    /// The top level reads "No folder", not the name of the vault.
+    #[test]
+    fn the_top_level_is_no_folder() {
+        let tree = FolderTree {
+            folders: vec![folder("w", None, "Work"), folder("a", Some("w"), "Acme")],
+            item_folder: BTreeMap::new(),
+        };
+        assert_eq!(tree.path_label(None), "No folder");
+        assert_eq!(tree.path_label(Some("gone")), "No folder");
+        assert_eq!(tree.path_label(Some("a")), "Work › Acme");
+        assert_eq!(
+            tree.choices(),
+            vec![
+                (None, "No folder".to_owned()),
+                (Some("w".to_owned()), "Work".to_owned()),
+                (Some("a".to_owned()), "Work › Acme".to_owned()),
+            ]
+        );
+        assert!(
+            tree.choices().iter().all(|(_, label)| label != "Personal"),
+            "Personal is the vault"
+        );
+        assert_eq!(tree.in_folder(Some("a")), " in Work › Acme");
+        assert_eq!(tree.in_folder(None), "");
+        assert_eq!(tree.in_folder(Some("gone")), "");
+        assert_eq!(FolderTree::default().path_label(None), NO_FOLDER);
+    }
 }

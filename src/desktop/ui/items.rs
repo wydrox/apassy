@@ -3188,8 +3188,8 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
                     app.add_form = ItemDraft::default();
                     app.ui.sheet = None;
                     reveal_saved(app, item.id, folder.clone());
-                    let place = FolderTree::load(app).path_label(folder.as_deref());
-                    app.set_ok(format!("Added {} in {place}.", item.name));
+                    let place = FolderTree::load(app).in_folder(folder.as_deref());
+                    app.set_ok(format!("Added {}{place}.", item.name));
                 }
                 Err(err) => app.set_err(err.message),
             }

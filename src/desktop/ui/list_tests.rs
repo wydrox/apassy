@@ -349,7 +349,7 @@ fn look_alike_rows_tell_themselves_apart() {
     assert!(!window.text.contains("c.example.com"), "{}", window.text);
     // No host: the folder tells them apart.
     assert!(window.has_line("API key · Work"), "{}", window.text);
-    assert!(window.has_line("API key · Personal"), "{}", window.text);
+    assert!(window.has_line("API key · No folder"), "{}", window.text);
 }
 
 /// "Possible duplicates (N)" shows only with look-alikes. It lists only them, each set
@@ -411,4 +411,151 @@ fn the_duplicates_filter_lists_look_alikes_together() {
     window.click(&mut app, "Show All");
     assert_eq!(app.ui.credential_filter, Filter::All);
     assert!(window.text.contains("Zeta key"), "{}", window.text);
+}
+
+/// The credentials in no folder have the group "No folder", above the folders. The
+/// vault keeps its name "Personal" in the sidebar.
+#[test]
+fn the_top_level_group_is_named_no_folder() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let work = folders::create(&mut app, None, "Work").expect("folder");
+    let key = CredentialKind::ApiKey;
+    add(&mut app, "Filed key", key, "", "", Some(&work.uuid));
+    add(&mut app, "Loose key", key, "", "", None);
+    app.place = Place::CREDENTIALS;
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(window.has_line("No folder"), "{}", window.text);
+    assert!(
+        window.top_of("No folder") < window.top_of("Loose key"),
+        "{}",
+        window.text
+    );
+    assert!(
+        window.top_of("Loose key") < window.top_of("Filed key"),
+        "{}",
+        window.text
+    );
+    assert!(
+        window.text.contains("Personal"),
+        "the vault: {}",
+        window.text
+    );
+}
+
+/// The Folder row of a credential in no folder says "No folder". One group has no
+/// header, so the row is the only "No folder" on the screen.
+#[test]
+fn the_folder_row_of_a_top_level_credential_says_no_folder() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    folders::create(&mut app, None, "Work").expect("folder");
+    let id = add(&mut app, "Loose key", CredentialKind::ApiKey, "", "", None);
+    app.place = Place::CREDENTIALS;
+    app.select_item(id.to_string());
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(window.has_line("Folder"), "{}", window.text);
+    assert!(window.has_line("No folder"), "{}", window.text);
+}
+
+/// Move to Folder offers "No folder" first, and the status says where the credentials
+/// went. Move Folder offers "Top level" instead: a folder is never in "No folder".
+#[test]
+fn the_move_sheets_name_the_top_level() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let work = folders::create(&mut app, None, "Work").expect("folder");
+    let key = CredentialKind::ApiKey;
+    let alpha = add(&mut app, "Alpha key", key, "", "", Some(&work.uuid));
+    let beta = add(&mut app, "Beta key", key, "", "", Some(&work.uuid));
+    let folder_of = |app: &DesktopApp, id: u64| {
+        app.owner_ui
+            .session
+            .with_vault(|vault| vault.item_folder(id))
+            .expect("open vault")
+            .expect("folder")
+    };
+    app.place = Place::CREDENTIALS;
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(!window.text.contains("No folder"), "{}", window.text);
+
+    folders::open_move(&mut app, alpha);
+    window.idle(&mut app);
+    assert!(window.has_line("No folder"), "{}", window.text);
+    window.click(&mut app, "No folder");
+    window.click(&mut app, "Move");
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert_eq!(folder_of(&app, alpha), None);
+    assert_eq!(app.status_text, "Moved 1 credential out of folders.");
+
+    assert!(folders::move_items(&mut app, &[beta], None));
+    assert_eq!(folder_of(&app, beta), None);
+    assert_eq!(app.status_text, "Moved 1 credential out of folders.");
+    assert!(folders::move_items(
+        &mut app,
+        &[alpha, beta],
+        Some(&work.uuid)
+    ));
+    assert_eq!(app.status_text, "Moved 2 credentials to Work.");
+
+    folders::open_move_folder(&mut app, work.uuid.clone());
+    window.idle(&mut app);
+    assert!(window.has_line("Top level"), "{}", window.text);
+}
+
+/// The tiles of the rows that a frame paints with the white ring of a selected row.
+fn tile_rings(window: &Window, app: &mut DesktopApp) -> usize {
+    fn count(shape: &egui::Shape) -> usize {
+        match shape {
+            egui::Shape::Rect(rect) if rect.stroke == kit::SELECTED_TILE_RING => 1,
+            egui::Shape::Circle(circle) if circle.stroke == kit::SELECTED_TILE_RING => 1,
+            egui::Shape::Vec(shapes) => shapes.iter().map(count).sum(),
+            _ => 0,
+        }
+    }
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+        ..Default::default()
+    };
+    let output = window.ctx.run_ui(input, |ui| draw(app, ui));
+    let rings = output
+        .shapes
+        .iter()
+        .map(|clipped| count(&clipped.shape))
+        .sum();
+    output.drop_without_applying_deltas();
+    rings
+}
+
+/// A login tile is the accent blue, as the selection is: on a selected row it has a
+/// white ring. A row that is not selected has none, and the tile keeps its color.
+#[test]
+fn a_selected_row_rings_its_tile_in_white() {
+    assert_eq!(kit::tile_ring(true), Some(kit::SELECTED_TILE_RING));
+    assert_eq!(kit::tile_ring(false), None);
+    assert_eq!(kit::SELECTED_TILE_RING.color, egui::Color32::WHITE);
+    assert!((kit::SELECTED_TILE_RING.width - 1.5).abs() < f32::EPSILON);
+    assert_eq!(
+        super::super::credential_tile(CredentialKind::Login, "", "Synthetic login").color,
+        kit::ACCENT
+    );
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let login = CredentialKind::Login;
+    let id = add(&mut app, "Synthetic login", login, "me@x.io", "", None);
+    add(&mut app, "Other login", login, "you@x.io", "", None);
+    app.place = Place::CREDENTIALS;
+    app.selected_item_id = None;
+    app.ui.selected_items.clear();
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert_eq!(tile_rings(&window, &mut app), 0, "no row is selected");
+
+    app.select_item(id.to_string());
+    window.idle(&mut app);
+    assert_eq!(tile_rings(&window, &mut app), 1, "the selected row only");
 }
