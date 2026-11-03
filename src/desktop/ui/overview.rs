@@ -112,8 +112,8 @@ pub(super) enum Action {
     ShowAllProjects,
     /// An attention item: Logs for its agent, in its environment; a silent Mac: that Mac.
     Attention(Attention),
-    /// An agent row: Agents, in its environment.
-    Agent(DeviceScope),
+    /// An agent row: its page on Agents, in its environment.
+    Agent(DeviceScope, Option<super::bouncer::AgentRef>),
     /// An environment row: that environment.
     Environment(DeviceScope),
 }
@@ -151,7 +151,8 @@ pub(super) fn wide_pane(app: &mut DesktopApp, ui: &mut Ui, pending: &Pending) {
         action = draw(ui, &view, now, offset);
     });
     if let Some(action) = action {
-        apply(app, action);
+        let ctx = ui.ctx().clone();
+        apply(app, &ctx, action);
     }
 }
 
@@ -162,7 +163,7 @@ fn now() -> u64 {
 }
 
 /// Do what the owner chose.
-fn apply(app: &mut DesktopApp, action: Action) {
+fn apply(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
     match action {
         Action::ConnectAgent => {
             #[cfg(feature = "vault")]
@@ -170,8 +171,16 @@ fn apply(app: &mut DesktopApp, action: Action) {
             #[cfg(not(feature = "vault"))]
             super::sidebar::navigate(app, Place::Agents);
         }
-        // The switch of remote access is on the Agents page (U3b-2, frame 2).
-        Action::TurnOnRemoteAccess => super::sidebar::navigate(app, Place::Agents),
+        // Touch ID, then the route goes on; Agents shows the address (frame 2).
+        Action::TurnOnRemoteAccess => {
+            #[cfg(feature = "vault")]
+            if app.cloud_node().is_some() {
+                app.ask_remote_access_on(Some(ctx));
+                return;
+            }
+            let _ = ctx;
+            super::sidebar::navigate(app, Place::Agents);
+        }
         Action::ShowAllProjects => app.ui.activity_scope.project = None,
         Action::Attention(Attention::Silent { scope, .. }) | Action::Environment(scope) => {
             app.ui.activity_scope.device = scope;
@@ -188,9 +197,10 @@ fn apply(app: &mut DesktopApp, action: Action) {
             super::logs::show_agent(app, agent);
             super::sidebar::navigate(app, Place::Logs);
         }
-        Action::Agent(scope) => {
+        Action::Agent(scope, agent) => {
             app.ui.activity_scope.device = scope;
             super::sidebar::navigate(app, Place::Agents);
+            app.ui.agent_page.open = agent;
         }
     }
 }
@@ -462,7 +472,7 @@ fn agents(ui: &mut Ui, view: &OverviewView, now: u64, offset: i64) -> Option<Act
                 })
                 .inner;
             if response.clicked() {
-                action = Some(Action::Agent(agent.env.clone()));
+                action = Some(Action::Agent(agent.env.clone(), agent.id.clone()));
             }
         }
     });

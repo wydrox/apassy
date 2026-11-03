@@ -27,17 +27,17 @@ use crate::node::{ACTIVITY_CONNECTED, Node, NodeOptions};
 use crate::owner::wire::{Command, Data, OWNER_WIRE_VERSION, Request, Response, SecretText};
 use crate::vault::{ConnectedWith, EnvDelivery, Field, ItemDraft, SecretValue};
 
-struct Fixture {
-    _dir: TempDir,
-    app: DesktopApp,
-    node: Arc<Node>,
-    backend: FakeBackend,
-    cli: Arc<FakeCli>,
+pub(super) struct Fixture {
+    pub(super) _dir: TempDir,
+    pub(super) app: DesktopApp,
+    pub(super) node: Arc<Node>,
+    pub(super) backend: FakeBackend,
+    pub(super) cli: Arc<FakeCli>,
 }
 
 /// An unlocked app with a running broker, a node of fakes, a placeholder item, and the
 /// route on: the window starts the node with no remote agent yet.
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     app.start_broker(&socket_dir(&dir));
@@ -89,7 +89,11 @@ fn fixture() -> Fixture {
 
 /// One frame of `logic` with a close request of the window when `close` is true.
 /// Returns the commands of the root viewport.
-fn frame(ctx: &egui::Context, app: &mut DesktopApp, close: bool) -> Vec<ViewportCommand> {
+pub(super) fn frame(
+    ctx: &egui::Context,
+    app: &mut DesktopApp,
+    close: bool,
+) -> Vec<ViewportCommand> {
     let mut input = RawInput::default();
     input.viewports.insert(
         ViewportId::ROOT,
@@ -120,7 +124,7 @@ fn route_turned_off(cli: &FakeCli) -> bool {
 }
 
 /// Run frames until `done` holds.
-fn until(
+pub(super) fn until(
     ctx: &egui::Context,
     app: &mut DesktopApp,
     what: &str,
@@ -222,7 +226,7 @@ fn unix_now() -> u64 {
 }
 
 /// Wait until the node (its host thread) lists the connect request `id`.
-fn offered(fx: &Fixture, id: &str, client: &str) -> PendingConnect {
+pub(super) fn offered(fx: &Fixture, id: &str, client: &str) -> PendingConnect {
     fx.backend
         .state
         .lock()

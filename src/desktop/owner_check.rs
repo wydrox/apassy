@@ -646,6 +646,14 @@ pub enum OwnerRequest {
     },
     /// The remote access switch on (Bouncer > Agents): Tailscale Funnel to the node.
     TurnOnRemoteAccess,
+    /// "Choose Credentials…" on an agent page: the agent may use `add` from now on, as
+    /// "only these items" (ADR 0012). Adding gives access, so it needs the check; the
+    /// node then sends the new list to a remote agent. Removing needs none.
+    ChooseAgentItems {
+        agent_id: u64,
+        agent_name: String,
+        add: Vec<u64>,
+    },
 }
 
 impl OwnerRequest {
@@ -1054,6 +1062,10 @@ impl OwnerRequest {
                 days: *days,
             },
             Self::TurnOnRemoteAccess => OwnerAction::TurnOnRemoteAccess,
+            Self::ChooseAgentItems { agent_id, add, .. } => OwnerAction::ChangeGrants {
+                agent_id: *agent_id,
+                item_ids: add.clone(),
+            },
         }
     }
 
@@ -1456,6 +1468,17 @@ impl OwnerRequest {
                 page_text(name)
             ),
             Self::TurnOnRemoteAccess => "Turn on remote access? Remote agents can then reach this Mac through Tailscale Funnel while it is awake and the vault is unlocked. The name of this Mac appears in public certificate logs. Every remote run still asks you.".to_owned(),
+            Self::ChooseAgentItems {
+                agent_name, add, ..
+            } => format!(
+                "Let {} use {}? It sees their names, never their values. The bouncer still decides each use.",
+                page_text(agent_name),
+                if add.len() == 1 {
+                    "1 more credential".to_owned()
+                } else {
+                    format!("{} more credentials", add.len())
+                }
+            ),
         }
     }
 }
@@ -2393,6 +2416,42 @@ impl DesktopApp {
                 self.complete_add_remote_agent(&name, days, proof);
             }
             OwnerRequest::TurnOnRemoteAccess => self.complete_remote_access_on(proof),
+            OwnerRequest::ChooseAgentItems {
+                agent_id,
+                agent_name,
+                add,
+            } => {
+                let action = OwnerAction::ChangeGrants {
+                    agent_id,
+                    item_ids: add.clone(),
+                };
+                let result = session.with_vault(|vault| {
+                    proof
+                        .check(&action, &vault.epoch())
+                        .map_err(|refusal| refusal.message().to_owned())?;
+                    for item_id in &add {
+                        vault
+                            .add_agent_exception(
+                                agent_id,
+                                *item_id,
+                                crate::vault::exceptions::ExceptionKind::Only,
+                            )
+                            .map_err(|err| format!("The credentials did not change: {err}."))?;
+                    }
+                    Ok::<(), String>(())
+                });
+                match result {
+                    Some(Ok(())) => {
+                        self.sync_remote_catalog();
+                        self.set_ok(format!(
+                            "{} can use the chosen credentials. The bouncer decides each use.",
+                            page_text(&agent_name)
+                        ));
+                    }
+                    Some(Err(message)) => self.set_err(message),
+                    None => self.set_err("The vault is locked."),
+                }
+            }
         }
     }
 

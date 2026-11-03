@@ -905,7 +905,9 @@ struct AgentOut {
     /// v2: when a remote agent connected.
     connected_at: Option<u64>,
     revoked: bool,
-    token_expires_at: u64,
+    /// `null` for the far end of an agent that connected by itself (its node refreshes
+    /// short tokens): the app never shows 9999-12-31 as an end.
+    token_expires_at: Option<u64>,
     last_use_at: Option<u64>,
     uses_this_week: u32,
     /// v2: 7 days, today first; empty for a feed of v1.
@@ -1177,6 +1179,16 @@ fn text(value: &str) -> String {
     envelope::shown(value, usize::MAX)
 }
 
+/// The vault's token end of a remote agent of the MCP authorization flow
+/// (`apassy::node::NO_TOKEN_EXPIRY`, 9999-12-31T23:59:59Z): it has no end.
+const NO_TOKEN_EXPIRY: u64 = 253_402_300_799;
+
+/// The end of a token as the app shows it: none for the far end of an agent that
+/// connected by itself.
+fn shown_token_end(expires_at: u64) -> Option<u64> {
+    (expires_at < NO_TOKEN_EXPIRY).then_some(expires_at)
+}
+
 fn agent_out(
     agent: &Agent,
     titles: Option<&BTreeMap<String, String>>,
@@ -1189,7 +1201,7 @@ fn agent_out(
         place: agent.place.clone(),
         connected_at: agent.connected_at,
         revoked: agent.revoked,
-        token_expires_at: agent.token_expires_at,
+        token_expires_at: shown_token_end(agent.token_expires_at),
         last_use_at: agent.last_use_at,
         uses_this_week: agent.uses_this_week,
         days: agent.days.clone(),
@@ -2958,6 +2970,19 @@ mod tests {
         assert_eq!(read.agents[0].place, "remote");
         assert_eq!(read.agents[0].connected_at, Some(1_790_000_000));
         assert_eq!(read.week.answer_p50_secs, None);
+        // Its token has the far end of the vault (9999-12-31): the list gets none, so the
+        // iPhone never shows that date; a real end goes through.
+        let mut far = remote.clone();
+        far["agents"][0]["token_expires_at"] = json!(NO_TOKEN_EXPIRY);
+        let read = parse_feed(far.to_string().as_bytes()).expect("a far end reads");
+        let out = serde_json::to_value(agent_out(&read.agents[0], None, |_| false)).unwrap();
+        assert_eq!(out["token_expires_at"], json!(null));
+        let read = parse_feed(remote.to_string().as_bytes()).expect("a remote agent reads");
+        let out = serde_json::to_value(agent_out(&read.agents[0], None, |_| false)).unwrap();
+        assert_eq!(
+            out["token_expires_at"],
+            json!(read.agents[0].token_expires_at)
+        );
 
         // v3, and each field of v2 out of its form.
         let mut bad = Vec::new();
