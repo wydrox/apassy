@@ -11,7 +11,7 @@ description = "A personal credential manager with controlled agent access"
 autotests = false
 
 [workspace]
-members = [".", "ios/ApassyCore", "crates/apassy-relay"]
+members = [".", "ios/ApassyCore", "crates/apassy-relay", "crates/apassy-app"]
 default-members = ["."]
 
 [features]
@@ -72,11 +72,6 @@ rustix = { version = "=1.1.4", optional = true, default-features = false, featur
 [target.'cfg(target_os = "macos")'.dependencies]
 # Main-process native menus through a safe API; no application framework or GTK.
 muda = { version = "=0.21.2", optional = true, default-features = false }
-
-[[bin]]
-name = "apassy"
-path = "src/main.rs"
-required-features = ["desktop"]
 
 [[bin]]
 name = "apassy-mcp"

@@ -143,7 +143,12 @@ jobs:
       # The demo app builds without the vault feature. The steps above build only
       # with all features, so they do not see vault code that is not gated.
       - name: Check the demo build without the vault
-        run: cargo check --offline --locked --features desktop --bin apassy
+        run: cargo check --offline --locked --features desktop --lib
+
+      # The app binary (crates/apassy-app) is outside the default members: it joins the
+      # core with the relay crate for the Mac's own node (ADR 0037).
+      - name: Run Clippy on the app crate
+        run: cargo clippy --offline --locked -p apassy-app --all-targets -- -D warnings
 
       - name: Check vault API compile failures
         run: cargo test --offline --locked --features vault --doc
@@ -226,6 +231,11 @@ jobs:
       - name: Run Clippy on the relay and the iPhone vault core
         run: cargo clippy --offline --locked -p apassy-relay -p apassy-core --all-targets -- -D warnings
 
+      # The app binary (crates/apassy-app) is outside the default members: it joins the
+      # core with the relay crate for the Mac's own node (ADR 0037).
+      - name: Run Clippy on the app crate
+        run: cargo clippy --offline --locked -p apassy-app --all-targets -- -D warnings
+
       - name: Check vault API compile failures
         run: cargo test --offline --locked --features vault --doc
 
@@ -289,6 +299,11 @@ jobs:
       - name: Run the relay and iPhone vault core doc tests
         if: matrix.slice == 1
         run: cargo test --offline --locked -p apassy-relay -p apassy-core --doc
+      # The app crate is built on its own: built together with the relay, the core
+      # would get the desktop feature in the relay tests too.
+      - name: Run the app crate tests
+        if: matrix.slice == 1
+        run: cargo nextest run --profile ci --offline --locked -p apassy-app
       - name: Run the relay end-to-end script
         if: matrix.slice == 1
         run: bash crates/apassy-relay/scripts/e2e.sh
@@ -431,7 +446,7 @@ jobs:
           echo "APASSY_BUILD_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
           echo "APASSY_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build the release binaries
-        run: cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
+        run: cargo build --release --locked -p apassy -p apassy-app --features apassy/desktop,apassy/vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
       - name: Install Python 3.12
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

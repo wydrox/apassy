@@ -2,7 +2,13 @@
 //!
 //! Without arguments, it opens the window. With a command, it talks to the running
 //! window over the owner socket. It never prints a secret value of an item.
+//!
+//! The window runs the Mac's own node for cloud agents (ADR 0037): this binary passes
+//! the embedded relay of this workspace in.
 
+use std::sync::Arc;
+
+use apassy::node::backend::NodeBackend;
 use rustix::process::{Resource, Rlimit, setrlimit};
 
 mod owner_diagnostics;
@@ -17,7 +23,7 @@ fn main() -> eframe::Result {
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        return apassy::desktop::run();
+        return apassy::desktop::run_with(desktop_options());
     }
     if args.len() == 1 && args[0] == "--smoke-test" {
         match apassy::desktop::smoke_test() {
@@ -25,7 +31,6 @@ fn main() -> eframe::Result {
                 eprintln!(
                     "smoke-test: desktop model check passed. This check does not open a window."
                 );
-                #[cfg(feature = "vault")]
                 eprintln!(
                     "smoke-test: owner vault round trip passed. No real credentials were used."
                 );
@@ -43,6 +48,13 @@ fn main() -> eframe::Result {
     }
     // Every other argument list is a command of the owner command line.
     std::process::exit(apassy::cli::run(args));
+}
+
+/// The window with the Mac's own node: the relay of this workspace, in this process
+/// (ADR 0037, cloud slice, decision 1).
+fn desktop_options() -> apassy::desktop::RunOptions {
+    let node: Arc<dyn NodeBackend> = Arc::new(apassy_relay::embedded::EmbeddedRelay::default());
+    apassy::desktop::RunOptions { node: Some(node) }
 }
 
 /// Set the soft and the hard core file size limit to 0. Child processes, such as

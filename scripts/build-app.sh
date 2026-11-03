@@ -390,7 +390,7 @@ if [ -n "${APASSY_PREBUILT_DIR:-}" ]; then
 else
   step "Build the Rust binaries (release)"
   APASSY_BUILD_COMMIT="$BUILD_COMMIT" APASSY_BUILD_DATE="$BUILD_DATE" \
-    cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
+    cargo build --release --locked -p apassy -p apassy-app --features apassy/desktop,apassy/vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
 fi
 
 step "Build the Swift helper"

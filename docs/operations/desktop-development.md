@@ -18,13 +18,13 @@ cargo test --locked --all-features --test it desktop_model::
 Open the native window:
 
 ```
-cargo run --locked --features desktop --bin apassy
+cargo run --locked -p apassy-app
 ```
 
 Exercise the native app model without a window. This check is not a graphical test. A failure exits with a non-zero status:
 
 ```
-cargo run --locked --features desktop --bin apassy -- --smoke-test
+cargo run --locked -p apassy-app -- --smoke-test
 ```
 
 The smoke-test option does not read secrets. It does not print secrets. The binary has no other command that reads or prints secrets.
@@ -75,7 +75,7 @@ Isolation status: unverified.
 
 ## Vault feature
 
-`cargo run --locked --features desktop,vault --bin apassy` connects the Vault and Item details views to `apassy::vault`.
+The app binary is the crate `crates/apassy-app` (ADR 0037: it joins the core with the embedded relay), so it always has the vault feature. `cargo run --locked -p apassy-app` connects the Vault and Item details views to `apassy::vault`.
 The owner types a file path and a passphrase. Create and open return a locked file. Unlock, add, edit, search, delete, reveal, backup, and restore use that file.
 Secret fields are not search keys and are not copied into status text. Reveal keeps a value on screen until hide or lock. The desktop does not write the clipboard.
 Rules, agents, and activity stay on the in-memory demo. Reset demo does not delete the vault file.
