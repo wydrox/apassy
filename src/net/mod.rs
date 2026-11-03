@@ -18,6 +18,7 @@
 
 pub mod limits;
 pub mod pin;
+pub mod sealed_key;
 pub mod tailnet;
 
 pub use pin::Pin;
