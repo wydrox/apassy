@@ -1,15 +1,15 @@
 #![cfg(feature = "vault")]
 
 //! Shadow mode, promotion, and rollback of a candidate model through the broker (ADR
-//! 0010, goal items B9 and B10). Fake model servers on loopback ports. Synthetic values
-//! only.
+//! 0010, goal items B9 and B10). Since plan 0035 unit F the candidate rides in the
+//! request of the active model as `shadow_heads` (contract bouncer-brain-v1 section 3):
+//! one fake model server on a loopback port knows the head sets. Synthetic values only.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -19,45 +19,121 @@ use apassy::agent::wire::{Action, WireResponse};
 use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, OwnerProof};
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
+use apassy::broker::model_server::ModelGate;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault, shadow};
 use apassy::contracts::CredentialKind;
 use apassy::vault::exceptions::ExceptionKind;
 use apassy::vault::{
     ActivationAction, CandidateState, Declaration, Environment, ExecMode, Field, ItemDraft,
     NewCandidate, OwnerLabel, RealOutcome, Reversibility, RiskLevel, Scope, SecretValue,
-    ShadowAnswer, ShadowEntry, Vault,
+    ShadowAnswer, ShadowEntry, THIS_MAC_HOST, Vault,
 };
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const PASS: &str = "shadow-mode-pass-ok";
 const WRONG: &str = "shadow-mode-pass-no";
 const SECRET: &str = "FAKE-shadow-secret-4471-canary";
 const ENV_NAME: &str = "DEMO_KEY";
+const BASE: &str = "apassy-base-v1+83224960";
+const BASE_HEADS: &str = "83224960aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CANDIDATE: &str = "apassy-local-v1+0badc0de";
 const SHA: &str = "0badc0de0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+/// A head set that the fake server does not have.
+const SHA_UNKNOWN: &str = "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+/// A head set that the fake server has under another version.
+const SHA_OTHER: &str = "111111110123456789abcdef0123456789abcdef0123456789abcdef01234567";
+const OTHER_VERSION: &str = "apassy-local-v1+11111111";
 
-/// A fake Laya server. `task_match` comes from `answer(state)`. `writes` is 0.5, so the
-/// policy needs `task_match`. Every other fact is 0.02. The server keeps each state.
+/// One head set of the fake server.
+#[derive(Clone, Copy)]
+struct Heads {
+    sha: &'static str,
+    model: &'static str,
+    answer: fn(&str) -> f64,
+}
+
+/// What the fake server does with `shadow_heads`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShadowMode {
+    /// The contract: the answers of a known head set, `unknown_heads` for another.
+    Answer,
+    /// `shadow.error: "shadow_failed"`, for example a shadow over its time or size cap.
+    Failed,
+    /// No `shadow` part at all.
+    Missing,
+    /// A shadow part that names another head set.
+    WrongHeads,
+}
+
+/// A fake Laya server with head sets (contract bouncer-brain-v1). `task_match` comes
+/// from the `answer` of the head set. `writes` is 0.5, so the policy needs
+/// `task_match`. Every other fact is 0.02. Without `heads` the default head set
+/// answers; an unknown `heads` is 409 `unknown_heads`. The server keeps each body.
 struct FakeModel {
     url: String,
-    states: Arc<Mutex<Vec<String>>>,
+    bodies: Arc<Mutex<Vec<Value>>>,
+    heads: Arc<Mutex<Vec<Heads>>>,
+    shadow: Arc<Mutex<ShadowMode>>,
 }
 
 impl FakeModel {
     fn calls(&self) -> usize {
-        self.states.lock().expect("states").len()
+        self.bodies.lock().expect("bodies").len()
+    }
+
+    fn bodies(&self) -> Vec<Value> {
+        self.bodies.lock().expect("bodies").clone()
+    }
+
+    /// The bodies after the first `from`.
+    fn bodies_since(&self, from: usize) -> Vec<Value> {
+        self.bodies().split_off(from)
+    }
+
+    fn add(&self, heads: Heads) {
+        self.heads.lock().expect("heads").push(heads);
+    }
+
+    fn forget(&self, sha: &str) {
+        self.heads.lock().expect("heads").retain(|h| h.sha != sha);
+    }
+
+    fn set_shadow(&self, mode: ShadowMode) {
+        *self.shadow.lock().expect("mode") = mode;
     }
 }
 
-fn fake_model(
-    model: Option<&'static str>,
-    answer: fn(&str) -> f64,
-    hold: Option<mpsc::Receiver<()>>,
-) -> FakeModel {
+fn answers(request: &Value, state: &str, answer: fn(&str) -> f64) -> Value {
+    let mut answers = serde_json::Map::new();
+    if let Some(questions) = request["questions"].as_object() {
+        for name in questions.keys() {
+            let p = match name.as_str() {
+                "task_match" => answer(state),
+                "writes" => 0.5,
+                _ => 0.02,
+            };
+            answers.insert(name.clone(), json!({"type": "noul", "noul": p}));
+        }
+    }
+    Value::Object(answers)
+}
+
+fn respond(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+}
+
+fn fake_model(default: Heads) -> FakeModel {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake model");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
-    let states = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::clone(&states);
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let heads = Arc::new(Mutex::new(vec![default]));
+    let shadow = Arc::new(Mutex::new(ShadowMode::Answer));
+    let (seen, known, mode) = (Arc::clone(&bodies), Arc::clone(&heads), Arc::clone(&shadow));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
@@ -75,37 +151,81 @@ fn fake_model(
             if reader.read_exact(&mut body).is_err() {
                 continue;
             }
-            let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let request: Value = serde_json::from_slice(&body).unwrap_or_default();
+            seen.lock().expect("bodies").push(request.clone());
             let state = request["state"].as_str().unwrap_or_default().to_owned();
-            seen.lock().expect("states").push(state.clone());
-            if let Some(hold) = &hold {
-                let _ = hold.recv_timeout(Duration::from_secs(10));
-            }
-            let mut answers = serde_json::Map::new();
-            if let Some(questions) = request["questions"].as_object() {
-                for name in questions.keys() {
-                    let p = match name.as_str() {
-                        "task_match" => answer(&state),
-                        "writes" => 0.5,
-                        _ => 0.02,
-                    };
-                    answers.insert(name.clone(), serde_json::json!({"type": "noul", "noul": p}));
+            let sets = known.lock().expect("heads").clone();
+            let find = |sha: &str| sets.iter().find(|h| h.sha == sha).copied();
+            let mut stream = stream;
+            let active = match request["heads"].as_str() {
+                None => default,
+                Some(sha) => match find(sha) {
+                    Some(heads) => heads,
+                    None => {
+                        respond(
+                            &mut stream,
+                            "409 Conflict",
+                            r#"{"detail":{"code":"unknown_heads","message":"the head set is not on this server"}}"#,
+                        );
+                        continue;
+                    }
+                },
+            };
+            let mut out = json!({
+                "answers": answers(&request, &state, active.answer),
+                "model": active.model,
+                "heads": active.sha,
+            });
+            if let Some(sha) = request["shadow_heads"].as_str() {
+                match (*mode.lock().expect("mode"), find(sha)) {
+                    (ShadowMode::Answer, Some(heads)) => {
+                        out["shadow"] = json!({
+                            "heads": heads.sha,
+                            "model": heads.model,
+                            "answers": answers(&request, &state, heads.answer),
+                        });
+                    }
+                    (ShadowMode::Answer, None) => {
+                        out["shadow"] = json!({"heads": sha, "error": "unknown_heads"});
+                    }
+                    (ShadowMode::Failed, _) => {
+                        out["shadow"] = json!({"heads": sha, "error": "shadow_failed"});
+                    }
+                    (ShadowMode::Missing, _) => {}
+                    (ShadowMode::WrongHeads, heads) => {
+                        out["shadow"] = json!({
+                            "heads": SHA_UNKNOWN,
+                            "model": heads.map_or(CANDIDATE, |h| h.model),
+                            "answers": answers(&request, &state, opposite_answer),
+                        });
+                    }
                 }
             }
-            let mut out = serde_json::json!({"answers": answers});
-            if let Some(model) = model {
-                out["model"] = serde_json::json!(model);
-            }
-            let out = out.to_string();
-            let mut stream = stream;
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{out}",
-                out.len()
-            );
+            respond(&mut stream, "200 OK", &out.to_string());
         }
     });
-    FakeModel { url, states }
+    FakeModel {
+        url,
+        bodies,
+        heads,
+        shadow,
+    }
+}
+
+/// A loopback address that counts its connections and never answers: the place of an
+/// old candidate server on 8775, without a fixed port.
+fn silent_listener() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            seen.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    (url, count)
 }
 
 /// The active model: sure for a "fast" command, unsure for the others.
@@ -117,6 +237,23 @@ fn active_answer(state: &str) -> f64 {
 fn opposite_answer(state: &str) -> f64 {
     if state.contains("fast") { 0.3 } else { 0.95 }
 }
+
+/// Unsure about everything.
+fn unsure_answer(_: &str) -> f64 {
+    0.3
+}
+
+const BASE_SET: Heads = Heads {
+    sha: BASE_HEADS,
+    model: BASE,
+    answer: active_answer,
+};
+
+const CANDIDATE_SET: Heads = Heads {
+    sha: SHA,
+    model: CANDIDATE,
+    answer: opposite_answer,
+};
 
 struct Fixture {
     _dir: TempDir,
@@ -159,10 +296,21 @@ fn owner_check(vault: &SharedVault, action: OwnerAction) -> OwnerProof {
         .expect("owner check")
 }
 
+fn brain_client(url: &str) -> BouncerClient {
+    BouncerClient::new(url)
+        .expect("url")
+        .with_timeout(Duration::from_secs(2))
+}
+
 /// A broker with the active fake model and a simulated owner. The owner denies a run
 /// whose command has the word "deny" and approves every other run, with the owner check.
 fn fixture() -> Fixture {
-    let active = fake_model(Some("apassy-base-v1+83224960"), active_answer, None);
+    fixture_with(None)
+}
+
+/// [`fixture`] with the hook of Settings > Agents `gate`.
+fn fixture_with(gate: Option<Arc<dyn ModelGate>>) -> Fixture {
+    let active = fake_model(BASE_SET);
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
     std::fs::create_dir_all(&project).expect("project");
@@ -204,11 +352,8 @@ fn fixture() -> Fixture {
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = Duration::from_secs(20);
     options.run_timeout = Duration::from_secs(10);
-    options.bouncer = Some(
-        BouncerClient::new(&active.url)
-            .expect("url")
-            .with_timeout(Duration::from_secs(2)),
-    );
+    options.bouncer = Some(brain_client(&active.url));
+    options.model_gate = gate;
     let socket = dir.path().join("run").join("broker.sock");
     let broker = broker::start_with(Arc::clone(&shared), &socket, options).expect("broker");
     let owner_stop = Arc::new(AtomicBool::new(false));
@@ -282,15 +427,17 @@ fn with_vault<T>(fx: &Fixture, f: impl FnOnce(&mut Vault) -> T) -> T {
     f(guard.as_mut().expect("open"))
 }
 
-fn register(fx: &Fixture, url: &str) -> u64 {
+/// Register a candidate with `version` and head hash `sha`. `url` is the old address
+/// column, which the broker no longer reads.
+fn register_as(fx: &Fixture, url: &str, version: &str, sha: &str) -> u64 {
     with_vault(fx, |vault| {
         vault
             .register_candidate(
                 &NewCandidate {
-                    version: CANDIDATE.to_owned(),
+                    version: version.to_owned(),
                     url: url.to_owned(),
                     checkpoint: "/tmp/apassy-test/candidate.safetensors".to_owned(),
-                    checkpoint_sha256: SHA.to_owned(),
+                    checkpoint_sha256: sha.to_owned(),
                     report: "{}".to_owned(),
                 },
                 broker::learning::now(),
@@ -300,8 +447,28 @@ fn register(fx: &Fixture, url: &str) -> u64 {
     })
 }
 
-/// Wait until the candidate has `rows` shadow rows. The shadow thread stores them after
-/// the broker answers.
+fn register(fx: &Fixture, url: &str) -> u64 {
+    register_as(fx, url, CANDIDATE, SHA)
+}
+
+/// The head file of candidate `id` is on the bouncer brain of this Mac (unit G marks it
+/// after the upload).
+fn place(fx: &Fixture, id: u64) {
+    assert!(with_vault(fx, |vault| {
+        vault
+            .mark_candidate_uploaded(id, Some(THIS_MAC_HOST))
+            .expect("mark")
+    }));
+}
+
+/// Register and place a candidate with `version` and `sha`.
+fn placed_as(fx: &Fixture, version: &str, sha: &str) -> u64 {
+    let id = register_as(fx, "", version, sha);
+    place(fx, id);
+    id
+}
+
+/// Wait until the candidate has `rows` shadow rows.
 fn wait_for_rows(fx: &Fixture, candidate: u64, rows: u32) -> apassy::vault::ShadowSummary {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -324,6 +491,13 @@ const SEQUENCE: [&str; 4] = [
     "printenv DEMO_KEY",
 ];
 
+const BASELINE: [&str; 4] = [
+    "Bouncer allowed",
+    "Owner approved",
+    "approval_denied",
+    "Owner approved",
+];
+
 fn decisions(fx: &Fixture) -> Vec<String> {
     SEQUENCE
         .iter()
@@ -331,33 +505,50 @@ fn decisions(fx: &Fixture) -> Vec<String> {
         .collect()
 }
 
-/// ADR 0010: the candidate decides in parallel with no effect. The broker gives the
-/// same decisions with and without a candidate that answers the opposite. The vault
-/// records each candidate answer next to the real outcome and the owner decision. A
-/// candidate that is down, answers as another version, or is slow changes nothing. A
-/// slow candidate does not delay a run.
+/// The `shadow_heads` of each body.
+fn shadow_heads(bodies: &[Value]) -> Vec<Option<String>> {
+    bodies
+        .iter()
+        .map(|body| body["shadow_heads"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// ADR 0010 with plan 0035 unit F: the candidate decides in the same request with no
+/// effect. The broker gives the same decisions with and without a candidate that
+/// answers the opposite, and asks one server once per model step. The vault records
+/// each candidate answer next to the real outcome and the owner decision. A candidate
+/// that the server does not have ("down"), whose head file is not on the host yet,
+/// that answers as another version, or that the server gives up on ("slow",
+/// `shadow_failed`) records no answer and changes nothing; a run does not wait for it.
 #[test]
 fn a_candidate_that_is_down_slow_or_another_version_changes_nothing() {
     let fx = fixture();
     let baseline = decisions(&fx);
-    assert_eq!(
-        baseline,
-        vec![
-            "Bouncer allowed",
-            "Owner approved",
-            "approval_denied",
-            "Owner approved"
-        ]
-    );
+    assert_eq!(baseline, BASELINE);
     assert_eq!(fx.active.calls(), 3, "a rule flag skips the model");
+    assert!(
+        shadow_heads(&fx.active.bodies())
+            .iter()
+            .all(Option::is_none),
+        "no candidate, no shadow_heads"
+    );
 
-    // Opposite: the candidate answers the opposite of the active model.
-    let candidate = fake_model(Some(CANDIDATE), opposite_answer, None);
-    let id = register(&fx, &candidate.url);
+    // Opposite: the candidate answers the opposite of the active model. Its old address
+    // is never asked.
+    let (old_url, old_calls) = silent_listener();
+    fx.active.add(CANDIDATE_SET);
+    let id = register(&fx, &old_url);
+    place(&fx, id);
     assert_eq!(decisions(&fx), baseline, "the candidate changed a decision");
-    assert_eq!(fx.active.calls(), 6);
+    assert_eq!(fx.active.calls(), 6, "one request for each model step");
+    let sent = fx.active.bodies_since(3);
+    assert_eq!(shadow_heads(&sent), vec![Some(SHA.to_owned()); 3]);
+    assert!(
+        sent.iter().all(|body| body.get("heads").is_none()),
+        "the default head set decides"
+    );
+    assert_eq!(old_calls.load(Ordering::SeqCst), 0, "no second server");
     let summary = wait_for_rows(&fx, id, 3);
-    assert_eq!(candidate.calls(), 3, "only requests at the model step");
     assert_eq!(summary.requests, 3);
     assert_eq!(summary.no_answer, 0);
     assert_eq!(
@@ -378,49 +569,93 @@ fn a_candidate_that_is_down_slow_or_another_version_changes_nothing() {
             .all(|record| !record.entry.note.contains(CANDIDATE))
     );
 
-    // Down: nothing listens on the port.
-    let port = TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port();
-    let down = register(&fx, &format!("http://127.0.0.1:{port}"));
+    // Down: the server does not have the head set (`shadow.error: unknown_heads`).
+    let down = placed_as(&fx, CANDIDATE, SHA_UNKNOWN);
     assert_eq!(decisions(&fx), baseline);
     let summary = wait_for_rows(&fx, down, 3);
     assert_eq!((summary.requests, summary.no_answer), (3, 3));
     assert_eq!(summary.agreement.shadow_decisions, 0);
 
-    // Another version at the candidate address: no answer.
-    let impostor = fake_model(Some("apassy-local-v1+11111111"), opposite_answer, None);
-    let other = register(&fx, &impostor.url);
+    // Not on the host: the request goes without `shadow_heads`, and no answer.
+    let calls = fx.active.calls();
+    let unplaced = register_as(&fx, "", CANDIDATE, SHA);
     assert_eq!(decisions(&fx), baseline);
-    let summary = wait_for_rows(&fx, other, 3);
-    assert_eq!(impostor.calls(), 3);
+    assert_eq!(
+        shadow_heads(&fx.active.bodies_since(calls)),
+        vec![None; 3],
+        "nothing rides before the upload"
+    );
+    let summary = wait_for_rows(&fx, unplaced, 3);
     assert_eq!((summary.requests, summary.no_answer), (3, 3));
 
-    // Slow: the candidate holds its answer. The sure run still ends at once.
-    let (release, hold) = mpsc::channel();
-    let slow = fake_model(Some(CANDIDATE), opposite_answer, Some(hold));
-    let held = register(&fx, &slow.url);
+    // Another version under the candidate's head hash: no answer.
+    fx.active.add(Heads {
+        sha: SHA_OTHER,
+        model: OTHER_VERSION,
+        answer: opposite_answer,
+    });
+    let other = placed_as(&fx, CANDIDATE, SHA_OTHER);
+    assert_eq!(decisions(&fx), baseline);
+    let summary = wait_for_rows(&fx, other, 3);
+    assert_eq!((summary.requests, summary.no_answer), (3, 3));
+
+    // Slow: the server gives up on the shadow head set and answers the active part. The
+    // sure run still ends at once, with the active answer.
+    fx.active.set_shadow(ShadowMode::Failed);
+    let slow = placed_as(&fx, CANDIDATE, SHA);
     let started = Instant::now();
     assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Bouncer allowed");
     let elapsed = started.elapsed();
-    assert_eq!(
-        with_vault(&fx, |vault| vault
-            .shadow_summary(held)
-            .expect("summary")
-            .requests),
-        0,
-        "the run ended before the candidate answered"
-    );
-    release.send(()).expect("release");
-    let summary = wait_for_rows(&fx, held, 1);
-    assert_eq!(summary.requests, 1);
-    assert_eq!(
-        summary.no_answer, 0,
-        "the held answer arrives after the run"
-    );
+    let summary = wait_for_rows(&fx, slow, 1);
+    assert_eq!((summary.requests, summary.no_answer), (1, 1));
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+}
+
+/// Plan 0035 unit F: a shadow error, a missing shadow part, or a shadow part of another
+/// head set records `NoAnswer`. The active answer still decides each run.
+#[test]
+fn a_shadow_error_records_no_answer_and_the_active_decision_stands() {
+    let fx = fixture();
+    fx.active.add(CANDIDATE_SET);
+    for mode in [
+        ShadowMode::Failed,
+        ShadowMode::Missing,
+        ShadowMode::WrongHeads,
+    ] {
+        fx.active.set_shadow(mode);
+        let id = placed_as(&fx, CANDIDATE, SHA);
+        let calls = fx.active.calls();
+        assert_eq!(decisions(&fx), BASELINE, "{mode:?}");
+        assert_eq!(
+            shadow_heads(&fx.active.bodies_since(calls)),
+            vec![Some(SHA.to_owned()); 3],
+            "{mode:?}"
+        );
+        let summary = wait_for_rows(&fx, id, 3);
+        assert_eq!((summary.requests, summary.no_answer), (3, 3), "{mode:?}");
+        assert_eq!(summary.agreement.shadow_decisions, 0, "{mode:?}");
+    }
+    // The decision log has the active answers: "fast 1" ran with task_match 0.95.
+    let log = with_vault(&fx, |vault| vault.decision_log().expect("log"));
+    let fast = log
+        .iter()
+        .rev()
+        .find(|record| record.entry.note.contains("Model allowed"))
+        .expect("a model decision");
+    assert!(
+        fast.entry
+            .model_facts
+            .iter()
+            .any(|(name, p)| name == "task_match" && (*p - 0.95).abs() < 1e-9),
+        "{:?}",
+        fast.entry.model_facts
+    );
+    // Back to the contract: the candidate answers again.
+    fx.active.set_shadow(ShadowMode::Answer);
+    let id = placed_as(&fx, CANDIDATE, SHA);
+    assert_eq!(decisions(&fx), BASELINE);
+    let summary = wait_for_rows(&fx, id, 3);
+    assert_eq!((summary.requests, summary.no_answer), (3, 0));
 }
 
 /// Add shadow rows straight in the vault: `agree` owner approvals that the candidate
@@ -486,9 +721,18 @@ fn promotion_is_refused_below_each_threshold_and_without_the_owner_check() {
     assert_eq!(outcome(&run(&fx, SEQUENCE[1])), "Owner approved");
 
     // Exactly at the gate: 100 decisions, 95 agreed, no allowed denial.
-    let candidate = fake_model(Some(CANDIDATE), opposite_answer, None);
-    let id = register(&fx, &candidate.url);
+    let (old_url, old_calls) = silent_listener();
+    fx.active.add(CANDIDATE_SET);
+    let id = register(&fx, &old_url);
     shadow_rows(&fx, id, 95, 5, 0);
+    // Plan 0035 unit F: the head file must be on the host first.
+    let refused = promote(&fx, id, CANDIDATE).expect_err("not on the host");
+    assert!(
+        refused.contains("not on the bouncer brain on this Mac"),
+        "{refused}"
+    );
+    assert_eq!(active(&fx), None);
+    place(&fx, id);
     // No owner check: a wrong passphrase gives no proof.
     let gate = OwnerGate::new(Arc::clone(&fx.vault), None);
     let action = OwnerAction::PromoteModel {
@@ -525,7 +769,8 @@ fn promotion_is_refused_below_each_threshold_and_without_the_owner_check() {
     let activation = active(&fx).expect("activation");
     assert_eq!(activation.action, ActivationAction::Promote);
     assert_eq!(activation.version, CANDIDATE);
-    assert_eq!(activation.url, candidate.url);
+    assert_eq!(activation.url, old_url, "the old address is kept, not read");
+    assert_eq!(activation.heads_sha256.as_deref(), Some(SHA));
     assert!(
         activation.previous_url.is_empty(),
         "the default model before"
@@ -545,10 +790,12 @@ fn promotion_is_refused_below_each_threshold_and_without_the_owner_check() {
     let again = promote(&fx, id, CANDIDATE).expect_err("not in shadow mode");
     assert!(again.contains("not in shadow mode"), "{again}");
 
-    // The promoted model decides now: it is sure about "slow 2".
-    let calls = candidate.calls();
+    // The promoted head set decides now, pinned by its hash: it is sure about "slow 2".
+    let calls = fx.active.calls();
     assert_eq!(outcome(&run(&fx, SEQUENCE[1])), "Bouncer allowed");
-    assert_eq!(candidate.calls(), calls + 1);
+    assert_eq!(fx.active.calls(), calls + 1);
+    assert_eq!(fx.active.bodies_since(calls)[0]["heads"], json!(SHA));
+    assert_eq!(old_calls.load(Ordering::SeqCst), 0);
     let activity = with_vault(&fx, |vault| vault.recent_activity(1).expect("activity"));
     assert!(
         activity[0].reason.contains(&format!("Model: {CANDIDATE}")),
@@ -562,9 +809,14 @@ fn promotion_is_refused_below_each_threshold_and_without_the_owner_check() {
 #[test]
 fn a_promoted_model_is_pinned_to_its_version() {
     let fx = fixture();
-    // The candidate address serves another version.
-    let impostor = fake_model(Some("apassy-local-v1+11111111"), opposite_answer, None);
-    let id = register(&fx, &impostor.url);
+    // The server has the candidate's head hash under another version.
+    fx.active.add(Heads {
+        sha: SHA,
+        model: OTHER_VERSION,
+        answer: opposite_answer,
+    });
+    let id = register(&fx, "");
+    place(&fx, id);
     shadow_rows(&fx, id, 100, 0, 0);
     promote(&fx, id, CANDIDATE).expect("promoted");
     // The impostor is sure about "slow 2", but the broker does not accept its answer.
@@ -585,8 +837,9 @@ fn a_promoted_model_is_pinned_to_its_version() {
 #[test]
 fn rollback_returns_to_the_previous_model_and_needs_the_owner_check() {
     let fx = fixture();
-    let candidate = fake_model(Some(CANDIDATE), opposite_answer, None);
-    let id = register(&fx, &candidate.url);
+    fx.active.add(CANDIDATE_SET);
+    let id = register(&fx, "");
+    place(&fx, id);
     shadow_rows(&fx, id, 100, 0, 0);
     promote(&fx, id, CANDIDATE).expect("promoted");
     assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Owner approved");
@@ -629,11 +882,16 @@ fn rollback_returns_to_the_previous_model_and_needs_the_owner_check() {
     .expect("rolled back");
     assert_eq!(rollback.action, ActivationAction::Rollback);
     assert!(rollback.is_default(), "the default model is active again");
+    assert_eq!(rollback.heads_sha256, None);
     assert_eq!(rollback.previous_version, CANDIDATE);
     // The default model decides again: sure about "fast", unsure about "slow".
     let before = fx.active.calls();
     assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Bouncer allowed");
     assert_eq!(fx.active.calls(), before + 1);
+    assert!(
+        fx.active.bodies_since(before)[0].get("heads").is_none(),
+        "the default head set again"
+    );
     let state = with_vault(&fx, |vault| {
         vault.candidate(id).expect("read").expect("some").state
     });
@@ -660,6 +918,150 @@ fn rollback_returns_to_the_previous_model_and_needs_the_owner_check() {
     let _ = &fx.broker;
 }
 
+/// Plan 0035 unit F: a promotion pins the head hash. Each request names it as `heads`,
+/// and a server that no longer has that head set (409) makes the owner decide; it never
+/// falls back to the default head set.
+#[test]
+fn a_promoted_head_set_is_pinned_by_hash() {
+    let fx = fixture();
+    fx.active.add(CANDIDATE_SET);
+    let id = register(&fx, "");
+    shadow_rows(&fx, id, 100, 0, 0);
+    let refused = promote(&fx, id, CANDIDATE).expect_err("not placed");
+    assert!(refused.starts_with("Not promoted."), "{refused}");
+    place(&fx, id);
+    promote(&fx, id, CANDIDATE).expect("promoted");
+    let activation = with_vault(&fx, |vault| {
+        vault.active_model().expect("read").expect("some")
+    });
+    assert_eq!(activation.heads_sha256.as_deref(), Some(SHA));
+    assert!(activation.url.is_empty());
+    assert!(!activation.is_default());
+    // The promoted head set is sure about "slow 2", and its answer names the hash.
+    let calls = fx.active.calls();
+    assert_eq!(outcome(&run(&fx, SEQUENCE[1])), "Bouncer allowed");
+    let sent = fx.active.bodies_since(calls);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["heads"], json!(SHA));
+    assert!(
+        sent[0].get("shadow_heads").is_none(),
+        "no candidate in shadow mode after the promotion"
+    );
+    // The server loses the head set: 409, and the owner decides, also for "fast 1",
+    // which the default head set would allow.
+    fx.active.forget(SHA);
+    assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Owner approved");
+    let log = with_vault(&fx, |vault| vault.decision_log().expect("log"));
+    let last = &log.last().expect("entry").entry;
+    assert!(last.model_facts.is_empty(), "no answer was accepted");
+    assert!(last.note.contains("pinned head set"), "{}", last.note);
+}
+
+/// Plan 0035 unit F: a candidate row from before schema 29 (an `http://127.0.0.1:8775`
+/// address, origin "local", no upload mark) still works. The broker never asks its old
+/// address. It records no answer until its head file is on the host, then rides as
+/// `shadow_heads`, and its promotion pins its head hash.
+#[test]
+fn an_old_candidate_row_with_an_8775_url_still_works_after_29() {
+    let fx = fixture();
+    fx.active.add(CANDIDATE_SET);
+    // The listener stands in for the old candidate server on 8775 (no fixed port).
+    let (old_url, old_calls) = silent_listener();
+    let id = register(&fx, &old_url);
+    let record = with_vault(&fx, |vault| {
+        vault.candidate(id).expect("read").expect("some")
+    });
+    assert_eq!(record.origin, apassy::vault::CandidateOrigin::Local);
+    assert_eq!(record.uploaded_to, None);
+    assert_eq!(decisions(&fx), BASELINE);
+    let summary = wait_for_rows(&fx, id, 3);
+    assert_eq!((summary.requests, summary.no_answer), (3, 3));
+    place(&fx, id);
+    let calls = fx.active.calls();
+    assert_eq!(decisions(&fx), BASELINE);
+    assert_eq!(
+        shadow_heads(&fx.active.bodies_since(calls)),
+        vec![Some(SHA.to_owned()); 3]
+    );
+    let summary = wait_for_rows(&fx, id, 6);
+    assert_eq!((summary.requests, summary.no_answer), (6, 3));
+    shadow_rows(&fx, id, 100, 0, 0);
+    promote(&fx, id, CANDIDATE).expect("promoted");
+    let activation = with_vault(&fx, |vault| {
+        vault.active_model().expect("read").expect("some")
+    });
+    assert_eq!(activation.url, old_url);
+    assert_eq!(activation.heads_sha256.as_deref(), Some(SHA));
+    assert_eq!(outcome(&run(&fx, SEQUENCE[1])), "Bouncer allowed");
+    assert_eq!(
+        old_calls.load(Ordering::SeqCst),
+        0,
+        "the old address is not read"
+    );
+}
+
+/// The hook of Settings > Agents with a client that the test changes, as a change of
+/// the hosting choice changes the client of `ModelServer`.
+#[derive(Debug, Default)]
+struct SwitchGate {
+    client: Mutex<Option<BouncerClient>>,
+    asked: AtomicUsize,
+}
+
+impl SwitchGate {
+    fn set(&self, client: Option<BouncerClient>) {
+        *self.client.lock().expect("client") = client;
+    }
+}
+
+impl ModelGate for SwitchGate {
+    fn before_model(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn bouncer_client(&self) -> Option<BouncerClient> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.client.lock().expect("client").clone()
+    }
+}
+
+/// Plan 0035 unit F: the broker reads the bouncer brain client of the gate for each
+/// request, so a change of the host in Settings applies at the next run without a
+/// restart. Without a client from the gate, the client of the broker start decides.
+#[test]
+fn a_hosting_change_applies_at_the_next_run() {
+    let gate = Arc::new(SwitchGate::default());
+    let fx = fixture_with(Some(Arc::clone(&gate) as Arc<dyn ModelGate>));
+    let other = fake_model(Heads {
+        sha: SHA_OTHER,
+        model: BASE,
+        answer: unsure_answer,
+    });
+    gate.set(Some(brain_client(&fx.active.url)));
+    assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Bouncer allowed");
+    assert_eq!((fx.active.calls(), other.calls()), (1, 0));
+    // The host changes: the next run asks the new host only.
+    gate.set(Some(brain_client(&other.url)));
+    assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Owner approved");
+    assert_eq!((fx.active.calls(), other.calls()), (1, 1));
+    // A candidate rides to the current host too.
+    other.add(CANDIDATE_SET);
+    let id = placed_as(&fx, CANDIDATE, SHA);
+    assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Owner approved");
+    assert_eq!(
+        other.bodies().last().expect("body")["shadow_heads"],
+        json!(SHA)
+    );
+    assert_eq!(fx.active.calls(), 1);
+    let summary = wait_for_rows(&fx, id, 1);
+    assert_eq!((summary.requests, summary.no_answer), (1, 0));
+    // No client from the gate: the client of the broker start.
+    gate.set(None);
+    assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Bouncer allowed");
+    assert_eq!((fx.active.calls(), other.calls()), (2, 2));
+    assert!(gate.asked.load(Ordering::SeqCst) >= 4, "read for each run");
+}
+
 /// (ok, command line, purpose) of each labeled case.
 fn fixture_cases(path: &str) -> Vec<(bool, String, String)> {
     let text = std::fs::read_to_string(path).expect("fixture");
@@ -674,24 +1076,23 @@ fn fixture_cases(path: &str) -> Vec<(bool, String, String)> {
 }
 
 /// The shadow measurement on this Mac (goal item B9, `docs/operations/fine-tune.md`).
-/// The active model and the candidate are real model servers. The requests are the
+/// The active model is a real model server that has the candidate head set (uploaded
+/// with `PUT /v1/heads/<sha256>`); the candidate rides as `shadow_heads`. The requests are the
 /// labeled cases of `tests/fixtures/bouncer/independent.tsv`, each once. The simulated
 /// owner approves `ok` and denies `risk`. `PATH` has no programs, so no command runs.
 /// With `APASSY_SHADOW_ASK=1`, the grant is in "ask" mode: every request waits for the
 /// owner, so every request at the model step has an owner decision.
 ///
 /// `APASSY_EVAL_MODEL=http://127.0.0.1:8774 APASSY_CANDIDATE_DIR=<candidate folder>
-/// APASSY_CANDIDATE_MODEL=http://127.0.0.1:8775 cargo test --locked --release
-/// --all-features --test it shadow_mode::shadow_session_on_synthetic_requests --
-/// --ignored --nocapture`
+/// cargo test --locked --release --all-features --test it
+/// shadow_mode::shadow_session_on_synthetic_requests -- --ignored --nocapture`
 #[test]
-#[ignore = "needs two model servers: APASSY_EVAL_MODEL and APASSY_CANDIDATE_MODEL"]
+#[ignore = "needs a model server with the candidate head set: APASSY_EVAL_MODEL"]
 fn shadow_session_on_synthetic_requests() {
     use apassy::broker::shell_risk::command_line_to_argv;
     use std::collections::BTreeMap;
 
     let active_url = std::env::var("APASSY_EVAL_MODEL").expect("APASSY_EVAL_MODEL");
-    let candidate_url = std::env::var("APASSY_CANDIDATE_MODEL").expect("APASSY_CANDIDATE_MODEL");
     let folder =
         PathBuf::from(std::env::var("APASSY_CANDIDATE_DIR").expect("APASSY_CANDIDATE_DIR"));
     let ask_mode = std::env::var("APASSY_SHADOW_ASK").is_ok_and(|value| value == "1");
@@ -751,7 +1152,7 @@ fn shadow_session_on_synthetic_requests() {
         .register_candidate(
             &NewCandidate {
                 version: version.clone(),
-                url: candidate_url.clone(),
+                url: String::new(),
                 checkpoint: folder.join("candidate.safetensors").display().to_string(),
                 checkpoint_sha256: sha,
                 report: "{}".to_owned(),
@@ -760,6 +1161,9 @@ fn shadow_session_on_synthetic_requests() {
         )
         .expect("candidate")
         .id;
+    vault
+        .mark_candidate_uploaded(candidate, Some(THIS_MAC_HOST))
+        .expect("placed");
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = Duration::from_secs(60);
@@ -829,7 +1233,7 @@ fn shadow_session_on_synthetic_requests() {
         let _ = outcome(&response);
     }
     let seconds = started.elapsed().as_secs_f64();
-    // The shadow threads store their rows after the broker answers.
+    // The rows are stored before the broker answers; wait until the count stays.
     let mut last = u32::MAX;
     let summary = loop {
         std::thread::sleep(Duration::from_secs(2));
@@ -899,7 +1303,7 @@ fn shadow_session_on_synthetic_requests() {
     );
     assert_eq!(
         summary.no_answer, 0,
-        "the candidate server answered every request"
+        "the candidate head set answered every request"
     );
     drop(broker);
 }

@@ -1804,6 +1804,10 @@ mod tests {
                     crate::broker::learning::now(),
                 )
                 .expect("candidate");
+            // Plan 0035 unit F: a promotion needs the head file on the host.
+            vault
+                .mark_candidate_uploaded(candidate.id, Some(crate::vault::THIS_MAC_HOST))
+                .expect("uploaded");
             for n in 0..100u32 {
                 let (candidate_answer, owner) = if n < 96 {
                     (ShadowAnswer::Run, OwnerLabel::Allow)

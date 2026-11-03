@@ -91,9 +91,10 @@ pub use bouncer_host::{
     valid_host_url,
 };
 pub use candidate::{
-    ActivationAction, CandidateRecord, CandidateState, MAX_ACTIVATIONS, MAX_CANDIDATES,
-    MAX_MODEL_VERSION, MAX_SHADOW_ROWS, ModelActivation, NewCandidate, OwnerLabel, RealOutcome,
-    ShadowAnswer, ShadowEntry, ShadowSummary, model_label, valid_model_version,
+    ActivationAction, CandidateOrigin, CandidateRecord, CandidateState, MAX_ACTIVATIONS,
+    MAX_CANDIDATES, MAX_MODEL_VERSION, MAX_SHADOW_ROWS, ModelActivation, NewCandidate, OwnerLabel,
+    RealOutcome, ShadowAnswer, ShadowEntry, ShadowSummary, THIS_MAC_HOST, model_label,
+    valid_model_version,
 };
 pub use cloud::{
     CLOUD_PORT_MAX, CLOUD_PORT_MIN, CLOUD_TOKEN_DAYS, CloudAgent, CloudNodeSetting, CloudRun,
