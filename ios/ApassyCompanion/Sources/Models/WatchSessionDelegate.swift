@@ -8,15 +8,19 @@ import WatchConnectivity
 final class WatchSessionDelegate: NSObject, WCSessionDelegate, Sendable {
     /// The state of the session, read on the queue of WatchConnectivity.
     struct State: Sendable {
+        let activated: Bool
         let paired: Bool
         let installed: Bool
         let reachable: Bool
+        /// The connection that Apassy on the watch reported last (its application context).
+        let report: WatchConnectionReport?
 
-        init(_ session: WCSession) {
-            let activated = session.activationState == .activated
+        init(_ session: WCSession, context: [String: Any]? = nil) {
+            activated = session.activationState == .activated
             paired = activated && session.isPaired
             installed = activated && session.isWatchAppInstalled
             reachable = activated && session.isReachable
+            report = installed ? WatchConnectionReport(context: context ?? session.receivedApplicationContext) : nil
         }
     }
 
@@ -43,6 +47,10 @@ final class WatchSessionDelegate: NSObject, WCSessionDelegate, Sendable {
     func sessionWatchStateDidChange(_ session: WCSession) { onChange(State(session)) }
 
     func sessionReachabilityDidChange(_ session: WCSession) { onChange(State(session)) }
+
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        onChange(State(session, context: applicationContext))
+    }
 
     /// One message with the link (`WatchHandoff`); the reply says whether the watch took it.
     static func send(_ link: String) async -> AppleWatchLink.SendResult {
