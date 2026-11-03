@@ -525,6 +525,7 @@ jobs:
           bwrap --version
       # The same namespace options as src/isolation/linux/bwrap.rs (namespace_args).
       - name: Record user namespaces with the runner defaults
+        id: userns
         run: |
           uname -r
           for knob in kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces; do
@@ -536,9 +537,21 @@ jobs:
                --unshare-net --disable-userns --die-with-parent --new-session --as-pid-1 \
                --ro-bind / / --dev /dev --proc /proc true; then
             echo "measurement: bubblewrap makes the sandbox with the runner defaults"
+            echo "expect=netns" >> "$GITHUB_OUTPUT"
           else
             echo "measurement: bubblewrap cannot make the sandbox with the runner defaults (exit $?)"
+            echo "expect=none:userns_blocked" >> "$GITHUB_OUTPUT"
           fi
+      # Judge finding L3: what a proxied run reports on the stock runner follows the
+      # measurement above: `none` with `userns_blocked` where user namespaces are
+      # restricted, `netns` where they are not.
+      - name: Check the network rule of a run with the runner defaults
+        env:
+          APASSY_EXPECT_RULE: ${{ steps.userns.outputs.expect }}
+        run: >-
+          cargo nextest run --profile ci --offline --locked --all-features
+          --test it -E 'test(=run_proxy::linux_proxied_run_reports_the_measured_rule)'
+          --no-capture
       - name: Allow unprivileged user namespaces
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then

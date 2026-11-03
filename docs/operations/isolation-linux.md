@@ -127,7 +127,12 @@ With `NetPlan::Bridged(bridges)` the sandbox has its own network namespace with 
   to its socket. At most 256 connections at once go through one bridge or one relay.
 - Abstract Unix sockets belong to the network namespace, so the host's (an old-style
   session bus, an X server) are out of reach. Path sockets of the host are out of reach
-  through the mount plan, not through the namespace.
+  through the mount plan, not through the namespace. So a proxied run never binds a
+  shared folder (judge finding M1): its working directory cannot be in `/tmp`,
+  `/var/tmp`, `/run`, or `/dev/shm`, cannot be the home folder, and cannot hold a
+  denied path; a `PATH` folder in those folders is not shown; `/run/user/<real uid>`
+  is always denied (`getuid()`, whatever `XDG_RUNTIME_DIR` says). The rules are in
+  `src/isolation/run_paths.rs`.
 - No bridge: no network at all. `NetPlan::Host` keeps the host network and has no
   network rule (X3, as `sandbox/apassy-agent-host.sb` keeps the network on macOS).
 
@@ -149,7 +154,11 @@ it: they send `CONNECT host:443` to the proxy, and the proxy resolves the host.
 
 ## 5. The probe and the report without a rule
 
-`probe()` runs once per process:
+`probe()` keeps a definite answer for the process. A transient failure (a timeout, or
+`EAGAIN` / `ENOSPC` when a process or namespace limit is full for a moment) is not kept:
+the next run probes again (judge finding L3).
+
+A probe:
 
 1. It takes the first of `/usr/bin/bwrap`, `/bin/bwrap`, `/usr/local/bin/bwrap`,
    `/run/current-system/sw/bin/bwrap` that root owns, in a folder that root owns, that
@@ -252,13 +261,14 @@ What `spawn_collect` (`src/broker/exec.rs`) adds to the plan of section 2:
 - The folder of the trust files of the run (`apassy-run-…` in the host temporary
   folder, hidden by the private `/tmp`), read-only.
 - Each folder of the run's `PATH`, and the program when its path is absolute, that the
-  plan would hide (under the home, `/tmp`, `/var/tmp`, `/run`, `/root`), read-only, so
-  that `~/.local/bin`, `~/.cargo/bin`, and the NixOS wrappers still start. Skipped: the
-  home itself and any folder that holds a hidden one, a path in a denied path, a path in
-  the working directory (already writable), and a path that does not exist. A tool whose
-  files live elsewhere in the hidden home (for example a rustup proxy and
-  `~/.rustup`) still does not start; put it in a folder outside the home or run it
-  without placeholders.
+  plan would hide (under the home or `/root`), read-only, so that `~/.local/bin` and
+  `~/.cargo/bin` still start. Skipped: a folder in `/tmp`, `/var/tmp`, `/run`, or
+  `/dev/shm` (it can hold the socket of another program; so `/run/wrappers/bin` of NixOS
+  is not shown), the home itself and any folder that holds a hidden one, a path in a
+  denied path, a path in the working directory (already writable), and a path that does
+  not exist. A tool whose files live elsewhere in the hidden home (for example a rustup
+  proxy and `~/.rustup`) still does not start; put it in a folder outside the home or
+  run it without placeholders.
 - The base environment (`HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `PATH`; `TMPDIR` is
   `/tmp`) goes through the sandbox plan. The secrets, the placeholders, and the proxy
   variables are set on the `bwrap` command after it, as before, so their values never
@@ -267,9 +277,11 @@ What `spawn_collect` (`src/broker/exec.rs`) adds to the plan of section 2:
   of the run stops the process group of `bwrap`; then PID 1 and every process of the
   sandbox stop.
 
-A run whose sandbox cannot be built (its working directory is `/`, `/tmp`, or `/home`
-itself; the vault list cannot be read; a path is inside a denied one) does not start
-(`start_failed`, with the cause), instead of running without the rule.
+A run whose sandbox cannot be built (its working directory is `/`, in `/tmp`,
+`/var/tmp`, `/run`, or `/dev/shm`, the home folder itself, or a folder that holds a
+denied path; the vault list cannot be read; a path is inside a denied one) does not
+start (`start_failed`, with the cause and the folder to use instead, for example
+`~/projects/<name>`), instead of running without the rule.
 
 Differences from a run without the rule: a process stopped by a signal reports
 `exit_code` 128 + the signal (the init program's code) instead of none; the run sees an
@@ -359,7 +371,10 @@ acceptance of the s5 plan.
   its command. Their zombies stay until the run ends (the standard library cannot
   wait for any child without `unsafe`). The run ends them all.
 - **No seccomp**, so the kernel's whole system call surface is open to the command,
-  inside its namespaces. A kernel bug in user namespaces is an escape.
+  inside its namespaces. A kernel bug in user namespaces is an escape. A run can also
+  open an `AF_VSOCK` socket: a network namespace does not cover vsock, so on a virtual
+  machine with a vsock device the run reaches the hypervisor host past its network rule
+  (judge finding L5). Follow-up: a seccomp filter for `socket(AF_VSOCK)`.
 - **The program that starts the sandbox is not inside it.** In a linked environment
   the agent runs outside and can change the executor or its environment. The remote
   holds only placeholders, so this costs no value (ADR 0037 §6).

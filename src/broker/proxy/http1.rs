@@ -87,6 +87,15 @@ impl<S: Read> Conn<S> {
     /// A head up to and with the empty line. `None` at the end of the stream before
     /// the first byte.
     pub fn read_head(&mut self) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.read_head_with(|_| Ok(()))
+    }
+
+    /// As [`Conn::read_head`]; `before_read` runs before each read of the stream,
+    /// for a deadline of the whole head. Its error ends the read.
+    pub fn read_head_with(
+        &mut self,
+        mut before_read: impl FnMut(&S) -> io::Result<()>,
+    ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
         loop {
             if let Some(end) = find(self.buffered(), b"\r\n\r\n") {
                 let head = Zeroizing::new(self.buffered()[..end + 4].to_vec());
@@ -96,6 +105,7 @@ impl<S: Read> Conn<S> {
             if self.buffered().len() > MAX_HEAD_BYTES {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "head too large"));
             }
+            before_read(&self.inner)?;
             if self.fill()? == 0 {
                 return if self.buffered().is_empty() {
                     Ok(None)
@@ -167,6 +177,23 @@ impl RequestHead {
 
     pub fn wants_close(&self) -> bool {
         wants_close(&self.headers, self.http10)
+    }
+
+    /// How many headers have this name.
+    pub fn header_count(&self, name: &str) -> usize {
+        self.headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+            .count()
+    }
+
+    /// The target is in origin form (`/path?query`, RFC 9112 §3.2.1), or `*` for
+    /// `OPTIONS`. An absolute form (`https://other.example/`) or an authority could
+    /// name another host than the connection, so the proxy refuses it on an
+    /// intercepted connection. `//x` is refused too: some servers read it as a host.
+    pub fn has_origin_form(&self) -> bool {
+        (self.target.starts_with('/') && !self.target.starts_with("//"))
+            || (self.target == "*" && self.method.eq_ignore_ascii_case("OPTIONS"))
     }
 }
 
@@ -313,6 +340,17 @@ pub(super) struct ResponseHead {
     pub upgrade: bool,
     /// The body is compressed, so the proxy cannot find a real value in it.
     pub encoded: bool,
+    /// A transfer coding other than `chunked` alone (`gzip, chunked`): the proxy
+    /// cannot find a real value in it either.
+    pub transfer_coded: bool,
+}
+
+impl ResponseHead {
+    /// The proxy cannot read the body for a real value: a content coding other
+    /// than `identity`, or a transfer coding other than `chunked`.
+    pub fn unreadable(&self) -> bool {
+        self.encoded || self.transfer_coded
+    }
 }
 
 pub(super) fn parse_response_head(raw: &[u8], method: &str) -> Result<ResponseHead, &'static str> {
@@ -350,14 +388,20 @@ pub(super) fn parse_response_head(raw: &[u8], method: &str) -> Result<ResponseHe
             None => BodyLen::UntilClose,
         }
     };
-    let encoded = header(&headers, "content-encoding")
-        .is_some_and(|coding| !coding.trim().eq_ignore_ascii_case("identity"));
+    let encoded = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"));
+    let transfer_coded = !codings.is_empty() && codings != ["chunked"];
     Ok(ResponseHead {
         status,
         close: wants_close(&headers, http10) || body == BodyLen::UntilClose,
         body,
         upgrade: status == 101,
         encoded,
+        transfer_coded,
     })
 }
 
@@ -690,6 +734,20 @@ mod tests {
             .body,
             BodyLen::Chunked
         );
+        let plain = head(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "GET",
+        );
+        assert!(!plain.unreadable());
+        for coded in [
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 3\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Encoding: br\r\nContent-Length: 3\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Encoding: identity, deflate\r\nContent-Length: 3\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n",
+        ] {
+            assert!(head(coded, "GET").unreadable(), "{coded}");
+        }
         let until = head("HTTP/1.1 200 OK\r\n\r\n", "GET");
         assert_eq!(until.body, BodyLen::UntilClose);
         assert!(until.close);

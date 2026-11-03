@@ -343,6 +343,19 @@ the validation commands for the top-level agent, deviations, open questions, ris
 - CI (this unit owns the steps first): `sudo apt-get install -y bubblewrap` and `sudo sysctl -w
   kernel.apparmor_restrict_unprivileged_userns=0` on ubuntu-24.04, and `APASSY_REQUIRE_BWRAP=1`, so the tests
   fail instead of skip there.
+- Unix sockets are not covered by a network namespace (judge finding M1, 2026-11-03): a run refuses a
+  working directory in `/tmp`, `/var/tmp`, `/run`, or `/dev/shm`, the home folder itself, and a folder
+  above a denied path; it skips `PATH` folders in those folders; it always denies `/run/user/<real
+  uid>` (from `getuid()`, not `XDG_RUNTIME_DIR`); and the deny list has the cloud and container
+  credentials (`~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.docker`, `~/.kube`,
+  `~/.netrc`). The path rules are in `src/isolation/run_paths.rs`, tested on every system.
+- The probe caches only a definite answer; a timeout or a full namespace limit (`EAGAIN`, `ENOSPC`)
+  is probed again on the next run (judge finding L3). CI checks the rule of a run on the stock runner
+  before the sysctl change, following the measurement: `none` with `userns_blocked` where user
+  namespaces are restricted, else `netns`.
+- Known limit (judge finding L5): no seccomp filter, so a run can open an `AF_VSOCK` socket, which a
+  network namespace does not cover; on a virtual machine with vsock it reaches the hypervisor host.
+  The run holds only placeholders. Follow-up: a seccomp filter for `socket(AF_VSOCK)`.
 - Acceptance (Linux): `netns_reaches_only_the_bridged_port` (a direct TCP connection to a listener of the
   host, also on 127.0.0.1, fails); `netns_has_no_udp` (UDP to 1.1.1.1:53 fails); `netns_abstract_socket_of_the_host_is_unreachable`;
   `netns_cannot_see_outside_processes`; `netns_run_ends_with_its_descendants` (a `setsid` grandchild does not

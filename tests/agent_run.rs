@@ -65,6 +65,9 @@ fn review_mcp_oversized_input_returns_a_protocol_error_before_exiting() {
 
 struct Fixture {
     dir: TempDir,
+    /// The folder of the project: on Linux in the home folder, outside `/tmp`,
+    /// where a proxied run cannot work (the sandbox refuses a shared folder).
+    _project_dir: TempDir,
     vault: SharedVault,
     socket: PathBuf,
     project: PathBuf,
@@ -87,7 +90,14 @@ fn fixture_with(
     model_gate: Option<Arc<dyn ModelGate>>,
 ) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
-    let project = dir.path().join("project");
+    // Not in the checkout either: a project in a Git repository is named after it.
+    let project_dir = if cfg!(target_os = "linux") {
+        let home = std::env::var_os("HOME").expect("HOME");
+        TempDir::new_in(home).expect("project temp dir")
+    } else {
+        TempDir::new().expect("project temp dir")
+    };
+    let project = project_dir.path().join("project");
     std::fs::create_dir_all(project.join("sub")).expect("project dir");
     let project = std::fs::canonicalize(project).expect("canonical project");
     let mut vault = Vault::create(&dir.path().join("vault.db"), PASS).expect("create");
@@ -129,6 +139,7 @@ fn fixture_with(
         token: token.expose().to_owned(),
         broker,
         dir,
+        _project_dir: project_dir,
     }
 }
 

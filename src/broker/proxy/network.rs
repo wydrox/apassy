@@ -172,7 +172,7 @@ fn linux_rule(
     trust_dir: &std::path::Path,
 ) -> io::Result<(Option<LinuxNet>, Option<NoRule>)> {
     use crate::isolation::linux::probe;
-    linux::plan(probe(), linux::init_program(), port, trust_dir)
+    linux::plan(&probe(), linux::init_program(), port, trust_dir)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -261,6 +261,7 @@ mod linux {
     use crate::isolation::linux::{
         Availability, HostPaths, HostRelay, INTERNAL_DIR, NetPlan, Sandbox,
     };
+    use crate::isolation::run_paths;
 
     use super::{LinuxNet, NoRule};
 
@@ -411,6 +412,10 @@ mod linux {
     /// They are bound read-only. Skipped: a path that does not exist, the home itself
     /// or a folder that holds a hidden folder, a path in a denied one, in the working
     /// directory (already writable), or in the folder of the sandbox.
+    ///
+    /// SECURITY (judge panel, M1): a `PATH` folder in `/tmp`, `/var/tmp`, `/run`, or
+    /// `/dev/shm` is skipped too: it can hold the socket of another program, and a
+    /// network namespace does not stop Unix sockets.
     pub(super) fn programs_to_show(
         path: &str,
         program: &str,
@@ -424,6 +429,7 @@ mod linux {
             .filter_map(|root| std::fs::canonicalize(root).ok())
             .collect();
         hidden.push(home.clone());
+        let shared = run_paths::shared_roots();
         let denied: Vec<PathBuf> = denied
             .iter()
             .flat_map(|path| {
@@ -454,6 +460,7 @@ mod linux {
                 real.is_file()
             };
             let skip = !kind_ok
+                || (is_dir && run_paths::in_shared_root(&real, &shared))
                 || !hidden.iter().any(|root| real.starts_with(root))
                 || real == Path::new("/")
                 || hidden.iter().any(|root| root.starts_with(&real))
@@ -608,7 +615,8 @@ mod tests {
         /// change; the trust files are bound read-only; no value is in the arguments.
         #[test]
         fn a_ready_sandbox_bridges_only_the_proxy_port() {
-            let dir = TestDir::new("x2-ready");
+            // The working directory of a run is never in /tmp (M1).
+            let dir = TestDir::outside_tmp("x2-ready");
             let init = dir.file("bin/apassy-sandbox", "");
             let trust = dir.mkdir("trust");
             let project = dir.mkdir("project");
@@ -677,7 +685,10 @@ mod tests {
 
         #[test]
         fn hidden_tool_folders_are_shown_read_only_and_nothing_else() {
-            let dir = TestDir::new("x2-path");
+            let dir = TestDir::outside_tmp("x2-path");
+            // A tool folder in /tmp can hold the socket of another program (M1).
+            let shared = TestDir::new("x2-path-tmp");
+            let in_tmp = shared.mkdir("bin");
             let home = dir.mkdir("home");
             let tools = dir.mkdir("home/.local/bin");
             let keys = dir.mkdir("home/.ssh/bin");
@@ -692,6 +703,9 @@ mod tests {
                 home.to_str().expect("utf-8"),
                 "/usr/bin",
                 "/tmp",
+                in_tmp.to_str().expect("utf-8"),
+                "/var/tmp",
+                "/dev/shm",
                 "relative/bin",
                 "/nonexistent/apassy/bin",
             ]

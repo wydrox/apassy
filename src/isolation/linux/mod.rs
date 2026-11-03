@@ -23,7 +23,8 @@
 //! - [`bridge_main`] is the init and bridge inside the sandbox; [`HostRelay`] is
 //!   the host end of a bridge.
 //!
-//! Only `std`, `serde`, and `serde_json`, and no `unsafe`. The facts, the profile,
+//! Only `std`, `serde`, `serde_json`, and `rustix` (the real user id), and no
+//! `unsafe`. The facts, the profile,
 //! and the limits are in `docs/operations/isolation-linux.md`.
 
 mod bridge;
@@ -130,6 +131,10 @@ pub enum SandboxError {
     BadEnv(String),
     /// The vault list cannot be read, so a vault file may be unknown.
     VaultList(String),
+    /// The working directory of a run is in a shared folder (`/tmp`, `/var/tmp`,
+    /// `/run`, `/dev/shm`), is the home folder, or holds a denied path. The text
+    /// names the folder to use instead.
+    UnsafeWorkDir(String),
 }
 
 impl fmt::Display for SandboxError {
@@ -171,7 +176,9 @@ impl fmt::Display for SandboxError {
                 path.display()
             ),
             SandboxError::BadEnv(name) => write!(f, "bad environment variable {name}"),
-            SandboxError::VaultList(message) => write!(f, "{message}"),
+            SandboxError::VaultList(message) | SandboxError::UnsafeWorkDir(message) => {
+                write!(f, "{message}")
+            }
         }
     }
 }
@@ -320,8 +327,8 @@ impl Builder {
         let bwrap = match self.bwrap {
             Some(program) => program,
             None => match probe() {
-                Availability::Ready { program, .. } => program.clone(),
-                other => return Err(SandboxError::Unavailable(other.clone())),
+                Availability::Ready { program, .. } => program,
+                other => return Err(SandboxError::Unavailable(other)),
             },
         };
         let init = self.init.ok_or(SandboxError::NoInitProgram)?;
@@ -408,10 +415,17 @@ impl Sandbox {
     /// directory, a private `/tmp`, the deny list of `paths`
     /// ([`HostPaths::denied`]), no network until the caller adds a bridge. The
     /// caller adds the bridge, the init program, and the environment.
+    ///
+    /// SECURITY (judge panel, M1): a network namespace does not stop Unix sockets,
+    /// so `project` must not be in `/tmp`, `/var/tmp`, `/run`, or `/dev/shm`, must
+    /// not be the home folder, and must not hold a denied path
+    /// ([`crate::isolation::run_paths::check_work_dir`]).
     pub fn for_run(paths: &HostPaths, project: &Path) -> Result<Builder, SandboxError> {
+        let denied = paths.denied()?;
+        check_run_dir(project, &paths.home, &denied)?;
         Ok(Sandbox::builder()
             .home(paths.home.clone(), HomePolicy::Hidden)
-            .deny(paths.denied()?)
+            .deny(denied)
             .rw([project])
             .cwd(project)
             .net(NetPlan::Bridged(Vec::new())))
@@ -447,6 +461,25 @@ impl Sandbox {
         }
         command
     }
+}
+
+/// The working directory of a run, checked with the resolved paths. A path that
+/// cannot be resolved is checked as given; bubblewrap refuses a missing one later.
+fn check_run_dir(project: &Path, home: &Path, denied: &[PathBuf]) -> Result<(), SandboxError> {
+    use crate::isolation::run_paths;
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let cwd = real(project);
+    let home = real(home);
+    let denied: Vec<PathBuf> = denied
+        .iter()
+        .flat_map(|path| {
+            let mut both = vec![path.clone()];
+            both.extend(std::fs::canonicalize(path).ok());
+            both
+        })
+        .collect();
+    run_paths::check_work_dir(&cwd, &home, &run_paths::shared_roots(), &denied)
+        .map_err(|refusal| SandboxError::UnsafeWorkDir(refusal.message(&cwd, &home)))
 }
 
 /// The paths of the user that a sandbox denies by default.
@@ -508,13 +541,18 @@ impl HostPaths {
     }
 
     /// The deny list: the Apassy data folder, its configuration with the link file,
-    /// the runtime folder, each vault of the vault list outside the data folder with
+    /// the runtime folder (`$XDG_RUNTIME_DIR` and always `/run/user/<real uid>`:
+    /// the variable can point elsewhere), each vault of the vault list outside the data folder with
     /// its companion files, each synced vault file, the SSH and GPG keys, the
-    /// keyrings, and the browser profiles. A vault list that cannot be read is an
+    /// cloud and container credentials, the keyrings, and the browser profiles. A vault list that cannot be read is an
     /// error: a vault file that the list names could then stay visible.
     pub fn denied(&self) -> Result<Vec<PathBuf>, SandboxError> {
         let mut paths = vec![self.data_dir.clone(), self.config_dir()];
         paths.extend(self.runtime_dir.clone());
+        let own = crate::isolation::run_paths::runtime_dir_of(rustix::process::getuid().as_raw());
+        if !paths.contains(&own) {
+            paths.push(own);
+        }
         paths.extend(listed_vault_files(&self.data_dir)?);
         for rel in HOME_DENIED {
             paths.push(self.home.join(rel));
@@ -529,10 +567,18 @@ impl HostPaths {
     }
 }
 
-/// Keys, keyrings, and browser and mail profiles under the home folder.
-const HOME_DENIED: [&str; 21] = [
+/// Keys, cloud and container credentials, keyrings, and browser and mail profiles
+/// under the home folder.
+const HOME_DENIED: [&str; 28] = [
     ".ssh",
     ".gnupg",
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".config/gh",
+    ".docker",
+    ".kube",
+    ".netrc",
     ".password-store",
     ".pki",
     ".kde/share/apps/kwallet",
@@ -557,8 +603,10 @@ const HOME_DENIED: [&str; 21] = [
 /// Keyrings under `$XDG_DATA_HOME`.
 const DATA_HOME_DENIED: [&str; 2] = ["keyrings", "kwalletd"];
 
-/// Browser profiles under `$XDG_CONFIG_HOME`.
-const CONFIG_HOME_DENIED: [&str; 12] = [
+/// Credentials and browser profiles under `$XDG_CONFIG_HOME`.
+const CONFIG_HOME_DENIED: [&str; 14] = [
+    "gh",
+    "gcloud",
     "google-chrome",
     "google-chrome-beta",
     "google-chrome-unstable",
@@ -646,6 +694,23 @@ pub(crate) mod test_dir {
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).expect("test folder");
             TestDir(dir)
+        }
+
+        /// A test folder outside the shared folders (`/tmp`), for the working
+        /// directory of a run: in the `target` folder of the crate.
+        pub(crate) fn outside_tmp(name: &str) -> TestDir {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("tmp")
+                .join(format!(
+                    "apassy-isotest-{name}-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("test folder");
+            TestDir(fs::canonicalize(&dir).expect("canonical test folder"))
         }
 
         pub(crate) fn path(&self) -> &Path {
@@ -807,9 +872,19 @@ mod tests {
             "/home/dev/.config/google-chrome",
             "/home/dev/.config/chromium",
             "/home/dev/.config/BraveSoftware",
+            "/home/dev/.aws",
+            "/home/dev/.azure",
+            "/home/dev/.config/gh",
+            "/home/dev/.config/gcloud",
+            "/home/dev/.docker",
+            "/home/dev/.kube",
+            "/home/dev/.netrc",
         ] {
             assert!(denied.contains(&PathBuf::from(wanted)), "{wanted}");
         }
+        // The runtime folder of the real user, also without XDG_RUNTIME_DIR.
+        let own = PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw()));
+        assert!(denied.contains(&own), "{denied:?}");
         let with_runtime = HostPaths {
             runtime_dir: Some(PathBuf::from("/run/user/1000")),
             ..paths
@@ -820,6 +895,33 @@ mod tests {
                 .expect("denied")
                 .contains(&PathBuf::from("/run/user/1000"))
         );
+    }
+
+    /// SECURITY (judge panel, M1): a run never works in a shared folder, in the home
+    /// folder itself, or above a denied path; the error names the folder to use.
+    #[test]
+    fn a_run_refuses_a_shared_folder_the_home_and_a_folder_above_a_denied_path() {
+        let shared = TestDir::new("run-in-tmp");
+        let outside = TestDir::outside_tmp("run-dirs");
+        let home = outside.mkdir("home");
+        let project = outside.mkdir("home/projects/app");
+        outside.mkdir("home/.config/apassy");
+        let paths = HostPaths::under_home(&home);
+        let refused = |dir: &Path| match Sandbox::for_run(&paths, dir) {
+            Err(SandboxError::UnsafeWorkDir(text)) => text,
+            other => panic!(
+                "expected UnsafeWorkDir for {}, got {other:?}",
+                dir.display()
+            ),
+        };
+        let text = refused(shared.path());
+        assert!(text.contains("/tmp"), "{text}");
+        assert!(text.contains("projects"), "{text}");
+        let text = refused(&home);
+        assert!(text.contains("home folder"), "{text}");
+        let text = refused(&home.join(".config"));
+        assert!(text.contains(".config/apassy"), "{text}");
+        assert!(Sandbox::for_run(&paths, &project).is_ok());
     }
 
     /// ADR 0013 and 0014: a vault outside the data folder, its companions, and a

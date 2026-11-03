@@ -16,7 +16,10 @@
 //! - A frame of the service has each real value replaced with its placeholder, of
 //!   the same length. A value split over the fragments of one message is found
 //!   too; each message is complete at its last fragment, so no byte moves into
-//!   another message.
+//!   another message. A value that starts at the end of one message and ends in
+//!   the next one cannot be replaced: the proxy keeps the end of the stream across
+//!   messages, and such a value closes the WebSocket with 1008 before its rest is
+//!   sent (judge finding L2).
 //! - A frame with a reserved bit (a compressed frame), an unknown opcode, a wrong
 //!   mask, a long or fragmented control frame, or a broken fragment sequence is a
 //!   protocol error (Close 1002). It is never passed on, so the proxy never passes
@@ -677,6 +680,7 @@ fn direction(
     let mut replacer = Replacer::new(secrets.pairs);
     let mut reported = false;
     let mut in_message = false;
+    let mut boundary = Boundary::new(secrets.pairs);
     loop {
         if shared.is_done() {
             return;
@@ -739,6 +743,22 @@ fn direction(
                     replaced = Replacer::replace_all(secrets.pairs, &mut payload[..]);
                     payload
                 } else {
+                    if let Some(index) =
+                        boundary.feed(frame.opcode == OP_CONTINUATION, &frame.payload)
+                    {
+                        let name = secrets.names.get(index).copied().unwrap_or("a secret");
+                        report(Report::Failed(format!(
+                            "A real value of {name} was split over two WebSocket messages of the service. Apassy cannot replace it across messages, so it closed the WebSocket before the rest was sent."
+                        )));
+                        shared.end(
+                            Some((
+                                POLICY_VIOLATION,
+                                "Apassy: the service split a real value over two messages.",
+                            )),
+                            Some((GOING_AWAY, "")),
+                        );
+                        return;
+                    }
                     // A value can start in one fragment and end in the next. A
                     // fragment may go out shorter; the last one has the rest.
                     let mut payload = replacer.feed(&frame.payload);
@@ -772,6 +792,65 @@ fn direction(
                 Ordering::SeqCst,
             );
         }
+    }
+}
+
+/// Finds a real value that starts at the end of one data message of the service
+/// and ends in the next one (judge finding L2). It keeps the end of the data
+/// stream across messages (the longest value less one byte) and the start of the
+/// current message.
+struct Boundary<'a> {
+    pairs: &'a [(&'a [u8], &'a [u8])],
+    keep: usize,
+    /// The last `keep` bytes of the data stream, before this frame.
+    tail: Zeroizing<Vec<u8>>,
+    /// The tail at the start of the current message.
+    before: Zeroizing<Vec<u8>>,
+    /// The first bytes of the current message, up to `keep`.
+    start: Zeroizing<Vec<u8>>,
+}
+
+impl<'a> Boundary<'a> {
+    fn new(pairs: &'a [(&'a [u8], &'a [u8])]) -> Self {
+        let keep = pairs
+            .iter()
+            .map(|(from, _)| from.len())
+            .max()
+            .unwrap_or(1)
+            .saturating_sub(1);
+        Self {
+            pairs,
+            keep,
+            tail: Zeroizing::new(Vec::new()),
+            before: Zeroizing::new(Vec::new()),
+            start: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    /// One data frame; `continuation` for a later fragment of a message. The index
+    /// of a pair whose value spans the start of this message, before the frame is
+    /// sent.
+    fn feed(&mut self, continuation: bool, payload: &[u8]) -> Option<usize> {
+        if !continuation {
+            self.before = Zeroizing::new(self.tail.to_vec());
+            self.start.clear();
+        }
+        let mut found = None;
+        if self.start.len() < self.keep && !self.before.is_empty() {
+            let more = (self.keep - self.start.len()).min(payload.len());
+            self.start.extend_from_slice(&payload[..more]);
+            found = self.pairs.iter().position(|(value, _)| {
+                (1..value.len()).any(|k| {
+                    self.before.ends_with(&value[..k]) && self.start.starts_with(&value[k..])
+                })
+            });
+        }
+        let mut window = Zeroizing::new(Vec::with_capacity(self.tail.len() + payload.len()));
+        window.extend_from_slice(&self.tail);
+        window.extend_from_slice(payload);
+        let from = window.len().saturating_sub(self.keep);
+        self.tail = Zeroizing::new(window[from..].to_vec());
+        found
     }
 }
 
@@ -1075,6 +1154,66 @@ mod tests {
             vec![Report::Replaced],
             "one note for the connection"
         );
+    }
+
+    /// Judge finding L2: a value that the service splits over two messages closes
+    /// the WebSocket with 1008; the rest of the value never reaches the program.
+    #[test]
+    fn a_value_split_over_two_server_messages_closes_with_1008() {
+        let mut run = start(limits(), Vec::new(), Vec::new());
+        // Two whole messages that only touch: they pass.
+        run.service
+            .write_all(&server_frame(true, OP_TEXT, b"first"))
+            .expect("first");
+        assert_eq!(read_frame(&mut run.program).expect("first").2, b"first");
+        run.service
+            .write_all(&server_frame(true, OP_TEXT, b"second"))
+            .expect("second");
+        assert_eq!(read_frame(&mut run.program).expect("second").2, b"second");
+
+        let (a, b) = VALUE.split_at(11);
+        let mut first = b"v=".to_vec();
+        first.extend_from_slice(a);
+        let mut second = b.to_vec();
+        second.extend_from_slice(b";");
+        run.service
+            .write_all(&server_frame(true, OP_TEXT, &first))
+            .expect("first part");
+        let (_, opcode, payload, _) = read_frame(&mut run.program).expect("first part");
+        assert_eq!((opcode, payload.as_slice()), (OP_TEXT, first.as_slice()));
+        run.service
+            .write_all(&server_frame(true, OP_TEXT, &second))
+            .expect("second part");
+        let (_, opcode, payload, _) = read_frame(&mut run.program).expect("close");
+        assert_eq!(opcode, OP_CLOSE);
+        assert_eq!(close_code(&payload), 1008);
+        assert!(!contains(&payload, b), "the rest of the value is not sent");
+        let (_, opcode, payload, _) = read_frame(&mut run.service).expect("close");
+        assert_eq!((opcode, close_code(&payload)), (OP_CLOSE, 1001));
+        run.relay.join().expect("relay");
+        let reports = run.reports.lock().expect("reports").clone();
+        assert!(
+            matches!(reports.as_slice(), [Report::Failed(text)] if text.contains(NAME)),
+            "{reports:?}"
+        );
+        no_secret_in(&reports);
+    }
+
+    #[test]
+    fn the_boundary_check_sees_a_value_over_three_messages() {
+        let pairs: [(&[u8], &[u8]); 1] = [(VALUE, PLACEHOLDER)];
+        let mut boundary = Boundary::new(&pairs);
+        assert_eq!(boundary.feed(false, &VALUE[..5]), None);
+        assert_eq!(boundary.feed(false, &VALUE[5..7]), None, "undecided");
+        assert_eq!(boundary.feed(false, &VALUE[7..]), Some(0));
+        // A value inside one message, then another message: no finding.
+        let mut boundary = Boundary::new(&pairs);
+        assert_eq!(boundary.feed(false, VALUE), None);
+        assert_eq!(boundary.feed(false, b"next"), None);
+        // Fragments of one message are the replacer's work, not a boundary.
+        let mut boundary = Boundary::new(&pairs);
+        assert_eq!(boundary.feed(false, &VALUE[..9]), None);
+        assert_eq!(boundary.feed(true, &VALUE[9..]), None);
     }
 
     #[test]
