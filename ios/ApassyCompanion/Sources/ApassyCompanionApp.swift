@@ -31,7 +31,9 @@ struct RootView: View {
         Group {
             switch root.screen {
             case .starting:
-                ProgressView()
+                // The picture of the privacy cover and of the lock screen while Face ID asks, so
+                // the launch goes from it to the vault with nothing in between.
+                PrivacyCoverView()
                     .task { await root.start() }
             case .failed(let message):
                 ContentUnavailableView {

@@ -1,7 +1,10 @@
 import ApassyVaultKit
 import SwiftUI
 
-/// The locked vault: Face ID when the passphrase is stored behind it, else the passphrase.
+/// The locked vault. With the passphrase stored behind Face ID, Face ID asks first, over the cover
+/// of the app (the picture of the app switcher), so a return to the app shows no other screen
+/// before the vault opens. The passphrase field shows only when Face ID did not open the vault, or
+/// when Face ID unlock is off.
 struct LockView: View {
     @Environment(VaultModel.self) private var vault
     @Environment(\.scenePhase) private var scenePhase
@@ -11,7 +14,50 @@ struct LockView: View {
 
     private var offersFaceID: Bool { vault.faceIDUnlockOn && vault.hasStoredPassphrase }
 
+    /// When the lock screen starts the Face ID try.
+    private struct FaceIDTry: Equatable {
+        let active: Bool
+        let waits: Bool
+    }
+
     var body: some View {
+        ZStack {
+            if vault.showsPassphraseField {
+                passphraseScreen
+                    .transition(.opacity)
+            } else {
+                LockCover(isUnlocking: vault.isUnlocking)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: vault.showsPassphraseField)
+        // Face ID once each time the lock screen shows while the app is active (a prompt cannot
+        // show in the background), and again after each return to the app.
+        .onChange(of: FaceIDTry(active: scenePhase == .active, waits: vault.waitsForFaceIDTry), initial: true) {
+            _, key in
+            guard key.active, key.waits else { return }
+            Task { await vault.unlockWithFaceIDFirst() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { passphrase = "" }
+        }
+        .onChange(of: vault.isUnlocked) { _, unlocked in
+            if !unlocked { passphrase = "" }
+        }
+        #if targetEnvironment(simulator)
+            // A development aid: `-ApassyUnlockPassphrase <synthetic passphrase>` unlocks once
+            // at launch, where nobody types.
+            .task {
+                guard !prompted, let typed = UserDefaults.standard.string(forKey: "ApassyUnlockPassphrase")
+                else { return }
+                prompted = true
+                await vault.unlock(passphrase: typed)
+            }
+        #endif
+    }
+
+    /// The passphrase, with "Unlock with Face ID" to try again.
+    private var passphraseScreen: some View {
         PairingScreen {
             VStack(spacing: 24) {
                 Image("CoverIcon")
@@ -69,26 +115,11 @@ struct LockView: View {
             .buttonStyle(offersFaceID ? AnyPrimitiveButtonStyle(.glass) : AnyPrimitiveButtonStyle(.glassProminent))
             .disabled(vault.isUnlocking || passphrase.isEmpty)
         }
-        // Face ID once when the screen shows and the app is active (a prompt cannot show in the
-        // background). A cancel leaves the passphrase field.
+        // The field shows because the passphrase is needed: the keyboard comes up with it, and
+        // again when the app comes back to it.
         .task(id: scenePhase == .active) {
-            guard scenePhase == .active, !prompted, offersFaceID else { return }
-            prompted = true
-            await vault.unlockWithFaceID()
+            if scenePhase == .active { focused = true }
         }
-        .onChange(of: vault.isUnlocked) { _, unlocked in
-            if !unlocked { passphrase = "" }
-        }
-        #if targetEnvironment(simulator)
-            // A development aid: `-ApassyUnlockPassphrase <synthetic passphrase>` unlocks once
-            // at launch, where nobody types.
-            .task {
-                guard !prompted, let typed = UserDefaults.standard.string(forKey: "ApassyUnlockPassphrase")
-                else { return }
-                prompted = true
-                await vault.unlock(passphrase: typed)
-            }
-        #endif
     }
 
     private var vaultPicker: some View {
@@ -103,7 +134,6 @@ struct LockView: View {
             }
         }
         .pickerStyle(.menu)
-        .onChange(of: vault.vault?.id) { prompted = false }
     }
 
     private func unlock() {
@@ -111,6 +141,23 @@ struct LockView: View {
         guard !typed.isEmpty else { return }
         passphrase = ""
         Task { await vault.unlock(passphrase: typed) }
+    }
+}
+
+/// The lock screen while Face ID asks by itself: the privacy cover, so the return to the app shows
+/// the same picture as the app switcher until the vault opens, and a spinner while it opens.
+private struct LockCover: View {
+    let isUnlocking: Bool
+
+    var body: some View {
+        PrivacyCoverView()
+            .overlay {
+                if isUnlocking {
+                    ProgressView()
+                        .offset(y: 110)
+                        .accessibilityLabel("Unlocking")
+                }
+            }
     }
 }
 

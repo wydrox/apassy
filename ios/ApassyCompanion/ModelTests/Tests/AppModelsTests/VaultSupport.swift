@@ -50,6 +50,8 @@ final class MemoryPassphraseStore: PassphraseStore {
     private struct State {
         var values: [String: String] = [:]
         var readError: VaultError?
+        /// How long a `read` waits, as the owner looks at the Face ID prompt.
+        var readDelay: Duration?
         /// The Face ID prompts: each `read`, and each `readSession`.
         var prompts: [String] = []
         /// The next `readSession` is cancelled, as when the owner cancels Face ID.
@@ -66,6 +68,11 @@ final class MemoryPassphraseStore: PassphraseStore {
     var readError: VaultError? {
         get { state.withLock { $0.readError } }
         set { state.withLock { $0.readError = newValue } }
+    }
+
+    var readDelay: Duration? {
+        get { state.withLock { $0.readDelay } }
+        set { state.withLock { $0.readDelay = newValue } }
     }
 
     /// The reasons of the Face ID prompts, in order.
@@ -132,8 +139,13 @@ final class MemoryPassphraseStore: PassphraseStore {
     }
 
     func read(vaultID: String, reason: String) async throws -> String {
-        let outcome: Result<String, VaultError> = state.withLock { state in
+        if let delay = state.withLock({ state in
             state.prompts.append(reason)
+            return state.readDelay
+        }) {
+            try? await Task.sleep(for: delay)
+        }
+        let outcome: Result<String, VaultError> = state.withLock { state in
             if let error = state.readError { return .failure(error) }
             if let value = state.values[vaultID] { return .success(value) }
             return .failure(VaultError(.locked, "No passphrase is stored."))
