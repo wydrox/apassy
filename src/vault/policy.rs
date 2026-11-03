@@ -588,7 +588,7 @@ mod tests {
             .save_declaration(
                 id,
                 &agents::Declaration {
-                    project: String::new(),
+                    project: "synthetic".to_owned(),
                     environment: super::super::providers::DEFAULT_ENVIRONMENT,
                     risk: super::super::providers::DEFAULT_RISK,
                     scope: super::super::providers::DEFAULT_SCOPE,

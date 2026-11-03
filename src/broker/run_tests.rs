@@ -257,9 +257,9 @@ fn a_development_label_is_judged_with_the_development_defaults() {
         reversibility: source,
     };
     // A value without a signal: production, high risk, admin, irreversible, and every
-    // value only a default.
+    // value only a default. (`save_declaration` needs a project; this one is the run's.)
     let unlabeled = Declaration {
-        project: String::new(),
+        project: "project".to_owned(),
         environment: providers::DEFAULT_ENVIRONMENT,
         risk: providers::DEFAULT_RISK,
         scope: providers::DEFAULT_SCOPE,
