@@ -28,7 +28,8 @@ Update it together with both app/core Cargo manifests and their lockfile, iOS
 deriving `VERSION` from the first dated changelog section; its npm package has no
 separate product version. The relay is the crate `crates/apassy-relay` of this
 workspace (ADR 0037): update its Cargo package (the workspace `Cargo.lock` follows)
-and the edge Worker package in `crates/apassy-relay/deploy/worker`. Both
+the edge Worker package in `crates/apassy-relay/deploy/worker`, and the push
+gateway package in `crates/apassy-relay/deploy/push-gateway`. Both
 `apassy-relay` and the Linux `apassy-team` binary inherit the crate version, and so
 does the Linux node: its commands are in the relay crate, `apassy --version` prints
 the relay crate's version, and `packaging/linux/build.sh` names the packages with it.

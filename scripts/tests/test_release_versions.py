@@ -27,7 +27,7 @@ class ReleaseVersionsTests(unittest.TestCase):
             "release-versions.json", "Cargo.toml", "Cargo.lock", "ios/ApassyCore/Cargo.toml",
             "ios/ApassyCompanion/project.yml", "extension/manifest.json", "CHANGELOG.md",
             "site/src/lib/site.ts", f"{RELAY}/Cargo.toml", f"{RELAY}/deploy/worker/package.json",
-            f"{APP}/Cargo.toml", "packaging/linux/build.sh", "packaging/linux/deb/control.in",
+            f"{RELAY}/deploy/push-gateway/package.json", f"{APP}/Cargo.toml", "packaging/linux/build.sh", "packaging/linux/deb/control.in",
         ):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -47,6 +47,7 @@ class ReleaseVersionsTests(unittest.TestCase):
             ("CHANGELOG.md", f'## [{self.version}]'),
             (f"{RELAY}/Cargo.toml", f'version = "{self.version}"'),
             (f"{RELAY}/deploy/worker/package.json", f'"version": "{self.version}"'),
+            (f"{RELAY}/deploy/push-gateway/package.json", f'"version": "{self.version}"'),
             (f"{APP}/Cargo.toml", f'version = "{self.version}"'),
             ("Cargo.lock", f'name = "apassy-app"\nversion = "{self.version}"'),
         ):

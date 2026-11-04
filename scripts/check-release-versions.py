@@ -90,6 +90,10 @@ def check(root):
         "relay edge Worker package": json.loads(
             (root / RELAY / "deploy/worker/package.json").read_text(encoding="utf-8")
         )["version"],
+        # The push gateway (push-gateway-v1) is a second Worker of the relay surface.
+        "relay push gateway package": json.loads(
+            (root / RELAY / "deploy/push-gateway/package.json").read_text(encoding="utf-8")
+        )["version"],
     }
     project = (root / "ios/ApassyCompanion/project.yml").read_text(encoding="utf-8")
     marketing = re.findall(r'^\s*MARKETING_VERSION:\s*["\']?([0-9.]+)["\']?\s*$', project, re.MULTILINE)

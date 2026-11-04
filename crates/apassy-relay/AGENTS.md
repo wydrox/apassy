@@ -8,7 +8,7 @@ the relay is a member of this workspace; these rules add what is particular to i
   `--no-default-features --features node`, as `.tar.gz` and `.deb` for x86_64 and aarch64; its
   version is this crate's. `apassy-team` stays one release as its alias.
 - Keep `crates/apassy-relay/Cargo.toml`, its entry in the workspace `Cargo.lock`, the edge Worker
-  package and its lock metadata, both downloadable team CLIs, the relay image label, and public
+  package and its lock metadata, the push gateway package, both downloadable team CLIs, the relay image label, and public
   release metadata at the shared release version. Do not renumber pinned dependencies, schema
   versions, API versions, toolchains, or third-party packages merely to match the release.
 - Release provenance names the exact source commit and artifact hashes. A successful build, upload,
