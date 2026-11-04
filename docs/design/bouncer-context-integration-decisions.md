@@ -138,3 +138,16 @@ bridge is unchanged. PRs run only compiled/tokenizer preflight; after green CI o
 the final revision, one manual pipeline runs the probe and starts training only
 after the whole probe job succeeds with nonempty eligible groups. Any other
 outcome ends this path without a retry. No manual dispatch has occurred.
+
+## Owner-approved Intel validation fallback R7
+
+After repeated GitHub-hosted ARM runner capacity cancellations, the owner approved
+the prepared two-job fallback on 2026-11-04. `extension` and `macos` select
+`macos-15-intel` when repository variable `APASSY_MACOS_INTEL_FALLBACK` is exactly
+`true`; otherwise they retain `macos-15`. The variable was enabled and read back as
+`true`. This is an explicit switch, not an automatic retry of failed tests.
+
+The contextual experiment still uses the reviewed Ubuntu runner and resource
+limits. The owner approval changes only these two validation jobs. The final
+revision must pass CI before its single manual full-mode pipeline; no actual
+new-method probe has been consumed. Intel runtime validation remains pending CI.

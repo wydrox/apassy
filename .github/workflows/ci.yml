@@ -80,7 +80,7 @@ jobs:
   extension:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
-    runs-on: macos-15
+    runs-on: ${{ vars.APASSY_MACOS_INTEL_FALLBACK == 'true' && 'macos-15-intel' || 'macos-15' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,7 +116,7 @@ jobs:
   macos:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
-    runs-on: macos-15
+    runs-on: ${{ vars.APASSY_MACOS_INTEL_FALLBACK == 'true' && 'macos-15-intel' || 'macos-15' }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
