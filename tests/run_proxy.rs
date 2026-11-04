@@ -31,6 +31,70 @@ use zeroize::Zeroizing;
 const REAL: &str = "sk_live_FAKE-proxy-value-0123456789-abcdefghij-KLMN";
 const OTHER_REAL: &str = "ghp_FAKE-other-value-0123456789-abcdefghij-KLMN";
 const NAME: &str = "DEMO_KEY";
+const ECHO_REAL: &str = "sk_live_FAKE+echo/value=<>&\"'\\é0123456789";
+
+fn echo_forms() -> Vec<String> {
+    let percent = |upper: bool| {
+        ECHO_REAL
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                    char::from(b).to_string()
+                } else if upper {
+                    format!("%{b:02X}")
+                } else {
+                    format!("%{b:02x}")
+                }
+            })
+            .collect::<String>()
+    };
+    let html: String = ECHO_REAL
+        .chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            '\'' => "&#39;".to_owned(),
+            '/' => "&#x2F;".to_owned(),
+            c => c.to_string(),
+        })
+        .collect();
+    let json = serde_json::to_string(ECHO_REAL).unwrap();
+    vec![
+        ECHO_REAL.to_owned(),
+        percent(true),
+        percent(false),
+        html,
+        json[1..json.len() - 1].replace('/', r"\/"),
+        ECHO_REAL
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c.to_string()
+                } else {
+                    format!("\\u{:04x}", u32::from(c))
+                }
+            })
+            .collect(),
+    ]
+}
+
+fn query_placeholder(run: &Run, upper: bool) -> String {
+    ECHO_REAL
+        .bytes()
+        .zip(run.placeholder.bytes())
+        .map(|(value, shown)| {
+            if value.is_ascii_alphanumeric() || b"-._~".contains(&value) {
+                char::from(shown).to_string()
+            } else if upper {
+                format!("%{shown:02X}")
+            } else {
+                format!("%{shown:02x}")
+            }
+        })
+        .collect()
+}
 
 /// What the service got.
 #[derive(Debug, Clone)]
@@ -202,20 +266,168 @@ fn ok(status: &str, body: &str) -> String {
     )
 }
 
+/// Query-preserving redirects and error pages from a synthetic HTTPS upstream.
+fn serve_encoded_echo(stream: StreamOwned<ServerConnection, TcpStream>, seen: &Mutex<Vec<Seen>>) {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let path = line.split(' ').nth(1).unwrap().to_owned();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+    }
+    let forms = echo_forms();
+    assert!(path.ends_with(&format!("?key={}", forms[1])), "{path}");
+    seen.lock().unwrap().push(Seen {
+        path: path.clone(),
+        authorization: None,
+        body: String::new(),
+    });
+    let route = path.split('?').next().unwrap();
+    let (status, extra, body) = match route {
+        "/redirect" => (
+            "301 Moved Permanently",
+            format!("Location: {}\r\n", path.replacen("/redirect?", "/json?", 1)),
+            String::new(),
+        ),
+        "/json" => (
+            "404 Not Found",
+            String::new(),
+            serde_json::json!({"url":path}).to_string(),
+        ),
+        "/header" => (
+            "200 OK",
+            format!("X-Echo: {}\r\n", forms[2]),
+            "ok".to_owned(),
+        ),
+        _ => (
+            "200 OK",
+            "Content-Type: text/html\r\n".to_owned(),
+            forms[3..].join(" | "),
+        ),
+    };
+    let out = reader.get_mut();
+    if route == "/chunked" {
+        write!(
+            out,
+            "HTTP/1.1 {status}\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
+        )
+        .unwrap();
+        for chunk in body.as_bytes().chunks(7) {
+            write!(out, "{:x}\r\n", chunk.len()).unwrap();
+            out.write_all(chunk).unwrap();
+            out.write_all(b"\r\n").unwrap();
+            out.flush().unwrap();
+        }
+        write!(out, "0\r\nX-Echo: {}\r\n\r\n", forms[1]).unwrap();
+    } else {
+        write!(
+            out,
+            "HTTP/1.1 {status}\r\nConnection: close\r\n{extra}Content-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        if route == "/split" {
+            let split = body.find("&amp;").unwrap() + 3;
+            out.write_all(&body.as_bytes()[..split]).unwrap();
+            out.flush().unwrap();
+            thread::sleep(Duration::from_millis(30));
+            out.write_all(&body.as_bytes()[split..]).unwrap();
+        } else {
+            out.write_all(body.as_bytes()).unwrap();
+        }
+    }
+    out.flush().unwrap();
+}
+
+#[test]
+fn encoded_echoes_in_redirect_errors_html_headers_and_split_bodies_are_masked() {
+    let service = start_service_with(serve_encoded_echo);
+    let proxied = start_proxy_value(&service, OtherHosts::Tunnel, ECHO_REAL);
+    for route in ["redirect", "json", "html", "header", "split", "chunked"] {
+        let request = format!(
+            "GET /{route}?key={} HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            proxied.placeholder, service.port
+        );
+        let (head, body) = intercepted(&proxied, service.port, &request);
+        let received = format!("{head}{body}");
+        assert!(
+            received.contains(&proxied.placeholder)
+                || received.contains(&query_placeholder(&proxied, true))
+                || received.contains(&query_placeholder(&proxied, false)),
+            "{route}: {received}"
+        );
+        for form in echo_forms() {
+            assert!(!received.contains(&form), "{route}: {received}");
+        }
+        if route == "redirect" {
+            assert!(head.starts_with("HTTP/1.1 301"));
+        }
+        if route == "json" {
+            assert!(head.starts_with("HTTP/1.1 404"));
+        }
+        let out = run(
+            &proxied,
+            &format!(
+                "curl -sv 'https://localhost:{}/{route}?key='\"$DEMO_KEY\" -D - | rev",
+                service.port
+            ),
+        );
+        assert_eq!(out.exit_code, Some(0), "{route}: {out:?}");
+        assert!(
+            out.stdout.contains(&reversed(&proxied.placeholder))
+                || out
+                    .stdout
+                    .contains(&reversed(&query_placeholder(&proxied, true)))
+                || out
+                    .stdout
+                    .contains(&reversed(&query_placeholder(&proxied, false))),
+            "{route}: {out:?}"
+        );
+        for form in echo_forms() {
+            assert!(!out.stdout.contains(&reversed(&form)), "{route}: {out:?}");
+            assert!(!out.stderr.contains(&form), "{route}: {out:?}");
+        }
+    }
+    let out = run(
+        &proxied,
+        &format!(
+            "curl -svL 'https://localhost:{}/redirect?key='\"$DEMO_KEY\" | rev",
+            service.port
+        ),
+    );
+    assert_eq!(out.exit_code, Some(0), "{out:?}");
+    assert!(out.stderr.contains("404 Not Found"), "{out:?}");
+    for form in echo_forms() {
+        assert!(!out.stderr.contains(&form), "{out:?}");
+    }
+    assert_eq!(service.seen.lock().unwrap().len(), 14);
+    let log = events(proxied);
+    assert_eq!(log.len(), 14);
+}
+
 struct Run {
+    value: String,
     proxy: RunProxy,
     placeholder: String,
     other_placeholder: String,
 }
 
 fn start_proxy<T>(service: &Service<T>, other_hosts: OtherHosts) -> Run {
-    let placeholder = mint_placeholder(REAL).expect("placeholder");
+    start_proxy_value(service, other_hosts, REAL)
+}
+
+fn start_proxy_value<T>(service: &Service<T>, other_hosts: OtherHosts, value: &str) -> Run {
+    let placeholder = mint_placeholder(value).expect("placeholder");
     let other_placeholder = mint_placeholder(OTHER_REAL).expect("placeholder");
     let secrets = vec![
         ProxySecret {
             name: NAME.to_owned(),
             placeholder: placeholder.clone(),
-            value: Zeroizing::new(REAL.to_owned()),
+            value: Zeroizing::new(value.to_owned()),
             hosts: vec![HostRule::parse(&format!("localhost:{}", service.port)).expect("rule")],
         },
         ProxySecret {
@@ -235,6 +447,7 @@ fn start_proxy<T>(service: &Service<T>, other_hosts: OtherHosts) -> Run {
     )
     .expect("proxy");
     Run {
+        value: value.to_owned(),
         proxy,
         placeholder,
         other_placeholder,
@@ -301,7 +514,7 @@ fn run(run: &Run, script: &str) -> RunOutput {
     ];
     let masks = [SecretEnv {
         name: NAME.to_owned(),
-        value: Zeroizing::new(REAL.to_owned()),
+        value: Zeroizing::new(run.value.clone()),
     }];
     exec::run_with(
         &["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
@@ -910,6 +1123,27 @@ fn serve_ws(stream: StreamOwned<ServerConnection, TcpStream>, seen: &Mutex<Vec<W
         let _ = out.flush();
         return;
     }
+    if path.starts_with("/ws-encoded") {
+        out.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").unwrap();
+        for echo in echo_forms() {
+            out.write_all(&ws_frame(true, 1, echo.as_bytes(), false))
+                .unwrap();
+            let split = echo.len() / 2;
+            out.write_all(&ws_frame(false, 1, &echo.as_bytes()[..split], false))
+                .unwrap();
+            out.write_all(&ws_frame(true, 0, &echo.as_bytes()[split..], false))
+                .unwrap();
+        }
+        out.flush().unwrap();
+        let (_, opcode, payload) = read_ws_frame(&mut reader).unwrap();
+        assert_eq!(opcode, 8);
+        reader
+            .get_mut()
+            .write_all(&ws_frame(true, 8, &payload, false))
+            .unwrap();
+        reader.get_mut().flush().unwrap();
+        return;
+    }
     let extension = if path.starts_with("/ws-deflate") {
         "Sec-WebSocket-Extensions: permessage-deflate\r\n"
     } else {
@@ -1337,6 +1571,38 @@ fn the_extension_offer_is_removed() {
                 .is_some_and(|reason| reason.contains("extension"))),
         "{log:?}"
     );
+}
+
+#[test]
+fn websocket_encoded_echoes_are_masked_in_whole_and_fragmented_text_messages() {
+    let service = start_ws_service();
+    let proxied = start_proxy_value(&service, OtherHosts::Tunnel, ECHO_REAL);
+    let port = service.port;
+    let (mut client, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request("/ws-encoded", port, ""),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    for echo in echo_forms() {
+        let mut expected = proxied.placeholder.clone();
+        let fill = expected.chars().next_back().unwrap();
+        expected.extend(std::iter::repeat_n(fill, echo.len() - ECHO_REAL.len()));
+        for _ in 0..2 {
+            let mut message = Vec::new();
+            loop {
+                let (fin, _, payload) = read_ws_frame(&mut client).expect("text frame");
+                message.extend_from_slice(&payload);
+                if fin {
+                    break;
+                }
+            }
+            assert_eq!(message, expected.as_bytes(), "{echo}");
+        }
+    }
+    close_ws(&mut client);
+    events(proxied);
 }
 
 #[test]

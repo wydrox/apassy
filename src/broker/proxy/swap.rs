@@ -214,31 +214,9 @@ pub(super) struct Swapped {
     pub head: Zeroizing<Vec<u8>>,
     pub used: Vec<usize>,
     /// Forms of the real values that only this request has, for the answer: the
-    /// Basic credentials (base64 of `user:value`) with the base64 of the
-    /// placeholder credentials (judge finding L1).
+    /// Basic credentials (base64 of `user:value`) and percent-encoded query keys
+    /// with equal-length encoded placeholders (judge finding L1).
     pub echoes: Vec<EchoPair>,
-}
-
-/// The JSON form of a value with `/` (`\/`, which a JSON writer may use), with
-/// the placeholder in the same form: each `/` of the value stays `\/` at its
-/// place, every other byte is the placeholder's, so both have one length. `None`
-/// for a value without `/` (judge finding L1).
-pub(super) fn json_escaped_pair(value: &str, placeholder: &str) -> Option<EchoPair> {
-    if !value.contains('/') || value.len() != placeholder.len() {
-        return None;
-    }
-    let mut from = Zeroizing::new(Vec::with_capacity(value.len() * 2));
-    let mut to = Zeroizing::new(Vec::with_capacity(value.len() * 2));
-    for (byte, other) in value.bytes().zip(placeholder.bytes()) {
-        if byte == b'/' {
-            from.extend_from_slice(b"\\/");
-            to.extend_from_slice(b"\\/");
-        } else {
-            from.push(byte);
-            to.push(other);
-        }
-    }
-    Some((from, to))
 }
 
 /// Headers that the proxy removes. `Accept-Encoding` goes so the response comes
@@ -274,7 +252,7 @@ pub(super) fn swap_request(
         Ok(())
     };
 
-    let target = swap_target(&head.target, secrets, &mut take)?;
+    let target = swap_target(&head.target, secrets, &mut take, &mut echoes)?;
     let mut headers: Vec<(&str, Zeroizing<String>)> = Vec::with_capacity(head.headers.len());
     for (name, value) in &head.headers {
         let lower = name.to_ascii_lowercase();
@@ -456,6 +434,7 @@ fn swap_target(
     target: &str,
     secrets: &[SwapSecret<'_>],
     take: &mut impl FnMut(usize) -> Result<(), Refusal>,
+    echoes: &mut Vec<EchoPair>,
 ) -> Result<Zeroizing<String>, Refusal> {
     let (path, query) = match target.split_once('?') {
         Some((path, query)) => (path, Some(query)),
@@ -486,9 +465,23 @@ fn swap_target(
             && KEY_PARAMS.contains(&name_lower.as_str())
         {
             take(index)?;
+            let secret = &secrets[index];
+            let query =
+                super::echo::query_echoes(secret.value, secret.placeholder).ok_or_else(|| {
+                    Refusal::Misplaced {
+                        index,
+                        place: "a query key without an equal-length encoded placeholder".to_owned(),
+                    }
+                })?;
             out.push_str(name);
             out.push('=');
-            percent_encode_into(secrets[index].value, &mut out);
+            out.push_str(&query[0].sent);
+            echoes.extend(query.into_iter().map(|echo| {
+                (
+                    Zeroizing::new(echo.sent.as_bytes().to_vec()),
+                    Zeroizing::new(echo.shown.into_bytes()),
+                )
+            }));
             continue;
         }
         if let Some(index) =
@@ -530,19 +523,6 @@ fn hex(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
-    }
-}
-
-fn percent_encode_into(value: &str, out: &mut String) {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            out.push(char::from(byte));
-        } else {
-            out.push('%');
-            out.push(char::from(HEX[usize::from(byte >> 4)]));
-            out.push(char::from(HEX[usize::from(byte & 15)]));
-        }
     }
 }
 
@@ -653,7 +633,7 @@ mod tests {
     fn secrets<'a>(hosts: &'a [HostRule]) -> Vec<SwapSecret<'a>> {
         vec![
             SwapSecret {
-                placeholder: "ph_AAAAAAAAAAAAAAAAAAAA",
+                placeholder: "ph_AAAAAAAAAAAAAAAAAAAAAA",
                 value: "REAL-ONE-value/with+chars",
                 hosts,
             },
@@ -678,7 +658,7 @@ mod tests {
         let hosts = [rule("api.example.com")];
         let secrets = secrets(&hosts);
         let request = head(
-            "GET /v1/x?key=ph_AAAAAAAAAAAAAAAAAAAA&q=1 HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer ph_AAAAAAAAAAAAAAAAAAAA\r\nX-Api-Key: ph_AAAAAAAAAAAAAAAAAAAA\r\nAccept-Encoding: gzip\r\nProxy-Authorization: Basic eDp5\r\n\r\n",
+            "GET /v1/x?key=ph_AAAAAAAAAAAAAAAAAAAAAA&q=1 HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer ph_AAAAAAAAAAAAAAAAAAAAAA\r\nX-Api-Key: ph_AAAAAAAAAAAAAAAAAAAAAA\r\nAccept-Encoding: gzip\r\nProxy-Authorization: Basic eDp5\r\n\r\n",
         );
         let swapped = swap_request(&request, "api.example.com", 443, &secrets).expect("swap");
         let text = swapped_text(&swapped);
@@ -688,7 +668,7 @@ mod tests {
         assert!(!text.contains("Accept-Encoding") && !text.contains("Proxy-Authorization"));
         assert_eq!(swapped.used, vec![0]);
 
-        let basic = base64::encode(b"x-access-token:ph_AAAAAAAAAAAAAAAAAAAA");
+        let basic = base64::encode(b"x-access-token:ph_AAAAAAAAAAAAAAAAAAAAAA");
         let request = head(&format!(
             "GET / HTTP/1.1\r\nHost: sub.api.example.com\r\nAuthorization: Basic {basic}\r\n\r\n"
         ));
@@ -709,7 +689,7 @@ mod tests {
         };
         assert_eq!(
             refused(
-                "GET / HTTP/1.1\r\nAuthorization: Bearer ph_AAAAAAAAAAAAAAAAAAAA\r\n\r\n",
+                "GET / HTTP/1.1\r\nAuthorization: Bearer ph_AAAAAAAAAAAAAAAAAAAAAA\r\n\r\n",
                 "evil.example.net"
             ),
             Refusal::WrongHost { index: 0 }
@@ -723,21 +703,21 @@ mod tests {
         );
         assert!(matches!(
             refused(
-                "GET / HTTP/1.1\r\nUser-Agent: x ph_AAAAAAAAAAAAAAAAAAAA\r\n\r\n",
+                "GET / HTTP/1.1\r\nUser-Agent: x ph_AAAAAAAAAAAAAAAAAAAAAA\r\n\r\n",
                 "api.example.com"
             ),
             Refusal::Misplaced { index: 0, .. }
         ));
         assert!(matches!(
             refused(
-                "GET /store/ph_AAAAAAAAAAAAAAAAAAAA HTTP/1.1\r\n\r\n",
+                "GET /store/ph_AAAAAAAAAAAAAAAAAAAAAA HTTP/1.1\r\n\r\n",
                 "api.example.com"
             ),
             Refusal::Misplaced { index: 0, .. }
         ));
         assert!(matches!(
             refused(
-                "GET /?note=ph_AAAAAAAAAAAAAAAAAAAA HTTP/1.1\r\n\r\n",
+                "GET /?note=ph_AAAAAAAAAAAAAAAAAAAAAA HTTP/1.1\r\n\r\n",
                 "api.example.com"
             ),
             Refusal::Misplaced { index: 0, .. }
@@ -745,7 +725,7 @@ mod tests {
         // A port that the rule does not cover.
         assert_eq!(
             swap_request(
-                &head("GET / HTTP/1.1\r\nAuthorization: Bearer ph_AAAAAAAAAAAAAAAAAAAA\r\n\r\n"),
+                &head("GET / HTTP/1.1\r\nAuthorization: Bearer ph_AAAAAAAAAAAAAAAAAAAAAA\r\n\r\n"),
                 "api.example.com",
                 8443,
                 &secrets
@@ -755,10 +735,47 @@ mod tests {
         );
     }
 
-    /// Judge finding L1: the Basic credentials of a request and the JSON form of a
-    /// value with `/` have a placeholder form of the same length for the answer.
     #[test]
-    fn basic_credentials_and_json_escaped_values_have_echo_forms() {
+    fn query_echoes_decode_to_the_placeholder_and_keep_length() {
+        let value = "REAL-value+with/slash=0123456789";
+        let placeholder = mint_placeholder(value).unwrap();
+        let hosts = [rule("api.example.com")];
+        let secrets = [SwapSecret {
+            value,
+            placeholder: &placeholder,
+            hosts: &hosts,
+        }];
+        let swapped = swap_request(
+            &head(&format!(
+                "GET /?key={placeholder} HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+            )),
+            "api.example.com",
+            443,
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(swapped.echoes.len(), 2);
+        for (from, to) in swapped.echoes {
+            assert_eq!(from.len(), to.len());
+            assert_eq!(
+                percent_decode(std::str::from_utf8(&to).unwrap()),
+                placeholder
+            );
+            let mut data = from.to_vec();
+            let pairs = [
+                (value.as_bytes(), placeholder.as_bytes()),
+                (from.as_slice(), to.as_slice()),
+            ];
+            assert!(super::super::http1::Replacer::replace_all(
+                &pairs, &mut data
+            ));
+            assert_eq!(data, *to);
+        }
+    }
+
+    /// Basic credentials have a placeholder form of the same length for the answer.
+    #[test]
+    fn basic_credentials_have_equal_length_echo_forms() {
         let value = "REAL-ONE-value/with+chars";
         let placeholder = "ph_AAAAAAAAAAAAAAAAAAAAAA";
         assert_eq!(value.len(), placeholder.len());
@@ -794,12 +811,6 @@ mod tests {
         )
         .expect("swap");
         assert!(bearer.echoes.is_empty());
-
-        let (from, to) = json_escaped_pair(value, placeholder).expect("a value with /");
-        assert_eq!(from.as_slice(), br"REAL-ONE-value\/with+chars");
-        assert_eq!(to.as_slice(), br"ph_AAAAAAAAAAA\/AAAAAAAAAA");
-        assert_eq!(from.len(), to.len());
-        assert!(json_escaped_pair("REAL-TWO-value-0123", "ph_BBBBBBBBBBBBBBBB").is_none());
     }
 
     #[test]
