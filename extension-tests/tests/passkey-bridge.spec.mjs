@@ -8,6 +8,7 @@
 // WebAuthn verifier accepts; it does not show that Apassy signs them.
 
 import { test, expect } from "../fixtures/passkey-bridge/browser.mjs";
+import { goto } from "../support/helium.mjs";
 
 async function turnOn(ph) {
   const reply = await ph.handle({ type: "passkeys", on: true });
@@ -16,7 +17,7 @@ async function turnOn(ph) {
 
 async function openRp(ph, query = "") {
   const page = await ph.context.newPage();
-  await page.goto(`${ph.rp.origin}/${query}`);
+  await goto(page, `${ph.rp.origin}/${query}`);
   await expect(page.locator("#rp-origin")).toHaveText(ph.rp.origin);
   return page;
 }
@@ -42,7 +43,7 @@ test("turning on registers the two scripts: MAIN and ISOLATED, document_start, t
     ["apassy-passkey-page", "MAIN", "document_start", false, ["passkey-page.js"]],
   ]);
   const page = await ph.context.newPage();
-  await page.goto(ph.pageUrl("/otp-iframe"));
+  await goto(page, ph.pageUrl("/otp-iframe"));
   const frame = page.frameLocator("#frame");
   await expect(frame.locator("#code")).toBeVisible();
   const native = (p) => p.evaluate(() => CredentialsContainer.prototype.create.toString().includes("[native code]"));

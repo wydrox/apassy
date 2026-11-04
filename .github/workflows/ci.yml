@@ -313,6 +313,9 @@ jobs:
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy-relay -p apassy-core
           --partition "slice:$SLICE/2"
+      - name: Verify vendored HTTP listener shutdown
+        if: matrix.slice == 1
+        run: cargo nextest run --profile ci --offline --locked -p tiny_http --test shutdown
       # nextest does not run doc tests.
       - name: Run the relay and iPhone vault core doc tests
         if: matrix.slice == 1

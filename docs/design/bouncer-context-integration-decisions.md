@@ -151,3 +151,26 @@ The contextual experiment still uses the reviewed Ubuntu runner and resource
 limits. The owner approval changes only these two validation jobs. The final
 revision must pass CI before its single manual full-mode pipeline; no actual
 new-method probe has been consumed. Intel runtime validation remains pending CI.
+
+## CI reliability repairs R8
+
+The Intel extension job reached the browser tests and failed on two initial
+Helium navigations with `ERR_ABORTED`. Those navigations now use the existing
+bounded transport helper. WebAuthn actions, assertions and the cancellation-test
+navigation remain unchanged. The three helper unit checks passed locally.
+
+The relay failed its synchronous tailnet-listener stop assertion in both nextest
+attempts. The vendored HTTP server now owns and joins its accept thread before
+drop returns. Nonblocking accept and a 10 ms idle park remove dependence on a
+connect-to-self wakeup. The admission latency and roughly 100 idle wakeups per
+second per listener are recorded in the patch notes. Deadline-free responses and
+guarded-connection shutdown are documented separately.
+
+Opus accepted these changes in
+`docs/reviews/bouncer-context-ci-reliability-review-2026-11-04.md`; the parent
+applied its small documentation corrections. The original tailnet assertion is
+unchanged. Three additional vendored shutdown behavior tests run in relay slice 1.
+Cargo package selection, formatting, workflow syntax and whitespace were checked;
+Rust compilation and runtime tests still require CI. Browser E2E uses the existing
+macOS Helium harness on the approved Intel fallback; no Ubuntu browser result is
+claimed. These repairs do not establish gate B or unlock C/D/E.
