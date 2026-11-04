@@ -2039,11 +2039,11 @@ mod live {
                 return self.set_err("This build has no node. Nothing was revoked.");
             };
             let vault = self.owner_ui.session.shared_vault();
-            let ids: Vec<u64> = request.devices.iter().map(|(id, _)| *id).collect();
+            let devices = request.devices.clone();
             let repaint = self.ui.devices.cache.repaint.clone();
             self.ui.devices.cache.call = Some(Task::spawn(repaint, move || {
-                for id in ids {
-                    node.revoke_device(&vault, id)
+                for (id, uuid) in devices {
+                    node.revoke_device(&vault, id, &uuid)
                         .map_err(|error| (name.clone(), error.message))?;
                 }
                 Ok(format!("{name} revoked"))

@@ -314,6 +314,52 @@ fn revoke_removes_the_device_on_the_node_and_its_row_and_refuses_this_mac() {
             .set_trusted_device_relay_id(&uuid, &team.team_id, 2)
             .unwrap();
     });
+    let before = fx.with_vault(|vault| vault.ensure_question_key().unwrap().key_id());
+    // A request with an absent or mismatched mapping must not claim success.
+    assert_eq!(
+        fx.node.revoke_device(&fx.vault, 3, &uuid).unwrap_err().code,
+        "not_found"
+    );
+    assert_eq!(
+        fx.node
+            .revoke_device(&fx.vault, 2, "missing-uuid")
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    assert!(fx.state().revoked_devices.is_empty());
+    assert!(
+        fx.with_vault(|vault| vault.trusted_device(&uuid).unwrap())
+            .is_some()
+    );
+    assert_eq!(
+        fx.with_vault(|vault| vault.question_key().unwrap().unwrap().key_id()),
+        before
+    );
+    // A lock/unlock during the relay call changes the epoch. Completion must fail
+    // visibly and leave the new session untouched.
+    let epoch = fx.with_vault(|vault| vault.epoch());
+    fx.with_vault(|vault| {
+        vault.lock().unwrap();
+        vault.unlock(PASS).unwrap();
+    });
+    assert_eq!(
+        Node::finish_device_revoke(&fx.vault, epoch, &uuid)
+            .unwrap_err()
+            .code,
+        "vault_locked"
+    );
+    assert!(
+        fx.with_vault(|vault| vault.trusted_device(&uuid).unwrap())
+            .is_some()
+    );
+    assert_eq!(
+        fx.with_vault(|vault| vault.question_key().unwrap().unwrap().key_id()),
+        before
+    );
+    // Restart the route for the new vault epoch before the normal revoke.
+    fx.node.stop();
+    fx.start();
     let status = fx.node.status(&fx.vault).tailnet;
     let shown = status.devices.iter().find(|device| device.id == 2).unwrap();
     assert_eq!(shown.kind, Some(TrustedDeviceKind::Iphone));
@@ -321,10 +367,14 @@ fn revoke_removes_the_device_on_the_node_and_its_row_and_refuses_this_mac() {
 
     let own = fx
         .node
-        .revoke_device(&fx.vault, team.device_id)
+        .revoke_device(&fx.vault, team.device_id, &uuid)
         .unwrap_err();
     assert_eq!(own.code, "conflict");
-    fx.node.revoke_device(&fx.vault, 2).unwrap();
+    fx.node.revoke_device(&fx.vault, 2, &uuid).unwrap();
+    assert_ne!(
+        fx.with_vault(|vault| vault.question_key().unwrap().unwrap().key_id()),
+        before
+    );
     assert_eq!(fx.state().revoked_devices, vec![(team.team_id.clone(), 2)]);
     assert!(
         fx.with_vault(|vault| vault.trusted_device_by_relay_id(&team.team_id, 2).unwrap())

@@ -1676,7 +1676,12 @@ impl Node {
     /// device row goes with a new question key, so it cannot read the next questions. The
     /// caller passed the owner check (`OwnerRequest::RevokeNodeDevice`, unit N7). This Mac
     /// itself is refused (`conflict`).
-    pub fn revoke_device(&self, vault: &SharedVault, device_id: u64) -> Result<(), NodeError> {
+    pub fn revoke_device(
+        &self,
+        vault: &SharedVault,
+        device_id: u64,
+        device_uuid: &str,
+    ) -> Result<(), NodeError> {
         let (origin, _, epoch) = self.route_info()?;
         let membership = {
             let guard = lock(vault);
@@ -1693,6 +1698,23 @@ impl Node {
                 "This Mac holds the approvals of the vault. Turn them off instead.",
             ));
         }
+        // Resolve the request's stable UUID before making any remote change.
+        {
+            let guard = lock(vault);
+            let open = guard
+                .as_ref()
+                .filter(|vault| !vault.is_locked() && vault.epoch() == epoch)
+                .ok_or_else(|| error("vault_locked", "The vault changed or was locked."))?;
+            open.trusted_device_by_relay_id(&membership.team_id, device_id)
+                .map_err(|_| error("vault_error", "The device mapping cannot be read."))?
+                .filter(|device| device.uuid == device_uuid)
+                .ok_or_else(|| {
+                    error(
+                        "not_found",
+                        "The trusted device or its relay mapping is missing.",
+                    )
+                })?;
+        }
         let team = NodeTeamId(membership.team_id.clone());
         let shared = self
             .shared()
@@ -1700,14 +1722,30 @@ impl Node {
         shared
             .with_node(|node| node.revoke_device(&team, device_id))
             .ok_or_else(|| error("node_stopped", "The node is not running."))??;
+        Self::finish_device_revoke(vault, epoch, device_uuid)?;
+        Ok(())
+    }
+
+    fn finish_device_revoke(
+        vault: &SharedVault,
+        epoch: [u8; 32],
+        device_uuid: &str,
+    ) -> Result<(), NodeError> {
         let mut guard = lock(vault);
-        if let Some(open) = guard
+        let open = guard
             .as_mut()
             .filter(|vault| !vault.is_locked() && vault.epoch() == epoch)
-            && let Ok(Some(device)) = open.trusted_device_by_relay_id(&team.0, device_id)
+            .ok_or_else(|| {
+                error(
+                    "vault_locked",
+                    "The vault changed or was locked. Device removal is incomplete.",
+                )
+            })?;
+        if !open
+            .remove_trusted_device_and_rotate(device_uuid)
+            .map_err(|_| error("vault_error", "The device row cannot be removed."))?
         {
-            open.remove_trusted_device_and_rotate(&device.uuid)
-                .map_err(|_| error("vault_error", "The device row cannot be removed."))?;
+            return Err(error("not_found", "The trusted device row is missing."));
         }
         Ok(())
     }
