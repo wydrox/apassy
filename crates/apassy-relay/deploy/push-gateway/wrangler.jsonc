@@ -20,7 +20,7 @@
   "migrations": [{ "tag": "v1-limits", "new_sqlite_classes": ["LimitCounter"] }],
   "vars": {
     "GATEWAY_KEY_ID": "1",
-    "APNS_KEY_ID": "2549AX5SGX",
+    "APNS_KEY_ID": "QZXTZJ9BQK",
     "APNS_TEAM_ID": "7S3F9767BM",
     "APNS_TOPIC": "com.wydrox.apassy.companion",
     "APNS_WATCH_TOPIC": "com.wydrox.apassy.companion.watchkitapp"
