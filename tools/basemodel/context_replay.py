@@ -98,7 +98,8 @@ def baseline_lower_bound(views, binary_path):
     rows = _replay(views, binary_path)
     return {'pre_ask': [r['pre_ask'] for r in rows],
             'pre_reason': [r['pre_reason'] for r in rows],
-            'diagnostics': [{'note': r.get('pre_note'), 'flags': r.get('analysis_flags')} for r in rows],
+            'diagnostics': [{'reason': r['pre_reason'], 'note': r.get('pre_note'),
+                             'flags': r.get('analysis_flags')} for r in rows],
             'systemone_body': [r['systemone_body'] for r in rows],
             'assumptions': list(ASSUMPTIONS), 'contract': 'sdc-baseline-replay-v1'}
 

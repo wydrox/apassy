@@ -19,7 +19,7 @@ def view():
     s = {k: next((x for x in ('unknown', 'none', 'not_recorded', '0', 'undeclared', 'no') if x in v), v[0])
          for k, v in load_contract()['secret_facts']}
     s.update(env='development', env_from='owner', scope='read_only', scope_from='owner',
-             sensitive='no', provider='none')
+             sensitive='no', provider='none', hosts='none', project='undeclared')
     return dict(request=dict(user_request='Show repository status.', command='git status', purpose=''),
                 action='read', secrets=[s], local_rule=None)
 
