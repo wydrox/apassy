@@ -214,3 +214,27 @@ concrete executor, verified cost and resource limits, explicit owner approval
 including one read of shipped heads from R2, and supervision before any compute.
 No such experiment, secret access, runner change or publication is authorized
 by this adapter package.
+
+## Existing trainer reuse R10
+
+The owner challenged preparing a separate GPU trainer. The parent stopped the
+new B2 infrastructure expansion, cancelled its unfinished trainer worker and did
+not start the executor. Five uncommitted preparation files were preserved at
+`/Users/rafalw/Dev/apassy-bouncer-context-evidence/parked-b2-jldxup7q/`, with a
+receipt and tracked diff, then removed from the active checkout. None was pushed.
+No model run, paid resource, R2 read or external upload occurred. The Modal/B2
+preparation proposal is not the active implementation path.
+
+The bounded replacement is input conversion for the existing `train.py`, which
+already supports MPS and CUDA. `context_train_rows.py` exports synthetic G1 rows
+through the existing serializer into that trainer's state/instructions/answer
+format. The trainer change only appends `owner_accepts_use` to its question
+catalog; its loop, optimizer, device handling and defaults are unchanged.
+
+Conversion validates source hashes, strict G1 rows and disjoint splits, preserves
+source datasets, and records separate context/control selection and refusal
+counts. It rejects held-out/H1 paths before opening them, never truncates input,
+and refuses an empty trainable split. Output provenance describes input data;
+it is not a model freeze. Complete context checkpoint metadata and freeze
+compatibility still need acceptance before any model execution. All quality,
+baseline and cost gates remain; B is UNSUPPORTED and production is unchanged.

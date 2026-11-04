@@ -41,7 +41,7 @@ sys.path.insert(0, HERE)
 
 import common  # noqa: E402
 
-QUESTIONS = ["task_match", "writes", "remote", "leak", "destroy", "rule_break"]
+QUESTIONS = ["task_match", "writes", "remote", "leak", "destroy", "rule_break", "owner_accepts_use"]
 
 
 def on_ac_power():
