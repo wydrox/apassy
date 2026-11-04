@@ -617,13 +617,17 @@ fn switch_row(
             .show(
                 ui,
                 |ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        ui.label(rows::label_text(title));
-                        if let Some(subline) = subline {
+                    // A title alone is centered on the switch; with a subline, the two
+                    // lines are a column.
+                    if let Some(subline) = subline {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(rows::label_text(title));
                             ui.add(Label::new(rows::note(subline)).wrap());
-                        }
-                    });
+                        });
+                    } else {
+                        ui.label(rows::label_text(title));
+                    }
                 },
                 |ui| {
                     ui.add_enabled_ui(enabled, |ui| kit::toggle(ui, on, title));
@@ -848,7 +852,7 @@ fn devices_label(ui: &mut Ui, count: usize) {
 
 fn devices_group(ui: &mut Ui, view: &DevicesView, action: &mut Option<Action>) {
     devices_label(ui, view.devices.len());
-    rows::group(ui, None, |g| {
+    rows::group_box(ui, |g| {
         for (index, device) in view.devices.iter().enumerate() {
             if let Some(clicked) = device_row(g, device, view.now)
                 && clicked
@@ -1443,10 +1447,18 @@ pub(crate) fn link_step(
         ADD_TITLE,
         Some(if expired { LINK_EXPIRED } else { ADD_LEAD }),
     );
-    route_line(ui, step.route);
+    let shows_qr = !expired && step.seconds_left.is_some();
+    if !shows_qr {
+        route_line(ui, step.route);
+    }
     ui.add_space(8.0);
-    if !expired && step.seconds_left.is_some() {
-        ui.vertical_centered(qr);
+    if shows_qr {
+        // The route chip sits under the QR code, centered (frame 2a).
+        ui.vertical_centered(|ui| {
+            qr(ui);
+            ui.add_space(6.0);
+            route_chip(ui, step.route);
+        });
         ui.add_space(10.0);
         rows::group(ui, None, |g| {
             if let Some(shown) = &step.shown {
@@ -1677,14 +1689,22 @@ pub(crate) fn move_step(
     });
     ui.add_space(10.0);
     let expired = link.is_some_and(LinkStep::expired);
-    if scanning && !expired && link.is_some_and(|link| link.seconds_left.is_some()) {
-        ui.vertical_centered(qr);
+    let shows_qr = scanning && !expired && link.is_some_and(|link| link.seconds_left.is_some());
+    if shows_qr {
+        // The route chip sits under the QR code, centered (frame 4b).
+        ui.vertical_centered(|ui| {
+            qr(ui);
+            ui.add_space(6.0);
+            route_chip(ui, Route::Mac);
+        });
         ui.add_space(8.0);
     }
     if expired {
         kit::note(ui, LINK_EXPIRED);
     }
-    route_line(ui, Route::Mac);
+    if !shows_qr {
+        route_line(ui, Route::Mac);
+    }
     extra(ui);
     ui.add_space(8.0);
     kit::sheet_buttons(

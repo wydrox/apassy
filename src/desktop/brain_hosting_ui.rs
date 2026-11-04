@@ -45,6 +45,8 @@ pub(crate) const COMING_WITH_CONNECT: &str = "Coming with Connect";
 const CONNECT_HOVER: &str = "Apassy Connect hosting comes with the Connect sign-in.";
 /// The note of the row while a server runs the brain, after its host name.
 pub(crate) const GATE_STAYS: &str = "The bouncer gate still decides on this Mac.";
+/// The note of the row for an Apassy Connect host, which another version chose.
+pub(crate) const CONNECT_ELSEWHERE: &str = "Apassy Connect · chosen on another version";
 /// The headline when the chosen host cannot be used.
 pub(crate) const FALLBACK_HEADLINE: &str =
     "The chosen host cannot be used, so the bouncer brain runs on this Mac.";
@@ -232,8 +234,13 @@ pub(crate) fn kind_title(kind: BouncerHostKind) -> &'static str {
 
 /// The note of the row for a stored host: its host name and that the gate stays here.
 /// The token never shows.
+/// An Apassy Connect row comes from another version: this one cannot choose it, and its
+/// address means nothing to the owner (mockup frame 5).
 pub(crate) fn host_note(host: &BouncerHost) -> String {
-    format!("{} · {GATE_STAYS}", host_of(&host.url))
+    match host.kind {
+        BouncerHostKind::Connect => CONNECT_ELSEWHERE.to_owned(),
+        _ => format!("{} · {GATE_STAYS}", host_of(&host.url)),
+    }
 }
 
 /// The fallback words: the headline and the reason, without a second "runs on this
@@ -746,6 +753,17 @@ mod tests {
             "brain.synthetic.ts.net:8443 · The bouncer gate still decides on this Mac."
         );
         assert_eq!(kind_title(BouncerHostKind::OwnServer), "My Server");
+        let connect = BouncerHost {
+            kind: BouncerHostKind::Connect,
+            url: "https://brain.connect.invalid".to_owned(),
+            has_bearer: false,
+            ..host
+        };
+        assert_eq!(
+            host_note(&connect),
+            "Apassy Connect · chosen on another version",
+            "a Connect row names no address"
+        );
         assert!(consent_note().contains(&HOSTING_CONSENT_VERSION.to_string()));
     }
 }
