@@ -442,7 +442,7 @@ fn persisted_free_text_canaries_never_escape_input_debug_or_any_ask() {
         .id;
     let declared = declaration("CANARY_PROJECT_TEXT");
     vault.save_declaration(id, &declared, None, None).unwrap();
-    let hosts = vec!["canary-destination.test".into()];
+    let hosts: Vec<String> = vec!["canary-destination.test".into()];
     let known = vec!["canary-known.test".into(), hosts[0].clone()];
     vault
         .record_item_use(&NewItemUse {
