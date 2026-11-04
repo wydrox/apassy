@@ -191,6 +191,11 @@ fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
 }
 
 impl QuestionsRelay {
+    /// Advertise a synthetic TLS front while the fake still listens on loopback.
+    pub fn set_origin(&self, origin: &str) {
+        lock(&self.shared.0).origin = origin.to_owned();
+    }
+
     /// Reject the next answer POSTs before acceptance, as an explicit relay 429.
     pub fn rate_answer_posts(&self, count: usize) {
         lock(&self.shared.0).answer_rate_next = count;

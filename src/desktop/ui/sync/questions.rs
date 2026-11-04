@@ -21,9 +21,9 @@
 //! sync.
 //!
 //! "Add an iPhone or a Mac…" links a device to the questions team: the "Add a device…"
-//! sheet of relay sync for a sync team, its questions mode ([`SyncSheet::AddIphone`])
-//! for a notifications-only team. The confirmation writes the row of an iPhone or an Apple
-//! Watch (ADR 0039) from the keys of its link (`register_linked_device`); a Mac writes its
+//! sheet in questions mode ([`SyncSheet::AddIphone`]), also for a team that syncs the vault,
+//! so its code carries the handoff a watch needs. The confirmation writes the row of an
+//! iPhone or an Apple Watch (ADR 0039) from its link (`register_linked_device`); a Mac writes its
 //! own. Devices lists each trusted device of the vault, with the push state of an iPhone
 //! when the relay tells it (`GET /v1/devices`, every 30 seconds while the tab shows), and
 //! "Remove…" for each other device ([`SyncSheet::RemoveQuestionsDevice`]): no owner
@@ -1481,16 +1481,19 @@ impl DesktopApp {
         let Some(id) = self.vault_list.current.clone() else {
             return self.set_err("Open a vault of the list first.");
         };
-        let only = self
+        let connected = self
             .owner_ui
             .session
             .with_vault(|vault| questions_membership(vault).ok().flatten())
             .flatten()
-            .map(|membership| questions_only(&membership));
-        match only {
-            Some(true) => self.sync_open_sheet(SyncSheet::AddIphone { id }, ctx),
-            Some(false) => self.sync_open_sheet(SyncSheet::AddMac { id }, ctx),
-            None => self.questions_turn_on(ctx),
+            .is_some();
+        // Devices adds an approving device even when the questions team also syncs
+        // this vault. Its code needs the handoff for the watch's replica keys. The
+        // separate Vault > Sync > Add Mac path still offers the vault-sync link.
+        if connected {
+            self.sync_open_sheet(SyncSheet::AddIphone { id }, ctx);
+        } else {
+            self.questions_turn_on(ctx);
         }
     }
 

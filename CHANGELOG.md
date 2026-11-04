@@ -4,6 +4,17 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.18] - 2026-11-04
+
+### Fixed
+
+- **iPhone crash when connecting to a Mac:** the iPhone app of 0.5.17 crashed each time it joined or synced a vault after the update. The build of the iPhone core stripped local symbols, and the linker then merged two different Rust functions; the app called one with the arguments of the other. The core now goes into the app unstripped. The same build flaw was in 0.5.16, where fewer paths reached it.
+- **Add Apple Watch did nothing after scanning:** for a vault that syncs through the relay, the Mac's **Add an iPhone or a Mac…** showed a sync-only code without the handoff that a watch needs, so the scan had no effect. The Mac now shows the code with the handoff, and the iPhone says why a scanned code cannot be used. A handoff also keeps the node's certificate pin.
+
+### Upgrade notes
+
+- Coordinated release: macOS, iOS (TestFlight, with the watch app), browser extension, relay, Linux CLI and website move to 0.5.18 together. The extension, the relay and the Linux node have no functional change since 0.5.17. No schema changes.
+
 ## [0.5.17] - 2026-11-04
 
 ### Added

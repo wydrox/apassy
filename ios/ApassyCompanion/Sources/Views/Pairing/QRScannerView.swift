@@ -87,6 +87,15 @@ struct QRScannerView: UIViewControllerRepresentable {
             deliver(addedItems)
         }
 
+        func dataScanner(
+            _ dataScanner: DataScannerViewController, didUpdate updatedItems: [RecognizedItem],
+            allItems: [RecognizedItem]
+        ) {
+            // A QR item's bounds can arrive before its decoded text. Keep listening for
+            // the payload instead of silently losing a code whose didAdd had none.
+            deliver(updatedItems)
+        }
+
         func dataScanner(_ dataScanner: DataScannerViewController, didTapOn item: RecognizedItem) {
             deliver([item])
         }

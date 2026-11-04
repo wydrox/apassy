@@ -52,8 +52,11 @@ for slice in "${slices[@]}"; do
     cargo build -p apassy-core --profile "$profile" --target "$target" ${features[@]+"${features[@]}"}
     lib="$target_dir/$target/$dir/libapassy_core.a"
     mkdir -p "$out/$target"
-    # No debug symbols in the archive: the app has its own dSYM for Swift.
-    strip -S -x -o "$out/$target/libapassy_core.a" "$lib" 2>/dev/null || cp "$lib" "$out/$target/libapassy_core.a"
+    # Keep the linker input intact. Apple strip (even -S) removes LLVM's .llvm.*
+    # suffixes from private externs. Distinct optimized Rust functions then share
+    # a name and ld can coalesce incompatible calling conventions, crashing in
+    # e.g. io::Error drop glue during a join/sync. Xcode strips the final app.
+    cp "$lib" "$out/$target/libapassy_core.a"
     args+=(-library "$out/$target/libapassy_core.a" -headers "$headers")
     if [ "$slice" = mac ]; then
         cargo build -p apassy-core --profile "$profile" --target "$target" --example questions_macs

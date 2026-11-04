@@ -2300,8 +2300,8 @@ impl DesktopApp {
         });
     }
 
-    /// The client of the notifications-only questions team of the open, unlocked vault
-    /// `id`, with its key in memory. It reads the vault for a moment, with no network.
+    /// The client of the questions team of the open, unlocked vault `id`, whether it
+    /// also syncs the vault or carries questions only. No network while reading the key.
     pub(crate) fn questions_team_client(&self, id: &str) -> Result<QuestionsClient, String> {
         if !self.relay_open(id) {
             return Err(call_error(SyncError::Vault(VaultErrorKind::Locked)));
@@ -2310,7 +2310,6 @@ impl DesktopApp {
             .session
             .with_vault(|vault| crate::relay::membership::questions_membership(vault))
             .and_then(|found| found.ok().flatten())
-            .filter(crate::relay::membership::questions_only)
             .ok_or_else(|| {
                 "Turn on “Send questions through the relay” for this vault first.".to_owned()
             })
