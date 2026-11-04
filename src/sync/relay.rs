@@ -47,7 +47,7 @@ use std::io::Seek;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -440,6 +440,51 @@ impl Removal {
     }
 }
 
+/// One sign-in of a [`Session`] at a time ([`Session::bearer_until`]).
+#[derive(Debug, Default)]
+struct SignIns {
+    running: Mutex<bool>,
+    ended: Condvar,
+}
+
+/// The turn of one caller to sign in. The next caller goes when it ends.
+struct SignInTurn<'a>(&'a SignIns);
+
+impl Drop for SignInTurn<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0.running) = false;
+        self.0.ended.notify_all();
+    }
+}
+
+impl SignIns {
+    /// Wait while another caller signs in, at most until `deadline`, then take the turn.
+    /// `Unreachable` when the deadline passed first, as a call that ran out of time.
+    fn take(&self, deadline: Option<Instant>) -> Result<SignInTurn<'_>, ApiError> {
+        let mut running = lock(&self.running);
+        while *running {
+            running = match deadline {
+                None => self
+                    .ended
+                    .wait(running)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(ApiError::Unreachable);
+                    }
+                    self.ended
+                        .wait_timeout(running, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
+        }
+        *running = true;
+        Ok(SignInTurn(self))
+    }
+}
+
 /// A device of one team on one relay: its key, and an access token while it lasts.
 /// Debug is redacted.
 pub(crate) struct Session {
@@ -454,6 +499,9 @@ pub(crate) struct Session {
     /// Set when the relay refused this device ([`Removal`]). [`RelaySync`] shares it
     /// with each session of its vault, so it outlives a lock.
     removed: Arc<Removal>,
+    /// One sign-in at a time: the waiter of the worker and a sync can need a token at
+    /// the same moment.
+    sign_ins: SignIns,
 }
 
 impl fmt::Debug for Session {
@@ -481,6 +529,7 @@ impl Session {
             devices: Mutex::new(None),
             cancel: Cancel::default(),
             removed: Arc::new(Removal::new(REMOVED_PROBE_EVERY)),
+            sign_ins: SignIns::default(),
         }
     }
 
@@ -602,25 +651,24 @@ impl Session {
     /// [`Self::bearer`] with a token in memory only when it lasts past `until` too: an
     /// upload needs a token that lasts to its end, since the relay reads it again after
     /// the body (contract section 5).
+    ///
+    /// One sign-in of the session runs at a time. A caller that needs a token while
+    /// another signs in (the waiter of the worker beside a sync) waits for it, at most
+    /// until its own `deadline`, and then takes its answer: its token, or the refusal
+    /// that marked the device. So a refusal and a sign-in that works never cross: two
+    /// sign-ins at once could leave a refused sync with no mark, or a mark with a
+    /// token in memory, which no later sign-in would clear.
     fn bearer_until(
         &self,
         deadline: Option<Instant>,
         until: Option<Instant>,
     ) -> Result<Zeroizing<String>, ApiError> {
-        if self.cancel.is_closed() {
-            return Err(SyncError::Vault(VaultErrorKind::Locked).into());
+        if let Some(ready) = self.bearer_ready(until) {
+            return ready;
         }
-        // A removed device signs in no more until its next try ([`Removal`]), the owner
-        // turns sync off, or joins again (contract section 13).
-        if self.removed.holds() {
-            return Err(SyncError::RemovedFromRelay.into());
-        }
-        let margin = Instant::now() + TOKEN_MARGIN;
-        let needed = until.map_or(margin, |until| until.max(margin));
-        if let Some(token) = lock(&self.token).as_ref()
-            && token.until > needed
-        {
-            return Ok(token.value.clone());
+        let _turn = self.sign_ins.take(deadline)?;
+        if let Some(ready) = self.bearer_ready(until) {
+            return ready;
         }
         let token = self.sign_in(deadline)?;
         let value = token.value.clone();
@@ -628,6 +676,26 @@ impl Session {
             *lock(&self.token) = Some(token);
         }
         Ok(value)
+    }
+
+    /// The answer of [`Self::bearer_until`] without a sign-in: a closed session, a
+    /// removed device before its next try, or a token in memory that lasts past
+    /// `until`. `None`: a sign-in is needed.
+    fn bearer_ready(&self, until: Option<Instant>) -> Option<Result<Zeroizing<String>, ApiError>> {
+        if self.cancel.is_closed() {
+            return Some(Err(SyncError::Vault(VaultErrorKind::Locked).into()));
+        }
+        // A removed device signs in no more until its next try ([`Removal`]), the owner
+        // turns sync off, or joins again (contract section 13).
+        if self.removed.holds() {
+            return Some(Err(SyncError::RemovedFromRelay.into()));
+        }
+        let margin = Instant::now() + TOKEN_MARGIN;
+        let needed = until.map_or(margin, |until| until.max(margin));
+        lock(&self.token)
+            .as_ref()
+            .filter(|token| token.until > needed)
+            .map(|token| Ok(token.value.clone()))
     }
 
     /// A call with the access token. A `401` signs in again once and repeats the call

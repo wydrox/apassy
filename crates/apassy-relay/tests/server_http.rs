@@ -844,6 +844,26 @@ fn incomplete_invite(relay: &relay::TestRelay) -> std::io::BufReader<std::net::T
     std::io::BufReader::new(socket)
 }
 
+/// An incomplete upload that the relay admitted (`100 Continue`), within 2 seconds. The
+/// handler of a request keeps its member seat until it returns, a moment after its
+/// client read the answer: a new connection can then get `503 busy`. That refusal takes
+/// no member seat, so the upload is sent again until a seat is free.
+fn admitted_incomplete_invite(relay: &relay::TestRelay) -> std::io::BufReader<std::net::TcpStream> {
+    use std::time::{Duration, Instant};
+    let until = Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut socket = incomplete_invite(relay);
+        let head = read_response_head(&mut socket);
+        if head.starts_with("HTTP/1.1 100 ") {
+            return socket;
+        }
+        assert!(head.starts_with("HTTP/1.1 503 "), "{head}");
+        assert!(Instant::now() < until, "no member seat was freed: {head}");
+        // Few refusals at once: the relay closes the connections over 8 of them.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn read_response_head(socket: &mut impl std::io::BufRead) -> String {
     let mut head = String::new();
     loop {
@@ -901,11 +921,9 @@ fn stalled_and_refused_bodies_leave_health_and_approvals_available() {
     );
     // Use the normal body deadline here: capacity must stay occupied throughout
     // this phase. Deadline expiry is exercised separately below.
-    let mut first = incomplete_invite(&relay);
-    assert!(read_response_head(&mut first).starts_with("HTTP/1.1 100 "));
+    let mut first = admitted_incomplete_invite(&relay);
     relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
-    let mut second = incomplete_invite(&relay);
-    assert!(read_response_head(&mut second).starts_with("HTTP/1.1 100 "));
+    let mut second = admitted_incomplete_invite(&relay);
     let mut refused = incomplete_invite(&relay);
     let started = Instant::now();
     let head = read_response_head(&mut refused);
@@ -935,14 +953,14 @@ fn expired_stalled_body_frees_capacity_for_a_new_connection() {
         UpstreamOptions::default(),
     );
     for _ in 0..2 {
-        let mut stalled = incomplete_invite(&relay);
-        assert!(read_response_head(&mut stalled).starts_with("HTTP/1.1 100 "));
         // A previously admitted upload expires and frees its slot. The next
         // incomplete upload is therefore admitted, then gets a body-error 400,
         // rather than the busy 503 the old sleep-based test always expected.
+        let mut stalled = admitted_incomplete_invite(&relay);
         assert_unreadable_body(&mut stalled);
-        wait_for_approval_capacity(&relay);
     }
+    // A member request still gets the freed seat.
+    wait_for_approval_capacity(&relay);
 }
 
 #[test]
