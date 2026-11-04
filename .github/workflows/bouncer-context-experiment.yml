@@ -1,0 +1,216 @@
+name: Bouncer context CPU probe (not gate B)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/bouncer-context-experiment.yml'
+      - 'tools/basemodel/context_*.py'
+      - 'tools/basemodel/contracts/secret-decision-context-v1.json'
+      - 'tools/basemodel/requirements.txt'
+      - 'tools/basemodel/common.py'
+      - 'tools/basemodel/fetch_weights.py'
+      - 'tools/basemodel/manifest.json'
+      - 'tools/basemodel/train.py'
+      - 'tests/basemodel/test_context*.py'
+      - 'tests/fixtures/secret-decision-context-v1/**'
+      - 'docs/design/bouncer-context-*.md'
+      - 'docs/reviews/bouncer-context-*.md'
+      - 'docs/reviews/bouncer-context-token-budget-*.json'
+      - 'docs/evaluation/bouncer-context-ci-probe.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bouncer-context-probe-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      OPENBLAS_NUM_THREADS: '2'
+      NUMEXPR_NUM_THREADS: '2'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Isolate probe paths and credentials
+        run: |
+          set -euo pipefail
+          EXP="$RUNNER_TEMP/bouncer-context"
+          mkdir -p "$EXP/evidence"
+          cat > "$EXP/sanitize.sh" <<'SH'
+          unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+          unset APASSY_BASE_MODEL LAYA_API_KEY
+          SH
+          source "$EXP/sanitize.sh"
+          {
+            echo "EXP=$EXP"
+            echo "PY=$EXP/venv/bin/python"
+            echo "HF_HOME=$EXP/hf"
+            echo "HF_HUB_CACHE=$EXP/hf/hub"
+            echo "XDG_CACHE_HOME=$EXP/cache"
+            echo "PIP_CACHE_DIR=$EXP/pip-cache"
+            echo "BASH_ENV=$EXP/sanitize.sh"
+          } >> "$GITHUB_ENV"
+          date +%s > "$EXP/evidence/start-epoch.txt"
+          python -m venv "$EXP/venv"
+      - name: Install existing dependencies with CPU torch first
+        run: |
+          set -euo pipefail
+          "$PY" -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+          "$PY" -m pip install -r tools/basemodel/requirements.txt
+          "$PY" -m pip check
+          "$PY" -B - <<'PY'
+          import torch
+          assert torch.__version__.split('+')[0] == '2.14.0'
+          assert torch.version.cuda is None, 'CPU-only torch required'
+          assert torch.get_num_threads() == 2, 'two CPU threads required'
+          PY
+      - name: Fetch and verify the pinned public base, then go offline
+        run: |
+          set -euo pipefail
+          "$PY" -B tools/basemodel/fetch_weights.py
+          "$PY" -B - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools/basemodel')
+          import common
+          manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+          assert common.BASE_REPO == manifest['repo']
+          assert common.BASE_REVISION == manifest['revision']
+          base = Path(common.base_dir()).resolve()
+          assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+              f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+          Path(os.environ['EXP'], 'evidence/base-identity.json').write_text(json.dumps({
+              'base_dir': str(base), 'manifest_base': manifest}, sort_keys=True) + '\n')
+          PY
+      - name: Require tokenizer unittest without skips and exact canonical measurement
+        run: |
+          set -euo pipefail
+          "$PY" -B - <<'PY'
+          import json, os, sys, unittest
+          from pathlib import Path
+          sys.path.insert(0, 'tools/basemodel')
+          import context_v1 as C
+          suite = unittest.defaultTestLoader.discover('tests/basemodel', pattern='test_context_tokens.py')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          evidence = Path(os.environ['EXP'], 'evidence/token-report.json')
+          report = {'tests_run': result.testsRun, 'skipped': len(result.skipped),
+                    'successful': result.wasSuccessful(), 'gate_B': 'UNSUPPORTED'}
+          evidence.write_text(json.dumps(report, sort_keys=True) + '\n')
+          if not result.wasSuccessful() or result.skipped or result.testsRun < 1:
+              raise SystemExit('Tokenizer unittest must run successfully without skips')
+          c = C.load_contract()
+          proposed, measurement = C.measure(os.environ['APASSY_CONTEXT_TOKENIZER_BASE'], c, fuzz=10000)
+          assert proposed['budget'] == c['budget'], 'canonical budget differs'
+          report.update(measurement=measurement, canonical_contract_sha256=C.contract_hash(c),
+                        budget_matches=True)
+          evidence.write_text(json.dumps(report, sort_keys=True) + '\n')
+          PY
+      - name: Generate only G1 synthetic train and validation
+        run: |
+          set -euo pipefail
+          "$PY" -B tools/basemodel/context_data.py --out "$EXP/synthetic" --groups 40 --seed 7
+          cp "$EXP/synthetic/data-manifest.json" "$EXP/evidence/data-manifest.json"
+      - name: Bounded training-only probe and verified exit 3
+        timeout-minutes: 23
+        run: |
+          set -euo pipefail
+          set +e
+          /usr/bin/time -v -o "$EXP/evidence/training-time.txt" \
+            timeout --signal=TERM --kill-after=30s 1250s \
+            "$PY" -B tools/basemodel/context_train.py \
+            --data "$EXP/synthetic" --out "$EXP/probe" \
+            --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" \
+            --mode probe --limit 64 --epochs 1 --max-steps 4 --batch 1 \
+            --threads 2 --seconds-per-head 600 --seed 7
+          rc=$?
+          set -e
+          echo "$rc" > "$EXP/evidence/training-exit.txt"
+          test "$rc" -eq 3
+          "$PY" -B - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ['EXP'])
+          out = root / 'probe'
+          def digest(path):
+              return hashlib.file_digest(path.open('rb'), 'sha256').hexdigest()
+          report = json.loads((out / 'training-report.json').read_text())
+          assert report.get('training_completed') is True
+          assert report['mode'] == 'probe' and report['outcome'] == 'UNSUPPORTED'
+          assert report['reason'] == 'training_only_no_heldout_opened'
+          freeze_path = out / 'freeze.json'
+          assert digest(freeze_path) == report['freeze_sha256']
+          freeze = json.loads(freeze_path.read_text())
+          expected = {'train': root / 'synthetic/train.jsonl', 'val': root / 'synthetic/val.jsonl',
+                      'context': out / 'context.safetensors', 'control': out / 'control.safetensors'}
+          for name, path in expected.items():
+              assert Path(freeze[name]['path']).resolve() == path.resolve()
+              assert path.is_file() and path.stat().st_size > 0
+              assert digest(path) == freeze[name]['sha256'], name
+          config = freeze['config']
+          for key, value in dict(mode='probe', limit=64, epochs=1, max_steps=4, batch=1,
+                                 threads=2, seconds_per_head=600, seed=7).items():
+              assert config[key] == value, key
+          (root / 'evidence/freeze-verification.json').write_text(json.dumps({
+              'verified': True, 'freeze_sha256': digest(freeze_path),
+              'gate_B': 'UNSUPPORTED'}, sort_keys=True) + '\n')
+          PY
+      - name: Record bounded resource evidence even after failure
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bouncer-context/evidence"
+          python -B - <<'PY'
+          import json, os, time
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'bouncer-context'
+          start = root / 'evidence/start-epoch.txt'
+          sizes = {name: sum(p.stat().st_size for p in (root / name).rglob('*') if p.is_file())
+                   for name in ('probe', 'synthetic', 'hf', 'venv', 'cache', 'pip-cache')}
+          (root / 'evidence/probe-costs.json').write_text(json.dumps({
+              'elapsed_seconds': time.time() - int(start.read_text()) if start.exists() else None,
+              'directory_bytes': sizes, 'cpu_threads': 2, 'job_timeout_minutes': 30,
+              'gate_B': 'UNSUPPORTED', 'scope': 'synthetic_training_probe_only',
+              'head_sha': os.environ['SOURCE_HEAD_SHA'],
+              'tested_sha': os.environ['GITHUB_SHA']}, sort_keys=True) + '\n')
+          PY
+      - name: Save only probe evidence and experimental heads
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bouncer-context-probe-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/bouncer-context/evidence/*.json
+            ${{ runner.temp }}/bouncer-context/evidence/training-time.txt
+            ${{ runner.temp }}/bouncer-context/evidence/training-exit.txt
+            ${{ runner.temp }}/bouncer-context/probe/training-report.json
+            ${{ runner.temp }}/bouncer-context/probe/freeze.json
+            ${{ runner.temp }}/bouncer-context/probe/context.safetensors
+            ${{ runner.temp }}/bouncer-context/probe/control.safetensors
