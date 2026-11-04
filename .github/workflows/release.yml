@@ -50,18 +50,23 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
-          sparse-checkout: |
-            Cargo.toml
-            CHANGELOG.md
-            scripts/ci-release-ready.py
-            scripts/ci-release-newer.py
-          sparse-checkout-cone-mode: false
+          fetch-depth: 0
+
+      - name: Install Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
 
       - name: Check that the version is released
         id: ready
         run: >-
           python3 scripts/ci-release-ready.py --cargo Cargo.toml
           --changelog CHANGELOG.md --github-output "$GITHUB_OUTPUT"
+
+      # Full checkout above fetches tags before deciding whether publication is safe.
+      - name: Require a new coordinated release version
+        if: steps.ready.outputs.production == 'true'
+        run: python3 scripts/check-release-versions.py --release
 
       - name: Require a version newer than the public Mac release
         if: steps.ready.outputs.production == 'true'

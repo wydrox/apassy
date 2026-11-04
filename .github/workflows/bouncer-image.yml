@@ -299,22 +299,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if ! gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "::warning::No GitHub release $VERSION yet. Attach dist/apassy-brain-$VERSION-cpu-*.tar.gz and .sha256 from this run's artifacts later."
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::warning::No GitHub release v$VERSION yet. Attach dist/apassy-brain-$VERSION-cpu-*.tar.gz and .sha256 from this run's artifacts later."
             exit 0
           fi
-          existing="$(gh release view "$VERSION" --json assets --jq '.assets[].name')"
+          existing="$(gh release view "v$VERSION" --json assets --jq '.assets[].name')"
           for suffix in cpu-amd64 cpu-arm64; do
             for file in "dist/apassy-brain-$VERSION-$suffix.tar.gz" "dist/apassy-brain-$VERSION-$suffix.tar.gz.sha256"; do
               name="$(basename "$file")"
               if grep -qx -- "$name" <<< "$existing"; then
-                echo "::warning::$name is already on release $VERSION; not replaced."
+                echo "::warning::$name is already on release v$VERSION; not replaced."
                 continue
               fi
               if [ "$(stat -c %s "$file")" -ge 2147483648 ]; then
                 echo "::warning::$name is 2 GiB or more, over the release asset limit; it is only on GHCR."
                 continue
               fi
-              gh release upload "$VERSION" "$file"
+              gh release upload "v$VERSION" "$file"
             done
           done

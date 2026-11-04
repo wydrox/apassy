@@ -1,18 +1,50 @@
 # The relay image, the Linux node packages (plan S2-S3, L3), and both downloadable team
 # CLIs (ADR 0037: the relay is the crate crates/apassy-relay of this workspace). GitHub builds release artifacts; never build on
-# the production VPS or in a local VM. Push image-* on the exact tested release commit.
+# the production VPS or in a local VM. Push image-release-<version> on the tested main
+# commit, or image-test-* for artifacts without a release label or publication.
 # Deployment remains a separate step.
 name: Relay image
 
 on:
   push:
-    tags: ["image-*"]
+    tags: ["image-release-*", "image-test-*"]
 
 permissions:
   contents: read
 
 jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    outputs:
+      publish: ${{ steps.guard.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Guard release image tags
+        id: guard
+        shell: bash
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/apassy-relay/Cargo.toml", "rb"))["package"]["version"])')"
+          # Only the matching release tag on a commit already on main may carry a
+          # release label. Integration test tags build artifacts with test/SHA tags.
+          case "$GITHUB_REF_NAME" in
+            image-release-*)
+              test "$GITHUB_REF_NAME" = "image-release-$version" || {
+                echo "::error::Release image tag must match relay crate version $version"
+                exit 1
+              }
+              git fetch origin main:refs/remotes/origin/main
+              git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              ;;
+            image-test-*) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Unsupported image tag"; exit 1 ;;
+          esac
+
   image:
+    needs: guard
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     # id-token and attestations: provenance and SBOM attestations (docs/operations/release.md,
@@ -26,13 +58,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Build the image
+        env:
+          RELEASE_IMAGE: ${{ needs.guard.outputs.publish }}
         run: |
           version="$(awk -F '\"' '/^version = / {print $2; exit}' crates/apassy-relay/Cargo.toml)"
-          tag="apassy-relay:release-$version"
+          tag="apassy-relay:test-$GITHUB_SHA"
+          if [ "$RELEASE_IMAGE" = true ]; then tag="apassy-relay:release-$version"; fi
           immutable="apassy-relay:sha-$GITHUB_SHA"
-          echo "TAG=$tag" >> "$GITHUB_ENV"
-          echo "IMMUTABLE_TAG=$immutable" >> "$GITHUB_ENV"
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+          {
+            echo "TAG=$tag"
+            echo "IMMUTABLE_TAG=$immutable"
+            echo "VERSION=$version"
+          } >> "$GITHUB_ENV"
           docker build --platform linux/amd64 \
             --build-arg "APASSY_RELEASE_VERSION=$version" \
             --build-arg "APASSY_RELEASE_COMMIT=$GITHUB_SHA" \
@@ -86,6 +123,7 @@ jobs:
   # builds the old single binary apassy-team-linux-x86_64 for one more release: the
   # name is an alias of `apassy team` until then.
   linux-node:
+    needs: guard
     name: linux-node (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -290,6 +328,7 @@ jobs:
           retention-days: 7
 
   darwin-cli:
+    needs: guard
     runs-on: macos-15
     timeout-minutes: 60
     permissions:

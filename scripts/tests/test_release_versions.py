@@ -111,5 +111,65 @@ class ReleaseVersionsTests(unittest.TestCase):
         self.assertEqual(MODULE.check(self.root)[1], [])
 
 
+class ReleaseTagTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.git("init", "--quiet")
+        self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "commit", "--quiet", "--allow-empty", "-m", "fixture")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.root, check=True,
+                              capture_output=True, text=True)
+
+    def test_above_equal_and_below_latest_tag(self):
+        # SemVer order differs from a plain string sort (10 sorts above 9).
+        for tag in ("v0.5.9", "v0.5.10", "image-release-99.0.0"):
+            self.git("tag", tag)
+        self.assertEqual(MODULE.release_errors(self.root, "0.5.11"), [])
+        for version in ("0.5.10", "0.5.9"):
+            with self.subTest(version=version):
+                errors = MODULE.release_errors(self.root, version)
+                self.assertIn("latest tag v0.5.10", errors[0])
+
+    def test_prerelease_ordering(self):
+        ordered = ("1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta",
+                   "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11",
+                   "1.0.0-rc.1", "1.0.0")
+        for index, version in enumerate(ordered):
+            self.git("tag", "v" + version)
+            self.assertTrue(MODULE.release_errors(self.root, version))
+            if index:
+                self.assertTrue(MODULE.release_errors(self.root, ordered[index - 1]))
+            if index + 1 < len(ordered):
+                self.assertEqual(MODULE.release_errors(self.root, ordered[index + 1]), [])
+
+    def test_build_metadata_does_not_make_a_new_release(self):
+        self.git("tag", "v1.0.0+build.1")
+        self.assertTrue(MODULE.release_errors(self.root, "1.0.0+build.2"))
+
+    def test_first_release_without_tags(self):
+        self.assertEqual(MODULE.release_errors(self.root, "0.1.0"), [])
+
+    def test_malformed_release_tag_fails_closed(self):
+        self.git("tag", "v1.0.0-01")
+        with self.assertRaisesRegex(ValueError, "numeric prerelease"):
+            MODULE.release_errors(self.root, "2.0.0")
+
+    def test_release_cli_rejects_equal_version_but_default_is_unchanged(self):
+        self.git("tag", "v" + json.loads((ROOT / "release-versions.json").read_text())["version"])
+        from unittest.mock import patch
+        # Keep source consistency checks independent of the temporary tag repository.
+        with patch.object(MODULE, "check", return_value=(
+            json.loads((ROOT / "release-versions.json").read_text())["version"], []
+        )):
+            with patch.object(sys, "argv", [str(SCRIPT), "--root", str(self.root)]):
+                self.assertEqual(MODULE.main(), 0)
+            with patch.object(sys, "argv", [str(SCRIPT), "--root", str(self.root), "--release"]):
+                self.assertEqual(MODULE.main(), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,8 @@ import argparse
 import json
 from pathlib import Path
 import re
+import runpy
+import subprocess
 import sys
 import tomllib
 
@@ -113,9 +115,35 @@ def check(root):
     return version, errors
 
 
+def release_errors(root, version):
+    """Require a new SemVer above every v* tag; callers must fetch tags first."""
+    # Share precedence rules with the public latest.json guard (including prereleases
+    # and build metadata), rather than trusting Git's lexicographic/version sorting.
+    semver = runpy.run_path(str(Path(__file__).with_name("ci-release-newer.py")))
+    compare = semver["compare_versions"]
+    semver["parse_version"](version)
+    result = subprocess.run(
+        ["git", "tag", "-l", "v*"], cwd=root, check=True,
+        capture_output=True, text=True,
+    )
+    latest = None
+    for tag in result.stdout.splitlines():
+        candidate = tag[1:]
+        # A malformed release tag is an error, not permission to publish.
+        semver["parse_version"](candidate)
+        if latest is None or compare(candidate, latest) > 0:
+            latest = candidate
+    if latest is not None and compare(version, latest) <= 0:
+        return [f"release version {version} must be newer than latest tag v{latest}; "
+                "same-version rebuilds are forbidden"]
+    return []
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--release", action="store_true",
+                        help="require a version above the latest v* tag (fetch tags first)")
     # Kept so that an old command fails clearly instead of checking the wrong tree.
     parser.add_argument("--relay-checkout", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--require-relay", action="store_true", help=argparse.SUPPRESS)
@@ -129,7 +157,9 @@ def main():
         return 1
     try:
         version, errors = check(args.root)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+        if args.release:
+            errors.extend(release_errors(args.root, version))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"Release version check failed: {error}", file=sys.stderr)
         return 1
     if errors:
