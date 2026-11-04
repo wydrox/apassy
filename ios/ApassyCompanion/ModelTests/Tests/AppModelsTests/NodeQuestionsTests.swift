@@ -34,7 +34,7 @@ struct NodeQuestionsTests {
             await service.setQuestionsReportVaultScope(true)
             (vault, _) = makeVault(service: service, settings: settings)
             questions = QuestionsModel(
-                service: service, signers: TeamAnswerSigners(store: ScriptedKeyStore()), push: nil,
+                service: service, signers: SharedAnswerSigners(signer: ScriptedSigner()), push: nil,
                 deviceName: "Test iPhone", defaults: defaults, retryInterval: .milliseconds(10))
             questions.follow(vault)
             await vault.start()
@@ -54,7 +54,8 @@ struct NodeQuestionsTests {
         await fixture.service.addQuestionsVault(
             id: Self.work.id, name: Self.work.name, team: Self.work.team, onPhone: true,
             node: NodeInfo(origin: Self.origin, name: "Mac mini"))
-        await fixture.vault.reload()
+        // The new vault entry (with the node's name) is in the list of vaults.
+        await fixture.vault.refreshInfo()
         await fixture.questions.refresh()
         let routes = fixture.questions.questionRoutes
         #expect(routes.map(\.vault.vaultID) == [previewVaultID, Self.work.id])
