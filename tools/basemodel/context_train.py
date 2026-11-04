@@ -800,7 +800,8 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
                 baseline_evidence.update(provenance='shipped', status='MEASURED', heads_sha256=shipped_sha,
                                          shipped_attempt=dict(status='MEASURED', heads_sha256=shipped_sha))
                 evidence_errors.pop('baseline_shipped', None)
-            except (Unsupported, OSError, ValueError, KeyError, TypeError, ImportError, RuntimeError):
+            except Exception:
+                # Optional replay failures must preserve the already measured quality result.
                 evidence_errors['baseline_shipped'] = 'shipped baseline evidence unavailable'
         if cost_path:
             try:

@@ -264,7 +264,11 @@ and [asset download](https://docs.github.com/en/rest/releases/assets#get-a-relea
 with Contents read; download may return 200 or 302.
 
 For that preflight, use `context_experiment=cost-only` with `transport_only=true`
-in `ci.yml` (or `mode=cost-only` in the direct workflow). Supply only `source_sha`,
+in `ci.yml`. Dispatch through this bridge while the experiment workflow is absent
+from `main`; direct `mode=cost-only` dispatch is available only after that workflow
+exists on `main`. Every bridge dispatch also starts ordinary CI, including macOS
+and `release-binaries` builds; the owner's run approval must include this work.
+Supply only `source_sha`,
 `checkpoint_asset` and `checkpoint_sha256`. The approved test asset may contain
 small synthetic bytes; no model checkpoint is needed. This uses the same guarded
 download, limited to five minutes within a ten-minute job. It ends by uploading

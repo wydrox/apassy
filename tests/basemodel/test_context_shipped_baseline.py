@@ -98,7 +98,8 @@ class ShippedBaselineTests(unittest.TestCase):
         self.assertEqual(len(gates.call_args_list), 2)
 
     def test_malformed_or_unavailable_full_replay_retains_sound_lower_bound(self):
-        bad = [None, [], {}, RuntimeError('PRIVATE file contents')]
+        bad = [None, [], {}, RuntimeError('PRIVATE file contents'),
+               AssertionError('PRIVATE assertion'), AttributeError('PRIVATE attribute')]
         for field, value in [('status', 'UNSUPPORTED'), ('heads_sha256', 'wrong'), ('ask', []),
                              ('ask', [1] * len(self.rows)), ('ask', tuple(self.measured()['ask'])),
                              ('ask', [None] * len(self.rows))]:
@@ -117,13 +118,16 @@ class ShippedBaselineTests(unittest.TestCase):
 
     def test_runtime_failure_preserves_measured_quality_fail(self):
         for binary in ('fake-binary', None):
-            report, full, _, _ = self.evaluate(RuntimeError('PRIVATE'), fail=True, binary=binary)
-            self.assertEqual(report['feasibility_quality'], 'FAIL')
-            self.assertEqual(report['gate_b'], 'FAIL')
-            self.assertEqual(report['outcome'], 'FAIL')
-            self.assertIn('baseline_shipped', report['evidence_errors'])
-            if binary is None:
-                full.assert_not_called()
+            for error in (RuntimeError('PRIVATE'), AssertionError('PRIVATE'), AttributeError('PRIVATE')):
+                with self.subTest(binary=binary, error=type(error).__name__):
+                    report, full, _, _ = self.evaluate(error, fail=True, binary=binary)
+                    self.assertEqual(report['feasibility_quality'], 'FAIL')
+                    self.assertEqual(report['gate_b'], 'FAIL')
+                    self.assertEqual(report['outcome'], 'FAIL')
+                    self.assertIn('baseline_shipped', report['evidence_errors'])
+                    self.assertNotIn('PRIVATE', json.dumps(report))
+                    if binary is None:
+                        full.assert_not_called()
 
     def test_full_replay_can_succeed_without_lower_bound(self):
         report, _, _, gates = self.evaluate(self.measured(), lower_error=True)
