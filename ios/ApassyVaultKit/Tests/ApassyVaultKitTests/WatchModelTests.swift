@@ -80,6 +80,21 @@ import Testing
         #expect(try replica.load() == nil)
     }
 
+    @Test func anUnreachableRelayShowsWhatTheNetworkOfTheWatchSaid() async throws {
+        let service = PreviewWatchService(
+            state: .unpaired, connection: .fails(VaultError(.relayUnreachable, "The relay can't be reached.")))
+        await service.setNetworkProblem("connect: URLError -1009, 0 bytes sent, 12 ms")
+        let keys = MemoryWatchAnswerKeys()
+        let replica = MemoryWatchReplicaStore()
+        let model = model(service, keys: keys, replica: replica)
+        await model.scenePhaseChanged(.active)
+        #expect(model.receiveLink(WatchPreview.link) == nil)
+        await model.connectFinished()
+        #expect(model.screen == .connect(.relayUnreachable(detail: "connect: URLError -1009, 0 bytes sent, 12 ms")))
+        #expect(keys.publicKey(team: team) == nil)
+        #expect(try replica.load() == nil)
+    }
+
     @Test func cancelOnTheWordsGoesBackWithoutAReason() async throws {
         let service = PreviewWatchService(state: .unpaired, connection: .waits)
         let keys = MemoryWatchAnswerKeys()

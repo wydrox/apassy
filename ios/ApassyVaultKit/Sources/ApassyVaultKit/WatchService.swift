@@ -41,6 +41,11 @@ public protocol WatchService: Sendable {
     func pushTokenClear() async throws
     /// The summary key of the watch's questions team, for its Notification Service Extension.
     func pushSummaryKeys() async throws -> [PushSummaryKey]
+
+    /// Why the last relay call of `connectStart` that could not reach the relay failed, in the
+    /// words of the network layer of this watch (error codes, not a sentence for the owner), or
+    /// nil when it is not known.
+    func networkProblem() async -> String?
 }
 
 extension WatchService {
@@ -51,4 +56,6 @@ extension WatchService {
     public func pushTokenClear() async throws {}
 
     public func pushSummaryKeys() async throws -> [PushSummaryKey] { [] }
+
+    public func networkProblem() async -> String? { nil }
 }

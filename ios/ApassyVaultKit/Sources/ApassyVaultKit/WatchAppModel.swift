@@ -5,7 +5,8 @@ import Observation
 public enum WatchConnectProblem: Equatable, Sendable {
     case wordsDiffer
     case codeExpired
-    case relayUnreachable
+    /// `detail`: what the network layer of the watch said (`WatchService.networkProblem`).
+    case relayUnreachable(detail: String?)
     /// A sentence of the core or of this watch.
     case other(String)
 
@@ -13,7 +14,9 @@ public enum WatchConnectProblem: Equatable, Sendable {
         switch self {
         case .wordsDiffer: "The words didn't match, so nothing was connected. Start again on your iPhone."
         case .codeExpired: "The code expired. Show a new code on your Mac."
-        case .relayUnreachable: "Couldn't reach the relay. Check that this watch is online, then start again on your iPhone."
+        case .relayUnreachable(let detail):
+            "Couldn't reach the relay. Check that this watch is online, then start again on your iPhone."
+                + (detail.map { "\n\nDetails: \($0)" } ?? "")
         case .other(let message): message
         }
     }
@@ -25,7 +28,7 @@ public enum WatchConnectProblem: Equatable, Sendable {
         switch error.code {
         case .safetyMismatch, .joinRefused: return .wordsDiffer
         case .linkInvalid, .expired: return .codeExpired
-        case .relayUnreachable, .rateLimited, .busy: return .relayUnreachable
+        case .relayUnreachable, .rateLimited, .busy: return .relayUnreachable(detail: nil)
         default: return .other(error.message)
         }
     }
@@ -417,7 +420,12 @@ public final class WatchAppModel {
             return
         } catch {
             guard generation == connectGeneration else { return }
-            fail(WatchConnectProblem.of(error), team: team, generation: generation)
+            var problem = WatchConnectProblem.of(error)
+            if case .relayUnreachable = problem {
+                problem = .relayUnreachable(detail: await service.networkProblem())
+                guard generation == connectGeneration else { return }
+            }
+            fail(problem, team: team, generation: generation)
         }
     }
 

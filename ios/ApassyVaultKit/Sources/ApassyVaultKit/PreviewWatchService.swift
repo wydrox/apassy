@@ -23,6 +23,7 @@ public actor PreviewWatchService: WatchService {
     private let connection: Connection
     private var posts: [(id: String, choice: AccessChoice, signature: Data?)] = []
     private var failures: [VaultError] = []
+    private var problem: String?
     private let settles: Bool
     /// How long `watch_connect_start` and `unlock` take: the core sets the join, and opens the
     /// replica, only when they return.
@@ -49,6 +50,8 @@ public actor PreviewWatchService: WatchService {
     public func setRequests(_ requests: [RelayAccessRequest]) { rows = requests }
     public func setState(_ value: WatchStatus.State) { state = value }
     public func failNextAnswer(_ error: VaultError) { failures.append(error) }
+    /// What `networkProblem` says after a relay call that failed.
+    public func setNetworkProblem(_ value: String?) { problem = value }
     /// The answers posted so far: the request, the choice, and the signature (Allow once).
     public func postedAnswers() -> [(id: String, choice: AccessChoice, signature: Data?)] { posts }
 
@@ -88,6 +91,8 @@ public actor PreviewWatchService: WatchService {
     }
 
     public func connectCancel() { if state == .connecting { state = .unpaired } }
+
+    public func networkProblem() -> String? { problem }
 
     public func forget() {
         state = .unpaired
