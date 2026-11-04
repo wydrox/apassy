@@ -157,14 +157,21 @@ impl Node {
         origin: &str,
     ) -> Result<String, (u16, Value)> {
         let public_key = key.public_key_b64();
-        let challenge = self.ok(
+        // A revoked or unknown key is refused at the challenge already.
+        let (status, challenge) = self.call(
             base,
             "POST",
             "/v1/auth/challenge",
             None,
             Some(&json!({"team_id": team, "public_key": public_key})),
         );
-        let nonce = challenge["nonce"].as_str().expect("nonce").to_string();
+        if status != 200 {
+            return Err((status, challenge));
+        }
+        let nonce = challenge["result"]["nonce"]
+            .as_str()
+            .expect("nonce")
+            .to_string();
         let signature = key
             .sign(&device::sign_in_message(origin, team, &public_key, &nonce))
             .expect("sign");
