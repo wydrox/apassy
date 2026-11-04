@@ -143,7 +143,7 @@ jobs:
     # not export the node from the trixie relay image: that raises its glibc requirement.
     # The image is a multi-platform index: the arm64 runner pulls its arm64 image.
     container:
-      image: rust:1.97.0-bullseye@sha256:08d3da459cca408754c8071b1f74ed334c40a149e7fa6a150bceb11e2ee924c5
+      image: rust:1.97.0-bullseye@sha256:7373627c1378e62a7e4963df5b6ceb90422c5b87afd59e17943029d19ea31e9a
     env:
       CARGO_INCREMENTAL: "0"
       APASSY_RELEASE_COMMIT: ${{ github.sha }}
