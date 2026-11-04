@@ -1,4 +1,6 @@
-//! Per-user service files for the owner's host. No root service is installed.
+//! Per-user service files for the owner's host. The node without a window has its unit
+//! in `crate::node::service` (plan S2-S3 D8, unit L2), which uses the helpers here. No
+//! root service is installed.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -51,12 +53,18 @@ fn xml(text: &str) -> Result<String, CliError> {
 }
 
 fn host_args(team: &TeamId, options: HostOptions) -> Vec<String> {
-    let mut args = vec![
+    // `apassy team host ...` runs as `<apassy> team --team ... host`.
+    let mut args: Vec<String> = crate::cli::program()
+        .service_prefix()
+        .iter()
+        .map(|word| (*word).to_string())
+        .collect();
+    args.extend([
         "--team".to_string(),
         team.to_string(),
         "host".to_string(),
         "--dialog".to_string(),
-    ];
+    ]);
     if options.ask_all {
         args.push("--ask-all".to_string());
     }
@@ -94,7 +102,7 @@ pub fn generate_plist(
     ))
 }
 
-fn unit_path(path: &Path) -> Result<&str, CliError> {
+pub(crate) fn unit_path(path: &Path) -> Result<&str, CliError> {
     let text = path_text(path)?;
     if !text
         .chars()
@@ -134,6 +142,16 @@ pub fn generate_unit(
     ))
 }
 
+/// The directory of systemd user units: `$XDG_CONFIG_HOME/systemd/user` or
+/// `~/.config/systemd/user`.
+pub fn user_unit_dir() -> Result<PathBuf, CliError> {
+    let config = match xdg_config()? {
+        Some(value) => PathBuf::from(value),
+        None => home()?.join(".config"),
+    };
+    Ok(config.join("systemd/user"))
+}
+
 fn home() -> Result<PathBuf, CliError> {
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -164,11 +182,7 @@ fn service_path(team: Option<&TeamId>) -> Result<PathBuf, CliError> {
             .join("Library/LaunchAgents")
             .join(format!("{label}.plist")))
     } else if cfg!(target_os = "linux") {
-        let config = match xdg_config()? {
-            Some(value) => PathBuf::from(value),
-            None => home()?.join(".config"),
-        };
-        Ok(config.join("systemd/user").join(unit))
+        Ok(user_unit_dir()?.join(unit))
     } else {
         Err(CliError::usage("Host services need macOS or Linux."))
     }
@@ -186,7 +200,7 @@ fn io_error(action: &str, error: std::io::Error) -> CliError {
     CliError::usage(format!("Cannot {action}: {}.", error.kind()))
 }
 
-fn write_service(path: &Path, text: &str) -> Result<(), CliError> {
+pub(crate) fn write_service(path: &Path, text: &str) -> Result<(), CliError> {
     let parent = path
         .parent()
         .ok_or_else(|| CliError::usage("The service path has no directory."))?;
@@ -247,14 +261,14 @@ fn clean_output(text: &str) -> String {
     clean
 }
 
-fn command(program: &str, args: &[&str]) -> Result<Output, CliError> {
+pub(crate) fn command(program: &str, args: &[&str]) -> Result<Output, CliError> {
     Command::new(program)
         .args(args)
         .output()
         .map_err(|error| io_error(&format!("run {program}"), error))
 }
 
-fn require_success(program: &str, output: Output) -> Result<(), CliError> {
+pub(crate) fn require_success(program: &str, output: Output) -> Result<(), CliError> {
     if output.status.success() {
         Ok(())
     } else {

@@ -1,0 +1,16 @@
+---
+// One fact of a legal page that the owner gives (lib/legal.ts). Without it, the
+// marker shows, and a page that is not a draft fails the build (layouts/Legal.astro).
+import { LEGAL, OWNER_TEXT_NEEDED } from "../lib/legal";
+
+interface Props {
+  /** The key in LEGAL. */
+  name: string;
+  /** What is needed, in a few words. */
+  what: string;
+}
+const { name, what } = Astro.props;
+const value = LEGAL[name];
+if (value === undefined) throw new Error(`OwnerFact: no fact ${name} in lib/legal.ts`);
+---
+{value ?? <span class="owner">[{OWNER_TEXT_NEEDED}: {what}]</span>}

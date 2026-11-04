@@ -102,6 +102,15 @@ class Harness {
 
   clearRequests() {
     fs.writeFileSync(path.join(this.mockDir, "requests.jsonl"), "");
+    fs.writeFileSync(path.join(this.mockDir, "answers.jsonl"), "");
+  }
+
+  // The answers that the mock host wrote for `cmd`: { cmd, ok, code } only.
+  answers(cmd) {
+    const file = path.join(this.mockDir, "answers.jsonl");
+    if (!fs.existsSync(file)) return [];
+    return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      .filter((answer) => answer.cmd === cmd);
   }
 
   requests(cmd) {

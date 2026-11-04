@@ -14,15 +14,9 @@ use std::time::{Duration, Instant};
 
 const SCUTIL: &str = "/usr/sbin/scutil";
 const IFCONFIG: &str = "/sbin/ifconfig";
-/// Only known installation paths are used. The process environment cannot select a
-/// different executable through PATH. The Funnel route of the Mac's own node uses the
-/// same paths (`crate::node::funnel`).
-pub(crate) const TAILSCALE_PROGRAMS: [&str; 4] = [
-    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    "/usr/local/bin/tailscale",
-    "/opt/homebrew/bin/tailscale",
-    "/usr/bin/tailscale",
-];
+/// Only known installation paths are used (moved to `crate::net::tailnet`, unit N2).
+/// The Funnel route of the Mac's own node uses the same paths (`crate::node::funnel`).
+pub(crate) use crate::net::tailnet::TAILSCALE_PROGRAMS;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 /// A command writes at most this much. `ifconfig -a` of a busy Mac is some KiB.
 const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
@@ -90,22 +84,10 @@ fn discover_tailscale_ipv4(
 }
 
 /// A CGNAT address alone does not identify Tailscale. Only the running daemon's Self
-/// record can supply an address, and only the Tailscale IPv4 range is accepted.
+/// record can supply an address, and only the Tailscale IPv4 range is accepted. The
+/// parsing is the TLS front's (`crate::net::tailnet::parse_status`).
 fn parse_tailscale_ipv4(output: &str) -> Option<Ipv4Addr> {
-    let status: serde_json::Value = serde_json::from_str(output).ok()?;
-    if status.get("BackendState")?.as_str()? != "Running" {
-        return None;
-    }
-    status
-        .get("Self")?
-        .get("TailscaleIPs")?
-        .as_array()?
-        .iter()
-        .filter_map(|value| value.as_str()?.parse::<Ipv4Addr>().ok())
-        .find(|address| {
-            let [first, second, _, _] = address.octets();
-            first == 100 && (64..=127).contains(&second)
-        })
+    crate::net::tailnet::parse_status(output).ipv4()
 }
 
 /// The name of the Mac for the phone (`scutil --get ComputerName`, for example

@@ -357,6 +357,46 @@ pub enum OwnerAction {
     RollbackModel {
         activation_id: u64,
     },
+    /// Change who hosts the bouncer brain (ADR 0035 section 1): this Mac, the owner's
+    /// server, or Apassy Connect. The proof names the kind, the `https://` address as the
+    /// vault stores it (empty for this Mac) and the consent screen that the owner
+    /// accepted (0 for this Mac). A return to this Mac needs the check too. The global
+    /// owner window never covers it ([`OwnerAction::needs_fresh_local_check`]), and no
+    /// phone or other Mac can make it.
+    ChangeBouncerHosting {
+        kind: crate::vault::BouncerHostKind,
+        url: String,
+        consent_version: u32,
+    },
+    /// Change who trains the bouncer brain (ADR 0035 section 1), with the same rules as
+    /// [`OwnerAction::ChangeBouncerHosting`].
+    ChangeBouncerTraining {
+        kind: crate::vault::BouncerHostKind,
+        url: String,
+        consent_version: u32,
+    },
+    /// Turn short-lived credentials ("way C", ADR 0037 stage 6 D11) on or off for one
+    /// source item (contract private-sharing-v1 rule 3). The proof names the item, the
+    /// kind of its `short_lived` row, and the new state, exactly as the sheet showed
+    /// them. Off delivers the item as a static key; nothing else turns way C off.
+    ChangeDelivery {
+        item: u64,
+        kind: crate::vault::ShortLivedKind,
+        on: bool,
+    },
+    /// Change the kind or the settings of the `short_lived` row of one source item
+    /// (contract private-sharing-v1 section 3.2): the role, the policy, the permissions,
+    /// the repositories, the scopes, the account to act as, and the API, token, and
+    /// revoke URLs, that is what a lease can do and where the long-lived secret goes. The
+    /// proof names the item, the new kind, and the SHA-256 (hex) of the canonical
+    /// settings text (`ShortLivedSettings::digest`), exactly as the sheet showed them.
+    /// The global owner window never covers it: a changed URL sends the long-lived
+    /// secret to another host.
+    ChangeShortLivedSettings {
+        item: u64,
+        kind: crate::vault::ShortLivedKind,
+        settings_sha256: String,
+    },
     /// Open a command-line session (ADR 0017). The session can read and change the vault
     /// like the views, but every action in this list still needs its own check.
     OpenCliSession,
@@ -411,6 +451,66 @@ pub enum OwnerAction {
         relay_url: String,
         team_id: Option<String>,
     },
+    /// Add a device to the Apassy Connect account of this Mac (connect-account-v1
+    /// section 7.1, plan s7 M1). The proof names the join exactly as the owner confirmed
+    /// it: the account, the join at Connect, the name and the public key of the device
+    /// (X9.63, 65 bytes), and the six safety words that both devices show. Only a fresh
+    /// check on this Mac makes it ([`OwnerAction::needs_fresh_local_check`]); no phone or
+    /// other Mac can.
+    ConfirmConnectDevice {
+        account_id: String,
+        join_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
+        words: String,
+    },
+    /// Revoke a device of the Apassy Connect account (section 7.4), also this Mac
+    /// itself ("Forget this device"). The proof names the account and the device.
+    RevokeConnectDevice {
+        account_id: String,
+        device_id: String,
+        device_name: String,
+    },
+    /// Delete the Apassy Connect account (section 6): its vault stores, devices, and
+    /// subscription end.
+    DeleteConnectAccount {
+        account_id: String,
+    },
+    /// Delete a vault store of the Apassy Connect account (connect-account-v1 section 8):
+    /// the relay copy of one vault and its snapshots go at Connect. The proof names the
+    /// store by its relay team.
+    DeleteVaultStore {
+        team_id: String,
+    },
+    /// Add a device of the Apassy Connect account, or of its group, to a vault store
+    /// (section 8): the device can then read and write the relay copy of that vault. The
+    /// proof names the store, the device, and the account of the device.
+    AddStoreDevice {
+        team_id: String,
+        device_id: String,
+        account_id: String,
+    },
+    /// Change the Family or Team group of the Apassy Connect account (connect-billing-v1
+    /// section 6): confirm or remove a member, or change the seats.
+    ChangeConnectGroup {
+        account_id: String,
+        group_id: String,
+        change: ConnectGroupChange,
+    },
+    /// Turn the tailnet route of this Mac's node on or off (plan S2–S3, unit N7): the
+    /// iPhone and the other Macs reach the approvals of this Mac directly, or no longer.
+    SetTailnetRoute {
+        on: bool,
+    },
+    /// Revoke devices in Settings > Devices (plan S2–S3, unit N7): devices of the team
+    /// `team_id` (on this Mac's node or another relay) by their relay numbers, or this Mac
+    /// leaves the team of a Linux node. The proof names the team, the devices, and the
+    /// name that the sheet showed.
+    RevokeNodeDevice {
+        team_id: String,
+        device_ids: Vec<u64>,
+        device_name: String,
+    },
     /// Connect a remote agent to this Mac: allow the connect request `id` of the MCP
     /// authorization flow (plan "Bouncer section" decision 4). The proof names the
     /// request, the client name, and the match code exactly as Decisions showed them. A
@@ -431,6 +531,64 @@ pub enum OwnerAction {
     /// Turn remote access on: Tailscale Funnel routes the internet to the node of this
     /// Mac. Off is stricter and needs no check.
     TurnOnRemoteAccess,
+}
+
+/// A change of a Connect group that needs the owner check (connect-billing-v1 section 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectGroupChange {
+    /// Make a pending member active: it gets the plan and can be in shared vaults.
+    ConfirmMember { account_id: String, name: String },
+    /// Remove a member: it leaves the shared vault stores of the group.
+    RemoveMember { account_id: String, name: String },
+    /// Change the people or seats of the subscription.
+    SetSeats { quantity: u64 },
+}
+
+/// The words of a short-lived kind in an owner check: what each run gets.
+fn delivery_words(kind: crate::vault::ShortLivedKind) -> &'static str {
+    use crate::vault::ShortLivedKind as Kind;
+    match kind {
+        Kind::AwsSts => "AWS credentials that expire in 15 minutes",
+        Kind::GithubApp => "a GitHub token for each run",
+        Kind::GoogleServiceAccount => "Google access tokens that expire in 15 minutes",
+        Kind::OauthRefresh => "an OAuth access token for each run",
+        Kind::CloudflareToken | Kind::PlanetscalePassword | Kind::NeonRole => {
+            "a credential made for each run"
+        }
+    }
+}
+
+/// Where the bouncer brain runs or trains, for the owner texts. No address: the dialog
+/// shows it.
+fn host_words(kind: crate::vault::BouncerHostKind, url: &str) -> String {
+    match kind {
+        crate::vault::BouncerHostKind::ThisMac => "on this Mac".to_owned(),
+        crate::vault::BouncerHostKind::OwnServer => format!("on your server {}", host_name(url)),
+        crate::vault::BouncerHostKind::Connect => format!("at Apassy Connect {}", host_name(url)),
+    }
+}
+
+/// The host name (and port) of an `https://` address for the Touch ID reason: printable
+/// characters only. A long name keeps its end, where the domain that owns it is, so a
+/// name such as `brain.example.com.evil.net` cannot hide `evil.net`.
+fn host_name(url: &str) -> String {
+    const MAX_HOST_CHARS: usize = 60;
+    let rest = url.strip_prefix("https://").unwrap_or(url);
+    let host: Vec<char> = rest
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_graphic() && *c != '"')
+        .collect();
+    if host.is_empty() {
+        "unknown".to_owned()
+    } else if host.len() > MAX_HOST_CHARS {
+        let tail: String = host[host.len() - (MAX_HOST_CHARS - 1)..].iter().collect();
+        format!("…{tail}")
+    } else {
+        host.into_iter().collect()
+    }
 }
 
 /// The words for the Touch ID prompt after the relying party of a passkey. `None` is
@@ -520,14 +678,6 @@ fn passkey_caller(origin: Option<&String>) -> &'static str {
 }
 
 impl OwnerAction {
-    /// True for an action that always takes a fresh local check: an open owner-check
-    /// window (ADR 0030) never covers it. `AddRemoteAgent` mints a bearer token that
-    /// works from the internet and goes back to the caller of the command line, whose
-    /// session proves no owner at the Mac (owner-cli-v1 §4, review 0.5.16).
-    pub fn needs_fresh_local_check(&self) -> bool {
-        matches!(self, Self::AddRemoteAgent { .. })
-    }
-
     /// Trusted heading: never interpolate website, agent, item, or request text.
     pub fn touch_id_title(&self) -> &'static str {
         match self {
@@ -564,6 +714,20 @@ impl OwnerAction {
                 "Remove an Apple Watch"
             }
             Self::RemoveOlderIphone { .. } => "Remove an iPhone",
+            Self::ChangeBouncerHosting { .. } => "Change the bouncer brain host",
+            Self::ChangeBouncerTraining { .. } => "Change the bouncer brain training",
+            Self::ChangeDelivery { on: true, .. } => "Use temporary credentials",
+            Self::ChangeDelivery { on: false, .. } => "Stop temporary credentials",
+            Self::ChangeShortLivedSettings { .. } => "Change temporary credentials",
+            Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
+            Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
+            Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
+            Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
+            Self::AddStoreDevice { .. } => "Add a device to a relay copy",
+            Self::ChangeConnectGroup { .. } => "Change your family or team",
+            Self::SetTailnetRoute { on: true } => "Reach this Mac on your tailnet",
+            Self::SetTailnetRoute { on: false } => "Stop the tailnet route",
+            Self::RevokeNodeDevice { .. } => "Revoke a device",
             _ => "Confirm with Touch ID",
         }
     }
@@ -709,6 +873,26 @@ impl OwnerAction {
             }
             Self::PromoteModel { .. } => "promote a new bouncer brain".to_owned(),
             Self::RollbackModel { .. } => "roll back the bouncer brain".to_owned(),
+            Self::ChangeBouncerHosting { kind, url, .. } => {
+                format!("run the bouncer brain {}", host_words(*kind, url))
+            }
+            Self::ChangeBouncerTraining { kind, url, .. } => {
+                format!("train the bouncer brain {}", host_words(*kind, url))
+            }
+            Self::ChangeDelivery { kind, on: true, .. } => format!(
+                "give agents {} instead of this item's long-lived key",
+                delivery_words(*kind)
+            ),
+            Self::ChangeDelivery {
+                kind, on: false, ..
+            } => format!(
+                "stop {} and let agents use this item's long-lived key",
+                delivery_words(*kind)
+            ),
+            Self::ChangeShortLivedSettings { kind, .. } => format!(
+                "change what {} of this item can do and where Apassy asks for them",
+                delivery_words(*kind)
+            ),
             Self::OpenCliSession => "start a command-line session".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "bind 1 environment variable".to_owned(),
@@ -739,6 +923,53 @@ impl OwnerAction {
             Self::EnableRelayQuestions { .. } => {
                 "send the questions of this vault through the relay".to_owned()
             }
+            Self::ConfirmConnectDevice {
+                device_name, words, ..
+            } => format!(
+                "add the device \"{}\" to your Apassy Connect account; both devices show: {}",
+                short_device_name(device_name),
+                words
+                    .chars()
+                    .filter(|c| c.is_ascii_lowercase() || *c == ' ')
+                    .take(80)
+                    .collect::<String>()
+            ),
+            Self::RevokeConnectDevice { device_name, .. } => format!(
+                "remove the device \"{}\" from your Apassy Connect account",
+                short_device_name(device_name)
+            ),
+            Self::DeleteConnectAccount { .. } => {
+                "delete your Apassy Connect account, its vault stores, and its plan".to_owned()
+            }
+            Self::DeleteVaultStore { .. } => {
+                "delete the relay copy of this vault and its snapshots at Apassy Connect".to_owned()
+            }
+            Self::AddStoreDevice { .. } => {
+                "let another device sync the relay copy of this vault at Apassy Connect".to_owned()
+            }
+            Self::ChangeConnectGroup { change, .. } => match change {
+                ConnectGroupChange::ConfirmMember { name, .. } => format!(
+                    "add \"{}\" to your Apassy Connect family or team",
+                    short_device_name(name)
+                ),
+                ConnectGroupChange::RemoveMember { name, .. } => format!(
+                    "remove \"{}\" from your Apassy Connect family or team",
+                    short_device_name(name)
+                ),
+                ConnectGroupChange::SetSeats { quantity } => {
+                    format!("change your Apassy Connect plan to {quantity} people or seats")
+                }
+            },
+            Self::SetTailnetRoute { on: true } => {
+                "let your iPhone and Macs reach this Mac directly on your tailnet".to_owned()
+            }
+            Self::SetTailnetRoute { on: false } => {
+                "stop the tailnet route of this Mac; approvals go through Apassy relay".to_owned()
+            }
+            Self::RevokeNodeDevice { device_name, .. } => format!(
+                "revoke the device \"{}\"; it can no longer see or answer questions",
+                short_device_name(device_name)
+            ),
             Self::AllowConnect {
                 client_name,
                 redirect_host,
@@ -765,6 +996,34 @@ impl OwnerAction {
                 "let remote agents reach this Mac through Tailscale Funnel".to_owned()
             }
         }
+    }
+
+    /// True for an action that only a fresh Touch ID or passphrase check on this Mac can
+    /// confirm: the global owner window never covers it (ADR 0035 section 1, plan 0035
+    /// C2). A change of the bouncer brain host or trainer sends request data to another
+    /// computer, so each change asks again. The Apassy Connect account actions (plan s7
+    /// M1) add or remove a device or a person of the account, a device of a vault store,
+    /// or a vault store, or end the account, so each asks again too. Turning way C off
+    /// gives runs the long-lived key again (contract private-sharing-v1 rule 3), so it
+    /// asks again as well; turning it on gives runs less and stays in the window.
+    /// `AddRemoteAgent` mints a bearer token that works from the internet and goes back
+    /// to the caller of the command line, whose session proves no owner at the Mac
+    /// (owner-cli-v1 §4, review 0.5.16).
+    pub fn needs_fresh_local_check(&self) -> bool {
+        matches!(
+            self,
+            Self::AddRemoteAgent { .. }
+                | Self::ChangeBouncerHosting { .. }
+                | Self::ChangeBouncerTraining { .. }
+                | Self::ChangeShortLivedSettings { .. }
+                | Self::ChangeDelivery { on: false, .. }
+                | Self::ConfirmConnectDevice { .. }
+                | Self::RevokeConnectDevice { .. }
+                | Self::DeleteConnectAccount { .. }
+                | Self::DeleteVaultStore { .. }
+                | Self::AddStoreDevice { .. }
+                | Self::ChangeConnectGroup { .. }
+        )
     }
 
     /// The waiting run of an approval action.
@@ -1967,13 +2226,106 @@ mod evaluation_tests {
                 code: "K7Q-4MD".into(),
                 redirect_host: "grok.example".into(),
             },
-            OwnerAction::AddRemoteAgent {
-                name: "Grok Bot".into(),
-                days: 90,
-            },
             OwnerAction::TurnOnRemoteAccess,
         ] {
             assert!(LocalWindowSource::LocalOwner.permits(&action), "{action:?}");
+        }
+        // A new remote agent always asks again (review 0.5.16).
+        let remote = OwnerAction::AddRemoteAgent {
+            name: "Grok Bot".into(),
+            days: 90,
+        };
+        assert!(!LocalWindowSource::LocalOwner.permits(&remote));
+    }
+
+    /// The Apassy Connect account actions (plan s7 M1) always need a fresh check on this
+    /// Mac: the global window never covers them, no phone or other Mac makes them, and
+    /// their texts name the device and the words without passing the Touch ID limit.
+    #[test]
+    fn connect_account_actions_need_a_fresh_local_check() {
+        let long = "N".repeat(200);
+        for action in [
+            OwnerAction::ConfirmConnectDevice {
+                account_id: "acc_k7m2q4x3ca".into(),
+                join_id: 4,
+                device_name: long.clone(),
+                public_key: vec![4; 65],
+                words: "blaze cable flute board seal tiger".into(),
+            },
+            OwnerAction::RevokeConnectDevice {
+                account_id: "acc_k7m2q4x3ca".into(),
+                device_id: "dev_p4n6r2t7bc".into(),
+                device_name: long.clone(),
+            },
+            OwnerAction::DeleteConnectAccount {
+                account_id: "acc_k7m2q4x3ca".into(),
+            },
+            OwnerAction::ChangeConnectGroup {
+                account_id: "acc_k7m2q4x3ca".into(),
+                group_id: "grp_f4m6n2p7qa".into(),
+                change: ConnectGroupChange::ConfirmMember {
+                    account_id: "acc_m3n5p7q2rb".into(),
+                    name: long.clone(),
+                },
+            },
+            OwnerAction::ChangeConnectGroup {
+                account_id: "acc_k7m2q4x3ca".into(),
+                group_id: "grp_f4m6n2p7qa".into(),
+                change: ConnectGroupChange::SetSeats { quantity: 6 },
+            },
+            OwnerAction::DeleteVaultStore {
+                team_id: "t".repeat(32),
+            },
+            OwnerAction::AddStoreDevice {
+                team_id: "t".repeat(32),
+                device_id: "dev_p4n6r2t7bc".into(),
+                account_id: "acc_m3n5p7q2rb".into(),
+            },
+        ] {
+            assert!(action.needs_fresh_local_check(), "{action:?}");
+            #[cfg(feature = "desktop")]
+            assert!(
+                !LocalWindowSource::LocalOwner.permits(&action),
+                "{action:?}"
+            );
+            assert!(matches!(
+                remote_choice(&action, None),
+                Err(OwnerAuthError::RemoteUnsupported)
+            ));
+            let reason = action.reason();
+            assert!(reason.chars().count() <= MAX_REASON_CHARS, "{reason}");
+            assert!(reason.contains("Apassy Connect"), "{reason}");
+            assert_ne!(action.touch_id_title(), "Confirm with Touch ID");
+        }
+        let connect =
+            |join_id: u64, public_key: Vec<u8>, words: &str| OwnerAction::ConfirmConnectDevice {
+                account_id: "acc_k7m2q4x3ca".into(),
+                join_id,
+                device_name: "iPhone".into(),
+                public_key,
+                words: words.into(),
+            };
+        let confirm = connect(4, vec![4; 65], "blaze cable flute board seal tiger");
+        assert!(
+            confirm
+                .reason()
+                .ends_with("both devices show: blaze cable flute board seal tiger")
+        );
+        // Another join, key, or set of words is another action.
+        let confirm_with =
+            |join_id: u64, public_key: Vec<u8>, words: &str| OwnerAction::ConfirmConnectDevice {
+                account_id: "acc_k7m2q4x3ca".into(),
+                join_id,
+                device_name: "iPhone".into(),
+                public_key,
+                words: words.into(),
+            };
+        for other in [
+            confirm_with(5, vec![4; 65], "blaze cable flute board seal tiger"),
+            confirm_with(4, vec![5; 65], "blaze cable flute board seal tiger"),
+            confirm_with(4, vec![4; 65], "blaze cable flute board seal tile"),
+        ] {
+            assert_ne!(other, confirm);
         }
     }
 
@@ -2052,6 +2404,171 @@ mod evaluation_tests {
                 Err(ProofRefusal::WrongAction)
             );
         }
+    }
+
+    #[test]
+    fn changing_delivery_needs_the_owner_check() {
+        use crate::vault::ShortLivedKind;
+        let action = OwnerAction::ChangeDelivery {
+            item: 7,
+            kind: ShortLivedKind::AwsSts,
+            on: false,
+        };
+        // A phone or another Mac cannot make the change.
+        assert!(matches!(
+            remote_choice(&action, None),
+            Err(OwnerAuthError::RemoteUnsupported)
+        ));
+        // The proof names the item, the kind, and the new state.
+        let proof = OwnerProof::issue_for_test(action.clone(), [1; 32], Instant::now());
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        for other in [
+            OwnerAction::ChangeDelivery {
+                item: 8,
+                kind: ShortLivedKind::AwsSts,
+                on: false,
+            },
+            OwnerAction::ChangeDelivery {
+                item: 7,
+                kind: ShortLivedKind::GithubApp,
+                on: false,
+            },
+            OwnerAction::ChangeDelivery {
+                item: 7,
+                kind: ShortLivedKind::AwsSts,
+                on: true,
+            },
+            OwnerAction::ChangeItemRules { item_id: 7 },
+        ] {
+            assert_eq!(
+                proof.check(&other, &[1; 32]),
+                Err(ProofRefusal::WrongAction),
+                "{other:?}"
+            );
+        }
+        // A proof for the agent settings of the item does not change its delivery.
+        let rules = OwnerProof::issue_for_test(
+            OwnerAction::ChangeItemRules { item_id: 7 },
+            [1; 32],
+            Instant::now(),
+        );
+        assert_eq!(
+            rules.check(&action, &[1; 32]),
+            Err(ProofRefusal::WrongAction)
+        );
+        // The texts name the change and no value.
+        assert_eq!(action.touch_id_title(), "Stop temporary credentials");
+        assert!(action.reason().contains("long-lived key"));
+        let on = OwnerAction::ChangeDelivery {
+            item: 7,
+            kind: ShortLivedKind::AwsSts,
+            on: true,
+        };
+        assert!(on.reason().contains("15 minutes"));
+        // Off gives runs the long-lived key again: only a fresh check on this Mac makes
+        // it, never the global window (A-L1). On gives runs less.
+        assert!(action.needs_fresh_local_check());
+        #[cfg(feature = "desktop")]
+        assert!(!LocalWindowSource::LocalOwner.permits(&action));
+        assert!(!on.needs_fresh_local_check());
+    }
+
+    #[test]
+    fn changing_short_lived_settings_needs_a_fresh_owner_check() {
+        use crate::vault::{ShortLivedKind, ShortLivedSettings};
+        let settings = |text: &str| {
+            ShortLivedSettings::parse(ShortLivedKind::OauthRefresh, text)
+                .unwrap()
+                .digest()
+        };
+        let safe =
+            settings(r#"{"token_url":"https://auth.example.test/token","client_auth":"basic"}"#);
+        let action = OwnerAction::ChangeShortLivedSettings {
+            item: 7,
+            kind: ShortLivedKind::OauthRefresh,
+            settings_sha256: safe.clone(),
+        };
+        assert!(matches!(
+            remote_choice(&action, None),
+            Err(OwnerAuthError::RemoteUnsupported)
+        ));
+        assert!(action.needs_fresh_local_check());
+        let proof = OwnerProof::issue_for_test(action.clone(), [1; 32], Instant::now());
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        // Other settings (another token URL), another item, another kind, or the on/off
+        // switch are other actions.
+        let moved = settings(
+            r#"{"token_url":"https://attacker.example.test/token","client_auth":"basic"}"#,
+        );
+        assert_ne!(moved, safe);
+        for other in [
+            OwnerAction::ChangeShortLivedSettings {
+                item: 7,
+                kind: ShortLivedKind::OauthRefresh,
+                settings_sha256: moved,
+            },
+            OwnerAction::ChangeShortLivedSettings {
+                item: 8,
+                kind: ShortLivedKind::OauthRefresh,
+                settings_sha256: safe.clone(),
+            },
+            OwnerAction::ChangeShortLivedSettings {
+                item: 7,
+                kind: ShortLivedKind::GithubApp,
+                settings_sha256: safe.clone(),
+            },
+            OwnerAction::ChangeDelivery {
+                item: 7,
+                kind: ShortLivedKind::OauthRefresh,
+                on: true,
+            },
+        ] {
+            assert_eq!(
+                proof.check(&other, &[1; 32]),
+                Err(ProofRefusal::WrongAction),
+                "{other:?}"
+            );
+        }
+        assert_eq!(action.touch_id_title(), "Change temporary credentials");
+        assert!(!action.reason().contains("attacker"));
+    }
+
+    /// ADR 0035 (panel L4): the Touch ID reason of a hosting change names the host, and a
+    /// long name keeps its end, where the owning domain is.
+    #[test]
+    fn a_hosting_change_names_its_host_in_the_touch_id_reason() {
+        use crate::vault::{BouncerHostKind, HOSTING_CONSENT_VERSION};
+        let hosting = |kind, url: &str| OwnerAction::ChangeBouncerHosting {
+            kind,
+            url: url.to_owned(),
+            consent_version: HOSTING_CONSENT_VERSION,
+        };
+        assert_eq!(
+            hosting(
+                BouncerHostKind::OwnServer,
+                "https://brain.tail0a1b.ts.net:8443"
+            )
+            .reason(),
+            "run the bouncer brain on your server brain.tail0a1b.ts.net:8443"
+        );
+        assert_eq!(
+            hosting(BouncerHostKind::ThisMac, "").reason(),
+            "run the bouncer brain on this Mac"
+        );
+        let training = OwnerAction::ChangeBouncerTraining {
+            kind: BouncerHostKind::Connect,
+            url: "https://train.apassy.example".to_owned(),
+            consent_version: HOSTING_CONSENT_VERSION,
+        };
+        assert_eq!(
+            training.reason(),
+            "train the bouncer brain at Apassy Connect train.apassy.example"
+        );
+        let long = format!("https://brain.{}.evil.net", "a".repeat(200));
+        let reason = hosting(BouncerHostKind::OwnServer, &long).reason();
+        assert!(reason.ends_with("aaa.evil.net"), "{reason}");
+        assert!(reason.contains('…'), "{reason}");
+        assert!(reason.chars().count() <= MAX_REASON_CHARS, "{reason}");
     }
 
     #[test]
@@ -2167,7 +2684,8 @@ pub(crate) enum LocalWindowSource {
 impl LocalWindowSource {
     fn permits(self, action: &OwnerAction) -> bool {
         match self {
-            Self::LocalOwner => true,
+            // An action of `needs_fresh_local_check` always asks again.
+            Self::LocalOwner => !action.needs_fresh_local_check(),
             Self::BrowserDebuggingClick => matches!(action, OwnerAction::BrowserDebugging { .. }),
             Self::BrowserGesture => matches!(
                 action,

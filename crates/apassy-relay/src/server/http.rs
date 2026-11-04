@@ -14,9 +14,15 @@
 //! (`AuthFailures` for its other paths, `AgentAuthFailures` by source address for `/mcp`
 //! and `/p/`, docs/SPEC.md section 30.5). With `RelayConfig::oauth` (an embedded node)
 //! both listeners also serve the MCP authorization flow (`oauth`, docs/SPEC.md section
-//! 31), and a 401 of `POST /mcp` carries `WWW-Authenticate`.
+//! 31), and a 401 of `POST /mcp` carries `WWW-Authenticate`. A node on the tailnet has a
+//! third listener (`Scope::Tailnet`, docs/SPEC.md section 32) that its TLS front forwards
+//! to: the device routes, and on the Linux node the team routes too; never the OAuth
+//! flow, `/v1/connect`, or anything else (404). It counts failed authentications by
+//! tailnet peer on every path (`FailureKeys::PerPeer`).
 
+use std::collections::HashMap;
 use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -43,7 +49,7 @@ use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{
-    Core, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, sync,
+    Core, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, push, sync,
 };
 use crate::session::SessionSource;
 
@@ -60,10 +66,12 @@ const MAINTENANCE_SECS: u64 = 5;
 /// Seconds between two sweeps of a Connect team that had no request since its last one.
 const IDLE_MAINTENANCE_SECS: u64 = 60;
 /// Bad bearer tokens and session keys that one listener takes in one window on its
-/// paths other than `/mcp` and `/p/` (`AuthFailures`), and that one source address takes
-/// on `/mcp` and `/p/` (`AgentAuthFailures`). One more request in the window gets 429
-/// `rate_limited`.
+/// paths other than `/mcp` and `/p/` (`AuthFailures`), that one source address takes
+/// on `/mcp` and `/p/` (`AgentAuthFailures`), and that one tailnet peer takes on the
+/// tailnet listener. One more request in the window gets 429 `rate_limited`.
 pub const AUTH_FAILURES_MAX: u32 = 20;
+/// Shared tailnet bucket when Serve supplies no peer address (old Tailscale).
+pub const AUTH_FAILURES_WITHOUT_PEER_MAX: u32 = 200;
 /// The window of `AUTH_FAILURES_MAX`, in seconds, and the `Retry-After` of its 429.
 pub const AUTH_FAILURE_WINDOW_SECS: u64 = 60;
 /// Bad bearer tokens and session keys on `/mcp` and `/p/` of one listener without a
@@ -83,6 +91,51 @@ pub enum Scope {
     /// `POST /mcp` and `/p/` only: the listener of an embedded node that Tailscale
     /// Funnel reaches. Every other request, `/healthz` included, is 404 `not_found`.
     Public,
+    /// The listener that the TLS front of a node forwards to (docs/SPEC.md section 32.1):
+    /// `/healthz` and the device routes (`DEVICE_EXACT`, `DEVICE_UNDER`); with `agents`
+    /// (the Linux node) also the team routes (`TEAM_EXACT`, `TEAM_UNDER`, `/mcp`, `/p/`).
+    /// Never the OAuth flow, `/v1/connect`, or any other path: 404 `not_found`, before
+    /// any other check. No header of the front is trusted.
+    Tailnet { agents: bool },
+}
+
+/// The device paths of the tailnet scope that are served exactly.
+const DEVICE_EXACT: [&str; 6] = [
+    paths::HEALTH,
+    paths::JOIN,
+    paths::TEAMS,
+    paths::ME,
+    paths::LEAVE,
+    paths::INVITES,
+];
+/// The device paths of the tailnet scope that are served with every path below them.
+const DEVICE_UNDER: [&str; 8] = [
+    "/v1/auth",
+    paths::DEVICES,
+    paths::JOINS,
+    paths::MEMBERS,
+    paths::SYNC,
+    paths::QUESTIONS,
+    "/v1/push",
+    paths::FEED,
+];
+/// The team paths of the tailnet scope of the Linux node, served exactly.
+const TEAM_EXACT: [&str; 3] = [paths::ACCESS, paths::AUDIT, paths::MCP];
+/// The team paths of the tailnet scope of the Linux node, with every path below them.
+const TEAM_UNDER: [&str; 7] = [
+    paths::COLLECTIONS,
+    paths::ITEMS,
+    paths::GRANTS,
+    "/v1/agents",
+    paths::APPROVALS,
+    paths::RUNS,
+    "/v1/host",
+];
+
+/// `path` is `prefix` or below it (`prefix/...`).
+fn is_under(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 impl Scope {
@@ -93,7 +146,21 @@ impl Scope {
             Self::Public => {
                 (method == "POST" && path == paths::MCP) || path.starts_with(paths::PROXY_PREFIX)
             }
+            Self::Tailnet { agents } => {
+                DEVICE_EXACT.contains(&path)
+                    || DEVICE_UNDER.iter().any(|prefix| is_under(path, prefix))
+                    || (agents
+                        && (TEAM_EXACT.contains(&path)
+                            || TEAM_UNDER.iter().any(|prefix| is_under(path, prefix))
+                            || path.starts_with(paths::PROXY_PREFIX)))
+            }
         }
+    }
+
+    /// The MCP authorization flow is served on this listener (with `RelayConfig::oauth`):
+    /// on the node and public listeners, never on the tailnet listener.
+    pub fn serves_oauth(self) -> bool {
+        !matches!(self, Self::Tailnet { .. })
     }
 
     /// The kind of the audit row of a listener at its limit.
@@ -101,6 +168,7 @@ impl Scope {
         match self {
             Self::Node => "auth_limit_node",
             Self::Public => "auth_limit_public",
+            Self::Tailnet { .. } => "auth_limit_tailnet",
         }
     }
 
@@ -108,6 +176,7 @@ impl Scope {
         match self {
             Self::Node => "node",
             Self::Public => "public",
+            Self::Tailnet { .. } => "tailnet",
         }
     }
 }
@@ -149,25 +218,83 @@ impl Window {
 
 /// The failed authentications of one listener on its paths other than `/mcp` and `/p/`:
 /// bad bearer tokens in a fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its
-/// first failure. With `AUTH_FAILURES_MAX` of them, every request of those paths gets 429
-/// `rate_limited` until the window ends; then the count starts again. In memory only.
+/// first failure, for each key. With `AUTH_FAILURES_MAX` of them, every request of those
+/// paths and that key gets 429 `rate_limited` until the window ends; then the count
+/// starts again. In memory only.
+///
+/// The node and public listeners, and the Mac's local route, use one key for the whole
+/// listener (`AuthFailures::limited`, `AuthFailures::record`). The tailnet listener that
+/// the TLS front forwards to uses the tailnet peer of each request for every path
+/// (`Listener::counted`, N8-1), so one peer with bad tokens never locks out another
+/// peer. With no PROXY address, the shared loopback key has a higher 200/min limit.
 #[derive(Debug, Default)]
 pub struct AuthFailures {
-    window: Mutex<Window>,
+    /// For each key: its window.
+    windows: Mutex<HashMap<IpAddr, Window>>,
 }
 
+/// The key of a listener that counts as one.
+const WHOLE_LISTENER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+/// At most this many keys. A new key past it is not counted (the front admits only
+/// tailnet peers, so this many is far above a real tailnet).
+pub const AUTH_FAILURE_KEYS_MAX: usize = 4096;
+
 impl AuthFailures {
-    /// True while the listener is at its limit.
+    /// True while the whole listener is at its limit.
     pub fn limited(&self, now: u64) -> bool {
-        let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
-        window.count(now) >= AUTH_FAILURES_MAX
+        self.limited_for(WHOLE_LISTENER, now)
     }
 
-    /// Counts one bad bearer token or session key.
+    /// Counts one bad bearer token or session key for the whole listener.
     pub fn record(&self, now: u64) {
-        let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
-        window.record(now);
+        self.record_for(WHOLE_LISTENER, now);
     }
+
+    /// True while `key` is at its limit.
+    pub fn limited_for(&self, key: IpAddr, now: u64) -> bool {
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(window) = windows.get_mut(&key) else {
+            return false;
+        };
+        if window.ended(now) {
+            windows.remove(&key);
+            return false;
+        }
+        window.count
+            >= if key.is_loopback() {
+                AUTH_FAILURES_WITHOUT_PEER_MAX
+            } else {
+                AUTH_FAILURES_MAX
+            }
+    }
+
+    /// Counts one bad bearer token or session key of `key`.
+    pub fn record_for(&self, key: IpAddr, now: u64) {
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        if !windows.contains_key(&key) && windows.len() >= AUTH_FAILURE_KEYS_MAX {
+            windows.retain(|_, window| !window.ended(now));
+            if windows.len() >= AUTH_FAILURE_KEYS_MAX {
+                return;
+            }
+        }
+        windows.entry(key).or_default().record(now);
+    }
+}
+
+/// How a listener keys its failed authentications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKeys {
+    /// One window for the whole listener on its paths other than `/mcp` and `/p/`, and
+    /// the source addresses of `X-Forwarded-For` on those two (`AgentAuthFailures`): the
+    /// node and public listeners, and the local route of the Mac
+    /// (`Serving::local_route`).
+    Whole,
+    /// One window for each tailnet peer, on every path: the tailnet listener at this
+    /// address, which the TLS front forwards to. The front names the peer of each
+    /// connection in process (`apassy::net::front_peers`); a connection that it did not
+    /// make is keyed by its own address, the loopback. No header is read: a peer could
+    /// forge `X-Forwarded-For`.
+    PerPeer(SocketAddr),
 }
 
 /// The client address of a request to `/mcp` or `/p/`: the last address of
@@ -176,12 +303,11 @@ impl AuthFailures {
 /// failed-auth count reads it: it gives no identity and no authority, and a value that
 /// a local program forges only puts its own failures in another count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Source(std::net::IpAddr);
+pub struct Source(IpAddr);
 
 impl Source {
     /// `None` without the header or with a value that is not one address.
     pub fn from_forwarded(value: Option<&str>) -> Option<Self> {
-        use std::net::{IpAddr, Ipv6Addr};
         let last = value?.rsplit(',').next()?.trim();
         let addr = match last.parse::<IpAddr>().ok()? {
             IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
@@ -202,7 +328,7 @@ impl Source {
 /// holds only their own address at 429, and one shared window for the requests without
 /// an address (`AGENT_SHARED_FAILURES_MAX`). A source that the full table
 /// (`AUTH_SOURCES_MAX`) cannot take counts, and is checked, in the shared window. In
-/// memory only.
+/// memory only. The tailnet listener does not use it (`FailureKeys::PerPeer`).
 #[derive(Debug, Default)]
 pub struct AgentAuthFailures {
     state: Mutex<AgentFailureState>,
@@ -210,7 +336,7 @@ pub struct AgentAuthFailures {
 
 #[derive(Debug, Default)]
 struct AgentFailureState {
-    sources: std::collections::HashMap<Source, Window>,
+    sources: HashMap<Source, Window>,
     shared: Window,
 }
 
@@ -263,10 +389,13 @@ enum Counted {
     Listener,
     /// `/mcp` and `/p/`: the count of the source address, or the shared one.
     Agent(Option<Source>),
+    /// Every path of the tailnet listener: the count of the tailnet peer (N8-1).
+    Peer(IpAddr),
 }
 
 impl Counted {
-    /// The count of a request to `path`, with its `X-Forwarded-For`.
+    /// The count of a request to `path`, with its `X-Forwarded-For`, on a listener that
+    /// counts as one (`FailureKeys::Whole`).
     fn of(path: &str, forwarded: Option<&str>) -> Self {
         if path == paths::MCP || path.starts_with(paths::PROXY_PREFIX) {
             Self::Agent(Source::from_forwarded(forwarded))
@@ -281,6 +410,7 @@ impl Counted {
             Self::Listener => "listener",
             Self::Agent(Some(_)) => "source",
             Self::Agent(None) => "shared",
+            Self::Peer(_) => "peer",
         }
     }
 }
@@ -292,15 +422,20 @@ pub struct Listener {
     pub scope: Scope,
     pub failures: Option<AuthFailures>,
     pub agent_failures: Option<AgentAuthFailures>,
+    pub keys: FailureKeys,
+    /// The tailnet scope on the Mac's own local route (`Serving::local_route`).
+    pub local_route: bool,
 }
 
 impl Listener {
     /// A listener with the counts on or off.
-    pub fn new(scope: Scope, limiter: bool) -> Self {
+    pub fn new(scope: Scope, limiter: bool, keys: FailureKeys, local_route: bool) -> Self {
         Self {
             scope,
             failures: limiter.then(AuthFailures::default),
             agent_failures: limiter.then(AgentAuthFailures::default),
+            keys,
+            local_route,
         }
     }
 
@@ -308,11 +443,30 @@ impl Listener {
         self.failures.is_some() || self.agent_failures.is_some()
     }
 
+    /// The failed-auth count of `request` to `path`.
+    fn counted(&self, request: &Request, path: &str) -> Counted {
+        let FailureKeys::PerPeer(listen) = self.keys else {
+            let forwarded = header_value(request, "X-Forwarded-For");
+            return Counted::of(path, forwarded.as_deref());
+        };
+        let Some(remote) = request.remote_addr().copied() else {
+            return Counted::Peer(WHOLE_LISTENER);
+        };
+        let peer = apassy::net::front_peers::peer_of(remote, listen)
+            .unwrap_or_else(|| remote.ip().to_canonical());
+        Counted::Peer(peer)
+    }
+
     fn record_failure(&self, counted: Counted, now: u64) {
         match counted {
             Counted::Listener => {
                 if let Some(failures) = &self.failures {
                     failures.record(now);
+                }
+            }
+            Counted::Peer(key) => {
+                if let Some(failures) = &self.failures {
+                    failures.record_for(key, now);
                 }
             }
             Counted::Agent(source) => {
@@ -329,10 +483,23 @@ impl Listener {
                 .failures
                 .as_ref()
                 .is_some_and(|failures| failures.limited(now)),
+            Counted::Peer(key) => self
+                .failures
+                .as_ref()
+                .is_some_and(|failures| failures.limited_for(key, now)),
             Counted::Agent(source) => self
                 .agent_failures
                 .as_ref()
                 .is_some_and(|failures| failures.limited(source, now)),
+        }
+    }
+
+    /// The kind of the audit row of a listener (or one of its peers) at its limit.
+    fn limit_kind(&self) -> &'static str {
+        if self.local_route {
+            "auth_limit_tailnet_local"
+        } else {
+            self.scope.limit_kind()
         }
     }
 }
@@ -401,6 +568,8 @@ pub enum Endpoint {
     Settle(Qid),
     PushTokenPut,
     PushTokenDelete,
+    PushHandlePut,
+    PushHandleDelete,
     FeedPut,
     FeedList,
     FeedDelete,
@@ -600,6 +769,13 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
                 ("DELETE", Need::Member, PushTokenDelete),
             ],
         ),
+        ["v1", "push", "handle"] => pick(
+            method,
+            &[
+                ("PUT", Need::Member, PushHandlePut),
+                ("DELETE", Need::Member, PushHandleDelete),
+            ],
+        ),
         ["v1", "feed"] => pick(
             method,
             &[
@@ -645,6 +821,10 @@ pub struct Serving {
     pub scope: Scope,
     /// The limits of this listener's lanes.
     pub limits: Limits,
+    /// A tailnet-scope listener for the Mac's own clients (the local route of the node
+    /// origin, N8-1): the TLS front never forwards to it, so no tailnet peer shares its
+    /// failed-auth count. It counts as one window.
+    pub local_route: bool,
 }
 
 /// True for a path that agents use: the proxy, MCP, runs, and access. These
@@ -838,8 +1018,19 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         stop,
         scope,
         limits,
+        local_route,
     } = serving;
-    let listener = Arc::new(Listener::new(scope, hub.config.auth_limiter));
+    let listen = server.server_addr().to_ip();
+    let keys = match (scope, listen) {
+        (Scope::Tailnet { .. }, Some(addr)) if !local_route => FailureKeys::PerPeer(addr),
+        _ => FailureKeys::Whole,
+    };
+    let listener = Arc::new(Listener::new(
+        scope,
+        hub.config.auth_limiter,
+        keys,
+        local_route,
+    ));
     let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
     let slots = Arc::new(Slots {
         all: AtomicUsize::new(0),
@@ -869,7 +1060,6 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     if maintenance.as_ref().is_some_and(Result::is_err) {
         eprintln!("apassy-relay: the maintenance thread cannot start");
     }
-    let listen = server.server_addr().to_ip();
     let mut probed = Instant::now();
     let mut failed_probes = 0;
     let mut outcome = Ok(());
@@ -1119,6 +1309,7 @@ fn respond_ok(request: Request, result: Value) {
 
 /// 429 `rate_limited` with `Retry-After` for a request whose failed-auth count is at its
 /// limit, and a row in the relay audit at most once per ten seconds for each listener.
+/// The row names the count; a per-peer row also names the tailnet peer.
 fn respond_auth_limited(
     hub: &Hub,
     listener: &Listener,
@@ -1126,16 +1317,18 @@ fn respond_auth_limited(
     request: Request,
     now: u64,
 ) {
-    hub.refusal(
-        now,
-        listener.scope.limit_kind(),
-        "rate_limited",
-        &json!({
-            "code": codes::RATE_LIMITED,
-            "scope": listener.scope.name(),
-            "bucket": counted.bucket(),
-        }),
-    );
+    let mut detail = json!({
+        "code": codes::RATE_LIMITED,
+        "scope": listener.scope.name(),
+        "bucket": counted.bucket(),
+    });
+    if let Counted::Peer(peer) = counted {
+        detail["peer"] = json!(peer.to_string());
+    }
+    if listener.local_route {
+        detail["listener"] = json!("local_route");
+    }
+    hub.refusal(now, listener.limit_kind(), "rate_limited", &detail);
     let error = RelayError::new(
         codes::RATE_LIMITED,
         "Too many requests with a bad token or session key. Try again later.",
@@ -1164,11 +1357,13 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (url.clone(), String::new()),
     };
-    // The MCP authorization flow, on a relay that has it (an embedded node).
+    // The MCP authorization flow, on a relay that has it (an embedded node), and never on
+    // its tailnet listener.
     let oauth_route = hub
         .config
         .oauth
         .as_ref()
+        .filter(|_| listener.scope.serves_oauth())
         .and_then(|_| oauth::route(&method, &path));
     // The public listener knows two routes and the flow. Anything else is not there,
     // before any other check.
@@ -1219,7 +1414,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         respond_oauth(hub, request, route, &method, &path, &query, now);
         return;
     }
-    let counted = Counted::of(&path, header_value(&request, "X-Forwarded-For").as_deref());
+    let counted = listener.counted(&request, &path);
     if listener.limited(counted, now) {
         respond_auth_limited(hub, listener, counted, request, now);
         return;
@@ -1308,7 +1503,12 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         let prefix = hub.config.edge.secret().and_then(|secret| {
             connect::verified_prefix(secret.expose(), prefix.as_deref(), mac.as_deref())
         });
-        let result = dispatch_edge(hub, endpoint, &body, prefix, now);
+        // A challenge names the sign-in origin of the request's `Host` (a node has more
+        // than one, docs/SPEC.md section 32.3).
+        let host = (endpoint == Endpoint::Challenge)
+            .then(|| header_value(&request, "Host"))
+            .flatten();
+        let result = dispatch_edge(hub, endpoint, &body, prefix, host.as_deref(), now);
         let recovery = endpoint == Endpoint::ConnectChallenge
             || (endpoint == Endpoint::Connect
                 && serde_json::from_slice::<api::ConnectCreate>(&body)
@@ -1351,6 +1551,20 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         respond_error(request, &error);
         return;
     }
+    // The sealed summary of a question (push-gateway-v1 section 12): only a node in the
+    // gateway mode reads it, and checks its form (400) before the token; the hosted relay
+    // ignores the header.
+    let summary = if endpoint == Endpoint::QuestionPost && hub.push.is_gateway() {
+        match push::checked_summary(header_value(&request, push::SUMMARY_HEADER).as_deref()) {
+            Ok(summary) => summary,
+            Err(error) => {
+                respond_error(request, &error);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     // A push answers a malformed request (400) before it reads the token (section 24.3).
     let push = if endpoint == Endpoint::SyncPush {
         match PushRequest::from_headers(|name| header_value(&request, name)) {
@@ -1379,6 +1593,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         );
         respond_auth_error(
             hub,
+            listener.scope,
             endpoint,
             request,
             &RelayError::unauthenticated(),
@@ -1400,7 +1615,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
                     &json!({"code": error.code, "path_kind": endpoint_kind(endpoint)}),
                 );
             }
-            respond_auth_error(hub, endpoint, request, &error, true);
+            respond_auth_error(hub, listener.scope, endpoint, request, &error, true);
             return;
         }
     };
@@ -1458,7 +1673,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         match authenticate(&core, need, token, after_body) {
             Ok(principal) => principal,
             Err(error) => {
-                respond_auth_error(hub, endpoint, request, &error, true);
+                respond_auth_error(hub, listener.scope, endpoint, request, &error, true);
                 return;
             }
         }
@@ -1473,6 +1688,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             | Endpoint::AnswerPost(_)
             | Endpoint::Settle(_)
             | Endpoint::PushTokenPut
+            | Endpoint::PushHandlePut
             | Endpoint::FeedPut
             | Endpoint::FeedActionPost
             | Endpoint::FeedActionSettle(_)
@@ -1482,7 +1698,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         now
     };
     if endpoint == Endpoint::Mcp {
-        respond_mcp(hub, &core, request, principal, &body);
+        respond_mcp(hub, listener.scope, &core, request, principal, &body);
         return;
     }
     match dispatch(
@@ -1491,6 +1707,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         principal.as_ref(),
         &query,
         &body,
+        summary.as_deref(),
         hold,
         now,
     ) {
@@ -1579,12 +1796,22 @@ fn respond_sync(
             false,
             version.and_then(etag).into_iter().collect(),
         ),
-        Err(SyncError { error, current }) => respond_json_with(
+        Err(SyncError {
+            error,
+            current,
+            retry_after,
+        }) => respond_json_with(
             request,
             error.status(),
             &error.to_envelope(),
             error.code == codes::PAYLOAD_TOO_LARGE,
-            current.and_then(etag).into_iter().collect(),
+            current
+                .and_then(etag)
+                .into_iter()
+                .chain(retry_after.and_then(|seconds| {
+                    Header::from_bytes(&b"Retry-After"[..], seconds.to_string().as_bytes()).ok()
+                }))
+                .collect(),
         ),
     }
 }
@@ -1626,6 +1853,7 @@ fn dispatch_edge(
     endpoint: Endpoint,
     body: &[u8],
     prefix: Option<&str>,
+    host: Option<&str>,
     now: u64,
 ) -> RelayResult<Value> {
     match endpoint {
@@ -1667,7 +1895,7 @@ fn dispatch_edge(
             let core = hub
                 .team(&request.team_id)
                 .ok_or_else(RelayError::unauthenticated)?;
-            devices::challenge(&core, &request, now)
+            devices::challenge_for(&core, &request, host, now)
         }
         Endpoint::Token => {
             let request: TokenRequest = parse_body(body)?;
@@ -1785,6 +2013,7 @@ fn feed_length(request: &Request) -> RelayResult<()> {
 
 fn respond_mcp(
     hub: &Hub,
+    scope: Scope,
     core: &Core,
     request: Request,
     principal: Option<Principal>,
@@ -1803,6 +2032,7 @@ fn respond_mcp(
     let Some(Principal::Agent(agent)) = principal else {
         respond_auth_error(
             hub,
+            scope,
             Endpoint::Mcp,
             request,
             &RelayError::unauthenticated(),
@@ -1828,15 +2058,17 @@ fn respond_mcp(
 /// An error answer that may be a 401 of `POST /mcp`: on a relay with OAuth it carries
 /// `WWW-Authenticate` with the address of the resource metadata (RFC 9728 section 5.1),
 /// so a client can start the authorization flow. `token_sent`: the request had a bearer
-/// token.
+/// token. Never on the tailnet listener, which does not serve the flow
+/// (`Scope::serves_oauth`).
 fn respond_auth_error(
     hub: &Hub,
+    scope: Scope,
     endpoint: Endpoint,
     request: Request,
     error: &RelayError,
     token_sent: bool,
 ) {
-    let challenge = (endpoint == Endpoint::Mcp && error.status() == 401)
+    let challenge = (endpoint == Endpoint::Mcp && error.status() == 401 && scope.serves_oauth())
         .then(|| oauth::www_authenticate(&hub.config, token_sent))
         .flatten()
         .and_then(|value| Header::from_bytes(&b"WWW-Authenticate"[..], value.as_bytes()).ok());
@@ -2023,13 +2255,16 @@ fn wait_of(query: &str) -> RelayResult<u64> {
 }
 
 /// Runs one endpoint. The principal has passed `auth::allow` for its need. `hold`: a
-/// question long poll may wait.
+/// question long poll may wait. `summary`: the checked sealed summary of a question post
+/// (a node in the gateway mode only).
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     core: &Core,
     endpoint: Endpoint,
     principal: Option<&Principal>,
     query: &str,
     body: &[u8],
+    summary: Option<&str>,
     hold: bool,
     now: u64,
 ) -> RelayResult<Value> {
@@ -2151,9 +2386,13 @@ fn dispatch(
             now,
         )?),
         SyncReceipt => sync::receipt(core, member_of(principal)?, &parse_body(body)?, now),
-        QuestionPost => {
-            questions::post(core, device_member_of(principal)?, &parse_body(body)?, now)
-        }
+        QuestionPost => questions::post_with_summary(
+            core,
+            device_member_of(principal)?,
+            &parse_body(body)?,
+            summary,
+            now,
+        ),
         QuestionList => {
             let since = number(query, "since")?.unwrap_or(0);
             let wait = wait_of(query)?;
@@ -2195,6 +2434,10 @@ fn dispatch(
             questions::push_token_put(core, device_member_of(principal)?, &parse_body(body)?, now)
         }
         PushTokenDelete => questions::push_token_delete(core, device_member_of(principal)?, now),
+        PushHandlePut => {
+            push::handle_put(core, device_member_of(principal)?, &parse_body(body)?, now)
+        }
+        PushHandleDelete => push::handle_delete(core, device_member_of(principal)?, now),
         FeedPut => feed::put(core, device_member_of(principal)?, &parse_body(body)?, now),
         FeedDelete => feed::delete(core, device_member_of(principal)?, now),
         FeedList => {
@@ -2480,6 +2723,14 @@ mod tests {
             (Need::Member, Endpoint::PushTokenPut)
         );
         assert_eq!(
+            route("PUT", "/v1/push/handle").unwrap(),
+            (Need::Member, Endpoint::PushHandlePut)
+        );
+        assert_eq!(
+            route("DELETE", "/v1/push/handle").unwrap(),
+            (Need::Member, Endpoint::PushHandleDelete)
+        );
+        assert_eq!(
             route("DELETE", "/v1/push/token").unwrap(),
             (Need::Member, Endpoint::PushTokenDelete)
         );
@@ -2494,6 +2745,8 @@ mod tests {
             ("GET", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/settle"),
             ("DELETE", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers"),
             ("GET", "/v1/push/token"),
+            ("GET", "/v1/push/handle"),
+            ("POST", "/v1/push/handle"),
         ] {
             assert_eq!(
                 route(method, path).unwrap_err().code,
@@ -2648,6 +2901,90 @@ mod tests {
     }
 
     #[test]
+    fn the_tailnet_scope_serves_the_device_routes_and_with_agents_the_team_routes() {
+        let devices = Scope::Tailnet { agents: false };
+        let linux = Scope::Tailnet { agents: true };
+        for (method, path) in [
+            ("GET", "/healthz"),
+            ("POST", "/v1/auth/challenge"),
+            ("POST", "/v1/auth/token"),
+            ("GET", "/v1/devices"),
+            ("POST", "/v1/devices/links"),
+            ("POST", "/v1/devices/link"),
+            ("POST", "/v1/devices/link/cancel"),
+            ("POST", "/v1/devices/links/3/confirm"),
+            ("DELETE", "/v1/devices/3"),
+            ("POST", "/v1/join"),
+            ("GET", "/v1/joins"),
+            ("POST", "/v1/joins/3/confirm"),
+            ("POST", "/v1/invites"),
+            ("POST", "/v1/teams"),
+            ("GET", "/v1/me"),
+            ("POST", "/v1/leave"),
+            ("GET", "/v1/members"),
+            ("PUT", "/v1/members/3/role"),
+            ("DELETE", "/v1/sync"),
+            ("GET", "/v1/sync/head"),
+            ("PUT", "/v1/sync/snapshot"),
+            ("POST", "/v1/questions"),
+            ("GET", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers"),
+            ("PUT", "/v1/push/handle"),
+            ("PUT", "/v1/push/token"),
+            ("PUT", "/v1/feed"),
+            ("GET", "/v1/feed/actions"),
+        ] {
+            assert!(devices.serves(method, path), "{method} {path}");
+            assert!(linux.serves(method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            ("POST", "/mcp"),
+            ("GET", "/p/apassy_ses_x/api.example.com/v1"),
+            ("POST", "/v1/runs"),
+            ("GET", "/v1/runs/7"),
+            ("GET", "/v1/access"),
+            ("GET", "/v1/host/requests"),
+            ("POST", "/v1/host/requests/7/release"),
+            ("POST", "/v1/collections"),
+            ("PUT", "/v1/collections/3/policy"),
+            ("POST", "/v1/items"),
+            ("DELETE", "/v1/items/3"),
+            ("POST", "/v1/grants"),
+            ("POST", "/v1/agents"),
+            ("GET", "/v1/approvals"),
+            ("GET", "/v1/audit"),
+        ] {
+            assert!(!devices.serves(method, path), "{method} {path}");
+            assert!(linux.serves(method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            ("POST", "/v1/connect"),
+            ("POST", "/v1/connect/challenge"),
+            ("GET", "/.well-known/oauth-authorization-server"),
+            ("GET", "/.well-known/oauth-protected-resource"),
+            ("POST", "/oauth/register"),
+            ("GET", "/oauth/authorize"),
+            ("POST", "/oauth/token"),
+            ("GET", "/"),
+            ("GET", "/v1/mex"),
+            ("GET", "/v1/devicesx"),
+            ("GET", "/v1/questionsx"),
+            ("GET", "/v1/runsx"),
+            ("GET", "/mcp/x"),
+            ("GET", "/v1/feedx"),
+            ("GET", "/v1/me/x"),
+            ("GET", "/healthz/x"),
+            ("GET", "/px/"),
+        ] {
+            assert!(!devices.serves(method, path), "{method} {path}");
+            assert!(!linux.serves(method, path), "{method} {path}");
+        }
+        assert!(!devices.serves_oauth() && !linux.serves_oauth());
+        assert!(Scope::Node.serves_oauth() && Scope::Public.serves_oauth());
+        assert_eq!(linux.name(), "tailnet");
+        assert_eq!(devices.limit_kind(), "auth_limit_tailnet");
+    }
+
+    #[test]
     fn the_failed_auth_limit_trips_at_the_21st_request_and_resets_after_its_window() {
         let failures = AuthFailures::default();
         let start = 1_000;
@@ -2755,6 +3092,24 @@ mod tests {
         assert_eq!(Counted::Agent(None).bucket(), "shared");
         assert_eq!(Counted::Agent(source).bucket(), "source");
         assert_eq!(Counted::Listener.bucket(), "listener");
+        assert_eq!(Counted::Peer(WHOLE_LISTENER).bucket(), "peer");
+    }
+
+    /// N8-1: the keys of the tailnet listener (its peers) have windows of their own, and
+    /// none of them is the window of the whole listener.
+    #[test]
+    fn each_failure_key_has_its_own_window() {
+        let failures = AuthFailures::default();
+        let peer_a: IpAddr = "100.64.0.11".parse().unwrap();
+        let peer_b: IpAddr = "100.64.0.12".parse().unwrap();
+        let start = 7_000;
+        for _ in 0..AUTH_FAILURES_MAX {
+            failures.record_for(peer_a, start);
+        }
+        assert!(failures.limited_for(peer_a, start + 1));
+        assert!(!failures.limited_for(peer_b, start + 1));
+        assert!(!failures.limited(start + 1));
+        assert!(!failures.limited_for(peer_a, start + AUTH_FAILURE_WINDOW_SECS));
     }
 
     #[test]

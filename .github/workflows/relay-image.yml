@@ -1,32 +1,75 @@
-# The relay image and both downloadable team CLIs (ADR 0037: the relay is the crate
-# crates/apassy-relay of this workspace). GitHub builds release artifacts; never build on
-# the production VPS or in a local VM. Push image-* on the exact tested release commit.
+# The relay image, the Linux node packages (plan S2-S3, L3), and both downloadable team
+# CLIs (ADR 0037: the relay is the crate crates/apassy-relay of this workspace). GitHub builds release artifacts; never build on
+# the production VPS or in a local VM. Push image-release-<version> on the tested main
+# commit, or image-test-* for artifacts without a release label or publication.
 # Deployment remains a separate step.
 name: Relay image
 
 on:
   push:
-    tags: ["image-*"]
+    tags: ["image-release-*", "image-test-*"]
 
 permissions:
   contents: read
 
 jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    outputs:
+      publish: ${{ steps.guard.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Guard release image tags
+        id: guard
+        shell: bash
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/apassy-relay/Cargo.toml", "rb"))["package"]["version"])')"
+          # Only the matching release tag on a commit already on main may carry a
+          # release label. Integration test tags build artifacts with test/SHA tags.
+          case "$GITHUB_REF_NAME" in
+            image-release-*)
+              test "$GITHUB_REF_NAME" = "image-release-$version" || {
+                echo "::error::Release image tag must match relay crate version $version"
+                exit 1
+              }
+              git fetch origin main:refs/remotes/origin/main
+              git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              ;;
+            image-test-*) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Unsupported image tag"; exit 1 ;;
+          esac
+
   image:
+    needs: guard
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # id-token and attestations: provenance and SBOM attestations (docs/operations/release.md,
+    # "Attestations and SBOMs"). Only a push of an image-* tag runs this workflow.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Build the image
+        env:
+          RELEASE_IMAGE: ${{ needs.guard.outputs.publish }}
         run: |
           version="$(awk -F '\"' '/^version = / {print $2; exit}' crates/apassy-relay/Cargo.toml)"
-          tag="apassy-relay:release-$version"
+          tag="apassy-relay:test-$GITHUB_SHA"
+          if [ "$RELEASE_IMAGE" = true ]; then tag="apassy-relay:release-$version"; fi
           immutable="apassy-relay:sha-$GITHUB_SHA"
-          echo "TAG=$tag" >> "$GITHUB_ENV"
-          echo "IMMUTABLE_TAG=$immutable" >> "$GITHUB_ENV"
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+          {
+            echo "TAG=$tag"
+            echo "IMMUTABLE_TAG=$immutable"
+            echo "VERSION=$version"
+          } >> "$GITHUB_ENV"
           docker build --platform linux/amd64 \
             --build-arg "APASSY_RELEASE_VERSION=$version" \
             --build-arg "APASSY_RELEASE_COMMIT=$GITHUB_SHA" \
@@ -52,6 +95,15 @@ jobs:
               "image_id": image["Id"], "architecture": image["Architecture"],
           }, indent=2) + "\n")
           PY
+      - name: Attest the image tarball and its record
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            relay-image.tar.gz
+            relay-image.release.json
+          sbom-subject-path: relay-image.tar.gz
+          sbom-image: ${{ env.TAG }}
+          sbom-output: relay-image.spdx.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: relay-image
@@ -61,32 +113,82 @@ jobs:
             relay-image.id
             relay-image.inspect.json
             relay-image.release.json
+            relay-image.spdx.json
           if-no-files-found: error
           retention-days: 7
 
-  linux-cli:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    # Debian 11 glibc 2.31 is the oldest supported Linux runtime. Do not export
-    # the CLI from the trixie relay image: that raises its glibc requirement.
+  # The Linux node (plan S2-S3, D8, unit L3): `apassy-app --no-default-features --features
+  # node`, installed as `apassy`, for x86_64 and aarch64, as a .tar.gz and a .deb
+  # (packaging/linux/build.sh), with SHA256SUMS and attestations. The x86_64 leg also
+  # builds the old single binary apassy-team-linux-x86_64 for one more release: the
+  # name is an alias of `apassy team` until then.
+  linux-node:
+    needs: guard
+    name: linux-node (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    # Debian 11 glibc 2.31 is the oldest supported Linux runtime, on both machines. Do
+    # not export the node from the trixie relay image: that raises its glibc requirement.
+    # The image is a multi-platform index: the arm64 runner pulls its arm64 image.
     container:
       image: rust:1.97.0-bullseye@sha256:08d3da459cca408754c8071b1f74ed334c40a149e7fa6a150bceb11e2ee924c5
     env:
       CARGO_INCREMENTAL: "0"
       APASSY_RELEASE_COMMIT: ${{ github.sha }}
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install artifact inspection tools
         run: |
+          test "$(uname -m)" = "$ARCH"
           apt-get update
           apt-get install -y --no-install-recommends binutils file python3
-      - name: Build and verify the Linux CLI
+      - name: Build the node
         run: |
-          test "$(uname -m)" = x86_64
-          cargo build --release --locked -p apassy-relay --bin apassy-team
+          # The container runs as root on a checkout of the runner's user.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bins="--bin apassy-app"
+          if [ "$ARCH" = x86_64 ]; then bins="$bins --bin apassy-team"; fi
+          # shellcheck disable=SC2086 # two words on purpose
+          cargo build --release --locked -p apassy-app -p apassy-relay \
+            --no-default-features --features apassy-app/node $bins
+      - name: The node has no eframe
+        run: |
+          cargo tree --locked -p apassy-app --no-default-features --features node \
+            -e normal,build --prefix none > target/node-tree.txt
+          grep -q '^apassy-relay ' target/node-tree.txt
+          count="$(grep -c eframe target/node-tree.txt || true)"
+          test "$count" = 0
+      - name: Package the node
+        run: |
           mkdir -p dist
+          cp target/release/apassy-app "dist/apassy-linux-$ARCH"
+          strip "dist/apassy-linux-$ARCH"
+          file "dist/apassy-linux-$ARCH" | tee "dist/file-$ARCH.txt"
+          ldd "dist/apassy-linux-$ARCH" | tee "dist/ldd-$ARCH.txt"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$GITHUB_SHA")" \
+            packaging/linux/build.sh --binary "dist/apassy-linux-$ARCH" --arch "$ARCH" \
+            --out dist --max-glibc 2.31
+          # The packages hold the binary; the loose copy is not a download.
+          rm "dist/apassy-linux-$ARCH"
+          cat "dist/SHA256SUMS-node-$ARCH" "dist/release-linux-$ARCH.json"
+      - name: Build and verify the old Linux CLI
+        if: matrix.arch == 'x86_64'
+        run: |
           cp target/release/apassy-team dist/apassy-team-linux-x86_64
           strip dist/apassy-team-linux-x86_64
           version="$(awk -F '\"' '/^version = / {print $2; exit}' crates/apassy-relay/Cargo.toml)"
@@ -111,16 +213,128 @@ jobs:
               "glibc_max": ".".join(map(str, max(versions))),
           }, indent=2) + "\n")
           PY
+      # The SBOM scans the packages' binary and the workspace Cargo.lock: a superset of
+      # the crates in the node, because the lockfile is shared by the whole workspace.
+      # A folder in the workspace: runner.temp names the host path, not the container path.
+      - name: Stage the SBOM input
+        run: |
+          rm -rf "target/sbom-node-$ARCH"
+          mkdir -p "target/sbom-node-$ARCH"
+          cp target/release/apassy-app "target/sbom-node-$ARCH/apassy"
+          strip "target/sbom-node-$ARCH/apassy"
+          cp Cargo.lock "target/sbom-node-$ARCH/"
+      - name: Attest the node packages
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            dist/apassy-*-linux-${{ matrix.arch }}.tar.gz
+            dist/apassy_*.deb
+            dist/release-linux-${{ matrix.arch }}.json
+          sbom-subject-path: |
+            dist/apassy-*-linux-${{ matrix.arch }}.tar.gz
+            dist/apassy_*.deb
+          sbom-path: target/sbom-node-${{ matrix.arch }}
+          sbom-output: dist/apassy-node-linux-${{ matrix.arch }}.spdx.json
+      - name: Stage the SBOM input of the old CLI
+        if: matrix.arch == 'x86_64'
+        run: |
+          rm -rf target/sbom-linux
+          mkdir -p target/sbom-linux
+          cp dist/apassy-team-linux-x86_64 Cargo.lock target/sbom-linux/
+      - name: Attest the old Linux CLI
+        if: matrix.arch == 'x86_64'
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            dist/apassy-team-linux-x86_64
+            dist/release-linux.json
+          sbom-subject-path: dist/apassy-team-linux-x86_64
+          sbom-path: target/sbom-linux
+          sbom-output: dist/apassy-team-linux-x86_64.spdx.json
+      - name: Split the old CLI from the node files
+        if: matrix.arch == 'x86_64'
+        run: |
+          mkdir -p cli
+          mv dist/apassy-team-linux-x86_64 dist/apassy-team-linux-x86_64.spdx.json \
+            dist/SHA256SUMS-linux dist/release-linux.json dist/file.txt dist/ldd.txt \
+            dist/glibc-symbols.txt cli/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: apassy-team-linux-x86_64
+          name: apassy-node-linux-${{ matrix.arch }}
           path: dist/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.arch == 'x86_64'
+        with:
+          name: apassy-team-linux-x86_64
+          path: cli/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The packages on the runner itself (Ubuntu 24.04) and in Debian 11 and 12: install,
+  # `--version`, `systemd-analyze verify` of both units, removal, and install.sh from a
+  # file:// directory (packaging/linux/verify.sh).
+  linux-node-verify:
+    name: linux-node-verify (${{ matrix.arch }})
+    needs: linux-node
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apassy-node-linux-${{ matrix.arch }}
+          path: dist
+      - name: Verify the packages
+        run: packaging/linux/verify.sh --dist dist --arch "${{ matrix.arch }}" --containers
+
+  # One SHA256SUMS of the four node packages, for /dl/ next to the team CLIs.
+  linux-node-sums:
+    needs: linux-node
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: apassy-node-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Combine the checksums
+        run: |
+          cd dist
+          LC_ALL=C sort -k 2 SHA256SUMS-node-x86_64 SHA256SUMS-node-aarch64 > SHA256SUMS-node
+          test "$(wc -l < SHA256SUMS-node)" -eq 4
+          sha256sum -c SHA256SUMS-node
+          cat SHA256SUMS-node
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-node-sha256sums
+          path: |
+            dist/SHA256SUMS-node
+            dist/release-linux-x86_64.json
+            dist/release-linux-aarch64.json
           if-no-files-found: error
           retention-days: 7
 
   darwin-cli:
+    needs: guard
     runs-on: macos-15
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       CARGO_INCREMENTAL: "0"
       APASSY_RELEASE_COMMIT: ${{ github.sha }}
@@ -156,6 +370,20 @@ jobs:
               "filename": artifact.name, "sha256": digest, "platform": "darwin-arm64",
           }, indent=2) + "\n")
           PY
+      - name: Stage the SBOM input
+        run: |
+          rm -rf target/sbom-darwin
+          mkdir -p target/sbom-darwin
+          cp dist/apassy-team-darwin-arm64 Cargo.lock target/sbom-darwin/
+      - name: Attest the Apple silicon CLI
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            dist/apassy-team-darwin-arm64
+            dist/release-darwin.json
+          sbom-subject-path: dist/apassy-team-darwin-arm64
+          sbom-path: target/sbom-darwin
+          sbom-output: dist/apassy-team-darwin-arm64.spdx.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apassy-team-darwin-arm64

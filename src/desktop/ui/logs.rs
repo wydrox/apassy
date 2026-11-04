@@ -483,7 +483,7 @@ fn cells(event: &LogEvent, several: bool, open: bool, offset: i64) -> Vec<Cell> 
     cells.push(Cell::plain(event.kind.label()));
     cells.push(match &event.credential {
         Some(credential) if event.production => {
-            Cell::Production(kit::text(credential, Font::Body).color(kit::LABEL))
+            Cell::Production(kit::text(credential, Font::Body).color(kit::palette().label))
         }
         Some(credential) => Cell::plain(credential),
         None => Cell::secondary("—"),
@@ -497,7 +497,7 @@ fn cells(event: &LogEvent, several: bool, open: bool, offset: i64) -> Vec<Cell> 
     };
     let value = match tone {
         Some(tone) => kit::medium(text, Font::Body).color(tone.text()),
-        None => kit::text(text, Font::Body).color(kit::LABEL),
+        None => kit::text(text, Font::Body).color(kit::palette().label),
     };
     cells.push(Cell::Disclosure { value, open });
     cells
@@ -517,14 +517,14 @@ fn expansion(ui: &mut Ui, event: &LogEvent, requests: &[ProxyRow], offset: i64) 
             ui.spacing_mut().item_spacing.y = 4.0;
             if !event.command.is_empty() {
                 egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(242, 242, 244))
+                    .fill(kit::palette().code)
                     .corner_radius(6)
                     .inner_margin(egui::Margin::symmetric(10, 8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.add(
                             egui::Label::new(
-                                kit::text(&event.command, Font::Mono).color(kit::LABEL),
+                                kit::text(&event.command, Font::Mono).color(kit::palette().label),
                             )
                             .wrap(),
                         );
@@ -547,7 +547,8 @@ fn expansion(ui: &mut Ui, event: &LogEvent, requests: &[ProxyRow], offset: i64) 
                     ui.horizontal(|ui| {
                         ui.add_space(12.0);
                         ui.label(
-                            kit::text("No proxied requests", Font::Callout).color(kit::SECONDARY),
+                            kit::text("No proxied requests", Font::Callout)
+                                .color(kit::palette().secondary),
                         );
                     });
                     ui.add_space(10.0);
@@ -562,8 +563,12 @@ fn expansion(ui: &mut Ui, event: &LogEvent, requests: &[ProxyRow], offset: i64) 
                     };
                     let cells = [
                         Cell::secondary(bouncer::clock_seconds(request.at, offset)),
-                        Cell::Text(kit::text(&request.method, Font::Mono).color(kit::LABEL)),
-                        Cell::Text(kit::text(&request.host, Font::Mono).color(kit::LABEL)),
+                        Cell::Text(
+                            kit::text(&request.method, Font::Mono).color(kit::palette().label),
+                        ),
+                        Cell::Text(
+                            kit::text(&request.host, Font::Mono).color(kit::palette().label),
+                        ),
                         status,
                     ];
                     ui.push_id(("proxy-row", index), |ui| {

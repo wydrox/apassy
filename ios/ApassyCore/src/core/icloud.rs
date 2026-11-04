@@ -435,6 +435,9 @@ impl Core {
                 team_id: None,
                 device_id: None,
                 added_at: now() as i64,
+                pin: None,
+                alt: Vec::new(),
+                node_name: None,
             };
             let mut list = guard(&self.list);
             if list.get(&entry.id).is_some() {

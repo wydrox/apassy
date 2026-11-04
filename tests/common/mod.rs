@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use apassy::sync as relay_api;
 
 #[cfg(feature = "vault")]
+pub mod fake_connect;
+#[cfg(feature = "vault")]
 pub mod fake_relay;
 
 /// A fake Jev-compatible bouncer (contract v2). By default it answers a clean,
@@ -78,4 +80,38 @@ pub fn key_raw(conn: &rusqlite::Connection, passphrase: &str) -> rusqlite::Resul
     #[cfg(feature = "insecure-test-kdf")]
     apassy::vault::test_kdf::match_vault_kdf(conn)?;
     Ok(())
+}
+
+/// Make `item` of the unlocked `vault` a source of `kind` with `settings` after the owner
+/// check of exactly those settings (`OwnerAction::ChangeShortLivedSettings`, A-L2), with
+/// the passphrase `pass` as the owner check. The vault goes through an owner gate and
+/// comes back with the row.
+#[cfg(feature = "vault")]
+pub fn make_source(
+    vault: apassy::vault::Vault,
+    pass: &str,
+    item: u64,
+    kind: apassy::vault::ShortLivedKind,
+    settings: &str,
+    now: u64,
+) -> (apassy::vault::Vault, apassy::vault::ShortLived) {
+    use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate};
+    let action = OwnerAction::ChangeShortLivedSettings {
+        item,
+        kind,
+        settings_sha256: apassy::vault::ShortLivedSettings::parse(kind, settings)
+            .expect("settings")
+            .digest(),
+    };
+    let shared: apassy::broker::SharedVault = Arc::new(Mutex::new(Some(vault)));
+    let gate = OwnerGate::new(Arc::clone(&shared), None);
+    let proof = gate
+        .authorize(action, OwnerCheck::passphrase(pass))
+        .expect("owner check");
+    drop(gate);
+    let mut vault = shared.lock().unwrap().take().expect("vault");
+    let row = vault
+        .set_short_lived(item, kind, settings, proof, now)
+        .expect("source");
+    (vault, row)
 }

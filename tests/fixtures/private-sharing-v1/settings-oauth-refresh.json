@@ -1,0 +1,6 @@
+{
+  "token_url": "https://auth.example.test/oauth/token",
+  "client_auth": "basic",
+  "revoke_url": "https://auth.example.test/oauth/revoke",
+  "scope": "read write"
+}

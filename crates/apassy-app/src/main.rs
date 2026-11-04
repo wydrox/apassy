@@ -1,32 +1,60 @@
-//! Native desktop entry for Apassy, and the `apassy` owner command line (ADR 0017): the
-//! main executable of the app bundle (`Contents/MacOS/apassy`, built as `apassy-app`).
+//! The main executable of Apassy, built as `apassy-app` and installed as `apassy`.
 //!
-//! Without arguments, it opens the window. With a command, it talks to the running
-//! window over the owner socket. It never prints a secret value of an item.
+//! - macOS (feature `window`, the app bundle's `Contents/MacOS/apassy`): without
+//!   arguments, it opens the window; with a command, it is the `apassy` owner command
+//!   line (ADR 0017) and talks to the running window over the owner socket. It never
+//!   prints a secret value of an item. The window runs the Mac's own node for cloud
+//!   agents (ADR 0037): this binary passes the embedded relay of this workspace in.
+//! - Linux (feature `node`; the package builds `--no-default-features --features node`):
+//!   the node without a window, `apassy serve`, `up`, `pair`, `status`, `doctor`, and
+//!   `team` (plan S2-S3, D8; `apassy_relay::node`).
 //!
-//! The window runs the Mac's own node for cloud agents (ADR 0037): this binary passes
-//! the embedded relay of this workspace in.
+//! `serve`, `up`, `pair`, and `team` are node commands everywhere. `status` and `doctor`
+//! are node commands on Linux and in a build without the window; on macOS they stay the
+//! owner commands.
 
+#[cfg(feature = "window")]
 use std::sync::Arc;
 
+#[cfg(feature = "window")]
 use apassy::node::backend::NodeBackend;
-use rustix::process::{Resource, Rlimit, setrlimit};
 
 // The same narrow diagnostics sink as the root `apassy` target.
+#[cfg(feature = "window")]
 #[path = "../../../src/owner_diagnostics.rs"]
 mod owner_diagnostics;
 
-fn main() -> eframe::Result {
-    owner_diagnostics::install();
-    // Key-memory review F6: a core file would contain the vault memory. The hard
-    // limit is 0 too, so a parent shell or a later call cannot raise it.
-    if disable_core_dumps().is_err() {
-        eprintln!("Apassy cannot turn off core dumps, so it does not start.");
-        std::process::exit(1);
+/// True when `args` name a command of the node (`apassy_relay::node::main`).
+fn is_node_command(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("serve" | "up" | "pair" | "team") => true,
+        Some("status" | "doctor") => cfg!(target_os = "linux") || !cfg!(feature = "window"),
+        // Without the window there is no owner command line: the node prints its usage.
+        _ => !cfg!(feature = "window"),
     }
+}
+
+fn main() {
+    // Key-memory review F6 and ADR 0011 stage 6: no core file (it would contain the
+    // vault memory; the hard limit is 0 too). First, before anything reads a secret.
+    apassy::harden::harden_process_or_exit("apassy");
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if is_node_command(&args) {
+        std::process::exit(apassy_relay::node::main(args));
+    }
+    #[cfg(feature = "window")]
+    window_main(args);
+}
+
+#[cfg(feature = "window")]
+fn window_main(args: Vec<String>) {
+    owner_diagnostics::install();
     if args.is_empty() {
-        return apassy::desktop::run_with(desktop_options());
+        if let Err(error) = apassy::desktop::run_with(desktop_options()) {
+            eprintln!("apassy: the window stopped: {error}");
+            std::process::exit(1);
+        }
+        return;
     }
     if args.len() == 1 && args[0] == "--smoke-test" {
         match apassy::desktop::smoke_test() {
@@ -37,7 +65,7 @@ fn main() -> eframe::Result {
                 eprintln!(
                     "smoke-test: owner vault round trip passed. No real credentials were used."
                 );
-                return Ok(());
+                return;
             }
             Err(err) => {
                 eprintln!("smoke-test failed: {err}");
@@ -55,32 +83,22 @@ fn main() -> eframe::Result {
 
 /// The window with the Mac's own node: the relay of this workspace, in this process
 /// (ADR 0037, cloud slice, decision 1).
+#[cfg(feature = "window")]
 fn desktop_options() -> apassy::desktop::RunOptions {
     let node: Arc<dyn NodeBackend> = Arc::new(apassy_relay::embedded::EmbeddedRelay::default());
     apassy::desktop::RunOptions { node: Some(node) }
 }
 
-/// Set the soft and the hard core file size limit to 0. Child processes, such as
-/// agent commands with secrets, get the same limit.
-fn disable_core_dumps() -> rustix::io::Result<()> {
-    setrlimit(
-        Resource::Core,
-        Rlimit {
-            current: Some(0),
-            maximum: Some(0),
-        },
-    )
-}
-
-// The shipped main executable sets the limit itself: its own copy of the check.
+// The shipped main executable hardens itself: its own copy of the check.
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rustix::process::getrlimit;
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+
+    use super::is_node_command;
 
     #[test]
     fn core_dump_limit_is_zero_and_cannot_be_raised() {
-        disable_core_dumps().expect("set the core limit");
+        apassy::harden::harden_process().expect("set the core limit");
         let limit = getrlimit(Resource::Core);
         assert_eq!(limit.current, Some(0));
         assert_eq!(limit.maximum, Some(0));
@@ -97,5 +115,25 @@ mod tests {
             .output()
             .expect("run sh");
         assert_eq!(String::from_utf8_lossy(&child.stdout), "0\n0\n");
+    }
+
+    fn words(text: &str) -> Vec<String> {
+        text.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn node_commands_go_to_the_node() {
+        for command in ["serve", "up --port 8444", "pair --json", "team me"] {
+            assert!(is_node_command(&words(command)), "{command}");
+        }
+        let linux_or_headless = cfg!(target_os = "linux") || !cfg!(feature = "window");
+        assert_eq!(is_node_command(&words("status --json")), linux_or_headless);
+        assert_eq!(is_node_command(&words("doctor")), linux_or_headless);
+        // The owner command line keeps its commands when the window is built in.
+        assert_eq!(
+            is_node_command(&words("items list")),
+            !cfg!(feature = "window")
+        );
+        assert_eq!(is_node_command(&[]), !cfg!(feature = "window"));
     }
 }

@@ -167,6 +167,9 @@ impl From<SyncError> for CoreError {
                 "safety_mismatch",
                 "The relay's words differ from this iPhone's. Do not confirm on the Mac. Cancel, and make a new link.",
             ),
+            // Contract node-pairing-v1 sections 4 and 7.
+            SyncError::PinMismatch => Self::new("pin_mismatch", apassy::sync::PIN_CHANGED_TEXT),
+            SyncError::LinkInvalid(refusal) => Self::new("link_invalid", refusal.message()),
             SyncError::Relay(refusal) => refusal.into(),
         }
     }
@@ -190,6 +193,12 @@ impl From<RelayRefusal> for CoreError {
             RelayRefusal::TeamLimit => Self::new(
                 "rate_limited",
                 "The relay takes no more changes this hour. Apassy tries again later.",
+            ),
+            // `403 plan_required` (no vault copy on this relay): an existing code, so the
+            // iPhone contract gets no new one.
+            RelayRefusal::PlanRequired => Self::new(
+                "not_allowed",
+                "The relay does not keep a copy of this vault yet.",
             ),
             RelayRefusal::RateLimited => Self::new(
                 "rate_limited",

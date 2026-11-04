@@ -1075,10 +1075,12 @@ impl MockWorker {
     /// [`MockWorker::config`] with a call `timeout` and a backoff `unit` instead of the
     /// relay's 10 s and 1 s (pinned by the unit test of `server::push`).
     fn config_with(&self, timeout: Duration, unit: Duration) -> PushConfig {
-        PushConfig {
+        PushConfig::Worker {
+            url: self.url.clone(),
+            topic: TOPIC.to_string(),
+            secret: SecretString::new(PUSH_SECRET.to_string()),
             timeout,
             backoff_unit: unit,
-            ..self.config()
         }
     }
 

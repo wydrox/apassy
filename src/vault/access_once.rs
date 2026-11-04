@@ -288,7 +288,7 @@ impl Vault {
                 vec![],
             ),
             (
-                "SELECT team_id,relay_url,device_id,public_key,purposes FROM relay_membership ORDER BY team_id",
+                "SELECT team_id,relay_url,device_id,public_key,purposes,key_source,key_pkcs8 FROM relay_membership ORDER BY team_id",
                 vec![],
             ),
             (
@@ -894,6 +894,47 @@ mod tests {
         assert!(v.access_status(agent, id + 1).is_err());
         assert!(v.cancel_scoped_access_request(agent, id + 1).is_err());
         assert_eq!(v.scoped_access_requests().unwrap().len(), 1);
+    }
+    /// B-L4: the policy digest covers how a relay membership signs: its key source and
+    /// its private key, also when the public key stays.
+    #[test]
+    fn the_policy_digest_covers_the_key_of_each_relay_membership() {
+        let (_d, mut v, agent, item, _id) = fixture();
+        let digest = |v: &Vault| v.access_policy_digest(agent, item, "/w", "p").unwrap();
+        let mut public_key = vec![0x04];
+        public_key.extend_from_slice(&[7; 64]);
+        v.add_relay_membership(&crate::vault::RelayMembership {
+            team_id: "t_aaaaaaaaaa".into(),
+            relay_url: "https://relay.example.test".into(),
+            device_id: 2,
+            public_key,
+            key_pkcs8: zeroize::Zeroizing::new(vec![0xab; 138]),
+            purposes: std::collections::BTreeSet::from([crate::vault::MembershipPurpose::Sync]),
+            created_at: 0,
+            pin: None,
+            alt: Vec::new(),
+        })
+        .unwrap();
+        let first = digest(&v);
+        let conn = v.conn_ref().unwrap();
+        conn.execute(
+            "UPDATE relay_membership SET key_pkcs8 = ?1 WHERE team_id = 't_aaaaaaaaaa'",
+            [vec![0xcd_u8; 138]],
+        )
+        .unwrap();
+        let rekeyed = digest(&v);
+        assert_ne!(rekeyed, first, "another private key, the same public key");
+        v.conn_ref()
+            .unwrap()
+            .execute(
+                "UPDATE relay_membership SET key_source = 'account', key_pkcs8 = X''
+                 WHERE team_id = 't_aaaaaaaaaa'",
+                [],
+            )
+            .unwrap();
+        let account = digest(&v);
+        assert_ne!(account, rekeyed, "the account key signs now");
+        assert_ne!(account, first);
     }
     #[test]
     fn scope_mutations_and_key_or_policy_rotation_fence_admission() {

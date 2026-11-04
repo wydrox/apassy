@@ -14,6 +14,9 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case storage
         case unsupportedSchema = "unsupported_schema"
         case linkInvalid = "link_invalid"
+        /// A node presented another certificate than the pin of its link (node-pairing-v1 section 4):
+        /// nothing was sent. Pair again.
+        case pinMismatch = "pin_mismatch"
         case joinRefused = "join_refused"
         case safetyMismatch = "safety_mismatch"
         case relayUnreachable = "relay_unreachable"
@@ -53,6 +56,10 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         /// The time of the answer is too old to send again: answer again.
         case staleAnswer = "stale_answer"
         case pushUnavailable = "push_unavailable"
+        /// The push gateway of a node team cannot be reached (push-gateway-v1); the core tries again.
+        case pushGatewayUnreachable = "push_gateway_unreachable"
+        /// The Mac of a node team does not use the push gateway that this iPhone names.
+        case pushGatewayRefused = "push_gateway_refused"
         /// The `vault_id` of an answer is not the vault of its question.
         case wrongVault = "wrong_vault"
         // The agents of the Macs (section 5.12).
@@ -213,6 +220,9 @@ public protocol VaultService: Sendable {
     /// Remove the token from the relay, as `pushTokenSet` reaches it. `pending`: the vaults whose
     /// team keeps it until they open (a core that keeps every unlocked vault; else empty).
     func pushTokenClear() async throws -> PushCleared
+    /// The summary key of the questions team of each unlocked vault (push-gateway-v1 section
+    /// 12), for the Keychain group of the Notification Service Extension.
+    func pushSummaryKeys() async throws -> [PushSummaryKey]
     /// Join the notifications-only team of the selected vault with the device link of the Mac.
     /// `answerKey`: the answer key of this iPhone (X9.63), which goes to the Mac that confirms.
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo

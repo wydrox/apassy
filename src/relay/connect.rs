@@ -1,4 +1,8 @@
-//! Account-free, questions-only onboarding. No operator code, account, or sync entitlement.
+//! Account-free onboarding on a relay without an operator code or an account: a Connect
+//! team (`POST /v1/connect`) for the questions (ADR 0032), or for relay sync (plans
+//! section 4.1, plan s7 unit S0) where the relay gives new Connect teams a sync size
+//! (`APASSY_RELAY_CONNECT_SYNC_BYTES`). A vault has at most one Connect team: relay sync
+//! uses the questions team of the vault, and the questions later use the sync team.
 use crate::sync::relay::{clean_name, json_request};
 use crate::sync::relay_http;
 use crate::sync::{DeviceKey, RelayUrl, SyncError, decode_b64u, encode_b64u};
@@ -20,6 +24,9 @@ pub enum ConnectError {
     Unsupported,
     Refused,
     OriginChanged,
+    /// The vault has a Connect team that another Mac holds and this Mac is not in: this
+    /// Mac joins it with a link instead of making a second team.
+    JoinOtherMac,
 }
 impl From<SyncError> for ConnectError {
     fn from(e: SyncError) -> Self {
@@ -42,6 +49,7 @@ impl fmt::Display for ConnectError {
             Self::NetworkLimit => "This network has reached Connect's creation limit (up to 5 connections per day). Wait until tomorrow and try again. Your saved key will be reused.",
             Self::Unsupported => "This relay does not support Connect. Update the relay, then try again.",
             Self::OriginChanged => "A connection is already waiting at another relay address. Retry with that address so Apassy can reuse its saved key.",
+            Self::JoinOtherMac => "This vault already has a relay connection on another Mac. On that Mac, turn on relay sync for this vault, then select “Join from another Mac” here.",
             Self::Refused => "The relay could not complete Connect. Nothing was enabled. Your connection key is saved; try again later.",
             Self::Sync(e) => return write!(f, "{e}"),
         })
@@ -50,11 +58,29 @@ impl fmt::Display for ConnectError {
 
 /// Commit a stable key and request labels before returning anything that can send a request.
 /// A retry after a lock/restart reads this same row, even if labels have since changed.
+/// The questions path: [`prepare_connect_for`] with the purpose `questions`.
 pub fn prepare_connect(
     vault: &mut Vault,
     relay: &str,
     team: &str,
     device: &str,
+) -> Result<PendingConnect, ConnectError> {
+    prepare_connect_for(vault, relay, team, device, MembershipPurpose::Questions)
+}
+
+/// [`prepare_connect`] for `purpose`. The row is the one Connect attempt of the vault for
+/// every purpose: a row that a questions attempt left (also one whose team was made) is
+/// the row of a relay sync attempt, so the vault keeps one Connect team. `questions`: a
+/// vault with a questions membership or a questions team has its team (`AlreadyEnabled`).
+/// `sync`: a vault with a questions team that this Mac is not in joins it from the Mac in
+/// it (`JoinOtherMac`); the caller uses this Mac's questions membership on the relay
+/// ([`crate::relay::membership::questions_team_for_sync`]) before it asks for a row.
+pub fn prepare_connect_for(
+    vault: &mut Vault,
+    relay: &str,
+    team: &str,
+    device: &str,
+    purpose: MembershipPurpose,
 ) -> Result<PendingConnect, ConnectError> {
     let url = RelayUrl::parse(relay)?;
     if let Some(pending) = vault.pending_connect()? {
@@ -63,10 +89,21 @@ pub fn prepare_connect(
         }
         return Ok(pending);
     }
-    if super::membership::questions_membership(vault)?.is_some()
-        || super::membership::existing_questions_team(vault)?.is_some()
-    {
-        return Err(SyncError::AlreadyEnabled.into());
+    match purpose {
+        MembershipPurpose::Questions => {
+            if super::membership::questions_membership(vault)?.is_some()
+                || super::membership::existing_questions_team(vault)?.is_some()
+            {
+                return Err(SyncError::AlreadyEnabled.into());
+            }
+        }
+        MembershipPurpose::Sync => {
+            if super::membership::existing_questions_team(vault)?.is_some() {
+                return Err(ConnectError::JoinOtherMac);
+            }
+        }
+        // A shared vault comes from its host, never from a Connect team.
+        MembershipPurpose::Share => return Err(ConnectError::Refused),
     }
     let key = DeviceKey::generate()?;
     let pending = PendingConnect {
@@ -79,6 +116,17 @@ pub fn prepare_connect(
     vault.keep_pending_connect(&pending)?;
     Ok(pending)
 }
+
+/// The team name that a codeless Connect team gets on the relay (plan s7 S0, B-L6): the
+/// relay never learns the name of the vault. The vault keeps its own name locally.
+pub const CODELESS_TEAM_NAME: &str = "Vault";
+/// The device name that a codeless Connect team gets on the relay: the kind of the
+/// device, never the name that the owner gave it.
+pub const CODELESS_DEVICE_NAME: &str = if cfg!(target_os = "ios") {
+    "iPhone"
+} else {
+    "Mac"
+};
 
 fn label(name: &str, fallback: &str) -> String {
     let name = clean_name(name, fallback);
@@ -187,7 +235,19 @@ fn failure(error: Failure) -> ConnectError {
 
 /// Only a persisted attempt can be sent. One retry after a lost response uses exactly its key.
 /// `connect_key_used` feature-detects F06 via a fresh challenge, never via a version string.
+/// The membership has the purpose `questions` ([`create_connect_for`]).
 pub fn create_connect(pending: &PendingConnect) -> Result<RelayMembership, ConnectError> {
+    create_connect_for(pending, MembershipPurpose::Questions)
+}
+
+/// [`create_connect`] whose membership has the purpose `purpose`: `sync` for a relay copy
+/// without a code (plans section 4.1). The team is the same for every purpose: an attempt
+/// whose team was made (`created`) sends nothing, and a lost answer recovers the team of
+/// the saved key (ADR 0032 F06).
+pub fn create_connect_for(
+    pending: &PendingConnect,
+    purpose: MembershipPurpose,
+) -> Result<RelayMembership, ConnectError> {
     let url = RelayUrl::parse(&pending.relay_url)?;
     let key = DeviceKey::from_pkcs8(pending.key_pkcs8.clone())?;
     let created = if let Some((team_id, device_id)) = &pending.created {
@@ -200,10 +260,11 @@ pub fn create_connect(pending: &PendingConnect) -> Result<RelayMembership, Conne
         let public = key.public_key_b64u();
         let mut message =
             format!("apassy-relay connect v1\0{}\0{public}", url.as_str()).into_bytes();
+        // Only generic names go to the relay; `pending` keeps the local names.
         let request = Create {
             v: 1,
-            team: &pending.team_name,
-            device_name: &pending.device_name,
+            team: CODELESS_TEAM_NAME,
+            device_name: CODELESS_DEVICE_NAME,
             public_key: &public,
             signature: encode_b64u(&key.sign(&message)?),
             recovery_nonce: None,
@@ -265,8 +326,10 @@ pub fn create_connect(pending: &PendingConnect) -> Result<RelayMembership, Conne
         device_id: created.device_id,
         public_key: key.public_key().to_vec(),
         key_pkcs8: pending.key_pkcs8.clone(),
-        purposes: BTreeSet::from([MembershipPurpose::Questions]),
+        purposes: BTreeSet::from([purpose]),
         created_at: 0,
+        pin: None,
+        alt: Vec::new(),
     })
 }
 

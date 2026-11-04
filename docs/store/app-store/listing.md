@@ -118,16 +118,13 @@ Rules that this text follows ([plans.md](../../product/plans.md) §5 and §3, Ap
 
 App Store Connect does not show "What's New" for the first version of an app. Use this text from the
 second App Store version. Write it from the dated changelog of that release, only with what the
-iPhone and the watch change. The text for 0.5.16, from its changelog section:
+iPhone and the watch change. The text for 0.5.17, from its changelog section. It names no
+price and no plan (App Review 3.1); the push gateway is left out until it is live:
 
 ```text
-- Apple Watch: answer access requests with Allow once or Deny while the watch is unlocked on your wrist. Connect it in Settings > Devices > Add Apple Watch.
-- Import everything from another app: an import through Credential Exchange now keeps cards, Wi-Fi networks, identities, notes and other items.
-- More passkeys: ES384, EdDSA and RS256 passkeys from another app, with their PRF and large blob data.
-- Find duplicates: Settings > General > Find duplicates lists the items that hold the same account and merges them.
-- Lock screen: Face ID asks first; the passphrase field shows only when Face ID does not open the vault.
-- Try the Demo: look around the app with sample data only, without a vault.
-- Remote agents: allow a hosted agent's connect request and its runs from Requests.
+- Your Mac over Tailscale: approvals and sync can go straight to your Mac on any network while Tailscale is on. Settings > Devices shows "via your Mac" and the node words to compare with the Mac.
+- Your own Linux node can be the home of your approvals and sync.
+- Apple Watch: reaches your Mac over Tailscale too.
 ```
 
 ## Age rating

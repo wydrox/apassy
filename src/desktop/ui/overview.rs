@@ -341,7 +341,7 @@ pub(super) fn draw(ui: &mut Ui, view: &OverviewView, now: u64, offset: i64) -> O
     ui.horizontal(|ui| {
         ui.add_space(2.0);
         kit::help_button(ui, "About these numbers", &notes);
-        ui.label(kit::text("The last 7 days", Font::Footnote).color(kit::TERTIARY));
+        ui.label(kit::text("The last 7 days", Font::Footnote).color(kit::palette().tertiary));
     });
     action
 }
@@ -392,7 +392,9 @@ fn attention(ui: &mut Ui, items: &[Attention], offset: i64) -> Option<Action> {
             s.row(|ui| {
                 ui.horizontal(|ui| {
                     kit::paint_icon_in(ui, Icon::CheckCircle, 14.0, Tone::Good.mark());
-                    ui.label(kit::text("Nothing needs you", Font::Body).color(kit::LABEL));
+                    ui.label(
+                        kit::text("Nothing needs you", Font::Body).color(kit::palette().label),
+                    );
                 });
             });
         }
@@ -415,12 +417,16 @@ fn attention(ui: &mut Ui, items: &[Attention], offset: i64) -> Option<Action> {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.horizontal(|ui| {
-                                ui.label(kit::medium(&title, Font::Body).color(kit::LABEL));
+                                ui.label(
+                                    kit::medium(&title, Font::Body).color(kit::palette().label),
+                                );
                                 if matches!(item, Attention::Production(_)) {
                                     kit::cap(ui, "Production", true);
                                 }
                             });
-                            ui.label(kit::text(&detail, Font::Callout).color(kit::SECONDARY));
+                            ui.label(
+                                kit::text(&detail, Font::Callout).color(kit::palette().secondary),
+                            );
                         });
                     });
                 });
@@ -452,7 +458,10 @@ fn agents(ui: &mut Ui, view: &OverviewView, now: u64, offset: i64) -> Option<Act
         if view.agents.is_empty() {
             ui.add_space(10.0);
             ui.vertical_centered(|ui| {
-                ui.label(kit::text("No agent in this scope", Font::Callout).color(kit::SECONDARY));
+                ui.label(
+                    kit::text("No agent in this scope", Font::Callout)
+                        .color(kit::palette().secondary),
+                );
             });
             ui.add_space(12.0);
         }
@@ -513,12 +522,14 @@ fn environments(ui: &mut Ui, rows: &[EnvRow]) -> Option<Action> {
             let response = s.clickable_row(&format!("{}, {}", row.name, row.value), |ui| {
                 kit::dimmed(ui, row.dimmed, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(kit::text(&row.name, Font::Body).color(kit::LABEL));
+                        ui.label(kit::text(&row.name, Font::Body).color(kit::palette().label));
                         if row.this_mac {
                             kit::cap_toned(ui, "This Mac", Tone::Accent);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(kit::text(&row.value, Font::Body).color(kit::SECONDARY));
+                            ui.label(
+                                kit::text(&row.value, Font::Body).color(kit::palette().secondary),
+                            );
                         });
                     });
                 });

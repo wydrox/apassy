@@ -1,0 +1,206 @@
+---
+import Page from "../layouts/Page.astro";
+import { REPO } from "../lib/site";
+import {
+  CONNECT_STATUS,
+  FAMILY_EXTRA,
+  FAMILY_INCLUDED_PEOPLE,
+  FREE_MONTHS_A_YEAR,
+  PLANS,
+  YEAR_MONTHS,
+  eur,
+} from "../lib/plans";
+// The plans of docs/product/plans.md. Keep the text true to its rules (section 5):
+// the paid part is Apassy Connect; "free" without a limit only for what is free
+// when you host it yourself. The prices come from lib/plans.ts only.
+const coming = CONNECT_STATUS === "coming";
+const doc = (path: string) => `${REPO}/blob/main/${path}`;
+
+const free = [
+  { what: "The apps", how: "Mac, iPhone, Apple Watch, the browser extension, and the Linux CLI. Download them, or build them from source." },
+  { what: "Vaults and the bouncer", how: "Your vaults, the bouncer gate, and the bouncer brain on your own Mac or on a server of yours." },
+  { what: "Sync of your devices", how: "Through iCloud Drive or another sync folder that you choose." },
+  { what: "Approvals away from the Mac", how: "The iPhone and the Apple Watch reach your own Mac over your tailnet or your local network." },
+  { what: "Shared vaults", how: "For a family or a team, on a host that you run, or as a synced file in a shared folder." },
+  { what: "Agents on other machines", how: "Linked environments and a route to your own Mac for agents in the cloud." },
+  { what: "Push notifications", how: "Through the push gateway of the Apassy project, for everyone, also when you host the rest yourself." },
+];
+
+const sees = [
+  { fn: "Reachability without Tailscale: a byte relay, with TLS end to end between your devices", sees: "TLS records, sizes, and times" },
+  { fn: "An always-on sync home: a blind store for the encrypted copy of a vault", sees: "Ciphertext, sizes, and times" },
+  { fn: "The hosted bouncer brain, only if you turn it on", sees: "The command and the task of each question to the brain. Never a credential value." },
+  { fn: "Support", sees: "What you send" },
+];
+---
+<Page
+  title="Pricing · apassy"
+  description="Apassy is free and open source when you host it yourself. Apassy Connect, the hosted service, is coming."
+>
+  <main class="container">
+    <header class="head">
+      <p class="eyebrow">Pricing</p>
+      <h1>Everything is free when you host it yourself.</h1>
+      <p class="lead">
+        Apassy is open source (Apache-2.0). The apps, your vaults, the bouncer, sync, and shared vaults cost nothing when
+        they run on your own devices and servers. Only Apassy Connect, the hosted service of the Apassy project, and
+        support are paid.
+      </p>
+    </header>
+
+    <section class="block" aria-labelledby="free">
+      <div class="block-head">
+        <h2 id="free">Free, on your own hardware</h2>
+        <span class="price-tag">€0</span>
+      </div>
+      <ul class="free card">
+        {free.map((row) => (
+          <li><b>{row.what}.</b> {row.how}</li>
+        ))}
+      </ul>
+    </section>
+
+    <section class="block" aria-labelledby="connect">
+      <div class="block-head">
+        <h2 id="connect">Apassy Connect</h2>
+        {coming && <span class="badge coming">Coming</span>}
+      </div>
+      <p class="intro">
+        Connect is optional. It is for you if you do not want to keep a Mac or a server on all the time, or if you cannot
+        use Tailscale, for example because a work VPN runs on your iPhone. Each function of Connect can also be hosted by
+        you, for cost or for security.
+        {coming && <> Connect is not on sale yet. These are the prices it will start with.</>}
+      </p>
+
+      <div class="plans">
+        {PLANS.map((plan) => (
+          <article class="plan card" data-spotlight aria-labelledby={`plan-${plan.id}`}>
+            <h3 id={`plan-${plan.id}`}>{plan.name}</h3>
+            <p class="for">{plan.for}</p>
+            <p class="amount">
+              <span class="big">{eur(plan.price.month)}</span>
+              <span class="unit">a month{plan.per && <>, {plan.per}</>}</span>
+            </p>
+            <p class="year">or {eur(plan.price.year)} a year{plan.per && <>, {plan.per}</>}</p>
+            {plan.id === "family" && (
+              <p class="extra">
+                Each person after {FAMILY_INCLUDED_PEOPLE}: {eur(FAMILY_EXTRA.month)} a month, or {eur(FAMILY_EXTRA.year)} a year.
+              </p>
+            )}
+            <ul class="adds">
+              {plan.adds.map((line) => <li>{line}</li>)}
+            </ul>
+            {coming && <p class="status">Coming</p>}
+          </article>
+        ))}
+      </div>
+
+      <ul class="notes">
+        <li>Prices in euro, VAT included: you pay the price that you see.</li>
+        <li>A year costs {YEAR_MONTHS} months: {FREE_MONTHS_A_YEAR} months are free.</li>
+        <li>
+          You will buy Connect in Apassy on your Mac (Settings › Connect), through a web checkout. The iPhone shows your
+          plan only. There are no in-app purchases.
+        </li>
+        <li>A Connect account never adds a device by itself. You confirm each new device on one that you already have.</li>
+      </ul>
+    </section>
+
+    <section class="block" aria-labelledby="sees">
+      <h2 id="sees">What Connect sees</h2>
+      <p class="intro">
+        No Apassy server holds a key that opens a credential, a vault, a question, or an answer. The bouncer brain is
+        the one Connect service that reads content, and only when you turn it on.
+      </p>
+      <div class="table card">
+        <table>
+          <thead><tr><th scope="col">Function</th><th scope="col">What Connect sees</th></tr></thead>
+          <tbody>
+            {sees.map((row) => (
+              <tr><td>{row.fn}</td><td>{row.sees}</td></tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p class="links">
+        <a href={doc("docs/security/trust-model.md")}>Trust model <span aria-hidden="true">↗</span></a>
+        <a href={doc("docs/product/plans.md")}>Plans <span aria-hidden="true">↗</span></a>
+        <a href={doc("docs/adr/0037-own-relay-open-source.md")}>Decision record 0037 <span aria-hidden="true">↗</span></a>
+      </p>
+    </section>
+
+    <section class="block" aria-labelledby="until">
+      <h2 id="until">Until Connect starts</h2>
+      <ul class="plain">
+        <li>
+          Sync through the hosted Apassy relay is free for everyone until Connect starts. Then the hosted sync store is part
+          of Connect. Your own sync home and sync through a folder stay free.
+        </li>
+        <li>
+          Approvals on the iPhone through the hosted relay, without a code, work today at no cost. They end when Connect
+          starts. Tailscale to your own Mac stays free.
+        </li>
+        <li>The apps tell you two releases before these change, and offer the free way and Connect.</li>
+        <li>Push notifications stay free.</li>
+      </ul>
+    </section>
+  </main>
+</Page>
+
+<style>
+  main { max-width: 1080px; padding-top: 72px; padding-bottom: 120px; }
+  .head { max-width: 820px; padding-bottom: 36px; }
+  h1 { margin-top: 12px; font-size: clamp(40px, 6vw, 64px); font-weight: 500; letter-spacing: -0.05em; line-height: 1.02; text-wrap: balance; }
+  .lead { margin-top: 16px; }
+
+  .block { border-top: 1px solid var(--line); padding-top: 48px; margin-top: 48px; }
+  .block-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  h2 { font-size: clamp(28px, 3.4vw, 36px); font-weight: 500; letter-spacing: -0.035em; }
+  .price-tag { font-family: var(--mono); font-size: 14px; padding: 3px 10px; border-radius: 999px; background: var(--green-soft); color: var(--green); }
+  .badge.coming { font-size: 13px; padding: 3px 10px; }
+  .intro { margin-top: 14px; max-width: 760px; color: var(--muted); }
+
+  .free { margin-top: 24px; padding: 26px 28px; list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 16px 32px; }
+  .free li { position: relative; padding-left: 34px; color: var(--muted); }
+  .free li::before {
+    content: "✓"; position: absolute; left: 0; top: 0; width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+    font-size: 12px; color: var(--green); background: var(--green-soft); border: 1px solid color-mix(in srgb, var(--green) 35%, transparent);
+  }
+  .free b { color: var(--ink); font-weight: 600; }
+
+  .plans { margin-top: 28px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .plan { padding: 28px; display: flex; flex-direction: column; }
+  .plan h3 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+  .for { margin-top: 6px; color: var(--muted); font-size: 15px; }
+  .amount { margin-top: 22px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .big { font-size: 48px; font-weight: 500; letter-spacing: -0.04em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .unit { color: var(--muted); font-size: 15px; }
+  .year { margin-top: 8px; color: var(--ink-2); font-size: 15px; }
+  .extra { margin-top: 6px; color: var(--muted); font-size: 14px; }
+  .adds { margin-top: 22px; padding: 18px 0 0; border-top: 1px solid var(--line); list-style: none; display: grid; gap: 10px; font-size: 15px; }
+  .adds li { position: relative; padding-left: 22px; color: var(--ink-2); }
+  .adds li::before { content: ""; position: absolute; left: 4px; top: 0.65em; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
+  .status {
+    margin-top: auto; padding-top: 24px; text-align: center; font-size: 14px; font-weight: 600; color: var(--faint);
+  }
+  .status::before { content: ""; display: block; height: 1px; margin-bottom: 18px; background: var(--line); }
+
+  .notes, .plain { margin-top: 24px; padding: 0; list-style: none; display: grid; gap: 10px; max-width: 820px; }
+  .notes li, .plain li { position: relative; padding-left: 22px; color: var(--muted); }
+  .notes li::before, .plain li::before { content: ""; position: absolute; left: 4px; top: 0.7em; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
+
+  .table { margin-top: 24px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 14px 20px; border-bottom: 1px solid var(--line); color: var(--muted); }
+  tr:last-child td { border-bottom: 0; }
+  th { color: var(--ink); font-weight: 600; background: var(--surface-2); }
+  td:first-child { color: var(--ink-2); width: 55%; }
+  .links { margin-top: 18px; display: flex; gap: 22px; flex-wrap: wrap; font-size: 15px; }
+  .links a { color: var(--blue); }
+  .links a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+  @media (max-width: 900px) {
+    .plans { grid-template-columns: 1fr; }
+    .free { grid-template-columns: 1fr; }
+  }
+</style>

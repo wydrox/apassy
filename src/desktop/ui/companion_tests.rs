@@ -1,7 +1,10 @@
-//! Headless tests of Settings > iPhone companion (ADR 0020): the listener follows the setting and
-//! the lock, the QR code is drawn from its modules, a pairing goes from the QR code to a
-//! stored device through the code and the owner check, and "Remove" and "Reset pairing"
-//! act at once. A real listener runs on a temporary vault. The phone is a rustls client
+//! Headless tests of Settings > Devices > Wi-Fi Pairing (ADR 0020, in its notice state of
+//! ADR 0028 stage 3, plan S2–S3 unit W1): the listener follows the setting and the lock,
+//! the QR code is drawn from its modules, a pairing of the controller goes to a stored
+//! device through the code and the owner check, the group shows only with a paired
+//! iPhone or a listener that is on, has no "Pair an iPhone", and showing it never turns
+//! the listener off, the once-only notice, and "Remove" and "Reset
+//! pairing" act at once. A real listener runs on a temporary vault. The phone is a rustls client
 //! that accepts only the pinned certificate, with keys made by ring. All values are
 //! synthetic.
 
@@ -17,7 +20,8 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 use tempfile::TempDir;
 
-use super::companion::{countdown, draw_qr, keep_code_characters};
+use super::companion::draw_qr;
+use super::devices::{WIFI_GROUP, WIFI_LISTEN, WIFI_NOTICE_TITLE};
 use super::owner_tests::{
     PASS, WRONG, collect, confirm_with, input, socket_dir, unlocked_app_with_item,
 };
@@ -424,16 +428,9 @@ fn a_failed_start_says_why_and_a_retry_works() {
     );
     assert_eq!(app.status_kind, crate::desktop::StatusKind::Error);
 
-    // A failed listener is not started again in each frame, and the page says why.
+    // A failed listener is not started again in each frame.
     app.poll_companion(&ctx);
     assert!(matches!(app.companion.listener, Listener::Failed { .. }));
-    let (text, _) = settings_frame(&ctx, &mut app);
-    assert!(text.contains("another program already uses port"), "{text}");
-    assert!(text.contains("Try again"), "{text}");
-    assert!(
-        !text.contains("Pair an iPhone"),
-        "no pairing without a listener: {text}"
-    );
 
     drop(occupied);
     app.retry_companion();
@@ -453,29 +450,54 @@ fn without_the_broker_the_listener_does_not_start() {
 
 // ---- The settings page. ----
 
+/// Without a paired Wi-Fi iPhone there is no way to pair a new one. Showing Settings >
+/// Devices never changes the listener: a listener that is on keeps running, and keeps its
+/// group so that the owner can turn it off; with the listener off there is no group.
 #[test]
-fn the_settings_page_shows_the_companion() {
+fn showing_devices_never_turns_the_listener_off() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = app_with_broker(&dir);
     let ctx = egui::Context::default();
-    let (text, _) = settings_frame(&ctx, &mut app);
-    for expected in [
-        "iPhone",
-        "Allow the iPhone app on this network",
-        "It never shows a secret value",
-        "Pair an iPhone",
-        "Pair…",
-    ] {
-        assert!(text.contains(expected), "missing {expected}: {text}");
-    }
-    // No paired iPhone: nothing to reset.
-    assert!(!text.contains("Reset pairing…"), "{text}");
+    let enabled = |app: &DesktopApp| {
+        app.owner_ui
+            .session
+            .companion_status()
+            .is_ok_and(|(setting, _)| setting.enabled)
+    };
 
-    app.set_companion_on(true);
+    // Off and no paired iPhone: no group.
     let (text, _) = settings_frame(&ctx, &mut app);
-    // A listener that works needs no status row.
-    assert!(!text.contains("Listening on port"), "{text}");
-    assert!(text.contains("Pair an iPhone"), "{text}");
+    for gone in [WIFI_GROUP, WIFI_LISTEN, "Reset Pairing…"] {
+        assert!(!text.contains(gone), "no {gone}: {text}");
+    }
+
+    // On without a paired iPhone: the group with its switch, no pairing, and the
+    // listener stays on after several frames.
+    app.set_companion_on(true);
+    assert!(running_port(&app).is_some(), "the listener runs");
+    for _ in 0..3 {
+        let (text, _) = settings_frame(&ctx, &mut app);
+        assert!(text.contains(WIFI_GROUP), "{text}");
+        assert!(text.contains(WIFI_LISTEN), "{text}");
+        for gone in [
+            "Allow the iPhone app on this network",
+            "Pair an iPhone",
+            "Pair…",
+        ] {
+            assert!(!text.contains(gone), "no {gone}: {text}");
+        }
+    }
+    assert!(
+        enabled(&app),
+        "drawing Devices does not turn the listener off"
+    );
+    assert!(running_port(&app).is_some());
+
+    // The owner turns it off: the group goes.
+    app.set_companion_on(false);
+    let (text, _) = settings_frame(&ctx, &mut app);
+    assert!(!text.contains(WIFI_GROUP), "{text}");
+    assert!(!enabled(&app));
 }
 
 #[test]
@@ -488,31 +510,24 @@ fn the_qr_code_is_drawn_from_its_modules_and_never_copied() {
     poll_until(&mut app, &ctx, "the pairing window", |app| {
         app.companion.invite.is_some()
     });
+    // Settings has no pairing code any more (ADR 0028 stage 3): the link is no text and
+    // never goes to the pasteboard.
     let (text, commands) = settings_frame(&ctx, &mut app);
-    for expected in [
-        "Mac name",
-        "Code works for",
-        "Cancel",
-        "Do not photograph or share",
-    ] {
-        assert!(text.contains(expected), "missing {expected}: {text}");
-    }
     assert!(
-        !text.contains("apassy://") && !text.contains("Copy"),
-        "the link is not text and has no copy button: {text}"
+        !text.contains("apassy://") && !text.contains("Code works for"),
+        "no pairing code in Settings: {text}"
     );
     assert!(
         commands.is_empty(),
         "the link never goes to the pasteboard: {} commands",
         commands.len()
     );
-    // The countdown counts down from about 5 minutes.
+    // The window of the controller lasts about 5 minutes.
     let seconds = match app.companion_controller().expect("running").view() {
         PairingView::Open { expires_at } => expires_at.saturating_sub(now()),
         other => panic!("an open window, got {other:?}"),
     };
     assert!((295..=300).contains(&seconds), "{seconds}");
-    assert!(text.contains("4:5") || text.contains("5:00"), "{text}");
 
     // Cancel closes the window and needs no owner check.
     app.cancel_pairing();
@@ -579,36 +594,6 @@ fn qr_modules_have_the_finder_patterns_and_a_quiet_zone() {
     output.drop_without_applying_deltas();
 }
 
-#[test]
-fn the_code_field_keeps_digits_and_spaces_only() {
-    for (typed, kept) in [
-        ("348 942", "348 942"),
-        ("348942", "348942"),
-        ("34a8-9 42", "3489 42"),
-        ("12345678901", "123456"),
-        // Spaces are ignored, wherever they stand, and do not use up the 6 digits.
-        ("3 4 8 9 4 2", "3 4 8 9 4 2"),
-        ("348 94 2", "348 94 2"),
-        (" 3 4 8 9 4 2", " 3 4 8 9 4 2"),
-        ("3 4 8 9 4 2 7 7", "3 4 8 9 4 2"),
-        ("348 942 ", "348 942"),
-        ("1 2 3 4 5 6 7", "1 2 3 4 5 6"),
-        ("", ""),
-        ("abc", ""),
-    ] {
-        let mut code = typed.to_owned();
-        keep_code_characters(&mut code);
-        assert_eq!(code, kept, "typed {typed}");
-    }
-    // A paste of spaces does not fill the field with nothing else.
-    let mut spaces = " ".repeat(500);
-    keep_code_characters(&mut spaces);
-    assert!(spaces.len() <= 32, "{}", spaces.len());
-    assert_eq!(countdown(272), "4:32");
-    assert_eq!(countdown(300), "5:00");
-    assert_eq!(countdown(9), "0:09");
-}
-
 // ---- Pairing, removing, and resetting. ----
 
 /// Open a window on the controller (the test needs the secret of the link), let the
@@ -644,15 +629,8 @@ fn a_pairing_goes_from_the_phone_through_the_code_and_the_owner_check() {
     let code = phone.code(&secret);
     let digits = code.replace(' ', "");
 
-    // The Mac asks for the code. It does not show it.
+    // The Mac never shows the code.
     let (text, _) = settings_frame(&ctx, &mut app);
-    assert!(
-        text.contains(
-            "\"Test iPhone\" wants to pair. Type the 6-digit code that the iPhone shows."
-        ),
-        "{text}"
-    );
-    assert!(text.contains("Pair") && text.contains("Cancel"), "{text}");
     assert!(
         !text.contains(&digits) && !text.contains(&code),
         "the code is on the phone only"
@@ -674,12 +652,11 @@ fn a_pairing_goes_from_the_phone_through_the_code_and_the_owner_check() {
     app.companion.code = wrong.to_owned();
     app.submit_pairing_code(&ctx);
     assert!(app.companion.code.is_empty(), "the typed code is erased");
-    let (text, _) = settings_frame(&ctx, &mut app);
+    let notice = app.companion.notice.as_ref().map(|n| n.text.as_str());
     assert!(
-        text.contains("The code is wrong. 2 tries are left."),
-        "{text}"
+        notice.is_some_and(|text| text.starts_with("The code is wrong. 2 tries are left.")),
+        "{notice:?}"
     );
-    assert!(text.contains("Wrong codes so far: 1 of 3."), "{text}");
     assert!(
         app.owner.check.is_none(),
         "a wrong code starts no owner check"
@@ -733,7 +710,8 @@ fn a_pairing_goes_from_the_phone_through_the_code_and_the_owner_check() {
         app.status_text
     );
 
-    // The window is closed, and the page lists the device.
+    // The window is closed, and the Wi-Fi Pairing group lists the device in its notice
+    // state, with no way to pair another.
     app.poll_companion(&ctx);
     assert_eq!(
         app.companion_controller().expect("running").view(),
@@ -741,17 +719,56 @@ fn a_pairing_goes_from_the_phone_through_the_code_and_the_owner_check() {
     );
     assert!(app.companion.notice.is_none());
     let (text, _) = settings_frame(&ctx, &mut app);
-    assert!(text.contains("Test iPhone"), "{text}");
-    assert!(text.contains("Last seen never"), "{text}");
-    assert!(text.contains("Remove"), "{text}");
-    assert!(!text.contains("No iPhone is paired."), "{text}");
+    for expected in [
+        WIFI_GROUP,
+        "Wi-Fi pairing ends in two versions.",
+        WIFI_LISTEN,
+        "Test iPhone",
+        "Paired ",
+        "Wi-Fi",
+        "Remove…",
+        "Reset Pairing…",
+    ] {
+        assert!(text.contains(expected), "shows {expected}: {text}");
+    }
+    for gone in [
+        "Pair an iPhone",
+        "Pair…",
+        "Allow the iPhone app on this network",
+    ] {
+        assert!(!text.contains(gone), "no {gone}: {text}");
+    }
 
-    // The phone is paired: a signed request works.
+    // The phone is paired: a signed request works, and its last contact shows.
     let (status, body) = phone.status(port, &pin(&app)).expect("status");
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(DEVICE), "{body}");
     let (text, _) = settings_frame(&ctx, &mut app);
-    assert!(text.contains("Last seen just now"), "{text}");
+    assert!(text.contains("Now"), "{text}");
+
+    // The next unlock shows the notice once (frame 6b: no tailnet route); Escape, as OK,
+    // closes it for good.
+    app.ui.devices.notice_epoch = None;
+    let text = super::owner_tests::app_frame(&ctx, &mut app);
+    assert!(text.contains(WIFI_NOTICE_TITLE), "{text}");
+    assert!(
+        text.contains("The iPhone app now reaches this Mac through Apassy relay."),
+        "{text}"
+    );
+    let escape = egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let output = ctx.run_ui(input(0.0, vec![escape]), |ui| super::draw(&mut app, ui));
+    output.drop_without_applying_deltas();
+    assert!(app.ui.wifi_notice_seen, "the notice is seen");
+    assert!(app.ui.devices.sheet.is_none());
+    app.ui.devices.notice_epoch = None;
+    let text = super::owner_tests::app_frame(&ctx, &mut app);
+    assert!(!text.contains(WIFI_NOTICE_TITLE), "it shows once: {text}");
 
     // "Remove" needs no owner check and works at once.
     app.remove_companion_device(DEVICE, DEVICE_NAME);
@@ -836,7 +853,7 @@ fn reset_pairing_removes_every_device_and_makes_a_new_certificate() {
     // The button opens a confirmation. Nothing changes before "Reset pairing" there.
     app.ui.sheet = Some(super::Sheet::ResetCompanion);
     let (text, _) = settings_frame(&ctx, &mut app);
-    assert!(text.contains("Reset pairing?"), "{text}");
+    assert!(text.contains("Reset Pairing?"), "{text}");
     assert_eq!(
         app.owner_ui
             .session

@@ -134,16 +134,22 @@ fn row(ui: &mut egui::Ui, tone: Tone, text: &str, detail: Option<&str>, at: u64,
             ui,
             |ui| {
                 kit::dot(ui, tone);
-                ui.label(kit::text(text, Font::Body).color(kit::LABEL));
+                ui.label(kit::text(text, Font::Body).color(kit::palette().label));
             },
             |ui| {
-                ui.label(kit::text(relative_time(at, now), Font::Footnote).color(kit::SECONDARY))
-                    .on_hover_text(format_utc(at));
+                ui.label(
+                    kit::text(relative_time(at, now), Font::Footnote)
+                        .color(kit::palette().secondary),
+                )
+                .on_hover_text(format_utc(at));
             },
         );
     if let Some(detail) = detail {
         kit::indented(ui, kit::DOT_INDENT, |ui| {
-            ui.add(Label::new(kit::text(detail, Font::Footnote).color(kit::SECONDARY)).wrap());
+            ui.add(
+                Label::new(kit::text(detail, Font::Footnote).color(kit::palette().secondary))
+                    .wrap(),
+            );
         });
     }
 }
@@ -161,7 +167,7 @@ fn fold_toggle(app: &mut DesktopApp, s: &mut kit::Section<'_>, key: &str, total:
     };
     let clicked = s
         .clickable_row(&label, |ui| {
-            ui.label(kit::text(&label, Font::Body).color(kit::ACCENT_TEXT));
+            ui.label(kit::text(&label, Font::Body).color(kit::palette().accent_text));
         })
         .clicked();
     if clicked {
@@ -250,11 +256,11 @@ pub(super) fn access_timeline(
                             |ui| {
                                 kit::dot(ui, tone);
                                 let who = if by_agent { &entry.item } else { &entry.agent };
-                                ui.label(kit::medium(who, Font::Body).color(kit::LABEL));
+                                ui.label(kit::medium(who, Font::Body).color(kit::palette().label));
                                 ui.add(
                                     Label::new(
                                         kit::text(&entry.operation, Font::MonoSmall)
-                                            .color(kit::SECONDARY),
+                                            .color(kit::palette().secondary),
                                     )
                                     .truncate(),
                                 )
@@ -263,7 +269,7 @@ pub(super) fn access_timeline(
                             |ui| {
                                 ui.label(
                                     kit::text(relative_time(entry.at, now), Font::Footnote)
-                                        .color(kit::SECONDARY),
+                                        .color(kit::palette().secondary),
                                 )
                                 .on_hover_text(&entry.when);
                                 kit::tag(ui, label, tone);
@@ -273,7 +279,8 @@ pub(super) fn access_timeline(
                         kit::indented(ui, kit::DOT_INDENT, |ui| {
                             ui.add(
                                 Label::new(
-                                    kit::text(&entry.reason, Font::Footnote).color(kit::SECONDARY),
+                                    kit::text(&entry.reason, Font::Footnote)
+                                        .color(kit::palette().secondary),
                                 )
                                 .truncate(),
                             )

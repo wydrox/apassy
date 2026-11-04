@@ -258,7 +258,7 @@ fn collect_text_bounds(shape: &egui::Shape, clip: Rect, out: &mut Vec<(String, R
 
 fn count_focus_strokes(shape: &egui::Shape, count: &mut usize) {
     match shape {
-        egui::Shape::Rect(rect) if rect.stroke == kit::FOCUS_STROKE => *count += 1,
+        egui::Shape::Rect(rect) if rect.stroke == kit::focus_stroke() => *count += 1,
         egui::Shape::Vec(nested) => nested
             .iter()
             .for_each(|inner| count_focus_strokes(inner, count)),

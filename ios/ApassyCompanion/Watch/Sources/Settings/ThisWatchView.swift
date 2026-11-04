@@ -5,6 +5,8 @@ import SwiftUI
 /// has a warning and a Cancel).
 struct ThisWatchView: View {
     let model: WatchAppModel
+    /// "Notifications on this watch" (push-gateway-v1 section 11); nil in previews.
+    @Environment(WatchNotificationsModel.self) private var notifications: WatchNotificationsModel?
     @State private var confirmingRemove = false
 
     var body: some View {
@@ -27,6 +29,20 @@ struct ThisWatchView: View {
                     Text("Allow once needs this watch unlocked on your wrist.")
                         .font(.footnote)
                 }
+                if let notifications {
+                    Section {
+                        Toggle(
+                            "Notifications on this watch",
+                            isOn: Binding(
+                                get: { notifications.enabled },
+                                set: { on in Task { await notifications.setEnabled(on) } })
+                        )
+                    } footer: {
+                        if let footnote = notifications.footnote {
+                            Text(verbatim: footnote)
+                        }
+                    }
+                }
                 Section {
                     Button("Remove This Watch", role: .destructive) { confirmingRemove = true }
                 }
@@ -39,7 +55,10 @@ struct ThisWatchView: View {
                 Text("It stops answering access requests. Also remove it on your Mac in Settings › Devices.")
             }
         }
-        .task { await model.reloadStatus() }
+        .task {
+            await model.reloadStatus()
+            await notifications?.refresh()
+        }
     }
 
     private var connected: String {

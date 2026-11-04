@@ -16,6 +16,7 @@
 	<array>
 		<string>$(AppIdentifierPrefix)com.wydrox.apassy.companion</string>
 		<string>$(AppIdentifierPrefix)com.wydrox.apassy.shared</string>
+		<string>$(AppIdentifierPrefix)com.wydrox.apassy.push</string>
 	</array>
 </dict>
 </plist>

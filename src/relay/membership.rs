@@ -45,6 +45,20 @@ use crate::vault::{
     VaultResult,
 };
 
+/// The Apassy release that ends the free paths on the hosted relay (ADR 0037 D14, stage 7):
+/// the questions-only Connect path of ADR 0032 and relay sync on
+/// `apassy-relay.wyderka.cc`. The notice ships two releases before (R1 = 0.5.17, R3 =
+/// 0.5.19, implementation plan s7 section 5). The release unit of R1 confirms the number,
+/// and a later slip changes it here and in the iPhone app (`VaultText.swift`,
+/// `FreeRelayNotice.endVersion`); a test checks that both say the same.
+pub const FREE_RELAY_PATHS_END_VERSION: &str = "0.5.19";
+
+/// Whether `url` is the hosted relay (`DEFAULT_RELAY_URL`), whose free paths end with
+/// [`FREE_RELAY_PATHS_END_VERSION`]. A relay that the owner runs is never the hosted one.
+pub fn on_hosted_relay(url: &str) -> bool {
+    RelayUrl::parse(url).is_ok_and(|url| url.as_str() == crate::sync::DEFAULT_RELAY_URL)
+}
+
 /// A new team on the relay: its ID and the device number of its first device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreatedTeam {
@@ -55,6 +69,12 @@ pub(crate) struct CreatedTeam {
 /// `POST /v1/teams` with the operator team code: a new team named `team` with the key
 /// `key` as its first device, named `device` (relay-sync-v1 section 6). The team code
 /// must have its form; the caller checks it.
+///
+/// `url` brings its trust: a pinned node (the team code of kind `node` of a node pairing
+/// link, node-pairing-v1 section 6; plan S2–S3 unit L4) gets the request only after its
+/// leaf certificate matches the pin, at its origin or an alternative; another
+/// certificate is `PinMismatch` before any request byte. A hosted address keeps system
+/// trust.
 pub(crate) fn create_team_on_relay(
     url: &RelayUrl,
     team_code: &str,
@@ -186,6 +206,31 @@ pub fn existing_questions_team(vault: &Vault) -> VaultResult<Option<String>> {
         .map(|(team, _)| team))
 }
 
+/// The questions membership of this Mac that relay sync on `url` uses instead of a new
+/// team (plans section 4.1): a vault that asks through a Connect team (or another
+/// questions team) on the same relay pushes its copy into that team, and the membership
+/// then has both purposes (`Vault::set_relay_device` adds `sync`). `None`: this Mac has
+/// no questions membership with its own key on that relay. `AlreadyExists`: the owner
+/// removed this Mac's key, so relay sync with it would be refused too.
+pub fn questions_team_for_sync(
+    vault: &Vault,
+    url: &RelayUrl,
+) -> Result<Option<RelayMembership>, SyncError> {
+    let Some(membership) = questions_membership(vault)? else {
+        return Ok(None);
+    };
+    let same_relay =
+        RelayUrl::parse(&membership.relay_url).is_ok_and(|own| own.as_str() == url.as_str());
+    // An account key (schema 34) has no private key here: Connect accounts sync their way.
+    if !same_relay || membership.key_pkcs8.is_empty() {
+        return Ok(None);
+    }
+    if vault.trusted_key_removed(&membership.public_key)? {
+        return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
+    }
+    Ok(Some(membership))
+}
+
 /// Whether the key of this Mac in `membership` is the key of a removed device: the owner
 /// removed this Mac from the questions.
 pub fn this_device_removed(vault: &Vault, membership: &RelayMembership) -> VaultResult<bool> {
@@ -246,14 +291,30 @@ pub fn new_questions_team(
     vault_name: &str,
     device_name: &str,
 ) -> Result<RelayMembership, SyncError> {
-    let url = RelayUrl::parse(relay_url)?;
+    new_questions_team_at(
+        &RelayUrl::parse(relay_url)?,
+        team_code,
+        vault_name,
+        device_name,
+    )
+}
+
+/// [`new_questions_team`] at the address `url` with its trust: on a pinned node the
+/// membership keeps the pin and the alternatives of `url` (vault schema 28), and the
+/// team is made only after the pin check.
+pub fn new_questions_team_at(
+    url: &RelayUrl,
+    team_code: &str,
+    vault_name: &str,
+    device_name: &str,
+) -> Result<RelayMembership, SyncError> {
     let team_code = team_code.trim();
     if !valid_team_code(team_code) {
         return Err(SyncError::Relay(RelayRefusal::InviteInvalid));
     }
     let key = DeviceKey::generate()?;
     let team = clean_name(vault_name, "Vault");
-    let created = create_team_on_relay(&url, team_code, &team, device_name, &key)?;
+    let created = create_team_on_relay(url, team_code, &team, device_name, &key)?;
     Ok(RelayMembership {
         team_id: created.team_id,
         relay_url: url.as_str().to_owned(),
@@ -265,6 +326,8 @@ pub fn new_questions_team(
             .unwrap_or_else(|| Zeroizing::new(Vec::new())),
         purposes: BTreeSet::from([MembershipPurpose::Questions]),
         created_at: 0,
+        pin: url.trust().pin_text(),
+        alt: url.alternative_list(),
     })
 }
 
@@ -287,6 +350,72 @@ pub fn adopt_questions_team(
         return Err(SyncError::AlreadyEnabled);
     }
     keep_questions_membership(vault, membership, device_name)
+}
+
+/// Keep the questions team of the vault on the Mac's own node (plan S2–S3, unit N4,
+/// decision D6): `membership` is the first device of this Mac in a new team of devices
+/// on the node (`RunningNode::create_device_team`), with the node origin, the pin, and the
+/// alternatives of the node (`crate::node::questions_team::new_node_team`). Then as
+/// [`adopt_questions_team`]: the team becomes the questions team of the vault, the vault
+/// gets its question key, and this Mac registers. No relay call. `InvalidRelayAddress`:
+/// the membership has no pin (a node team is always pinned). `AlreadyEnabled`: the vault
+/// has a questions membership (a hosted one moves with [`move_questions_to_node`]) or
+/// another questions team.
+pub fn adopt_node_team(
+    vault: &mut Vault,
+    membership: &RelayMembership,
+    device_name: &str,
+) -> Result<TrustedDevice, SyncError> {
+    if membership.pin.is_none() {
+        return Err(SyncError::InvalidRelayAddress);
+    }
+    adopt_questions_team(vault, membership, device_name)
+}
+
+/// "Move approvals to this Mac" (ADR 0037, Migration; plan S2–S3 D6), the vault step
+/// after a device joined the node team: the questions of the vault go through `node`
+/// (this Mac's device in the team of devices on its node) instead of the membership of
+/// `hosted_team`. The hosted membership loses the purpose `questions` (a
+/// notifications-only one goes with its key; relay sync never changes), the node team
+/// becomes the questions team of the vault, and this Mac registers with the key of
+/// `node`. On a failure the hosted questions stay as they were.
+///
+/// Returns the hosted membership as it was, for the relay calls that take its devices
+/// off the hosted relay (best effort, by the caller, only for a notifications-only team).
+/// `NotEnabled`: the questions of the vault are not on `hosted_team` any more.
+/// `InvalidRelayAddress`: `node` has no pin.
+pub fn move_questions_to_node(
+    vault: &mut Vault,
+    node: &RelayMembership,
+    hosted_team: &str,
+    device_name: &str,
+) -> Result<RelayMembership, SyncError> {
+    if vault.is_locked() {
+        return Err(SyncError::Vault(VaultErrorKind::Locked));
+    }
+    if node.pin.is_none() || node.team_id == hosted_team {
+        return Err(SyncError::InvalidRelayAddress);
+    }
+    let hosted = questions_membership(vault)?
+        .filter(|membership| membership.team_id == hosted_team)
+        .ok_or(SyncError::NotEnabled)?;
+    if vault.trusted_key_removed(&node.public_key)? {
+        return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
+    }
+    disable_questions(vault)?;
+    match keep_questions_membership(vault, node, device_name) {
+        Ok(_) => Ok(hosted),
+        Err(error) => {
+            // The hosted questions come back as they were.
+            let _ = if questions_only(&hosted) {
+                vault.add_relay_membership(&hosted)
+            } else {
+                vault.set_membership_purposes(&hosted.team_id, &hosted.purposes)
+            };
+            let _ = vault.set_questions_team(&hosted.team_id);
+            Err(error)
+        }
+    }
 }
 
 /// A Mac joins the questions team of the vault (a second Mac of an iCloud Drive vault):
@@ -489,6 +618,138 @@ pub fn valid_device_uuid(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A relay of one canned answer to `POST /v1/teams` behind the real TLS front of a
+    /// node on the loopback (with the front's test hooks), and a new self-signed node
+    /// certificate. Returns the front, the node origin, the pin, and the number of
+    /// connections that reached the relay behind the front.
+    fn pinned_team_relay() -> (
+        crate::net::tls_front::FrontHandle,
+        String,
+        crate::net::pin::Pin,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use crate::net::certificate::NodeCertificate;
+        use crate::net::tls_front::{Front, FrontLimits, FrontOptions};
+        use std::io::{Read, Write};
+        use std::net::{IpAddr, Ipv4Addr, TcpListener};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let target = listener.local_addr().unwrap();
+        let reached = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&reached);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                count.fetch_add(1, Ordering::SeqCst);
+                // The head, then the JSON body of its Content-Length.
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(read) = stream.read(&mut buf) {
+                    if read == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..read]);
+                    let text = String::from_utf8_lossy(&seen).to_string();
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                }
+                // The envelope of relay-sync-v1 section 4.
+                let body = r#"{"ok":true,"result":{"team_id":"t_7k2m5q4x3c","device_id":1}}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let certificate = NodeCertificate::generate("Synthetic build box").unwrap();
+        let pin = certificate.pin;
+        let mut options = FrontOptions::new(
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            0,
+            certificate,
+            target,
+        );
+        options.allow_loopback_bind = true;
+        options.allow_test_peers = true;
+        // The refused attempts count too: more than a real peer's minute allows.
+        options.limits = FrontLimits {
+            max_connections: 64,
+            max_per_peer: 64,
+            new_per_peer_per_minute: 10_000,
+            ..FrontLimits::default()
+        };
+        let front = Front::start(options).unwrap();
+        let origin = format!("https://127.0.0.1:{}", front.bound()[0].port());
+        (front, origin, pin, reached)
+    }
+
+    /// The team of a node pairing link (plan S2–S3 unit L4) is made through the pin: a
+    /// wrong pin and system trust are refused before any byte reaches the relay; the
+    /// right pin makes the team, and a questions membership keeps the pin and the
+    /// alternatives of the address.
+    #[test]
+    fn a_team_on_a_pinned_node_is_made_only_through_its_pin() {
+        use crate::net::pin::Pin;
+        use crate::sync::TlsTrust;
+        use std::sync::atomic::Ordering;
+        let (_front, origin, pin, reached) = pinned_team_relay();
+        let code = format!("apassy_tcd_{}", "cd".repeat(32));
+        let key = DeviceKey::generate().unwrap();
+        let other = Pin::of_certificate(b"synthetic other certificate");
+        let wrong = RelayUrl::parse_with_trust(&origin, TlsTrust::Pinned(other)).unwrap();
+        assert_eq!(
+            create_team_on_relay(&wrong, &code, "Personal", "Synthetic Mac", &key).unwrap_err(),
+            SyncError::PinMismatch
+        );
+        let system = RelayUrl::parse(&origin).unwrap();
+        assert_eq!(
+            create_team_on_relay(&system, &code, "Personal", "Synthetic Mac", &key).unwrap_err(),
+            SyncError::RelayUnreachable
+        );
+        assert_eq!(reached.load(Ordering::SeqCst), 0, "no request reached it");
+
+        let node = RelayUrl::parse_with_trust(&origin, TlsTrust::Pinned(pin)).unwrap();
+        let created = create_team_on_relay(&node, &code, "Personal", "Synthetic Mac", &key)
+            .expect("the team");
+        assert_eq!(
+            created,
+            CreatedTeam {
+                team_id: "t_7k2m5q4x3c".to_owned(),
+                device_id: 1
+            }
+        );
+        assert_eq!(reached.load(Ordering::SeqCst), 1);
+
+        // A questions team at the address with an alternative: the membership keeps the
+        // pin and the alternative (vault schema 28).
+        let node = node
+            .alternatives(&["apassy-node.tail0123.ts.net".to_owned()])
+            .unwrap();
+        let membership =
+            new_questions_team_at(&node, &code, "Personal", "Synthetic Mac").expect("team");
+        assert_eq!(membership.relay_url, origin);
+        assert_eq!(membership.pin, Some(pin.text()));
+        let port = origin.rsplit(':').next().unwrap();
+        assert_eq!(
+            membership.alt,
+            [format!("apassy-node.tail0123.ts.net:{port}")]
+        );
+        assert_eq!(reached.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn a_new_device_uuid_has_the_contract_form() {
         let a = new_device_uuid().unwrap();
@@ -581,6 +842,7 @@ mod tests {
                 public_key: key.public_key().to_vec(),
                 key_pkcs8: key.pkcs8().unwrap().clone(),
                 created_at: 0,
+                account_key: false,
             })
             .unwrap();
         assert_eq!(

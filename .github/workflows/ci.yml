@@ -186,6 +186,8 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/brain-venv"
           "$RUNNER_TEMP/brain-venv/bin/pip" install --quiet 'fastapi==0.141.1' 'httpx==0.28.1'
           "$RUNNER_TEMP/brain-venv/bin/python" -I -B -m unittest discover -s tests/basemodel -p 'test_*.py'
+          # The K1 bench script (implementation plan 0035, E2) without a server or torch.
+          "$RUNNER_TEMP/brain-venv/bin/python" -I -B tools/basemodel/bench.py --dry-run
 
       - name: Check coordinated release versions
         run: |
@@ -333,10 +335,72 @@ jobs:
           cache-dependency-path: crates/apassy-relay/deploy/worker/package-lock.json
       - name: Run Worker tests
         run: node --test 'test/*.test.ts'
+      # The push gateway (push-gateway-v1): the same Node test runner, no dependency.
+      - name: Run push gateway tests
+        working-directory: crates/apassy-relay/deploy/push-gateway
+        run: node --test 'test/*.test.ts'
       - name: Install typecheck dependencies
         run: npm ci --no-audit --no-fund
       - name: Check Worker types
         run: npx tsc -p tsconfig.json
+      # The gateway has no lockfile: its types are checked with the Worker's dependencies.
+      - name: Check push gateway types
+        working-directory: crates/apassy-relay/deploy/push-gateway
+        run: ../worker/node_modules/.bin/tsc -p tsconfig.json
+
+  # The Linux node (plan S2-S3, D8, units L1 to L3): `apassy-app` without the window
+  # builds, has no eframe in its dependency graph, and the packaging scripts make, install,
+  # and check a .tar.gz and a .deb of this debug build (packaging/linux/verify.sh: the
+  # units pass `systemd-analyze verify`, install.sh installs from a file:// directory).
+  # The release builds of both machines are in relay-image.yml.
+  linux-node:
+    needs: reuse-pr
+    if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-node
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Fetch Cargo dependencies
+        run: cargo fetch --locked
+      - name: The node build has no eframe
+        run: |
+          mkdir -p target
+          cargo tree --offline --locked -p apassy-app --no-default-features --features node \
+            -e normal,build --prefix none > target/node-tree.txt
+          grep -q '^apassy-relay ' target/node-tree.txt
+          count="$(grep -c eframe target/node-tree.txt || true)"
+          if [ "$count" != 0 ]; then
+            echo "::error::apassy-app --no-default-features --features node resolves eframe ($count lines)."
+            grep eframe target/node-tree.txt
+            exit 1
+          fi
+      - name: Build the node without the window
+        run: cargo build --offline --locked -p apassy-app --no-default-features --features node --bin apassy-app
+      - name: Check the packaging scripts
+        run: >-
+          shellcheck packaging/linux/build.sh packaging/linux/tarball.sh packaging/linux/verify.sh
+          packaging/linux/apassy-team packaging/linux/deb/postinst
+          crates/apassy-relay/deploy/worker/public/install.sh
+      - name: Package and verify the debug build
+        run: |
+          mkdir -p target/node-dist
+          cp target/debug/apassy-app target/node-dist/apassy
+          strip target/node-dist/apassy
+          packaging/linux/build.sh --binary target/node-dist/apassy --arch x86_64 --out target/node-dist
+          rm target/node-dist/apassy
+          packaging/linux/verify.sh --dist target/node-dist --arch x86_64
 
   audit:
     needs: reuse-pr
@@ -422,6 +486,91 @@ jobs:
         run: >-
           cargo nextest run --profile ci --offline --locked --all-features --all-targets
           --partition "slice:$((TEST_SHARD + 1))/$TEST_SHARD_COUNT"
+
+  # The Linux sandbox (unit X1 of docs/design/implementation-plan-s5-env-0011.md,
+  # docs/operations/isolation-linux.md). Its tests need bubblewrap and unprivileged
+  # user namespaces, which the test matrix does not have, so they report a skip
+  # there. This job installs bubblewrap, records what the runner allows before any
+  # change (the measurement that the plan asks for), allows user namespaces, and
+  # runs the isolation tests with APASSY_REQUIRE_BWRAP=1: here a test fails, and
+  # never skips, when bubblewrap cannot run.
+  linux-isolation:
+    needs: reuse-pr
+    if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-isolation
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Fetch Cargo dependencies
+        run: cargo fetch --locked
+      - name: Install cargo-nextest 0.9.150
+        run: bash scripts/ci-install-nextest.sh
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          ls -l "$(command -v bwrap)"
+          bwrap --version
+      # The same namespace options as src/isolation/linux/bwrap.rs (namespace_args).
+      - name: Record user namespaces with the runner defaults
+        id: userns
+        run: |
+          uname -r
+          for knob in kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces; do
+            file="/proc/sys/$(echo "$knob" | tr . /)"
+            if [ -e "$file" ]; then echo "$knob=$(cat "$file")"; else echo "$knob: not present"; fi
+          done
+          ls /etc/apparmor.d | grep -i -e bwrap -e userns || echo "no AppArmor profile named bwrap or userns"
+          if bwrap --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \
+               --unshare-net --disable-userns --die-with-parent --new-session --as-pid-1 \
+               --ro-bind / / --dev /dev --proc /proc true; then
+            echo "measurement: bubblewrap makes the sandbox with the runner defaults"
+            echo "expect=netns" >> "$GITHUB_OUTPUT"
+          else
+            echo "measurement: bubblewrap cannot make the sandbox with the runner defaults (exit $?)"
+            echo "expect=none:userns_blocked" >> "$GITHUB_OUTPUT"
+          fi
+      # Judge finding L3: what a proxied run reports on the stock runner follows the
+      # measurement above: `none` with `userns_blocked` where user namespaces are
+      # restricted, `netns` where they are not.
+      - name: Check the network rule of a run with the runner defaults
+        env:
+          APASSY_EXPECT_RULE: ${{ steps.userns.outputs.expect }}
+        run: >-
+          cargo nextest run --profile ci --offline --locked --all-features
+          --test it -E 'test(=run_proxy::linux_proxied_run_reports_the_measured_rule)'
+          --no-capture
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \
+            --unshare-net --disable-userns --die-with-parent --new-session --as-pid-1 \
+            --ro-bind / / --dev /dev --proc /proc true
+          echo "bubblewrap makes the sandbox"
+      - name: Run the Linux isolation tests
+        env:
+          APASSY_REQUIRE_BWRAP: "1"
+          NEXTEST_TEST_THREADS: "8"
+        run: >-
+          cargo nextest run --profile ci --offline --locked --all-features
+          --lib --test it -E 'test(/^isolation(::|_linux::)/) | test(/^broker::proxy::network::/) | test(/^run_proxy::linux_/) | test(=agent_run::a_placeholder_variable_gets_a_placeholder_and_the_run_proxy)'
+      - name: List leftover processes
+        if: always()
+        run: ps -eo pid,ppid,pgid,etimes,args --sort=pid | awk '$5 !~ /^\[/'
 
   release-binaries:
     # No signing credentials enter this job. Its artifact is eligible for Release

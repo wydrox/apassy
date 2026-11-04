@@ -89,7 +89,7 @@ pub(super) fn exposes_setup_key(detail: &DetailLine) -> bool {
 /// The content of the row for a visible detail with a setup key. It has the label and no
 /// value.
 pub(super) fn exposed_content(ui: &mut egui::Ui, detail: &DetailLine) {
-    ui.label(kit::text(&detail.label, Font::Callout).color(kit::SECONDARY));
+    ui.label(kit::text(&detail.label, Font::Callout).color(kit::palette().secondary));
     rows::mask(ui);
     kit::note(
         ui,
@@ -284,7 +284,7 @@ fn code_row(
             Layout::left_to_right(Align::Center),
             |ui| {
                 ui.set_min_size(Vec2::new(width, 24.0));
-                ui.label(kit::text(&line.label, Font::Body).color(kit::LABEL));
+                ui.label(kit::text(&line.label, Font::Body).color(kit::palette().label));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     match code {
@@ -332,14 +332,14 @@ fn show_code(ui: &mut egui::Ui, code: &Code) {
         let label = ui.label(
             kit::text(code.grouped(), Font::Mono)
                 .size(26.0)
-                .color(kit::LABEL),
+                .color(kit::palette().label),
         );
         ui.add_space(8.0);
         ui.label(
             kit::text(format!("{} s", code.left), Font::Callout).color(if low {
                 tone.text()
             } else {
-                kit::SECONDARY
+                kit::palette().secondary
             }),
         );
         let spoken = format!("One-time code {}, {} seconds left", code.digits, code.left);
@@ -349,7 +349,8 @@ fn show_code(ui: &mut egui::Ui, code: &Code) {
     let width = ui.available_width().min(220.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 3.0), Sense::hover());
     let radius = CornerRadius::same(2);
-    ui.painter().rect_filled(rect, radius, kit::SEPARATOR);
+    ui.painter()
+        .rect_filled(rect, radius, kit::palette().separator);
     let fraction = code.left as f32 / code.period.max(1) as f32;
     let filled = egui::Rect::from_min_size(rect.min, Vec2::new(width * fraction.min(1.0), 3.0));
     ui.painter().rect_filled(filled, radius, tone.mark());

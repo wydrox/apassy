@@ -512,7 +512,7 @@ pub struct ConnectCard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum AnyCard {
-    Run(Card),
+    Run(Box<Card>),
     Connect(ConnectCard),
 }
 
@@ -640,7 +640,7 @@ pub fn parse_any_card(plaintext: &[u8], relay_qid: &str) -> Result<AnyCard, Card
     if v2 {
         parse_connect_card(plaintext, relay_qid).map(AnyCard::Connect)
     } else {
-        parse_card(plaintext, relay_qid).map(AnyCard::Run)
+        parse_card(plaintext, relay_qid).map(|card| AnyCard::Run(Box::new(card)))
     }
 }
 

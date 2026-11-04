@@ -616,6 +616,7 @@ mod tests {
                 public_key: mac.public_key().to_vec(),
                 key_pkcs8: mac.pkcs8().unwrap().clone(),
                 created_at: 0,
+                account_key: false,
             })
             .unwrap();
         enable_questions(&mut vault, "Synthetic Mac").unwrap();

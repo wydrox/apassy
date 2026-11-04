@@ -1,0 +1,1668 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apassy · New views of the misc plan (M0)</title>
+<!--
+  Mockup for unit M0 of implementation-plan-misc.md. Final frames for the implementers of
+  M7, M9, M10, M12, M13, M14, M16, M17, M24, and M28, and the reference for the screenshot
+  check before a release (M30). No owner approval gate (owner decision 2026-11-03).
+  Visual language copied from cloud-agents-mockup.html and devices-settings-mockup.html.
+  New here: every Mac color is a CSS variable named after its role in src/desktop/ui/kit.rs,
+  so the light frames use today's exact values and the dark frames use Palette::DARK.
+  The palette table at the end is the one M13 and M14 copy.
+  One self-contained file: inline CSS and SVG, no script, no font file, no network request.
+  Demo data only.
+-->
+<style>
+/* ---- Palette roles. Light = today's kit.rs values (M13 Palette::LIGHT). ---- */
+:root{
+  --window:#fafafb;--sidebar:#ececef;--list:#ffffff;--detail:#f6f6f7;--surface:#ffffff;
+  --selection:#0a6cff;--production:#e0352b;
+  --separator:#e8e8ec;--section-edge:#e4e4e9;--border:#d2d2d8;
+  --label:#1d1d1f;--secondary:#6a6a70;--tertiary:#a0a0a6;
+  --fill:#f0f0f3;--fill-hover:#e8e8ec;--fill-pressed:#dedee3;
+  --accent:#007aff;--accent-hover:#006ce6;--accent-pressed:#005ecc;--accent-text:#0066d6;
+  --mark-neutral:#8e8e93;--mark-good:#34c759;--mark-warning:#ff9500;--mark-critical:#ff3b30;
+  --text-good:#1d8036;--text-warning:#a65200;--text-critical:#c81e1e;
+  --tint-accent:#e8f2ff;--tint-good:#e9f7ed;--tint-warning:#fff5e5;--tint-critical:#ffeeed;
+  /* Proposed new roles (P1–P5 in the palette table). */
+  --sidebar-selected:#d7d7da;--button:#ffffff;--badge:#e0352b;--code:#f2f2f4;--menu:#fafafa;--scrim:rgba(0,0,0,.12);
+  --edge-shadow:rgba(0,0,0,.08);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+/* ---- Dark = M14 Palette::DARK. ---- */
+.dark{
+  --window:#1e1e20;--sidebar:#28282b;--list:#202022;--detail:#1a1a1c;--surface:#2c2c2e;
+  --selection:#0058d0;--production:#ff5c52;
+  --separator:#3a3a3e;--section-edge:#36363a;--border:#54545a;
+  --label:#ececf0;--secondary:#a2a2a8;--tertiary:#636368;
+  --fill:#38383c;--fill-hover:#404044;--fill-pressed:#4a4a4f;
+  --accent:#0a70f5;--accent-hover:#1e7afa;--accent-pressed:#0060d6;--accent-text:#64aaff;
+  --mark-neutral:#98989d;--mark-good:#30d158;--mark-warning:#ff9f0a;--mark-critical:#ff453a;
+  --text-good:#54d67c;--text-warning:#ffb040;--text-critical:#ff7c72;
+  --tint-accent:#102a4a;--tint-good:#12341e;--tint-warning:#3e2a0a;--tint-critical:#481816;
+  --sidebar-selected:#3c3c40;--button:#38383c;--badge:#d93a30;--code:#232325;--menu:#2e2e31;--scrim:rgba(0,0,0,.42);
+  --edge-shadow:rgba(0,0,0,.4);
+  color:var(--label);
+}
+*{box-sizing:border-box}
+html,body{margin:0;font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;color:#1d1d1f;-webkit-font-smoothing:antialiased;background:#cfd0d5}
+svg{display:block}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+
+/* ---- The page of frames (as cloud-agents-mockup.html). ---- */
+.page{min-width:1260px;padding:36px 40px 70px}
+.intro{max-width:1180px;margin:0 auto 34px}
+.intro h1{font-size:22px;font-weight:700;margin:0 0 6px;letter-spacing:-.01em}
+.intro p{margin:0 0 6px;color:rgba(0,0,0,.62);max-width:940px}
+.intro ol{margin:10px 0 0;padding-left:20px;color:rgba(0,0,0,.62);columns:2;column-gap:40px;max-width:940px}
+.frame{max-width:1180px;margin:0 auto 56px}
+.flabel{margin:0 0 12px 4px}
+.flabel b{font-size:14px;font-weight:700;color:#232327}
+.flabel span{display:block;font-size:12px;color:rgba(0,0,0,.55);margin-top:2px;max-width:940px}
+.flabel .fnum{display:inline-grid;color:#fff;font-size:11px;margin-top:0;max-width:none}
+.fnum{display:inline-grid;place-items:center;min-width:24px;height:20px;padding:0 5px;border-radius:10px;background:#232327;color:#fff;font-size:11px;font-weight:700;margin-right:8px;vertical-align:1px}
+.ap{display:inline-block;font-size:10px;font-weight:700;border-radius:4px;padding:0 5px;margin-left:6px;vertical-align:1px;line-height:15px;background:#fff;color:#232327;box-shadow:0 0 0 .5px rgba(0,0,0,.25)}
+.ap.dk{background:#232327;color:#fff}
+.flabel .ap{display:inline-block;margin-top:0;max-width:none;font-size:10px;color:#232327}
+.flabel .ap.dk{color:#fff}
+.sub-l{font-size:12px;font-weight:600;color:#232327;margin:18px 4px 8px}
+.fnotes{max-width:1180px;margin:14px auto 0;padding:10px 16px 10px 34px;background:rgba(255,255,255,.55);border-radius:10px;font-size:12px;color:rgba(0,0,0,.66);line-height:1.5}
+.fnotes li{margin:1px 0}
+.fnotes b{color:#232327}
+.fnotes code,.flabel code,.notes code{font-family:var(--mono);font-size:11px;background:rgba(0,0,0,.06);border-radius:4px;padding:0 4px}
+
+/* ---- The Mac window. ---- */
+.win{display:flex;width:100%;min-height:600px;background:var(--window);border-radius:12px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 22px 70px rgba(0,0,0,.28);position:relative;color:var(--label)}
+.dark .win,.win.dark{box-shadow:0 0 0 .5px rgba(0,0,0,.6),inset 0 0 0 .5px rgba(255,255,255,.12),0 22px 70px rgba(0,0,0,.4)}
+.side{width:216px;flex:none;background:var(--sidebar);border-right:.5px solid var(--separator);display:flex;flex-direction:column}
+.side .chrome{height:52px;flex:none;display:flex;align-items:center;padding:0 18px;gap:8px}
+.lights{display:flex;gap:8px}.lights i{width:12px;height:12px;border-radius:50%;display:block;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.15)}
+.lights i:nth-child(1){background:#ff5f57}.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+.sidetoggle{margin-left:auto;width:28px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--secondary)}
+.sidetoggle svg{width:17px;height:17px}
+.side .scroll{flex:1;padding:0 10px 10px}
+.sh{font-size:11px;font-weight:600;color:var(--secondary);padding:12px 8px 4px}
+.si{display:flex;align-items:center;gap:7px;width:100%;height:28px;border-radius:6px;padding:0 8px}
+.si.on{background:var(--sidebar-selected)}
+.si svg{width:15px;height:15px;flex:none;color:var(--accent)}
+.si svg.fav{color:var(--mark-warning)}
+.si .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.si .cnt{color:var(--secondary);font-size:12px;font-variant-numeric:tabular-nums}
+.si .bdg{font-size:11px;font-weight:600;border-radius:9px;padding:0 6px;min-width:18px;text-align:center;background:var(--badge);color:#fff}
+.si.l1{padding-left:22px}
+.si.on .cnt{color:var(--label)}
+.sq{width:13px;height:13px;border-radius:3.5px;flex:none;margin:0 1px;display:grid;place-items:center;color:#fff;font-size:8.5px;font-weight:700;line-height:1}
+.side .foot{padding:8px 10px 10px;border-top:.5px solid var(--separator)}
+.me{display:flex;align-items:center;gap:8px;padding:4px 6px}
+.me .av{width:22px;height:22px;border-radius:50%;background:linear-gradient(#ffa43a,#ff8a00);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:600;flex:none}
+.me .t{flex:1;line-height:1.2}.me .t small{display:block;color:var(--secondary);font-size:11px}
+.ib{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--secondary);flex:none}
+.ib svg{width:16px;height:16px}
+.ib.on{background:var(--sidebar-selected);color:var(--label)}
+.ib.star svg{color:var(--mark-warning)}
+.ib.open{background:var(--fill-pressed);color:var(--label)}
+
+.listcol{width:300px;flex:none;border-right:.5px solid var(--separator);display:flex;flex-direction:column;background:var(--list)}
+.listcol.set{width:260px}
+.listcol.set .r{min-height:46px}
+.listcol.set .tile{width:28px;height:28px;border-radius:7px}
+.listcol.set .tile svg{width:16px;height:16px}
+.tb{height:52px;flex:none;display:flex;align-items:center;padding:0 10px 0 16px;gap:6px}
+.tb .ttl{flex:1;min-width:0;line-height:1.2}
+.tb .ttl b{font-size:13px;font-weight:700;display:block}
+.tb .ttl small{font-size:11px;color:var(--secondary)}
+.rows{flex:1;padding:4px 8px 12px}
+.gh{font-size:11px;font-weight:600;color:var(--secondary);padding:10px 8px 4px;display:flex;align-items:center}
+.gh span{margin-left:auto;font-weight:400}
+.r{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;min-height:48px}
+.r.top{align-items:flex-start}
+.r.on{background:var(--selection);color:#fff}
+.r.on .sub,.r.on .meta,.r.on .sub3{color:rgba(255,255,255,.85)}
+.r .tx{flex:1;min-width:0}
+.r .ttl2{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub,.r .sub3{font-size:12px;color:var(--secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .meta{display:flex;align-items:center;gap:6px;color:var(--secondary);font-size:12px;flex:none;font-variant-numeric:tabular-nums}
+.r .meta svg{width:12px;height:12px;color:var(--mark-warning)}
+.r.on .meta svg{color:#fff}
+.dotp{width:7px;height:7px;border-radius:50%;background:var(--production);flex:none}
+.r.on .dotp{background:#fff}
+.tm{color:var(--text-warning);font-weight:500;font-variant-numeric:tabular-nums}
+.r.on .tm{color:#fff}
+.tile{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px;flex:none;letter-spacing:-.02em;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12)}
+.tile svg{width:16px;height:16px}
+.tile.s{width:20px;height:20px;border-radius:5px;font-size:10px}.tile.s svg{width:11px;height:11px}
+.hdr .tile{width:40px;height:40px;border-radius:10px;font-size:18px}.hdr .tile svg{width:22px;height:22px}
+.ava{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px;flex:none;position:relative}
+.ava.l{width:56px;height:56px;font-size:22px}
+.ava.s{width:22px;height:22px;font-size:10.5px}
+.detail{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.detail .tb{justify-content:flex-end;padding:0 12px;gap:4px}
+.dscroll{flex:1}
+.dpad{max-width:640px;margin:0 auto;padding:0 28px 34px}
+.hdr{display:flex;align-items:center;gap:14px;margin:6px 0 22px}
+.hdr h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-.01em;line-height:1.2}
+.hdr .s{color:var(--secondary);margin-top:2px}
+.caps{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
+.cap{font-size:11px;font-weight:500;border-radius:5px;padding:1px 6px;background:var(--fill-hover);color:var(--secondary);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.cap svg{width:11px;height:11px}
+.cap.red{background:var(--tint-critical);color:var(--text-critical)}
+.cap.acc{background:var(--tint-accent);color:var(--accent-text)}
+.cap.warn{background:var(--tint-warning);color:var(--text-warning)}
+.cap.good{background:var(--tint-good);color:var(--text-good)}
+.gl{font-size:12px;font-weight:600;color:var(--secondary);margin:20px 2px 6px;display:flex;align-items:center;gap:6px}
+.gl span{margin-left:auto;font-weight:400}
+.gl .hi,.gl .cap{margin-left:0}
+.grp{background:var(--surface);border-radius:10px;box-shadow:0 0 0 .5px var(--section-edge),0 .5px 1.5px var(--edge-shadow);position:relative}
+.fr{display:flex;align-items:center;gap:10px;min-height:38px;padding:7px 12px;position:relative}
+.fr+.fr::before,.tr+.tr::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--separator)}
+.fr.top{align-items:flex-start}
+.fr .k{flex:none;min-width:130px;color:var(--label)}
+.fr .v{flex:1;min-width:0;text-align:right;color:var(--secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fr .v.l{text-align:left;color:var(--label);white-space:normal}
+.fr .v.lab{color:var(--label)}
+.fr .kn{flex:1;min-width:0}
+.fr .kn .nt{font-size:12px;color:var(--secondary);margin-top:2px;line-height:1.4}
+.fr.dim .kn,.fr.dim .k{opacity:.5}
+.chev{color:var(--tertiary);font-size:15px}
+.lnk{color:var(--accent-text)}
+.mono{font-family:var(--mono);font-size:12px}
+.pb{border:0;border-radius:6px;height:24px;padding:0 10px;background:var(--fill-hover);font-size:12.5px;font-weight:500;flex:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit;color:var(--label)}
+.pb svg{width:13px;height:13px;color:var(--secondary)}
+.pb.pri{background:var(--accent);color:#fff}.pb.pri svg{color:#fff}
+.pb.des{color:var(--text-critical)}
+.sw{width:32px;height:19px;border-radius:10px;background:var(--fill-pressed);position:relative;flex:none;border:0;padding:0}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 .5px 2px rgba(0,0,0,.3)}
+.sw.on{background:var(--mark-good)}.sw.on::after{left:15px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--mark-good);margin-right:6px;vertical-align:0;flex:none}
+.dot.warn{background:var(--mark-warning)}.dot.crit{background:var(--mark-critical)}.dot.off{background:var(--mark-neutral)}
+.tn{font-size:12px;line-height:1.4;display:flex;gap:6px;align-items:flex-start}
+.tn svg{width:13px;height:13px;flex:none;margin-top:1.5px}
+.tn.warn{color:var(--text-warning)}.tn.crit{color:var(--text-critical)}.tn.good{color:var(--text-good)}.tn.acc{color:var(--accent-text)}
+.cmd{font-family:var(--mono);font-size:12px;background:var(--code);border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-all;color:var(--label);flex:1;text-align:left}
+.note{font-size:12px;color:var(--secondary);margin:6px 4px 0;line-height:1.4}
+.abar{flex:none;border-top:.5px solid var(--separator);background:var(--detail);padding:10px 16px;display:flex;align-items:center;gap:8px}
+.abar .cap2{flex:1;font-size:11.5px;color:var(--secondary);min-width:0}
+.btn{border:0;border-radius:7px;height:28px;padding:0 14px;background:var(--button);box-shadow:0 0 0 .5px var(--border),0 .5px 1px var(--edge-shadow);font-weight:500;white-space:nowrap;flex:none;font-family:inherit;font-size:13px;color:var(--label);display:inline-flex;align-items:center;gap:6px}
+.btn svg{width:14px;height:14px;color:var(--secondary)}
+.btn.pri{background:var(--accent);color:#fff;box-shadow:0 .5px 1px rgba(0,0,0,.2)}
+.btn.pri svg{color:#fff}
+.btn.des{color:var(--text-critical)}
+.btn.desf{background:var(--mark-critical);color:#fff;box-shadow:0 .5px 1px rgba(0,0,0,.2)}
+.seg{display:inline-flex;background:var(--fill-hover);border-radius:7px;padding:2px;gap:2px;flex:none}
+.seg span{padding:1px 10px;border-radius:5px;font-size:12px;color:var(--label)}
+.seg span.on{background:var(--button);box-shadow:0 0 0 .5px var(--border),0 1px 2px var(--edge-shadow);font-weight:500}
+.searchf{height:24px;border-radius:7px;background:var(--fill);display:flex;align-items:center;gap:6px;padding:0 8px;color:var(--tertiary);font-size:12.5px;width:200px}
+.searchf svg{width:13px;height:13px}
+.popm{display:inline-flex;align-items:center;gap:7px;height:22px;padding:0 8px 0 9px;border-radius:6px;background:var(--button);box-shadow:0 0 0 .5px var(--border),0 .5px 1px var(--edge-shadow);color:var(--label);font-size:12.5px;white-space:nowrap}
+.popm::after{content:"";width:5px;height:5px;border-right:1.5px solid var(--secondary);border-bottom:1.5px solid var(--secondary);transform:rotate(45deg) translateY(-2px)}
+.menu{position:absolute;background:var(--menu);border-radius:8px;box-shadow:0 0 0 .5px var(--border),0 10px 30px rgba(0,0,0,.25);padding:5px;z-index:30;min-width:250px;font-size:13px;color:var(--label)}
+.menu .mi{display:flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:5px}
+.menu .mi .ck{width:14px;flex:none;font-size:12px;text-align:center}
+.menu .mi small{margin-left:auto;padding-left:14px;color:var(--secondary);font-size:12px}
+.menu .mi.sel{background:var(--accent);color:#fff}.menu .mi.sel small{color:rgba(255,255,255,.85)}
+.menu .mi.red{color:var(--text-critical)}
+.menu hr{border:0;border-top:.5px solid var(--separator);margin:4px 6px}
+.hi{width:18px;height:18px;border-radius:50%;display:inline-grid;place-items:center;color:var(--secondary);flex:none}
+.hi svg{width:15px;height:15px}
+.hi.open{color:var(--accent-text);background:var(--tint-accent)}
+.hpop{position:absolute;width:300px;background:var(--menu);border-radius:10px;box-shadow:0 0 0 .5px var(--border),0 10px 30px rgba(0,0,0,.25);padding:11px 14px 9px;z-index:20;font-size:12px;line-height:1.45;color:var(--label)}
+.hpop p{margin:0 0 5px}
+.pgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start}
+.pgrid.three{grid-template-columns:1fr 1fr 1fr}
+.pgrid.w{grid-template-columns:1.25fr 1fr}
+.pcard{background:var(--detail);color:var(--label);border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18);padding:0;overflow:hidden;display:flex;flex-direction:column}
+.pcard .plabel{font-size:11px;font-weight:600;color:var(--secondary);padding:14px 22px 0}
+.shc{background:var(--detail);color:var(--label);border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 18px 50px rgba(0,0,0,.22);padding:18px 20px 16px;display:flex;flex-direction:column;position:relative}
+.dark.shc,.dark .shc{box-shadow:0 0 0 .5px rgba(0,0,0,.6),inset 0 0 0 .5px rgba(255,255,255,.12),0 18px 50px rgba(0,0,0,.4)}
+.shc .plabel{font-size:11px;font-weight:600;color:var(--secondary);margin:0 0 10px}
+.shc h2{font-size:13px;font-weight:700;margin:0 0 2px;display:flex;align-items:center;gap:6px}
+.shc .lead{color:var(--secondary);font-size:12px;margin:0 0 12px}
+.shc .sbar{display:flex;gap:8px;justify-content:flex-end;margin-top:auto;padding-top:16px;align-items:center}
+.shc .sbar .left{margin-right:auto}
+.shc .gl:first-of-type{margin-top:4px}
+.alert{display:flex;flex-direction:column;align-items:center;text-align:center}
+.alert .aic{width:56px;height:56px;border-radius:13px;background:#fff;display:grid;place-items:center;margin:4px 0 12px;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.alert .aic svg{width:34px;height:31px}
+.alert h2{font-size:13px;margin-bottom:6px;justify-content:center}
+.alert p{margin:0 0 4px;font-size:12px;color:var(--label);max-width:260px}
+.alert .sbar{justify-content:center;width:100%}
+.alert .sbar .btn{flex:1;justify-content:center}
+.veilw{position:absolute;inset:0;background:var(--scrim);display:flex;justify-content:center;align-items:flex-start;z-index:40}
+.veilw .shc{margin-top:64px;width:300px}
+.chk{display:inline-grid;place-items:center;width:14px;height:14px;border-radius:4px;background:var(--accent);flex:none}
+.chk svg{width:9px;height:9px;color:#fff}
+.chk.off{background:var(--button);box-shadow:inset 0 0 0 .5px var(--border),0 .5px 1px var(--edge-shadow)}
+.hud{display:inline-flex;align-items:center;gap:8px;background:rgba(40,40,42,.92);color:#fff;border-radius:10px;padding:8px 14px;font-size:12.5px}
+.hud svg{width:14px;height:14px}
+.tr{display:grid;align-items:center;gap:10px;padding:6px 12px;min-height:34px;position:relative}
+.tr.th{font-size:11px;font-weight:600;color:var(--secondary);min-height:26px;padding:6px 12px 5px}
+.tr .sec{color:var(--secondary)}
+.tr.off>*:not(:first-child){opacity:.45;text-decoration:line-through}
+.g-rv{grid-template-columns:16px 1.9fr .6fr .75fr .55fr}
+.g-cn{grid-template-columns:1.8fr .5fr}
+.es{padding:20px 16px;text-align:center}
+.es b{display:block;font-size:13px;font-weight:600}
+.es .l{color:var(--secondary);font-size:12px;margin-top:3px}
+
+/* ---- The owner-check panel of ADR 0038 (native, NSVisualEffectView .popover). ---- */
+.panel{width:340px;border-radius:16px;background:rgba(246,246,248,.97);color:#1d1d1f;box-shadow:0 0 0 .5px rgba(0,0,0,.22),0 24px 60px rgba(0,0,0,.3);padding:24px;display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center}
+.panel.dark{background:rgba(44,44,47,.97);color:#ececf0;box-shadow:0 0 0 .5px rgba(0,0,0,.7),inset 0 0 0 .5px rgba(255,255,255,.14),0 24px 60px rgba(0,0,0,.5)}
+.panel .icon{width:64px;height:64px;border-radius:15px;background:#fff;display:grid;place-items:center;box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.panel .icon svg{width:40px;height:36px}
+.panel h3{font-size:17px;font-weight:600;margin:0;line-height:1.28}
+.panel .det{font-size:13px;color:rgba(0,0,0,.55);margin:-6px 0 0;line-height:1.38}
+.panel.dark .det{color:rgba(255,255,255,.6)}
+.panel .tid{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;color:#ff3b5c;box-shadow:inset 0 0 0 1.5px rgba(255,59,92,.35)}
+.panel .tid svg{width:32px;height:32px}
+.panel .hint{font-size:11px;color:rgba(0,0,0,.32);margin-top:-6px}
+.panel.dark .hint{color:rgba(255,255,255,.32)}
+.panel .pbtns{display:flex;gap:12px}
+.panel .nb{height:24px;padding:0 14px;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.18),0 .5px 1px rgba(0,0,0,.1);font-size:13px;display:inline-flex;align-items:center;white-space:nowrap}
+.panel.dark .nb{background:#5a5a5e;color:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.5)}
+.panel .nb.wide{min-width:118px;justify-content:center}
+.panel .caller{display:inline-flex;align-items:center;gap:6px;font-size:12px;border-radius:6px;padding:3px 8px;background:rgba(0,0,0,.05);font-family:var(--mono)}
+.panel.dark .caller{background:rgba(255,255,255,.08)}
+.panel .caller svg{width:13px;height:13px}
+
+/* ---- Browser page and the inline chooser (F6). ---- */
+.bwin{background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18);color:#1d1d1f;position:relative}
+.bbar{height:38px;background:#ececef;border-bottom:.5px solid rgba(0,0,0,.1);display:flex;align-items:center;gap:12px;padding:0 12px}
+.bbar .lights i{width:11px;height:11px}
+.burl{flex:1;height:24px;border-radius:6px;background:#fff;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12);display:flex;align-items:center;gap:6px;padding:0 9px;font-size:12px;color:#6a6a70;white-space:nowrap;overflow:hidden}
+.burl svg{width:11px;height:11px;flex:none}
+.burl b{color:#1d1d1f;font-weight:400}
+.bext{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:#fff;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12)}
+.bext svg{width:15px;height:13px}
+.shop{padding:18px 26px 30px;min-height:430px;background:#fbfaf7;position:relative}
+.shop .nav{display:flex;align-items:center;gap:20px;font-size:13px;color:#555;margin-bottom:22px}
+.shop .nav b{font-size:16px;color:#2a2a2a;margin-right:auto;letter-spacing:-.01em}
+.shop .cols{display:grid;grid-template-columns:1fr 330px;gap:26px}
+.shop .cart{background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 0 0 1px rgba(0,0,0,.06);font-size:12.5px;color:#444}
+.shop .cart .li{display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid #f0efe9}
+.shop .cart .li:first-of-type{border-top:0}
+.ifr{border:1px dashed rgba(10,108,255,.55);border-radius:10px;background:#fff;padding:16px 16px 18px;position:relative}
+.ifr .tag{position:absolute;top:-9px;left:10px;background:#fbfaf7;padding:0 6px;font-size:10.5px;color:#0a6cff;font-family:var(--mono)}
+.ifr h4{margin:2px 0 10px;font-size:14px}
+.ifr label{display:block;font-size:11.5px;color:#666;margin:8px 0 3px}
+.ifr .inp{height:30px;border-radius:7px;box-shadow:inset 0 0 0 1px #cfcfd4;padding:0 9px;display:flex;align-items:center;font-size:13px;color:#999}
+.ifr .inp.focus{box-shadow:inset 0 0 0 2px #0a6cff;color:#1d1d1f}
+.ifr .go{margin-top:12px;height:32px;border-radius:8px;background:#2a2a2a;color:#fff;display:grid;place-items:center;font-size:13px;font-weight:500}
+.chooser{position:absolute;width:290px;background:#fff;border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.22);padding:6px;z-index:5;font-size:13px;color:#1d1d1f}
+.chooser .ch{display:flex;align-items:center;gap:7px;padding:4px 8px 6px;font-size:11px;color:#6a6a70;border-bottom:.5px solid #e8e8ec;margin-bottom:4px}
+.chooser .ch svg{width:14px;height:13px}
+.chooser .acc{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:6px}
+.chooser .acc.sel{background:#0a6cff;color:#fff}
+.chooser .acc.sel small{color:rgba(255,255,255,.85)}
+.chooser .acc small{display:block;color:#6a6a70;font-size:11.5px}
+.chooser .acc .tile{width:24px;height:24px;border-radius:6px;font-size:11px}
+.chooser .cf{font-size:11px;color:#6a6a70;padding:6px 8px 3px;border-top:.5px solid #e8e8ec;margin-top:4px;display:flex;gap:5px;align-items:flex-start}
+.chooser .cf svg{width:12px;height:12px;flex:none;margin-top:1px}
+.chooser .rec{padding:8px 8px 6px}
+.chooser .rec b{display:block;font-size:12.5px;margin-bottom:3px}
+.chooser .rec p{margin:0 0 8px;font-size:12px;color:#6a6a70}
+
+/* ---- Desktop crop and the macOS notification banner (F5). ---- */
+.desk{border-radius:12px;overflow:hidden;position:relative;height:180px;background:linear-gradient(135deg,#7aa2d6 0%,#a8b8e8 45%,#e7c7d9 100%);box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18)}
+.desk.dk{background:linear-gradient(135deg,#1d2b4a 0%,#2e2a52 50%,#4a2c45 100%)}
+.desk .mbar{height:24px;background:rgba(255,255,255,.55);display:flex;align-items:center;padding:0 12px;gap:16px;font-size:12.5px;color:#111;backdrop-filter:blur(20px)}
+.desk.dk .mbar{background:rgba(20,20,24,.55);color:#eee}
+.desk .mbar b{font-weight:700}.desk .mbar .r{margin-left:auto}
+.nban{position:absolute;right:14px;top:36px;width:344px;border-radius:16px;background:rgba(246,246,248,.86);backdrop-filter:blur(30px);box-shadow:0 0 0 .5px rgba(0,0,0,.15),0 8px 26px rgba(0,0,0,.2);padding:11px 12px;display:flex;gap:10px;color:#1d1d1f}
+.desk.dk .nban{background:rgba(52,52,56,.86);color:#ececf0;box-shadow:0 0 0 .5px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,255,255,.12),0 8px 26px rgba(0,0,0,.4)}
+.nban .ai{width:38px;height:38px;border-radius:9px;background:#fff;display:grid;place-items:center;flex:none;box-shadow:0 0 0 .5px rgba(0,0,0,.12)}
+.nban .ai svg{width:24px;height:22px}
+.nban .tx{flex:1;min-width:0;font-size:13px;line-height:1.32}
+.nban .tt{display:flex;justify-content:space-between;font-weight:600}
+.nban .tt span{font-weight:400;color:rgba(0,0,0,.45);font-size:12px}
+.desk.dk .nban .tt span{color:rgba(255,255,255,.5)}
+.nban .bd{color:rgba(0,0,0,.82)}
+.desk.dk .nban .bd{color:rgba(255,255,255,.85)}
+
+/* ---- Terminal (F7). ---- */
+.term{background:#1e1e1e;color:#e6e6e6;border-radius:10px;font-family:var(--mono);font-size:12px;line-height:1.55;padding:0 0 12px;box-shadow:0 0 0 .5px rgba(0,0,0,.4),0 12px 36px rgba(0,0,0,.2);overflow:hidden}
+.term .tbar{height:28px;background:#323234;display:flex;align-items:center;padding:0 10px;gap:10px;font-family:-apple-system,system-ui,sans-serif;font-size:12px;color:#aaa}
+.term .tbar .lights i{width:10px;height:10px}
+.term .tbar span{margin:0 auto;padding-right:50px}
+.term pre{margin:0;padding:10px 14px 0;white-space:pre-wrap}
+.term .p{color:#7fd88f}.term .d{color:#8a8a8a}.term .w{color:#ffb040}
+
+/* ---- iPhone (as ios-v1-mockup.html, prefixed ip-). ---- */
+.ipr{display:flex;gap:30px;align-items:flex-start;flex-wrap:wrap}
+.ipf{display:flex;flex-direction:column;align-items:center;gap:8px}
+.ipf .cap-l{font-size:12px;font-weight:600;color:#232327}
+.ip{--bg:#f2f2f7;--card:#fff;--lab:#000;--sec:rgba(60,60,67,.6);--ter:rgba(60,60,67,.3);--sep:rgba(60,60,67,.18);--fl:rgba(120,120,128,.12);--acc:#007aff;--red:#ff3b30;--orange:#ff9500;--green:#34c759;
+  width:390px;height:844px;zoom:.78;border-radius:54px;background:var(--bg);position:relative;overflow:hidden;box-shadow:0 0 0 11px #1c1c1e,0 0 0 12.5px #3a3a3c,0 20px 50px rgba(0,0,0,.35);color:var(--lab);font-size:17px;line-height:1.29}
+.ip .island{position:absolute;top:11px;left:50%;transform:translateX(-50%);width:124px;height:36px;background:#000;border-radius:20px;z-index:20}
+.ip .status{height:54px;display:flex;align-items:flex-end;justify-content:space-between;padding:0 30px 8px 44px;font-weight:600;font-size:16px}
+.ip .status i{display:inline-block;width:26px;height:12px;border-radius:3px;box-shadow:inset 0 0 0 1.2px #000;position:relative}
+.ip .status i::after{content:"";position:absolute;inset:2px 6px 2px 2px;background:#000;border-radius:1.5px}
+.ip .nav{display:flex;align-items:center;justify-content:space-between;padding:4px 16px 0;height:44px}
+.ip .nav .back{color:var(--acc);display:flex;align-items:center;gap:2px}
+.ip .nav .back svg{width:20px;height:20px}
+.ip .nav .done{color:var(--acc);font-weight:600;margin-left:auto}
+.ip .nav .ttl{font-weight:600;position:absolute;left:0;right:0;text-align:center;pointer-events:none}
+.ip .big{font-size:34px;font-weight:700;letter-spacing:.2px;padding:2px 16px 8px}
+.ip .ish{font-size:13px;color:var(--sec);text-transform:uppercase;letter-spacing:.2px;padding:16px 32px 6px}
+.ip .list{margin:0 16px;background:var(--card);border-radius:26px;overflow:hidden}
+.ip .row{display:flex;align-items:center;gap:12px;padding:11px 16px;min-height:52px;position:relative}
+.ip .row+.row::before{content:"";position:absolute;top:0;right:0;left:60px;border-top:.5px solid var(--sep)}
+.ip .list.plain .row+.row::before{left:16px}
+.ip .row .tx{flex:1;min-width:0}
+.ip .row .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ip .row .s{font-size:15px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ip .row .v{color:var(--sec);text-align:right;white-space:nowrap}
+.ip .row .act{color:var(--acc)}
+.ip .row .red{color:var(--red)}
+.ip .chev{color:var(--ter);font-size:20px;font-weight:500}
+.ip .ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;flex:none}
+.ip .ic svg{width:17px;height:17px}
+.ip .tl{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px;flex:none}
+.ip .tl svg{width:16px;height:16px}
+.ip .ava{width:72px;height:72px;font-size:30px}
+.ip .hd{display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px;padding:4px 16px 16px}
+.ip .hd h1{font-size:24px;font-weight:700;margin:4px 0 0;line-height:1.15}
+.ip .hd .s{color:var(--sec);font-size:15px}
+.ip .foot{font-size:13px;color:var(--sec);padding:7px 32px 0;line-height:1.35}
+.ip .badge{background:var(--red);color:#fff;font-size:14px;font-weight:600;border-radius:11px;min-width:22px;height:22px;padding:0 7px;display:grid;place-items:center}
+.ip .pill{border-radius:16px;background:var(--fl);color:var(--acc);font-weight:600;font-size:15px;padding:5px 12px;flex:none}
+.ip .dt{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);margin-right:6px}
+.ip .dt.w{background:var(--orange)}
+.ip .warnl{color:#a65200}
+.ip .dim{position:absolute;inset:0;background:rgba(0,0,0,.28);z-index:15}
+.ip .asheet{position:absolute;left:10px;right:10px;bottom:30px;z-index:16;display:flex;flex-direction:column;gap:8px}
+.ip .asheet .grpa{background:rgba(250,250,252,.96);border-radius:22px;overflow:hidden;text-align:center}
+.ip .asheet .hdx{padding:16px 20px 14px;font-size:13px;color:var(--sec);line-height:1.35}
+.ip .asheet .hdx b{display:block;color:var(--lab);font-size:15px;margin-bottom:3px}
+.ip .asheet .ab{height:56px;display:grid;place-items:center;font-size:19px;border-top:.5px solid var(--sep);color:var(--red)}
+.ip .asheet .ab.c{border-top:0;color:var(--acc);font-weight:600;background:rgba(250,250,252,.98);border-radius:22px}
+.ip .banner{margin:0 16px 14px;background:var(--card);border-radius:22px;padding:12px 14px;display:flex;gap:12px;align-items:center;font-size:15px}
+.ip .banner .bi{width:34px;height:34px;border-radius:9px;background:#fff4e5;color:var(--orange);display:grid;place-items:center;flex:none}
+.ip .banner .bi svg{width:20px;height:20px}
+.ip .tabbar{position:absolute;left:16px;right:16px;bottom:24px;height:62px;display:flex;gap:10px;align-items:center;z-index:12}
+.ip .tabs{flex:1;height:62px;border-radius:31px;background:rgba(255,255,255,.78);box-shadow:0 6px 24px rgba(0,0,0,.12),inset 0 0 0 .5px rgba(0,0,0,.04);display:flex;align-items:center;justify-content:space-around;padding:0 6px}
+.ip .tab{display:flex;flex-direction:column;align-items:center;gap:1px;font-size:10px;font-weight:600;color:#1c1c1e;width:90px;height:52px;justify-content:center;border-radius:26px;position:relative}
+.ip .tab svg{width:24px;height:24px}
+.ip .tab.on{color:var(--acc);background:rgba(120,120,128,.12)}
+.ip .tab .bd{position:absolute;top:3px;right:22px;background:var(--red);color:#fff;font-size:11px;border-radius:9px;min-width:17px;height:17px;display:grid;place-items:center;padding:0 4px}
+.ip .tsrch{width:62px;height:62px;border-radius:31px;background:rgba(255,255,255,.78);box-shadow:0 6px 24px rgba(0,0,0,.12);display:grid;place-items:center}
+.ip .tsrch svg{width:24px;height:24px}
+
+/* ---- Apple Watch (watchOS is always dark), prefixed wt-. ---- */
+.wtr{display:flex;gap:34px;align-items:flex-start;flex-wrap:wrap}
+.wtf{display:flex;flex-direction:column;align-items:center;gap:10px}
+.wtf .cap-l{font-size:12px;font-weight:600;color:#232327}
+.wt{width:208px;height:250px;border-radius:52px;background:#000;color:#fff;position:relative;overflow:hidden;box-shadow:0 0 0 9px #2a2a2c,0 0 0 10.5px #4a4a4e,0 16px 40px rgba(0,0,0,.35);font-size:15px;line-height:1.25}
+.wt .wtop{display:flex;align-items:center;justify-content:space-between;padding:14px 18px 4px 20px;height:40px}
+.wt .wtop b{font-size:16px;font-weight:600;color:#3d9bff}
+.wt .wtop .clk{font-size:15px;font-weight:600}
+.wt .wtop .gear{width:26px;height:26px;border-radius:50%;background:#262628;display:grid;place-items:center;margin-right:auto;margin-left:8px}
+.wt .wtop .gear svg{width:15px;height:15px;color:#fff}
+.wt .wtop .bk{width:26px;height:26px;border-radius:50%;background:#262628;display:grid;place-items:center}
+.wt .wtop .bk svg{width:15px;height:15px}
+.wt .wb{padding:2px 8px}
+.wt .wsh{font-size:12px;color:rgba(255,255,255,.55);padding:3px 10px 2px;font-weight:600}
+.wt .wr{background:#222224;border-radius:16px;padding:8px 11px;margin-bottom:5px}
+.wt .wr .t1{font-size:13.5px;font-weight:600;line-height:1.2}
+.wt .wr .t2{font-size:12px;color:rgba(255,255,255,.6)}
+.wt .wr .t3{font-size:12px;color:#ffb040;font-variant-numeric:tabular-nums}
+.wt .wf{padding:5px 11px;display:flex;justify-content:space-between;gap:8px;font-size:13px;border-bottom:.5px solid rgba(255,255,255,.12)}
+.wt .wf span{color:rgba(255,255,255,.6)}
+.wt .wf b{font-weight:500;text-align:right}
+.wt .wbtn{height:38px;border-radius:19px;display:grid;place-items:center;font-size:15px;font-weight:600;margin:6px 4px 0}
+.wt .wbtn.a{background:#0a70f5}
+.wt .wbtn.d{background:#2c2c2e;color:#ff7c72}
+.wt .wbtn.n{background:#2c2c2e;color:#3d9bff}
+.wt .wrow{display:flex;align-items:center;gap:8px;background:#222224;border-radius:16px;padding:8px 11px;margin-bottom:5px}
+.wt .wrow .tx{flex:1;min-width:0}
+.wt .wrow .fg{font-size:13px;color:#ff7c72;font-weight:600}
+.wt .wnote{font-size:11.5px;color:rgba(255,255,255,.5);padding:4px 10px}
+
+/* ---- The notes at the end. ---- */
+.notes{max-width:1180px;margin:0 auto 28px;background:#fff;border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.15);padding:22px 28px 24px;color:#1d1d1f}
+.notes h2{font-size:15px;margin:0 0 8px}
+.notes table{border-collapse:collapse;width:100%;font-size:12.5px;margin:8px 0 18px}
+.notes th,.notes td{text-align:left;vertical-align:top;padding:6px 10px 6px 0;border-top:.5px solid rgba(0,0,0,.09)}
+.notes th{font-size:11.5px;color:rgba(0,0,0,.52);font-weight:600;border-top:0}
+.notes td:first-child{white-space:nowrap}
+.notes ul{margin:6px 0 16px;padding-left:18px;line-height:1.5}
+.sw2{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:6px;box-shadow:0 0 0 .5px rgba(0,0,0,.3)}
+.notes td.hex{font-family:var(--mono);font-size:11.5px;white-space:nowrap}
+.notes .ok{color:#1d8036;font-weight:600}
+.notes .bad{color:#c81e1e;font-weight:600}
+</style>
+</head>
+<body>
+
+<!-- The icons, used with <use href="#…">. Copied from devices-settings-mockup.html, plus the star, eye, plug, and brain icons. -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9.5 5v14"/><path d="M5.5 8.5h2M5.5 11h2"/></g></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></g></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></g></symbol>
+  <symbol id="i-checkc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></g></symbol>
+  <symbol id="i-agent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></g></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19.5V13M10 19.5V8M15 19.5v-9M20 19.5V5"/></g></symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r=".6"/><circle cx="4.8" cy="12" r=".6"/><circle cx="4.8" cy="17.5" r=".6"/></g></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></g></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></g></symbol>
+  <symbol id="i-touch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 5.6A8.5 8.5 0 0 1 20.5 12v1.5M3.5 12a8.5 8.5 0 0 1 1.2-4.4M7 19.5a12 12 0 0 0 1.5-6.5 3.5 3.5 0 0 1 7 0v1M12 13a14 14 0 0 1-2 7.5M15.3 17.5a17 17 0 0 1-1 3M3.6 15.5a9 9 0 0 0 1-3.5"/></g></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4M12 17h.01"/></g></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></g></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></g></symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12.5l4 4 8-9"/></g></symbol>
+  <symbol id="i-no" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10M17 7L7 17"/></g></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6.5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="17.5" cy="12" r="1.7"/></g></symbol>
+  <symbol id="i-mini" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="8" width="17" height="8" rx="2.5"/><path d="M7 13h.01"/></g></symbol>
+  <symbol id="i-laptop" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></g></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></g></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></g></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></g></symbol>
+  <symbol id="i-mark" viewBox="0 0 229 206.2"><path d="M0,114.5A114.5,114.5 0 0 1 229,114.5L229,204.2A2,2 0 0 1 227,206.2L190.5,206.2A21,21 0 0 1 169.5,185.2L169.5,114.5A55,55 0 0 0 59.5,114.5L59.5,204.2A2,2 0 0 1 57.5,206.2L2,206.2A2,2 0 0 1 0,204.2Z" fill="#0e1820"/><path d="M75,97.76A2.5,2.5 0 0 1 78.47,95.45L105.54,106.78A26,26 0 0 1 121.5,130.76L121.5,178.76A3,3 0 0 1 119.95,181.39L76.48,205.38A1,1 0 0 1 75,204.51Z" fill="#0a77fe"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.6"/><path d="M5 6v12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6M5 12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6"/></g></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l7 2.6v5.4c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V6.1z"/></g></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M7.5 10l2.5 2-2.5 2M12.5 14.5h4"/></g></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5v10M7.5 10.5l4.5 4.5 4.5-4.5M5 19.5h14"/></g></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="10" height="18" rx="2.4"/><path d="M11 18h2"/></g></symbol>
+  <symbol id="i-watch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="6.5" width="10" height="11" rx="2.6"/><path d="M9 6.5l.6-3h4.8l.6 3M9 17.5l.6 3h4.8l.6-3M12 10v2.2l1.4 1"/></g></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.6l2.6 5.3 5.8.85-4.2 4.1 1 5.8L12 16.9l-5.2 2.75 1-5.8-4.2-4.1 5.8-.85z" fill="currentColor"/></symbol>
+  <symbol id="i-staro" viewBox="0 0 24 24"><path d="M12 3.6l2.6 5.3 5.8.85-4.2 4.1 1 5.8L12 16.9l-5.2 2.75 1-5.8-4.2-4.1 5.8-.85z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5v4M15 3.5v4M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0zM12 16v4.5"/></g></symbol>
+  <symbol id="i-brain" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4.5a3 3 0 0 0-3 3 3 3 0 0 0-1.5 5.5A3 3 0 0 0 7 18a2.5 2.5 0 0 0 5 .5V6a1.5 1.5 0 0 0-3-1.5zM15 4.5a3 3 0 0 1 3 3 3 3 0 0 1 1.5 5.5A3 3 0 0 1 17 18a2.5 2.5 0 0 1-5 .5"/></g></symbol>
+  <symbol id="i-autofill" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="6" width="17" height="12" rx="2.5"/><path d="M7 12h.01M10.5 12h.01M14 12h.01M17 10v4"/></g></symbol>
+  <symbol id="i-gh" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2.8a9.2 9.2 0 0 0-2.9 17.9c.46.08.63-.2.63-.44v-1.6c-2.56.56-3.1-1.1-3.1-1.1-.42-1.06-1.02-1.35-1.02-1.35-.84-.57.06-.56.06-.56.92.07 1.4.95 1.4.95.83 1.41 2.17 1 2.7.77.08-.6.32-1 .59-1.24-2.04-.23-4.19-1.02-4.19-4.55 0-1 .36-1.83.95-2.47-.1-.23-.41-1.17.09-2.44 0 0 .77-.25 2.53.95a8.7 8.7 0 0 1 4.6 0c1.76-1.2 2.53-.95 2.53-.95.5 1.27.19 2.2.09 2.44.6.64.95 1.46.95 2.47 0 3.54-2.15 4.32-4.2 4.55.33.28.62.84.62 1.7v2.52c0 .25.17.53.64.44A9.2 9.2 0 0 0 12 2.8z"/></symbol>
+  <symbol id="i-fwd" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 6l6 6-6 6"/></g></symbol>
+  <symbol id="i-frame" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><rect x="8" y="9" width="8" height="6.5" rx="1.2" stroke-dasharray="2 1.6"/></g></symbol>
+</svg>
+
+<div class="page">
+
+<div class="intro">
+  <h1>Apassy · New views of the misc plan</h1>
+  <p>Mockup for M0 of implementation-plan-misc.md. Final frames, not a draft. Demo data. This Mac: Mac mini (office). Vaults: Personal, Acme team. Now: Tue 3 Nov 2026, 14:20.</p>
+  <p>Mac colors are CSS variables named after the <code>kit.rs</code> roles. Light frames use today's values; dark frames use the proposed <code>Palette::DARK</code>. The palette table, the exact strings, and the open questions are at the end.</p>
+  <ol>
+    <li>F1 Credentials, light and dark</li>
+    <li>F2 Decisions with an access request, dark</li>
+    <li>F3 Settings → Bouncer and a sheet, dark</li>
+    <li>F4 Favorites on the Mac</li>
+    <li>F5 Access-request notification</li>
+    <li>F6 Fill a login in a frame</li>
+    <li>F7 Command-line code panel, light and dark</li>
+    <li>F8 iPhone Settings and Vault</li>
+    <li>F9 iPhone agent page</li>
+    <li>F10 Apple Watch with two vaults</li>
+    <li>F11 Shared brain: consent and review</li>
+    <li>F12 Settings → Tools → Connectors</li>
+  </ol>
+</div>
+
+<!-- ============================================================ F1 -->
+<section class="frame" id="f1">
+  <div class="flabel"><b><span class="fnum">F1</span>Credentials · All credentials<span class="ap">Light</span><span class="ap dk">Dark</span></b>
+    <span>The same view in both palettes. Every color is a role; nothing else changes.</span></div>
+
+  <div class="sub-l">F1a · Light (Palette::LIGHT, today's values)</div>
+  <div class="win">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i></i><i></i><i></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si on"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si"><svg class="fav"><use href="#i-star"/></svg><span class="lbl">Favorites</span><span class="cnt">3</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>All credentials</b><small>14 credentials</small></div><span class="ib"><svg><use href="#i-search"/></svg></span></div>
+      <div class="rows">
+        <div class="gh">Work<span>9</span></div>
+        <div class="r on"><div class="tile" style="background:#635bff">S</div><div class="tx"><div class="ttl2">Stripe test key</div><div class="sub">API key · STRIPE_TEST_KEY</div></div><div class="meta"><svg><use href="#i-star"/></svg></div></div>
+        <div class="r"><div class="tile" style="background:#635bff">S</div><div class="tx"><div class="ttl2">Stripe live</div><div class="sub">API key · STRIPE_LIVE_KEY</div></div><div class="meta"><span class="dotp"></span></div></div>
+        <div class="r"><div class="tile" style="background:#24292f"><svg><use href="#i-gh"/></svg></div><div class="tx"><div class="ttl2">GitHub token</div><div class="sub">Token · GITHUB_TOKEN</div></div><div class="meta"><svg><use href="#i-star"/></svg></div></div>
+        <div class="r"><div class="tile" style="background:#336791">P</div><div class="tx"><div class="ttl2">Shop database</div><div class="sub">Database · DATABASE_URL</div></div></div>
+        <div class="r"><div class="tile" style="background:#10a37f">O</div><div class="tx"><div class="ttl2">OpenAI key</div><div class="sub">API key · OPENAI_API_KEY</div></div></div>
+        <div class="gh">Infra<span>5</span></div>
+        <div class="r"><div class="tile" style="background:#8e8e93"><svg><use href="#i-key"/></svg></div><div class="tx"><div class="ttl2">Deploy key</div><div class="sub">SSH key · DEPLOY_KEY</div></div><div class="meta"><span class="dotp"></span></div></div>
+        <div class="r"><div class="tile" style="background:#f38020">C</div><div class="tx"><div class="ttl2">Cloudflare API</div><div class="sub">Token · CLOUDFLARE_API_TOKEN</div></div><div class="meta"><svg><use href="#i-star"/></svg></div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"><span class="ib star"><svg><use href="#i-star"/></svg></span><span class="ib"><svg><use href="#i-dots"/></svg></span></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:#635bff">S</div><div><h1>Stripe test key</h1><div class="s">API key · Work</div><div class="caps"><span class="cap">Development</span></div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="k">Secret</div><div class="v mono" style="letter-spacing:2px">••••••••••••••••</div><span class="pb"><svg><use href="#i-eye"/></svg>Show</span><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+          <div class="fr"><div class="k">Variable</div><div class="v mono lab">STRIPE_TEST_KEY</div></div>
+          <div class="fr"><div class="k">Sends To</div><div class="v">api.stripe.com</div></div>
+        </div>
+        <div class="gl">Agent Use</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Used By</div><div class="v">Claude Code, Codex</div></div>
+          <div class="fr"><div class="k">Last Use</div><div class="v">Today, 14:02</div></div>
+          <div class="fr"><div class="kn"><div>Allow reads in acme-billing</div><div class="nt">From your answer on 28 Oct</div></div><span class="pb">Remove…</span></div>
+        </div>
+        <div class="gl">Hosts and Risk</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Always Ask Me</div><div class="v"></div><span class="sw"></span></div>
+          <div class="fr"><div class="k">Bouncer Today</div><div class="v"><span class="dot"></span>6 allowed · 1 asked you</div></div>
+        </div>
+      </div></div>
+    </section>
+  </div>
+
+  <div class="sub-l">F1b · Dark (Palette::DARK)</div>
+  <div class="dark">
+  <div class="win">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i></i><i></i><i></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si on"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si"><svg class="fav"><use href="#i-star"/></svg><span class="lbl">Favorites</span><span class="cnt">3</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>All credentials</b><small>14 credentials</small></div><span class="ib"><svg><use href="#i-search"/></svg></span></div>
+      <div class="rows">
+        <div class="gh">Work<span>9</span></div>
+        <div class="r on"><div class="tile" style="background:#635bff">S</div><div class="tx"><div class="ttl2">Stripe test key</div><div class="sub">API key · STRIPE_TEST_KEY</div></div><div class="meta"><svg><use href="#i-star"/></svg></div></div>
+        <div class="r"><div class="tile" style="background:#635bff">S</div><div class="tx"><div class="ttl2">Stripe live</div><div class="sub">API key · STRIPE_LIVE_KEY</div></div><div class="meta"><span class="dotp"></span></div></div>
+        <div class="r"><div class="tile" style="background:#24292f;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.25)"><svg><use href="#i-gh"/></svg></div><div class="tx"><div class="ttl2">GitHub token</div><div class="sub">Token · GITHUB_TOKEN</div></div><div class="meta"><svg><use href="#i-star"/></svg></div></div>
+        <div class="r"><div class="tile" style="background:#336791">P</div><div class="tx"><div class="ttl2">Shop database</div><div class="sub">Database · DATABASE_URL</div></div></div>
+        <div class="r"><div class="tile" style="background:#10a37f">O</div><div class="tx"><div class="ttl2">OpenAI key</div><div class="sub">API key · OPENAI_API_KEY</div></div></div>
+        <div class="gh">Infra<span>5</span></div>
+        <div class="r"><div class="tile" style="background:#8e8e93"><svg><use href="#i-key"/></svg></div><div class="tx"><div class="ttl2">Deploy key</div><div class="sub">SSH key · DEPLOY_KEY</div></div><div class="meta"><span class="dotp"></span></div></div>
+        <div class="r"><div class="tile" style="background:#f38020">C</div><div class="tx"><div class="ttl2">Cloudflare API</div><div class="sub">Token · CLOUDFLARE_API_TOKEN</div></div><div class="meta"><svg><use href="#i-star"/></svg></div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"><span class="ib star"><svg><use href="#i-star"/></svg></span><span class="ib"><svg><use href="#i-dots"/></svg></span></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:#635bff">S</div><div><h1>Stripe test key</h1><div class="s">API key · Work</div><div class="caps"><span class="cap">Development</span></div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="k">Secret</div><div class="v mono" style="letter-spacing:2px">••••••••••••••••</div><span class="pb"><svg><use href="#i-eye"/></svg>Show</span><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+          <div class="fr"><div class="k">Variable</div><div class="v mono lab">STRIPE_TEST_KEY</div></div>
+          <div class="fr"><div class="k">Sends To</div><div class="v">api.stripe.com</div></div>
+        </div>
+        <div class="gl">Agent Use</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Used By</div><div class="v">Claude Code, Codex</div></div>
+          <div class="fr"><div class="k">Last Use</div><div class="v">Today, 14:02</div></div>
+          <div class="fr"><div class="kn"><div>Allow reads in acme-billing</div><div class="nt">From your answer on 28 Oct</div></div><span class="pb">Remove…</span></div>
+        </div>
+        <div class="gl">Hosts and Risk</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Always Ask Me</div><div class="v"></div><span class="sw"></span></div>
+          <div class="fr"><div class="k">Bouncer Today</div><div class="v"><span class="dot"></span>6 allowed · 1 asked you</div></div>
+        </div>
+      </div></div>
+    </section>
+  </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Only colors change.</b> Layout, sizes, and text are the same in F1a and F1b. Tiles keep their brand colors in both.</li>
+    <li><b>Roles used here:</b> SIDEBAR, P1 sidebar selected, LIST, SELECTION (white text), DETAIL, SURFACE (groups), SECTION_EDGE, SEPARATOR, LABEL, SECONDARY, TERTIARY (chevrons), FILL_HOVER (small buttons), FILL_PRESSED (switch off), PRODUCTION (red dot, badge), Tone::Warning mark (star).</li>
+    <li><b>Dark tile edge:</b> a near-black tile (GitHub) gets a 0.5 px white edge at 25 % in dark, so it does not melt into the list.</li>
+    <li><b>Follow the system</b> (D7): repaint on the appearance change, no in-app switch. The native panels (F6, F7) already follow the system.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F2 -->
+<section class="frame" id="f2">
+  <div class="flabel"><b><span class="fnum">F2</span>Decisions · a waiting run and an access request<span class="ap dk">Dark</span></b>
+    <span>The access request is selected, as after a click on its notification (F5).</span></div>
+  <div class="dark">
+  <div class="win" style="min-height:640px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i></i><i></i><i></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si"><svg class="fav"><use href="#i-star"/></svg><span class="lbl">Favorites</span><span class="cnt">3</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si on"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Decisions</b><small>12 by you · 61 automatic</small></div></div>
+      <div class="rows">
+        <div class="gh">Waiting<span>2</span></div>
+        <div class="r on"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex asks for Deploy key</div><div class="sub">Access request · Mac mini (office)</div></div><div class="meta"><span class="dotp"></span>14:16</div></div>
+        <div class="r"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Stripe live</div><div class="sub">Run · Mac mini (office)</div></div><div class="meta"><span class="dotp"></span><span class="tm">3:12</span></div></div>
+        <div class="gh" style="padding-top:16px">History</div>
+        <div style="padding:2px 8px 6px"><span class="seg"><span class="on">All</span><span>Asked You</span><span>Automatic</span><span>Denied</span></span></div>
+        <div class="gh">Today</div>
+        <div class="r top"><div class="ava" style="background:#d97757">C</div><div class="tx"><div class="ttl2">Claude Code · Stripe test key</div><div class="sub3">Allowed by bouncer</div></div><div class="meta">14:02</div></div>
+        <div class="r top"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex · Shop database</div><div class="sub3">Allowed by you</div></div><div class="meta">13:40</div></div>
+        <div class="r top"><div class="ava" style="background:#10a37f">C</div><div class="tx"><div class="ttl2">Codex · Deploy key</div><div class="sub3"><span style="color:var(--text-critical)">Denied by you</span></div></div><div class="meta">13:18</div></div>
+        <div class="r top"><div class="ava" style="background:#6e5ae6">T</div><div class="tx"><div class="ttl2">T3 Code · GitHub token</div><div class="sub3">Allowed by bouncer</div></div><div class="meta">11:05</div></div>
+      </div>
+    </section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="ava l" style="background:#10a37f">C</div><div><h1>Codex asks for access</h1><div class="s">Mac mini (office) · Personal · 14:16</div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="k">Credential</div><div class="v lab" style="display:flex;justify-content:flex-end;align-items:center;gap:8px"><div class="tile s" style="background:#8e8e93"><svg><use href="#i-key"/></svg></div>Deploy key<span class="cap red">Production</span></div></div>
+          <div class="fr"><div class="k">Agent</div><div class="v">Codex</div></div>
+          <div class="fr"><div class="k">Project</div><div class="v">acme-billing</div></div>
+          <div class="fr"><div class="k">Folder</div><div class="v">Infra</div></div>
+          <div class="fr"><div class="k">Action</div><div class="v">Deploy</div></div>
+          <div class="fr"><div class="k">Hosts</div><div class="v mono">github.com:22</div></div>
+        </div>
+        <div class="gl">The Agent Says <span class="cap warn" style="margin-left:4px">Not verified</span></div>
+        <div class="grp"><div class="fr"><div class="v l">"Push the release tag v2.4.0."</div></div></div>
+        <div class="gl">If You Allow</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Allows</div><div class="v">One use. The bouncer still checks it.</div></div>
+          <div class="fr"><div class="k">Expires</div><div class="v">Tomorrow, 14:16</div></div>
+        </div>
+      </div></div>
+      <div class="abar"><span class="btn des">Deny</span><div class="cap2"></div><span class="btn">Grant Access on This Mac…</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Allow Once</span></div>
+    </section>
+  </div>
+  </div>
+
+  <div class="pgrid dark" style="margin-top:22px">
+    <div class="pcard">
+      <div class="plabel">F2b · The waiting run, selected</div>
+      <div style="padding:14px 22px 14px">
+        <div class="hdr"><div class="ava l" style="background:#d97757">C</div><div><h1>Claude Code wants to use Stripe live</h1><div class="s">Mac mini (office) · <span class="tm">3:12</span> left</div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="k">Credential</div><div class="v lab" style="display:flex;justify-content:flex-end;align-items:center;gap:8px"><div class="tile s" style="background:#635bff">S</div>Stripe live<span class="cap red">Production</span></div></div>
+          <div class="fr"><div class="k">Project</div><div class="v">acme-billing</div></div>
+          <div class="fr"><div class="k">Why It Asks</div><div class="v">Production item</div></div>
+        </div>
+        <div class="gl">Command</div>
+        <div class="grp"><div class="fr"><div class="cmd">stripe balance retrieve --api-key $STRIPE_LIVE_KEY</div></div></div>
+      </div>
+      <div class="abar" style="margin-top:auto"><span class="btn des">Deny</span><div class="cap2"></div><span class="btn pri"><svg><use href="#i-touch"/></svg>Allow Once</span></div>
+    </div>
+    <div class="pcard">
+      <div class="plabel">F2c · The access request after the answer</div>
+      <div style="padding:14px 22px 18px">
+        <div class="hdr"><div class="ava l" style="background:#10a37f">C</div><div><h1>Codex asks for access</h1><div class="s">Mac mini (office) · Personal · 14:16</div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="tn good" style="flex:1"><svg><use href="#i-checkc"/></svg><span>Allowed once by you at 14:21.</span></div></div>
+          <div class="fr"><div class="k">Credential</div><div class="v lab">Deploy key</div></div>
+          <div class="fr"><div class="k">Used</div><div class="v">Not yet</div></div>
+        </div>
+        <div class="note">The notification of this request is gone.</div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Row:</b> "&lt;agent&gt; asks for &lt;item&gt;", subline "Access request · &lt;Mac&gt;". The run row stays "&lt;agent&gt; · &lt;item&gt;" with "Run · &lt;Mac&gt;". Both show the production dot; only the run has a countdown.</li>
+    <li><b>Detail facts</b> are the Mac-verified fields of today's view (<code>decisions.rs:2981–3150</code>), regrouped: credential, agent, project, folder, action, hosts. The agent's reason goes under "The Agent Says" with the "Not verified" tag.</li>
+    <li><b>Buttons:</b> Deny (red text), Grant Access on This Mac… (today's durable path), Allow Once (primary, Touch ID glyph, M8 <code>owner_press</code>). Expired or decided: no buttons, F2c.</li>
+    <li><b>Dark roles:</b> the production tag uses <code>tint_critical</code> + <code>text_critical</code>; "Not verified" uses the warning tint and text; the countdown is <code>Tone::Warning.text()</code>.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F3 -->
+<section class="frame" id="f3">
+  <div class="flabel"><b><span class="fnum">F3</span>Settings → Bouncer and a sheet<span class="ap dk">Dark</span></b>
+    <span>Bouncer with the new Shared Brain group (ADR 0043, M24). F3b is the alert of the bouncer switch.</span></div>
+  <div class="dark">
+  <div class="win" style="min-height:660px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i></i><i></i><i></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si"><svg class="fav"><use href="#i-star"/></svg><span class="lbl">Favorites</span><span class="cnt">3</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b></div></div><div class="rows">
+      <div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · Apassy relay</div></div></div>
+      <div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div>
+      <div class="r"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">6 devices</div></div></div>
+      <div class="r on"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div>
+      <div class="r"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line · Extension</div></div></div>
+      <div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Apassy 0.5.18</div></div></div>
+    </div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div><h1>Bouncer</h1><div class="s">Brain: Ready</div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Bouncer</div><div class="nt">Decides routine runs. Asks you when unsure.</div></div><span class="sw on"></span></div>
+          <div class="fr"><div class="k">Today</div><div class="v">37 decided · 4 asked you · 0 failed</div></div>
+        </div>
+        <div class="gl">Bouncer Brain</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Bouncer Brain</div><div class="v"><span class="dot"></span>Running · apassy-base-v1</div><span class="ib" style="width:24px;height:24px"><svg><use href="#i-dots"/></svg></span></div>
+          <div class="fr"><div class="k">Start the Bouncer Brain</div><div class="v"></div><span class="popm">With Apassy</span></div>
+          <div class="fr"><div class="k">Stop After</div><div class="v"></div><span class="popm">30 minutes without a run</span></div>
+        </div>
+        <div class="gl">Shared Brain</div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Help Train the Shared Brain</div><div class="nt">Sends examples without names or values. You review each batch.</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><svg style="width:15px;height:15px;color:var(--tertiary)"><use href="#i-touch"/></svg><span class="sw on"></span></div>
+          <div class="fr"><div class="tn acc" style="flex:1"><svg><use href="#i-info"/></svg><span>40 new examples to review.</span></div><span class="pb">Review and Send…</span></div>
+          <div class="fr"><div class="k">Sent</div><div class="v">2 batches · 77 records · last 27 Oct</div></div>
+          <div class="fr"><div class="k" style="color:var(--text-critical)">Delete My Contributions…</div><div class="v"></div></div>
+        </div>
+      </div></div>
+    </section>
+  </div>
+  </div>
+
+  <div class="pgrid three dark" style="margin-top:22px">
+    <div class="shc">
+      <div class="plabel">F3b · Turning the bouncer off</div>
+      <div class="alert">
+        <span class="aic"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></span>
+        <h2>Turn Off the Bouncer?</h2>
+        <p>Every run waits for you until you turn it on.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Turn Off</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F3c · The quiet line, nothing new</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>Help Train the Shared Brain</div><div class="nt">Sends examples without names or values. You review each batch.</div></div><span class="sw on"></span></div>
+        <div class="fr"><div class="k">Sent</div><div class="v">2 batches · last 27 Oct</div></div>
+      </div>
+      <div class="note">The review line shows at most once a week.</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F3d · The help behind ⓘ</div>
+      <div class="hpop" style="position:static;width:auto">
+        <p><b>Help Train the Shared Brain</b></p>
+        <p>Your answers make the stock bouncer better for everyone.</p>
+        <p>Only commands with names replaced leave this Mac.</p>
+        <p>A command trains only after 5 people sent it.</p>
+        <p>Off by default. Turning it on needs Touch ID.</p>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Shared Brain group</b> shows only when <code>APASSY_CONTRIB_ENDPOINT</code> is set and the ADR 0043 §9 gate holds (M24 <code>the_switch_is_hidden_without_an_endpoint</code>). Off: only the switch row.</li>
+    <li><b>Switch on</b> opens the consent sheet (F11a), then the owner check. Switch off: no check, no alert; later batches stop.</li>
+    <li><b>Review line</b> ("N new examples to review." + Review and Send…) at most once a week, never a notification. Fewer than 10 new records: no line (F3c).</li>
+    <li><b>F3b:</b> the existing bouncer switch gets this alert. The default button is Turn Off (blue); Cancel is Esc. After it: today's note "The bouncer brain is off. Every run waits for you."</li>
+    <li><b>Dark sheet roles:</b> sheet = DETAIL, groups = SURFACE, bordered buttons = P2 BUTTON, the alert icon is the app icon on its white tile.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F4 -->
+<section class="frame" id="f4">
+  <div class="flabel"><b><span class="fnum">F4</span>Favorites on the Mac<span class="ap">Light</span></b>
+    <span>The Favorites row, the star in the header, and the "⋯" menu (D3, M12).</span></div>
+  <div class="win" style="min-height:560px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i></i><i></i><i></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si on"><svg class="fav"><use href="#i-star"/></svg><span class="lbl">Favorites</span><span class="cnt">3</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol">
+      <div class="tb"><div class="ttl"><b>Favorites</b><small>3 credentials</small></div><span class="ib"><svg><use href="#i-search"/></svg></span></div>
+      <div class="rows">
+        <div class="r"><div class="tile" style="background:#635bff">S</div><div class="tx"><div class="ttl2">Stripe test key</div><div class="sub">Work · STRIPE_TEST_KEY</div></div></div>
+        <div class="r on"><div class="tile" style="background:#24292f"><svg><use href="#i-gh"/></svg></div><div class="tx"><div class="ttl2">GitHub token</div><div class="sub">Work · GITHUB_TOKEN</div></div></div>
+        <div class="r"><div class="tile" style="background:#f38020">C</div><div class="tx"><div class="ttl2">Cloudflare API</div><div class="sub">Infra · CLOUDFLARE_API_TOKEN</div></div></div>
+      </div>
+    </section>
+    <section class="detail" style="position:relative">
+      <div class="tb"><span class="ib star"><svg><use href="#i-star"/></svg></span><span class="ib open"><svg><use href="#i-dots"/></svg></span></div>
+      <div class="menu" style="right:12px;top:46px">
+        <div class="mi sel"><span class="ck"></span>Remove from Favorites</div>
+        <div class="mi"><span class="ck"></span>Copy Variable Name</div>
+        <div class="mi"><span class="ck"></span>Move to Folder…</div>
+        <div class="mi"><span class="ck"></span>Duplicate</div>
+        <hr>
+        <div class="mi red"><span class="ck"></span>Archive…</div>
+      </div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:#24292f"><svg><use href="#i-gh"/></svg></div><div><h1>GitHub token</h1><div class="s">Token · Work</div><div class="caps"><span class="cap">Development</span></div></div></div>
+        <div class="grp">
+          <div class="fr"><div class="k">Secret</div><div class="v mono" style="letter-spacing:2px">••••••••••••••••</div><span class="pb"><svg><use href="#i-eye"/></svg>Show</span><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+          <div class="fr"><div class="k">Variable</div><div class="v mono lab">GITHUB_TOKEN</div></div>
+          <div class="fr"><div class="k">Sends To</div><div class="v">api.github.com</div></div>
+        </div>
+        <div class="gl">Agent Use</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Used By</div><div class="v">T3 Code</div></div>
+          <div class="fr"><div class="k">Last Use</div><div class="v">Today, 11:05</div></div>
+        </div>
+      </div></div>
+    </section>
+  </div>
+
+  <div class="pgrid three" style="margin-top:22px">
+    <div class="shc">
+      <div class="plabel">F4b · The header star, two states</div>
+      <div class="grp">
+        <div class="fr"><span class="ib"><svg><use href="#i-staro"/></svg></span><div class="kn"><div>Add to Favorites</div><div class="nt">Not a favorite. Tooltip and menu item.</div></div></div>
+        <div class="fr"><span class="ib star"><svg><use href="#i-star"/></svg></span><div class="kn"><div>Remove from Favorites</div><div class="nt">A favorite. Tooltip and menu item.</div></div></div>
+      </div>
+      <div class="note">Shortcut ⌘D toggles the star of the selected credential.</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F4c · No favorites: no row</div>
+      <div style="background:var(--sidebar);border-radius:8px;padding:2px 8px 8px">
+        <div class="sh">Personal</div>
+        <div class="si on"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+      </div>
+      <div class="note">The row comes back with the first star.</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F4d · Unstar the last favorite</div>
+      <div style="display:flex;justify-content:center;margin:18px 0 10px"><span class="hud"><svg><use href="#i-staro"/></svg>Removed from Favorites</span></div>
+      <div class="note">Favorites closes and All credentials shows, with the same credential selected.</div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Row:</b> Favorites sits right under All credentials, star icon in <code>Tone::Warning.mark()</code>, count of live favorites. Hidden at 0 (<code>the_favorites_row_is_hidden_without_favorites</code>).</li>
+    <li><b>List order</b> is <code>position</code>, not folders; the subline is "&lt;folder&gt; · &lt;variable&gt;". Archived items are hidden. In other lists a favorite shows a small star in the row meta (F1).</li>
+    <li><b>Vault fact:</b> the star syncs to every Mac and iPhone of the vault (schema 35). It needs no owner check and never bumps the item's version.</li>
+    <li><b>Shared vaults</b> have no Favorites row: a favorite is personal and lives in the owner's vault only.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F5 -->
+<section class="frame" id="f5">
+  <div class="flabel"><b><span class="fnum">F5</span>Access-request notification<span class="ap">Light</span><span class="ap dk">Dark</span></b>
+    <span>The macOS banner of the new <code>access_requested</code> event (D1, M6). The click opens F2.</span></div>
+  <div class="pgrid">
+    <div class="desk">
+      <div class="mbar"><b>Finder</b><span>File</span><span>Edit</span><span>View</span><span class="r">Tue 3 Nov 14:16</span></div>
+      <div class="nban"><div class="ai"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></div><div class="tx"><div class="tt">Access request<span>now</span></div><div class="bd">Agent “Codex” asks for access to a credential. Open Apassy to review.</div></div></div>
+    </div>
+    <div class="desk dk">
+      <div class="mbar"><b>Finder</b><span>File</span><span>Edit</span><span>View</span><span class="r">Tue 3 Nov 14:16</span></div>
+      <div class="nban"><div class="ai"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></div><div class="tx"><div class="tt">Access request<span>now</span></div><div class="bd">Agent “Codex” asks for access to a credential. Open Apassy to review.</div></div></div>
+    </div>
+  </div>
+  <div class="pgrid three" style="margin-top:22px">
+    <div class="shc">
+      <div class="plabel">F5b · Click</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>Opens Decisions</div><div class="nt">The request is selected (F2). Locked vault: unlock first, then F2.</div></div></div>
+        <div class="fr"><div class="kn"><div>Another vault or session</div><div class="nt">Opens Decisions with nothing selected.</div></div></div>
+      </div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F5c · A second request within 30 s</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>No banner</div><div class="nt">It waits in Decisions; the sidebar count goes up.</div></div><span class="cap">Cooldown</span></div>
+      </div>
+      <div class="note">One banner per agent per 30 s.</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F5d · Answered, expired, or cancelled</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>Banner removed</div><div class="nt">From Notification Center too, on every path.</div></div></div>
+      </div>
+      <div class="note">A duplicate request returns the first id and sends nothing.</div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Text is fixed</b> by D1: the agent name only. No item, reason, project, or folder, also not in the preview or the subtitle.</li>
+    <li><b>Sound on</b>, interruption level as <code>approval_waiting</code>; id <code>access-&lt;id&gt;</code>; <code>waiting_key</code> allowed.</li>
+    <li><b>First look:</b> opening a vault file announces nothing for requests that were already open.</li>
+    <li>The banner follows the system appearance; Apassy draws nothing here, so the Palette does not apply.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F6 -->
+<section class="frame" id="f6">
+  <div class="flabel"><b><span class="fnum">F6</span>Fill a login in a frame</b>
+    <span>A same-site sign-in frame inside a shop page (D2, M10). Owner fills only.</span></div>
+  <div class="pgrid w">
+    <div class="bwin">
+      <div class="bbar"><div class="lights"><i></i><i></i><i></i></div><div class="burl"><svg><use href="#i-lock"/></svg><b>shop.example.com</b>/checkout</div><span class="bext"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></span></div>
+      <div class="shop">
+        <div class="nav"><b>Example Shop</b><span>Store</span><span>Orders</span><span>Help</span></div>
+        <div class="cols">
+          <div class="cart">
+            <div style="font-weight:600;color:#222;margin-bottom:4px">Your order</div>
+            <div class="li"><span>Desk lamp</span><span>€49.00</span></div>
+            <div class="li"><span>Cable set</span><span>€12.00</span></div>
+            <div class="li" style="font-weight:600;color:#222"><span>Total</span><span>€61.00</span></div>
+          </div>
+          <div class="ifr">
+            <span class="tag">frame · https://login.example.com</span>
+            <h4>Sign in to check out</h4>
+            <label>Email or username</label><div class="inp focus">ra|</div>
+            <label>Password</label><div class="inp">••••••••</div>
+            <div class="go">Sign In</div>
+          </div>
+        </div>
+        <div class="chooser" style="right:26px;top:212px">
+          <div class="ch"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg>Apassy · login.example.com</div>
+          <div class="acc sel"><div class="tile" style="background:#5856d6">E</div><div><div>Example</div><small>rafal</small></div></div>
+          <div class="acc"><div class="tile" style="background:#5856d6">E</div><div><div>Example (shop admin)</div><small>rafal.admin</small></div></div>
+          <div class="cf"><svg><use href="#i-frame"/></svg><span>Inside shop.example.com</span></div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:22px;align-items:center">
+      <div class="sub-l" style="margin:0;align-self:flex-start">F6b · The owner check names both origins</div>
+      <div class="panel">
+        <div class="icon"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></div>
+        <h3>Fill a Login</h3>
+        <p class="det">Fill the login “Example” (rafal) on https://login.example.com inside https://shop.example.com in your browser. The page gets the username and the password once.</p>
+        <div class="tid"><svg><use href="#i-touch"/></svg></div>
+        <div class="hint">Touch the Touch ID sensor</div>
+        <div class="pbtns"><span class="nb">Use Passphrase</span><span class="nb">Cancel</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="pgrid three" style="margin-top:22px">
+    <div class="shc" style="background:#fff">
+      <div class="plabel">F6c · Another site's frame: refused</div>
+      <div class="chooser" style="position:static;width:auto;box-shadow:0 0 0 .5px rgba(0,0,0,.2)">
+        <div class="ch"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg>Apassy · accounts.google.com</div>
+        <div class="rec"><b>Open this sign-in page in its own tab</b><p>It belongs to another site than shop.example.</p><span class="pb" style="background:#0a6cff;color:#fff">Open in New Tab</span></div>
+      </div>
+    </div>
+    <div class="shc" style="background:#fff">
+      <div class="plabel">F6d · No site access for the frame</div>
+      <div class="chooser" style="position:static;width:auto;box-shadow:0 0 0 .5px rgba(0,0,0,.2)">
+        <div class="ch"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg>Apassy · login.example.com</div>
+        <div class="rec"><b>Allow Apassy on login.example.com</b><p>Then logins show in this frame.</p><span class="pb" style="background:#0a6cff;color:#fff">Allow on This Site…</span></div>
+      </div>
+    </div>
+    <div class="shc" style="background:#fff">
+      <div class="plabel">F6e · The frame changed during the check</div>
+      <div class="chooser" style="position:static;width:auto;box-shadow:0 0 0 .5px rgba(0,0,0,.2)">
+        <div class="ch"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg>Apassy · login.example.com</div>
+        <div class="rec"><b>The page changed. Nothing was filled.</b><p>Choose the login again.</p></div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Chooser header</b> names the frame origin's host; the footer "Inside &lt;top host&gt;" shows only for a frame. A top-frame chooser is unchanged.</li>
+    <li><b>Matches</b> come from the frame origin only (rule 2). The top origin never adds a login.</li>
+    <li><b>Panel detail</b> is the D2 template plus today's second sentence. It must never truncate an origin: for a frame fill, raise the detail's <code>maximumNumberOfLines</code> from 3 to 5 (about 200 characters at 292 pt). The heading stays today's fixed heading.</li>
+    <li><b>Refusals</b> (F6c–F6e) use today's recovery and target texts; F6c adds "It belongs to another site than &lt;top site&gt;." Agent fills, passkeys, and codes never show a frame chooser.</li>
+    <li>The extension is light only; this frame has no dark variant.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F7 -->
+<section class="frame" id="f7">
+  <div class="flabel"><b><span class="fnum">F7</span>Command-line code panel<span class="ap">Light</span><span class="ap dk">Dark</span></b>
+    <span>The confirm mode of the ADR 0038 panel for <code>apassy code</code> inside a valid window (ADR 0042, M9).</span></div>
+  <div class="pgrid three" style="justify-items:center">
+    <div style="display:flex;flex-direction:column;gap:8px;align-items:center">
+      <div class="sub-l" style="margin:0">F7a · Show, light</div>
+      <div class="panel">
+        <div class="icon"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></div>
+        <h3>Show the code of “GitHub” in the command line</h3>
+        <span class="caller"><svg><use href="#i-term"/></svg>apassy · pid 48211 · Terminal</span>
+        <div class="pbtns"><span class="nb wide">Cancel</span><span class="nb wide">Show Code</span></div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px;align-items:center">
+      <div class="sub-l" style="margin:0">F7b · Show, dark</div>
+      <div class="panel dark">
+        <div class="icon"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></div>
+        <h3>Show the code of “GitHub” in the command line</h3>
+        <span class="caller"><svg><use href="#i-term"/></svg>apassy · pid 48211 · Terminal</span>
+        <div class="pbtns"><span class="nb wide">Cancel</span><span class="nb wide">Show Code</span></div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px;align-items:center">
+      <div class="sub-l" style="margin:0">F7c · Copy, dark</div>
+      <div class="panel dark">
+        <div class="icon"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></div>
+        <h3>Copy the code of “Stripe live” for the command line</h3>
+        <span class="caller"><svg><use href="#i-term"/></svg>apassy · pid 48302 · Ghostty</span>
+        <div class="pbtns"><span class="nb wide">Cancel</span><span class="nb wide">Copy Code</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="pgrid" style="margin-top:22px;align-items:start">
+    <div style="display:flex;flex-direction:column;gap:8px;align-items:center">
+      <div class="sub-l" style="margin:0;align-self:flex-start">F7d · An unverified press becomes the fresh check</div>
+      <div class="panel">
+        <div class="icon"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></div>
+        <h3>Show the code of “GitHub” in the command line</h3>
+        <p class="det">This press was not from this Mac's keyboard or mouse. Use Touch ID.</p>
+        <div class="tid"><svg><use href="#i-touch"/></svg></div>
+        <div class="hint">Touch the Touch ID sensor</div>
+        <div class="pbtns"><span class="nb">Use Passphrase</span><span class="nb">Cancel</span></div>
+      </div>
+    </div>
+    <div>
+      <div class="sub-l" style="margin:0 0 8px">F7e · What the command line prints</div>
+      <div class="term">
+        <div class="tbar"><div class="lights"><i></i><i></i><i></i></div><span>zsh — 96×18</span></div>
+<pre><span class="p">~/acme-billing $</span> apassy code github
+<span class="d">Confirm in Apassy…</span>
+482 913
+<span class="p">~/acme-billing $</span> apassy code stripe-live --copy
+<span class="w">apassy: Another code request is open in Apassy. (busy)</span>
+<span class="p">~/acme-billing $</span> apassy code github
+<span class="d">Confirm in Apassy…</span>
+<span class="w">apassy: The confirmation expired. Run the command again. (expired)</span>
+<span class="p">~/acme-billing $</span> apassy code github
+<span class="d">Touch ID for codes for 15 minutes: 3 cancels.</span>
+<span class="d">Confirm in Apassy…</span></pre>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>No default button.</b> Return does nothing, Esc cancels. Cancel and Show Code have the same width and style; neither is blue (ADR 0042 §1.3). This is the one view with no primary button, on purpose.</li>
+    <li><b>No Touch ID view, no text field, no hint</b> in confirm mode. The heading comes from the Rust template, with control characters cleaned; the caller line is "&lt;executable&gt; · pid &lt;n&gt; · &lt;terminal app&gt;", the terminal part only when the process tree names one.</li>
+    <li><b>F7d:</b> after a synthetic or accessibility press, the same panel turns into today's fresh check; only the detail line is new. VoiceOver users land here too.</li>
+    <li><b>Limits:</b> one panel at a time (<code>busy</code>), 60 s to answer (<code>expired</code>), three cancels in 5 minutes give 15 minutes of fresh checks (first line of F7e). The window is never extended.</li>
+    <li>The panel is native AppKit and follows the system appearance; F7b and F7c show its dark form for the screenshot check.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F8 -->
+<section class="frame" id="f8">
+  <div class="flabel"><b><span class="fnum">F8</span>iPhone Settings and Vault</b>
+    <span>Six destinations in the Mac's order (D5, M7). Each row: tile, name, one status line.</span></div>
+  <div class="ipr">
+    <div class="ipf"><div class="cap-l">F8a · Settings</div>
+      <div class="ip"><div class="island"></div><div class="status"><span>14:20</span><i></i></div>
+        <div class="nav"><span class="done">Done</span></div>
+        <div class="big">Settings</div>
+        <div class="list" style="margin-top:6px">
+          <div class="row"><div class="ic" style="background:#007aff"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="t">Vault</div><div class="s">Personal · Apassy relay</div></div><span class="chev">›</span></div>
+          <div class="row"><div class="ic" style="background:#5856d6"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="t">Security</div><div class="s">Face ID · Lock after 5 min</div></div><span class="chev">›</span></div>
+          <div class="row"><div class="ic" style="background:#30a0c8"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="t">Devices</div><div class="s">Questions on 3 devices</div></div><span class="chev">›</span></div>
+          <div class="row"><div class="ic" style="background:#af52de"><svg><use href="#i-agent"/></svg></div><div class="tx"><div class="t">Agent Access</div><div class="s">4 agents · 2 exceptions</div></div><span class="chev">›</span></div>
+          <div class="row"><div class="ic" style="background:#636366"><svg><use href="#i-autofill"/></svg></div><div class="tx"><div class="t">Tools</div><div class="s">AutoFill on</div></div><span class="chev">›</span></div>
+          <div class="row"><div class="ic" style="background:#8e8e93"><svg><use href="#i-info"/></svg></div><div class="tx"><div class="t">About</div><div class="s">Apassy 0.5.18</div></div><span class="chev">›</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="ipf"><div class="cap-l">F8b · Vault, relay sync</div>
+      <div class="ip"><div class="island"></div><div class="status"><span>14:20</span><i></i></div>
+        <div class="nav"><span class="back"><svg><use href="#i-back"/></svg>Settings</span><span class="ttl">Vault</span></div>
+        <div class="list plain" style="margin-top:14px">
+          <div class="row"><div class="tx"><div class="t">Vault</div></div><span class="v">Personal</span><span class="chev">›</span></div>
+          <div class="row"><div class="tx"><div class="t act">Add Another Vault</div></div></div>
+          <div class="row"><div class="tx"><div class="t red">Remove from This iPhone…</div></div></div>
+        </div>
+        <div class="ish">Sync</div>
+        <div class="list plain">
+          <div class="row"><div class="tx"><div class="t">Service</div></div><span class="v">Apassy relay</span></div>
+          <div class="row"><div class="tx"><div class="t">State</div></div><span class="v"><span class="dt"></span>Up to date</span></div>
+          <div class="row"><div class="tx"><div class="t">Last Sync</div></div><span class="v">Today, 14:18</span></div>
+          <div class="row"><div class="tx"><div class="t act">Sync Now</div></div></div>
+        </div>
+        <div class="list plain" style="margin-top:28px">
+          <div class="row"><div class="tx"><div class="t">Move to Another App</div></div><span class="chev">›</span></div>
+        </div>
+        <div class="foot">Export your credentials for another password app.</div>
+      </div>
+    </div>
+    <div class="ipf"><div class="cap-l">F8c · Vault, iCloud needs you</div>
+      <div class="ip"><div class="island"></div><div class="status"><span>14:20</span><i></i></div>
+        <div class="nav"><span class="back"><svg><use href="#i-back"/></svg>Settings</span><span class="ttl">Vault</span></div>
+        <div class="list plain" style="margin-top:14px">
+          <div class="row"><div class="tx"><div class="t">Vault</div></div><span class="v">Personal</span><span class="chev">›</span></div>
+          <div class="row"><div class="tx"><div class="t act">Add Another Vault</div></div></div>
+          <div class="row"><div class="tx"><div class="t red">Remove from This iPhone…</div></div></div>
+        </div>
+        <div class="ish">Sync</div>
+        <div class="list plain">
+          <div class="row"><div class="tx"><div class="t">Service</div></div><span class="v">iCloud Drive</span></div>
+          <div class="row"><div class="tx"><div class="t">State</div><div class="s warnl"><span class="dt w"></span>The passphrase changed on another device.</div></div></div>
+          <div class="row"><div class="tx"><div class="t">Last Sync</div></div><span class="v">Yesterday, 18:02</span></div>
+          <div class="row"><div class="tx"><div class="t act">Enter the New Passphrase…</div></div></div>
+          <div class="row"><div class="tx"><div class="t act">Select the iCloud File Again…</div></div></div>
+          <div class="row"><div class="tx"><div class="t act">Use the Relay Copy…</div></div></div>
+        </div>
+        <div class="list plain" style="margin-top:28px">
+          <div class="row"><div class="tx"><div class="t">Move to Another App</div></div><span class="chev">›</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Order and names</b> (D5): Vault, Security, Devices, Agent Access, Tools, About. General becomes Vault; Advanced becomes About; Tools is new and holds AutoFill. The old "Sync" row under the list goes into Vault.</li>
+    <li><b>Status lines:</b> Vault "&lt;vault&gt; · &lt;service&gt;"; Security "Face ID · Lock after &lt;n&gt; min"; Devices "Questions on &lt;n&gt; devices"; Agent Access "&lt;n&gt; agents · &lt;n&gt; exceptions"; Tools "AutoFill on" / "AutoFill off"; About "Apassy &lt;version&gt;".</li>
+    <li><b>Vault row:</b> one vault shows its name without a chevron; two or more open the picker. Remove… asks for confirmation as today.</li>
+    <li><b>Sync rows</b> show only when they apply: Enter the New Passphrase… after a passphrase change; Select the iCloud File Again… only for iCloud; Use the Relay Copy… only when the relay also has the vault. Nothing else moves; every old row stays reachable (M7 list test).</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F9 -->
+<section class="frame" id="f9">
+  <div class="flabel"><b><span class="fnum">F9</span>iPhone agent page</b>
+    <span>Relay feed v3: the request count, Suggestions with Dismiss, and Disconnect… (D16, M17).</span></div>
+  <div class="ipr">
+    <div class="ipf"><div class="cap-l">F9a · Agent page</div>
+      <div class="ip"><div class="island"></div><div class="status"><span>14:20</span><i></i></div>
+        <div class="nav"><span class="back"><svg><use href="#i-back"/></svg>Agent Access</span></div>
+        <div class="hd"><div class="ava" style="background:#10a37f">C</div><h1>Codex</h1><div class="s">On Mac mini (office) · Personal</div></div>
+        <div class="list plain">
+          <div class="row"><div class="tx"><div class="t">Open Requests</div></div><span class="badge">2</span><span class="chev">›</span></div>
+        </div>
+        <div class="ish">Suggestions</div>
+        <div class="list">
+          <div class="row"><div class="tl" style="background:#336791">P</div><div class="tx"><div class="t">Shop database</div><div class="s">Add host db.acme.internal</div></div><span class="pill">Dismiss</span></div>
+          <div class="row"><div class="tl" style="background:#635bff">S</div><div class="tx"><div class="t">Stripe test key</div><div class="s">Set to Development</div></div><span class="pill">Dismiss</span></div>
+        </div>
+        <div class="foot">Accept suggestions on Mac mini (office).</div>
+        <div class="ish">Sees</div>
+        <div class="list plain">
+          <div class="row"><div class="tx"><div class="t">Deploy key, Shop database, Stripe test key</div></div></div>
+        </div>
+        <div class="list plain" style="margin-top:24px">
+          <div class="row" style="justify-content:center"><span class="red" style="color:var(--red)">Disconnect…</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="ipf"><div class="cap-l">F9b · Disconnect…</div>
+      <div class="ip"><div class="island"></div><div class="status"><span>14:20</span><i></i></div>
+        <div class="nav"><span class="back"><svg><use href="#i-back"/></svg>Agent Access</span></div>
+        <div class="hd"><div class="ava" style="background:#10a37f">C</div><h1>Codex</h1><div class="s">On Mac mini (office) · Personal</div></div>
+        <div class="list plain"><div class="row"><div class="tx"><div class="t">Open Requests</div></div><span class="badge">2</span><span class="chev">›</span></div></div>
+        <div class="dim"></div>
+        <div class="asheet">
+          <div class="grpa"><div class="hdx"><b>Disconnect Codex?</b>It can no longer use credentials on Mac mini (office).</div><div class="ab">Disconnect</div></div>
+          <div class="ab c">Cancel</div>
+        </div>
+      </div>
+    </div>
+    <div class="ipf"><div class="cap-l">F9c · Agent Access, an older Mac</div>
+      <div class="ip"><div class="island"></div><div class="status"><span>14:20</span><i></i></div>
+        <div class="nav"><span class="back"><svg><use href="#i-back"/></svg>Settings</span><span class="ttl">Agent Access</span></div>
+        <div class="banner" style="margin-top:12px"><div class="bi"><svg><use href="#i-warn"/></svg></div><div class="tx">Update Apassy to see the agents of MacBook Pro.</div></div>
+        <div class="ish">Mac mini (office) · Personal</div>
+        <div class="list">
+          <div class="row"><div class="tl" style="background:#d97757;border-radius:50%">C</div><div class="tx"><div class="t">Claude Code</div><div class="s">Active now</div></div><span class="chev">›</span></div>
+          <div class="row"><div class="tl" style="background:#10a37f;border-radius:50%">C</div><div class="tx"><div class="t">Codex</div><div class="s">2 open requests</div></div><span class="badge">2</span><span class="chev">›</span></div>
+          <div class="row"><div class="tl" style="background:#6e5ae6;border-radius:50%">T</div><div class="tx"><div class="t">T3 Code</div><div class="s">3 h ago</div></div><span class="chev">›</span></div>
+        </div>
+        <div class="ish">Mac mini (studio) · Personal</div>
+        <div class="list">
+          <div class="row"><div class="tl" style="background:#d97757;border-radius:50%">C</div><div class="tx"><div class="t">Claude Code</div><div class="s">Active now</div></div><span class="chev">›</span></div>
+          <div class="row"><div class="tl" style="background:#10a37f;border-radius:50%">C</div><div class="tx"><div class="t">Codex</div><div class="s">1 h ago</div></div><span class="chev">›</span></div>
+        </div>
+        <div class="foot">Change access on each Mac.</div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Open Requests</b> shows only when <code>open_requests</code> &gt; 0; the row opens the Requests tab filtered to this agent. The feed carries the count only, never the item or the reason.</li>
+    <li><b>Suggestions</b> (at most 20): the item title and what the correction changes. Dismiss sends <code>dismiss_suggestion</code>, signed with the device key, no Face ID; the row leaves at once and comes back if the Mac refuses. Accepting stays on the Mac.</li>
+    <li><b>Disconnect…</b> sends <code>disconnect_agent</code> after the action sheet. A stale target: toast "Codex is already disconnected." and the page goes back.</li>
+    <li><b>Old Mac</b> (feed v1 or v2 reader, F9c): the banner replaces that Mac's section; the other Macs show as usual. No Suggestions group, no Disconnect… for its agents.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F10 -->
+<section class="frame" id="f10">
+  <div class="flabel"><b><span class="fnum">F10</span>Apple Watch with two vaults</b>
+    <span>Requests grouped by vault, the Vault fact, and This Watch with Forget (D15, M16).</span></div>
+  <div class="wtr">
+    <div class="wtf"><div class="cap-l">F10a · Requests</div>
+      <div class="wt"><div class="wtop"><b>Requests</b><span class="gear"><svg><use href="#i-gear"/></svg></span><span class="clk">14:20</span></div>
+        <div class="wb">
+          <div class="wsh">Personal</div>
+          <div class="wr"><div class="t1">Codex asks for Deploy key</div><div class="t2">on Mac mini (office)</div><div class="t3">Until 14:16 tomorrow</div></div>
+          <div class="wsh">Acme team</div>
+          <div class="wr"><div class="t1">Codex asks for npm token</div><div class="t2">on MacBook Pro</div><div class="t3">Until 18:40</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="wtf"><div class="cap-l">F10b · Request, top</div>
+      <div class="wt"><div class="wtop"><span class="bk"><svg><use href="#i-back"/></svg></span><span class="clk">14:20</span></div>
+        <div class="wb">
+          <div style="font-size:15px;font-weight:600;padding:2px 10px 6px;line-height:1.2">Codex asks for Deploy key</div>
+          <div class="wf"><span>Vault</span><b>Personal</b></div>
+          <div class="wf"><span>Mac</span><b>Mac mini (office)</b></div>
+          <div class="wf"><span>Agent</span><b>Codex</b></div>
+          <div class="wf"><span>Action</span><b>Deploy</b></div>
+        </div>
+      </div>
+    </div>
+    <div class="wtf"><div class="cap-l">F10c · Request, scrolled</div>
+      <div class="wt"><div class="wtop"><span class="bk"><svg><use href="#i-back"/></svg></span><span class="clk">14:20</span></div>
+        <div class="wb">
+          <div class="wf"><span>Folder</span><b>Infra</b></div>
+          <div class="wf"><span>Hosts</span><b>github.com:22</b></div>
+          <div class="wbtn a">Allow Once</div>
+          <div class="wbtn d">Deny</div>
+        </div>
+      </div>
+    </div>
+    <div class="wtf"><div class="cap-l">F10d · This Watch</div>
+      <div class="wt"><div class="wtop"><b>This Watch</b><span class="clk">14:20</span></div>
+        <div class="wb">
+          <div class="wrow"><div class="tx"><div class="t1" style="font-size:14px;font-weight:600">Personal</div><div class="t2" style="font-size:12px;color:rgba(255,255,255,.6)">Mac mini (office)</div></div><span class="fg">Forget</span></div>
+          <div class="wrow"><div class="tx"><div class="t1" style="font-size:14px;font-weight:600">Acme team</div><div class="t2" style="font-size:12px;color:rgba(255,255,255,.6)">MacBook Pro</div></div><span class="fg">Forget</span></div>
+          <div class="wbtn n" style="font-size:14px">Connect Another Vault</div>
+        </div>
+      </div>
+    </div>
+    <div class="wtf"><div class="cap-l">F10e · The same vault again</div>
+      <div class="wt"><div class="wtop"><span class="clk" style="margin-left:auto">14:20</span></div>
+        <div class="wb" style="text-align:center;padding-top:14px">
+          <div style="font-size:15px;font-weight:600;padding:0 10px 6px">Already Connected</div>
+          <div style="font-size:13px;color:rgba(255,255,255,.7);padding:0 12px 10px">This watch already answers for Personal.</div>
+          <div class="wbtn n">OK</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="ipr" style="margin-top:26px">
+    <div class="ipf"><div class="cap-l">F10f · iPhone Settings → Devices</div>
+      <div class="ip"><div class="island"></div><div class="status"><span>14:20</span><i></i></div>
+        <div class="nav"><span class="back"><svg><use href="#i-back"/></svg>Settings</span><span class="ttl">Devices</span></div>
+        <div class="ish">Apple Watch</div>
+        <div class="list">
+          <div class="row"><div class="ic" style="background:#1c1c1e"><svg><use href="#i-watch"/></svg></div><div class="tx"><div class="t">Rafal's Apple Watch</div><div class="s">Answers for Personal, Acme team</div></div><span class="chev">›</span></div>
+          <div class="row"><div class="tx" style="padding-left:42px"><div class="t" style="color:var(--acc)">Add Another Vault to Apple Watch</div></div></div>
+        </div>
+        <div class="foot">A watch answers for up to 4 vaults.</div>
+        <div class="ish">Questions</div>
+        <div class="list plain">
+          <div class="row"><div class="tx"><div class="t">Route</div></div><span class="v">via your Mac</span></div>
+          <div class="row"><div class="tx"><div class="t">Mac mini (office)</div></div><span class="v">Now</span></div>
+        </div>
+        <div class="ish">Devices</div>
+        <div class="list">
+          <div class="row"><div class="ic" style="background:#8e8e93"><svg><use href="#i-mini"/></svg></div><div class="tx"><div class="t">Mac mini (office)</div><div class="s">Mac · Hosts approvals</div></div></div>
+          <div class="row"><div class="ic" style="background:#8e8e93"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="t">MacBook Pro</div><div class="s">Mac · Syncs Acme team</div></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="wtr" style="align-self:center;gap:34px">
+      <div class="wtf"><div class="cap-l">F10g · Forget one vault</div>
+        <div class="wt"><div class="wtop"><span class="clk" style="margin-left:auto">14:20</span></div>
+          <div class="wb" style="text-align:center;padding-top:10px">
+            <div style="font-size:15px;font-weight:600;padding:0 10px 6px">Forget Personal on this watch?</div>
+            <div style="font-size:13px;color:rgba(255,255,255,.7);padding:0 12px 6px">Acme team stays.</div>
+            <div class="wbtn d">Forget</div>
+            <div class="wbtn n">Cancel</div>
+          </div>
+        </div>
+      </div>
+      <div class="wtf"><div class="cap-l">F10h · A fifth vault</div>
+        <div class="wt"><div class="wtop"><span class="clk" style="margin-left:auto">14:20</span></div>
+          <div class="wb" style="text-align:center;padding-top:14px">
+            <div style="font-size:15px;font-weight:600;padding:0 10px 6px">Too Many Vaults</div>
+            <div style="font-size:13px;color:rgba(255,255,255,.7);padding:0 12px 10px">This watch answers for 4 vaults, the most.</div>
+            <div class="wbtn n">OK</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Grouping</b> by vault only with two or more vaults; one vault keeps today's flat list. Newest first inside each group; groups in the order of This Watch.</li>
+    <li><b>Vault fact</b> is the first fact of the request, before Mac. Allow Once and Deny stay equal in size; Allow Once keeps the wrist check.</li>
+    <li><b>Forget</b> asks "Forget Personal on this watch?" with Forget and Cancel (F10g); it removes that replica only. The last vault's Forget returns to setup.</li>
+    <li><b>Limits:</b> a fifth vault refuses at the start (F10h). The same vault twice gives F10e and the new device leaves the team again.</li>
+    <li><b>iPhone:</b> without a watch the row reads "Add Apple Watch"; once the watch answers for a vault it reads "Add Another Vault to Apple Watch".</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F11 -->
+<section class="frame" id="f11">
+  <div class="flabel"><b><span class="fnum">F11</span>Shared brain: consent and review<span class="ap">Light</span></b>
+    <span>The consent sheet of the switch, then Review and Send (ADR 0043 §3 and §8, M24).</span></div>
+  <div class="pgrid" style="grid-template-columns:1fr 1.35fr">
+    <div class="shc">
+      <div class="plabel">F11a · Consent sheet</div>
+      <h2>Help Train the Shared Brain</h2>
+      <p class="lead">Send examples of your answers. Never names or values.</p>
+      <div class="gl">What Leaves This Mac</div>
+      <div class="grp">
+        <div class="fr"><div class="cmd">kubectl delete pod &lt;WORD&gt; -n &lt;WORD&gt;</div></div>
+        <div class="fr"><div class="k" style="min-width:90px">Action</div><div class="v">Delete</div></div>
+        <div class="fr"><div class="k" style="min-width:90px">Credentials</div><div class="v">other</div></div>
+        <div class="fr"><div class="k" style="min-width:90px">Your Answer</div><div class="v">Deny</div></div>
+      </div>
+      <div class="gl">What Never Leaves</div>
+      <div class="grp"><div class="fr"><div class="v l">Values, names, hosts, paths, numbers, and your requests. Nothing about production items, codes, or cloud agents.</div></div></div>
+      <div class="gl">How It Works</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>You review each batch</div><div class="nt">Nothing leaves before you press Send.</div></div></div>
+        <div class="fr"><div class="kn"><div>Only common commands</div><div class="nt">A command trains only after 5 people sent it.</div></div></div>
+        <div class="fr"><div class="kn"><div>Kept 180 days at most</div><div class="nt">A trained model cannot unlearn a record.</div></div></div>
+        <div class="fr"><div class="kn"><div>Stored in the EU</div><div class="nt">No account, no address. A new random id each year.</div></div></div>
+        <div class="fr"><div class="kn"><div>Turn it off anytime</div><div class="nt">Delete removes batches not yet used for training.</div></div></div>
+      </div>
+      <div class="sbar"><span class="lnk left">Privacy Policy</span><span class="btn">Cancel</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Turn On</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F11b · Review and Send</div>
+      <h2>Review and Send <span class="hi"><svg><use href="#i-info"/></svg></span></h2>
+      <p class="lead">40 records from your answers since 27 Oct.</p>
+      <div class="grp">
+        <div class="tr th g-rv"><div></div><div>Command</div><div>Action</div><div>Credentials</div><div>Answer</div></div>
+        <div class="tr g-rv"><span class="chk"><svg><use href="#i-ok"/></svg></span><div class="mono cut">git push &lt;WORD&gt; &lt;WORD&gt;</div><div>Change</div><div class="sec">github</div><div>Allow</div></div>
+        <div class="tr g-rv"><span class="chk"><svg><use href="#i-ok"/></svg></span><div class="mono">stripe balance retrieve</div><div>Read</div><div class="sec">stripe</div><div>Allow</div></div>
+        <div class="tr g-rv"><span class="chk"><svg><use href="#i-ok"/></svg></span><div class="mono">psql &lt;URL&gt; -c &lt;STR&gt;</div><div>Read</div><div class="sec">postgres</div><div>Allow</div></div>
+        <div class="tr g-rv off"><span class="chk off"></span><div class="mono">terraform destroy -auto-approve</div><div>Delete</div><div class="sec">other</div><div>Deny</div></div>
+        <div class="tr g-rv"><span class="chk"><svg><use href="#i-ok"/></svg></span><div class="mono">kubectl delete pod &lt;WORD&gt; -n &lt;WORD&gt;</div><div>Delete</div><div class="sec">other</div><div>Deny</div></div>
+        <div class="tr g-rv"><span class="chk"><svg><use href="#i-ok"/></svg></span><div class="mono">curl -X POST &lt;URL&gt;</div><div>Change</div><div class="sec">stripe</div><div>Deny</div></div>
+        <div class="tr g-rv"><span class="chk"><svg><use href="#i-ok"/></svg></span><div class="mono">gh pr list</div><div>Read</div><div class="sec">github</div><div>Allow</div></div>
+        <div class="tr g-rv"><span class="chk"><svg><use href="#i-ok"/></svg></span><div class="mono">npm publish</div><div>Deploy</div><div class="sec">other</div><div>Deny</div></div>
+        <div class="tr" style="grid-template-columns:1fr"><div class="sec" style="font-size:12px;padding-left:26px">32 more records</div></div>
+      </div>
+      <div class="note">39 of 40 records will be sent. Unchecked rows stay on this Mac.</div>
+      <div class="sbar"><span class="btn des left">Delete My Contributions…</span><span class="btn">Cancel</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Send 39 Records</span></div>
+    </div>
+  </div>
+  <div class="pgrid three" style="margin-top:22px">
+    <div class="shc">
+      <div class="plabel">F11c · Sent</div>
+      <div style="display:flex;justify-content:center;margin:14px 0 8px"><span class="hud"><svg><use href="#i-ok"/></svg>39 records sent</span></div>
+      <div class="note">Settings → Bouncer: Sent updates; the review line goes away.</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F11d · Delete My Contributions…</div>
+      <div class="alert">
+        <span class="aic"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></span>
+        <h2>Delete Your Contributions?</h2>
+        <p>Deletes 2 batches not yet used for training.</p>
+        <p style="color:var(--secondary)">A trained model cannot unlearn.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn desf">Delete</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">F11e · The help behind ⓘ</div>
+      <div class="hpop" style="position:static;width:auto">
+        <p><b>Review and Send</b></p>
+        <p>Words in &lt;angle brackets&gt; replace hosts, paths, names, and numbers.</p>
+        <p>Credentials shows the kind of service, never the variable.</p>
+        <p>Uncheck a row to keep it on this Mac.</p>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Order of the consent sheet</b> is ADR 0043 §8: what leaves (one example), what never leaves, review, <code>k = 5</code>, retention and unlearning, EU, off and delete, the policy link.</li>
+    <li><b>Turn On</b> runs the owner check; Cancel leaves the switch off. The example record is fixed text, not from the owner's data.</li>
+    <li><b>Review rows</b> are exactly the upload: <code>skeleton</code>, <code>action</code>, <code>env</code>, <code>label</code>; at most 200. The button counts the checked rows and needs the owner check (<code>ContributeExamples { count, batch_hash }</code>).</li>
+    <li><b>F11d</b> is the one view with a red primary: Delete sends every delete token of this Mac.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ F12 -->
+<section class="frame" id="f12">
+  <div class="flabel"><b><span class="fnum">F12</span>Settings → Tools → Connectors<span class="ap">Light</span></b>
+    <span>Bundled and installed plugins, a changed file, and the install sheet (ADR 0044, M28).</span></div>
+  <div class="win" style="min-height:600px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i></i><i></i><i></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si"><svg class="fav"><use href="#i-star"/></svg><span class="lbl">Favorites</span><span class="cnt">3</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Infra</span><span class="cnt">5</span></div>
+        <div class="sh">Shared</div>
+        <div class="si"><span class="sq" style="background:#0a84ff">A</span><span class="lbl">Acme team</span><span class="cnt">3</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span><span class="bdg">2</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">8</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b></div></div><div class="rows">
+      <div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · Apassy relay</div></div></div>
+      <div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div>
+      <div class="r"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">6 devices</div></div></div>
+      <div class="r"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div>
+      <div class="r on"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Extension · 3 connectors</div></div></div>
+      <div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Apassy 0.5.18</div></div></div>
+    </div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div><h1>Tools</h1><div class="s">Command line · Extension · 3 connectors</div></div></div>
+        <div class="gl">Command Line</div>
+        <div class="grp"><div class="fr"><div class="k">apassy</div><div class="v mono">/usr/local/bin/apassy</div></div></div>
+        <div class="gl">Browser Extension</div>
+        <div class="grp"><div class="fr"><div class="k">Helium</div><div class="v"><span class="dot"></span>Connected · 0.5.18</div></div></div>
+        <div class="gl">Connectors <span class="hi"><svg><use href="#i-info"/></svg></span><span>3</span></div>
+        <div class="grp">
+          <div class="fr"><div class="tile s" style="background:#24292f;width:28px;height:28px;border-radius:7px"><svg style="width:16px;height:16px"><use href="#i-gh"/></svg></div><div class="kn"><div>GitHub (read only) <span class="cap">Bundled</span></div><div class="nt">api.github.com · 4 operations · GitHub token</div></div><span class="chev">›</span></div>
+          <div class="fr"><div class="tile s" style="background:#5e6ad2;width:28px;height:28px;border-radius:7px">L</div><div class="kn"><div>Linear (read only)</div><div class="nt">api.linear.app · 3 operations · Installed 2 Nov</div></div><span class="pb">Remove…</span></div>
+          <div class="fr"><div class="tile s" style="background:#0052cc;width:28px;height:28px;border-radius:7px">J</div><div class="kn"><div>Jira (read only)</div><div class="nt" style="color:var(--text-warning)">The file changed after install. Not loaded.</div></div><span class="pb">Remove…</span></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn pri">Install…</span></div>
+      </div></div>
+    </section>
+  </div>
+
+  <div class="pgrid" style="margin-top:22px;grid-template-columns:1.1fr 1fr">
+    <div class="shc">
+      <div class="plabel">F12b · Install sheet (after the file picker)</div>
+      <h2>Install a Connector</h2>
+      <p class="lead">Check the hosts and operations before you install.</p>
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:100px">Name</div><div class="v lab">Linear (read only)</div></div>
+        <div class="fr"><div class="k" style="min-width:100px">Version</div><div class="v">1.0.0</div></div>
+        <div class="fr"><div class="k" style="min-width:100px">Hosts</div><div class="v mono lab">api.linear.app</div></div>
+        <div class="fr"><div class="k" style="min-width:100px">SHA-256</div><div class="v mono">3f9a 61c0 … 8e2d c21e</div></div>
+      </div>
+      <div class="gl">Operations<span>3</span></div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>List the issues of a team</div><div class="nt mono">id, title, state, url</div></div><span class="cap">Read</span></div>
+        <div class="fr"><div class="kn"><div>Get an issue</div><div class="nt mono">id, title, state, url, assignee</div></div><span class="cap">Read</span></div>
+        <div class="fr"><div class="kn"><div>List the projects</div><div class="nt mono">id, name, state</div></div><span class="cap">Read</span></div>
+      </div>
+      <div class="note">Agents get only the listed fields. Works with: Linear token.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Install</span></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:22px">
+      <div style="display:flex;flex-direction:column;gap:8px;align-items:center">
+        <div class="sub-l" style="margin:0;align-self:flex-start">F12c · The owner check</div>
+        <div class="panel">
+          <div class="icon"><svg viewBox="0 0 229 206.2"><use href="#i-mark"/></svg></div>
+          <h3>Install a Connector</h3>
+          <p class="det">Install the connector “Linear (read only)” 1.0.0 for api.linear.app with 3 read operations.</p>
+          <div class="tid"><svg><use href="#i-touch"/></svg></div>
+          <div class="hint">Touch the Touch ID sensor</div>
+          <div class="pbtns"><span class="nb">Use Passphrase</span><span class="nb">Cancel</span></div>
+        </div>
+      </div>
+      <div class="shc">
+        <div class="plabel">F12d · The help behind ⓘ</div>
+        <div class="hpop" style="position:static;width:auto">
+          <p><b>Connectors</b></p>
+          <p>A connector runs named operations with a credential.</p>
+          <p>Agents get only the fields it names, never the token.</p>
+          <p>It works only with credentials for its hosts.</p>
+          <p>Version 1 reads only. Install needs Touch ID.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>Rows:</b> name, Bundled tag for app-bundled plugins, subline "&lt;hosts&gt; · &lt;n&gt; operations · &lt;matching item or Installed date&gt;". Bundled rows open a read-only operations page (as F12b, no buttons); installed rows have Remove….</li>
+    <li><b>Changed file:</b> warning text "The file changed after install. Not loaded." and only Remove…; reinstall goes through Install….</li>
+    <li><b>Install…</b> (the one primary button) opens the file picker for one <code>.json</code>; a refused manifest shows its first error in the sheet's place, with only Cancel. A new host in a new version needs a new check.</li>
+    <li><b>Owner check detail</b> lists the hosts and the operation count; the sheet lists the operation titles and the output fields.</li>
+    <li>The test plugin <code>reporting-api-v0</code> never shows in a release build.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ Notes -->
+<div class="notes" id="palette">
+  <h2>Palette roles for M13 and M14</h2>
+  <p style="margin:0 0 4px;font-size:12.5px;color:rgba(0,0,0,.62)">Light is <code>kit.rs</code> today (M13 keeps it exactly). Dark is <code>Palette::DARK</code> for M14. Contrast is the lowest WCAG ratio of the role on its backgrounds (SURFACE, DETAIL, LIST, SIDEBAR, WINDOW, FILL; status text also on its tint).</p>
+  <table>
+    <tr><th>Role (CSS variable)</th><th>kit.rs today</th><th>Light</th><th>Dark</th><th>Used for</th><th>Contrast light / dark</th></tr>
+    <tr><td>window (<code>--window</code>)</td><td><code>WINDOW</code></td><td class="hex"><span class="sw2" style="background:#fafafb"></span>#FAFAFB</td><td class="hex"><span class="sw2" style="background:#1e1e20"></span>#1E1E20</td><td>Window background</td><td></td></tr>
+    <tr><td>sidebar</td><td><code>SIDEBAR</code></td><td class="hex"><span class="sw2" style="background:#ececef"></span>#ECECEF</td><td class="hex"><span class="sw2" style="background:#28282b"></span>#28282B</td><td>Sidebar</td><td></td></tr>
+    <tr><td>list</td><td><code>LIST</code></td><td class="hex"><span class="sw2" style="background:#ffffff"></span>#FFFFFF</td><td class="hex"><span class="sw2" style="background:#202022"></span>#202022</td><td>List column</td><td></td></tr>
+    <tr><td>detail</td><td><code>DETAIL</code></td><td class="hex"><span class="sw2" style="background:#f6f6f7"></span>#F6F6F7</td><td class="hex"><span class="sw2" style="background:#1a1a1c"></span>#1A1A1C</td><td>Detail column, sheets, action bar</td><td></td></tr>
+    <tr><td>surface</td><td><code>SURFACE</code></td><td class="hex"><span class="sw2" style="background:#ffffff"></span>#FFFFFF</td><td class="hex"><span class="sw2" style="background:#2c2c2e"></span>#2C2C2E</td><td>Grouped sections, stat cards</td><td></td></tr>
+    <tr><td>selection</td><td><code>SELECTION</code></td><td class="hex"><span class="sw2" style="background:#0a6cff"></span>#0A6CFF</td><td class="hex"><span class="sw2" style="background:#0058d0"></span>#0058D0</td><td>Selected list row (white text)</td><td>white 4.56 / 6.35 <span class="ok">✓</span></td></tr>
+    <tr><td>production</td><td><code>PRODUCTION</code></td><td class="hex"><span class="sw2" style="background:#e0352b"></span>#E0352B</td><td class="hex"><span class="sw2" style="background:#ff5c52"></span>#FF5C52</td><td>Production dot and mark; never text</td><td>mark ≥ 3.78 / ≥ 4.58</td></tr>
+    <tr><td>separator</td><td><code>SEPARATOR</code></td><td class="hex"><span class="sw2" style="background:#e8e8ec"></span>#E8E8EC</td><td class="hex"><span class="sw2" style="background:#3a3a3e"></span>#3A3A3E</td><td>Hairlines between rows and columns</td><td></td></tr>
+    <tr><td>section-edge</td><td><code>SECTION_EDGE</code></td><td class="hex"><span class="sw2" style="background:#e4e4e9"></span>#E4E4E9</td><td class="hex"><span class="sw2" style="background:#36363a"></span>#36363A</td><td>Outline of a group</td><td></td></tr>
+    <tr><td>border</td><td><code>BORDER</code></td><td class="hex"><span class="sw2" style="background:#d2d2d8"></span>#D2D2D8</td><td class="hex"><span class="sw2" style="background:#54545a"></span>#54545A</td><td>Text fields, bordered buttons, menus</td><td></td></tr>
+    <tr><td>label</td><td><code>LABEL</code></td><td class="hex"><span class="sw2" style="background:#1d1d1f"></span>#1D1D1F</td><td class="hex"><span class="sw2" style="background:#ececf0"></span>#ECECF0</td><td>Primary text</td><td>14.27 / 9.91 <span class="ok">✓</span></td></tr>
+    <tr><td>secondary</td><td><code>SECONDARY</code></td><td class="hex"><span class="sw2" style="background:#6a6a70"></span>#6A6A70</td><td class="hex"><span class="sw2" style="background:#a2a2a8"></span>#A2A2A8</td><td>Sublines, values, counts</td><td>4.56 / 4.60 <span class="ok">✓</span></td></tr>
+    <tr><td>tertiary</td><td><code>TERTIARY</code></td><td class="hex"><span class="sw2" style="background:#a0a0a6"></span>#A0A0A6</td><td class="hex"><span class="sw2" style="background:#636368"></span>#636368</td><td>Chevrons, placeholders; no meaning-carrying text</td><td>decoration only</td></tr>
+    <tr><td>fill</td><td><code>FILL</code></td><td class="hex"><span class="sw2" style="background:#f0f0f3"></span>#F0F0F3</td><td class="hex"><span class="sw2" style="background:#38383c"></span>#38383C</td><td>Search field, neutral tint</td><td></td></tr>
+    <tr><td>fill-hover</td><td><code>FILL_HOVER</code></td><td class="hex"><span class="sw2" style="background:#e8e8ec"></span>#E8E8EC</td><td class="hex"><span class="sw2" style="background:#404044"></span>#404044</td><td>Small buttons, tags, hover</td><td>label 13.77 / 8.76</td></tr>
+    <tr><td>fill-pressed</td><td><code>FILL_PRESSED</code></td><td class="hex"><span class="sw2" style="background:#dedee3"></span>#DEDEE3</td><td class="hex"><span class="sw2" style="background:#4a4a4f"></span>#4A4A4F</td><td>Pressed, open menu button, switch off</td><td></td></tr>
+    <tr><td>accent</td><td><code>ACCENT</code></td><td class="hex"><span class="sw2" style="background:#007aff"></span>#007AFF</td><td class="hex"><span class="sw2" style="background:#0a70f5"></span>#0A70F5</td><td>Primary button, sidebar icons, focus</td><td>white <span class="bad">4.02</span> / 4.52 (open question 1)</td></tr>
+    <tr><td>accent-hover</td><td><code>ACCENT_HOVER</code></td><td class="hex"><span class="sw2" style="background:#006ce6"></span>#006CE6</td><td class="hex"><span class="sw2" style="background:#1e7afa"></span>#1E7AFA</td><td>Primary hover</td><td></td></tr>
+    <tr><td>accent-pressed</td><td><code>ACCENT_PRESSED</code></td><td class="hex"><span class="sw2" style="background:#005ecc"></span>#005ECC</td><td class="hex"><span class="sw2" style="background:#0060d6"></span>#0060D6</td><td>Primary pressed</td><td></td></tr>
+    <tr><td>accent-text</td><td><code>ACCENT_TEXT</code></td><td class="hex"><span class="sw2" style="background:#0066d6"></span>#0066D6</td><td class="hex"><span class="sw2" style="background:#64aaff"></span>#64AAFF</td><td>Links, accent text</td><td>4.60 / 4.86 <span class="ok">✓</span></td></tr>
+    <tr><td>mark-neutral</td><td><code>Tone::Neutral.mark()</code></td><td class="hex"><span class="sw2" style="background:#8e8e93"></span>#8E8E93</td><td class="hex"><span class="sw2" style="background:#98989d"></span>#98989D</td><td>Off dot, idle icon</td><td></td></tr>
+    <tr><td>mark (accent)</td><td><code>Tone::Accent.mark()</code></td><td colspan="2">= ACCENT</td><td>Accent dot</td><td></td></tr>
+    <tr><td>mark-good</td><td><code>Tone::Good.mark()</code></td><td class="hex"><span class="sw2" style="background:#34c759"></span>#34C759</td><td class="hex"><span class="sw2" style="background:#30d158"></span>#30D158</td><td>Switch on, good dot</td><td></td></tr>
+    <tr><td>mark-warning</td><td><code>Tone::Warning.mark()</code></td><td class="hex"><span class="sw2" style="background:#ff9500"></span>#FF9500</td><td class="hex"><span class="sw2" style="background:#ff9f0a"></span>#FF9F0A</td><td>Warning dot, <b>favorite star</b></td><td></td></tr>
+    <tr><td>mark-critical</td><td><code>Tone::Critical.mark()</code></td><td class="hex"><span class="sw2" style="background:#ff3b30"></span>#FF3B30</td><td class="hex"><span class="sw2" style="background:#ff453a"></span>#FF453A</td><td>Critical dot, red fill button</td><td></td></tr>
+    <tr><td>text (neutral, accent)</td><td><code>Tone::{Neutral,Accent}.text()</code></td><td colspan="2">= SECONDARY, = ACCENT_TEXT</td><td></td><td></td></tr>
+    <tr><td>text-good</td><td><code>Tone::Good.text()</code></td><td class="hex"><span class="sw2" style="background:#1d8036"></span>#1D8036</td><td class="hex"><span class="sw2" style="background:#54d67c"></span>#54D67C</td><td>Good text</td><td>4.53 / 7.35 <span class="ok">✓</span></td></tr>
+    <tr><td>text-warning</td><td><code>Tone::Warning.text()</code></td><td class="hex"><span class="sw2" style="background:#a65200"></span>#A65200</td><td class="hex"><span class="sw2" style="background:#ffb040"></span>#FFB040</td><td>Warning text, countdown</td><td>5.08 / 7.49 <span class="ok">✓</span></td></tr>
+    <tr><td>text-critical</td><td><code>Tone::Critical.text()</code></td><td class="hex"><span class="sw2" style="background:#c81e1e"></span>#C81E1E</td><td class="hex"><span class="sw2" style="background:#ff7c72"></span>#FF7C72</td><td>Critical text, Deny, Production tag</td><td>5.11 / 5.56 <span class="ok">✓</span></td></tr>
+    <tr><td>tint (neutral)</td><td><code>Tone::Neutral.tint()</code></td><td colspan="2">= FILL</td><td></td><td></td></tr>
+    <tr><td>tint-accent</td><td><code>Tone::Accent.tint()</code></td><td class="hex"><span class="sw2" style="background:#e8f2ff"></span>#E8F2FF</td><td class="hex"><span class="sw2" style="background:#102a4a"></span>#102A4A</td><td>Remote tag, open ⓘ</td><td>accent text 4.80 / 6.02 <span class="ok">✓</span></td></tr>
+    <tr><td>tint-good</td><td><code>Tone::Good.tint()</code></td><td class="hex"><span class="sw2" style="background:#e9f7ed"></span>#E9F7ED</td><td class="hex"><span class="sw2" style="background:#12341e"></span>#12341E</td><td>Good banner, tag</td><td></td></tr>
+    <tr><td>tint-warning</td><td><code>Tone::Warning.tint()</code></td><td class="hex"><span class="sw2" style="background:#fff5e5"></span>#FFF5E5</td><td class="hex"><span class="sw2" style="background:#3e2a0a"></span>#3E2A0A</td><td>"Not verified" tag, warning banner</td><td></td></tr>
+    <tr><td>tint-critical</td><td><code>Tone::Critical.tint()</code></td><td class="hex"><span class="sw2" style="background:#ffeeed"></span>#FFEEED</td><td class="hex"><span class="sw2" style="background:#481816"></span>#481816</td><td>Production tag, critical banner</td><td></td></tr>
+    <tr><td colspan="6" style="padding-top:12px;font-weight:600">Proposed new roles. M13 maps each to the literal it finds in the 12 UI files; if none exists, it adds the role with this light value.</td></tr>
+    <tr><td>P1 sidebar-selected</td><td>literal in <code>ui.rs</code> (sidebar)</td><td class="hex"><span class="sw2" style="background:#d7d7da"></span>#D7D7DA</td><td class="hex"><span class="sw2" style="background:#3c3c40"></span>#3C3C40</td><td>Selected sidebar row, gear when Settings is open; its count uses LABEL</td><td>label 11.72 / 9.32</td></tr>
+    <tr><td>P2 button</td><td>bordered button fill</td><td class="hex"><span class="sw2" style="background:#ffffff"></span>#FFFFFF</td><td class="hex"><span class="sw2" style="background:#38383c"></span>#38383C</td><td>Push buttons, pop-up buttons, selected segment</td><td>critical text 5.74 / 4.66 <span class="ok">✓</span></td></tr>
+    <tr><td>P3 code</td><td>command block fill</td><td class="hex"><span class="sw2" style="background:#f2f2f4"></span>#F2F2F4</td><td class="hex"><span class="sw2" style="background:#232325"></span>#232325</td><td>Command and skeleton blocks</td><td>label 15.05 / 13.31</td></tr>
+    <tr><td>P4 menu</td><td>menu and popover fill</td><td class="hex"><span class="sw2" style="background:#fafafa"></span>#FAFAFA</td><td class="hex"><span class="sw2" style="background:#2e2e31"></span>#2E2E31</td><td>"⋯" menu, help popover</td><td>secondary 5.15 / 5.33</td></tr>
+    <tr><td>P5 scrim</td><td>sheet backdrop</td><td class="hex">#000000 at 12 %</td><td class="hex">#000000 at 42 %</td><td>Behind a sheet</td><td></td></tr>
+    <tr><td>P6 badge</td><td>sidebar count badge</td><td class="hex"><span class="sw2" style="background:#e0352b"></span>#E0352B</td><td class="hex"><span class="sw2" style="background:#d93a30"></span>#D93A30</td><td>Red count badge (white text)</td><td>white <span class="bad">4.46</span> / 4.57 (open question 1)</td></tr>
+  </table>
+  <ul style="margin-top:-6px">
+    <li><b>Not in the palette:</b> provider tile colors and agent avatar colors stay the same in both appearances; a near-black tile gets a 0.5 px white edge at 25 % in dark (F1b).</li>
+    <li><b>Test pairs for <code>every_text_role_has_contrast_4_5_in_both_palettes</code>:</b> LABEL, SECONDARY, ACCENT_TEXT on SURFACE, DETAIL, LIST, SIDEBAR, WINDOW, FILL; each <code>Tone::text()</code> on SURFACE, DETAIL, LIST, and its own tint; white on SELECTION, ACCENT, and P6.</li>
+    <li><b><code>production_red_is_distinct_in_dark</code>:</b> PRODUCTION differs from <code>Tone::Warning.mark()</code> and ACCENT, and is at least 3:1 on SIDEBAR, LIST, and SURFACE (4.83, 5.35, 4.58).</li>
+  </ul>
+</div>
+
+<div class="notes" id="strings">
+  <h2>Texts to keep exactly</h2>
+  <table>
+    <tr><th>Frame</th><th>Text</th><th>Note</th></tr>
+    <tr><td>F1, F4 sidebar</td><td>Favorites</td><td>Row under All credentials; hidden with no favorite.</td></tr>
+    <tr><td>F4 star and menu</td><td>Add to Favorites · Remove from Favorites</td><td>Tooltip of the header star and first item of the "⋯" menu. Shortcut ⌘D.</td></tr>
+    <tr><td>F4 HUD</td><td>Removed from Favorites</td><td>Only when the last favorite goes while Favorites is open.</td></tr>
+    <tr><td>F2 rows</td><td>&lt;agent&gt; asks for &lt;item&gt; · Access request · &lt;Mac&gt; · Run · &lt;Mac&gt;</td><td>List rows of the Waiting group.</td></tr>
+    <tr><td>F2 detail</td><td>&lt;agent&gt; asks for access · The Agent Says · Not verified · If You Allow · One use. The bouncer still checks it. · Expires</td><td>Header subline "&lt;Mac&gt; · &lt;vault&gt; · &lt;time&gt;".</td></tr>
+    <tr><td>F2 buttons</td><td>Deny · Grant Access on This Mac… · Allow Once</td><td>Replaces today's "Allow once", "Grant access on this Mac…" (title case).</td></tr>
+    <tr><td>F2 answered</td><td>Allowed once by you at &lt;time&gt;. · Denied by you at &lt;time&gt;. · Expired at &lt;time&gt;.</td><td>Good, critical, or neutral tone.</td></tr>
+    <tr><td>F3 Bouncer</td><td>Decides routine runs. Asks you when unsure.</td><td>Note of the Bouncer switch.</td></tr>
+    <tr><td>F3 Shared Brain</td><td>Shared Brain · Help Train the Shared Brain · Sends examples without names or values. You review each batch.</td><td>Group, switch, note.</td></tr>
+    <tr><td>F3 review line</td><td>&lt;n&gt; new examples to review. · Review and Send… · Sent · &lt;n&gt; batches · &lt;n&gt; records · last &lt;date&gt; · Delete My Contributions…</td><td>Line at most once a week, from 10 records.</td></tr>
+    <tr><td>F3b alert</td><td>Turn Off the Bouncer? · Every run waits for you until you turn it on. · Cancel · Turn Off</td><td>Then today's note "The bouncer brain is off. Every run waits for you."</td></tr>
+    <tr><td>F5 notification</td><td>Access request · Agent “&lt;name&gt;” asks for access to a credential. Open Apassy to review.</td><td>D1, verbatim. Typographic quotes.</td></tr>
+    <tr><td>F6 chooser</td><td>Apassy · &lt;frame host&gt; · Inside &lt;top host&gt;</td><td>Header and footer of a frame chooser.</td></tr>
+    <tr><td>F6 panel detail</td><td>Fill the login “&lt;item&gt;” (&lt;username&gt;) on &lt;frame origin&gt; inside &lt;top origin&gt; in your browser. The page gets the username and the password once.</td><td>D2 rule 6 + today's second sentence. Up to 5 lines.</td></tr>
+    <tr><td>F6 refusals</td><td>Open this sign-in page in its own tab · It belongs to another site than &lt;top site&gt;. · Open in New Tab · Allow Apassy on &lt;host&gt; · Then logins show in this frame. · Allow on This Site… · The page changed. Nothing was filled. · Choose the login again.</td><td>First line is today's recovery text.</td></tr>
+    <tr><td>F7 headings</td><td>Show the code of “&lt;item&gt;” in the command line · Copy the code of “&lt;item&gt;” for the command line</td><td>ADR 0042 templates.</td></tr>
+    <tr><td>F7 panel</td><td>&lt;executable&gt; · pid &lt;n&gt; · &lt;terminal app&gt; · Cancel · Show Code · Copy Code · This press was not from this Mac's keyboard or mouse. Use Touch ID.</td><td>No default button.</td></tr>
+    <tr><td>F7 CLI</td><td>Confirm in Apassy… · Another code request is open in Apassy. (busy) · The confirmation expired. Run the command again. (expired) · Touch ID for codes for 15 minutes: 3 cancels.</td><td>stderr, prefixed "apassy: " for errors. Wire codes per <code>owner-cli-v1</code>.</td></tr>
+    <tr><td>F8 list</td><td>Vault · Security · Devices · Agent Access · Tools · About</td><td>Status lines in F8 notes.</td></tr>
+    <tr><td>F8 Vault</td><td>Vault · Add Another Vault · Remove from This iPhone… · Sync · Service · State · Last Sync · Sync Now · Enter the New Passphrase… · Select the iCloud File Again… · Use the Relay Copy… · Move to Another App · Export your credentials for another password app.</td><td>State texts are today's sync messages.</td></tr>
+    <tr><td>F9 agent</td><td>Open Requests · Suggestions · Set to &lt;environment&gt; · Add host &lt;host&gt; · Dismiss · Accept suggestions on &lt;Mac&gt;. · Sees · Disconnect…</td><td>Header subline "On &lt;Mac&gt; · &lt;vault&gt;" as today.</td></tr>
+    <tr><td>F9 sheet</td><td>Disconnect &lt;agent&gt;? · It can no longer use credentials on &lt;Mac&gt;. · Disconnect · Cancel · &lt;agent&gt; is already disconnected.</td><td>Last one is the stale-target toast.</td></tr>
+    <tr><td>F9 older Mac</td><td>Update Apassy to see the agents of &lt;Mac&gt;. · &lt;n&gt; open requests · Change access on each Mac.</td><td>D16 text; the count is the list subline.</td></tr>
+    <tr><td>F10 watch</td><td>Requests · &lt;agent&gt; asks for &lt;item&gt; · on &lt;Mac&gt; · Until &lt;time&gt; · Vault · Allow Once · Deny · This Watch · Forget · Forget &lt;vault&gt; on this watch? · Connect Another Vault</td><td>Section headers are vault names.</td></tr>
+    <tr><td>F10 limits</td><td>Already Connected · This watch already answers for &lt;vault&gt;. · Too Many Vaults · This watch answers for 4 vaults, the most. · &lt;other vault&gt; stays. (two or more: The other vaults stay.)</td><td><code>already_connected</code>, <code>too_many_vaults</code>.</td></tr>
+    <tr><td>F10 iPhone</td><td>Add Another Vault to Apple Watch · Answers for &lt;vaults&gt; · A watch answers for up to 4 vaults.</td><td>Row, subline, footer.</td></tr>
+    <tr><td>F11 consent</td><td>Help Train the Shared Brain · Send examples of your answers. Never names or values. · What Leaves This Mac · What Never Leaves · How It Works · Privacy Policy · Cancel · Turn On</td><td>Body lines in F11a, verbatim.</td></tr>
+    <tr><td>F11 review</td><td>Review and Send · &lt;n&gt; records from your answers since &lt;date&gt;. · Command · Action · Credentials · Answer · &lt;n&gt; more records · &lt;n&gt; of &lt;n&gt; records will be sent. Unchecked rows stay on this Mac. · Send &lt;n&gt; Records</td><td>"Send 1 Record" for one.</td></tr>
+    <tr><td>F11 after</td><td>&lt;n&gt; records sent · Delete Your Contributions? · Deletes &lt;n&gt; batches not yet used for training. · A trained model cannot unlearn. · Delete</td><td>HUD; alert.</td></tr>
+    <tr><td>F12 Tools</td><td>Command Line · Browser Extension · Connectors · Bundled · &lt;hosts&gt; · &lt;n&gt; operations · Installed &lt;date&gt; · The file changed after install. Not loaded. · Remove… · Install…</td><td>Tools status line adds "&lt;n&gt; connectors".</td></tr>
+    <tr><td>F12 sheet</td><td>Install a Connector · Check the hosts and operations before you install. · Name · Version · Hosts · SHA-256 · Operations · Read · Agents get only the listed fields. Works with: &lt;item&gt;. · Install</td><td>Operation titles come from the manifest.</td></tr>
+    <tr><td>F12 check</td><td>Install the connector “&lt;name&gt;” &lt;version&gt; for &lt;hosts&gt; with &lt;n&gt; read operations.</td><td>Panel detail; heading "Install a Connector".</td></tr>
+  </table>
+
+  <h2>Help behind ⓘ</h2>
+  <ul>
+    <li><b>Help Train the Shared Brain</b> (F3d): Your answers make the stock bouncer better for everyone. / Only commands with names replaced leave this Mac. / A command trains only after 5 people sent it. / Off by default. Turning it on needs Touch ID.</li>
+    <li><b>Review and Send</b> (F11e): Words in &lt;angle brackets&gt; replace hosts, paths, names, and numbers. / Credentials shows the kind of service, never the variable. / Uncheck a row to keep it on this Mac.</li>
+    <li><b>Connectors</b> (F12d): A connector runs named operations with a credential. / Agents get only the fields it names, never the token. / It works only with credentials for its hosts. / Version 1 reads only. Install needs Touch ID.</li>
+  </ul>
+
+  <h2>Choices made in this mockup</h2>
+  <ul>
+    <li><b>Dark values</b> follow macOS dark materials (grouped surfaces lighter than the detail column) and are checked for 4.5:1; three dark text roles are lighter than Apple's defaults to pass on FILL.</li>
+    <li><b>Six proposed roles</b> (P1–P6) for literals that sit outside <code>kit.rs</code> today; the selected-sidebar count switches to LABEL in both appearances, because SECONDARY fails there (3.74 light).</li>
+    <li><b>Favorites:</b> a star in the toolbar of the detail, a star in the row meta of other lists, ⌘D (free today). No undo HUD except F4d.</li>
+    <li><b>Access request detail</b> regrouped into facts, "The Agent Says", and "If You Allow"; Allow Once is the one primary.</li>
+    <li><b>Turn Off the Bouncer?</b> alert (F3b) added to the existing switch, so the dark sheet has a real use.</li>
+    <li><b>Frame fill</b> keeps the panel's fixed heading; the five-line detail carries both origins.</li>
+    <li><b>Watch:</b> the Vault fact goes first; scrolling reaches Folder, Hosts, and the buttons.</li>
+    <li><b>Connectors</b> live in Tools as the third group, below Command Line and Browser Extension.</li>
+  </ul>
+
+  <h2>Open questions</h2>
+  <ul>
+    <li>Today's light white-on-ACCENT (primary buttons, 4.02:1) and white-on-badge (4.46:1) are below 4.5:1, and M13 must keep the light values. Should M14's test exempt them, or should the light primary fill move to SELECTION (#0A6CFF, 4.56:1)? Dark passes either way.</li>
+    <li>The D2 frame-fill detail runs past 12 words because both origins must be in the trusted text. This mockup keeps it.</li>
+    <li>iPhone buttons: this mockup uses title case for new and renamed buttons, as the owner asked. Older iPhone strings ("Connect this iPhone") stay as they are until M7 touches them. Should they all change now?</li>
+    <li>Watch: when the last vault is forgotten, should the watch go back to setup, as here, or keep an empty This Watch with Connect a Vault?</li>
+    <li>Connectors: should a bundled plugin without a matching credential show at all? Here it shows, with "No matching credential" as its subline.</li>
+  </ul>
+  <p style="margin:0;font-size:12px;color:rgba(0,0,0,.52)">Owner rules applied: no empty pane, titles of 5 words or fewer, lines of 12 words or fewer (except the F6 security template), help behind ⓘ, title case for buttons and menus, one primary button per view (F7 has none on purpose).</p>
+</div>
+
+</div>
+</body>
+</html>

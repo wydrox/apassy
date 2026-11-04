@@ -20,37 +20,9 @@ use eframe::egui::{
     WidgetText, WidgetType, epaint,
 };
 
-// ---- Color tokens (macOS light appearance). ----
+// ---- Colors: the roles of `palette.rs`. ----
 
-pub(crate) const WINDOW: Color32 = Color32::from_rgb(250, 250, 251);
-pub(crate) const SIDEBAR: Color32 = Color32::from_rgb(236, 236, 239);
-/// The list column (ADR 0026): white, as the content list of Mail.
-pub(crate) const LIST: Color32 = Color32::WHITE;
-/// The detail column, behind its white groups.
-pub(crate) const DETAIL: Color32 = Color32::from_rgb(246, 246, 247);
-/// The fill of the selected list row. White text on it passes 4.5:1.
-pub(crate) const SELECTION: Color32 = Color32::from_rgb(10, 108, 255);
-/// The one colored mark of the window: production, and what blocks an agent.
-pub(crate) const PRODUCTION: Color32 = Color32::from_rgb(224, 53, 43);
-pub(crate) const SURFACE: Color32 = Color32::WHITE;
-/// Hairlines between rows.
-pub(crate) const SEPARATOR: Color32 = Color32::from_rgb(232, 232, 236);
-/// The outline of a grouped section.
-pub(crate) const SECTION_EDGE: Color32 = Color32::from_rgb(228, 228, 233);
-/// Text field borders.
-pub(crate) const BORDER: Color32 = Color32::from_rgb(210, 210, 216);
-pub(crate) const LABEL: Color32 = Color32::from_rgb(29, 29, 31);
-pub(crate) const SECONDARY: Color32 = Color32::from_rgb(106, 106, 112);
-/// Placeholders and decoration only. It is too light for text that carries meaning.
-pub(crate) const TERTIARY: Color32 = Color32::from_rgb(160, 160, 166);
-pub(crate) const FILL: Color32 = Color32::from_rgb(240, 240, 243);
-pub(crate) const FILL_HOVER: Color32 = Color32::from_rgb(232, 232, 236);
-pub(crate) const FILL_PRESSED: Color32 = Color32::from_rgb(222, 222, 227);
-pub(crate) const ACCENT: Color32 = Color32::from_rgb(0, 122, 255);
-const ACCENT_HOVER: Color32 = Color32::from_rgb(0, 108, 230);
-const ACCENT_PRESSED: Color32 = Color32::from_rgb(0, 94, 204);
-/// Accent for text on white. It passes 4.5:1.
-pub(crate) const ACCENT_TEXT: Color32 = Color32::from_rgb(0, 102, 214);
+pub(crate) use super::palette::{fixed, palette};
 
 /// The meaning of a color. Status colors always come with a label or an icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,33 +38,33 @@ impl Tone {
     /// For dots, icons, bars, and fills.
     pub(crate) fn mark(self) -> Color32 {
         match self {
-            Self::Neutral => Color32::from_rgb(142, 142, 147),
-            Self::Accent => ACCENT,
-            Self::Good => Color32::from_rgb(52, 199, 89),
-            Self::Warning => Color32::from_rgb(255, 149, 0),
-            Self::Critical => Color32::from_rgb(255, 59, 48),
+            Self::Neutral => palette().mark_neutral,
+            Self::Accent => palette().accent,
+            Self::Good => palette().mark_good,
+            Self::Warning => palette().mark_warning,
+            Self::Critical => palette().mark_critical,
         }
     }
 
     /// For text on white or on the tint. Each passes 4.5:1.
     pub(crate) fn text(self) -> Color32 {
         match self {
-            Self::Neutral => SECONDARY,
-            Self::Accent => ACCENT_TEXT,
-            Self::Good => Color32::from_rgb(29, 128, 54),
-            Self::Warning => Color32::from_rgb(166, 82, 0),
-            Self::Critical => Color32::from_rgb(200, 30, 30),
+            Self::Neutral => palette().secondary,
+            Self::Accent => palette().accent_text,
+            Self::Good => palette().text_good,
+            Self::Warning => palette().text_warning,
+            Self::Critical => palette().text_critical,
         }
     }
 
     /// A light wash for banners and tags.
     pub(crate) fn tint(self) -> Color32 {
         match self {
-            Self::Neutral => FILL,
-            Self::Accent => Color32::from_rgb(232, 242, 255),
-            Self::Good => Color32::from_rgb(233, 247, 237),
-            Self::Warning => Color32::from_rgb(255, 245, 229),
-            Self::Critical => Color32::from_rgb(255, 238, 237),
+            Self::Neutral => palette().fill,
+            Self::Accent => palette().tint_accent,
+            Self::Good => palette().tint_good,
+            Self::Warning => palette().tint_warning,
+            Self::Critical => palette().tint_critical,
         }
     }
 }
@@ -172,7 +144,7 @@ pub(crate) fn paragraph(ui: &mut Ui, value: impl Into<String>, font: Font, color
 
 /// A wrapping secondary note under a control or a section.
 pub(crate) fn note(ui: &mut Ui, value: impl Into<String>) {
-    paragraph(ui, value, Font::Footnote, SECONDARY);
+    paragraph(ui, value, Font::Footnote, palette().secondary);
 }
 
 /// A wrapping note in a status color.
@@ -309,57 +281,57 @@ fn install_fonts(ctx: &egui::Context) {
 
 fn visuals() -> egui::Visuals {
     let mut v = egui::Visuals::light();
-    v.panel_fill = WINDOW;
-    v.window_fill = SURFACE;
-    v.window_stroke = Stroke::new(1.0, SECTION_EDGE);
+    v.panel_fill = palette().window;
+    v.window_fill = palette().menu;
+    v.window_stroke = Stroke::new(1.0, palette().section_edge);
     v.window_corner_radius = CornerRadius::same(12);
     v.window_shadow = soft_shadow(28, 30);
     v.popup_shadow = soft_shadow(14, 34);
     v.menu_corner_radius = CornerRadius::same(8);
-    v.extreme_bg_color = SURFACE;
-    v.text_edit_bg_color = Some(SURFACE);
-    v.faint_bg_color = Color32::from_rgb(248, 248, 250);
-    v.code_bg_color = FILL;
-    v.hyperlink_color = ACCENT_TEXT;
+    v.extreme_bg_color = palette().surface;
+    v.text_edit_bg_color = Some(palette().surface);
+    v.faint_bg_color = palette().faint;
+    v.code_bg_color = palette().fill;
+    v.hyperlink_color = palette().accent_text;
     v.warn_fg_color = Tone::Warning.text();
     v.error_fg_color = Tone::Critical.text();
-    v.selection.bg_fill = Color32::from_rgb(196, 222, 255);
+    v.selection.bg_fill = palette().text_selection;
     // The focus ring of a text field. 2 points of solid accent pass 3:1 (WCAG 1.4.11).
-    v.selection.stroke = Stroke::new(2.0, ACCENT);
+    v.selection.stroke = Stroke::new(2.0, palette().accent);
     v.indent_has_left_vline = false;
     v.striped = false;
     v.button_frame = true;
 
     let radius = CornerRadius::same(6);
     let w = &mut v.widgets;
-    w.noninteractive.bg_fill = SURFACE;
-    w.noninteractive.weak_bg_fill = SURFACE;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, SEPARATOR);
-    w.noninteractive.fg_stroke = Stroke::new(1.0, LABEL);
+    w.noninteractive.bg_fill = palette().surface;
+    w.noninteractive.weak_bg_fill = palette().surface;
+    w.noninteractive.bg_stroke = Stroke::new(1.0, palette().separator);
+    w.noninteractive.fg_stroke = Stroke::new(1.0, palette().label);
     w.noninteractive.corner_radius = radius;
-    w.inactive.bg_fill = FILL;
-    w.inactive.weak_bg_fill = FILL;
-    w.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    w.inactive.fg_stroke = Stroke::new(1.0, LABEL);
+    w.inactive.bg_fill = palette().fill;
+    w.inactive.weak_bg_fill = palette().fill;
+    w.inactive.bg_stroke = Stroke::new(1.0, palette().border);
+    w.inactive.fg_stroke = Stroke::new(1.0, palette().label);
     w.inactive.corner_radius = radius;
     w.inactive.expansion = 0.0;
-    w.hovered.bg_fill = FILL_HOVER;
-    w.hovered.weak_bg_fill = FILL_HOVER;
-    w.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(188, 188, 196));
-    w.hovered.fg_stroke = Stroke::new(1.0, LABEL);
+    w.hovered.bg_fill = palette().fill_hover;
+    w.hovered.weak_bg_fill = palette().fill_hover;
+    w.hovered.bg_stroke = Stroke::new(1.0, palette().border_hover);
+    w.hovered.fg_stroke = Stroke::new(1.0, palette().label);
     w.hovered.corner_radius = radius;
     w.hovered.expansion = 0.0;
-    w.active.bg_fill = FILL_PRESSED;
-    w.active.weak_bg_fill = FILL_PRESSED;
+    w.active.bg_fill = palette().fill_pressed;
+    w.active.weak_bg_fill = palette().fill_pressed;
     // egui draws a focused built-in widget, such as a menu button, as active.
-    w.active.bg_stroke = Stroke::new(2.0, ACCENT);
-    w.active.fg_stroke = Stroke::new(1.0, LABEL);
+    w.active.bg_stroke = Stroke::new(2.0, palette().accent);
+    w.active.fg_stroke = Stroke::new(1.0, palette().label);
     w.active.corner_radius = radius;
     w.active.expansion = 0.0;
-    w.open.bg_fill = FILL;
-    w.open.weak_bg_fill = FILL;
-    w.open.bg_stroke = Stroke::new(1.0, BORDER);
-    w.open.fg_stroke = Stroke::new(1.0, LABEL);
+    w.open.bg_fill = palette().fill;
+    w.open.weak_bg_fill = palette().fill;
+    w.open.bg_stroke = Stroke::new(1.0, palette().border);
+    w.open.fg_stroke = Stroke::new(1.0, palette().label);
     w.open.corner_radius = radius;
     v
 }
@@ -369,7 +341,7 @@ fn soft_shadow(blur: u8, alpha: u8) -> Shadow {
         offset: [0, (blur / 3) as i8],
         blur,
         spread: 0,
-        color: Color32::from_black_alpha(alpha),
+        color: palette().shadow.gamma_multiply_u8(alpha),
     }
 }
 
@@ -463,11 +435,11 @@ pub(crate) fn page_header(
     trailing: impl FnOnce(&mut Ui),
 ) {
     ui.horizontal(|ui| {
-        ui.label(text(title, Font::Title).color(LABEL));
+        ui.label(text(title, Font::Title).color(palette().label));
         ui.with_layout(Layout::right_to_left(Align::Center), trailing);
     });
     if let Some(subtitle) = subtitle {
-        paragraph(ui, subtitle, Font::Callout, SECONDARY);
+        paragraph(ui, subtitle, Font::Callout, palette().secondary);
     }
     ui.add_space(18.0);
 }
@@ -522,13 +494,13 @@ pub(crate) fn section<R>(
     if let Some(header) = header {
         ui.horizontal(|ui| {
             ui.add_space(2.0);
-            ui.label(text(header, Font::Headline).color(LABEL));
+            ui.label(text(header, Font::Headline).color(palette().label));
         });
         ui.add_space(2.0);
     }
     let inner = Frame::NONE
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, SECTION_EDGE))
+        .fill(palette().surface)
+        .stroke(Stroke::new(1.0, palette().section_edge))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(0, 2))
         .show(ui, |ui| {
@@ -554,7 +526,7 @@ impl Section<'_> {
             let (rect, _) = self
                 .ui
                 .allocate_exact_size(Vec2::new(width, 1.0), Sense::hover());
-            let stroke = Stroke::new(hairline(self.ui), SEPARATOR);
+            let stroke = Stroke::new(hairline(self.ui), palette().separator);
             self.ui.painter().hline(
                 (rect.left() + ROW_PAD_X)..=rect.right(),
                 rect.center().y,
@@ -596,9 +568,9 @@ impl Section<'_> {
             .response;
         if response.hovered() || response.has_focus() {
             let fill = if response.is_pointer_button_down_on() {
-                FILL_PRESSED
+                palette().fill_pressed
             } else {
-                Color32::from_rgb(246, 246, 248)
+                palette().row_hover
             };
             let rect = response.rect.shrink2(Vec2::new(4.0, 1.0));
             self.ui
@@ -623,7 +595,7 @@ impl Section<'_> {
         const GAP: f32 = 24.0;
         let value = value.into();
         self.row(|ui| {
-            let label = text(label, Font::Body).color(LABEL);
+            let label = text(label, Font::Body).color(palette().label);
             let one_line = galley(ui, label.clone()).size().x
                 + GAP
                 + value
@@ -663,13 +635,13 @@ impl Section<'_> {
                         Some(note_text) => {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.label(text(title, Font::Body).color(LABEL));
+                                ui.label(text(title, Font::Body).color(palette().label));
                                 note(ui, note_text);
                             });
                         }
                         // Alone, the title stays centered with the value.
                         None => {
-                            ui.label(text(title, Font::Body).color(LABEL));
+                            ui.label(text(title, Font::Body).color(palette().label));
                         }
                     },
                     |ui| ui.label(value),
@@ -705,19 +677,21 @@ impl Section<'_> {
                 match subtitle {
                     Some(subtitle) => {
                         ui.vertical(|ui| {
-                            ui.label(text(title, Font::Body).color(LABEL));
+                            ui.label(text(title, Font::Body).color(palette().label));
                             ui.add(
-                                Label::new(text(subtitle, Font::Footnote).color(SECONDARY))
-                                    .truncate(),
+                                Label::new(
+                                    text(subtitle, Font::Footnote).color(palette().secondary),
+                                )
+                                .truncate(),
                             );
                         });
                     }
                     None => {
-                        ui.label(text(title, Font::Body).color(LABEL));
+                        ui.label(text(title, Font::Body).color(palette().label));
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    paint_icon_in(ui, Icon::ChevronRight, 12.0, TERTIARY);
+                    paint_icon_in(ui, Icon::ChevronRight, 12.0, palette().tertiary);
                     if let Some(detail) = detail {
                         ui.add(Label::new(detail).truncate());
                     }
@@ -736,7 +710,7 @@ impl Section<'_> {
                         Layout::left_to_right(Align::Center),
                         |ui| {
                             ui.set_min_width(FIELD_LABEL_WIDTH);
-                            ui.label(text(label, Font::Body).color(LABEL))
+                            ui.label(text(label, Font::Body).color(palette().label))
                         },
                     )
                     .inner;
@@ -762,7 +736,7 @@ impl Section<'_> {
                             Layout::left_to_right(Align::Center),
                             |ui| {
                                 ui.set_min_width(FIELD_LABEL_WIDTH);
-                                ui.label(text(label, Font::Body).color(LABEL))
+                                ui.label(text(label, Font::Body).color(palette().label))
                             },
                         )
                         .inner;
@@ -794,7 +768,7 @@ impl Section<'_> {
                     ui,
                     |ui| {
                         ui.vertical(|ui| {
-                            ui.label(text(title, Font::Body).color(LABEL));
+                            ui.label(text(title, Font::Body).color(palette().label));
                             if let Some(subtitle) = subtitle {
                                 note(ui, subtitle);
                             }
@@ -863,6 +837,8 @@ pub(crate) fn small_button(ui: &mut Ui, label: &str, style: Style) -> Response {
 /// A small borderless button ([`Style::Link`] or [`Style::Destructive`]) at the trailing
 /// edge of a row: its text ends at the edge, as the switches of the rows above do. Its
 /// hover fill reaches past the edge by [`BORDERLESS_SMALL_PAD`], into the row's padding.
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 pub(crate) fn trailing_small_button(ui: &mut Ui, label: &str, style: Style) -> Response {
     debug_assert!(matches!(style, Style::Link | Style::Destructive));
     button_named(
@@ -963,42 +939,42 @@ fn button_named(
     let (fill, fg) = match style {
         Style::Prominent => (
             if pressed {
-                ACCENT_PRESSED
+                palette().accent_pressed
             } else if hovered {
-                ACCENT_HOVER
+                palette().accent_hover
             } else {
-                ACCENT
+                palette().accent
             },
-            Color32::WHITE,
+            palette().on_accent,
         ),
         Style::DestructiveProminent => (
             if pressed || hovered {
-                Color32::from_rgb(222, 44, 36)
+                palette().critical_hover
             } else {
                 Tone::Critical.mark()
             },
-            Color32::WHITE,
+            palette().on_accent,
         ),
         Style::Bordered => (
             if pressed {
-                FILL_PRESSED
+                palette().fill_pressed
             } else if hovered {
-                FILL_HOVER
+                palette().fill_hover
             } else {
-                FILL
+                palette().fill
             },
-            LABEL,
+            palette().label,
         ),
         Style::Link | Style::Destructive => (
             if pressed {
-                FILL_PRESSED
+                palette().fill_pressed
             } else if hovered {
-                FILL
+                palette().fill
             } else {
                 Color32::TRANSPARENT
             },
             if style == Style::Link {
-                ACCENT_TEXT
+                palette().accent_text
             } else {
                 Tone::Critical.text()
             },
@@ -1048,7 +1024,7 @@ pub(crate) fn text_input(
     let response = ui.add(
         TextEdit::singleline(value)
             .id_salt(salt)
-            .hint_text(text(placeholder, Font::Body).color(TERTIARY))
+            .hint_text(text(placeholder, Font::Body).color(palette().tertiary))
             .margin(FIELD_MARGIN)
             .desired_width(f32::INFINITY),
     );
@@ -1067,7 +1043,7 @@ pub(crate) fn mono_input(
         TextEdit::singleline(value)
             .id_salt(salt)
             .font(TextStyle::Monospace)
-            .hint_text(text(placeholder, Font::Mono).color(TERTIARY))
+            .hint_text(text(placeholder, Font::Mono).color(palette().tertiary))
             .margin(FIELD_MARGIN)
             .desired_width(f32::INFINITY),
     );
@@ -1086,7 +1062,7 @@ pub(crate) fn text_area(
     ui.add(
         TextEdit::multiline(value)
             .id_salt(salt)
-            .hint_text(text(placeholder, Font::Body).color(TERTIARY))
+            .hint_text(text(placeholder, Font::Body).color(palette().tertiary))
             .margin(FIELD_MARGIN)
             .desired_rows(rows)
             .desired_width(f32::INFINITY),
@@ -1102,8 +1078,8 @@ pub(crate) fn code_block(ui: &mut Ui, value: &str, rows: usize) -> Response {
             .font(TextStyle::Monospace)
             .frame(
                 Frame::NONE
-                    .fill(Color32::from_rgb(246, 246, 248))
-                    .stroke(Stroke::new(1.0, SEPARATOR))
+                    .fill(palette().code_field)
+                    .stroke(Stroke::new(1.0, palette().separator))
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(Margin::symmetric(10, 8)),
             )
@@ -1132,9 +1108,9 @@ pub(crate) fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, value, label));
     if ui.is_rect_visible(rect) {
         let t = ui.ctx().animate_bool_responsive(response.id, *on);
-        let off = Color32::from_rgb(216, 216, 222);
+        let off = palette().switch_off;
         let track = Color32::from(egui::lerp(
-            egui::Rgba::from(off)..=egui::Rgba::from(ACCENT),
+            egui::Rgba::from(off)..=egui::Rgba::from(palette().accent),
             t,
         ));
         let track = if enabled {
@@ -1153,9 +1129,9 @@ pub(crate) fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         painter.circle_filled(
             center + Vec2::new(0.0, 0.5),
             radius + 0.5,
-            Color32::from_black_alpha(28),
+            palette().shadow.gamma_multiply_u8(28),
         );
-        painter.circle_filled(center, radius, Color32::WHITE);
+        painter.circle_filled(center, radius, palette().knob);
         if response.has_focus() {
             focus_ring(painter, rect, 9);
         }
@@ -1259,7 +1235,7 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     let selected = options.iter().position(|(option, _)| option == value);
     let hovered = response.hover_pos().and_then(segment_at);
     let painter = ui.painter();
-    painter.rect_filled(rect, 7, Color32::from_rgb(234, 234, 238));
+    painter.rect_filled(rect, 7, palette().segment_track);
     for (index, galley) in galleys.into_iter().enumerate() {
         let segment_rect = Rect::from_min_size(
             Pos2::new(rect.left() + 2.0 + segment * index as f32, rect.top() + 2.0),
@@ -1269,19 +1245,23 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
             painter.rect_filled(
                 segment_rect.translate(Vec2::new(0.0, 0.5)),
                 5,
-                Color32::from_black_alpha(18),
+                palette().shadow.gamma_multiply_u8(18),
             );
-            painter.rect_filled(segment_rect, 5, SURFACE);
+            painter.rect_filled(segment_rect, 5, palette().button);
         } else if hovered == Some(index) {
-            painter.rect_filled(segment_rect, 5, Color32::from_rgb(224, 224, 229));
+            painter.rect_filled(segment_rect, 5, palette().segment_hover);
         } else if index > 0 && selected != Some(index - 1) {
             painter.vline(
                 segment_rect.left(),
                 (segment_rect.top() + 4.0)..=(segment_rect.bottom() - 4.0),
-                Stroke::new(1.0, Color32::from_rgb(214, 214, 220)),
+                Stroke::new(1.0, palette().segment_divider),
             );
         }
-        let color = if enabled { LABEL } else { TERTIARY };
+        let color = if enabled {
+            palette().label
+        } else {
+            palette().tertiary
+        };
         painter.galley(segment_rect.center() - galley.size() / 2.0, galley, color);
     }
     if response.has_focus() {
@@ -1292,24 +1272,23 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
 
 /// The keyboard focus ring: 2 points of solid accent. It passes 3:1 against the window
 /// and the sidebar (WCAG 1.4.11).
-pub(crate) const FOCUS_STROKE: Stroke = Stroke {
-    width: 2.0,
-    color: ACCENT,
-};
+pub(crate) fn focus_stroke() -> Stroke {
+    Stroke::new(2.0, palette().accent)
+}
 
 /// The keyboard focus ring around a control.
 pub(crate) fn focus_ring(painter: &Painter, rect: Rect, radius: u8) {
     painter.rect_stroke(
         rect.expand(2.0),
         radius + 2,
-        FOCUS_STROKE,
+        focus_stroke(),
         StrokeKind::Outside,
     );
 }
 
 /// The keyboard focus ring inside a full-width row.
 pub(crate) fn inner_focus_ring(painter: &Painter, rect: Rect, radius: u8) {
-    painter.rect_stroke(rect, radius, FOCUS_STROKE, StrokeKind::Inside);
+    painter.rect_stroke(rect, radius, focus_stroke(), StrokeKind::Inside);
 }
 
 /// True once when the owner presses `key` with `modifiers`. The key is consumed.
@@ -1335,7 +1314,7 @@ pub(crate) fn menu(
         .selected_text(selected)
         .icon(|ui, rect, _visuals, _open| {
             let center = rect.center();
-            let stroke = Stroke::new(1.3, SECONDARY);
+            let stroke = Stroke::new(1.3, palette().secondary);
             let (w, h) = (3.2, 2.6);
             ui.painter().line(
                 vec![
@@ -1408,7 +1387,7 @@ pub(crate) fn disclosure(ui: &mut Ui, open: &mut bool, label: &str) -> Response 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if response.hovered() {
-            painter.rect_filled(rect.expand2(Vec2::new(4.0, 0.0)), 6, FILL);
+            painter.rect_filled(rect.expand2(Vec2::new(4.0, 0.0)), 6, palette().fill);
         }
         if response.has_focus() {
             focus_ring(painter, rect.expand2(Vec2::new(4.0, 0.0)), 6);
@@ -1422,11 +1401,11 @@ pub(crate) fn disclosure(ui: &mut Ui, open: &mut bool, label: &str) -> Response 
             Pos2::new(rect.left() + 6.0, rect.center().y),
             Vec2::splat(10.0),
         );
-        paint_icon(painter, icon_rect, icon, SECONDARY);
+        paint_icon(painter, icon_rect, icon, palette().secondary);
         painter.galley(
             Pos2::new(rect.left() + 18.0, rect.center().y - galley.size().y / 2.0),
             galley,
-            LABEL,
+            palette().label,
         );
     }
     response
@@ -1466,9 +1445,6 @@ pub(crate) struct Badge {
     pub(crate) what: &'static str,
 }
 
-const SIDEBAR_SELECTED: Color32 = Color32::from_rgb(222, 222, 228);
-const SIDEBAR_HOVER: Color32 = Color32::from_rgb(232, 232, 236);
-
 /// The open vault at the top of the sidebar: a tile with its initial, its name, and a
 /// status line. A click opens the vault menu. `tone` colors the status line when sync
 /// needs the owner.
@@ -1488,9 +1464,9 @@ pub(crate) fn vault_header(
         let painter = ui.painter();
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
         if open || response.is_pointer_button_down_on() {
-            painter.rect_filled(rect, 8, SIDEBAR_SELECTED);
+            painter.rect_filled(rect, 8, palette().sidebar_pressed);
         } else if response.hovered() {
-            painter.rect_filled(rect, 8, SIDEBAR_HOVER);
+            painter.rect_filled(rect, 8, palette().sidebar_control_hover);
         }
         if response.has_focus() {
             inner_focus_ring(painter, rect, 8);
@@ -1510,7 +1486,7 @@ pub(crate) fn vault_header(
         painter.galley(
             tile_rect.center() - letter.size() / 2.0,
             letter,
-            Color32::WHITE,
+            palette().on_accent,
         );
         // The name and the status, cut to the room left of the chevrons.
         let text_left = tile_rect.right() + 8.0;
@@ -1523,19 +1499,19 @@ pub(crate) fn vault_header(
                 TextStyle::Body,
             )
         };
-        let title = line(text(name, Font::Body), LABEL);
+        let title = line(text(name, Font::Body), palette().label);
         let status_color = match tone {
-            Tone::Neutral => SECONDARY,
+            Tone::Neutral => palette().secondary,
             other => other.text(),
         };
         let subtitle = line(text(status, Font::Footnote), status_color);
         let top = rect.center().y - (title.size().y + subtitle.size().y) / 2.0;
         let subtitle_top = top + title.size().y;
-        painter.galley(Pos2::new(text_left, top), title, LABEL);
+        painter.galley(Pos2::new(text_left, top), title, palette().label);
         painter.galley(Pos2::new(text_left, subtitle_top), subtitle, status_color);
         // Up and down chevrons, as on a macOS pop-up button.
         let center = Pos2::new(rect.right() - 10.0, rect.center().y);
-        let stroke = Stroke::new(1.3, SECONDARY);
+        let stroke = Stroke::new(1.3, palette().secondary);
         let (w, h) = (3.2, 2.6);
         painter.line(
             vec![
@@ -1564,14 +1540,14 @@ pub(crate) fn title_bar_button(ui: &mut Ui, icon: Icon, name: &str) -> Response 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if response.is_pointer_button_down_on() {
-            painter.rect_filled(rect, 6, SIDEBAR_SELECTED);
+            painter.rect_filled(rect, 6, palette().sidebar_pressed);
         } else if response.hovered() {
-            painter.rect_filled(rect, 6, SIDEBAR_HOVER);
+            painter.rect_filled(rect, 6, palette().sidebar_control_hover);
         }
         if response.has_focus() {
             inner_focus_ring(painter, rect, 6);
         }
-        paint_icon(painter, rect.shrink(5.0), icon, SECONDARY);
+        paint_icon(painter, rect.shrink(5.0), icon, palette().secondary);
     }
     response.on_hover_text(name)
 }
@@ -1612,10 +1588,6 @@ pub(crate) const DETAIL_TOOLBAR: f32 = 34.0;
 pub(crate) const SIDEBAR_TOP: f32 = 30.0;
 /// The top of the rail icons: under the traffic lights and the sidebar button.
 pub(crate) const RAIL_TOP: f32 = 66.0;
-/// The hairline between the columns (the mockup: 0.5 px of black at 9 %).
-pub(crate) const COLUMN_EDGE: Color32 = Color32::from_black_alpha(23);
-/// The fill of a hovered sidebar row and of a pressed small button.
-const FILL2: Color32 = Color32::from_rgb(235, 235, 237);
 /// The leading edge of each row, as in the mockup.
 const ROW_RADIUS: u8 = 6;
 
@@ -1685,23 +1657,31 @@ pub(crate) fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile) {
                     .size((side * 0.44).round())
                     .variation(b"wght", 700.0),
             );
-            painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+            painter.galley(
+                rect.center() - galley.size() / 2.0,
+                galley,
+                palette().on_accent,
+            );
         }
-        Mark::Icon(icon) => paint_icon(painter, rect.shrink(side * 0.25), *icon, Color32::WHITE),
+        Mark::Icon(icon) => paint_icon(
+            painter,
+            rect.shrink(side * 0.25),
+            *icon,
+            palette().on_accent,
+        ),
     }
 }
 
 /// The ring around a tile on a selected row: white, 1.5 points, just outside the tile.
 /// A tile in the accent blue, such as a login, keeps its shape on the blue selection.
-pub(crate) const SELECTED_TILE_RING: Stroke = Stroke {
-    width: 1.5,
-    color: Color32::WHITE,
-};
+pub(crate) fn selected_tile_ring() -> Stroke {
+    Stroke::new(1.5, palette().on_accent)
+}
 
-/// The ring around the tile of a row: [`SELECTED_TILE_RING`] on a selected row, else
+/// The ring around the tile of a row: [`selected_tile_ring`] on a selected row, else
 /// none. The tile keeps its own color.
 pub(crate) fn tile_ring(selected: bool) -> Option<Stroke> {
-    selected.then_some(SELECTED_TILE_RING)
+    selected.then(selected_tile_ring)
 }
 
 /// Paint [`tile_ring`] around the tile or avatar in `rect` of a row.
@@ -1733,32 +1713,24 @@ pub(crate) fn tile(ui: &mut Ui, tile: &Tile, side: f32) -> Response {
 /// a steady color from its name. The name is compared without case, spaces, or dashes,
 /// so "claude-code" and "Ola's Claude Code" are Claude Code too.
 pub(crate) fn agent_color(name: &str) -> Color32 {
-    const OTHERS: [Color32; 6] = [
-        Color32::from_rgb(0, 122, 255),
-        Color32::from_rgb(88, 86, 214),
-        Color32::from_rgb(191, 90, 242),
-        Color32::from_rgb(48, 176, 199),
-        Color32::from_rgb(255, 55, 95),
-        Color32::from_rgb(142, 142, 147),
-    ];
     let plain: String = name
         .chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect();
     if plain.contains("claude") {
-        Color32::from_rgb(217, 119, 87)
+        fixed::CLAUDE
     } else if plain.contains("codex") {
-        Color32::from_rgb(16, 163, 127)
+        fixed::CODEX
     } else if plain.contains("t3code") {
-        Color32::from_rgb(110, 90, 230)
+        fixed::T3_CODE
     } else if plain.contains("github") {
-        Color32::from_rgb(36, 41, 47)
+        fixed::GITHUB_AGENT
     } else {
         let sum = plain
             .bytes()
             .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize));
-        OTHERS[sum % OTHERS.len()]
+        fixed::OTHER_AGENTS[sum % fixed::OTHER_AGENTS.len()]
     }
 }
 
@@ -1778,7 +1750,11 @@ pub(crate) fn paint_avatar(ui: &Ui, rect: Rect, name: &str) {
             .size((side * 0.42).round())
             .variation(b"wght", 600.0),
     );
-    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    painter.galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        palette().on_accent,
+    );
 }
 
 /// The round avatar of an agent, `side` points wide, in the layout: 28 in a list row,
@@ -1795,9 +1771,9 @@ pub(crate) fn avatar(ui: &mut Ui, name: &str, side: f32) -> Response {
 /// shared vault). `red` is the one red cap, "Production".
 pub(crate) fn cap(ui: &mut Ui, label: &str, red: bool) -> Response {
     let color = if red {
-        Color32::from_rgb(196, 43, 34)
+        palette().production_text
     } else {
-        SECONDARY
+        palette().secondary
     };
     let galley = galley(ui, medium(label, Font::Footnote));
     let size = galley.size() + Vec2::new(12.0, 2.0);
@@ -1805,9 +1781,9 @@ pub(crate) fn cap(ui: &mut Ui, label: &str, red: bool) -> Response {
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, label));
     if ui.is_rect_visible(rect) {
         let fill = if red {
-            PRODUCTION.gamma_multiply(0.1)
+            palette().production.gamma_multiply(0.1)
         } else {
-            FILL2
+            palette().fill_soft
         };
         let painter = ui.painter();
         painter.rect_filled(rect, 5, fill);
@@ -1829,7 +1805,7 @@ pub(crate) fn toolbar_title_on_row(
     let width = (right - left).max(10.0);
     let title_text = text(title, Font::Body)
         .variation(b"wght", 700.0)
-        .color(LABEL);
+        .color(palette().label);
     let height = galley(ui, title_text.clone()).size().y;
     let title_rect = Rect::from_min_size(
         Pos2::new(left, (center_y - height / 2.0).round()),
@@ -1843,7 +1819,7 @@ pub(crate) fn toolbar_title_on_row(
     if subtitle.is_empty() {
         return;
     }
-    let sub_text = text(subtitle, Font::Footnote).color(SECONDARY);
+    let sub_text = text(subtitle, Font::Footnote).color(palette().secondary);
     let sub_height = galley(ui, sub_text.clone()).size().y;
     put_left(
         ui,
@@ -1889,21 +1865,21 @@ pub(crate) fn plain_icon_toggle(ui: &mut Ui, icon: Icon, name: &str, selected: b
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(23));
+            painter.rect_filled(rect, ROW_RADIUS, palette().sidebar_selected);
         } else if response.is_pointer_button_down_on() {
-            painter.rect_filled(rect, ROW_RADIUS, FILL_PRESSED);
+            painter.rect_filled(rect, ROW_RADIUS, palette().fill_pressed);
         } else if response.hovered() {
-            painter.rect_filled(rect, ROW_RADIUS, FILL2);
+            painter.rect_filled(rect, ROW_RADIUS, palette().fill_soft);
         }
         if response.has_focus() {
             inner_focus_ring(painter, rect, ROW_RADIUS);
         }
         let color = if !enabled {
-            SECONDARY.gamma_multiply(0.45)
+            palette().secondary.gamma_multiply(0.45)
         } else if selected {
-            LABEL
+            palette().label
         } else {
-            SECONDARY
+            palette().secondary
         };
         paint_icon(painter, rect.shrink(6.0), icon, color);
     }
@@ -1928,9 +1904,9 @@ pub(crate) fn toolbar_button(ui: &mut Ui, icon: Option<Icon>, label: &str, name:
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if response.is_pointer_button_down_on() {
-            painter.rect_filled(rect, ROW_RADIUS, FILL_PRESSED);
+            painter.rect_filled(rect, ROW_RADIUS, palette().fill_pressed);
         } else if response.hovered() {
-            painter.rect_filled(rect, ROW_RADIUS, FILL2);
+            painter.rect_filled(rect, ROW_RADIUS, palette().fill_soft);
         }
         if response.has_focus() {
             inner_focus_ring(painter, rect, ROW_RADIUS);
@@ -1939,10 +1915,14 @@ pub(crate) fn toolbar_button(ui: &mut Ui, icon: Option<Icon>, label: &str, name:
         if let Some(icon) = icon {
             let icon_rect =
                 Rect::from_center_size(Pos2::new(x + 8.0, rect.center().y), Vec2::splat(16.0));
-            paint_icon(painter, icon_rect, icon, SECONDARY);
+            paint_icon(painter, icon_rect, icon, palette().secondary);
             x += icon_space;
         }
-        let color = if enabled { LABEL } else { TERTIARY };
+        let color = if enabled {
+            palette().label
+        } else {
+            palette().tertiary
+        };
         painter.galley(
             Pos2::new(x, rect.center().y - galley.size().y / 2.0),
             galley,
@@ -1961,7 +1941,7 @@ pub(crate) fn search_field(
 ) -> Response {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::hover());
-    ui.painter().rect_filled(rect, 7, FILL);
+    ui.painter().rect_filled(rect, 7, palette().fill);
     paint_icon(
         ui.painter(),
         Rect::from_center_size(
@@ -1969,7 +1949,7 @@ pub(crate) fn search_field(
             Vec2::splat(13.0),
         ),
         Icon::Search,
-        TERTIARY,
+        palette().tertiary,
     );
     let field_rect = Rect::from_min_max(
         Pos2::new(rect.left() + 24.0, rect.top()),
@@ -1987,7 +1967,7 @@ pub(crate) fn search_field(
                     TextEdit::singleline(value)
                         .id_salt(salt)
                         .frame(Frame::NONE.inner_margin(Margin::symmetric(2, 6)))
-                        .hint_text(text(placeholder, Font::Body).color(TERTIARY))
+                        .hint_text(text(placeholder, Font::Body).color(palette().tertiary))
                         .desired_width(field_rect.width()),
                 )
             },
@@ -2032,9 +2012,9 @@ pub(crate) fn list_row(ui: &mut Ui, row: &ListRow<'_>) -> Response {
     }
     let painter = ui.painter();
     if row.selected {
-        painter.rect_filled(rect, 8, SELECTION);
+        painter.rect_filled(rect, 8, palette().selection);
     } else if response.hovered() {
-        painter.rect_filled(rect, 8, Color32::from_rgb(247, 247, 248));
+        painter.rect_filled(rect, 8, palette().list_hover);
     }
     if response.has_focus() {
         inner_focus_ring(painter, rect, 8);
@@ -2046,17 +2026,17 @@ pub(crate) fn list_row(ui: &mut Ui, row: &ListRow<'_>) -> Response {
     paint_tile(ui, tile_rect, &row.tile);
     paint_tile_ring(painter, tile_rect, row.tile.round, row.selected);
     let (title_color, sub_color) = if row.selected {
-        (Color32::WHITE, Color32::from_white_alpha(210))
+        (palette().on_accent, palette().on_selection_secondary)
     } else {
-        (LABEL, SECONDARY)
+        (palette().label, palette().secondary)
     };
     let mut right = rect.right() - 8.0;
     if row.production {
         let center = Pos2::new(right - 3.5, rect.center().y);
         let dot = if row.selected {
-            Color32::WHITE
+            palette().on_accent
         } else {
-            PRODUCTION
+            palette().production
         };
         painter.circle_filled(center, 3.5, dot);
         right -= 13.0;
@@ -2103,12 +2083,12 @@ pub(crate) fn list_row(ui: &mut Ui, row: &ListRow<'_>) -> Response {
 /// covers the rows under it.
 pub(crate) fn paint_group_header(ui: &Ui, rect: Rect, title: &str, count: Option<usize>) {
     let painter = ui.painter();
-    painter.rect_filled(rect, 0, Color32::from_white_alpha(240));
+    painter.rect_filled(rect, 0, palette().list_header);
     let title = galley(ui, medium(title, Font::Footnote).variation(b"wght", 600.0));
     painter.galley(
         Pos2::new(rect.left() + 8.0, rect.bottom() - 4.0 - title.size().y),
         title,
-        SECONDARY,
+        palette().secondary,
     );
     if let Some(count) = count {
         let count = galley(ui, text(count.to_string(), Font::Footnote));
@@ -2118,7 +2098,7 @@ pub(crate) fn paint_group_header(ui: &Ui, rect: Rect, title: &str, count: Option
                 rect.bottom() - 4.0 - count.size().y,
             ),
             count,
-            SECONDARY,
+            palette().secondary,
         );
     }
 }
@@ -2173,7 +2153,7 @@ fn paint_lead(ui: &Ui, center: Pos2, lead: &Lead, side: f32) {
             ui.painter(),
             Rect::from_center_size(center, Vec2::splat(side)),
             *icon,
-            ACCENT,
+            palette().accent,
         ),
         Lead::Square(color, name) => {
             let rect = Rect::from_center_size(center, Vec2::splat(side - 2.0));
@@ -2193,9 +2173,9 @@ fn paint_badge(ui: &Ui, right: Pos2, badge: Badge, small: bool) {
     let size = Vec2::new((galley.size().x + 10.0).max(height + 2.0), height);
     let rect = Rect::from_min_size(Pos2::new(right.x - size.x, right.y - size.y / 2.0), size);
     let (fill, color) = match badge.tone {
-        Tone::Neutral => (Color32::from_black_alpha(36), LABEL),
-        Tone::Critical => (PRODUCTION, Color32::WHITE),
-        other => (other.mark(), Color32::WHITE),
+        Tone::Neutral => (palette().badge_neutral, palette().label),
+        Tone::Critical => (palette().badge, palette().on_accent),
+        other => (other.mark(), palette().on_accent),
     };
     painter.rect_filled(rect, height / 2.0, fill);
     painter.galley(rect.center() - galley.size() / 2.0, galley, color);
@@ -2261,9 +2241,9 @@ pub(crate) fn sidebar_row(ui: &mut Ui, row: &SidebarRow<'_>) -> (Response, Sideb
     }
     let painter = ui.painter();
     if row.selected {
-        painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(23));
+        painter.rect_filled(rect, ROW_RADIUS, palette().sidebar_selected);
     } else if response.hovered() {
-        painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(10));
+        painter.rect_filled(rect, ROW_RADIUS, palette().sidebar_hover);
     }
     if response.has_focus() {
         inner_focus_ring(painter, rect, ROW_RADIUS);
@@ -2284,7 +2264,11 @@ pub(crate) fn sidebar_row(ui: &mut Ui, row: &SidebarRow<'_>) -> (Response, Sideb
                 center + Vec2::new(-h / 1.4, w),
             ]
         };
-        painter.add(Shape::convex_polygon(points, SECONDARY, Stroke::NONE));
+        painter.add(Shape::convex_polygon(
+            points,
+            palette().secondary,
+            Stroke::NONE,
+        ));
     }
     let lead_center = Pos2::new(rect.left() + indent + 14.0, rect.center().y);
     paint_lead(ui, lead_center, &row.lead, 15.0);
@@ -2299,10 +2283,10 @@ pub(crate) fn sidebar_row(ui: &mut Ui, row: &SidebarRow<'_>) -> (Response, Sideb
             rect.center().y - galley.size().y / 2.0,
         );
         right = pos.x - 6.0;
-        ui.painter().galley(pos, galley, SECONDARY);
+        ui.painter().galley(pos, galley, palette().secondary);
     }
     let left = lead_center.x + 15.0;
-    let label = WidgetText::from(text(row.label, Font::Body).color(LABEL)).into_galley(
+    let label = WidgetText::from(text(row.label, Font::Body).color(palette().label)).into_galley(
         ui,
         Some(TextWrapMode::Truncate),
         (right - left).max(10.0),
@@ -2311,7 +2295,7 @@ pub(crate) fn sidebar_row(ui: &mut Ui, row: &SidebarRow<'_>) -> (Response, Sideb
     ui.painter().galley(
         Pos2::new(left, rect.center().y - label.size().y / 2.0),
         label,
-        LABEL,
+        palette().label,
     );
     (response, click)
 }
@@ -2336,9 +2320,9 @@ pub(crate) fn rail_row(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(23));
+            painter.rect_filled(rect, ROW_RADIUS, palette().sidebar_selected);
         } else if response.hovered() {
-            painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(10));
+            painter.rect_filled(rect, ROW_RADIUS, palette().sidebar_hover);
         }
         if response.has_focus() {
             inner_focus_ring(painter, rect, ROW_RADIUS);
@@ -2365,7 +2349,7 @@ pub(crate) fn sidebar_section(ui: &mut Ui, title: &str, add: Option<&str>) -> Op
     ui.painter().galley(
         Pos2::new(rect.left() + 8.0, rect.bottom() - 6.0 - galley.size().y),
         galley,
-        SECONDARY,
+        palette().secondary,
     );
     let name = add?;
     let button_rect = Rect::from_center_size(
@@ -2382,12 +2366,17 @@ pub(crate) fn sidebar_section(ui: &mut Ui, title: &str, add: Option<&str>) -> Op
     if visible {
         let painter = ui.painter();
         if response.hovered() {
-            painter.rect_filled(button_rect, 4, FILL2);
+            painter.rect_filled(button_rect, 4, palette().fill_soft);
         }
         if response.has_focus() {
             inner_focus_ring(painter, button_rect, 4);
         }
-        paint_icon(painter, button_rect.shrink(3.0), Icon::Plus, SECONDARY);
+        paint_icon(
+            painter,
+            button_rect.shrink(3.0),
+            Icon::Plus,
+            palette().secondary,
+        );
     }
     Some(response.on_hover_text(name))
 }
@@ -2419,9 +2408,9 @@ pub(crate) fn notice<R>(
                 ui.add_space(2.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    ui.label(text(title, Font::Headline).color(LABEL));
+                    ui.label(text(title, Font::Headline).color(palette().label));
                     if let Some(message) = message {
-                        paragraph(ui, message, Font::Callout, LABEL);
+                        paragraph(ui, message, Font::Callout, palette().label);
                     }
                     add(ui)
                 })
@@ -2445,14 +2434,14 @@ pub(crate) fn empty_state(
     let mut clicked = false;
     ui.vertical_centered(|ui| {
         ui.add_space(48.0);
-        paint_icon_in(ui, icon, 34.0, TERTIARY);
+        paint_icon_in(ui, icon, 34.0, palette().tertiary);
         ui.add_space(10.0);
-        ui.label(text(title, Font::Title3).color(LABEL));
+        ui.label(text(title, Font::Title3).color(palette().label));
         ui.add_space(2.0);
         ui.scope(|ui| {
             ui.set_max_width(380.0);
             ui.add(
-                Label::new(text(message, Font::Callout).color(SECONDARY))
+                Label::new(text(message, Font::Callout).color(palette().secondary))
                     .wrap()
                     .halign(Align::Center),
             );
@@ -2470,8 +2459,8 @@ pub(crate) fn empty_state(
 /// with the margins and the border.
 pub(crate) fn stat_tile(ui: &mut Ui, width: f32, label: &str, value: &str, caption: &str) {
     Frame::NONE
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, SECTION_EDGE))
+        .fill(palette().surface)
+        .stroke(Stroke::new(1.0, palette().section_edge))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(14, 12))
         .show(ui, |ui| {
@@ -2480,19 +2469,17 @@ pub(crate) fn stat_tile(ui: &mut Ui, width: f32, label: &str, value: &str, capti
             ui.set_width(width - 30.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(text(label, Font::Callout).color(SECONDARY));
-                ui.label(text(value, Font::LargeTitle).color(LABEL));
-                ui.add(Label::new(text(caption, Font::Footnote).color(SECONDARY)).truncate());
+                ui.label(text(label, Font::Callout).color(palette().secondary));
+                ui.label(text(value, Font::LargeTitle).color(palette().label));
+                ui.add(
+                    Label::new(text(caption, Font::Footnote).color(palette().secondary)).truncate(),
+                );
             });
         });
 }
 
 // ---- The Bouncer pages (implementation-plan-bouncer-section §1). ----
 
-/// "Allowed by bouncer" in charts (the mockup's `--s-auto`).
-pub(crate) const AUTOMATIC: Color32 = Color32::from_rgb(10, 108, 255);
-/// "Asked you" in charts and an ask rate of 25 % or more (`--s-ask`).
-pub(crate) const ASKED: Color32 = Color32::from_rgb(232, 137, 12);
 /// The opacity of a Mac silent for 24 hours or one that never reported.
 pub(crate) const DIMMED: f32 = 0.45;
 
@@ -2517,8 +2504,8 @@ pub(crate) fn figure_tile(
     share: Option<&str>,
 ) -> Response {
     let response = Frame::NONE
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, SECTION_EDGE))
+        .fill(palette().surface)
+        .stroke(Stroke::new(1.0, palette().section_edge))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin {
             left: 14,
@@ -2530,17 +2517,19 @@ pub(crate) fn figure_tile(
             ui.set_width(width - 30.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
-                ui.add(Label::new(text(label, Font::Callout).color(SECONDARY)).truncate());
+                ui.add(
+                    Label::new(text(label, Font::Callout).color(palette().secondary)).truncate(),
+                );
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(
                         text(value, Font::Title)
                             .size(22.0)
                             .variation(b"wght", 600.0)
-                            .color(LABEL),
+                            .color(palette().label),
                     );
                     if let Some(share) = share {
-                        ui.label(medium(share, Font::Body).color(SECONDARY));
+                        ui.label(medium(share, Font::Body).color(palette().secondary));
                     }
                 });
             });
@@ -2567,10 +2556,13 @@ pub(crate) struct ChartBar {
 pub(crate) fn day_chart(ui: &mut Ui, bars: &[ChartBar]) -> Response {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 5.0;
-        for (color, label) in [(AUTOMATIC, "Allowed by bouncer"), (ASKED, "Asked you")] {
+        for (color, label) in [
+            (palette().chart_automatic, "Allowed by bouncer"),
+            (palette().chart_asked, "Asked you"),
+        ] {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
             ui.painter().rect_filled(rect, 3, color);
-            ui.label(text(label, Font::Callout).color(SECONDARY));
+            ui.label(text(label, Font::Callout).color(palette().secondary));
             ui.add_space(9.0);
         }
     });
@@ -2604,7 +2596,11 @@ pub(crate) fn day_chart(ui: &mut Ui, bars: &[ChartBar]) -> Response {
         .max(1) as f32;
     let slot = rect.width() / bars.len() as f32;
     let bar_width = (slot * 0.5).min(36.0);
-    painter.hline(rect.x_range(), bottom, Stroke::new(hairline(ui), SEPARATOR));
+    painter.hline(
+        rect.x_range(),
+        bottom,
+        Stroke::new(hairline(ui), palette().separator),
+    );
     for (index, bar) in bars.iter().enumerate() {
         let center = rect.left() + slot * (index as f32 + 0.5);
         let total = bar.automatic + bar.asked;
@@ -2616,11 +2612,15 @@ pub(crate) fn day_chart(ui: &mut Ui, bars: &[ChartBar]) -> Response {
             painter.rect_filled(
                 Rect::from_x_y_ranges(x.clone(), auto_top..=bottom),
                 2,
-                AUTOMATIC,
+                palette().chart_automatic,
             );
         }
         if bar.asked > 0 {
-            painter.rect_filled(Rect::from_x_y_ranges(x, asked_top..=auto_top), 2, ASKED);
+            painter.rect_filled(
+                Rect::from_x_y_ranges(x, asked_top..=auto_top),
+                2,
+                palette().chart_asked,
+            );
         }
         let value = galley(ui, medium(total.to_string(), Font::Footnote));
         painter.galley(
@@ -2629,13 +2629,13 @@ pub(crate) fn day_chart(ui: &mut Ui, bars: &[ChartBar]) -> Response {
                 asked_top - value.size().y - 2.0,
             ),
             value,
-            Color32::from_black_alpha(184),
+            palette().chart_value,
         );
         let day = galley(ui, text(bar.label.clone(), Font::Footnote));
         painter.galley(
             Pos2::new(center - day.size().x / 2.0, bottom + 3.0),
             day,
-            SECONDARY,
+            palette().secondary,
         );
     }
     response
@@ -2647,14 +2647,14 @@ pub(crate) fn environment_header(ui: &mut Ui, name: &str, this_mac: bool, detail
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 7.0;
         ui.add_space(2.0);
-        ui.label(text(name, Font::Headline).color(LABEL));
+        ui.label(text(name, Font::Headline).color(palette().label));
         if this_mac {
             cap_toned(ui, "This Mac", Tone::Accent);
         } else {
             cap(ui, "Read-only", false);
         }
         if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
-            ui.label(text(detail, Font::Callout).color(SECONDARY));
+            ui.label(text(detail, Font::Callout).color(palette().secondary));
         }
     });
     ui.add_space(4.0);
@@ -2685,17 +2685,17 @@ pub(crate) fn remote_cap(ui: &mut Ui) -> Response {
 pub(crate) fn paint_cloud_badge(painter: &Painter, avatar: Rect) {
     let side = (avatar.width() * 0.54).max(11.0);
     let center = avatar.right_bottom() - Vec2::splat(side / 2.0 - side * 0.2);
-    painter.circle_filled(center, side / 2.0, Color32::WHITE);
+    painter.circle_filled(center, side / 2.0, palette().badge_disk);
     painter.circle_stroke(
         center,
         side / 2.0,
-        Stroke::new(0.5, Color32::from_black_alpha(38)),
+        Stroke::new(0.5, palette().badge_disk_edge),
     );
     paint_icon(
         painter,
         Rect::from_center_size(center, Vec2::splat(side * 0.66)),
         Icon::Cloud,
-        ACCENT,
+        palette().accent,
     );
 }
 
@@ -2716,7 +2716,11 @@ pub(crate) fn help_button(ui: &mut Ui, title: &str, lines: &[&str]) -> Response 
     let name = format!("About {title}");
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &name));
     if ui.is_rect_visible(rect) {
-        let color = if response.hovered() { LABEL } else { SECONDARY };
+        let color = if response.hovered() {
+            palette().label
+        } else {
+            palette().secondary
+        };
         paint_icon(ui.painter(), rect.shrink(1.0), Icon::Info, color);
         if response.has_focus() {
             focus_ring(ui.painter(), rect, 9);
@@ -2727,9 +2731,9 @@ pub(crate) fn help_button(ui: &mut Ui, title: &str, lines: &[&str]) -> Response 
         .show(|ui| {
             ui.set_max_width(300.0);
             ui.spacing_mut().item_spacing.y = 5.0;
-            ui.label(text(title, Font::Headline).color(LABEL));
+            ui.label(text(title, Font::Headline).color(palette().label));
             for line in lines {
-                paragraph(ui, *line, Font::Callout, SECONDARY);
+                paragraph(ui, *line, Font::Callout, palette().secondary);
             }
         });
     response.on_hover_text(name)
@@ -2738,8 +2742,8 @@ pub(crate) fn help_button(ui: &mut Ui, title: &str, lines: &[&str]) -> Response 
 /// A white group of table rows (the mockup's `.grp`), without the space under it.
 pub(crate) fn table_group<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     let inner = Frame::NONE
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, SECTION_EDGE))
+        .fill(palette().surface)
+        .stroke(Stroke::new(1.0, palette().section_edge))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(0, 1))
         .show(ui, |ui| {
@@ -2758,13 +2762,13 @@ pub(crate) fn group_heading(ui: &mut Ui, title: &str, count: Option<usize>, trai
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.add_space(2.0);
-        ui.label(medium(title, Font::Callout).color(SECONDARY));
+        ui.label(medium(title, Font::Callout).color(palette().secondary));
         if let Some(count) = count {
-            ui.label(text(count.to_string(), Font::Callout).color(SECONDARY));
+            ui.label(text(count.to_string(), Font::Callout).color(palette().secondary));
         }
         if !trailing.is_empty() {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(text(trailing, Font::Callout).color(SECONDARY));
+                ui.label(text(trailing, Font::Callout).color(palette().secondary));
             });
         }
     });
@@ -2807,11 +2811,11 @@ pub(crate) enum Cell {
 
 impl Cell {
     pub(crate) fn plain(value: impl Into<String>) -> Self {
-        Self::Text(text(value, Font::Body).color(LABEL))
+        Self::Text(text(value, Font::Body).color(palette().label))
     }
 
     pub(crate) fn secondary(value: impl Into<String>) -> Self {
-        Self::Text(text(value, Font::Body).color(SECONDARY))
+        Self::Text(text(value, Font::Body).color(palette().secondary))
     }
 
     fn words(&self) -> String {
@@ -2836,7 +2840,7 @@ impl Cell {
 pub(crate) fn table_header(ui: &mut Ui, columns: &[Column], titles: &[&str]) {
     let cells: Vec<Cell> = titles
         .iter()
-        .map(|title| Cell::Text(medium(*title, Font::Footnote).color(SECONDARY)))
+        .map(|title| Cell::Text(medium(*title, Font::Footnote).color(palette().secondary)))
         .collect();
     paint_table_row(ui, columns, &cells, 28.0, Sense::hover(), true, false);
 }
@@ -2886,17 +2890,13 @@ fn paint_table_row(
         painter.hline(
             (rect.left() + 12.0)..=rect.right(),
             rect.top(),
-            Stroke::new(hairline(ui), SEPARATOR),
+            Stroke::new(hairline(ui), palette().separator),
         );
     }
     if selected {
         painter.rect_filled(rect.shrink2(Vec2::new(4.0, 1.0)), 6, Tone::Accent.tint());
     } else if sense.senses_click() && response.hovered() {
-        painter.rect_filled(
-            rect.shrink2(Vec2::new(4.0, 1.0)),
-            6,
-            Color32::from_rgb(246, 246, 248),
-        );
+        painter.rect_filled(rect.shrink2(Vec2::new(4.0, 1.0)), 6, palette().row_hover);
     }
     if response.has_focus() {
         inner_focus_ring(painter, rect.shrink2(Vec2::new(4.0, 1.0)), 6);
@@ -2935,7 +2935,7 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
                 // As the mockup's `.stt.live` and `.stt.wait`: the text in the dot's tone.
                 text(words.clone(), Font::Body).color(match tone {
                     Tone::Warning | Tone::Good => tone.text(),
-                    _ => LABEL,
+                    _ => palette().label,
                 }),
                 (rect.width() - dot - 6.0).max(10.0),
             );
@@ -2945,7 +2945,7 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
                     rect.center().y - galley.size().y / 2.0,
                 ),
                 galley,
-                LABEL,
+                palette().label,
             );
         }
         Cell::Disclosure { value, open } => {
@@ -2954,7 +2954,7 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
             painter.galley(
                 Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0),
                 galley,
-                LABEL,
+                palette().label,
             );
             let icon = Rect::from_center_size(
                 Pos2::new(rect.right() - chevron / 2.0, rect.center().y),
@@ -2965,7 +2965,7 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
             } else {
                 Icon::ChevronRight
             };
-            paint_icon(&painter, icon, icon_kind, TERTIARY);
+            paint_icon(&painter, icon, icon_kind, palette().tertiary);
         }
         Cell::Text(value) => {
             let galley = fit(value.clone(), rect.width());
@@ -2977,7 +2977,7 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
             painter.galley(
                 Pos2::new(x, rect.center().y - galley.size().y / 2.0),
                 galley,
-                LABEL,
+                palette().label,
             );
         }
         Cell::Production(value) => {
@@ -2989,17 +2989,17 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
             painter.galley(
                 Pos2::new(rect.left(), y - galley.size().y / 2.0),
                 galley,
-                LABEL,
+                palette().label,
             );
             let cap_rect = Rect::from_min_size(
                 Pos2::new(rect.left() + text_width + 6.0, y - cap.size().y / 2.0 - 1.0),
                 Vec2::new(cap_width, cap.size().y + 2.0),
             );
-            painter.rect_filled(cap_rect, 5, PRODUCTION.gamma_multiply(0.1));
+            painter.rect_filled(cap_rect, 5, palette().production.gamma_multiply(0.1));
             painter.galley(
                 cap_rect.center() - cap.size() / 2.0,
                 cap,
-                Color32::from_rgb(196, 43, 34),
+                palette().production_text,
             );
         }
         Cell::Agent {
@@ -3026,7 +3026,7 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
             painter.galley(
                 avatar.center() - letter.size() / 2.0,
                 letter,
-                Color32::WHITE,
+                palette().on_accent,
             );
             if *remote {
                 paint_cloud_badge(&painter, avatar);
@@ -3039,12 +3039,12 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
             let cap = remote
                 .then(|| galley(ui, medium("Remote", Font::Footnote)))
                 .filter(|cap| whole + cap.size().x + 12.0 + 6.0 <= room);
-            let name_galley = fit(text(label.clone(), Font::Body).color(LABEL), room);
+            let name_galley = fit(text(label.clone(), Font::Body).color(palette().label), room);
             let name_width = name_galley.size().x;
             painter.galley(
                 Pos2::new(left, rect.center().y - name_galley.size().y / 2.0),
                 name_galley,
-                LABEL,
+                palette().label,
             );
             if let Some(cap) = cap {
                 let cap_rect = Rect::from_min_size(
@@ -3085,18 +3085,18 @@ pub(crate) fn empty_block(
     debug_assert!(empty_text_fits(title, line), "{title} / {line:?}");
     let mut choice = EmptyChoice::None;
     Frame::NONE
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, SECTION_EDGE))
+        .fill(palette().surface)
+        .stroke(Stroke::new(1.0, palette().section_edge))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(16, 22))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 3.0;
-                ui.label(text(title, Font::Title3).color(LABEL));
+                ui.label(text(title, Font::Title3).color(palette().label));
                 if let Some(line) = line {
                     ui.add(
-                        Label::new(text(line, Font::Callout).color(SECONDARY))
+                        Label::new(text(line, Font::Callout).color(palette().secondary))
                             .wrap()
                             .halign(Align::Center),
                     );
@@ -3341,11 +3341,11 @@ pub(crate) fn sheet(
     ctx.data_mut(|data| data.insert_temp(sheet_takes_focus_id(), takes_focus));
     let before = ctx.memory(|memory| memory.focused());
     let response = Modal::new(modal_id)
-        .backdrop_color(Color32::from_black_alpha(46))
+        .backdrop_color(palette().scrim)
         .frame(
             Frame::NONE
-                .fill(SURFACE)
-                .stroke(Stroke::new(1.0, Color32::from_black_alpha(16)))
+                .fill(palette().surface)
+                .stroke(Stroke::new(1.0, palette().sheet_edge))
                 .corner_radius(CornerRadius::same(14))
                 .inner_margin(Margin::same(22))
                 .shadow(soft_shadow(40, 60)),
@@ -3391,9 +3391,9 @@ pub(crate) fn sheet(
 
 /// The title of a sheet, with an optional line of explanation.
 pub(crate) fn sheet_title(ui: &mut Ui, title: &str, subtitle: Option<&str>) {
-    ui.label(text(title, Font::Title3).color(LABEL));
+    ui.label(text(title, Font::Title3).color(palette().label));
     if let Some(subtitle) = subtitle {
-        paragraph(ui, subtitle, Font::Callout, SECONDARY);
+        paragraph(ui, subtitle, Font::Callout, palette().secondary);
     }
     ui.add_space(12.0);
 }
@@ -3514,8 +3514,8 @@ pub(crate) fn toast(
         .interactable(true)
         .show(ctx, |ui| {
             Frame::NONE
-                .fill(SURFACE)
-                .stroke(Stroke::new(1.0, Color32::from_black_alpha(20)))
+                .fill(palette().surface)
+                .stroke(Stroke::new(1.0, palette().toast_edge))
                 .corner_radius(CornerRadius::same(12))
                 .inner_margin(Margin::symmetric(14, 10))
                 .shadow(soft_shadow(24, 40))
@@ -3531,7 +3531,8 @@ pub(crate) fn toast(
                         paint_icon_in(ui, icon, 15.0, tone.mark().gamma_multiply(opacity));
                         ui.add(
                             Label::new(
-                                text(message, Font::Body).color(LABEL.gamma_multiply(opacity)),
+                                text(message, Font::Body)
+                                    .color(palette().label.gamma_multiply(opacity)),
                             )
                             .wrap(),
                         );
@@ -3589,7 +3590,6 @@ pub(crate) enum Icon {
     /// Three dots: the menu of rare actions.
     More,
     /// A laptop: Settings > Devices.
-    #[cfg(feature = "vault")]
     Laptop,
     /// An arrow down in a circle: Settings > Updates.
     #[cfg(feature = "vault")]
@@ -3617,7 +3617,7 @@ pub(crate) fn icon_tile_sized(ui: &mut Ui, icon: Icon, color: Color32, size: f32
 pub(crate) fn paint_icon_tile(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
     let size = rect.width();
     painter.rect_filled(rect, (size * 0.26).round() as u8, color);
-    paint_icon(painter, rect.shrink(size * 0.21), icon, Color32::WHITE);
+    paint_icon(painter, rect.shrink(size * 0.21), icon, palette().on_accent);
 }
 
 /// Allocate `size` and paint an icon.
@@ -3817,7 +3817,6 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
                 painter.circle_filled(p(x, 0.5), stroke.width * 1.1, color);
             }
         }
-        #[cfg(feature = "vault")]
         Icon::Laptop => {
             painter.rect_stroke(
                 Rect::from_min_max(p(0.2, 0.22), p(0.8, 0.66)),
@@ -3859,7 +3858,7 @@ pub(crate) fn paint_app_logo(painter: &Painter, rect: Rect) {
     painter.rect_filled(
         tile,
         CornerRadius::same((side * 0.225).round() as u8),
-        Color32::from_rgb(14, 24, 32),
+        fixed::LOGO_TILE,
     );
     let point = |x: f32, y: f32| {
         tile.min
@@ -3876,12 +3875,12 @@ pub(crate) fn paint_app_logo(painter: &Painter, rect: Rect) {
         .collect();
     painter.add(Shape::line(
         arch,
-        Stroke::new(59.5 * (64.0 / 229.0) * side / 100.0, Color32::WHITE),
+        Stroke::new(59.5 * (64.0 / 229.0) * side / 100.0, fixed::LOGO_MARK),
     ));
     painter.rect_filled(
         Rect::from_min_max(point(0.0, 110.0), point(59.5, 206.2)),
         0,
-        Color32::WHITE,
+        fixed::LOGO_MARK,
     );
     let mut right = vec![
         point(169.5, 110.0),
@@ -3896,7 +3895,7 @@ pub(crate) fn paint_app_logo(painter: &Painter, rect: Rect) {
             185.2 + 21.0 * angle.sin(),
         ));
     }
-    painter.add(Shape::convex_polygon(right, Color32::WHITE, Stroke::NONE));
+    painter.add(Shape::convex_polygon(right, fixed::LOGO_MARK, Stroke::NONE));
     let mut blade = vec![point(75.0, 95.0), point(105.54, 106.78)];
     let start = (106.78_f32 - 130.76).atan2(105.54 - 95.5);
     for i in 1..=20 {
@@ -3909,7 +3908,7 @@ pub(crate) fn paint_app_logo(painter: &Painter, rect: Rect) {
     blade.extend([point(121.5, 180.5), point(75.0, 206.2)]);
     painter.add(Shape::convex_polygon(
         blade,
-        Color32::from_rgb(10, 119, 254),
+        fixed::LOGO_BLADE,
         Stroke::NONE,
     ));
 }

@@ -1,0 +1,337 @@
+{
+  "grace_days": 14,
+  "read_only_days": 30,
+  "delete_days": 90,
+  "cases": [
+    {
+      "name": "no_subscription",
+      "input": {
+        "stripe_status": null,
+        "cancel_at_period_end": false,
+        "period_end": null,
+        "first_failed_at": null,
+        "ended_at": null,
+        "now": 1790000000
+      },
+      "expect": {
+        "status": "none",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "push": false,
+        "pull": false
+      }
+    },
+    {
+      "name": "incomplete",
+      "input": {
+        "stripe_status": "incomplete",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": null,
+        "now": 1790000000
+      },
+      "expect": {
+        "status": "pending",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "push": false,
+        "pull": false
+      }
+    },
+    {
+      "name": "active",
+      "input": {
+        "stripe_status": "active",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": null,
+        "now": 1790000000
+      },
+      "expect": {
+        "status": "active",
+        "entitled": true,
+        "renews_at": 1792592000,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "push": true,
+        "pull": true
+      }
+    },
+    {
+      "name": "trialing",
+      "input": {
+        "stripe_status": "trialing",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": null,
+        "now": 1790000000
+      },
+      "expect": {
+        "status": "trialing",
+        "entitled": true,
+        "renews_at": 1792592000,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "push": true,
+        "pull": true
+      }
+    },
+    {
+      "name": "active_cancel_at_period_end",
+      "input": {
+        "stripe_status": "active",
+        "cancel_at_period_end": true,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": null,
+        "now": 1790000000
+      },
+      "expect": {
+        "status": "active",
+        "entitled": true,
+        "renews_at": null,
+        "ends_at": 1792592000,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "push": true,
+        "pull": true
+      }
+    },
+    {
+      "name": "past_due_in_grace",
+      "input": {
+        "stripe_status": "past_due",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": 1792592100,
+        "ended_at": null,
+        "now": 1792678500
+      },
+      "expect": {
+        "status": "past_due",
+        "entitled": true,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": 1793801700,
+        "read_only_until": null,
+        "delete_at": null,
+        "push": true,
+        "pull": true
+      }
+    },
+    {
+      "name": "past_due_last_second_of_grace",
+      "input": {
+        "stripe_status": "past_due",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": 1792592100,
+        "ended_at": null,
+        "now": 1793801699
+      },
+      "expect": {
+        "status": "past_due",
+        "entitled": true,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": 1793801700,
+        "read_only_until": null,
+        "delete_at": null,
+        "push": true,
+        "pull": true
+      }
+    },
+    {
+      "name": "past_due_after_grace",
+      "input": {
+        "stripe_status": "past_due",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": 1792592100,
+        "ended_at": null,
+        "now": 1793801700
+      },
+      "expect": {
+        "status": "read_only",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": 1793801700,
+        "read_only_until": 1796393700,
+        "delete_at": 1801577700,
+        "push": false,
+        "pull": true
+      }
+    },
+    {
+      "name": "canceled",
+      "input": {
+        "stripe_status": "canceled",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": 1793801700,
+        "now": 1793888100
+      },
+      "expect": {
+        "status": "read_only",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": 1796393700,
+        "delete_at": 1801577700,
+        "push": false,
+        "pull": true
+      }
+    },
+    {
+      "name": "unpaid",
+      "input": {
+        "stripe_status": "unpaid",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": 1793801700,
+        "now": 1793888100
+      },
+      "expect": {
+        "status": "read_only",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": 1796393700,
+        "delete_at": 1801577700,
+        "push": false,
+        "pull": true
+      }
+    },
+    {
+      "name": "incomplete_expired",
+      "input": {
+        "stripe_status": "incomplete_expired",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": 1793801700,
+        "now": 1793801700
+      },
+      "expect": {
+        "status": "read_only",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": 1796393700,
+        "delete_at": 1801577700,
+        "push": false,
+        "pull": true
+      }
+    },
+    {
+      "name": "paused",
+      "input": {
+        "stripe_status": "paused",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": 1793801700,
+        "now": 1793888100
+      },
+      "expect": {
+        "status": "read_only",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": 1796393700,
+        "delete_at": 1801577700,
+        "push": false,
+        "pull": true
+      }
+    },
+    {
+      "name": "canceled_suspended",
+      "input": {
+        "stripe_status": "canceled",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": 1793801700,
+        "now": 1796393700
+      },
+      "expect": {
+        "status": "suspended",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": 1801577700,
+        "push": false,
+        "pull": false
+      }
+    },
+    {
+      "name": "canceled_last_second_before_deletion",
+      "input": {
+        "stripe_status": "canceled",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": 1793801700,
+        "now": 1801577699
+      },
+      "expect": {
+        "status": "suspended",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": 1801577700,
+        "push": false,
+        "pull": false
+      }
+    },
+    {
+      "name": "canceled_deleted",
+      "input": {
+        "stripe_status": "canceled",
+        "cancel_at_period_end": false,
+        "period_end": 1792592000,
+        "first_failed_at": null,
+        "ended_at": 1793801700,
+        "now": 1801577700
+      },
+      "expect": {
+        "status": "none",
+        "entitled": false,
+        "renews_at": null,
+        "ends_at": null,
+        "grace_until": null,
+        "read_only_until": null,
+        "delete_at": null,
+        "push": false,
+        "pull": false
+      }
+    }
+  ]
+}

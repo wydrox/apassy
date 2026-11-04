@@ -178,6 +178,8 @@ pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
         with(".pre-v6.tmp"),
         with(".pre-v7"),
         with(".pre-v7.tmp"),
+        with(".pre-v8"),
+        with(".pre-v8.tmp"),
     ];
     for file in std::iter::once(path.clone().into_os_string()).chain(extra) {
         match std::fs::remove_file(&file) {
@@ -362,7 +364,7 @@ pub struct Hub {
     /// Snapshot transfers of every team in flight.
     sync_transfers: Arc<AtomicUsize>,
     /// The push trigger, shared by every team.
-    push: Arc<crate::server::push::Push>,
+    pub(crate) push: Arc<crate::server::push::Push>,
     /// The Connect teams of each client prefix today, in memory only (section 26).
     connect_prefixes: connect::PrefixLimiter,
     connect_recovery: Mutex<HashMap<String, ([u8; 32], u64)>>,
@@ -613,8 +615,12 @@ impl Hub {
                 .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
         let mut made: Option<TeamId> = None;
         let new = self.directory.store.tx(|tx| {
-            // The code is checked before any work for the team.
-            let code_id = directory::find_team_code(tx, request.code.expose(), now)?;
+            // The code is checked before any work for the team. A node pairing code
+            // (directory 1005) makes a team only on a node: a relay with a tailnet listener.
+            let (code_id, kind) = directory::find_team_code(tx, request.code.expose(), now)?;
+            if kind == directory::CodeKind::Node && self.config.tailnet_listen.is_none() {
+                return Err(directory::team_code_invalid());
+            }
             let new = make_team_file_with_device(
                 &self.config,
                 &request.team,
@@ -641,7 +647,7 @@ impl Hub {
                         RELAY_ACTOR,
                         "team_created",
                         None,
-                        &json!({"team_id": new.id, "code_id": code_id}),
+                        &json!({"team_id": new.id, "code_id": code_id, "code_kind": kind.text()}),
                     )
                 });
             added.map(|_| new)
@@ -731,6 +737,70 @@ impl Hub {
         drop(owner_token);
         self.register(id.clone(), store, limits, TeamKind::Operator)?;
         Ok(id)
+    }
+
+    /// A team of devices of a node, made in process (docs/SPEC.md section 32.4): the
+    /// bootstrap of `POST /v1/teams` without a team code. The owner member
+    /// (`PERSONAL_OWNER`) and its first device `device_name` with the P-256 public key
+    /// `public_key` (base64url, 65 bytes), which holds the keys; no member token. The team
+    /// has the default limits of an operator team. The directory's `team_created` row has
+    /// `kind: "device"`. Returns the team and the device. The device signs in with the
+    /// node origin like any other device.
+    pub fn create_device_team(
+        &self,
+        name: &str,
+        device_name: &str,
+        public_key: &str,
+        now: u64,
+    ) -> RelayResult<(TeamId, DeviceId)> {
+        let name = checked_team_name(name)?.to_string();
+        let device_name = admin::checked_label(device_name, "device name")?;
+        let public_key = crate::device::decode_public_key(public_key)
+            .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
+        let new = make_team_file_with_device(
+            &self.config,
+            &name,
+            PERSONAL_OWNER,
+            now,
+            Some((&device_name, &public_key)),
+        )?;
+        let added = self.directory.store.tx(|tx| {
+            directory::insert_team(tx, &new.id, &name, &new.file_key, false, now)?;
+            self.directory.audit.write_on(
+                tx,
+                now,
+                RELAY_ACTOR,
+                "team_created",
+                None,
+                &json!({"team_id": new.id, "kind": "device"}),
+            )
+        });
+        if let Err(error) = added {
+            // The team row did not commit: its file has no key anywhere.
+            let id = new.id.clone();
+            drop(new);
+            let _ = remove_team_file(&self.config, &id);
+            return Err(error);
+        }
+        let NewTeam {
+            id,
+            owner_id,
+            store,
+            owner_token,
+            ..
+        } = new;
+        drop(owner_token);
+        let device_id = store.with(|conn| {
+            conn.query_row(
+                "SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL",
+                params![to_i(owner_id.0)],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|id| DeviceId(to_u(id)))
+            .map_err(db)
+        })?;
+        self.register(id.clone(), store, TeamLimits::default(), TeamKind::Operator)?;
+        Ok((id, device_id))
     }
 
     /// An existence-independent, bounded recovery challenge for a device key.
@@ -835,6 +905,10 @@ impl Hub {
         }
         let per_day = self.config.connect_teams_per_day;
         let max = self.config.connect_teams_max;
+        // The vault sync size of the relay's setting (`APASSY_RELAY_CONNECT_SYNC_BYTES`):
+        // 0 keeps `plan_required` on a push. A team keeps it after the setting changes.
+        let limits = TeamLimits::connect_with(self.config.connect_sync_bytes);
+        limits.validate()?;
         // In memory only: the count of this client prefix today.
         let ticket = self
             .connect_prefixes
@@ -863,7 +937,7 @@ impl Hub {
                 refused = Some(reason);
                 error
             })?;
-            directory::insert_connect_team(tx, &new.id, &name, &new.file_key, now)?;
+            directory::insert_connect_team(tx, &new.id, &name, &new.file_key, &limits, now)?;
             directory::insert_connect_key(tx, &key_hash, &new.id, now)?;
             self.directory.audit.write_on(
                 tx,
@@ -903,7 +977,7 @@ impl Hub {
         })?;
         // A team that cannot be served (its cap) stays in `relay.db`, out of service like
         // a team that fails to open at start: the call answers 500.
-        self.register(id.clone(), store, TeamLimits::connect(), TeamKind::Connect)?;
+        self.register(id.clone(), store, limits, TeamKind::Connect)?;
         Ok((id, owner_id, device_id))
     }
 
@@ -1229,7 +1303,7 @@ impl Hub {
         let changed = self.directory.store.tx(|tx| {
             let Some(row) = directory::team_by_id(tx, id)? else { return Ok(false); };
             if row.state != TeamState::Active || row.kind != TeamKind::Connect
-                || row.limits != TeamLimits::connect() { return Ok(false); }
+                || !row.limits.is_connect_preset(self.config.connect_sync_bytes) { return Ok(false); }
             core.store.with(|conn| {
                 if !sweep_idle(conn, row.created_at, before)? { return Ok(false); }
                 if !dry_run {
@@ -1267,8 +1341,9 @@ impl Hub {
     /// team whose newest sign-in of any live device (or, without one, the newest device's
     /// creation) is `idle_days` old, with the reason `idle`, however many devices it has;
     /// deletes each Connect team that a sweep suspended `delete_days` ago or earlier. A
-    /// team whose limits are not `TeamLimits::connect()` (a plan lifted them) or that
-    /// has a vault sync head is never swept. A team that the operator suspended, or that
+    /// team whose limits are not a Connect preset (`TeamLimits::is_connect_preset` of
+    /// `APASSY_RELAY_CONNECT_SYNC_BYTES`: a plan lifted them) or that has a vault sync
+    /// head is never swept. A team that the operator suspended, or that
     /// a sweep suspended and the operator resumed, is never deleted here. A team
     /// suspended in this run is deleted in a later one. `dry_run` changes nothing and
     /// names the same teams.
@@ -1304,7 +1379,9 @@ impl Hub {
                 break;
             }
             // A plan's team (lifted limits) is the operator's, not the sweep's.
-            if row.kind != TeamKind::Connect || row.limits != TeamLimits::connect() {
+            if row.kind != TeamKind::Connect
+                || !row.limits.is_connect_preset(self.config.connect_sync_bytes)
+            {
                 continue;
             }
             let done = match row.state {

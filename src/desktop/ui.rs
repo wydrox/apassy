@@ -52,6 +52,8 @@ mod decisions_tests;
 mod demo;
 #[cfg(feature = "vault")]
 mod detail_rows;
+/// Settings > Devices: the node of this Mac, every device, and the Wi-Fi notice.
+pub(crate) mod devices;
 /// Find duplicates and merge them (`src/vault/dedup.rs`).
 #[cfg(feature = "vault")]
 mod duplicates;
@@ -90,6 +92,8 @@ mod overview;
 mod owner_check_view;
 #[cfg(all(test, feature = "vault"))]
 mod owner_tests;
+/// The colors by role (implementation-plan-misc M13).
+pub(crate) mod palette;
 /// An idle window asks for no frame soon.
 #[cfg(all(test, feature = "vault"))]
 mod repaint_tests;
@@ -126,7 +130,11 @@ use eframe::egui::TextEdit;
 
 use crate::desktop::{DesktopApp, StatusKind};
 
-pub(crate) use kit::WINDOW as WINDOW_COLOR;
+/// The color behind the window, of the current appearance.
+pub(crate) fn window_color() -> egui::Color32 {
+    kit::palette().window
+}
+
 #[cfg(feature = "vault")]
 pub(crate) use settings::rows as settings_rows;
 #[cfg(feature = "vault")]
@@ -236,7 +244,7 @@ fn presize(value: &mut String, capacity: usize) {
 /// buffer (key-memory review F4). The widget ID is global ([`secret_field_id`]), so
 /// the app can clear the undo history (F1).
 #[cfg(feature = "vault")]
-fn secure_input(
+pub(crate) fn secure_input(
     ui: &mut egui::Ui,
     salt: &str,
     value: &mut String,
@@ -249,7 +257,7 @@ fn secure_input(
             .password(true)
             .id(secret_field_id(salt))
             .char_limit(capacity / 4)
-            .hint_text(kit::text(placeholder, kit::Font::Body).color(kit::TERTIARY))
+            .hint_text(kit::text(placeholder, kit::Font::Body).color(kit::palette().tertiary))
             .margin(kit::FIELD_MARGIN)
             .desired_width(f32::INFINITY),
     );
@@ -313,6 +321,12 @@ pub(crate) struct UiState {
     pub(crate) open_folders: BTreeSet<String>,
     /// "Show agents on the iPhone" is off (relay-feed-v1 section 8). `ui.json` keeps it.
     pub(crate) feed_off: bool,
+    /// The owner closed the once-only notice of the end of Wi-Fi pairing (ADR 0028 stage
+    /// 3). `ui.json` keeps it: it is for this Mac, not for a vault.
+    #[cfg(feature = "vault")]
+    pub(crate) wifi_notice_seen: bool,
+    /// Settings > Devices: its sheets, the node cache, and the demo frame.
+    pub(crate) devices: devices::State,
     /// The shared vaults in the sidebar (ADR 0026 §6). Nothing fills it until the vault
     /// keeps shared vaults; the tests draw synthetic ones.
     pub(crate) shared_vaults: Vec<sidebar::SharedVaultRow>,
@@ -416,6 +430,7 @@ impl UiState {
         self.sidebar_hidden = prefs.sidebar_hidden;
         self.open_folders = prefs.open_folders;
         self.feed_off = prefs.feed_off;
+        self.wifi_notice_seen = prefs.wifi_notice_seen;
         self.prefs_path = Some(path);
     }
 
@@ -428,6 +443,7 @@ impl UiState {
                 sidebar_hidden: self.sidebar_hidden,
                 open_folders: self.open_folders.clone(),
                 feed_off: self.feed_off,
+                wifi_notice_seen: self.wifi_notice_seen,
             };
             let _ = prefs.save(path);
         }
@@ -450,7 +466,16 @@ impl UiState {
         }
     }
 
+    /// The owner closed the Wi-Fi notice: it never shows again on this Mac.
+    #[cfg(feature = "vault")]
+    pub(crate) fn set_wifi_notice_seen(&mut self) {
+        self.wifi_notice_seen = true;
+        self.save_prefs();
+    }
+
     /// Turn "Show agents on the iPhone" off or on, and keep the choice.
+    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+    #[allow(dead_code)]
     pub(crate) fn set_feed_off(&mut self, off: bool) {
         self.feed_off = off;
         self.save_prefs();
@@ -550,6 +575,10 @@ pub(crate) enum Sheet {
     Share {
         item_id: u64,
     },
+    /// "Use My Server": the address, the token and the consent of the bouncer brain
+    /// host (ADR 0035). The draft with the token is in `app.bouncer_host.draft`.
+    #[cfg(feature = "vault")]
+    BrainHosting,
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {
@@ -843,6 +872,7 @@ pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
             forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
         }
         Some(Sheet::Import) => app.import.forget(),
+        Some(Sheet::BrainHosting) => crate::desktop::brain_hosting_ui::forget(app, ctx),
         Some(Sheet::Duplicates) => {
             app.ui.duplicates = Default::default();
             app.import.forget();
@@ -952,18 +982,18 @@ pub(super) fn meta_line(project: &str, service: &str) -> String {
 
 /// The color of the Postgres tile. A database of an unknown engine gets it too, as in
 /// the mockup.
-const DATABASE_TILE: egui::Color32 = egui::Color32::from_rgb(51, 103, 145);
+const DATABASE_TILE: egui::Color32 = kit::fixed::DATABASE;
 
 /// The icon and the tile color of a credential kind, in the colors of the mockup: a
 /// database has the blue Postgres tile and an SSH key the dark gray terminal tile.
 pub(super) fn kind_icon(kind: crate::contracts::CredentialKind) -> (kit::Icon, egui::Color32) {
     use crate::contracts::CredentialKind;
     match kind {
-        CredentialKind::ApiKey => (kit::Icon::Key, egui::Color32::from_rgb(255, 149, 0)),
-        CredentialKind::Login => (kit::Icon::Person, kit::ACCENT),
-        CredentialKind::SshKey => (kit::Icon::Terminal, egui::Color32::from_rgb(75, 79, 88)),
+        CredentialKind::ApiKey => (kit::Icon::Key, kit::fixed::ORANGE),
+        CredentialKind::Login => (kit::Icon::Person, kit::palette().accent),
+        CredentialKind::SshKey => (kit::Icon::Terminal, kit::fixed::SSH_KEY),
         CredentialKind::Database => (kit::Icon::Database, DATABASE_TILE),
-        CredentialKind::Custom => (kit::Icon::Asterisk, egui::Color32::from_rgb(142, 142, 147)),
+        CredentialKind::Custom => (kit::Icon::Asterisk, kit::fixed::GRAY),
     }
 }
 
@@ -986,18 +1016,18 @@ pub(super) fn credential_tile(
 pub(super) fn named_provider(service: &str, name: &str) -> Option<(&'static str, kit::Tile)> {
     use egui::Color32;
     const PROVIDERS: [(&str, &str, Color32); 12] = [
-        ("anthropic", "Anthropic", Color32::from_rgb(204, 120, 92)),
-        ("github", "GitHub", Color32::from_rgb(31, 35, 40)),
-        ("stripe", "Stripe", Color32::from_rgb(99, 91, 255)),
-        ("cloudflare", "Cloudflare", Color32::from_rgb(244, 129, 32)),
-        ("fly.io", "Fly.io", Color32::from_rgb(123, 63, 228)),
-        ("openai", "OpenAI", Color32::from_rgb(16, 163, 127)),
-        ("aws", "AWS", Color32::from_rgb(35, 47, 62)),
-        ("amazon", "AWS", Color32::from_rgb(35, 47, 62)),
-        ("slack", "Slack", Color32::from_rgb(74, 21, 75)),
-        ("sentry", "Sentry", Color32::from_rgb(54, 45, 89)),
-        ("resend", "Resend", Color32::from_rgb(17, 17, 17)),
-        ("netflix", "Netflix", Color32::from_rgb(229, 9, 20)),
+        ("anthropic", "Anthropic", kit::fixed::ANTHROPIC),
+        ("github", "GitHub", kit::fixed::GITHUB),
+        ("stripe", "Stripe", kit::fixed::STRIPE),
+        ("cloudflare", "Cloudflare", kit::fixed::CLOUDFLARE),
+        ("fly.io", "Fly.io", kit::fixed::FLY_IO),
+        ("openai", "OpenAI", kit::fixed::OPENAI),
+        ("aws", "AWS", kit::fixed::AWS),
+        ("amazon", "AWS", kit::fixed::AWS),
+        ("slack", "Slack", kit::fixed::SLACK),
+        ("sentry", "Sentry", kit::fixed::SENTRY),
+        ("resend", "Resend", kit::fixed::RESEND),
+        ("netflix", "Netflix", kit::fixed::NETFLIX),
     ];
     let words = format!("{} {}", service.to_lowercase(), name.to_lowercase());
     if words.contains("postgres") {
@@ -1294,7 +1324,7 @@ mod tests {
         app.ui.shared_vaults = vec![sidebar::SharedVaultRow {
             uuid: "drawn-shared".to_owned(),
             name: "Drawn team".to_owned(),
-            color: kit::ACCENT,
+            color: kit::palette().accent,
         }];
         app.select_item(item.to_string());
         let places = vec![

@@ -16,6 +16,11 @@
 //!   variable in the app starts. Else the real value: also for a provider that signs
 //!   requests with the secret (`real_value` in the pack: AWS, Google Cloud). The
 //!   known hosts stay recorded through the declaration's provider.
+//! - A short-lived source (S6-14, [`Detected::short_lived`]): an AWS pair or a Google
+//!   service-account key gets its `short_lived` row (schema 32) with empty settings, in
+//!   the same transaction, after the fields are checked against the kind. Way C is on
+//!   only when runs make leases ([`super::LEASES_IN_RUNS`]); until then the row is off,
+//!   and each run gets the static form (`Vault::run_extra_bindings`).
 //! - No owner check: a new item moves no authority that an existing item has. The
 //!   bouncer decides each use of it (ADR 0025 §3).
 
@@ -212,6 +217,9 @@ fn add_one(
     )?;
 
     bind_variable(tx, item, detected)?;
+    if let Some(kind) = detected.short_lived {
+        add_short_lived(tx, item, kind, &draft.fields)?;
+    }
 
     let provider = detected.provider.as_deref();
     if provider.is_some_and(|id| providers::find(id).is_none()) {
@@ -350,6 +358,34 @@ fn bind_variable(tx: &Transaction<'_>, item: i64, detected: &Detected) -> VaultR
         None => display_name.to_owned(),
     };
     history::record(tx, item, ItemEventKind::Variable, &detail)
+}
+
+/// The source row of a new item, with the default settings of `kind`: way C on only when
+/// runs make leases ([`super::LEASES_IN_RUNS`]), else off, so that no run of the new item
+/// fails or gets the long-lived key under the variable of a lease.
+/// `InvalidInput`: the fields are not the fields of the kind, or the kind needs settings
+/// (OAuth: the token URL) or is reserved.
+fn add_short_lived(
+    tx: &Transaction<'_>,
+    item: i64,
+    kind: super::ShortLivedKind,
+    fields: &[super::Field],
+) -> VaultResult<()> {
+    super::check_draft_fields(kind, fields)?;
+    let settings = super::ShortLivedSettings::parse(kind, "{}")?.to_json();
+    tx.execute(
+        "INSERT INTO short_lived (item_id, kind, settings, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        (
+            item,
+            kind.as_str(),
+            settings,
+            i64::from(super::LEASES_IN_RUNS),
+            to_sql_time(now_unix())?,
+        ),
+    )
+    .map_err(|_| err(VaultErrorKind::Storage))?;
+    Ok(())
 }
 
 /// Place a newly inserted item. The caller checked the folder while holding the vault.

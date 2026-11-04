@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "code": "job_busy",
+    "message": "another job of this owner is queued or running"
+  }
+}

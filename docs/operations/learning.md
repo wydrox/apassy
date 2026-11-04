@@ -200,6 +200,7 @@ Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`,
 | `asked` | boolean | The request waited for the owner |
 | `remembered` | boolean | The owner used "Approve and remember" (since 0.5.0 only `apassy runs approve --remember`) |
 | `model_version` | string, optional | The version of the model that answered, for example `apassy-base-v1+1a2b3c4d` or `laya-rl-agent`. Only when the model answered with a version. Added on 2026-10-07; older lines and readers without it stay valid |
+| `project_dir` | string, optional | The project root of the run (the working directory when it is not in a project). The fine-tune shortens it to `.`, and the home folder to `~`, in the command of a training state, as the broker does in the state that it sends to the bouncer brain. Added on 2026-11-03; older lines and readers without it stay valid |
 
 The decision log keeps the version at the end of its `policy` text (`...; model apassy-base-v1+1a2b3c4d`), so the vault schema does not change. Since 0.5.0 the app does not show the policy text; the export gives the version in `model_version`.
 

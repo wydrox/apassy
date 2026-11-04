@@ -207,10 +207,9 @@ pub fn display_code(code: &str) -> String {
     }
 }
 
-/// The certificate pin: b64u of the SHA-256 of the certificate DER (contract 3).
-pub fn certificate_pin(certificate_der: &[u8]) -> String {
-    encode_url(&sha256(certificate_der))
-}
+/// The certificate pin: b64u of the SHA-256 of the certificate DER (contract 3). The
+/// node's TLS front uses the same pin (`crate::net::pin`, unit N2).
+pub use crate::net::pin::certificate_pin;
 
 #[cfg(test)]
 pub(crate) mod tests {

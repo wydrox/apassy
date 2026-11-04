@@ -103,6 +103,8 @@ When it is published, download the signed and notarized `Apassy-<version>.dmg` f
 
 Requirements: macOS 15 or later on Apple silicon. Linux is not supported yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first. Apassy already builds and passes its tests on Linux, and CI checks it there.
 
+On Linux, `apassy` is the node without a window: `apassy up` runs it as a systemd user service on your tailnet, and `apassy pair` pairs your Mac with it ([Linux node](docs/operations/linux-node.md)). The app with the vault is still macOS only.
+
 ### Install from source with one command
 
 Until the signed download is published, this command builds the newest release on your Mac, checks it, and installs it as `/Applications/Apassy.app`. It takes a few minutes:
@@ -199,7 +201,7 @@ Open items:
 | Topic | Documents |
 | --- | --- |
 | Start here | [Daily use](docs/operations/daily-use.md) · [Command line](docs/operations/cli.md) · [Agent path](docs/operations/agent-path.md) · [Host hooks](docs/operations/host-hooks.md) · [Import from 1Password](docs/operations/import-1password.md) · [Browser extension](docs/operations/browser.md) |
-| Vaults | [Several vaults](docs/operations/multiple-vaults.md) · [Sync](docs/operations/sync.md) · [Backup and restore](docs/operations/backup-restore.md) |
+| Vaults | [Several vaults](docs/operations/multiple-vaults.md) · [Sync](docs/operations/sync.md) · [Backup and restore](docs/operations/backup-restore.md) · [Linux node](docs/operations/linux-node.md) |
 | Security | [Isolation](docs/operations/isolation.md) · [Key-memory review](docs/reviews/key-memory.md) · [Storage review](docs/reviews/storage-dependencies.md) · [Vault verification](docs/operations/vault-verification.md) |
 | The bouncer | [Bouncer](docs/operations/bouncer.md) · [Rule packs](docs/operations/rule-packs.md) · [Declarations](docs/operations/declarations.md) · [Base model](docs/operations/base-model.md) · [Learning](docs/operations/learning.md) |
 | Decisions | [ADRs 0001–0017](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |

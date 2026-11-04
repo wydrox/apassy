@@ -9,6 +9,11 @@
 //! (`hostkeys::VALUE_ON_HOST`). The app is the host, in the same process: it acts as the
 //! team's owner member without a token, and it releases a run with the values from the
 //! vault (`host::release_values`). Nothing secret is written to the node's directory.
+//!
+//! On the tailnet (`NodeBackend::start_on_tailnet`, docs/SPEC.md section 32), the node
+//! also has a tailnet listener for its TLS front, accepts sign-ins with its node origin,
+//! pushes through the push gateway, and hosts teams of devices: made in process
+//! (`create_device_team`) or with a node pairing code (`make_node_code`).
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -17,8 +22,9 @@ use std::time::{Duration, Instant};
 
 use apassy::node::backend::{
     self as node, AgentAccess, AuditRow, CatalogItem, ConnectDecision, CreatedAgent, NewCloudAgent,
-    NodeAgentId, NodeBackend, NodeConfig, NodeError, NodeRunId, NodeSecret, NodeTeamId,
-    PendingConnect, PendingItem, PendingRun, RunState, RunningNode, SyncReport, TokenIssue,
+    NodeAgentId, NodeBackend, NodeCode, NodeConfig, NodeDevice, NodeError, NodeRunId, NodeSecret,
+    NodeTailnet, NodeTeamId, PendingConnect, PendingItem, PendingRun, RunState, RunningNode,
+    SyncReport, TokenIssue,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -29,7 +35,7 @@ use crate::api::{
 use crate::config::{EmbeddedOptions, RelayConfig, UpstreamOptions};
 use crate::error::{RelayError, RelayResult, codes};
 use crate::hostkeys;
-use crate::ids::{AgentId, CollectionId, ItemId, MemberId, RunId, TeamId};
+use crate::ids::{AgentId, CollectionId, DeviceId, ItemId, MemberId, RunId, TeamId};
 use crate::now_unix;
 use crate::secret::SecretString;
 use crate::server::approvals::{self, Denier, RunRow};
@@ -60,17 +66,38 @@ fn node_error(error: RelayError) -> NodeError {
 
 impl NodeBackend for EmbeddedRelay {
     fn start(&self, config: NodeConfig) -> Result<Box<dyn RunningNode>, NodeError> {
+        self.start_on_tailnet(config, None)
+    }
+
+    fn start_on_tailnet(
+        &self,
+        config: NodeConfig,
+        tailnet: Option<NodeTailnet>,
+    ) -> Result<Box<dyn RunningNode>, NodeError> {
         let NodeConfig {
             data_dir,
             master_key,
             public_url,
             public_listen,
         } = config;
+        let (node_origin, tailnet_listen, tailnet_agents, push_gateway) = match tailnet {
+            Some(tailnet) => (
+                Some(tailnet.node_origin),
+                Some(tailnet.tailnet_listen),
+                tailnet.tailnet_agents,
+                tailnet.push_gateway,
+            ),
+            None => (None, None, false, None),
+        };
         let mut relay = RelayConfig::embedded(EmbeddedOptions {
             data_dir,
             master_key: SecretString::new(master_key.expose().to_owned()),
             public_url,
             public_listen,
+            node_origin,
+            tailnet_listen,
+            tailnet_agents,
+            push_gateway,
         })
         .map_err(node_error)?;
         relay.upstream = self.upstream.clone();
@@ -137,6 +164,57 @@ fn owner(core: &Core) -> RelayResult<MemberAuth> {
         .optional()
         .map_err(db)?
         .ok_or_else(|| RelayError::not_found("owner"))
+    })
+}
+
+/// The owner of a team of devices, as its own device (the key holder first): the member
+/// that the node acts for when the app revokes a device. A team of devices has no
+/// member token, so `owner` (no device) cannot act in it.
+fn owner_device(core: &Core) -> RelayResult<MemberAuth> {
+    core.store.with(|conn| {
+        let id: i64 = conn
+            .query_row(
+                "SELECT d.id FROM device d JOIN member m ON m.id = d.member_id \
+                 WHERE m.role = 'owner' AND d.revoked_at IS NULL AND m.revoked_at IS NULL \
+                 ORDER BY d.key_holder DESC, d.id LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?
+            .ok_or_else(|| RelayError::not_found("owner device"))?;
+        crate::server::auth::device_member(conn, DeviceId(to_u(id)))
+    })
+}
+
+/// The live devices of a team, oldest first.
+fn team_devices(core: &Core) -> RelayResult<Vec<NodeDevice>> {
+    core.store.with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT d.id, d.name, m.id, m.name, m.role, d.key_holder, d.created_at, \
+                 d.last_seen_at, EXISTS(SELECT 1 FROM push_handle h \
+                 WHERE h.device_id = d.id AND h.failed_at IS NULL) \
+                 FROM device d JOIN member m ON m.id = d.member_id \
+                 WHERE d.revoked_at IS NULL AND m.revoked_at IS NULL ORDER BY d.id",
+            )
+            .map_err(db)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(NodeDevice {
+                    id: to_u(row.get(0)?),
+                    name: row.get(1)?,
+                    member_id: to_u(row.get(2)?),
+                    member_name: row.get(3)?,
+                    role: row.get(4)?,
+                    key_holder: row.get(5)?,
+                    created_at: to_u(row.get(6)?),
+                    last_seen_at: row.get::<_, Option<i64>>(7)?.map(to_u),
+                    push: row.get(8)?,
+                })
+            })
+            .map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
     })
 }
 
@@ -376,6 +454,61 @@ impl RunningNode for EmbeddedNode {
 
     fn public_addr(&self) -> Option<SocketAddr> {
         self.running.public_addr
+    }
+
+    fn tailnet_addr(&self) -> Option<SocketAddr> {
+        self.running.tailnet_addr
+    }
+
+    fn local_route_addr(&self) -> Option<SocketAddr> {
+        self.running.tailnet_local_addr
+    }
+
+    fn create_device_team(
+        &self,
+        name: &str,
+        device_name: &str,
+        public_key_b64u: &str,
+    ) -> Result<(NodeTeamId, u64), NodeError> {
+        self.hub
+            .create_device_team(name, device_name, public_key_b64u, now_unix())
+            .map(|(team, device)| (NodeTeamId(team.as_str().to_string()), device.0))
+            .map_err(node_error)
+    }
+
+    fn devices(&self, team: &NodeTeamId) -> Result<Vec<NodeDevice>, NodeError> {
+        self.core(team)
+            .and_then(|core| team_devices(&core))
+            .map_err(node_error)
+    }
+
+    fn revoke_device(&self, team: &NodeTeamId, device: u64) -> Result<(), NodeError> {
+        (|| -> RelayResult<()> {
+            let core = self.core(team)?;
+            let owner = owner_device(&core)?;
+            crate::server::devices::revoke(&core, &owner, DeviceId(device), now_unix()).map(drop)
+        })()
+        .map_err(node_error)
+    }
+
+    fn make_node_code(&self, minutes: u32) -> Result<NodeCode, NodeError> {
+        (|| -> RelayResult<NodeCode> {
+            if !self.hub.config.is_node() {
+                return Err(RelayError::new(
+                    codes::NOT_SUPPORTED,
+                    "A node pairing code needs the tailnet route of the node.",
+                ));
+            }
+            let (code, expires_at) = self
+                .hub
+                .directory
+                .new_node_code(u64::from(minutes), now_unix())?;
+            Ok(NodeCode {
+                code: NodeSecret::new(code.expose().to_owned()),
+                expires_at,
+            })
+        })()
+        .map_err(node_error)
     }
 
     fn create_team(&self, name: &str) -> Result<NodeTeamId, NodeError> {

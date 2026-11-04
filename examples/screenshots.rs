@@ -690,8 +690,40 @@ fn seed(home: &Path) {
     // remembered production answer are present. This affects only synthetic data.
     v.set_always_ask(id("Stripe live"), true)
         .expect("tour question veto");
+    seed_brain_host(&mut v);
     v.lock().expect("lock");
     println!("seeded {}", path.display());
+}
+
+/// `APASSY_TOUR_BRAIN_HOST` (plan 0035 J1): a stored host of the bouncer brain for the
+/// Settings > Bouncer states. `server`: the owner's server, at an address under
+/// `.invalid` that never resolves, so the row shows a server that does not answer.
+/// `connect`: an Apassy Connect row, which this version cannot use, so the row shows the
+/// fallback. Synthetic token; the seed writes the row as the owner check would.
+fn seed_brain_host(v: &mut Vault) {
+    use apassy::vault::{
+        BouncerHostChange, BouncerHostKind, BouncerHostRole, HOSTING_CONSENT_VERSION,
+    };
+    let change = match std::env::var("APASSY_TOUR_BRAIN_HOST").as_deref() {
+        Ok("server") => BouncerHostChange {
+            kind: BouncerHostKind::OwnServer,
+            url: "https://brain.tour.invalid".to_owned(),
+            bearer: Some(SecretValue::new(
+                "SYNTH-tour-brain-token-0123456789".to_owned(),
+            )),
+            consent_version: HOSTING_CONSENT_VERSION,
+        },
+        Ok("connect") => BouncerHostChange {
+            kind: BouncerHostKind::Connect,
+            url: "https://brain.connect.invalid".to_owned(),
+            bearer: None,
+            consent_version: HOSTING_CONSENT_VERSION,
+        },
+        Ok(other) => panic!("APASSY_TOUR_BRAIN_HOST={other}: use server or connect"),
+        Err(_) => return,
+    };
+    v.set_bouncer_host(BouncerHostRole::Hosting, &change, 1_762_000_000)
+        .expect("tour bouncer brain host");
 }
 
 #[cfg(unix)]
@@ -788,6 +820,9 @@ enum Step {
     Embed(bool),
     /// Send the run that waits for the owner ([`ask_in_background`]).
     Ask,
+    /// A state of the bouncer brain host (`DesktopApp::tour_brain_hosting`): `server`,
+    /// `server-shown`, `paste`, `consent`, `check`, `this-mac`.
+    BrainHost(&'static str),
     Access,
     ConnectPhone,
     Quit,
@@ -1057,7 +1092,8 @@ const LAYOUT: Layout = Layout {
 
 /// The tour. `APASSY_TOUR` names a file with other steps after the unlock, one per
 /// line: `click X Y`, `scroll X Y DY`, `wait S`, `shot NAME`, `snap NAME`, `size W H`,
-/// `type TEXT`, `paste TEXT` (`\n` for a new line), `key cmd+2`, `embed on|off`, `ask`.
+/// `type TEXT`, `paste TEXT` (`\n` for a new line), `key cmd+2`, `embed on|off`, `ask`,
+/// `brain-host STATE` (plan 0035 J1).
 /// It helps to find the positions of a new layout. With `APASSY_TOUR_RAW` set, the
 /// file steps run alone, without the unlock: for a scratch HOME with no vault (first
 /// steps). `APASSY_TOUR_FIRST_STEPS` takes the first steps of an empty vault.
@@ -1116,6 +1152,7 @@ fn parse_steps(text: &str) -> Vec<Step> {
             }
             Some("embed") => steps.push(Embed(parts.get(1) != Some(&"off"))),
             Some("ask") => steps.push(Ask),
+            Some("brain-host") => steps.push(BrainHost(name(1))),
             Some("connect-phone") => steps.push(ConnectPhone),
             Some("access") => steps.push(Access),
             Some("quit") => steps.push(Quit),
@@ -1312,6 +1349,13 @@ impl Tour {
             }
             Step::Embed(on) => ctx.set_embed_viewports(on),
             Step::Ask => ask_in_background(),
+            Step::BrainHost(state) => {
+                assert!(
+                    self.app.tour_brain_hosting(state),
+                    "brain-host {state}: unknown state or locked vault"
+                );
+                pause = 1.0;
+            }
             Step::Access => {
                 let home = PathBuf::from(
                     std::env::var_os("APASSY_TOUR_HOME").expect("isolated tour home"),

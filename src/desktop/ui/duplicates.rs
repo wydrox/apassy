@@ -225,7 +225,7 @@ fn group_row(
     let mut merge = false;
     let first = group.items.first().map_or(0, |item| item.id);
     let titles: Vec<&str> = group.items.iter().map(|item| item.title.as_str()).collect();
-    ui.label(kit::text(titles.join(", "), Font::Body).color(kit::LABEL));
+    ui.label(kit::text(titles.join(", "), Font::Body).color(kit::palette().label));
     kit::note(ui, summary(group));
     match chosen {
         Some(keep) => {
@@ -235,7 +235,7 @@ fn group_row(
                 .find(|(id, _)| *id == keep)
                 .map_or_else(String::new, |(_, label)| label.clone());
             ui.horizontal(|ui| {
-                ui.label(kit::text("Keep", Font::Body).color(kit::SECONDARY));
+                ui.label(kit::text("Keep", Font::Body).color(kit::palette().secondary));
                 let mut value = keep;
                 kit::picker(
                     ui,

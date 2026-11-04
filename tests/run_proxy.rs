@@ -21,13 +21,80 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
+};
 use zeroize::Zeroizing;
 
 const REAL: &str = "sk_live_FAKE-proxy-value-0123456789-abcdefghij-KLMN";
 const OTHER_REAL: &str = "ghp_FAKE-other-value-0123456789-abcdefghij-KLMN";
 const NAME: &str = "DEMO_KEY";
+const ECHO_REAL: &str = "sk_live_FAKE+echo/value=<>&\"'\\é0123456789";
+
+fn echo_forms() -> Vec<String> {
+    let percent = |upper: bool| {
+        ECHO_REAL
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                    char::from(b).to_string()
+                } else if upper {
+                    format!("%{b:02X}")
+                } else {
+                    format!("%{b:02x}")
+                }
+            })
+            .collect::<String>()
+    };
+    let html: String = ECHO_REAL
+        .chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            '\'' => "&#39;".to_owned(),
+            '/' => "&#x2F;".to_owned(),
+            c => c.to_string(),
+        })
+        .collect();
+    let json = serde_json::to_string(ECHO_REAL).unwrap();
+    vec![
+        ECHO_REAL.to_owned(),
+        percent(true),
+        percent(false),
+        html,
+        json[1..json.len() - 1].replace('/', r"\/"),
+        ECHO_REAL
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c.to_string()
+                } else {
+                    format!("\\u{:04x}", u32::from(c))
+                }
+            })
+            .collect(),
+    ]
+}
+
+fn query_placeholder(run: &Run, upper: bool) -> String {
+    ECHO_REAL
+        .bytes()
+        .zip(run.placeholder.bytes())
+        .map(|(value, shown)| {
+            if value.is_ascii_alphanumeric() || b"-._~".contains(&value) {
+                char::from(shown).to_string()
+            } else if upper {
+                format!("%{shown:02X}")
+            } else {
+                format!("%{shown:02x}")
+            }
+        })
+        .collect()
+}
 
 /// What the service got.
 #[derive(Debug, Clone)]
@@ -37,10 +104,10 @@ struct Seen {
     body: String,
 }
 
-struct Service {
+struct Service<T = Seen> {
     port: u16,
     root: CertificateDer<'static>,
-    seen: Arc<Mutex<Vec<Seen>>>,
+    seen: Arc<Mutex<Vec<T>>>,
 }
 
 fn validity(params: &mut CertificateParams) {
@@ -51,6 +118,14 @@ fn validity(params: &mut CertificateParams) {
 
 /// An HTTPS service on `localhost` with its own test root.
 fn start_service() -> Service {
+    start_service_with(serve)
+}
+
+/// An HTTPS service on `localhost` with its own test root; `handler` serves each
+/// connection.
+fn start_service_with<T: Send + 'static>(
+    handler: fn(StreamOwned<ServerConnection, TcpStream>, &Mutex<Vec<T>>),
+) -> Service<T> {
     let mut root = CertificateParams::default();
     let mut name = DistinguishedName::new();
     name.push(DnType::CommonName, "Apassy proxy test root");
@@ -97,7 +172,7 @@ fn start_service() -> Service {
                 let Ok(tls) = ServerConnection::new(config) else {
                     return;
                 };
-                serve(StreamOwned::new(tls, stream), &seen);
+                handler(StreamOwned::new(tls, stream), &seen);
             });
         }
     });
@@ -159,6 +234,23 @@ fn serve(stream: StreamOwned<ServerConnection, TcpStream>, seen: &Mutex<Vec<Seen
                 )
             }
             "/store" => ok("201 Created", "{\"stored\":true}"),
+            // An answer that the proxy cannot read (judge finding L1).
+            "/gzip" => format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n{REAL}",
+                REAL.len()
+            ),
+            "/te-gzip" => format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n{:x}\r\n{REAL}\r\n0\r\n\r\n",
+                REAL.len()
+            ),
+            // A debug endpoint that echoes the credentials.
+            "/echo-auth" => ok(
+                "200 OK",
+                &format!(
+                    "{{\"authorization\":\"{}\"}}",
+                    authorization.as_deref().unwrap_or_default()
+                ),
+            ),
             _ => ok("404 Not Found", "{}"),
         };
         if out.write_all(answer.as_bytes()).is_err() || out.flush().is_err() {
@@ -174,20 +266,168 @@ fn ok(status: &str, body: &str) -> String {
     )
 }
 
+/// Query-preserving redirects and error pages from a synthetic HTTPS upstream.
+fn serve_encoded_echo(stream: StreamOwned<ServerConnection, TcpStream>, seen: &Mutex<Vec<Seen>>) {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let path = line.split(' ').nth(1).unwrap().to_owned();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+    }
+    let forms = echo_forms();
+    assert!(path.ends_with(&format!("?key={}", forms[1])), "{path}");
+    seen.lock().unwrap().push(Seen {
+        path: path.clone(),
+        authorization: None,
+        body: String::new(),
+    });
+    let route = path.split('?').next().unwrap();
+    let (status, extra, body) = match route {
+        "/redirect" => (
+            "301 Moved Permanently",
+            format!("Location: {}\r\n", path.replacen("/redirect?", "/json?", 1)),
+            String::new(),
+        ),
+        "/json" => (
+            "404 Not Found",
+            String::new(),
+            serde_json::json!({"url":path}).to_string(),
+        ),
+        "/header" => (
+            "200 OK",
+            format!("X-Echo: {}\r\n", forms[2]),
+            "ok".to_owned(),
+        ),
+        _ => (
+            "200 OK",
+            "Content-Type: text/html\r\n".to_owned(),
+            forms[3..].join(" | "),
+        ),
+    };
+    let out = reader.get_mut();
+    if route == "/chunked" {
+        write!(
+            out,
+            "HTTP/1.1 {status}\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
+        )
+        .unwrap();
+        for chunk in body.as_bytes().chunks(7) {
+            write!(out, "{:x}\r\n", chunk.len()).unwrap();
+            out.write_all(chunk).unwrap();
+            out.write_all(b"\r\n").unwrap();
+            out.flush().unwrap();
+        }
+        write!(out, "0\r\nX-Echo: {}\r\n\r\n", forms[1]).unwrap();
+    } else {
+        write!(
+            out,
+            "HTTP/1.1 {status}\r\nConnection: close\r\n{extra}Content-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        if route == "/split" {
+            let split = body.find("&amp;").unwrap() + 3;
+            out.write_all(&body.as_bytes()[..split]).unwrap();
+            out.flush().unwrap();
+            thread::sleep(Duration::from_millis(30));
+            out.write_all(&body.as_bytes()[split..]).unwrap();
+        } else {
+            out.write_all(body.as_bytes()).unwrap();
+        }
+    }
+    out.flush().unwrap();
+}
+
+#[test]
+fn encoded_echoes_in_redirect_errors_html_headers_and_split_bodies_are_masked() {
+    let service = start_service_with(serve_encoded_echo);
+    let proxied = start_proxy_value(&service, OtherHosts::Tunnel, ECHO_REAL);
+    for route in ["redirect", "json", "html", "header", "split", "chunked"] {
+        let request = format!(
+            "GET /{route}?key={} HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            proxied.placeholder, service.port
+        );
+        let (head, body) = intercepted(&proxied, service.port, &request);
+        let received = format!("{head}{body}");
+        assert!(
+            received.contains(&proxied.placeholder)
+                || received.contains(&query_placeholder(&proxied, true))
+                || received.contains(&query_placeholder(&proxied, false)),
+            "{route}: {received}"
+        );
+        for form in echo_forms() {
+            assert!(!received.contains(&form), "{route}: {received}");
+        }
+        if route == "redirect" {
+            assert!(head.starts_with("HTTP/1.1 301"));
+        }
+        if route == "json" {
+            assert!(head.starts_with("HTTP/1.1 404"));
+        }
+        let out = run(
+            &proxied,
+            &format!(
+                "curl -sv 'https://localhost:{}/{route}?key='\"$DEMO_KEY\" -D - | rev",
+                service.port
+            ),
+        );
+        assert_eq!(out.exit_code, Some(0), "{route}: {out:?}");
+        assert!(
+            out.stdout.contains(&reversed(&proxied.placeholder))
+                || out
+                    .stdout
+                    .contains(&reversed(&query_placeholder(&proxied, true)))
+                || out
+                    .stdout
+                    .contains(&reversed(&query_placeholder(&proxied, false))),
+            "{route}: {out:?}"
+        );
+        for form in echo_forms() {
+            assert!(!out.stdout.contains(&reversed(&form)), "{route}: {out:?}");
+            assert!(!out.stderr.contains(&form), "{route}: {out:?}");
+        }
+    }
+    let out = run(
+        &proxied,
+        &format!(
+            "curl -svL 'https://localhost:{}/redirect?key='\"$DEMO_KEY\" | rev",
+            service.port
+        ),
+    );
+    assert_eq!(out.exit_code, Some(0), "{out:?}");
+    assert!(out.stderr.contains("404 Not Found"), "{out:?}");
+    for form in echo_forms() {
+        assert!(!out.stderr.contains(&form), "{out:?}");
+    }
+    assert_eq!(service.seen.lock().unwrap().len(), 14);
+    let log = events(proxied);
+    assert_eq!(log.len(), 14);
+}
+
 struct Run {
+    value: String,
     proxy: RunProxy,
     placeholder: String,
     other_placeholder: String,
 }
 
-fn start_proxy(service: &Service, other_hosts: OtherHosts) -> Run {
-    let placeholder = mint_placeholder(REAL).expect("placeholder");
+fn start_proxy<T>(service: &Service<T>, other_hosts: OtherHosts) -> Run {
+    start_proxy_value(service, other_hosts, REAL)
+}
+
+fn start_proxy_value<T>(service: &Service<T>, other_hosts: OtherHosts, value: &str) -> Run {
+    let placeholder = mint_placeholder(value).expect("placeholder");
     let other_placeholder = mint_placeholder(OTHER_REAL).expect("placeholder");
     let secrets = vec![
         ProxySecret {
             name: NAME.to_owned(),
             placeholder: placeholder.clone(),
-            value: Zeroizing::new(REAL.to_owned()),
+            value: Zeroizing::new(value.to_owned()),
             hosts: vec![HostRule::parse(&format!("localhost:{}", service.port)).expect("rule")],
         },
         ProxySecret {
@@ -207,6 +447,7 @@ fn start_proxy(service: &Service, other_hosts: OtherHosts) -> Run {
     )
     .expect("proxy");
     Run {
+        value: value.to_owned(),
         proxy,
         placeholder,
         other_placeholder,
@@ -252,6 +493,14 @@ fn node_reads_proxy_variables() -> bool {
 }
 
 fn run(run: &Run, script: &str) -> RunOutput {
+    // A folder of its own: on Linux the working directory of a run cannot be in
+    // `/tmp` (a shared folder with the sockets of other programs), so it is in the
+    // `target` folder there.
+    let cwd = if cfg!(target_os = "linux") {
+        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("cwd")
+    } else {
+        tempfile::tempdir().expect("cwd")
+    };
     let network = run.proxy.network();
     let env = [
         SecretEnv {
@@ -265,18 +514,15 @@ fn run(run: &Run, script: &str) -> RunOutput {
     ];
     let masks = [SecretEnv {
         name: NAME.to_owned(),
-        value: Zeroizing::new(REAL.to_owned()),
+        value: Zeroizing::new(run.value.clone()),
     }];
     exec::run_with(
         &["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
-        Path::new("/tmp"),
+        cwd.path(),
         Some(&run_path()),
         &env,
         &masks,
-        Network {
-            env: &network.env,
-            sandbox_profile: network.sandbox_profile.as_deref(),
-        },
+        Network::from(network),
         Duration::from_secs(60),
     )
     .expect("run")
@@ -577,4 +823,990 @@ fn on_macos_the_process_can_reach_only_the_proxy() {
         "through the proxy: {out:?}"
     );
     assert_eq!(service.seen.lock().expect("seen").len(), 1);
+}
+
+// Linux (ADR 0011 stage 2, unit X2): the run is in a bubblewrap sandbox whose network
+// namespace has one way out, a bridge to the proxy port. The CI job `linux-isolation`
+// has bubblewrap and sets APASSY_REQUIRE_BWRAP=1, so there these tests fail instead of
+// skip. Elsewhere the run has no rule and says why.
+
+/// The rule of a proxied run on this computer; `None` (skip) without bubblewrap,
+/// unless the job requires it.
+#[cfg(target_os = "linux")]
+fn netns_or_skip(run: &Run) -> bool {
+    let network = run.proxy.network();
+    if network.rule == apassy::broker::proxy::NetworkRule::Netns {
+        return true;
+    }
+    assert!(
+        std::env::var_os("APASSY_REQUIRE_BWRAP").is_none(),
+        "APASSY_REQUIRE_BWRAP is set, but the run has no network rule: {}",
+        network.report()
+    );
+    eprintln!("SKIP: no Linux network rule here: {}", network.report());
+    false
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_direct_connection_fails_in_a_proxied_run() {
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    if !netns_or_skip(&proxied) {
+        return;
+    }
+    let port = service.port;
+    // The service listens on the host's 127.0.0.1, the same address that the
+    // bridge uses in the namespace: only the proxy port leads out.
+    let out = run(
+        &proxied,
+        &format!(
+            "curl -sS --max-time 5 --noproxy '*' https://localhost:{port}/whoami; echo \"direct=$?\"; \
+             curl -sS --max-time 5 --noproxy '*' https://1.1.1.1/; echo \"outside=$?\"; \
+             python3 -c \"import socket; socket.create_connection(('127.0.0.1',{port}),timeout=3)\" 2>&1 | tail -1; \
+             curl -sS https://localhost:{port}/whoami -H \"Authorization: Bearer $DEMO_KEY\""
+        ),
+    );
+    assert!(
+        out.stdout.contains("direct=7"),
+        "curl without the proxy: {out:?}"
+    );
+    assert!(
+        out.stdout.contains("outside=7"),
+        "curl to the internet without the proxy: {out:?}"
+    );
+    assert!(
+        out.stdout.contains("Connection refused"),
+        "python without the proxy: {out:?}"
+    );
+    assert!(
+        out.stdout.contains("{\"ok\":true}"),
+        "through the proxy: {out:?}"
+    );
+    let seen = service.seen.lock().expect("seen").clone();
+    assert_eq!(seen.len(), 1, "only the proxied request arrives: {seen:?}");
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some(format!("Bearer {REAL}").as_str())
+    );
+    let log = events(proxied);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].outcome, ProxyOutcome::Swapped);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proxied_run_reports_netns() {
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    if !netns_or_skip(&proxied) {
+        return;
+    }
+    assert_eq!(
+        proxied.proxy.network().report(),
+        serde_json::json!({"rule": "netns"})
+    );
+    // PID 1 is the Apassy init; the processes of the host are not there; the
+    // variable holds the placeholder.
+    let out = run(
+        &proxied,
+        "tr '\\0' ' ' < /proc/1/cmdline; echo; ls /proc | grep -c '^[0-9]'; printf %s \"$DEMO_KEY\" | rev",
+    );
+    assert_eq!(out.exit_code, Some(0), "{out:?}");
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert!(lines[0].contains("__netns-bridge"), "{out:?}");
+    let processes: usize = lines[1].trim().parse().expect("count");
+    assert!(processes < 10, "{out:?}");
+    assert!(
+        out.stdout.contains(&reversed(&proxied.placeholder)),
+        "{out:?}"
+    );
+    assert!(!out.stdout.contains(&reversed(REAL)));
+}
+
+/// Without bubblewrap (every Linux test job but `linux-isolation`) the run has no
+/// rule and names the reason and the fix; with it, the rule is `netns`. Either way
+/// the process holds only placeholders and the proxy swaps.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proxied_run_reports_its_rule_and_holds_only_placeholders() {
+    use apassy::broker::proxy::NetworkRule;
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let network = proxied.proxy.network();
+    let report = network.report();
+    match network.rule {
+        NetworkRule::Netns => assert_eq!(report, serde_json::json!({"rule": "netns"})),
+        NetworkRule::None => {
+            assert!(
+                std::env::var_os("APASSY_REQUIRE_BWRAP").is_none(),
+                "{report}"
+            );
+            assert_eq!(report["rule"], "none");
+            assert!(
+                [
+                    "bwrap_missing",
+                    "bwrap_too_old",
+                    "userns_blocked",
+                    "sandbox_program_missing"
+                ]
+                .contains(&report["reason"].as_str().unwrap_or_default()),
+                "{report}"
+            );
+            assert!(report["fix"].as_str().is_some_and(|fix| !fix.is_empty()));
+            assert!(network.linux.is_none());
+        }
+        NetworkRule::Seatbelt => panic!("Seatbelt on Linux"),
+    }
+    let text = report.to_string();
+    assert!(!text.contains(REAL) && !text.contains(&proxied.placeholder));
+    let out = run(
+        &proxied,
+        &format!(
+            "curl -sS https://localhost:{}/whoami -H \"Authorization: Bearer $DEMO_KEY\"; echo; printf %s \"$DEMO_KEY\" | rev",
+            service.port
+        ),
+    );
+    assert_eq!(out.exit_code, Some(0), "{out:?}");
+    assert!(out.stdout.contains("{\"ok\":true}"), "{out:?}");
+    assert!(
+        out.stdout.contains(&reversed(&proxied.placeholder)),
+        "{out:?}"
+    );
+    assert!(!out.stdout.contains(&reversed(REAL)));
+    let seen = service.seen.lock().expect("seen").clone();
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some(format!("Bearer {REAL}").as_str())
+    );
+}
+
+/// The `linux-isolation` job measures the stock runner first and sets
+/// `APASSY_EXPECT_RULE` to what a run must report there: `none:userns_blocked` when
+/// the runner restricts user namespaces, `netns` when it does not (judge finding L3).
+/// Without the variable the test does nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proxied_run_reports_the_measured_rule() {
+    let Some(expected) = std::env::var_os("APASSY_EXPECT_RULE") else {
+        return;
+    };
+    let expected = expected.to_string_lossy().into_owned();
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let report = proxied.proxy.network().report();
+    eprintln!("measured: {expected}; network rule of a run: {report}");
+    match expected.split_once(':') {
+        Some((rule, reason)) => {
+            assert_eq!(report["rule"], rule, "{report}");
+            assert_eq!(report["reason"], reason, "{report}");
+        }
+        None => assert_eq!(report["rule"], expected.as_str(), "{report}"),
+    }
+    // Either way the run starts and holds only the placeholder.
+    let out = run(&proxied, "printf %s \"$DEMO_KEY\" | rev");
+    assert_eq!(out.exit_code, Some(0), "{out:?}");
+    assert!(
+        out.stdout.contains(&reversed(&proxied.placeholder)),
+        "{out:?}"
+    );
+}
+
+// WebSocket (ADR 0011 stage 5, unit P3). A raw client goes through the run proxy
+// with CONNECT, as a program does, to a WebSocket service on `localhost`.
+
+/// What the WebSocket service got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WsSeen {
+    Handshake {
+        path: String,
+        authorization: Option<String>,
+        extensions: Option<String>,
+    },
+    Frame {
+        opcode: u8,
+        payload: Vec<u8>,
+    },
+}
+
+/// A frame. A frame of the client is masked (RFC 6455 §5.3).
+fn ws_frame(fin: bool, opcode: u8, payload: &[u8], masked: bool) -> Vec<u8> {
+    let mut out = vec![(u8::from(fin) << 7) | opcode];
+    let mask_bit: u8 = if masked { 0x80 } else { 0 };
+    if payload.len() < 126 {
+        out.push(mask_bit | u8::try_from(payload.len()).expect("short"));
+    } else {
+        out.push(mask_bit | 126);
+        out.extend_from_slice(&u16::try_from(payload.len()).expect("length").to_be_bytes());
+    }
+    if masked {
+        let key = [0x5a, 0x17, 0xc3, 0x09];
+        out.extend_from_slice(&key);
+        out.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i % 4]));
+    } else {
+        out.extend_from_slice(payload);
+    }
+    out
+}
+
+/// One frame: (fin, opcode, unmasked payload).
+fn read_ws_frame(from: &mut impl Read) -> Option<(bool, u8, Vec<u8>)> {
+    let mut head = [0u8; 2];
+    from.read_exact(&mut head).ok()?;
+    let len = match head[1] & 0x7f {
+        126 => {
+            let mut bytes = [0u8; 2];
+            from.read_exact(&mut bytes).ok()?;
+            usize::from(u16::from_be_bytes(bytes))
+        }
+        127 => {
+            let mut bytes = [0u8; 8];
+            from.read_exact(&mut bytes).ok()?;
+            usize::try_from(u64::from_be_bytes(bytes)).ok()?
+        }
+        short => usize::from(short),
+    };
+    let mut key = None;
+    if head[1] & 0x80 != 0 {
+        let mut bytes = [0u8; 4];
+        from.read_exact(&mut bytes).ok()?;
+        key = Some(bytes);
+    }
+    let mut payload = vec![0u8; len];
+    from.read_exact(&mut payload).ok()?;
+    if let Some(key) = key {
+        for (i, byte) in payload.iter_mut().enumerate() {
+            *byte ^= key[i % 4];
+        }
+    }
+    Some((head[0] & 0x80 != 0, head[0] & 0x0f, payload))
+}
+
+/// A WebSocket service. `/ws` answers 101 and, in the same write, a frame with the
+/// real value; then it echoes text frames, answers `split` with the value split
+/// over two fragments, and answers a Close. `/ws-deflate` turns on an extension.
+/// `/ws-deny` answers 401 with the value in the body.
+fn serve_ws(stream: StreamOwned<ServerConnection, TcpStream>, seen: &Mutex<Vec<WsSeen>>) {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+        return;
+    }
+    let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
+    let mut authorization = None;
+    let mut extensions = None;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).unwrap_or(0) == 0 {
+            return;
+        }
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        let (name, value) = header.split_once(':').unwrap_or((header, ""));
+        match name.to_ascii_lowercase().as_str() {
+            "authorization" => authorization = Some(value.trim().to_owned()),
+            "sec-websocket-extensions" => extensions = Some(value.trim().to_owned()),
+            _ => {}
+        }
+    }
+    seen.lock().expect("seen").push(WsSeen::Handshake {
+        path: path.clone(),
+        authorization,
+        extensions,
+    });
+    let out = reader.get_mut();
+    if path.starts_with("/ws-deny") {
+        let _ =
+            out.write_all(ok("401 Unauthorized", &format!("{{\"value\":\"{REAL}\"}}")).as_bytes());
+        let _ = out.flush();
+        return;
+    }
+    if path.starts_with("/ws-encoded") {
+        out.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").unwrap();
+        for echo in echo_forms() {
+            out.write_all(&ws_frame(true, 1, echo.as_bytes(), false))
+                .unwrap();
+            let split = echo.len() / 2;
+            out.write_all(&ws_frame(false, 1, &echo.as_bytes()[..split], false))
+                .unwrap();
+            out.write_all(&ws_frame(true, 0, &echo.as_bytes()[split..], false))
+                .unwrap();
+        }
+        out.flush().unwrap();
+        let (_, opcode, payload) = read_ws_frame(&mut reader).unwrap();
+        assert_eq!(opcode, 8);
+        reader
+            .get_mut()
+            .write_all(&ws_frame(true, 8, &payload, false))
+            .unwrap();
+        reader.get_mut().flush().unwrap();
+        return;
+    }
+    let extension = if path.starts_with("/ws-deflate") {
+        "Sec-WebSocket-Extensions: permessage-deflate\r\n"
+    } else {
+        ""
+    };
+    let mut answer = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n{extension}\r\n"
+    )
+    .into_bytes();
+    answer.extend(ws_frame(
+        true,
+        1,
+        format!("welcome {REAL}").as_bytes(),
+        false,
+    ));
+    if out.write_all(&answer).is_err() || out.flush().is_err() {
+        return;
+    }
+    loop {
+        let Some((_, opcode, payload)) = read_ws_frame(&mut reader) else {
+            return;
+        };
+        seen.lock().expect("seen").push(WsSeen::Frame {
+            opcode,
+            payload: payload.clone(),
+        });
+        let reply = match (opcode, payload.as_slice()) {
+            (8, _) => {
+                let out = reader.get_mut();
+                let _ = out.write_all(&ws_frame(true, 8, &1000u16.to_be_bytes(), false));
+                let _ = out.flush();
+                return;
+            }
+            (1, b"split") => {
+                let (a, b) = REAL.split_at(11);
+                let mut reply = ws_frame(false, 1, format!("v={a}").as_bytes(), false);
+                reply.extend(ws_frame(true, 0, format!("{b};").as_bytes(), false));
+                reply
+            }
+            (1, text) => ws_frame(true, 1, &[&b"echo:"[..], text].concat(), false),
+            _ => continue,
+        };
+        let out = reader.get_mut();
+        if out.write_all(&reply).is_err() || out.flush().is_err() {
+            return;
+        }
+    }
+}
+
+fn start_ws_service() -> Service<WsSeen> {
+    start_service_with(serve_ws)
+}
+
+fn base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let bytes = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let word = (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2]);
+        for place in 0..4 {
+            if place <= chunk.len() {
+                let index = usize::try_from((word >> (18 - 6 * place)) & 63).expect("index");
+                out.push(char::from(TABLE[index]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The address and the password of the proxy, from `HTTPS_PROXY` of the run.
+fn proxy_login(run: &Run) -> (String, String) {
+    let url = run
+        .proxy
+        .network()
+        .env
+        .iter()
+        .find(|(name, _)| name == "HTTPS_PROXY")
+        .map(|(_, value)| value.clone())
+        .expect("proxy url");
+    let rest = url.strip_prefix("http://apassy:").expect("proxy user");
+    let (password, address) = rest.split_once('@').expect("proxy address");
+    (address.to_owned(), password.to_owned())
+}
+
+/// Reads one head byte by byte, so no byte after it is taken.
+fn read_raw_head(stream: &mut TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if stream.read(&mut byte).unwrap_or(0) == 0 {
+            break;
+        }
+        head.push(byte[0]);
+    }
+    String::from_utf8_lossy(&head).into_owned()
+}
+
+/// CONNECT through the proxy with the password of the run: the stream and the
+/// answer head.
+fn connect_through(run: &Run, target: &str) -> (TcpStream, String) {
+    let (address, password) = proxy_login(run);
+    let mut tcp = TcpStream::connect(address).expect("connect");
+    tcp.set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
+    let login = base64(format!("apassy:{password}").as_bytes());
+    write!(
+        tcp,
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {login}\r\n\r\n"
+    )
+    .expect("write");
+    let answer = read_raw_head(&mut tcp);
+    (tcp, answer)
+}
+
+type WsClient = BufReader<StreamOwned<ClientConnection, TcpStream>>;
+
+/// A WebSocket through the proxy: CONNECT to `target`, TLS for `localhost` with
+/// `roots`, and `request`. The client and the answer head.
+fn open_ws(
+    run: &Run,
+    target: &str,
+    request: &str,
+    roots: Vec<CertificateDer<'static>>,
+) -> (WsClient, String) {
+    let (tcp, answer) = connect_through(run, target);
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    let mut store = RootCertStore::empty();
+    for root in roots {
+        store.add(root).expect("root");
+    }
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_root_certificates(store)
+            .with_no_client_auth();
+    let name = ServerName::try_from("localhost").expect("name");
+    let conn = ClientConnection::new(Arc::new(config), name).expect("tls");
+    let mut tls = StreamOwned::new(conn, tcp);
+    tls.write_all(request.as_bytes()).expect("request");
+    tls.flush().expect("flush");
+    let mut client = BufReader::new(tls);
+    let mut head = String::new();
+    loop {
+        let mut line = String::new();
+        if client.read_line(&mut line).expect("head") == 0 {
+            break;
+        }
+        head.push_str(&line);
+        if line == "\r\n" {
+            break;
+        }
+    }
+    (client, head)
+}
+
+/// The run authority, as the trust file of the run has it.
+fn run_roots(run: &Run) -> Vec<CertificateDer<'static>> {
+    vec![CertificateDer::from_pem_file(&run.proxy.network().ca_file).expect("run authority")]
+}
+
+fn ws_request(path: &str, port: u16, extra: &str) -> String {
+    format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n"
+    )
+}
+
+/// The frame of the service that follows its 101.
+fn read_welcome(client: &mut WsClient, run: &Run) {
+    let (_, opcode, payload) = read_ws_frame(client).expect("welcome");
+    assert_eq!(opcode, 1);
+    assert_eq!(
+        payload,
+        format!("welcome {}", run.placeholder).into_bytes(),
+        "the value in the first frame became the placeholder"
+    );
+}
+
+/// The Close handshake from the client side.
+fn close_ws(client: &mut WsClient) {
+    client
+        .get_mut()
+        .write_all(&ws_frame(true, 8, &1000u16.to_be_bytes(), true))
+        .expect("close");
+    loop {
+        let (_, opcode, _) = read_ws_frame(client).expect("close answer");
+        if opcode == 8 {
+            return;
+        }
+    }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// One request on an intercepted connection to `localhost:<port>`: the answer
+/// head and the rest of the connection.
+fn intercepted(run: &Run, port: u16, request: &str) -> (String, String) {
+    let (mut client, head) = open_ws(run, &format!("localhost:{port}"), request, run_roots(run));
+    let mut rest = String::new();
+    let _ = client.read_to_string(&mut rest);
+    (head, rest)
+}
+
+/// Judge finding M2: the target and the Host header of a request on an
+/// intercepted connection must name the CONNECT host, before any swap.
+#[test]
+fn a_request_that_names_another_host_is_refused_before_the_swap() {
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let auth = format!("Authorization: Bearer {}", proxied.placeholder);
+    for request in [
+        format!(
+            "GET https://evil.example/whoami HTTP/1.1\r\nHost: localhost:{port}\r\n{auth}\r\n\r\n"
+        ),
+        format!(
+            "GET /whoami HTTP/1.1\r\nHost: localhost:{port}\r\nHost: evil.example\r\n{auth}\r\n\r\n"
+        ),
+        format!("GET /whoami HTTP/1.1\r\n{auth}\r\n\r\n"),
+        format!("GET /whoami HTTP/1.1\r\nHost: evil.example\r\n{auth}\r\n\r\n"),
+    ] {
+        let (head, body) = intercepted(&proxied, port, &request);
+        assert!(head.starts_with("HTTP/1.1 400 "), "{request}: {head}");
+        assert!(!body.contains(REAL), "{body}");
+    }
+    assert!(
+        service.seen.lock().expect("seen").is_empty(),
+        "no request reached the service"
+    );
+    let log = events(proxied);
+    assert_eq!(log.len(), 4, "{log:?}");
+    assert!(
+        log.iter()
+            .all(|event| event.outcome == ProxyOutcome::Refused)
+    );
+    assert!(!format!("{log:?}").contains(REAL));
+}
+
+/// Judge finding L1: after a real value went out, an answer that the proxy cannot
+/// read is a 502; the echo of Basic credentials gets the placeholder credentials.
+#[test]
+fn an_unreadable_answer_after_a_swap_is_502_and_basic_echoes_are_replaced() {
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let auth = format!("Authorization: Bearer {}", proxied.placeholder);
+    for path in ["/gzip", "/te-gzip"] {
+        let (head, body) = intercepted(
+            &proxied,
+            port,
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\n{auth}\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert!(head.starts_with("HTTP/1.1 502 "), "{path}: {head}");
+        assert!(!body.contains(REAL), "{path}: {body}");
+    }
+    // Without a real value on the connection, the answer passes as it is.
+    let (head, _) = intercepted(
+        &proxied,
+        port,
+        &format!("GET /gzip HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+
+    let shown = base64(format!("user:{}", proxied.placeholder).as_bytes());
+    let (head, body) = intercepted(
+        &proxied,
+        port,
+        &format!(
+            "GET /echo-auth HTTP/1.1\r\nHost: localhost:{port}\r\nAuthorization: Basic {shown}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+    let real = base64(format!("user:{REAL}").as_bytes());
+    assert!(body.contains(&format!("Basic {shown}")), "{body}");
+    assert!(!body.contains(&real), "{body}");
+    let seen = service.seen.lock().expect("seen").clone();
+    assert_eq!(
+        seen.last().and_then(|seen| seen.authorization.clone()),
+        Some(format!("Basic {real}"))
+    );
+    let log = events(proxied);
+    assert!(
+        log.iter()
+            .filter(|event| event.outcome == ProxyOutcome::Failed)
+            .count()
+            >= 2,
+        "{log:?}"
+    );
+}
+
+#[test]
+fn websocket_handshake_swaps_the_auth_header() {
+    let service = start_ws_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let (mut client, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request(
+            "/ws",
+            port,
+            &format!("Authorization: Bearer {}\r\n", proxied.placeholder),
+        ),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+    read_welcome(&mut client, &proxied);
+    // Frames go both ways.
+    client
+        .get_mut()
+        .write_all(&ws_frame(true, 1, b"hello", true))
+        .expect("send");
+    let (_, opcode, payload) = read_ws_frame(&mut client).expect("echo");
+    assert_eq!((opcode, payload.as_slice()), (1, &b"echo:hello"[..]));
+    close_ws(&mut client);
+    let seen = service.seen.lock().expect("seen").clone();
+    assert_eq!(
+        seen[0],
+        WsSeen::Handshake {
+            path: "/ws".to_owned(),
+            authorization: Some(format!("Bearer {REAL}")),
+            extensions: None,
+        }
+    );
+    assert!(seen.contains(&WsSeen::Frame {
+        opcode: 1,
+        payload: b"hello".to_vec()
+    }));
+    let log = events(proxied);
+    assert_eq!(log[0].outcome, ProxyOutcome::Swapped, "{log:?}");
+    assert_eq!(log[0].status, Some(101));
+    assert_eq!(log[0].path.as_deref(), Some("/ws"));
+    assert_eq!(log[0].secrets, vec![NAME.to_owned()]);
+    assert!(
+        log.iter().any(|event| event
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("WebSocket frame had a real value"))),
+        "{log:?}"
+    );
+    assert!(!format!("{log:?}").contains(REAL));
+}
+
+#[test]
+fn websocket_query_token_is_swapped() {
+    let service = start_ws_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let (mut client, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request(&format!("/ws?token={}", proxied.placeholder), port, ""),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+    read_welcome(&mut client, &proxied);
+    close_ws(&mut client);
+    let seen = service.seen.lock().expect("seen").clone();
+    assert!(
+        matches!(&seen[0], WsSeen::Handshake { path, .. } if *path == format!("/ws?token={REAL}")),
+        "{seen:?}"
+    );
+    let log = events(proxied);
+    assert_eq!(log[0].outcome, ProxyOutcome::Swapped, "{log:?}");
+    assert!(!format!("{log:?}").contains(REAL));
+}
+
+#[test]
+fn the_extension_offer_is_removed() {
+    let service = start_ws_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let offer = "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n";
+    let (mut client, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request("/ws", port, offer),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+    assert!(
+        !head
+            .to_ascii_lowercase()
+            .contains("sec-websocket-extensions"),
+        "{head}"
+    );
+    read_welcome(&mut client, &proxied);
+    close_ws(&mut client);
+    // A service that turns on an extension anyway is refused: its frames could not
+    // be checked.
+    let (_, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request("/ws-deflate", port, offer),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 502 "), "{head}");
+    let seen = service.seen.lock().expect("seen").clone();
+    let offers: Vec<&Option<String>> = seen
+        .iter()
+        .filter_map(|seen| match seen {
+            WsSeen::Handshake { extensions, .. } => Some(extensions),
+            WsSeen::Frame { .. } => None,
+        })
+        .collect();
+    assert_eq!(offers, vec![&None, &None], "{seen:?}");
+    let log = events(proxied);
+    assert!(
+        log.iter().any(|event| event.outcome == ProxyOutcome::Failed
+            && event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("extension"))),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn websocket_encoded_echoes_are_masked_in_whole_and_fragmented_text_messages() {
+    let service = start_ws_service();
+    let proxied = start_proxy_value(&service, OtherHosts::Tunnel, ECHO_REAL);
+    let port = service.port;
+    let (mut client, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request("/ws-encoded", port, ""),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    for echo in echo_forms() {
+        let mut expected = proxied.placeholder.clone();
+        let fill = expected.chars().next_back().unwrap();
+        expected.extend(std::iter::repeat_n(fill, echo.len() - ECHO_REAL.len()));
+        for _ in 0..2 {
+            let mut message = Vec::new();
+            loop {
+                let (fin, _, payload) = read_ws_frame(&mut client).expect("text frame");
+                message.extend_from_slice(&payload);
+                if fin {
+                    break;
+                }
+            }
+            assert_eq!(message, expected.as_bytes(), "{echo}");
+        }
+    }
+    close_ws(&mut client);
+    events(proxied);
+}
+
+#[test]
+fn a_server_frame_with_the_value_reaches_the_client_as_the_placeholder() {
+    let service = start_ws_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let (mut client, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request("/ws", port, ""),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+    // One frame (it came in one write with the 101).
+    read_welcome(&mut client, &proxied);
+    // Split over two fragments of one message.
+    client
+        .get_mut()
+        .write_all(&ws_frame(true, 1, b"split", true))
+        .expect("send");
+    let mut message = Vec::new();
+    loop {
+        let (fin, opcode, payload) = read_ws_frame(&mut client).expect("fragment");
+        assert!(opcode == 1 || opcode == 0, "{opcode}");
+        assert!(!contains(&payload, REAL.as_bytes()));
+        message.extend_from_slice(&payload);
+        if fin {
+            break;
+        }
+    }
+    assert_eq!(message, format!("v={};", proxied.placeholder).into_bytes());
+    close_ws(&mut client);
+    let placeholder = proxied.placeholder.clone();
+    let log = events(proxied);
+    assert!(!format!("{log:?}").contains(REAL));
+    assert!(!format!("{log:?}").contains(&placeholder));
+}
+
+#[test]
+fn a_client_frame_with_a_placeholder_closes_with_1008() {
+    let service = start_ws_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let (mut client, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request("/ws", port, ""),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+    read_welcome(&mut client, &proxied);
+    let body = format!("{{\"store\":\"{}\"}}", proxied.placeholder);
+    client
+        .get_mut()
+        .write_all(&ws_frame(true, 1, body.as_bytes(), true))
+        .expect("send");
+    let (_, opcode, payload) = read_ws_frame(&mut client).expect("close");
+    assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1008);
+    let reason = String::from_utf8_lossy(&payload[2..]).into_owned();
+    assert!(reason.contains(NAME), "{reason}");
+    assert!(!reason.contains(&proxied.placeholder));
+    // The frame never reached the service.
+    let seen = service.seen.lock().expect("seen").clone();
+    assert!(
+        seen.iter().all(|seen| match seen {
+            WsSeen::Frame { payload, .. } => !contains(payload, proxied.placeholder.as_bytes()),
+            WsSeen::Handshake { .. } => true,
+        }),
+        "{seen:?}"
+    );
+    let placeholder = proxied.placeholder.clone();
+    let log = events(proxied);
+    let refused: Vec<&ProxyEvent> = log
+        .iter()
+        .filter(|event| event.outcome == ProxyOutcome::Refused)
+        .collect();
+    assert_eq!(refused.len(), 1, "{log:?}");
+    assert!(
+        refused[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains(NAME)),
+        "{log:?}"
+    );
+    let text = format!("{log:?}");
+    assert!(
+        !text.contains(REAL) && !text.contains(&placeholder),
+        "{text}"
+    );
+}
+
+#[test]
+fn websocket_to_another_host_is_a_tunnel() {
+    let service = start_ws_service();
+    let port = service.port;
+    // 127.0.0.1 is not the host of the rule (localhost): a blind tunnel, no swap.
+    let tunnel = start_proxy(&service, OtherHosts::Tunnel);
+    let (mut client, head) = open_ws(
+        &tunnel,
+        &format!("127.0.0.1:{port}"),
+        &ws_request(
+            "/ws",
+            port,
+            &format!("Authorization: Bearer {}\r\n", tunnel.placeholder),
+        ),
+        vec![service.root.clone()],
+    );
+    assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+    let _ = read_ws_frame(&mut client).expect("welcome");
+    close_ws(&mut client);
+    let seen = service.seen.lock().expect("seen").clone();
+    assert_eq!(
+        seen[0],
+        WsSeen::Handshake {
+            path: "/ws".to_owned(),
+            authorization: Some(format!("Bearer {}", tunnel.placeholder)),
+            extensions: None,
+        }
+    );
+    let log = events(tunnel);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].outcome, ProxyOutcome::Tunneled);
+
+    // A run that reaches only the hosts of its secrets refuses it.
+    let refuse = start_proxy(&service, OtherHosts::Refuse);
+    let (_, answer) = connect_through(&refuse, &format!("127.0.0.1:{port}"));
+    assert!(answer.starts_with("HTTP/1.1 403 "), "{answer}");
+    let log = events(refuse);
+    assert_eq!(log[0].outcome, ProxyOutcome::Refused, "{log:?}");
+    assert_eq!(service.seen.lock().expect("seen").len(), seen.len());
+}
+
+#[test]
+fn an_upgrade_other_than_websocket_is_refused() {
+    let service = start_ws_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let request = format!(
+        "GET /ws HTTP/1.1\r\nHost: localhost:{port}\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n"
+    );
+    let (_, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &request,
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 501 "), "{head}");
+    assert!(service.seen.lock().expect("seen").is_empty());
+    let log = events(proxied);
+    assert_eq!(log[0].outcome, ProxyOutcome::Refused, "{log:?}");
+}
+
+#[test]
+fn a_refused_websocket_answer_gets_the_placeholder() {
+    let service = start_ws_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let (mut client, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request("/ws-deny", port, ""),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 401 "), "{head}");
+    let mut body = Vec::new();
+    let _ = client.read_to_end(&mut body);
+    let body = String::from_utf8_lossy(&body).into_owned();
+    assert!(body.contains(&proxied.placeholder), "{body}");
+    assert!(!body.contains(REAL));
+    let log = events(proxied);
+    assert_eq!(log[0].status, Some(401), "{log:?}");
+}
+
+/// The plan (D11) names the auth header and the key query parameter as the swap
+/// positions of a handshake. A placeholder in `Sec-WebSocket-Protocol` is not one:
+/// the handshake is refused and the service gets nothing.
+#[test]
+fn a_placeholder_in_the_subprotocol_header_is_refused() {
+    let service = start_ws_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let (_, head) = open_ws(
+        &proxied,
+        &format!("localhost:{port}"),
+        &ws_request(
+            "/ws",
+            port,
+            &format!("Sec-WebSocket-Protocol: key.{}\r\n", proxied.placeholder),
+        ),
+        run_roots(&proxied),
+    );
+    assert!(head.starts_with("HTTP/1.1 403 "), "{head}");
+    assert!(service.seen.lock().expect("seen").is_empty());
+    let placeholder = proxied.placeholder.clone();
+    let log = events(proxied);
+    assert_eq!(log[0].outcome, ProxyOutcome::Refused, "{log:?}");
+    assert!(
+        log[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Sec-WebSocket-Protocol")),
+        "{log:?}"
+    );
+    assert!(!format!("{log:?}").contains(&placeholder));
 }

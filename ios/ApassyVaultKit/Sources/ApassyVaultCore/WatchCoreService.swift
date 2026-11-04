@@ -24,6 +24,9 @@ public final class WatchCoreService: WatchService, @unchecked Sendable {
         static let answer = "access_request_answer"
         static let cancelPrepared = "access_request_cancel_prepared"
         static let wait = "questions_wait"
+        static let pushTokenSet = "push_token_set"
+        static let pushTokenClear = "push_token_clear"
+        static let pushSummaryKeys = "push_summary_keys"
     }
 
     private struct Empty: Decodable, Sendable {}
@@ -126,5 +129,18 @@ public final class WatchCoreService: WatchService, @unchecked Sendable {
 
     public func wait(timeout: Int) async throws -> Bool {
         try await call(Op.wait, ["timeout": min(max(timeout, 1), 25)], as: Waited.self).changed
+    }
+
+    // MARK: Notifications on this watch (push-gateway-v1 section 11)
+
+    public func pushTokenSet(token: Data, environment: PushEnvironment) async throws {
+        let hex = token.map { String(format: "%02x", $0) }.joined()
+        try await call(Op.pushTokenSet, ["token": hex, "environment": environment.rawValue])
+    }
+
+    public func pushTokenClear() async throws { try await call(Op.pushTokenClear) }
+
+    public func pushSummaryKeys() async throws -> [PushSummaryKey] {
+        try await call(Op.pushSummaryKeys, as: PushSummaryKeys.self).keys
     }
 }

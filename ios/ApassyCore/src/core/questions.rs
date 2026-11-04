@@ -39,6 +39,7 @@
 #[path = "access_requests.rs"]
 mod access_requests;
 pub(super) mod envelope;
+mod push_gateway;
 #[path = "watch.rs"]
 mod watch;
 
@@ -108,6 +109,9 @@ pub struct State {
     push: Option<PushToken>,
     /// The vaults of [`PUSH_FILE`].
     push_clear: BTreeSet<String>,
+    /// The push handles of the questions teams on a node, by vault ID (push-gateway-v1
+    /// section 6), also in [`PUSH_FILE`]: no token.
+    push_handles: BTreeMap<String, push_gateway::StoredHandle>,
     /// The highest feed `seq` accepted of each Mac (relay-feed-v1 section 8): no secret,
     /// kept on disk, and not dropped with the contexts.
     pub(super) feed_marks: super::feed::Marks,
@@ -121,8 +125,10 @@ pub struct State {
 /// it away.
 pub(super) struct Leftover {
     member: Arc<RelayMember>,
-    /// The push token is still in the team.
+    /// The push token (or the push handle) is still in the team.
     token: bool,
+    /// The team takes push handles (push-gateway-v1 section 10), not tokens.
+    handle: bool,
     /// The device number of this iPhone in a notifications-only team that it did not
     /// leave yet.
     leave: Option<u64>,
@@ -161,6 +167,12 @@ struct PushToken {
     token: String,
     environment: String,
     bundle_id: String,
+    /// The kind of this device at the push gateway: `watch` for the watch core.
+    kind: push_gateway::Kind,
+    /// The origin of the push gateway of the node teams.
+    gateway: String,
+    /// The app named the gateway (else [`push_gateway::DEFAULT_GATEWAY`]).
+    explicit_gateway: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -169,31 +181,60 @@ enum PushDue {
     Clear,
 }
 
+/// [`PUSH_FILE`]. `handles` is new in this version of the app; an older app ignores it,
+/// and an older file has none.
 #[derive(Serialize, Deserialize)]
 struct PushFile {
     version: u32,
     clear: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    handles: BTreeMap<String, push_gateway::StoredHandle>,
 }
 
 impl State {
-    /// The state of a new process, with the vaults of [`PUSH_FILE`].
+    /// The state of a new process, with the vaults and the handles of [`PUSH_FILE`].
     pub(super) fn load(data_dir: &Path) -> Self {
-        let clear = std::fs::read(data_dir.join(PUSH_FILE))
+        let file = std::fs::read(data_dir.join(PUSH_FILE))
             .ok()
             .and_then(|text| serde_json::from_slice::<PushFile>(&text).ok())
-            .filter(|file| file.version == 1)
-            .map(|file| {
+            .filter(|file| file.version == 1);
+        let (clear, handles) = match file {
+            Some(file) => (
                 file.clear
                     .into_iter()
                     .filter(|id| super::config::valid_id(id))
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect(),
+                file.handles
+                    .into_iter()
+                    .filter(|(id, handle)| super::config::valid_id(id) && handle.is_valid())
+                    .take(push_gateway::MAX_HANDLES)
+                    .collect(),
+            ),
+            None => Default::default(),
+        };
         Self {
             push_clear: clear,
+            push_handles: handles,
             feed_marks: super::feed::Marks::load(data_dir),
             ..Self::default()
         }
+    }
+
+    /// How the push of the team of `vault_id` on `member` goes.
+    fn push_route(
+        &self,
+        vault_id: &str,
+        member: &RelayMember,
+        kind: push_gateway::Kind,
+    ) -> push_gateway::Route {
+        let stored = self
+            .push_handles
+            .get(vault_id)
+            .is_some_and(|handle| handle.team_id == member.team_id());
+        let explicit = self.push.as_ref().is_some_and(|push| push.explicit_gateway);
+        // A pinned origin is a node (node-pairing-v1).
+        let pinned = member.url().pin().is_some();
+        push_gateway::route(member.relay_url(), kind, pinned, stored, explicit)
     }
 
     /// The context of `vault_id` while it still has the device `member`: a drop or a new
@@ -266,7 +307,8 @@ impl State {
         if let Some(old) = self.contexts.remove(vault_id) {
             old.member.close();
         }
-        self.push_clear.remove(vault_id)
+        let handle = self.push_handles.remove(vault_id).is_some();
+        self.push_clear.remove(vault_id) || handle
     }
 
     /// The vaults whose context holds `qid`.
@@ -428,6 +470,21 @@ struct StatusOut {
     registered: bool,
     /// The owner removed this iPhone on a Mac: it needs a new `join_attach`.
     removed: bool,
+    /// The questions team is on a node (a pinned origin, node-pairing-v1): its origin, for
+    /// "via your Mac". Absent for a hosted relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<NodeOut>,
+}
+
+/// The node of a questions team, as the app shows it.
+#[derive(Serialize)]
+struct NodeOut {
+    /// The origin that this iPhone stores and signs: `https://<Tailscale IPv4>:<port>`.
+    origin: String,
+    /// The six node words of the pin (node-pairing-v1 section 4a), for a visual check.
+    /// Absent when the stored pin text is not a canonical pin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_words: Option<String>,
 }
 
 impl StatusOut {
@@ -441,6 +498,7 @@ impl StatusOut {
             has_key: false,
             registered: false,
             removed: false,
+            node: None,
         }
     }
 
@@ -458,6 +516,10 @@ impl StatusOut {
             has_key: keys.key.is_some(),
             registered: keys.own.is_some(),
             removed: keys.is_removed(),
+            node: keys.node_origin.clone().map(|origin| NodeOut {
+                origin,
+                node_words: keys.node_words.clone(),
+            }),
         }
     }
 }
@@ -846,6 +908,10 @@ pub(super) struct Keys {
     removed: bool,
     /// The team is a notifications-only team (plan §A7): it carries no relay sync.
     questions_only: bool,
+    /// The origin of the team when it is on a node (the membership has a pin).
+    node_origin: Option<String>,
+    /// The node words of the pin of that membership (`apassy::net::pin::Pin::words`).
+    node_words: Option<String>,
 }
 
 impl Keys {
@@ -881,7 +947,7 @@ impl Keys {
     /// the request history and the run answers never take it.
     fn open(&self, record: &Record) -> Result<envelope::Card, &'static str> {
         match self.open_any(record)? {
-            AnyCard::Run(card) => Ok(card),
+            AnyCard::Run(card) => Ok(*card),
             AnyCard::Connect(_) => Err(UPDATE),
         }
     }
@@ -1080,6 +1146,15 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
         key: question_key(vault)?,
         team_id: membership.team_id.clone(),
         device_id: membership.device_id,
+        node_origin: membership
+            .pin
+            .as_ref()
+            .map(|_| membership.relay_url.clone()),
+        node_words: membership
+            .pin
+            .as_deref()
+            .and_then(apassy::net::pin::parse)
+            .map(|pin| pin.words()),
         questions_only: membership
             .purposes
             .iter()
@@ -1088,13 +1163,11 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
     Ok(Some((membership, keys)))
 }
 
+/// The device of `membership`, with the pin and the alternatives of a node relay that
+/// the membership keeps (node-pairing-v1 section 9): it never connects to a pinned
+/// node without its pin.
 fn member_of(membership: &RelayMembership) -> CoreResult<RelayMember> {
-    Ok(RelayMember::new(
-        &membership.relay_url,
-        &membership.team_id,
-        membership.device_id,
-        membership.key_pkcs8.clone(),
-    )?)
+    Ok(RelayMember::from_membership(membership)?)
 }
 
 fn settle_out(settle: envelope::Settle) -> SettleOut {
@@ -1349,23 +1422,40 @@ impl Core {
             "push_token_set" => {
                 #[derive(Deserialize)]
                 struct Token {
-                    token: String,
+                    token: Secret,
                     environment: String,
                     #[serde(default)]
                     bundle_id: Option<String>,
+                    /// The push gateway of the node teams (push-gateway-v1), an origin.
+                    /// Default: the Apassy project's gateway.
+                    #[serde(default)]
+                    gateway: Option<String>,
                 }
                 let Token {
                     token,
                     environment,
                     bundle_id,
+                    gateway,
                 } = params(request)?;
+                let kind = if self.role == Role::Watch {
+                    push_gateway::Kind::Watch
+                } else {
+                    push_gateway::Kind::Iphone
+                };
+                let default_bundle = match kind {
+                    push_gateway::Kind::Iphone => BUNDLE_ID,
+                    push_gateway::Kind::Watch => push_gateway::WATCH_BUNDLE_ID,
+                };
                 Ok(ok(&self.push_token_set(
-                    &token,
+                    token.expose(),
                     &environment,
-                    bundle_id.as_deref().unwrap_or(BUNDLE_ID),
+                    bundle_id.as_deref().unwrap_or(default_bundle),
+                    kind,
+                    gateway.as_deref(),
                 )?))
             }
             "push_token_clear" => Ok(ok(&self.push_token_clear()?)),
+            "push_summary_keys" => Ok(ok(&self.push_summary_keys())),
             "join_attach" => {
                 #[derive(Deserialize)]
                 struct Start {
@@ -1549,15 +1639,17 @@ impl Core {
         }
     }
 
-    /// Write [`PUSH_FILE`]. The app only; a failure leaves the old list (the core tries
+    /// Write [`PUSH_FILE`]. The app and the watch; a failure leaves the old list (the core tries
     /// again at the next change).
     fn save_push(&self, state: &State) {
-        if self.role != Role::App {
+        // The AutoFill extension pushes nothing; the watch keeps its own handle.
+        if self.role == Role::Autofill {
             return;
         }
         let file = PushFile {
             version: 1,
             clear: state.push_clear.clone(),
+            handles: state.push_handles.clone(),
         };
         if let Ok(text) = serde_json::to_vec(&file) {
             let _ = write_private(&self.paths.data_dir, PUSH_FILE, &text);
@@ -1693,9 +1785,12 @@ impl Core {
             context.member.close();
             return None;
         }
+        let handle = guard(&self.questions).push_route(vault_id, &context.member, self.push_kind())
+            == push_gateway::Route::Handle;
         let mut leftover = Leftover {
             member: context.member,
             token: true,
+            handle,
             leave: keys.questions_only.then_some(keys.device_id),
         };
         Self::leave_team(&mut leftover);
@@ -1715,10 +1810,10 @@ impl Core {
         }
     }
 
-    /// `DELETE /v1/push/token`, then `DELETE /v1/devices/{id}` of a notifications-only
+    /// `DELETE /v1/push/token` (or `/v1/push/handle`), then `DELETE /v1/devices/{id}` of a notifications-only
     /// team. A failure stays for the next try.
     fn leave_team(leftover: &mut Leftover) {
-        if leftover.token && Self::delete_token(&leftover.member).is_ok() {
+        if leftover.token && Self::delete_push(&leftover.member, leftover.handle).is_ok() {
             leftover.token = false;
         }
         if leftover.token {
@@ -2196,7 +2291,7 @@ impl Core {
         let using = self.context_for(&answer.qid, answer.vault_id.as_deref())?;
         let own = using.keys.own_row_as(self.role)?;
         let (record, card) = match self.opened_any(&answer.qid, &using)? {
-            (record, AnyCard::Run(card)) => (record, card),
+            (record, AnyCard::Run(card)) => (record, *card),
             (record, AnyCard::Connect(card)) => {
                 return self
                     .prepare_connect(answer, time, using, own, record, card)
@@ -2661,7 +2756,17 @@ impl Core {
         })
     }
 
-    // ---- The push token (relay-questions-v1 section 14). ----
+    // ---- The push token (relay-questions-v1 section 14) and the push handle of a node
+    // team (push-gateway-v1 sections 6 and 10). ----
+
+    /// The kind of this device at the push gateway.
+    fn push_kind(&self) -> push_gateway::Kind {
+        if self.role == Role::Watch {
+            push_gateway::Kind::Watch
+        } else {
+            push_gateway::Kind::Iphone
+        }
+    }
 
     fn put_token(member: &RelayMember, token: &PushToken) -> CoreResult<TokenSetWire> {
         let body = json!({
@@ -2683,6 +2788,134 @@ impl Core {
             .map_err(call_error)
     }
 
+    /// Give the team of `vault_id` this device's push: the token on the hosted relay, a
+    /// handle of the gateway on a node. The token goes to a node never: only to the
+    /// gateway, and to an unpinned relay that has no handle route (404, a relay before team
+    /// schema 8, which is no node). A pinned origin is a node: never a token.
+    fn put_push(
+        &self,
+        vault_id: &str,
+        member: &RelayMember,
+        token: &PushToken,
+    ) -> CoreResult<TokenSetWire> {
+        let route = guard(&self.questions).push_route(vault_id, member, token.kind);
+        match route {
+            push_gateway::Route::Token => Self::put_token(member, token),
+            push_gateway::Route::Unavailable => Err(no_push_here()),
+            push_gateway::Route::Handle => match self.put_handle(vault_id, member, token) {
+                Err(HandleFailure::NoRoute)
+                    if token.kind == push_gateway::Kind::Iphone && member.url().pin().is_none() =>
+                {
+                    Self::put_token(member, token)
+                }
+                Err(HandleFailure::NoRoute) => Err(no_push_here()),
+                Err(HandleFailure::Core(error)) => Err(error),
+                Ok(wire) => Ok(wire),
+            },
+        }
+    }
+
+    /// `PUT /v1/push/handle` with the kept handle of `vault_id` when it still serves this
+    /// token, else with a new one from the gateway (kept before the relay call, so a
+    /// failed call reuses it).
+    fn put_handle(
+        &self,
+        vault_id: &str,
+        member: &RelayMember,
+        token: &PushToken,
+    ) -> Result<TokenSetWire, HandleFailure> {
+        let at = now();
+        let digest = push_gateway::token_digest(&token.environment, &token.token);
+        let kept = guard(&self.questions)
+            .push_handles
+            .get(vault_id)
+            .filter(|handle| {
+                handle.serves(
+                    member.team_id(),
+                    member.relay_url(),
+                    &token.gateway,
+                    &digest,
+                    at,
+                )
+            })
+            .cloned();
+        let handle = match kept {
+            Some(handle) => handle,
+            None => {
+                let made = push_gateway::make_handle(
+                    &token.gateway,
+                    token.kind,
+                    &token.token,
+                    &token.environment,
+                    &token.bundle_id,
+                    at,
+                )
+                .map_err(HandleFailure::Core)?;
+                let handle = push_gateway::StoredHandle {
+                    team_id: member.team_id().to_owned(),
+                    relay_url: member.relay_url().to_owned(),
+                    gateway: token.gateway.clone(),
+                    handle: made.handle,
+                    secret: made.secret.to_string(),
+                    expires_at: made.expires_at,
+                    token_digest: digest,
+                };
+                let mut state = guard(&self.questions);
+                // The old handle is forgotten; it ends at its expiry or with the token.
+                state
+                    .push_handles
+                    .insert(vault_id.to_owned(), handle.clone());
+                self.save_push(&state);
+                handle
+            }
+        };
+        let body = json!({
+            "v": 1,
+            "gateway": handle.gateway,
+            "handle": handle.handle,
+            "secret": handle.secret,
+        });
+        match member.call("PUT", "/v1/push/handle", Some(&body), Duration::ZERO) {
+            Ok(result) => serde_json::from_value::<TokenSetWire>(result)
+                .map_err(|_| HandleFailure::Core(SyncError::RelayUnreachable.into())),
+            Err(RelayCallError::Relay { status: 404, .. }) => Err(HandleFailure::NoRoute),
+            Err(RelayCallError::Relay { status: 409, code }) if code == "push_gateway_refused" => {
+                Err(HandleFailure::Core(CoreError::new(
+                    "push_gateway_refused",
+                    "Your Mac does not use this push service. Questions show while Apassy is open.",
+                )))
+            }
+            Err(error) => Err(HandleFailure::Core(call_error(error))),
+        }
+    }
+
+    /// Take this device's push off a team: `DELETE /v1/push/handle` on a team of handles
+    /// (a relay without the route, 404: the token instead; 409 `push_unavailable`: it
+    /// holds nothing), else `DELETE /v1/push/token`.
+    fn delete_push(member: &RelayMember, handle: bool) -> CoreResult<()> {
+        if !handle {
+            return Self::delete_token(member);
+        }
+        match member.call("DELETE", "/v1/push/handle", None, Duration::ZERO) {
+            Ok(_) => Ok(()),
+            // A node never held a token.
+            Err(RelayCallError::Relay { status: 404, .. }) if member.url().pin().is_some() => {
+                Ok(())
+            }
+            Err(RelayCallError::Relay { status: 404, .. }) => Self::delete_token(member),
+            Err(RelayCallError::Relay { status: 409, code }) if code == "push_unavailable" => {
+                Ok(())
+            }
+            Err(error) => Err(call_error(error)),
+        }
+    }
+
+    /// Whether the team of `vault_id` takes handles: its route, or a handle kept for it.
+    fn handle_team(&self, vault_id: &str, member: &RelayMember) -> bool {
+        let state = guard(&self.questions);
+        state.push_route(vault_id, member, self.push_kind()) != push_gateway::Route::Token
+    }
+
     /// The push token change that the team of `vault_id` still needs, before its next
     /// read. A failure waits for the next one.
     fn push_due(&self, vault_id: &str, member: &Arc<RelayMember>) {
@@ -2696,15 +2929,22 @@ impl Core {
         };
         let done = match (due, token) {
             (None, _) => return,
-            (Some(PushDue::Set), Some(token)) => Self::put_token(member, &token).is_ok(),
+            (Some(PushDue::Set), Some(token)) => self.put_push(vault_id, member, &token).is_ok(),
             // Notifications went off after the context was made.
             (Some(PushDue::Set), None) => true,
-            (Some(PushDue::Clear), _) => Self::delete_token(member).is_ok(),
+            (Some(PushDue::Clear), _) => {
+                let handle = self.handle_team(vault_id, member);
+                Self::delete_push(member, handle).is_ok()
+            }
         };
         let mut state = guard(&self.questions);
         if done {
-            if due == Some(PushDue::Clear) && state.push_clear.remove(vault_id) {
-                self.save_push(&state);
+            if due == Some(PushDue::Clear) {
+                let cleared = state.push_clear.remove(vault_id);
+                let forgot = state.push_handles.remove(vault_id).is_some();
+                if cleared || forgot {
+                    self.save_push(&state);
+                }
             }
         } else if let Ok(context) = state.context_mut(vault_id, member) {
             // A newer change (`push_token_set` or `_clear`) in between wins.
@@ -2714,13 +2954,16 @@ impl Core {
         }
     }
 
-    /// `push_token_set`: the token goes to the questions team of every context, and to
-    /// the team of each vault that opens later in this process.
+    /// `push_token_set`: the token goes to the questions team of every context (a node
+    /// team gets a handle of the gateway instead), and to the team of each vault that
+    /// opens later in this process.
     fn push_token_set(
         &self,
         token: &str,
         environment: &str,
         bundle_id: &str,
+        kind: push_gateway::Kind,
+        gateway: Option<&str>,
     ) -> CoreResult<TokenSet> {
         let valid_token = (32..=200).contains(&token.len())
             && token
@@ -2732,11 +2975,17 @@ impl Core {
         if !matches!(environment, "development" | "production") {
             return Err(CoreError::invalid("The push environment is not valid."));
         }
+        let explicit_gateway = gateway.is_some();
+        let gateway =
+            push_gateway::gateway_origin(gateway.unwrap_or(push_gateway::DEFAULT_GATEWAY))?;
         let selected = self.questions_refresh()?;
         let token = PushToken {
             token: token.to_owned(),
             environment: environment.to_owned(),
             bundle_id: bundle_id.to_owned(),
+            kind,
+            gateway,
+            explicit_gateway,
         };
         {
             let mut state = guard(&self.questions);
@@ -2760,7 +3009,7 @@ impl Core {
         let mut first: Option<(u64, u64)> = None;
         let mut failed = None;
         for (id, member) in targets {
-            let out = match Self::put_token(&member, &token) {
+            let out = match self.put_push(&id, &member, &token) {
                 Ok(wire) => {
                     first.get_or_insert((wire.device_id, wire.updated_at));
                     PushOut {
@@ -2797,9 +3046,9 @@ impl Core {
         }
     }
 
-    /// `push_token_clear`: the token leaves the questions team of every context. Each
-    /// other vault on this iPhone, and a team that failed, goes into [`PUSH_FILE`]: its
-    /// token is cleared when the vault opens.
+    /// `push_token_clear`: the token (or the handle) leaves the questions team of every
+    /// context, and the kept handle is forgotten. Each other vault on this iPhone, and a
+    /// team that failed, goes into [`PUSH_FILE`]: its push is cleared when the vault opens.
     fn push_token_clear(&self) -> CoreResult<TokenCleared> {
         self.questions_refresh()?;
         let vault_ids: Vec<String> = guard(&self.list)
@@ -2807,9 +3056,9 @@ impl Core {
             .iter()
             .map(|entry| entry.id.clone())
             .collect();
+        let kind = self.push_kind();
         let targets = {
             let mut state = guard(&self.questions);
-            state.push = None;
             for context in state.contexts.values_mut() {
                 context.push_due = None;
             }
@@ -2819,16 +3068,23 @@ impl Core {
                 .collect();
             state.push_clear.extend(without);
             // A removed iPhone is no device of that team any more: nothing to clear.
-            state
+            let targets = state
                 .contexts
                 .iter()
                 .filter(|(_, context)| !context.keys.is_removed())
-                .map(|(id, context)| (id.clone(), Arc::clone(&context.member)))
-                .collect::<Vec<_>>()
+                .map(|(id, context)| {
+                    let handle =
+                        state.push_route(id, &context.member, kind) != push_gateway::Route::Token;
+                    (id.clone(), Arc::clone(&context.member), handle)
+                })
+                .collect::<Vec<_>>();
+            // After the routes: they read whether the app named a gateway.
+            state.push = None;
+            targets
         };
         let mut cleared = Vec::new();
-        for (id, member) in targets {
-            match Self::delete_token(&member) {
+        for (id, member, handle) in targets {
+            match Self::delete_push(&member, handle) {
                 Ok(()) => cleared.push(id),
                 Err(_) => {
                     let mut state = guard(&self.questions);
@@ -2842,12 +3098,38 @@ impl Core {
         let mut state = guard(&self.questions);
         for id in &cleared {
             state.push_clear.remove(id);
+            state.push_handles.remove(id);
         }
         self.save_push(&state);
         Ok(TokenCleared {
             cleared,
             pending: state.push_clear.iter().cloned().collect(),
         })
+    }
+
+    /// `push_summary_keys`: the summary key of the questions team of each context
+    /// (push-gateway-v1 section 12), for the Keychain group of the Notification Service
+    /// Extension. A context without a question key, or of a removed device, has none.
+    fn push_summary_keys(&self) -> SummaryKeys {
+        let state = guard(&self.questions);
+        let mut keys: Vec<SummaryKeyOut> = state
+            .contexts
+            .values()
+            .filter(|context| !context.keys.is_removed())
+            .filter_map(|context| {
+                let (_, question_key) = context.keys.key.as_ref()?;
+                let key = push_gateway::summary_key(question_key)?;
+                Some(SummaryKeyOut {
+                    team_id: context.keys.team_id.clone(),
+                    key: key.to_string(),
+                })
+            })
+            .collect();
+        keys.sort_by(|a, b| a.team_id.cmp(&b.team_id));
+        keys.dedup_by(|a, b| a.team_id == b.team_id);
+        // The extension tries at most 16 keys (section 12).
+        keys.truncate(16);
+        SummaryKeys { keys }
     }
 
     // ---- A notifications-only team (plan §A7). ----
@@ -2999,6 +3281,8 @@ impl Core {
                     key_pkcs8,
                     purposes: BTreeSet::from([MembershipPurpose::Questions]),
                     created_at: 0,
+                    pin: member.url().pin().map(|pin| pin.text()),
+                    alt: member.url().alternative_list(),
                 };
                 if let Some(handoff) = &handoff {
                     let answer_key = attaching
@@ -3037,6 +3321,39 @@ impl Core {
 struct TokenSetWire {
     device_id: u64,
     updated_at: u64,
+}
+
+/// Why a push handle did not reach a team.
+enum HandleFailure {
+    /// The relay has no handle route (404): a relay before team schema 8, so no node.
+    NoRoute,
+    Core(CoreError),
+}
+
+/// 409 `push_unavailable` of a relay that sends this device no notifications.
+fn no_push_here() -> CoreError {
+    CoreError::new(
+        "push_unavailable",
+        "This relay sends no notifications. Questions show while Apassy is open.",
+    )
+}
+
+#[derive(Serialize)]
+struct SummaryKeys {
+    keys: Vec<SummaryKeyOut>,
+}
+
+/// The summary key of one questions team (push-gateway-v1 section 12), b64u.
+#[derive(Serialize)]
+struct SummaryKeyOut {
+    team_id: String,
+    key: String,
+}
+
+impl Drop for SummaryKeyOut {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.key);
+    }
 }
 
 /// An answer that passed the checks, ready to sign and seal.
@@ -3089,6 +3406,8 @@ mod tests {
             devices: Vec::new(),
             own: None,
             removed: false,
+            node_origin: None,
+            node_words: None,
             questions_only: true,
         };
         {
@@ -3162,6 +3481,8 @@ mod tests {
             devices: vec![asker],
             own: None,
             removed: false,
+            node_origin: None,
+            node_words: None,
             questions_only: true,
         };
         (keys, key)

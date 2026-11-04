@@ -15,6 +15,9 @@
 //   save         { code: "ok" | "exists" | "cancelled" | ..., delayMs, item, message }
 //   create       { code: "ok" | "cancelled" | ..., delayMs, item, origin, password }
 //
+// requests.jsonl logs each request as it comes (passwords redacted), answers.jsonl
+// each answer after it was written: its command, ok and code only, never its data.
+//
 // Like the app, it answers bad_request to a missing or an unknown field.
 
 import fs from "node:fs";
@@ -101,6 +104,11 @@ function log(request) {
     safe.password = "[redacted]";
   }
   fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(safe) + "\n");
+}
+
+function logAnswer(request, answer) {
+  const entry = { cmd: request?.cmd ?? null, ok: answer?.ok === true, code: answer?.code ?? null };
+  fs.appendFileSync(path.join(dir, "answers.jsonl"), JSON.stringify(entry) + "\n");
 }
 
 function write(message) {
@@ -273,7 +281,11 @@ process.stdin.on("data", (chunk) => {
       request = null;
     }
     log(request);
-    queue = queue.then(async () => write(await answer(request)));
+    queue = queue.then(async () => {
+      const reply = await answer(request);
+      write(reply);
+      logAnswer(request, reply);
+    });
   }
 });
 

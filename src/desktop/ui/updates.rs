@@ -143,7 +143,7 @@ fn status(view: &UpdateView, ui: &mut egui::Ui, action: &mut Option<Action>) {
         },
     );
     let color = if tone == Tone::Neutral {
-        kit::LABEL
+        kit::palette().label
     } else {
         tone.text()
     };

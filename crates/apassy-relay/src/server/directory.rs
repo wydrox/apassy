@@ -6,8 +6,10 @@
 //! audit of the relay: operator actions, and refused requests that name no known team.
 //! Since version 1004 it also holds the OAuth state of an embedded node (docs/SPEC.md
 //! section 31): registered clients, connect requests, and refresh tokens, with codes and
-//! refresh tokens as hashes only. It holds no people, no items, and no runs: those are in
-//! the file of each team.
+//! refresh tokens as hashes only. Since version 1005 each team code has a kind:
+//! `operator` (`apassy-relay admin team-code`) or `node` (`apassy pair` on a node, ten
+//! minutes, docs/SPEC.md section 32). It holds no people, no items, and no runs: those are
+//! in the file of each team.
 
 use std::sync::Arc;
 
@@ -24,7 +26,7 @@ use crate::server::store::{Store, db, to_i, to_u};
 
 /// `PRAGMA user_version` of the directory. Far from the team versions, so one file is
 /// never taken for the other.
-pub const DIRECTORY_VERSION: i64 = 1004;
+pub const DIRECTORY_VERSION: i64 = 1005;
 
 const SCHEMA: &str = "
 CREATE TABLE team (
@@ -61,6 +63,23 @@ CREATE TABLE oauth_refresh (
   expires_at INTEGER NOT NULL, used_at INTEGER, revoked_at INTEGER);
 CREATE INDEX oauth_refresh_family ON oauth_refresh(family);
 CREATE INDEX oauth_refresh_agent ON oauth_refresh(team_id, agent_id);
+ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','node'));
+PRAGMA user_version = 1005;
+";
+
+/// Version 1004 to 1005 (docs/SPEC.md section 32.6): the kind of a team code, additive.
+/// Every existing code is `operator`. The same text as the last table line of `SCHEMA`,
+/// so a migrated file has the schema of a new one. A file that `downgrade_to_1004` took
+/// back has the column already: it stays (`migrate_1005`).
+const KIND_1005: &str = "
+ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','node'));
+";
+
+/// Version 1005 back to 1004 (`downgrade_to_1004`, docs/OPERATIONS.md section 25.3): the
+/// unused node codes go, so the image of 1004 cannot take one for an operator code; the
+/// column stays, and that image never reads it.
+const DOWNGRADE_1004: &str = "
+DELETE FROM team_code WHERE kind = 'node' AND used_at IS NULL;
 PRAGMA user_version = 1004;
 ";
 
@@ -116,6 +135,46 @@ pub const OPERATOR_ACTOR: &str = "operator";
 
 /// The longest life of a team code, in hours.
 pub const MAX_TEAM_CODE_HOURS: u64 = 720;
+
+/// The longest life of a node pairing code, in minutes (node-pairing-v1 section 6).
+pub const MAX_NODE_CODE_MINUTES: u64 = 10;
+
+/// The kind of a team code (`team_code.kind`, directory 1005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeKind {
+    /// Made by the operator (`apassy-relay admin team-code`): works on any relay.
+    Operator,
+    /// A node pairing code (`apassy pair`, node-pairing-v1 section 6): one use, at most
+    /// ten minutes, and only on a node (a relay with a tailnet listener).
+    Node,
+}
+
+impl CodeKind {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Node => "node",
+        }
+    }
+
+    fn from_text(text: &str) -> Option<Self> {
+        match text {
+            "operator" => Some(Self::Operator),
+            "node" => Some(Self::Node),
+            _ => None,
+        }
+    }
+}
+
+/// `migrate_1005` on a transaction: the column, when it is not there, and the version.
+fn migrate_1005(conn: &Connection) -> RelayResult<()> {
+    if !crate::server::store::has_column(conn, "team_code", "kind")? {
+        conn.execute_batch(KIND_1005).map_err(db)?;
+    }
+    conn.pragma_update(None, "user_version", DIRECTORY_VERSION)
+        .map_err(db)
+}
 
 /// The effective resource limits of one team.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,19 +298,43 @@ pub struct TeamLimitsUpdate {
 
 impl TeamLimits {
     /// The limits of a new Connect team (docs/SPEC.md section 26): one member, no items
-    /// and no agents (so no runs and no proxy), no vault sync (`plan_required`), 2 MiB
-    /// of questions, and 1 MiB of feeds. The other fields are the defaults. Devices are
-    /// 10 per member, as in every team.
+    /// and no agents (so no runs and no proxy), no vault sync (`plan_required`), 30
+    /// snapshot pushes an hour, 2 MiB of questions, and 1 MiB of feeds. The other fields
+    /// are the defaults. Devices are 10 per member, as in every team.
     pub fn connect() -> Self {
+        Self::connect_with(0)
+    }
+
+    /// [`Self::connect`] with the vault sync size `sync_bytes` of the relay's setting
+    /// `APASSY_RELAY_CONNECT_SYNC_BYTES` (docs/SPEC.md section 26.4): 0 is no vault sync,
+    /// else the largest snapshot. `sync_bytes` is stored in every limits column, so an
+    /// image before this setting reads it; `FEED_LIMIT_FIELDS` keep their rule.
+    pub fn connect_with(sync_bytes: u64) -> Self {
         Self {
             members: 1,
             items: 0,
             agents: 0,
-            sync_bytes: 0,
+            sync_bytes,
+            sync_pushes_per_hour: CONNECT_SYNC_PUSHES_PER_HOUR,
             question_bytes: CONNECT_QUESTION_BYTES,
             feed_bytes: CONNECT_FEED_BYTES,
             ..Self::default()
         }
+    }
+
+    /// Whether these are the limits a Connect team starts with on a relay whose setting
+    /// is `sync_bytes`: [`Self::connect`], or [`Self::connect_with`] of the setting. A
+    /// team with other limits got them from the operator (a plan); the idle sweep leaves
+    /// it alone. The presets from before `CONNECT_SYNC_PUSHES_PER_HOUR` (600 pushes an
+    /// hour, the default) count too, so the teams made before it stay in the sweep.
+    pub fn is_connect_preset(&self, sync_bytes: u64) -> bool {
+        let earlier = |limits: Self| Self {
+            sync_pushes_per_hour: Self::default().sync_pushes_per_hour,
+            ..limits
+        };
+        [Self::connect(), Self::connect_with(sync_bytes)]
+            .into_iter()
+            .any(|preset| *self == preset || *self == earlier(preset))
     }
 
     /// The limits of the personal team of an embedded node (docs/SPEC.md section 30.2):
@@ -270,7 +353,8 @@ impl TeamLimits {
     /// The largest file of a team of `kind` (`Store::set_max_bytes`), or `None` for no
     /// cap. A Connect team: its `question_bytes` and `feed_bytes`, plus
     /// `CONNECT_FILE_SLACK` for its rows and audit, plus room for the items and members
-    /// that a plan may give it. An operator team has no cap: the operator made it with a
+    /// that a plan may give it, plus `CONNECT_SYNC_FILE_BYTES` for the sync heads when
+    /// it has vault sync (the snapshots are files of their own). An operator team has no cap: the operator made it with a
     /// code and watches it.
     pub fn file_bytes(&self, kind: TeamKind) -> Option<u64> {
         match kind {
@@ -284,7 +368,12 @@ impl TeamLimits {
                         self.members
                             .saturating_sub(1)
                             .saturating_mul(MEMBER_FILE_BYTES),
-                    ),
+                    )
+                    .saturating_add(if self.sync_bytes == 0 {
+                        0
+                    } else {
+                        CONNECT_SYNC_FILE_BYTES
+                    }),
             ),
         }
     }
@@ -456,6 +545,19 @@ pub const CONNECT_FILE_SLACK: u64 = 8 * 1_048_576;
 /// Room in a Connect team's file for each item and each member beyond the first that a
 /// plan gives it: an item holds up to 4 KiB sealed, a member its devices and its audit.
 pub const ITEM_FILE_BYTES: u64 = 16 * 1024;
+/// Room in a Connect team's file for vault sync (`sync_bytes` above 0): up to
+/// `sync::KEPT_HEADS` (10000) signed heads of about 600 bytes each with their index, the
+/// receipts, and the audit rows of the pushes. The snapshots are files in
+/// `teams/<team id>.sync/`, at most two of `sync_bytes` each.
+pub const CONNECT_SYNC_FILE_BYTES: u64 = 16 * 1_048_576;
+/// `sync_pushes_per_hour` of a new Connect team: 30, a push every two minutes, which a
+/// vault that one person changes does not reach (docs/SPEC.md section 26.4).
+pub const CONNECT_SYNC_PUSHES_PER_HOUR: u64 = 30;
+/// The snapshot bytes that one Connect team may push in 3600 seconds: 512 MiB, eight
+/// full pushes of the largest `sync_bytes`. Over it: 429 `rate_limited` with
+/// `Retry-After` (docs/SPEC.md section 24.3 check 4). Not a stored limit: a plan that
+/// needs more makes the team an operator team.
+pub const CONNECT_SYNC_BYTES_PER_HOUR: u64 = 512 * 1_048_576;
 pub const MEMBER_FILE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -568,13 +670,13 @@ impl Directory {
         })
     }
 
-    /// Opens `relay.db` and checks its version. 1001, 1002, and 1003 move to 1004 in one
+    /// Opens `relay.db` and checks its version. 1001 to 1004 move to 1005 in one
     /// transaction; a failure leaves the file at its version.
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         match store.user_version()? {
             DIRECTORY_VERSION => {}
-            version @ (1001..=1003) => store.tx(|tx| {
+            version @ (1001..=1004) => store.tx(|tx| {
                 if version == 1001 {
                     tx.execute_batch("ALTER TABLE team ADD COLUMN limits TEXT;")
                         .map_err(db)?;
@@ -582,7 +684,10 @@ impl Directory {
                 if version <= 1002 {
                     tx.execute_batch(MIGRATE_1003).map_err(db)?;
                 }
-                tx.execute_batch(MIGRATE_1004).map_err(db)
+                if version <= 1003 {
+                    tx.execute_batch(MIGRATE_1004).map_err(db)?;
+                }
+                migrate_1005(tx)
             })?,
             _ => {
                 return Err(RelayError::internal(
@@ -597,10 +702,11 @@ impl Directory {
     }
 
     /// `apassy-relay downgrade-directory-1003` (docs/OPERATIONS.md section 24): with the
-    /// relay stopped (it takes `relay.lock`), a directory of version 1004 goes back to
-    /// 1003 in place, for an image before OAuth. The OAuth tables go: registered clients,
-    /// connect requests, and refresh tokens. An access token that was issued stays valid in
-    /// its team file until it ends (at most `oauth::ACCESS_TOKEN_SECS`), and no client can
+    /// relay stopped (it takes `relay.lock`), a directory of version 1004 or 1005 goes back
+    /// to 1003 in place, for an image before OAuth: first the step of `downgrade_to_1004`
+    /// (unused node codes go), then the OAuth tables go: registered clients, connect
+    /// requests, and refresh tokens. An access token that was issued stays valid in its
+    /// team file until it ends (at most `oauth::ACCESS_TOKEN_SECS`), and no client can
     /// refresh it. A file of version 1003 is left as it is. Returns the version before and
     /// after.
     pub fn downgrade_to_1003(config: &RelayConfig) -> RelayResult<(i64, i64)> {
@@ -608,11 +714,37 @@ impl Directory {
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         let from = store.user_version()?;
         match from {
+            1005 => store.tx(|tx| {
+                tx.execute_batch(DOWNGRADE_1004).map_err(db)?;
+                tx.execute_batch(DOWNGRADE_1003).map_err(db)
+            })?,
             1004 => store.tx(|tx| tx.execute_batch(DOWNGRADE_1003).map_err(db))?,
             1003 => {}
             _ => {
                 return Err(RelayError::internal(
-                    "relay.db is not a directory of version 1003 or 1004.",
+                    "relay.db is not a directory of version 1003, 1004, or 1005.",
+                ));
+            }
+        }
+        Ok((from, store.user_version()?))
+    }
+
+    /// `apassy-relay downgrade-directory-1004` (docs/OPERATIONS.md section 25.3): with the
+    /// relay stopped (it takes `relay.lock`), a directory of version 1005 goes back to 1004
+    /// in place, for the image before node pairing codes. The unused node codes go (the
+    /// image of 1004 would take one for an operator code); used ones stay as history, and
+    /// the `kind` column stays: that image never reads it, and the next open of 1005 keeps
+    /// it. A file of version 1004 is left as it is. Returns the version before and after.
+    pub fn downgrade_to_1004(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+        let _lock = crate::server::hub::lock_data_dir(config)?;
+        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let from = store.user_version()?;
+        match from {
+            1005 => store.tx(|tx| tx.execute_batch(DOWNGRADE_1004).map_err(db))?,
+            1004 => {}
+            _ => {
+                return Err(RelayError::internal(
+                    "relay.db is not a directory of version 1004 or 1005.",
                 ));
             }
         }
@@ -707,31 +839,58 @@ impl Directory {
         })
     }
 
-    /// A new one-time team code. Returns the code (shown once) and its expiry.
+    /// A new one-time team code of the operator. Returns the code (shown once) and its
+    /// expiry.
     pub fn new_team_code(&self, hours: u64, now: u64) -> RelayResult<(SecretString, u64)> {
         if !(1..=MAX_TEAM_CODE_HOURS).contains(&hours) {
             return Err(RelayError::invalid(format!(
                 "A team code lives 1 to {MAX_TEAM_CODE_HOURS} hours."
             )));
         }
+        self.insert_code(CodeKind::Operator, now + hours * 3600, now)
+    }
+
+    /// A new node pairing code (node-pairing-v1 section 6): a team code of kind `node`,
+    /// one use, for 1 to `MAX_NODE_CODE_MINUTES` minutes. It makes a team only on a node
+    /// (`Hub::create_team`). Returns the code (shown once) and its expiry. The row of the
+    /// relay audit is `node_code_created {code_id, expires_at}`.
+    pub fn new_node_code(&self, minutes: u64, now: u64) -> RelayResult<(SecretString, u64)> {
+        if !(1..=MAX_NODE_CODE_MINUTES).contains(&minutes) {
+            return Err(RelayError::invalid(format!(
+                "A node pairing code lives 1 to {MAX_NODE_CODE_MINUTES} minutes."
+            )));
+        }
+        self.insert_code(CodeKind::Node, now + minutes * 60, now)
+    }
+
+    fn insert_code(
+        &self,
+        kind: CodeKind,
+        expires_at: u64,
+        now: u64,
+    ) -> RelayResult<(SecretString, u64)> {
         let code = new_team_code()?;
-        let expires_at = now + hours * 3600;
         self.store.tx(|tx| {
             tx.execute(
-                "INSERT INTO team_code (code_hash, created_at, expires_at) VALUES (?1, ?2, ?3)",
+                "INSERT INTO team_code (code_hash, created_at, expires_at, kind) VALUES (?1, ?2, ?3, ?4)",
                 params![
                     token_hash(code.expose()).0.as_slice(),
                     to_i(now),
-                    to_i(expires_at)
+                    to_i(expires_at),
+                    kind.text()
                 ],
             )
             .map_err(db)?;
             let id = to_u(tx.last_insert_rowid());
+            let action = match kind {
+                CodeKind::Operator => "team_code_created",
+                CodeKind::Node => "node_code_created",
+            };
             self.audit.write_on(
                 tx,
                 now,
                 OPERATOR_ACTOR,
-                "team_code_created",
+                action,
                 None,
                 &serde_json::json!({"code_id": id, "expires_at": expires_at}),
             )?;
@@ -760,21 +919,24 @@ pub fn team_code_invalid() -> RelayError {
     )
 }
 
-/// The id of a live team code, inside a transaction. Refuses a wrong, used, or expired
-/// code. Check it before any work for a new team.
-pub fn find_team_code(conn: &Connection, code: &str, now: u64) -> RelayResult<u64> {
+/// The id and kind of a live team code, inside a transaction. Refuses a wrong, used, or
+/// expired code. Check it before any work for a new team. The caller refuses a `node`
+/// code on a relay that is not a node (`Hub::create_team`).
+pub fn find_team_code(conn: &Connection, code: &str, now: u64) -> RelayResult<(u64, CodeKind)> {
     if parse_token(code).is_none_or(|parsed| parsed.kind != TokenKind::TeamCode) {
         return Err(team_code_invalid());
     }
-    conn.query_row(
-        "SELECT id FROM team_code WHERE code_hash = ?1 AND used_at IS NULL AND expires_at > ?2",
-        params![token_hash(code).0.as_slice(), to_i(now)],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .map_err(db)?
-    .map(to_u)
-    .ok_or_else(team_code_invalid)
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, kind FROM team_code WHERE code_hash = ?1 AND used_at IS NULL AND expires_at > ?2",
+            params![token_hash(code).0.as_slice(), to_i(now)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db)?;
+    let (id, kind) = row.ok_or_else(team_code_invalid)?;
+    let kind = CodeKind::from_text(&kind).ok_or_else(team_code_invalid)?;
+    Ok((to_u(id), kind))
 }
 
 /// Marks a team code used for `team`, inside the transaction of `find_team_code`.
@@ -816,9 +978,10 @@ pub fn insert_connect_team(
     id: &TeamId,
     name: &str,
     file_key: &SecretString,
+    limits: &TeamLimits,
     now: u64,
 ) -> RelayResult<()> {
-    let limits = TeamLimits::connect().stored_json(TeamKind::Connect)?;
+    let limits = limits.stored_json(TeamKind::Connect)?;
     conn.execute(
         "INSERT INTO team (id, name, file_key, state, legacy, created_at, limits, kind) VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5, 'connect')",
         params![id.as_str(), name, file_key.expose(), to_i(now), limits],
@@ -1210,7 +1373,15 @@ mod tests {
         let connect_text =
             r#"{"members":1,"items":0,"agents":0,"sync_bytes":0,"question_bytes":2097152}"#;
         let connect = TeamLimits::from_stored(Some(connect_text), TeamKind::Connect).unwrap();
-        assert_eq!(connect, TeamLimits::connect());
+        // That image wrote no push count: the default of then, still a Connect preset.
+        assert_eq!(
+            connect,
+            TeamLimits {
+                sync_pushes_per_hour: 600,
+                ..TeamLimits::connect()
+            }
+        );
+        assert!(connect.is_connect_preset(0));
         assert_eq!(connect.feed_bytes, CONNECT_FEED_BYTES);
         let operator =
             TeamLimits::from_stored(Some(r#"{"members":7}"#), TeamKind::Operator).unwrap();
@@ -1262,12 +1433,14 @@ PRAGMA user_version = 1002;
                 items: defaults.items,
                 agents: defaults.agents,
                 sync_bytes: defaults.sync_bytes,
+                sync_pushes_per_hour: defaults.sync_pushes_per_hour,
                 question_bytes: defaults.question_bytes,
                 feed_bytes: defaults.feed_bytes,
                 ..connect
             },
             defaults
         );
+        assert_eq!(connect.sync_pushes_per_hour, CONNECT_SYNC_PUSHES_PER_HOUR);
         // The file cap grows by the feed budget: 2 + 1 + 8 MiB.
         assert_eq!(connect.file_bytes(TeamKind::Connect), Some(11 * 1_048_576));
         assert_eq!(defaults.file_bytes(TeamKind::Operator), None);
@@ -1291,7 +1464,61 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
-    fn directory_migrates_1002_to_1004_and_keeps_teams_as_operator() {
+    fn connect_with_sync_bytes_stores_them_and_keeps_the_rollback_rule() {
+        let synced = TeamLimits::connect_with(67_108_864);
+        synced.validate().unwrap();
+        assert_eq!(
+            TeamLimits {
+                sync_bytes: 0,
+                ..synced
+            },
+            TeamLimits::connect()
+        );
+        // `sync_bytes` is a field of every image's limits; the feed fields stay out.
+        let text = synced.stored_json(TeamKind::Connect).unwrap();
+        assert!(text.contains(r#""sync_bytes":67108864"#), "{text}");
+        for name in FEED_LIMIT_FIELDS {
+            assert!(!text.contains(name), "{text}");
+        }
+        assert_eq!(
+            TeamLimits::from_stored(Some(&text), TeamKind::Connect).unwrap(),
+            synced
+        );
+        // Room for the sync heads, only with vault sync: 11 + 16 MiB.
+        assert_eq!(synced.file_bytes(TeamKind::Connect), Some(27 * 1_048_576));
+        // Both are presets of a relay with the setting; a raised team is not.
+        assert!(synced.is_connect_preset(67_108_864));
+        assert!(TeamLimits::connect().is_connect_preset(67_108_864));
+        assert!(!synced.is_connect_preset(0));
+        let raised = synced
+            .apply(TeamLimitsUpdate {
+                members: Some(5),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!raised.is_connect_preset(67_108_864));
+        // A value between 0 and 1 MiB is not a limit.
+        assert!(TeamLimits::connect_with(1024).validate().is_err());
+        // B-M2: 30 pushes an hour; a team made before with 600 is still a preset, any
+        // other count is the operator's.
+        assert_eq!(synced.sync_pushes_per_hour, CONNECT_SYNC_PUSHES_PER_HOUR);
+        assert_eq!(TeamLimits::connect().sync_pushes_per_hour, 30);
+        for earlier in [TeamLimits::connect(), synced] {
+            let before = TeamLimits {
+                sync_pushes_per_hour: 600,
+                ..earlier
+            };
+            assert!(before.is_connect_preset(67_108_864));
+            let lifted = TeamLimits {
+                sync_pushes_per_hour: 120,
+                ..earlier
+            };
+            assert!(!lifted.is_connect_preset(67_108_864));
+        }
+    }
+
+    #[test]
+    fn directory_migrates_1002_to_1005_and_keeps_teams_as_operator() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let store =
@@ -1314,7 +1541,7 @@ PRAGMA user_version = 1002;
         drop(store);
 
         let directory = Directory::open(&config).unwrap();
-        assert_eq!(directory.store.user_version().unwrap(), 1004);
+        assert_eq!(directory.store.user_version().unwrap(), 1005);
         let rows = directory.teams().unwrap();
         assert_eq!(rows.len(), 2);
         let first_row = directory.team(&first).unwrap().unwrap();
@@ -1362,7 +1589,7 @@ PRAGMA user_version = 1002;
             .store
             .tx(|tx| {
                 check_connect_key(tx, &one, 2, 1000)?;
-                insert_connect_team(tx, &team, "Mac", &key, 1000)?;
+                insert_connect_team(tx, &team, "Mac", &key, &TeamLimits::connect(), 1000)?;
                 insert_connect_key(tx, &one, &team, 1000)
             })
             .unwrap();
@@ -1453,15 +1680,15 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
-    fn new_directory_uses_1004_and_refuses_unknown_versions() {
+    fn new_directory_uses_1005_and_refuses_unknown_versions() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let directory = Directory::create(&config).unwrap();
         assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
-        assert_eq!(DIRECTORY_VERSION, 1004);
+        assert_eq!(DIRECTORY_VERSION, 1005);
         directory
             .store
-            .with(|conn| conn.pragma_update(None, "user_version", 1005).map_err(db))
+            .with(|conn| conn.pragma_update(None, "user_version", 1006).map_err(db))
             .unwrap();
         drop(directory);
         assert!(Directory::open(&config).is_err());
@@ -1470,7 +1697,7 @@ PRAGMA user_version = 1002;
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            1005
+            1006
         );
     }
 
@@ -1494,7 +1721,7 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
-    fn directory_moves_from_1003_to_1004_and_back() {
+    fn directory_moves_from_1003_to_1005_and_back() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let fresh = {
@@ -1520,7 +1747,7 @@ PRAGMA user_version = 1002;
             })
             .unwrap();
         // Down: the OAuth tables go, the team stays, and a second run changes nothing.
-        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1004, 1003));
+        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1005, 1003));
         assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1003, 1003));
         let down = schema_of(&config);
         assert!(
@@ -1531,7 +1758,7 @@ PRAGMA user_version = 1002;
         assert!(down.iter().any(|(name, _)| name == "connect_key"));
         // Up again at the next open, with the schema of a new file.
         let directory = Directory::open(&config).unwrap();
-        assert_eq!(directory.store.user_version().unwrap(), 1004);
+        assert_eq!(directory.store.user_version().unwrap(), 1005);
         assert_eq!(directory.teams().unwrap().len(), 1);
         drop(directory);
         assert_eq!(schema_of(&config), fresh);
@@ -1568,5 +1795,136 @@ PRAGMA user_version = 1002;
                 version
             );
         }
+    }
+
+    #[test]
+    fn directory_moves_from_1004_to_1005_and_back_and_keeps_the_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let fresh = {
+            Directory::create(&config).unwrap();
+            schema_of(&config)
+        };
+        let directory = Directory::open(&config).unwrap();
+        let now = 1_790_000_000;
+        let (operator, _) = directory.new_team_code(1, now).unwrap();
+        let (node, node_expires) = directory.new_node_code(10, now).unwrap();
+        assert_eq!(node_expires, now + 600);
+        let (used_node, _) = directory.new_node_code(1, now).unwrap();
+        let team = TeamId::parse("t_abcdefgh23").unwrap();
+        directory
+            .store
+            .tx(|tx| {
+                let (id, kind) = find_team_code(tx, used_node.expose(), now)?;
+                assert_eq!(kind, CodeKind::Node);
+                mark_team_code_used(tx, id, &team, now)
+            })
+            .unwrap();
+        directory
+            .store
+            .with(|conn| {
+                assert_eq!(
+                    find_team_code(conn, operator.expose(), now)?.1,
+                    CodeKind::Operator
+                );
+                assert_eq!(find_team_code(conn, node.expose(), now)?.1, CodeKind::Node);
+                // A node code ends after its minutes.
+                assert_eq!(
+                    find_team_code(conn, node.expose(), node_expires)
+                        .unwrap_err()
+                        .code,
+                    codes::INVITE_INVALID
+                );
+                Ok(())
+            })
+            .unwrap();
+        // The bounds of a node code: 1 to 10 minutes.
+        for minutes in [0, 11, 60] {
+            assert_eq!(
+                directory.new_node_code(minutes, now).unwrap_err().code,
+                codes::INVALID_REQUEST
+            );
+        }
+        let audit: Vec<String> = directory
+            .store
+            .with(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT action FROM audit ORDER BY id")
+                    .map_err(db)?;
+                let rows = statement.query_map([], |row| row.get(0)).map_err(db)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db)
+            })
+            .unwrap();
+        assert_eq!(
+            audit,
+            [
+                "team_code_created",
+                "node_code_created",
+                "node_code_created"
+            ]
+        );
+        drop(directory);
+        // Down: the unused node code goes; the operator code and the used node code stay.
+        assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1005, 1004));
+        assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1004, 1004));
+        let kinds: Vec<(String, bool)> =
+            Store::open_at(&config.directory_path(), &config.master_key)
+                .unwrap()
+                .with(|conn| {
+                    let mut statement = conn
+                        .prepare("SELECT kind, used_at IS NOT NULL FROM team_code ORDER BY id")
+                        .map_err(db)?;
+                    let rows = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map_err(db)?;
+                    rows.collect::<Result<Vec<_>, _>>().map_err(db)
+                })
+                .unwrap();
+        assert_eq!(
+            kinds,
+            [("operator".to_string(), false), ("node".to_string(), true)]
+        );
+        // Up again at the next open, with the schema of a new file.
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), 1005);
+        drop(directory);
+        assert_eq!(schema_of(&config), fresh);
+        // A file of another version is refused by the step to 1004, and stays.
+        Store::open_at(&config.directory_path(), &config.master_key)
+            .unwrap()
+            .with(|conn| conn.pragma_update(None, "user_version", 1003).map_err(db))
+            .unwrap();
+        assert!(Directory::downgrade_to_1004(&config).is_err());
+    }
+
+    #[test]
+    fn a_1004_file_moves_to_1005_with_operator_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let directory = Directory::create(&config).unwrap();
+        let (code, _) = directory.new_team_code(1, 100).unwrap();
+        // The directory of version 1004: no kind column.
+        directory
+            .store
+            .with(|conn| {
+                conn.execute_batch(
+                    "ALTER TABLE team_code DROP COLUMN kind; PRAGMA user_version = 1004;",
+                )
+                .map_err(db)
+            })
+            .unwrap();
+        drop(directory);
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
+        directory
+            .store
+            .with(|conn| {
+                assert_eq!(
+                    find_team_code(conn, code.expose(), 100)?.1,
+                    CodeKind::Operator
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 }

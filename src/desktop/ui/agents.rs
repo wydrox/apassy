@@ -205,7 +205,7 @@ fn agent_menu(ui: &mut egui::Ui, page: &AgentPage, facts: Option<&LocalFacts>) -
     egui::Popup::menu(&more).show(|ui| {
         ui.set_min_width(200.0);
         if let Some(words) = facts.and_then(|facts| token_words(facts.token_end, now())) {
-            ui.label(kit::text(words, Font::Callout).color(kit::SECONDARY));
+            ui.label(kit::text(words, Font::Callout).color(kit::palette().secondary));
             ui.separator();
         }
         if ui.selectable_label(false, "Show in Logs").clicked() {
@@ -660,7 +660,8 @@ pub(super) fn choose_sheet(
                                     );
                                     ui.add(
                                         Label::new(
-                                            kit::text(&item.name, Font::Body).color(kit::LABEL),
+                                            kit::text(&item.name, Font::Body)
+                                                .color(kit::palette().label),
                                         )
                                         .truncate(),
                                     );
@@ -908,7 +909,7 @@ fn connection_progress(app: &mut DesktopApp, ui: &mut egui::Ui, cli: bool) {
                     if complete {
                         Tone::Good.text()
                     } else {
-                        kit::SECONDARY
+                        kit::palette().secondary
                     },
                 ),
             );
@@ -1100,7 +1101,8 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
                 );
             }
             if other {
-                let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+                let heading =
+                    ui.label(kit::text("Token", Font::Headline).color(kit::palette().label));
                 kit::code_block(ui, &token, 1).labelled_by(heading.id);
                 manual_config(ui, &token);
                 kit::note(
@@ -1146,7 +1148,8 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
             kit::disclosure(ui, &mut app.ui.agent_setup.advanced, "Advanced setup");
             if app.ui.agent_setup.advanced {
                 kit::note(ui, "Apassy shows this token one time. Keep it private.");
-                let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+                let heading =
+                    ui.label(kit::text("Token", Font::Headline).color(kit::palette().label));
                 kit::code_block(ui, &token, 1).labelled_by(heading.id);
                 ui.add_enabled_ui(!busy, |ui| setup_guidance(&mut app.ui, ui));
                 let mut manual = app.ui.is_expanded("manual-mcp-config");

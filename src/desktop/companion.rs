@@ -44,6 +44,8 @@ pub(crate) enum Listener {
         handle: CompanionHandle,
         /// The vault session that the listener serves.
         epoch: [u8; 32],
+        // Unused since Settings has no Wi-Fi pairing (ADR 0028 stage 3, plan S2–S3 unit W1); W2 removes it.
+        #[allow(dead_code)]
         mac_name: String,
     },
     /// The listener did not start. The app tries again only after the owner asks, or
@@ -101,6 +103,8 @@ impl QrModules {
 }
 
 /// A line under the pairing controls.
+// Unused since Settings has no Wi-Fi pairing (ADR 0028 stage 3, plan S2–S3 unit W1); W2 removes it.
+#[allow(dead_code)]
 pub(crate) struct Notice {
     pub(crate) text: String,
     pub(crate) error: bool,
@@ -143,11 +147,16 @@ pub(crate) fn now() -> u64 {
 
 impl CompanionFlows {
     /// True while a worker thread makes a pairing window.
+    // Unused since showing Settings > Devices never stops the listener (plan S2–S3, N7
+    // follow-up); W2 removes it.
+    #[allow(dead_code)]
     pub(crate) fn opening_window(&self) -> bool {
         self.opening.is_some()
     }
 
     /// The name of the Mac, while the listener runs.
+    // Unused since Settings has no Wi-Fi pairing (ADR 0028 stage 3, plan S2–S3 unit W1); W2 removes it.
+    #[allow(dead_code)]
     pub(crate) fn mac_name(&self) -> Option<&str> {
         match &self.listener {
             Listener::Running { mac_name, .. } => Some(mac_name),
@@ -276,7 +285,7 @@ impl DesktopApp {
         match &self.companion.listener {
             Listener::Running { handle, .. } => {
                 let message = format!(
-                    "The iPhone listener is on, port {}. Pair an iPhone in Settings.",
+                    "The iPhone listener is on, port {}. Paired Wi-Fi iPhones reach this Mac.",
                     handle.port()
                 );
                 self.set_ok(message);
@@ -296,6 +305,8 @@ impl DesktopApp {
     }
 
     /// Open a pairing window. The lookup of the hosts runs on a worker thread.
+    // Unused since Settings has no Wi-Fi pairing (ADR 0028 stage 3, plan S2–S3 unit W1); W2 removes it.
+    #[allow(dead_code)]
     pub(crate) fn open_pairing(&mut self, ctx: &egui::Context) {
         let Some(controller) = self.companion_controller() else {
             return;
@@ -309,6 +320,8 @@ impl DesktopApp {
     }
 
     /// Close the pairing window. It needs no owner check.
+    // Unused since Settings has no Wi-Fi pairing (ADR 0028 stage 3, plan S2–S3 unit W1); W2 removes it.
+    #[allow(dead_code)]
     pub(crate) fn cancel_pairing(&mut self) {
         if let Some(controller) = self.companion_controller() {
             controller.cancel();
@@ -334,6 +347,8 @@ impl DesktopApp {
     }
 
     /// The owner typed a code and selected "Pair". A right code opens the owner check.
+    // Unused since Settings has no Wi-Fi pairing (ADR 0028 stage 3, plan S2–S3 unit W1); W2 removes it.
+    #[allow(dead_code)]
     pub(crate) fn submit_pairing_code(&mut self, ctx: &egui::Context) {
         let Some(controller) = self.companion_controller() else {
             return;

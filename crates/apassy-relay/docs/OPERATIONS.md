@@ -18,8 +18,10 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    Review the exact relay commit and require all CI checks, including dependency
    advisories. Only after owner approval, push `image-*` on that exact commit.
    `.github/workflows/image.yml` builds on GitHub; it never deploys. Download
-   `relay-image`, `apassy-team-linux-x86_64`, and `apassy-team-darwin-arm64` from
-   the **same successful image run**, recording its URL and full source SHA.
+   `relay-image`, `apassy-team-linux-x86_64`, `apassy-team-darwin-arm64`,
+   `apassy-node-linux-x86_64`, `apassy-node-linux-aarch64`, and `apassy-node-sha256sums`
+   from the **same successful image run** (its `linux-node-verify` jobs green too),
+   recording its URL and full source SHA.
 2. Verify `relay-image.tar.gz.sha256`, `relay-image.id`,
    `relay-image.inspect.json`, and `relay-image.release.json`. The metadata version
    must equal Cargo/Worker versions; the full commit must equal the approved SHA.
@@ -40,7 +42,9 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    `release-linux.json` / `release-darwin.json`. Both metadata files must name the
    approved version and full commit. CI runs each binary's `--version`, verifies
    Darwin arm64, and builds Linux on pinned Bullseye with GLIBC requirements no
-   higher than 2.31. Never extract the portable CLI from the relay image.
+   higher than 2.31. Never extract the portable CLI from the relay image. Verify the
+   four Linux node packages against `SHA256SUMS-node` and `release-linux-x86_64.json` /
+   `release-linux-aarch64.json` (version, full commit, glibc at most 2.31).
    Stage verified files and combined metadata as shown below. In `deploy/worker`,
    run `npm ci --no-audit --no-fund`, `npm test`, `npm run typecheck`, and
    `npm run preflight`. The Wrangler build hook repeats the preflight even for a
@@ -72,7 +76,10 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    `x-apassy-relay-commit`. Check authenticated team/approval/sync paths and the
    backup timer. Public liveness alone is not acceptance for those paths.
 7. Rollback: stop the relay and select the archived previous image and compose
-   settings. From the release with directory 1004 (section 24) back to an image of
+   settings. From the release with team schema 8 and directory 1005 (section 25) back
+   to an image of schema 7 and directory 1004, run `apassy-relay downgrade-schema-7`
+   (section 25.2), then `apassy-relay downgrade-directory-1004` (section 25.3), with
+   the relay stopped. From the release with directory 1004 (section 24) back to an image of
    directory 1003, run `apassy-relay downgrade-directory-1003` with the relay stopped
    (section 24.3), after any team downgrade below. From the release with team
    schema 7 (section 23) back to a schema-6 image, first run
@@ -86,10 +93,11 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
 8. Verify the other application publication surfaces separately. Record pending
    store reviews and old public versions explicitly; the relay does not publish them.
 
-Stage both CLI artifacts from an extracted, verified CI run (example paths):
+Stage both CLI artifacts and the four node packages from an extracted, verified CI run
+(example paths; `node` holds the files of both `apassy-node-linux-*` artifacts):
 
 ```sh
-python3 - /tmp/relay-release/linux /tmp/relay-release/darwin <<'PY_STAGE'
+python3 - /tmp/relay-release/linux /tmp/relay-release/darwin /tmp/relay-release/node <<'PY_STAGE'
 import hashlib, json, pathlib, re, shutil, subprocess, sys
 root = pathlib.Path.cwd()
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
@@ -108,8 +116,22 @@ for folder, platform, meta in [(sys.argv[1], 'linux-x86_64', 'release-linux.json
     assert data['filename'] == name and data['sha256'] == digest
     shutil.copyfile(folder/name, out/name)
     artifacts[platform] = dict(filename=name, sha256=digest, size=len(blob))
-(out/'release.json').write_text(json.dumps(dict(version=version, commit=commit, artifacts=artifacts), indent=2)+'\n')
-(out/'SHA256SUMS').write_text(''.join(f"{a['sha256']}  {a['filename']}\n" for a in artifacts.values()))
+node = {}
+folder = pathlib.Path(sys.argv[3])
+for arch in ['x86_64', 'aarch64']:
+    data = json.loads((folder/f'release-linux-{arch}.json').read_text())
+    assert data['version'] == version and data['commit'] == commit
+    for entry in data['files']:
+        blob = (folder/entry['filename']).read_bytes()
+        digest = hashlib.sha256(blob).hexdigest()
+        assert entry['sha256'] == digest and entry['size'] == len(blob)
+        shutil.copyfile(folder/entry['filename'], out/entry['filename'])
+        node[entry['filename']] = dict(sha256=digest, size=len(blob))
+assert len(node) == 4
+(out/'release.json').write_text(json.dumps(dict(version=version, commit=commit, artifacts=artifacts, node=node), indent=2)+'\n')
+lines = [f"{a['sha256']}  {a['filename']}" for a in artifacts.values()]
+lines += [f"{n['sha256']}  {name}" for name, n in sorted(node.items())]
+(out/'SHA256SUMS').write_text(''.join(line + '\n' for line in lines))
 PY_STAGE
 (cd deploy/worker && npm run preflight)
 ```
@@ -921,9 +943,9 @@ The Worker serves three things itself, without the relay and without the edge se
 
 | Path | What |
 | --- | --- |
-| `/install.sh` | installs `apassy-team` into `~/.local/bin` after a SHA-256 check (`deploy/worker/public/install.sh`) |
+| `/install.sh` | after a SHA-256 check: on Linux (x86_64, aarch64) the node `apassy` and the `apassy-team` shim from the node tarball, on macOS `apassy-team`, into `~/.local/bin` (`deploy/worker/public/install.sh`) |
 | `/guide` | the guide for owners and members of a relay that they run (`deploy/worker/public/guide.html`; source `docs/ONBOARDING.md`) |
-| `/dl/*` | the CLI binaries and `SHA256SUMS` |
+| `/dl/*` | the CLI binaries, the Linux node packages (`.tar.gz` and `.deb` for x86_64 and aarch64), and `SHA256SUMS` |
 
 Users install with:
 
@@ -1029,7 +1051,7 @@ What changes at the first start of this version:
 
 - `relay.db` moves from version 1002 to 1003 in one transaction: the column `team.kind` (every existing team becomes `operator`), the column `team.suspend_reason`, and the table `connect_key` (the SHA-256 of each public key that made a Connect team, with the id of its team while the team exists). The change is additive. A failure leaves 1002 and the relay does not start. The images before (`sync-*` and `questions-*`, directory 1002) refuse a 1003 file: see 20.3. This image also carries questions (section 19): from `sync-*` the team files move to schema 5 at the same start (19, with its `.pre-v5` copies).
 - A new edge route, `POST /v1/connect`. Its body carries a signature of the device key (SPEC 26.3), so only the holder of a key can make a team with it. `POST /v1/teams` and team codes work as before.
-- Three settings, sized for the production container (2 cores, 512 MiB, 20.5):
+- Three settings, sized for the production container (2 cores, 512 MiB, 20.5), and a fourth for relay sync without a code (20.6):
   - `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` (default 50, 0 to 100000): the Connect teams of the whole relay in any 24 hours. Over it, 503 `busy` with `Retry-After: 3600`.
   - `APASSY_RELAY_CONNECT_TEAMS_MAX` (default 100, 0 to 1000000): the Connect teams the relay holds at once, active or suspended. At it, 503 `busy` ("no room") with `Retry-After: 3600`. A deleted team frees its place. Raise it only after the measurement of 20.5.
   - `APASSY_RELAY_CONNECT_LONG_POLLS` (default 96, 0 to 1024): the long polls of all Connect teams together (below).
@@ -1120,7 +1142,7 @@ rollout; the rollback analysis below describes that historical boundary.
 
 ### 20.4 Idle Connect teams
 
-A Connect team whose devices have not signed in for 30 days is most likely abandoned, however many devices it linked. The sweep suspends such teams, then deletes them 30 days after their suspension. It touches only Connect teams whose limits are still the Connect preset and that have no vault sync head: never operator teams, teams a plan or `admin limits` lifted, teams that synced a vault, or teams the operator suspended:
+A Connect team whose devices have not signed in for 30 days is most likely abandoned, however many devices it linked. The sweep suspends such teams, then deletes them 30 days after their suspension. It touches only Connect teams whose limits are still a Connect preset (`TeamLimits::connect()`, or the same with the `sync_bytes` of `APASSY_RELAY_CONNECT_SYNC_BYTES`) and that have no vault sync head: never operator teams, teams a plan or `admin limits` lifted, teams that synced a vault, or teams the operator suspended:
 
 ```sh
 docker compose exec relay apassy-relay admin connect-sweep --dry-run       # names the teams, changes nothing
@@ -1160,6 +1182,18 @@ Each open team holds one SQLite connection for as long as the relay runs: one fi
 2. The room fits when the memory of all teams, plus the threads of the request, question, and feed lanes (two tasks per request, above), stays well under 512 MiB, the open files under 65536, and the start time under the 300 s start period. Write the numbers in this section with the date, then raise the room, or raise the container's limits first.
 
 Opening Connect teams only when they are first used, and closing idle ones, would remove this cost. It is not built: `Hub::team` is how every request, the sweep, `admin teams`, and the backup find a team, and an open on first use would let an unauthenticated sign-in call with a known team id start a key derivation. Lower the room, or run the sweep, if the start grows too long.
+
+### 20.6 Relay sync without a code (`APASSY_RELAY_CONNECT_SYNC_BYTES`)
+
+Plans section 4.1: until Apassy Connect starts, relay sync on the hosted relay is free and needs no team code. The Mac makes a Connect team (`POST /v1/connect`) with the purpose `sync`, or uses the Connect team that the vault has for questions, and pushes version 1. The relay setting that allows it:
+
+- `APASSY_RELAY_CONNECT_SYNC_BYTES` (default `0`; `0` or 1048576 to 67108864, another value stops the start): `sync_bytes` of each **new** Connect team (SPEC 26.4). `0` keeps 403 `plan_required` on a push, as before. The hosted relay sets `"67108864"` in the release that ships the Mac's codeless relay copy (plan s7, R1), and the relay deploys before the apps.
+- A team keeps the value it was made with. Connect teams made before the setting (questions teams) get the same size by hand, one team at a time: `docker compose exec relay apassy-relay admin limits <id> --sync-bytes 67108864`. The app asks for nothing: a vault whose questions team still has `sync_bytes` 0 sees "The relay does not keep vault copies for this connection yet" when it turns relay sync on.
+- **Capacity, before you set it.** Each Connect team then holds up to two snapshots (the current and the previous version) of up to `sync_bytes` each, in `teams/<id>.sync/`, plus one temporary file for each push in flight (`sync_transfers`, 2), plus a team file capped at 27 MiB (20 above; 16 MiB more than without sync). At the default room (`APASSY_RELAY_CONNECT_TEAMS_MAX` 100, `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` 50) that is at most 100 × 128 MiB = 12.5 GiB of snapshots, 2.6 GiB of team files, and the temporary files of the pushes that run; real vaults are far smaller. `admin backup` copies all of it, so the backup volume needs as much again. Check the free disk of the VPS for both (`df -h /opt/apassy`) before the setting goes live, and raise `APASSY_RELAY_CONNECT_TEAMS_MAX` only after this check and 20.5, and only with the owner.
+- **Rate, and the disk again.** A Connect team pushes at most 30 snapshots an hour (`sync_pushes_per_hour` of the preset; 403 `team_limit`) and at most 512 MiB of snapshots an hour (429 `rate_limited` with `Retry-After`, SPEC 24.3 check 4). The relay keeps only the current and the previous snapshot, so the rate bounds the write load and the churn of the disk, not the size at rest: the capacity check above still decides. Check `df -h /opt/apassy` again before you set `APASSY_RELAY_CONNECT_SYNC_BYTES`, and do not set it when the data or the backup volume cannot hold the worst case of that check.
+- Watch: `admin teams` (`kind: connect` teams with a `sync_head`, their `file_level`), the disk of the data and the backup volume, `sync_refused {reason: "too_large"}` rows, and `limit_reached` rows with `sync_pushes_per_hour` or `sync_bytes_per_hour`.
+- Rollback: set the variable back to `"0"` (or remove it) and `docker compose up -d --wait`. New Connect teams get no relay sync again; the teams made with it keep their limit until `admin limits <id> --sync-bytes 0`, which stops pushes and receipts but keeps the copies downloadable. An image before this setting ignores the variable and reads the stored limits as they are (no directory change).
+- The cutover of stage 7 (plan s7, O2) sets it to `"0"` again.
 
 ## 21. The feed of a Mac (team schema 6)
 
@@ -1518,3 +1552,113 @@ its node does not start, and the app has no command for the way back. Start the 
 this version again. (Releases ship all components at one version, so a Mac app is not
 downgraded on its own.)
 
+
+## 25. A node on the tailnet: push handles (team schema 8) and node pairing codes (directory 1005)
+
+A node (the relay inside the Mac app, later `apassy serve` on Linux) serves the devices
+of its teams on its tailnet address through a TLS front, signs devices in with its node
+origin, makes teams of devices in process or with a one-use node pairing code, and
+pushes through the push gateway with per-device handles (docs/SPEC.md section 32). It
+is configured in code (`RelayConfig::embedded` with a node origin), not from the
+environment. The hosted relay serves none of it: it has no tailnet listener, one
+sign-in origin (`APASSY_RELAY_PUBLIC_URL`), and its Worker push as before. No variable
+of the hosted relay changes.
+
+What changes for the hosted relay at the first start of this version:
+
+- Each team file moves to schema version 8: the relay copies it to
+  `teams/<id>.db.pre-v8` (mode 0600, encrypted like the file), then adds the table
+  `push_handle` in one transaction. The change is additive; `push_token` is untouched.
+  A team whose copy cannot be made stays at version 7 and does not open; free disk space
+  and start again. The previous image (schema 7) refuses a version 8 file.
+- `relay.db` moves from version 1004 to 1005 in one transaction: the column
+  `team_code.kind` (`operator` for every existing code). The image before (directory
+  1004) refuses a 1005 file.
+- New routes `PUT` and `DELETE /v1/push/handle`: the hosted relay answers 409
+  `push_unavailable` (it has no gateway). Its table of handles stays empty.
+- New commands: `apassy-relay downgrade-schema-7` (25.2),
+  `apassy-relay downgrade-directory-1004` (25.3), and
+  `apassy-relay admin node-code [--minutes <n>]`, which makes a code that only a node
+  takes (on the hosted relay `POST /v1/teams` refuses it as `invite_invalid`).
+
+On a Mac the node's team files and `relay.db` move the same way at the first start of
+the app of this version.
+
+### 25.1 What to watch
+
+- The relay log at the start: no `cannot be moved to schema version 8` and no error
+  about `relay.db`.
+- `admin teams`: every team `"open": true`.
+- `ls /data/teams/*.db.pre-v8`: one copy for each team that existed before the start.
+- `admin readiness` and the push status: the hosted relay keeps `"mode": "worker"`
+  (or `off`); a node with a gateway shows `"mode": "gateway"`.
+- On a node: team audit rows `push_handle_set`, `push_handle_removed`, `push_sent` with
+  `"via": "gateway"`, and `push_failed`. A run of `push_failed {"reason": "clock"}` means
+  the node's clock and the gateway's differ by more than 300 s: fix the clock. Relay
+  audit rows `node_code_created` and `team_created` with `code_kind` or
+  `"kind": "device"`.
+
+Owner steps: use the release runbook at the top of this document; it names these
+rollbacks in its step 7. Before the deploy, check the free disk (each team file is
+copied once, `.pre-v8`) and take a backup (`admin backup`, section 13) as usual: it
+holds `relay.db` at 1004 and the team files at 7.
+
+### 25.2 Rollback of team schema 8
+
+**In place (preferred).** It keeps every change since the migration. With the relay
+stopped:
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay downgrade-schema-7 > downgrade.json
+jq -e 'all(.[]; .error == null and (.to // 0) <= 7)' downgrade.json && echo "every team is at schema 7"
+```
+
+It takes `relay.lock`, so it refuses to run beside a relay. For each team file of
+version 8 it sets the version to 7 and changes nothing else: the schema 7 image never
+reads `push_handle`. A file of another version is left as it is. It exits 1 when any
+team has an `error`: that team is still at version 8. Fix it (disk space, the file) and
+run the command again. To go further back to a schema-6 image, run
+`downgrade-schema-6` instead: it takes a file of version 7 or 8 to 6 (23.3). Both
+commands open `relay.db` and move it to the directory version of this image, so run any
+directory downgrade (25.3, 24.3) after them. Then select the old image in
+`compose.yaml` and `docker compose up -d --wait`.
+
+On a node, its devices get no push while it runs the image of schema 7. A later start of
+a schema-8 image moves the files to 8 again (a new `.pre-v8`), keeps the handles, and
+deletes those of the devices and members revoked meanwhile.
+
+**From the copy.** `cp -p "/data/teams/$id.db.pre-v8" "/data/teams/$id.db"` for each
+team with a copy, with the relay stopped. As in section 21.3, every change of access
+since the migration comes back undone (revoked devices, members, agents, and grants
+work again) and the audit rows since then are gone. Use it only when the in-place way
+fails for a team.
+
+### 25.3 Rollback of directory 1005
+
+**In place (preferred).** With the relay stopped, after any team downgrade of 25.2:
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay downgrade-directory-1004
+```
+
+It takes `relay.lock`. It deletes the unused node pairing codes (the image of 1004 would
+take one for an operator code) and sets the version to 1004 in one transaction, and
+prints `{"from": 1005, "to": 1004}`; a 1004 file is left as it is (`{"from": 1004,
+"to": 1004}`). Any other version exits 1 and changes nothing. Used codes stay as
+history, and the `kind` column stays: the 1004 image never reads it. On the hosted
+relay no node code exists unless an operator made one, so nothing is lost; operator
+codes keep working. To go back to an image of directory 1003, run
+`downgrade-directory-1003` instead: it takes a 1004 or 1005 file to 1003 with the same
+step first (24.3). Then select the old image and `docker compose up -d --wait`.
+
+**From the backup.** Restore `relay.db` from the backup of 25.1 with the relay stopped,
+as in 24.3. Use it only when the in-place way fails.
+
+A later start of a 1005 image moves the file to 1005 again and keeps the column.
+
+**An Apassy app before this version on a Mac** refuses the node's files at schema 8 and
+`relay.db` at 1005: its node does not start, and the app has no command for the way
+back. Start the app of this version again. (Releases ship all components at one
+version, so a Mac app is not downgraded on its own.)

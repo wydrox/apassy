@@ -204,6 +204,8 @@ pub(crate) enum SyncSheet {
     /// safety words and the owner check, as "Add a device…".
     AddIphone { id: String },
     /// "Remove…" of a device of the questions in Devices: its confirmation.
+    // Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+    #[allow(dead_code)]
     RemoveQuestionsDevice { id: String, uuid: String },
 }
 
@@ -336,6 +338,8 @@ pub(super) fn method_words(app: &DesktopApp, entry: &VaultEntry) -> String {
 }
 
 /// How the open vault reaches the other Macs, for Settings > Devices.
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 pub(super) struct OtherMacs {
     /// The way in a few words.
     pub(super) words: String,
@@ -344,6 +348,8 @@ pub(super) struct OtherMacs {
     pub(super) relay: Option<String>,
 }
 
+// Unused since Settings > Devices lists every device itself (plan S2–S3, unit N7).
+#[allow(dead_code)]
 pub(super) fn other_macs(app: &DesktopApp) -> OtherMacs {
     let entry = app
         .vault_list
@@ -1637,6 +1643,13 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         }
                     };
                     ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    // ADR 0037 D14: free relay sync on the hosted relay ends (plan s7 N1).
+                    if let Some(notice) = link
+                        .and_then(|link| link.relay.as_ref())
+                        .and_then(|on| relay::relay_sync_notice(&on.url))
+                    {
+                        ui.add(Label::new(super::settings::rows::note(&notice)).wrap());
+                    }
                     // The actions of a synced vault, under its state.
                     let actions = open_unlocked
                         && ((link.is_some() && !removed)
@@ -2086,7 +2099,7 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
             s.row(|ui| {
                 egui::Sides::new().show(
                     ui,
-                    |ui| ui.label(kit::text("Sync", Font::Body).color(kit::LABEL)),
+                    |ui| ui.label(kit::text("Sync", Font::Body).color(kit::palette().label)),
                     |ui| {
                         let current = match app.sync.create_folder.as_deref() {
                             Some(folder) if !app.sync.create_custom => Current::Folder(folder),
@@ -2259,7 +2272,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
     ui.add_space(8.0);
-    ui.label(kit::text("Use a vault from another Mac", Font::Title).color(kit::LABEL));
+    ui.label(kit::text("Use a vault from another Mac", Font::Title).color(kit::palette().label));
     ui.add_space(6.0);
     let before = app.sync.relay.source;
     kit::segmented(
@@ -2283,13 +2296,13 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui,
         "Select your vault file. Use the same vault passphrase as on the other Mac. Apassy keeps a local copy on this Mac.",
         Font::Callout,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     kit::paragraph(
         ui,
         "macOS can ask for permission to use iCloud Drive before Apassy can read the file.",
         Font::Callout,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     ui.add_space(14.0);
     if app.sync.open_found.is_none()
@@ -2315,9 +2328,10 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     (Some(base), true) => format!("{label} · a duplicate of {base}"),
                     (None, true) => label.clone(),
                 };
-                let detail =
-                    chosen.then(|| kit::text("Selected", Font::Footnote).color(kit::ACCENT_TEXT));
-                let gray = egui::Color32::from_rgb(99, 99, 104);
+                let detail = chosen.then(|| {
+                    kit::text("Selected", Font::Footnote).color(kit::palette().accent_text)
+                });
+                let gray = kit::fixed::VAULT_FILE;
                 if s.nav(
                     Some((kit::Icon::Lock, gray)),
                     &entry.name,
@@ -2335,7 +2349,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui,
             "No vault files were found. Select a file from your synced folder.",
             Font::Callout,
-            kit::SECONDARY,
+            kit::palette().secondary,
         );
     }
     if let Some(error) = app.sync.open_error {
@@ -2346,7 +2360,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         } else {
             format!("Apassy could not read the synced file or folder: {error}.")
         };
-        kit::paragraph(ui, &text, Font::Callout, kit::SECONDARY);
+        kit::paragraph(ui, &text, Font::Callout, kit::palette().secondary);
     }
     let refresh_label = if app.sync.open_error.is_some() {
         "Retry"
@@ -2386,7 +2400,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui,
             "If macOS shows an iCloud permission request, permit access for Apassy. In Finder, open iCloud Drive and find the vault file. If the file needs a download, use Download Now. Then select Refresh or Retry.",
             Font::Callout,
-            kit::SECONDARY,
+            kit::palette().secondary,
         );
     }
     if let Some(file) = app.sync.open_pick.clone() {
@@ -2414,14 +2428,14 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui,
             format!("Selected: {filename} · {service}"),
             Font::Body,
-            kit::LABEL,
+            kit::palette().label,
         );
         if app.sync.open_waiting {
             kit::paragraph(
                 ui,
                 "The file download is not complete. Apassy keeps this selection and checks the file again.",
                 Font::Callout,
-                kit::SECONDARY,
+                kit::palette().secondary,
             );
         }
         let mut submit = false;

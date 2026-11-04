@@ -43,6 +43,12 @@ for (const command of ["fill", "create"]) for (const gesture of [false, true]) {
       assert.equal(answer.ok, true);
       assert.equal(answer.data.type, "fill");
       assert.equal(answer.data.username, "synthetic");
+      // The answer log has the command, ok and code: never the login of the answer.
+      const answers = path.join(dir, "answers.jsonl");
+      await waitFor(() => fs.existsSync(answers) && fs.readFileSync(answers, "utf8").includes("\n"));
+      const logged = fs.readFileSync(answers, "utf8");
+      assert.deepEqual(logged.split("\n").filter(Boolean).map((line) => JSON.parse(line)), [{ cmd: command, ok: true, code: "ok" }]);
+      assert.ok(!logged.includes("fixture-password") && !logged.includes("synthetic"), logged);
     } finally {
       child.kill();
       await new Promise((resolve) => child.exitCode !== null ? resolve() : child.once("exit", resolve));

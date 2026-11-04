@@ -70,7 +70,7 @@ use serde_json::Value;
 use super::bouncer::ConnectLine;
 use super::columns::{self, Group};
 use super::decisions_bouncer::{
-    self as cards, CardAnswer, DecisionRow, HistoryAction, HistoryView, Mark, TIMER, decision_row,
+    self as cards, CardAnswer, DecisionRow, HistoryAction, HistoryView, Mark, decision_row,
     timer_text,
 };
 use super::folders::FolderTree;
@@ -95,8 +95,6 @@ use crate::vault::agent_items::{
 use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::detect::{self, Detected};
 
-/// The fill of the bars at the bottom of a detail, as in the mockup.
-const BAR_FILL: egui::Color32 = egui::Color32::from_rgb(246, 246, 247);
 /// The longest project name in a button. A longer name ends with "…".
 const SHORT_PROJECT: usize = 28;
 /// The longest folder path in the facts.
@@ -1706,7 +1704,7 @@ fn notifications_footer(app: &mut DesktopApp, ui: &mut egui::Ui, rect: Rect, sum
     ui.painter().hline(
         rect.x_range(),
         rect.top() + 0.5,
-        egui::Stroke::new(1.0, kit::SEPARATOR),
+        egui::Stroke::new(1.0, kit::palette().separator),
     );
     let inner = Rect::from_min_max(
         Pos2::new(rect.left() + 16.0, rect.top() + 1.0),
@@ -1722,7 +1720,8 @@ fn notifications_footer(app: &mut DesktopApp, ui: &mut egui::Ui, rect: Rect, sum
             kit::paint_icon_in(ui, Icon::Warning, 12.0, Tone::Warning.mark());
             ui.add(
                 Label::new(
-                    kit::text("macOS notifications are off", Font::Footnote).color(kit::SECONDARY),
+                    kit::text("macOS notifications are off", Font::Footnote)
+                        .color(kit::palette().secondary),
                 )
                 .truncate(),
             )
@@ -1750,7 +1749,9 @@ fn detail_header(ui: &mut egui::Ui, mark: &Mark, title: &str, line: impl FnOnce(
             ui.spacing_mut().item_spacing.y = 2.0;
             // Centered on the mark when the title has one line, as in the mockup.
             let one_line: f32 = 24.0 + 2.0 + 18.0;
-            let title_rich = kit::text(title, Font::Title).size(20.0).color(kit::LABEL);
+            let title_rich = kit::text(title, Font::Title)
+                .size(20.0)
+                .color(kit::palette().label);
             let lines = kit::galley(ui, title_rich.clone()).size().x > ui.available_width();
             if !lines {
                 ui.add_space(((56.0 - one_line) / 2.0).max(0.0));
@@ -1774,7 +1775,7 @@ fn group_label(ui: &mut egui::Ui, label: &str) {
         ui.label(
             kit::text(label, Font::Callout)
                 .variation(b"wght", 600.0)
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
         );
     });
     ui.add_space(-2.0);
@@ -1826,26 +1827,26 @@ fn bar_button(ui: &mut egui::Ui, label: &str, kind: Bar) -> egui::Response {
     let (fill, text, border) = match kind {
         Bar::Plain | Bar::Deny => (
             if pressed {
-                kit::FILL_PRESSED
+                kit::palette().fill_pressed
             } else if hovered {
-                egui::Color32::from_rgb(250, 250, 250)
+                kit::palette().button_hover
             } else {
-                egui::Color32::WHITE
+                kit::palette().button
             },
             if kind == Bar::Deny {
-                kit::PRODUCTION
+                kit::palette().production
             } else {
-                kit::LABEL
+                kit::palette().label
             },
-            Some(egui::Color32::from_black_alpha(48)),
+            Some(kit::palette().bar_button_edge),
         ),
         Bar::Main => (
             if pressed || hovered {
-                egui::Color32::from_rgb(0, 94, 224)
+                kit::palette().primary_bar_pressed
             } else {
-                egui::Color32::from_rgb(10, 108, 255)
+                kit::palette().primary_bar
             },
-            egui::Color32::WHITE,
+            kit::palette().on_accent,
             None,
         ),
     };
@@ -1882,7 +1883,7 @@ fn bottom_bar(
         .show_separator_line(true)
         .frame(
             Frame::NONE
-                .fill(BAR_FILL)
+                .fill(kit::palette().detail)
                 .inner_margin(Margin::symmetric(16, 10)),
         )
         .show(ui, add);
@@ -1904,7 +1905,7 @@ fn bar_caption(ui: &mut egui::Ui, caption: &str) {
                 Label::new(
                     kit::text(caption, Font::Footnote)
                         .size(11.5)
-                        .color(kit::SECONDARY),
+                        .color(kit::palette().secondary),
                 )
                 .wrap(),
             );
@@ -2044,7 +2045,7 @@ fn credential_row(app: &DesktopApp, section: &mut kit::Section<'_>, item: &Quest
     let tile = item_tile(app, item.item_id, &item.name);
     section.row(|ui| {
         ui.horizontal(|ui| {
-            ui.label(kit::text("Credential", Font::Body).color(kit::LABEL));
+            ui.label(kit::text("Credential", Font::Body).color(kit::palette().label));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if item.production {
@@ -2055,7 +2056,10 @@ fn credential_row(app: &DesktopApp, section: &mut kit::Section<'_>, item: &Quest
                 if item.always_ask {
                     kit::cap(ui, "Always ask", false);
                 }
-                ui.add(Label::new(kit::text(&item.name, Font::Body).color(kit::LABEL)).truncate());
+                ui.add(
+                    Label::new(kit::text(&item.name, Font::Body).color(kit::palette().label))
+                        .truncate(),
+                );
                 kit::tile(ui, &tile, 20.0);
             });
         });
@@ -2111,20 +2115,21 @@ fn draw_question(
         question_headline(question),
         |ui| {
             ui.label(
-                kit::text(format!("{} · ", project_text(run)), Font::Body).color(kit::SECONDARY),
+                kit::text(format!("{} · ", project_text(run)), Font::Body)
+                    .color(kit::palette().secondary),
             );
-            ui.label(timer_text(clock(waiting.left), Font::Body).color(TIMER));
-            ui.label(kit::text(" left to answer", Font::Body).color(kit::SECONDARY));
+            ui.label(timer_text(clock(waiting.left), Font::Body).color(kit::palette().countdown));
+            ui.label(kit::text(" left to answer", Font::Body).color(kit::palette().secondary));
         },
     );
     kit::paragraph(
         ui,
         format!("{} wants to use {}", run.agent, item_names(run)),
         Font::Body,
-        kit::SECONDARY,
+        kit::palette().secondary,
     );
     if let Some(classification) = classification_line(question) {
-        kit::paragraph(ui, classification, Font::Body, kit::SECONDARY);
+        kit::paragraph(ui, classification, Font::Body, kit::palette().secondary);
     }
     let mut notes = false;
     match remote {
@@ -2160,22 +2165,22 @@ fn draw_question(
         if question.items.is_empty() && !run.env_names.is_empty() {
             s.labeled(
                 "Variables",
-                kit::text(run.env_names.join(", "), Font::Mono).color(kit::LABEL),
+                kit::text(run.env_names.join(", "), Font::Mono).color(kit::palette().label),
             );
         }
         s.labeled(
             "Action",
-            kit::text(action_label(question.action), Font::Body).color(kit::SECONDARY),
+            kit::text(action_label(question.action), Font::Body).color(kit::palette().secondary),
         );
         s.labeled(
             "Project",
-            kit::text(project_text(run), Font::Body).color(kit::SECONDARY),
+            kit::text(project_text(run), Font::Body).color(kit::palette().secondary),
         );
         // A command without a host (a command line tool) has no row, as in the mockup.
         if !hosts.is_empty() {
             s.labeled(
                 "Sends to",
-                kit::text(hosts.join(", "), Font::Body).color(kit::SECONDARY),
+                kit::text(hosts.join(", "), Font::Body).color(kit::palette().secondary),
             );
         }
     });
@@ -2194,7 +2199,7 @@ fn draw_question(
                     ui,
                     format!("\"{}\" ({source})", run.user_request),
                     Font::Body,
-                    kit::LABEL,
+                    kit::palette().label,
                 );
                 // Goal item B6: the hook request replaced a different text of the agent.
                 if !run.agent_request.is_empty() {
@@ -2214,14 +2219,15 @@ fn draw_question(
     kit::section(ui, None, None, |s| {
         s.row(|ui| {
             Frame::NONE
-                .fill(egui::Color32::from_rgb(242, 242, 244))
+                .fill(kit::palette().code)
                 .corner_radius(6)
                 .inner_margin(Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.add(
                         Label::new(
-                            kit::text(shell_words(&run.command), Font::Mono).color(kit::LABEL),
+                            kit::text(shell_words(&run.command), Font::Mono)
+                                .color(kit::palette().label),
                         )
                         .wrap(),
                     );
@@ -2237,7 +2243,7 @@ fn draw_question(
     };
     group_label(ui, "Why you are asked");
     kit::section(ui, None, None, |s| {
-        s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::LABEL));
+        s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::palette().label));
     });
     // The quiet line at the foot of a detail of the mockup (`.meta-foot`).
     ui.add_space(2.0);
@@ -2248,7 +2254,7 @@ fn draw_question(
                     "The process can read these secrets. An allow needs Touch ID or the passphrase now. A notification is not an approval.",
                     Font::Footnote,
                 )
-                .color(kit::TERTIARY),
+                .color(kit::palette().tertiary),
             )
             .wrap()
             .halign(Align::Center),
@@ -2646,7 +2652,7 @@ fn request_detail(
         kit::section(ui, None, None, |s| {
             s.labeled(
                 "For",
-                kit::text(&request.purpose, Font::Body).color(kit::SECONDARY),
+                kit::text(&request.purpose, Font::Body).color(kit::palette().secondary),
             );
             s.row(|ui| get_it_at(ui, &request.where_to_get));
             s.row(|ui| saves_to(ui, request.id, &tree, &mut folder));
@@ -2677,7 +2683,7 @@ fn request_detail(
                     request.agent_name
                 ),
                 Font::Callout,
-                kit::SECONDARY,
+                kit::palette().secondary,
             );
         });
     });
@@ -2696,7 +2702,9 @@ fn request_header(ui: &mut egui::Ui, request: &CredentialRequest) {
         &Mark::Agent(request.agent_name.clone()),
         &request_title(request),
         |ui| {
-            ui.label(kit::text(request_project(request), Font::Body).color(kit::SECONDARY));
+            ui.label(
+                kit::text(request_project(request), Font::Body).color(kit::palette().secondary),
+            );
         },
     );
 }
@@ -2707,7 +2715,7 @@ fn saves_to(ui: &mut egui::Ui, id: u64, tree: &FolderTree, folder: &mut Option<S
     let label = tree.path_label(folder.as_deref());
     egui::Sides::new().shrink_left().show(
         ui,
-        |ui| ui.label(kit::text("Saves to", Font::Body).color(kit::LABEL)),
+        |ui| ui.label(kit::text("Saves to", Font::Body).color(kit::palette().label)),
         |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let change = kit::small_button(ui, "Change", Style::Link);
@@ -2725,7 +2733,10 @@ fn saves_to(ui: &mut egui::Ui, id: u64, tree: &FolderTree, folder: &mut Option<S
                         }
                     }
                 });
-            ui.add(Label::new(kit::text(&label, Font::Body).color(kit::SECONDARY)).truncate());
+            ui.add(
+                Label::new(kit::text(&label, Font::Body).color(kit::palette().secondary))
+                    .truncate(),
+            );
         },
     );
 }
@@ -2748,21 +2759,25 @@ fn get_it_at(ui: &mut egui::Ui, where_to_get: &str) {
     {
         egui::Sides::new().shrink_right().show(
             ui,
-            |ui| ui.label(kit::text("Get it at", Font::Body).color(kit::LABEL)),
+            |ui| ui.label(kit::text("Get it at", Font::Body).color(kit::palette().label)),
             |ui| {
                 let mut job = egui::text::LayoutJob::default();
-                kit::medium(domain, Font::Body).color(kit::LABEL).append_to(
-                    &mut job,
-                    ui.style(),
-                    egui::FontSelection::Default,
-                    Align::Center,
-                );
-                kit::text(rest, Font::Body).color(kit::SECONDARY).append_to(
-                    &mut job,
-                    ui.style(),
-                    egui::FontSelection::Default,
-                    Align::Center,
-                );
+                kit::medium(domain, Font::Body)
+                    .color(kit::palette().label)
+                    .append_to(
+                        &mut job,
+                        ui.style(),
+                        egui::FontSelection::Default,
+                        Align::Center,
+                    );
+                kit::text(rest, Font::Body)
+                    .color(kit::palette().secondary)
+                    .append_to(
+                        &mut job,
+                        ui.style(),
+                        egui::FontSelection::Default,
+                        Align::Center,
+                    );
                 ui.add(Label::new(job).truncate())
                     .on_hover_text("Apassy opens no link. Check the domain before you sign in.")
             },
@@ -2771,7 +2786,7 @@ fn get_it_at(ui: &mut egui::Ui, where_to_get: &str) {
     }
     egui::Sides::new().shrink_right().show(
         ui,
-        |ui| ui.label(kit::text("Get it at", Font::Body).color(kit::LABEL)),
+        |ui| ui.label(kit::text("Get it at", Font::Body).color(kit::palette().label)),
         |ui| {
             let shown = if domains.is_empty() {
                 kit::text(
@@ -2782,16 +2797,16 @@ fn get_it_at(ui: &mut egui::Ui, where_to_get: &str) {
                     },
                     Font::Body,
                 )
-                .color(kit::SECONDARY)
+                .color(kit::palette().secondary)
             } else {
-                kit::medium(domains.join(", "), Font::Body).color(kit::LABEL)
+                kit::medium(domains.join(", "), Font::Body).color(kit::palette().label)
             };
             ui.add(Label::new(shown).truncate())
         },
     );
     if !where_to_get.is_empty() && domains.first().map(String::as_str) != Some(where_to_get) {
         ui.add(
-            Label::new(kit::text(where_to_get, Font::Callout).color(kit::SECONDARY))
+            Label::new(kit::text(where_to_get, Font::Callout).color(kit::palette().secondary))
                 .wrap()
                 .selectable(false),
         );
@@ -2803,7 +2818,7 @@ fn get_it_at(ui: &mut egui::Ui, where_to_get: &str) {
                     "Apassy opens no link. Check the domain before you sign in.",
                     Font::Callout,
                 )
-                .color(kit::TERTIARY),
+                .color(kit::palette().tertiary),
             )
             .wrap(),
         );
@@ -2819,7 +2834,7 @@ fn paste_field(ui: &mut egui::Ui, value: &mut String) {
             .id(super::secret_field_id(REQUEST_FIELD))
             .char_limit(super::SECRET_VALUE_CAPACITY / 4)
             .font(egui::TextStyle::Monospace)
-            .hint_text(kit::text("Paste the key", Font::Mono).color(kit::TERTIARY))
+            .hint_text(kit::text("Paste the key", Font::Mono).color(kit::palette().tertiary))
             .margin(kit::FIELD_MARGIN)
             .desired_rows(3)
             .desired_width(f32::INFINITY),
@@ -2851,12 +2866,15 @@ fn detected_row(ui: &mut egui::Ui, found: &Detected, name: &str) {
                 ui.vertical(|ui| {
                     ui.set_width((ui.available_width() - 150.0).max(80.0));
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.add(Label::new(kit::medium(name, Font::Body).color(kit::LABEL)).truncate());
+                    ui.add(
+                        Label::new(kit::medium(name, Font::Body).color(kit::palette().label))
+                            .truncate(),
+                    );
                     ui.add(
                         Label::new(
                             RichText::new(super::new_credential::row_line(found))
                                 .font(egui::FontId::monospace(11.5))
-                                .color(kit::SECONDARY),
+                                .color(kit::palette().secondary),
                         )
                         .truncate(),
                     );
@@ -2969,7 +2987,7 @@ fn suggestion_detail(
             |ui| {
                 ui.label(
                     kit::text("Apassy noticed this from how agents use it.", Font::Body)
-                        .color(kit::SECONDARY),
+                        .color(kit::palette().secondary),
                 );
             },
         );
@@ -2977,7 +2995,10 @@ fn suggestion_detail(
         if !facts.is_empty() {
             kit::section(ui, None, None, |s| {
                 for (label, value) in &facts {
-                    s.labeled(label, kit::text(value, Font::Body).color(kit::SECONDARY));
+                    s.labeled(
+                        label,
+                        kit::text(value, Font::Body).color(kit::palette().secondary),
+                    );
                 }
             });
             ui.add_space(-18.0);
@@ -2988,7 +3009,7 @@ fn suggestion_detail(
                 ui,
                 suggestion_note(correction),
                 Font::Callout,
-                kit::SECONDARY,
+                kit::palette().secondary,
             );
         });
     });
@@ -3458,7 +3479,7 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
                     ui.add(Label::new(kit::text(&command, Font::Mono)).truncate())
                         .on_hover_text(command);
                 });
-            ui.label(timer_text(clock(first.left), Font::Body).color(TIMER));
+            ui.label(timer_text(clock(first.left), Font::Body).color(kit::palette().countdown));
             action_bar(ui, run, &mut answer);
         },
     );

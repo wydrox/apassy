@@ -27,7 +27,25 @@
 //! registers its request ID there, and [`Cancel::close`] cancels it through the transport.
 //! A snapshot (a file body or a download) never goes through it. Without an external
 //! transport nothing changes.
+//!
+//! A relay address can be **pinned** (contract node-pairing-v1, sections 3, 4, and 7): a
+//! node on the tailnet with a self-signed certificate. Its [`RelayUrl`] carries
+//! [`TlsTrust::Pinned`] and up to four alternative destinations. Each connection then
+//! takes TLS 1.3 only and the pinned leaf only, never the system trust store; it tries
+//! the origin's host first and then each alternative in order while a connection is
+//! refused or times out, all within 30 s, and stops at once at a pin mismatch
+//! ([`HttpError::PinMismatch`]). Every attempt sends the origin as `Host`, and the origin
+//! stays the signed value. A hosted address ([`TlsTrust::System`]) is unchanged.
+//!
+//! The Mac's own node sets a **local route** for its origin ([`set_local_route`], plan
+//! S2–S3 decision D1): a request to that origin then connects plain to the loopback
+//! address of the node and still names (and signs) the node origin. The external
+//! transport carries the pin of a pinned request ([`ExternalRequest::pin`], unit N6):
+//! the host accepts only the leaf with that pin, over TLS 1.3, and answers
+//! [`HttpError::PinMismatch`] for another certificate. It connects to the origin only:
+//! the host sets `Host` from the URL, so it tries no alternative destination.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
@@ -42,7 +60,8 @@ use rustls::{ClientConnection, StreamOwned};
 use zeroize::Zeroizing;
 
 use super::SyncError;
-use crate::broker::http::{DestinationUrl, TlsClient, parse_destination};
+use crate::broker::http::{DestinationUrl, TlsClient, is_pin_mismatch, parse_destination};
+use crate::net::pin::{Pin, parse as parse_pin};
 
 /// The relay address that the app proposes.
 pub const DEFAULT_RELAY_URL: &str = "https://apassy-relay.wyderka.cc";
@@ -66,15 +85,215 @@ const CHUNK: usize = 64 * 1024;
 /// never moves to a larger buffer and leaves no copy behind.
 const ANSWER_CAPACITY: usize = 64 * 1024;
 
+/// How a relay client checks the certificate of its relay.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum TlsTrust {
+    /// A hosted relay: the platform trust store, as before node-pairing-v1.
+    #[default]
+    System,
+    /// A node: only the leaf certificate with this pin (node-pairing-v1 section 4).
+    Pinned(Pin),
+}
+
+impl TlsTrust {
+    /// The trust of a stored pin text: `None` is [`TlsTrust::System`]; a text that is not
+    /// a canonical pin is `InvalidRelayAddress` (a stored pin never silently goes).
+    pub fn from_pin_text(pin: Option<&str>) -> Result<Self, SyncError> {
+        match pin {
+            None => Ok(Self::System),
+            Some(text) => parse_pin(text)
+                .map(Self::Pinned)
+                .ok_or(SyncError::InvalidRelayAddress),
+        }
+    }
+
+    /// The pin, when pinned.
+    pub fn pin(&self) -> Option<Pin> {
+        match self {
+            Self::System => None,
+            Self::Pinned(pin) => Some(*pin),
+        }
+    }
+
+    /// The text of the pin, when pinned: the stored form.
+    pub fn pin_text(&self) -> Option<String> {
+        self.pin().map(|pin| pin.text())
+    }
+}
+
+/// The most alternative destinations of a pinned origin (node-pairing-v1 section 7).
+pub const MAX_ALTERNATIVES: usize = 4;
+
 /// A relay address: an origin, `https://<host>[:port]` or a loopback `http://` with a
-/// port. It has no path, query, user, or trailing slash.
+/// port. It has no path, query, user, or trailing slash. A pinned address also has its
+/// trust and its alternative destinations ([`Self::parse_with_trust`],
+/// [`Self::alternatives`]); [`Self::as_str`] is the origin either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayUrl {
     origin: String,
     destination: DestinationUrl,
+    trust: TlsTrust,
+    /// The other destinations of the same relay, tried in order after `destination`:
+    /// the text `host:port` (an IPv6 host in brackets, the port always written) and
+    /// where it connects.
+    alternatives: Vec<(String, DestinationUrl)>,
+}
+
+/// `host[:port]` of an alternative destination or of a pinned origin (node-pairing-v1
+/// sections 3 and 7): a canonical IPv4 address, an RFC 5952 IPv6 address in brackets,
+/// or a name of two or more lowercase LDH labels; a port of 1 to 65535 without leading
+/// zeros. Returns the host as written and the port when one is written.
+pub(crate) fn split_host_port(text: &str) -> Option<(String, Option<u16>)> {
+    let (host, port) = if let Some(rest) = text.strip_prefix('[') {
+        let (inside, after) = rest.split_once(']')?;
+        let address: std::net::Ipv6Addr = inside.parse().ok()?;
+        if address.to_string() != inside {
+            return None;
+        }
+        let port = match after {
+            "" => None,
+            _ => Some(after.strip_prefix(':')?),
+        };
+        (format!("[{inside}]"), port)
+    } else {
+        let (host, port) = match text.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (text, None),
+        };
+        if !valid_ipv4_or_name(host) {
+            return None;
+        }
+        (host.to_owned(), port)
+    };
+    let port = match port {
+        None => None,
+        Some(text)
+            if !text.is_empty()
+                && text.bytes().all(|byte| byte.is_ascii_digit())
+                && !text.starts_with('0') =>
+        {
+            Some(text.parse::<u16>().ok()?)
+        }
+        Some(_) => return None,
+    };
+    Some((host, port))
+}
+
+/// A canonical dotted IPv4 address, or a name of at least two lowercase LDH labels of 1
+/// to 63 characters, at most 253 characters in all.
+fn valid_ipv4_or_name(host: &str) -> bool {
+    if host
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.to_string() == host);
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    host.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 impl RelayUrl {
+    /// Parse an origin and give it the trust `trust`. A pinned origin is `https://` with
+    /// an explicit port other than 443 (node-pairing-v1 section 3); anything else is
+    /// `InvalidRelayAddress`.
+    pub fn parse_with_trust(text: &str, trust: TlsTrust) -> Result<Self, SyncError> {
+        Self::parse(text)?.with_trust(trust)
+    }
+
+    /// This address with the trust `trust`. A pinned origin needs `https://` and a port
+    /// other than 443, and system trust takes no alternative destinations.
+    pub fn with_trust(mut self, trust: TlsTrust) -> Result<Self, SyncError> {
+        match trust {
+            TlsTrust::Pinned(_) => {
+                if !matches!(self.destination, DestinationUrl::Https { port, .. } if port != 443) {
+                    return Err(SyncError::InvalidRelayAddress);
+                }
+            }
+            TlsTrust::System => {
+                if !self.alternatives.is_empty() {
+                    return Err(SyncError::InvalidRelayAddress);
+                }
+            }
+        }
+        self.trust = trust;
+        Ok(self)
+    }
+
+    /// This pinned address with the alternative destinations `list` (each
+    /// `host[:port]`, without a port the origin's port), in the order to try them, in
+    /// place of any earlier ones. At most [`MAX_ALTERNATIVES`]; an entry of another form,
+    /// an entry equal to the origin's host and port, a repeated entry, or an alternative
+    /// of an address without a pin is `InvalidRelayAddress`. An empty list clears them.
+    /// The stricter rules of a link (no loopback, no link-local address) are the link
+    /// reader's (`PairedLink::parse`).
+    pub fn alternatives(mut self, list: &[String]) -> Result<Self, SyncError> {
+        if list.is_empty() {
+            self.alternatives.clear();
+            return Ok(self);
+        }
+        let (origin_host, origin_port) = match (&self.destination, self.trust) {
+            (DestinationUrl::Https { host, port }, TlsTrust::Pinned(_)) => (host.clone(), *port),
+            _ => return Err(SyncError::InvalidRelayAddress),
+        };
+        if list.len() > MAX_ALTERNATIVES {
+            return Err(SyncError::InvalidRelayAddress);
+        }
+        let mut alternatives: Vec<(String, DestinationUrl)> = Vec::with_capacity(list.len());
+        for entry in list {
+            let (host, port) = split_host_port(entry).ok_or(SyncError::InvalidRelayAddress)?;
+            let port = port.unwrap_or(origin_port);
+            let bare = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_owned();
+            let text = format!("{host}:{port}");
+            if (bare == origin_host && port == origin_port)
+                || alternatives.iter().any(|(known, _)| *known == text)
+                || ServerName::try_from(bare.clone()).is_err()
+            {
+                return Err(SyncError::InvalidRelayAddress);
+            }
+            alternatives.push((text, DestinationUrl::Https { host: bare, port }));
+        }
+        self.alternatives = alternatives;
+        Ok(self)
+    }
+
+    /// How this address checks the certificate of its relay.
+    pub fn trust(&self) -> TlsTrust {
+        self.trust
+    }
+
+    /// The pin, when the address is pinned.
+    pub fn pin(&self) -> Option<Pin> {
+        self.trust.pin()
+    }
+
+    /// The alternative destinations, `host:port` each, in the order they are tried: the
+    /// stored form.
+    pub fn alternative_list(&self) -> Vec<String> {
+        self.alternatives
+            .iter()
+            .map(|(text, _)| text.clone())
+            .collect()
+    }
+
+    /// Where a connection goes: the origin's host, then each alternative in order.
+    fn destinations(&self) -> impl Iterator<Item = &DestinationUrl> {
+        std::iter::once(&self.destination).chain(self.alternatives.iter().map(|(_, to)| to))
+    }
+
     /// Parse an address that the owner typed. A trailing slash goes.
     pub fn parse(text: &str) -> Result<Self, SyncError> {
         let destination =
@@ -97,6 +316,8 @@ impl RelayUrl {
         Ok(Self {
             origin,
             destination,
+            trust: TlsTrust::System,
+            alternatives: Vec::new(),
         })
     }
 
@@ -127,6 +348,60 @@ pub enum HttpError {
     Broken,
     /// The answer is not valid HTTP, too large, or a body is longer than allowed.
     Protocol,
+    /// A pinned relay presented another certificate (node-pairing-v1 section 4): no byte
+    /// of the request went out, and no other destination was tried.
+    PinMismatch,
+}
+
+/// The local routes of this process: the origin of the Mac's own node and the loopback
+/// address of its relay (plan S2–S3 decision D1).
+fn local_routes() -> &'static Mutex<BTreeMap<String, SocketAddr>> {
+    static ROUTES: OnceLock<Mutex<BTreeMap<String, SocketAddr>>> = OnceLock::new();
+    ROUTES.get_or_init(Mutex::default)
+}
+
+/// Route the requests to `origin` plain to `addr`, a loopback address of this computer,
+/// until [`clear_local_route`]: the node of this Mac sets it when it starts. A request
+/// keeps the origin as `Host` and as the signed value, so the callers do not change.
+/// `InvalidRelayAddress` when `origin` is not a relay origin or `addr` is not loopback.
+pub fn set_local_route(origin: &str, addr: SocketAddr) -> Result<(), SyncError> {
+    if !addr.ip().is_loopback() || addr.port() == 0 {
+        return Err(SyncError::InvalidRelayAddress);
+    }
+    let origin = RelayUrl::parse(origin)?;
+    local_routes()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(origin.as_str().to_owned(), addr);
+    Ok(())
+}
+
+/// End the local route of `origin`: the node of this Mac stopped. A request in flight
+/// keeps its connection.
+pub fn clear_local_route(origin: &str) {
+    let Ok(origin) = RelayUrl::parse(origin) else {
+        return;
+    };
+    local_routes()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(origin.as_str());
+}
+
+/// The local route of `url`, for the tests of the node (`crate::node::tailnet`).
+#[cfg(test)]
+pub(crate) fn local_route_for_test(url: &RelayUrl) -> Option<SocketAddr> {
+    local_route(url)
+}
+
+/// The local route of `url`, when the node of this Mac set one.
+fn local_route(url: &RelayUrl) -> Option<SocketAddr> {
+    local_routes()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(url.as_str())
+        .copied()
+        .filter(|addr| addr.ip().is_loopback())
 }
 
 /// The body of a request.
@@ -337,6 +612,11 @@ pub struct ExternalRequest<'a> {
     /// The whole request ends by then: the wait of a long poll and a margin, or less
     /// when the request has a deadline.
     pub timeout: Duration,
+    /// The pin of a pinned origin (node-pairing-v1 section 4), its 43-character text:
+    /// the transport accepts only the leaf certificate with this pin, over TLS 1.3, and
+    /// never the system trust store; another certificate is
+    /// [`HttpError::PinMismatch`] before any request byte. `None`: system trust.
+    pub pin: Option<String>,
 }
 
 impl std::fmt::Debug for ExternalRequest<'_> {
@@ -345,6 +625,7 @@ impl std::fmt::Debug for ExternalRequest<'_> {
             .field("id", &self.id)
             .field("method", &self.method)
             .field("timeout", &self.timeout)
+            .field("pinned", &self.pin.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -497,6 +778,9 @@ fn exchange_external(
         headers,
         body,
         timeout,
+        // A pinned origin: the transport checks the pin and never falls back to the
+        // system trust of the host (node-pairing-v1 section 4).
+        pin: url.pin().map(|pin| pin.text()),
     };
     let answer = transport.send(&external);
     drop(external);
@@ -586,18 +870,15 @@ fn connect_any(
     Err(HttpError::Connect)
 }
 
-/// The TCP connection of a request. The name lookup and the connect run on a helper
-/// thread that holds no token: a cancel or the deadline ends the wait at once, and the
-/// helper drops a connection that comes too late. All of it ends within
-/// `CONNECT_LIMIT`.
+/// The TCP connection of a request to `destination`. The name lookup and the connect
+/// run on a helper thread that holds no token: a cancel or `end` ends the wait at once,
+/// and the helper drops a connection that comes too late.
 fn open_tcp(
-    url: &RelayUrl,
+    destination: &DestinationUrl,
     cancel: Option<&Cancel>,
-    deadline: Option<Instant>,
+    end: Instant,
 ) -> Result<TcpStream, HttpError> {
-    let limit = Instant::now() + CONNECT_LIMIT;
-    let end = deadline.map_or(limit, |deadline| deadline.min(limit));
-    let destination = url.destination.clone();
+    let destination = destination.clone();
     let abandoned = Arc::new(AtomicBool::new(false));
     let (sender, receiver) = mpsc::channel();
     {
@@ -636,10 +917,9 @@ fn open_tcp(
     }
 }
 
-/// Connect for `request`. Its socket is in its [`Cancel`] from the TCP connect on, so a
-/// cancel also ends the TLS handshake. A failed check sends no token.
-fn connect<'a>(url: &RelayUrl, request: &Request<'a>) -> Result<(Conn, Held<'a>), HttpError> {
-    let tcp = open_tcp(url, request.cancel, request.deadline)?;
+/// The socket limits of `request` on `tcp`, and its place in the [`Cancel`] of the
+/// request.
+fn hold_socket<'a>(tcp: &TcpStream, request: &Request<'a>) -> Result<Held<'a>, HttpError> {
     let stall = time_left(request.deadline, STALL_TIMEOUT, HttpError::Connect)?;
     let header = time_left(request.deadline, HEADER_TIMEOUT, HttpError::Connect)?;
     tcp.set_write_timeout(Some(stall))
@@ -648,26 +928,72 @@ fn connect<'a>(url: &RelayUrl, request: &Request<'a>) -> Result<(Conn, Held<'a>)
         .map_err(|_| HttpError::Connect)?;
     let mut held = Held(None);
     if let Some(cancel) = request.cancel {
-        let number = cancel.hold(&tcp).map_err(|_| HttpError::Connect)?;
+        let number = cancel.hold(tcp).map_err(|_| HttpError::Connect)?;
         held = Held(Some((cancel, number)));
     }
-    match &url.destination {
-        DestinationUrl::Loopback { .. } => Ok((Conn::Plain(tcp), held)),
-        DestinationUrl::Https { host, .. } => {
-            let name = ServerName::try_from(host.clone()).map_err(|_| HttpError::Connect)?;
-            let conn = ClientConnection::new(tls()?.client_config(), name)
-                .map_err(|_| HttpError::Connect)?;
-            let mut stream = StreamOwned::new(conn, tcp);
-            // Finish the handshake before any request byte.
-            while stream.conn.is_handshaking() {
-                stream
-                    .conn
-                    .complete_io(&mut stream.sock)
-                    .map_err(|_| HttpError::Connect)?;
-            }
-            Ok((Conn::Tls(Box::new(stream)), held))
-        }
+    Ok(held)
+}
+
+/// Connect for `request`. Its socket is in its [`Cancel`] from the TCP connect on, so a
+/// cancel also ends the TLS handshake. A failed check sends no token.
+///
+/// A local route connects plain to the loopback address of this Mac's node. Otherwise
+/// the origin's host comes first, then each alternative of a pinned address, while a
+/// connection is refused or times out; all of it ends within `CONNECT_LIMIT`. A TLS
+/// failure stops at once: a pin mismatch is [`HttpError::PinMismatch`], and no other
+/// destination is tried after a wrong certificate.
+fn connect<'a>(url: &RelayUrl, request: &Request<'a>) -> Result<(Conn, Held<'a>), HttpError> {
+    let limit = Instant::now() + CONNECT_LIMIT;
+    let end = request
+        .deadline
+        .map_or(limit, |deadline| deadline.min(limit));
+    if let Some(addr) = local_route(url) {
+        let local = DestinationUrl::Loopback {
+            addr,
+            host_header: String::new(),
+        };
+        let tcp = open_tcp(&local, request.cancel, end)?;
+        let held = hold_socket(&tcp, request)?;
+        return Ok((Conn::Plain(tcp), held));
     }
+    let pinned = match url.trust {
+        TlsTrust::System => None,
+        TlsTrust::Pinned(pin) => Some(TlsClient::pinned(&pin).map_err(|_| HttpError::Connect)?),
+    };
+    for destination in url.destinations() {
+        if request.cancel.is_some_and(Cancel::is_closed) {
+            break;
+        }
+        let Ok(tcp) = open_tcp(destination, request.cancel, end) else {
+            // Refused, unreachable, or timed out: the next destination, if any.
+            continue;
+        };
+        let held = hold_socket(&tcp, request)?;
+        let host = match destination {
+            // Plain http:// is loopback only, and never pinned (`with_trust`).
+            DestinationUrl::Loopback { .. } => return Ok((Conn::Plain(tcp), held)),
+            DestinationUrl::Https { host, .. } => host,
+        };
+        let config = match &pinned {
+            Some(pinned) => pinned.client_config(),
+            None => tls()?.client_config(),
+        };
+        let name = ServerName::try_from(host.clone()).map_err(|_| HttpError::Connect)?;
+        let conn = ClientConnection::new(config, name).map_err(|_| HttpError::Connect)?;
+        let mut stream = StreamOwned::new(conn, tcp);
+        // Finish the handshake before any request byte.
+        while stream.conn.is_handshaking() {
+            stream.conn.complete_io(&mut stream.sock).map_err(|error| {
+                if pinned.is_some() && is_pin_mismatch(&error) {
+                    HttpError::PinMismatch
+                } else {
+                    HttpError::Connect
+                }
+            })?;
+        }
+        return Ok((Conn::Tls(Box::new(stream)), held));
+    }
+    Err(HttpError::Connect)
 }
 
 fn valid_header_text(text: &str) -> bool {
@@ -1035,9 +1361,30 @@ fn read_limited(reader: &mut impl Read, limit: usize) -> Result<Zeroizing<Vec<u8
 /// transport when the host installed one, else over TCP.
 pub(crate) fn exchange(url: &RelayUrl, request: &Request<'_>) -> Result<Answer, HttpError> {
     match external() {
-        Some(transport) => exchange_external(transport, url, request),
-        None => exchange_tcp(url, request),
+        Some(transport) if local_route(url).is_none() => exchange_external(transport, url, request),
+        _ => exchange_tcp(url, request),
     }
+}
+
+/// One JSON `POST` without a bearer to `path` of a service that is not a relay: the push
+/// gateway of push-gateway-v1 (`POST /v1/handles`). System trust, as a relay origin; the
+/// whole call ends within `timeout`; the answer is read into memory (at most 2 MiB).
+/// Returns the status and the body, which is erased on drop. Through the external
+/// transport when the host installed one.
+pub fn post_json(
+    origin: &RelayUrl,
+    path: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<(u16, Zeroizing<Vec<u8>>), HttpError> {
+    if !path.starts_with('/') || !path.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(HttpError::Protocol);
+    }
+    let mut request = Request::new("POST", path.to_owned(), None);
+    request.body = Body::Json(Zeroizing::new(body.to_vec()));
+    request.deadline = Some(Instant::now() + timeout);
+    let answer = exchange(origin, &request)?;
+    Ok((answer.status, answer.body))
 }
 
 fn exchange_tcp(url: &RelayUrl, request: &Request<'_>) -> Result<Answer, HttpError> {
@@ -1452,6 +1799,7 @@ mod tests {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
         timeout: Duration,
+        pin: Option<String>,
     }
 
     impl FakeTransport {
@@ -1485,6 +1833,7 @@ mod tests {
                     .collect(),
                 body: request.body.map(<[u8]>::to_vec),
                 timeout: request.timeout,
+                pin: request.pin.clone(),
             });
             if self.blocks {
                 let started = Instant::now();
@@ -1718,6 +2067,316 @@ mod tests {
             String::from_utf8(server.join().unwrap())
                 .unwrap()
                 .starts_with("GET /v1/devices HTTP/1.1\r\n")
+        );
+    }
+
+    // ---- Pinned relays (contract node-pairing-v1 sections 3, 4, and 7). ----
+
+    const CONTRACT_PIN: &str = "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE";
+
+    fn contract_pin() -> TlsTrust {
+        TlsTrust::Pinned(parse_pin(CONTRACT_PIN).unwrap())
+    }
+
+    /// A node certificate and a server that presents it.
+    fn node_tls() -> (Arc<rustls::ServerConfig>, Pin) {
+        let (config, der) =
+            crate::broker::http::test_support::self_signed_tls(&[&rustls::version::TLS13]);
+        (config, Pin::of_certificate(&der))
+    }
+
+    /// Serve one TLS connection with `config`: read the head and answer `{}`. Returns
+    /// the plaintext that arrived, empty after a failed handshake.
+    fn serve_tls_once(
+        listener: TcpListener,
+        config: Arc<rustls::ServerConfig>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let conn = rustls::ServerConnection::new(config).unwrap();
+            let mut tls = StreamOwned::new(conn, tcp);
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match tls.read(&mut buf) {
+                    Ok(0) | Err(_) => return seen,
+                    Ok(read) => seen.extend_from_slice(&buf[..read]),
+                }
+            }
+            let _ = tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+            let _ = tls.flush();
+            tls.conn.send_close_notify();
+            let _ = tls.conn.complete_io(&mut tls.sock);
+            seen
+        })
+    }
+
+    /// Two different ports of this computer where nothing listens, while `live` holds
+    /// its own.
+    fn closed_ports(live: &TcpListener) -> [u16; 2] {
+        let a = TcpListener::bind("127.0.0.1:0").unwrap();
+        let b = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ports = [port_of(&a), port_of(&b)];
+        assert!(!ports.contains(&port_of(live)));
+        ports
+    }
+
+    fn port_of(listener: &TcpListener) -> u16 {
+        listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn a_pinned_address_is_https_with_a_port_and_its_alternatives_have_their_form() {
+        let url = RelayUrl::parse_with_trust("https://100.64.0.7:8444", contract_pin())
+            .unwrap()
+            .alternatives(&[
+                "apassy-mini.tail0123.ts.net".to_owned(),
+                "[fd7a:115c:a1e0::7]:8444".to_owned(),
+            ])
+            .unwrap();
+        assert_eq!(url.as_str(), "https://100.64.0.7:8444");
+        assert_eq!(url.pin().unwrap().text(), CONTRACT_PIN);
+        assert_eq!(url.trust().pin_text().as_deref(), Some(CONTRACT_PIN));
+        assert_eq!(
+            url.alternative_list(),
+            [
+                "apassy-mini.tail0123.ts.net:8444",
+                "[fd7a:115c:a1e0::7]:8444"
+            ]
+        );
+        assert_eq!(url.destinations().count(), 3);
+        // The host header is the origin's, whatever destination connects.
+        assert_eq!(url.host_header(), "100.64.0.7:8444");
+
+        for bad in [
+            "http://127.0.0.1:8444",
+            "https://100.64.0.7",
+            "https://100.64.0.7:443",
+            "https://100.64.0.7:8444/v1",
+        ] {
+            assert_eq!(
+                RelayUrl::parse_with_trust(bad, contract_pin()),
+                Err(SyncError::InvalidRelayAddress),
+                "{bad}"
+            );
+        }
+        let pinned = || RelayUrl::parse_with_trust("https://100.64.0.7:8444", contract_pin());
+        for list in [
+            vec!["100.64.0.7:8444"],
+            vec!["100.64.0.7"],
+            vec!["a.example.com", "a.example.com:8444"],
+            vec!["[FD7A:115C:A1E0::7]"],
+            vec!["single"],
+            vec!["a.example.com:08444"],
+            vec!["a.example.com:0"],
+            vec!["Upper.example.com"],
+            vec![
+                "a.example.com",
+                "b.example.com",
+                "c.example.com",
+                "d.example.com",
+                "e.example.com",
+            ],
+        ] {
+            let list: Vec<String> = list.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                pinned().unwrap().alternatives(&list),
+                Err(SyncError::InvalidRelayAddress),
+                "{list:?}"
+            );
+        }
+        // Alternatives need a pin, and a pinned address keeps them only while pinned.
+        let hosted = RelayUrl::parse("https://relay.example.test:8443").unwrap();
+        assert_eq!(hosted.trust(), TlsTrust::System);
+        assert!(
+            hosted
+                .clone()
+                .alternatives(&["b.example.com".to_owned()])
+                .is_err()
+        );
+        assert_eq!(hosted.clone().alternatives(&[]).unwrap(), hosted);
+        assert!(url.with_trust(TlsTrust::System).is_err());
+        assert_eq!(TlsTrust::from_pin_text(None), Ok(TlsTrust::System));
+        assert_eq!(
+            TlsTrust::from_pin_text(Some(CONTRACT_PIN)),
+            Ok(contract_pin())
+        );
+        assert_eq!(
+            TlsTrust::from_pin_text(Some(&CONTRACT_PIN[..42])),
+            Err(SyncError::InvalidRelayAddress)
+        );
+    }
+
+    #[test]
+    fn a_pinned_request_reaches_the_pinned_relay_and_refuses_another_certificate() {
+        let (config, pin) = node_tls();
+        for (trust, refused) in [(TlsTrust::Pinned(pin), false), (contract_pin(), true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = RelayUrl::parse_with_trust(
+                &format!("https://127.0.0.1:{}", port_of(&listener)),
+                trust,
+            )
+            .unwrap();
+            let server = serve_tls_once(listener, Arc::clone(&config));
+            let request = Request::new(
+                "POST",
+                "/v1/auth/token".to_owned(),
+                Some("apassy_acc_synthetic"),
+            );
+            let result = exchange(&url, &request);
+            let seen = server.join().unwrap();
+            if refused {
+                assert_eq!(result.unwrap_err(), HttpError::PinMismatch);
+                assert!(seen.is_empty(), "no request byte before the pin check");
+            } else {
+                assert_eq!(result.unwrap().body.as_slice(), b"{}");
+                let head = String::from_utf8(seen).unwrap();
+                assert!(
+                    head.starts_with("POST /v1/auth/token HTTP/1.1\r\n"),
+                    "{head}"
+                );
+                assert!(head.contains(&format!("Host: {}\r\n", url.host_header())));
+            }
+        }
+    }
+
+    #[test]
+    fn a_hosted_address_never_takes_a_self_signed_node_certificate() {
+        // System trust as before: the node certificate is not in any trust store.
+        let (config, _) = node_tls();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = RelayUrl::parse(&format!("https://127.0.0.1:{}", port_of(&listener))).unwrap();
+        let server = serve_tls_once(listener, config);
+        let request = Request::new("GET", "/healthz".to_owned(), None);
+        assert_eq!(exchange(&url, &request).unwrap_err(), HttpError::Connect);
+        assert!(server.join().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_next_destination_is_tried_after_a_refused_connection_and_the_origin_stays() {
+        let (config, pin) = node_tls();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let [closed, also_closed] = closed_ports(&listener);
+        let origin = format!("https://127.0.0.1:{closed}");
+        let url = RelayUrl::parse_with_trust(&origin, TlsTrust::Pinned(pin))
+            .unwrap()
+            .alternatives(&[
+                format!("127.0.0.1:{also_closed}"),
+                format!("127.0.0.1:{}", port_of(&listener)),
+            ])
+            .unwrap();
+        let server = serve_tls_once(listener, config);
+        let request = Request::new("GET", "/healthz".to_owned(), None);
+        assert_eq!(exchange(&url, &request).unwrap().body.as_slice(), b"{}");
+        let head = String::from_utf8(server.join().unwrap()).unwrap();
+        // The third destination answered with the origin's Host: the origin stays the
+        // value that the app signs and stores.
+        let host = origin.strip_prefix("https://").unwrap();
+        assert!(head.contains(&format!("Host: {host}\r\n")), "{head}");
+        assert_eq!(url.as_str(), origin);
+    }
+
+    #[test]
+    fn a_pin_mismatch_stops_before_the_next_destination() {
+        let (wrong, _) = node_tls();
+        let (_, pin) = node_tls();
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = RelayUrl::parse_with_trust(
+            &format!("https://127.0.0.1:{}", port_of(&first)),
+            TlsTrust::Pinned(pin),
+        )
+        .unwrap()
+        .alternatives(&[format!("127.0.0.1:{}", port_of(&second))])
+        .unwrap();
+        let server = serve_tls_once(first, wrong);
+        let request = Request::new("GET", "/healthz".to_owned(), Some("apassy_acc_synthetic"));
+        assert_eq!(
+            exchange(&url, &request).unwrap_err(),
+            HttpError::PinMismatch
+        );
+        assert!(server.join().unwrap().is_empty());
+        second.set_nonblocking(true).unwrap();
+        assert_eq!(
+            second.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "no connection to the alternative after a wrong certificate"
+        );
+    }
+
+    #[test]
+    fn a_local_route_connects_plain_to_the_node_and_names_the_node_origin() {
+        let (plain, server) = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        let port: u16 = plain.as_str().rsplit(':').next().unwrap().parse().unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        // A synthetic node origin that no other test uses (the route table is of the
+        // process). Nothing connects to it: the route goes to the loopback server.
+        let origin = "https://100.64.0.77:8444";
+        let url = RelayUrl::parse_with_trust(origin, contract_pin()).unwrap();
+        assert_eq!(local_route(&url), None);
+        set_local_route(origin, addr).unwrap();
+        assert_eq!(local_route(&url), Some(addr));
+        let request = Request::new(
+            "GET",
+            "/v1/questions".to_owned(),
+            Some("apassy_acc_synthetic"),
+        );
+        assert_eq!(exchange(&url, &request).unwrap().body.as_slice(), b"{}");
+        let head = String::from_utf8(server.join().unwrap()).unwrap();
+        assert!(
+            head.starts_with("GET /v1/questions HTTP/1.1\r\nHost: 100.64.0.77:8444\r\n"),
+            "{head}"
+        );
+        clear_local_route(origin);
+        assert_eq!(local_route(&url), None);
+        // Only a loopback address is a local route.
+        assert_eq!(
+            set_local_route(origin, SocketAddr::from(([100, 64, 0, 77], 8444))),
+            Err(SyncError::InvalidRelayAddress)
+        );
+        assert_eq!(
+            set_local_route("not an origin", addr),
+            Err(SyncError::InvalidRelayAddress)
+        );
+    }
+
+    /// The watch (unit N6): a pinned request goes through the external transport with
+    /// its pin and the origin (no alternative), a hosted one without a pin, and a pin
+    /// mismatch of the host stays a pin mismatch.
+    #[test]
+    fn a_pinned_request_carries_its_pin_through_the_external_transport() {
+        let transport = FakeTransport::leaked(false, || external_answer(200, &[], b"{}"));
+        let url = RelayUrl::parse_with_trust("https://100.64.0.7:8444", contract_pin())
+            .unwrap()
+            .alternatives(&["apassy-mini.tail0123.ts.net:8444".to_owned()])
+            .unwrap();
+        let request = Request::new(
+            "GET",
+            "/v1/questions".to_owned(),
+            Some("apassy_acc_synthetic"),
+        );
+        exchange_external(transport, &url, &request).unwrap();
+        {
+            let seen = transport.seen();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].url, "https://100.64.0.7:8444/v1/questions");
+            assert_eq!(seen[0].pin.as_deref(), Some(CONTRACT_PIN));
+        }
+        // A hosted address goes through it without a pin.
+        exchange_external(transport, &loopback(), &request).unwrap();
+        assert_eq!(transport.seen().len(), 2);
+        assert_eq!(transport.seen()[1].pin, None);
+
+        let refusing = FakeTransport::leaked(false, || Err(HttpError::PinMismatch));
+        assert_eq!(
+            exchange_external(refusing, &url, &request).unwrap_err(),
+            HttpError::PinMismatch
+        );
+        assert_eq!(
+            refusing.seen().len(),
+            1,
+            "no alternative after a wrong certificate"
         );
     }
 }

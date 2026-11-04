@@ -313,13 +313,13 @@ pub(super) fn week_summary(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             kit::paint_icon_in(ui, Icon::CheckCircle, 16.0, Tone::Good.mark());
-            ui.label(kit::medium("All clear", Font::Body).color(kit::LABEL));
+            ui.label(kit::medium("All clear", Font::Body).color(kit::palette().label));
         });
         ui.add_space(14.0);
     }
     ui.horizontal(|ui| {
         ui.add_space(2.0);
-        ui.label(kit::text("This week", Font::Title3).color(kit::LABEL));
+        ui.label(kit::text("This week", Font::Title3).color(kit::palette().label));
     });
     ui.add_space(6.0);
     let week = activity.week(scope).unwrap_or_default();
@@ -363,7 +363,7 @@ pub(super) fn week_summary(
                 s.status(
                     &mac.name,
                     Some(mac.note.as_str()),
-                    kit::text("No counts", Font::Body).color(kit::SECONDARY),
+                    kit::text("No counts", Font::Body).color(kit::palette().secondary),
                 );
             }
         }

@@ -4,14 +4,18 @@
   if (self.apassyLoginSave) { self.apassyLoginSave.resume(); return; }
   const api = self.apassyLoginTarget;
   const typed = api.typedTracker();
-  let enabled = true, activation, attempt, monitor, banner, bannerTimer, bannerVisibility;
+  let enabled = true, activation, attempt, monitor, banner, bannerOffer, bannerTimer, bannerVisibility;
   const send = (m) => chrome.runtime.sendMessage(m).catch(() => ({ ok: false }));
   function removeBanner() { clearTimeout(bannerTimer); bannerVisibility?.disconnect(); bannerVisibility = null; banner?.remove(); banner = null; }
   function clearAttempt() { clearTimeout(monitor); attempt = null; }
   async function show(reply) {
     const offer = reply?.offer;
     if (!enabled || !offer || offer.until <= Date.now()) return;
+    // The offer on screen again (a second resume of this document): the banner stays, so
+    // a click that it took, or its visible time, is not lost to a new one.
+    if (banner?.isConnected && bannerOffer === offer.id) return;
     removeBanner();
+    bannerOffer = offer.id;
     banner = document.createElement("div");
     banner.setAttribute("data-apassy-save-offer", "");
     const visibleBanner = banner;
@@ -159,6 +163,8 @@
     if (message?.type === "login_features_stop" && sender.id === chrome.runtime.id && !sender.tab) self.apassyLoginSave.stop();
   });
   addEventListener("pagehide", () => { typed.clearAll(); activation = null; clearAttempt(); removeBanner(); });
-  addEventListener("pageshow", () => { if (enabled) self.apassyLoginSave.resume(); });
+  // Only a page back from the back/forward cache: the first pageshow of a document comes
+  // after the resume below when this script runs before the load event.
+  addEventListener("pageshow", (event) => { if (event.persisted && enabled) self.apassyLoginSave.resume(); });
   self.apassyLoginSave.resume();
 })();

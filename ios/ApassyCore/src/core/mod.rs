@@ -49,7 +49,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use apassy::sync::{RelayConfig, RelaySync};
+use apassy::sync::RelaySync;
 use apassy::vault::Vault;
 
 use config::{Paths, PhoneList, VaultEntry};
@@ -91,6 +91,10 @@ const WATCH_OPS: &[&str] = &[
     "watch_connect_cancel",
     "watch_status",
     "watch_forget",
+    // The watch's own push handle (push-gateway-v1 section 11) and its summary key.
+    "push_token_set",
+    "push_token_clear",
+    "push_summary_keys",
 ];
 
 #[derive(Deserialize)]
@@ -689,12 +693,17 @@ impl Core {
             | "question_answer_string"
             | "question_answer"
             | "answer_key_register"
-            | "push_token_set"
-            | "push_token_clear"
             | "join_attach"
             | "join_attach_poll"
             | "join_attach_cancel" => {
                 self.require_app()?;
+                self.questions_call(&op, request)
+            }
+            // The push handle of the device (push-gateway-v1 sections 10 and 11) and the
+            // summary keys of its notification extension (section 12): the app and the
+            // watch, never AutoFill.
+            "push_token_set" | "push_token_clear" | "push_summary_keys" => {
+                self.require_app_or_watch()?;
                 self.questions_call(&op, request)
             }
             // 5.12 The agent feeds of the Macs: the app only.
@@ -774,16 +783,13 @@ impl Core {
     /// The relay sync of the selected vault, made again after a selection.
     fn select_relay(&self) -> CoreResult<()> {
         let entry = guard(&self.list).selected_entry().cloned();
-        let relay = entry.and_then(|entry| {
-            entry.relay_url.as_ref().map(|url| {
-                RelaySync::new(RelayConfig::in_data_dir(
-                    &self.paths.data_dir,
-                    &self.paths.vault_file(&entry.id),
-                    url,
-                    &entry.id,
-                ))
-            })
-        });
+        // A node relay keeps its pin and its alternatives (node-pairing-v1 section 9).
+        let relay = match entry {
+            Some(entry) => entry
+                .relay_config(&self.paths.data_dir, &self.paths.vault_file(&entry.id))?
+                .map(RelaySync::new),
+            None => None,
+        };
         *guard(&self.relay) = relay;
         *guard(&self.status) = sync::Memory::default();
         Ok(())
@@ -938,6 +944,9 @@ impl Core {
             team_id: None,
             device_id: None,
             added_at: now() as i64,
+            pin: None,
+            alt: Vec::new(),
+            node_name: None,
         };
         {
             let mut list = guard(&self.list);

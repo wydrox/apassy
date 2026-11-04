@@ -1211,9 +1211,12 @@ mod tests {
                 public_key: key.public_key().to_vec(),
                 key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
                 created_at: 0,
+                account_key: false,
             })
             .expect("row");
-        let config = RelayConfig::in_data_dir(dir, &vault_path, &url, "relay");
+        // As the app builds it from the vault list (`relay_of`).
+        let link = crate::vaults::RelayLink::new(&url, "t_7k2m5q4x3c", 2);
+        let config = RelayConfig::for_link(dir, &vault_path, &link, "relay").expect("config");
         std::fs::create_dir_all(&config.work_dir).expect("sync dir");
         let state = serde_json::json!({
             "format": 3,
@@ -1696,6 +1699,50 @@ mod tests {
             assert!(
                 relay.count("GET /v1/sync/head") >= heads + 2,
                 "the waiter polls again: {:?}",
+                relay.log()
+            );
+        }
+
+        /// The waiter polls while a sync signs in: the session is in memory and has no
+        /// token yet. The relay refuses the challenge of the sync. The poll does not sign
+        /// in beside it: it waits for that sign-in and takes its refusal. So the mark
+        /// says "removed" for both, and no token stays: two sign-ins at once left the
+        /// refused sync without a mark (no status for a while), or a mark beside a token
+        /// that no later sign-in cleared (the status came back after each sync).
+        #[test]
+        fn a_poll_beside_a_refused_sign_in_takes_its_refusal() {
+            let root = tempfile::TempDir::new().expect("dir");
+            let relay = FakeRelay::start();
+            let (_a, _vault_a, b, vault_b) = pair(root.path(), &relay);
+            b.forget();
+            relay.fail_next("POST /v1/auth/challenge", 1, 401);
+            let gate = relay.hold("POST /v1/auth/challenge", Duration::from_secs(10));
+            let challenges = relay.count("POST /v1/auth/challenge");
+            let tokens = relay.count("POST /v1/auth/token");
+            let vault: SharedVault = Arc::new(Mutex::new(Some(vault_b)));
+            std::thread::scope(|scope| {
+                let sync = scope.spawn(|| b.sync_shared(&vault, |_| true));
+                gate.wait_entered();
+                assert!(b.has_session() && !b.is_removed());
+                let poll = scope.spawn(|| b.poll(Duration::from_secs(1)));
+                // A second sign-in, if the poll could start one, reaches the relay now.
+                std::thread::sleep(Duration::from_millis(300));
+                assert_eq!(
+                    relay.count("POST /v1/auth/challenge"),
+                    challenges + 1,
+                    "{:?}",
+                    relay.log()
+                );
+                gate.release();
+                assert_eq!(sync.join().expect("sync"), Err(SyncError::RemovedFromRelay));
+                assert_eq!(poll.join().expect("poll"), Err(SyncError::RemovedFromRelay));
+            });
+            assert!(b.is_removed());
+            assert_eq!(relay.count("POST /v1/auth/challenge"), challenges + 1);
+            assert_eq!(
+                relay.count("POST /v1/auth/token"),
+                tokens,
+                "{:?}",
                 relay.log()
             );
         }

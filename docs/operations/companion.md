@@ -4,6 +4,13 @@ Date: 2026-09-30.
 Scope: [ADR 0020](../adr/0020-iphone-companion.md) and the wire in [companion-v1](../contracts/companion-v1.md). The setting is off by default.
 Use only synthetic values for tests. This document does not open the real-secret gate.
 
+> **Wi-Fi pairing is ending** ([ADR 0028](../adr/0028-retire-wifi-companion.md) stage 3, [plan S2–S3](../design/implementation-plan-s2-s3.md) unit W1, from Apassy 0.5.17). The iPhone app now reaches the Mac through your tailnet ([the node of the Mac](node.md)) or through Apassy relay. New Wi-Fi pairing is no longer possible: Settings has no "Pair an iPhone" and no pairing code. iPhones that are paired keep working until the removal, two versions later (unit W2). The settings group is now "Wi-Fi Pairing" in Settings > Devices, and the switch is "Listen on This Network". Sections 2 and 3 describe the old pairing for reference.
+>
+> - **The notice.** At the first unlock after the update, a Mac with a paired Wi-Fi iPhone shows "Wi-Fi Pairing Is Ending" once: "The iPhone app now reaches this Mac through your tailnet." (the tailnet route of the Mac is on) or "…through Apassy relay." (it is off), then "Wi-Fi pairing ends in two versions." OK and Open Devices both close it for good on this Mac (`ui.json`, key `wifi_notice_seen`). Open Devices opens Settings > Devices.
+> - **The group.** Settings > Devices > Wi-Fi Pairing shows only while a Wi-Fi iPhone is paired: the warning line "Wi-Fi pairing ends in two versions." (ⓘ: why), "Listen on This Network", each iPhone with "Paired DAY", the route word "Wi-Fi", its last contact, and Remove…, and Reset Pairing…. Remove… and Reset Pairing… keep their behaviour (section 5). When the last iPhone is removed, the group goes and the listener stops. A Mac with the switch on and no paired iPhone turns it off when Devices opens.
+> - **Next.** The next release says "Wi-Fi pairing ends in the next version." The release after it removes the listener, the group, the flag, and this notice (W2).
+> - **Move the iPhone.** Turn on "Reachable on Your Tailnet" on the Mac (or keep Apassy relay), then "Add an iPhone or a Mac…" in Settings > Devices, and scan the code with the Apassy app. Then remove the Wi-Fi pairing.
+
 ## 1. What it does
 
 The iPhone app shows the runs that wait for you, and lets you approve or deny them with Face ID. Use it when an agent waits for a decision (up to 5 minutes). The iPhone must reach the Mac through the local network or Tailscale.
@@ -21,8 +28,8 @@ An approval on the iPhone is as strong as Touch ID on the Mac: your Face ID, now
 ## 2. Turn it on
 
 1. Unlock the vault.
-2. Open Settings > Devices > iPhone.
-3. Turn on "Allow the iPhone app on this network".
+2. Open Settings > Devices > Wi-Fi Pairing (shown only while a Wi-Fi iPhone is paired).
+3. Turn on "Listen on This Network" ("Allow the iPhone app on this network" before 0.5.17).
 
 The switch then stays on with no error under it; the listener uses port 48620. Turning it on gives no access: an iPhone must pair first, and pairing needs your owner check.
 
@@ -30,7 +37,9 @@ The listener runs only while the setting is on and the vault is unlocked. A lock
 
 The first start makes a self-signed certificate and keeps it in the vault. The iPhone trusts only that certificate (its pin), not the system trust store.
 
-## 3. Pair an iPhone
+## 3. Pair an iPhone (before 0.5.17)
+
+From 0.5.17 the Mac makes no new Wi-Fi pairing code. Use "Add an iPhone or a Mac…" in Settings > Devices ([node](node.md)). The steps below were the old pairing.
 
 Connect the iPhone and Mac to the same Wi-Fi network, or connect both to Tailscale. Have the iPhone app open.
 
@@ -70,8 +79,8 @@ Open the app on the iPhone. The waiting runs of the Mac show in the Waiting list
 
 ## 5. Remove an iPhone, and reset
 
-- **Remove**: in Settings > Devices > iPhone, select "Remove" next to the device. It needs no owner check, because it only takes authority away. It works at once: the iPhone gets `unpaired` and deletes its pairing. An iPhone can also remove its own pairing: "Unpair this iPhone" in its app.
-- **Reset pairing**: select "Reset pairing…" and confirm. It removes every iPhone and makes a new certificate. The listener restarts with the new certificate. Use it when you lost an iPhone and do not know which one it was, or when you doubt the certificate. Each iPhone must pair again.
+- **Remove**: in Settings > Devices > Wi-Fi Pairing, select "Remove…" next to the device. It needs no owner check, because it only takes authority away. It works at once: the iPhone gets `unpaired` and deletes its pairing. An iPhone can also remove its own pairing: "Unpair this iPhone" in its app.
+- **Reset pairing**: select "Reset Pairing…" and confirm. It removes every iPhone and makes a new certificate. The listener restarts with the new certificate. Use it when you lost an iPhone and do not know which one it was, or when you doubt the certificate. Each iPhone must pair again.
 - **A new Face ID enrollment** on the iPhone makes its approval key unusable, by design. The app then asks you to pair again. Remove the old entry on the Mac first.
 
 ## 6. What the iPhone sees
@@ -84,10 +93,10 @@ It never gets a secret value, a placeholder, an agent token, a note, or a hidden
 
 | Symptom | What to check |
 | --- | --- |
-| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi, or both are connected to Tailscale. For Tailscale, make a new pairing code after the Mac connects and check that the network permits the listener port. The vault is unlocked (a lock stops the listener). In Settings > Devices > iPhone, "Allow the iPhone app on this network" is on and shows no error. Some guest and hotel networks stop devices from talking to each other. |
+| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi, or both are connected to Tailscale. For Tailscale, make a new pairing code after the Mac connects and check that the network permits the listener port. The vault is unlocked (a lock stops the listener). In Settings > Devices > Wi-Fi Pairing, "Listen on This Network" is on and shows no error. Some guest and hotel networks stop devices from talking to each other. |
 | The iPhone app says to allow local network access | In the iPhone Settings > Privacy & Security > Local Network, turn on Apassy. iOS asks the first time the app connects. If you refused, turn it on there. |
 | The Mac asks "Do you want the application Apassy to accept incoming network connections?" | Select "Allow". macOS asks once, the first time the listener starts. If the firewall is on and you refused, open System Settings > Network > Firewall, and allow incoming connections for Apassy. |
-| "Nothing listens on the network", or "another program already uses port 48620" | Another program uses the port. Close it, then select "Try again". |
+| "Nothing listens on the network", or "another program already uses port 48620" | Another program uses the port. Close it, then select "Try Again". |
 | "The agent broker is not running" | The listener needs the broker of the app. Restart Apassy. |
 | The pairing page says "Apassy found no network address for this Mac" | Connect the Mac to Wi-Fi or Ethernet, then select "Pair an iPhone" again. |
 | The iPhone says "This link does not work. Another device may have used it." | The link works once. Another device may have used it, or the window ended. Select "Cancel" on the Mac and make a new code. If you do not know the device name on the Mac, do not type its code. |

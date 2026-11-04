@@ -177,6 +177,11 @@ Plan: [implementation plan, stage 8](../design/implementation-plan-s8.md), track
 - The release check and AGENTS.md name the two Linux packages. CI builds the window on Linux.
 - Support grows by Linux desktops. The acceptance covers GNOME and KDE Plasma on Wayland, and one X11
   session.
+- Known limit of the Linux sandbox of s5 (judge finding L5, 2026-11-03): the sandbox has no seccomp
+  filter, so a run can open an `AF_VSOCK` socket. A network namespace does not cover vsock: on a
+  virtual machine with a vsock device, a run can reach the hypervisor host past its network rule. The
+  run still holds only placeholders. Follow-up: a seccomp filter for `socket(AF_VSOCK)` in the sandbox
+  of a run (s5 plan, X1).
 
 ## Open decisions
 

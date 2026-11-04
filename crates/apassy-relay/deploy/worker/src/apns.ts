@@ -107,8 +107,11 @@ function pemToDer(pem: string): Uint8Array {
   return der;
 }
 
-/** A provider token (ES256 JWT). It is kept while it is young and its inputs are unchanged. */
-async function providerToken(key: string, keyId: string, teamId: string, now: number): Promise<string> {
+/**
+ * A provider token (ES256 JWT). It is kept while it is young and its inputs are unchanged.
+ * The push gateway (`../push-gateway`) uses it too. Throws when the key does not import.
+ */
+export async function providerToken(key: string, keyId: string, teamId: string, now: number): Promise<string> {
   if (
     cached &&
     cached.keyId === keyId &&
@@ -201,34 +204,54 @@ interface PushResult {
   reason?: string;
 }
 
-async function sendOne(
-  deps: PushDeps,
-  push: PushRequest,
+/** One APNs request, as the push gateway sends it too. */
+export interface Notification {
+  token: string;
+  environment: "development" | "production";
+  topic: string;
+  expiresAt: number;
+  collapseId: string;
+  /** The JSON payload: APNS_PAYLOAD, or the gateway's payload with a sealed summary. */
+  payload: string;
+}
+
+/** The answer of APNs to one request: status 0 when it threw or timed out. */
+export interface NotificationResult {
+  status: number;
+  reason?: string;
+}
+
+/**
+ * Send one notification. The status is APNs's; a reason is the APNs reason when it is
+ * a word of 1 to 64 letters, else `Unknown`; status 0 with `Unreachable` when the request
+ * threw or took longer than APNS_TIMEOUT_MS.
+ */
+export async function sendNotification(
+  deps: Pick<PushDeps, "fetch">,
   jwt: string,
-  topic: string,
-  token: string,
-): Promise<PushResult> {
-  const base = push.environment === "production" ? APNS_PRODUCTION : APNS_SANDBOX;
+  notification: Notification,
+): Promise<NotificationResult> {
+  const base = notification.environment === "production" ? APNS_PRODUCTION : APNS_SANDBOX;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), APNS_TIMEOUT_MS);
   try {
-    const response = await deps.fetch(base + token, {
+    const response = await deps.fetch(base + notification.token, {
       method: "POST",
       signal: controller.signal,
       headers: {
         authorization: `bearer ${jwt}`,
-        "apns-topic": topic,
+        "apns-topic": notification.topic,
         "apns-push-type": "alert",
         "apns-priority": "10",
-        "apns-expiration": String(push.expiresAt),
-        "apns-collapse-id": push.collapseId,
+        "apns-expiration": String(notification.expiresAt),
+        "apns-collapse-id": notification.collapseId,
         "content-type": "application/json",
       },
-      body: APNS_PAYLOAD,
+      body: notification.payload,
     });
     if (response.status === 200) {
       await response.body?.cancel().catch(() => undefined);
-      return { token, status: 200 };
+      return { status: 200 };
     }
     let reason = "Unknown";
     const raw = await readBody(response, MAX_APNS_ERROR_BODY);
@@ -239,12 +262,30 @@ async function sendOne(
     } catch {
       // An empty or non-JSON body keeps the reason Unknown.
     }
-    return { token, status: response.status, reason };
+    return { status: response.status, reason };
   } catch {
-    return { token, status: 0, reason: "Unreachable" };
+    return { status: 0, reason: "Unreachable" };
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function sendOne(
+  deps: PushDeps,
+  push: PushRequest,
+  jwt: string,
+  topic: string,
+  token: string,
+): Promise<PushResult> {
+  const result = await sendNotification(deps, jwt, {
+    token,
+    environment: push.environment,
+    topic,
+    expiresAt: push.expiresAt,
+    collapseId: push.collapseId,
+    payload: APNS_PAYLOAD,
+  });
+  return { token, ...result };
 }
 
 /** Handles every request whose path starts with `/internal/`. */

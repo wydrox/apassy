@@ -1,0 +1,21 @@
+# The build context of tools/basemodel/Dockerfile is the repository root. Only the
+# files that the Dockerfile copies go in: the server and trainer scripts, the
+# manifest, the pinned requirements, the license and notice, and the synthetic
+# bench cases. No vault, no owner data, no Rust tree. The fine-tuned checkpoint
+# comes from the named build context `model`, not from this context.
+*
+!LICENSE
+!tools/basemodel/requirements.txt
+!tools/basemodel/manifest.json
+!tools/basemodel/NOTICE
+!tools/basemodel/docker-entrypoint.sh
+!tools/basemodel/common.py
+!tools/basemodel/app.py
+!tools/basemodel/heads_cache.py
+!tools/basemodel/jobs.py
+!tools/basemodel/serve.py
+!tools/basemodel/train.py
+!tools/basemodel/bench.py
+!tools/basemodel/fetch_weights.py
+!tools/finetune/local_train.py
+!tests/fixtures/bouncer/cases.tsv

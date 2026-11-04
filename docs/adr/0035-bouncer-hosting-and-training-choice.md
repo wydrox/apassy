@@ -3,7 +3,14 @@
 Date: 2026-11-02.
 Status: ACCEPTED by the owner on 2026-11-02, with the implementation plan
 [implementation-plan-0035.md](../design/implementation-plan-0035.md) ("start with the plan").
-Progress (2026-11-03): wave 1 (units A, B and D1, PR #67) shipped in 0.5.14. The later waves are not merged.
+Progress (2026-11-03): wave 1 (units A, B and D1, PR #67) shipped in 0.5.14. Merged into
+`release/0.5.17`: C1 (HTTPS client), C2 (hosting choice, vault schema 29, owner check), E2 (container
+images), A2 (contract bouncer-brain-v2), F (shadow in one request), G (head set placement),
+I-srv (training jobs on a server), and J1 (the "Runs on" row and the consent screen). Remaining:
+I-cli and J2 (remote trainer in the app and the training picker), J3 (docs, this change), D2 (Connect
+sign-in on the server), C3 (Connect sign-in in the app), H (the Connect service), K1 (measurements on a
+paid devbox run that the owner confirms), and K3 (deletion test on the live service). Apassy Connect hosting
+is not live.
 Direction from the owner on 2026-11-02: "The user has the choice:
 trains it themselves or delegates; hosts it themselves or delegates." The owner
 answered the open decisions on the same day (last section).

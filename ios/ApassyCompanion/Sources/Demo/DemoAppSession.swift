@@ -77,6 +77,8 @@ final class DemoAppSession {
         let questions = QuestionsModel(
             service: demo.service, signers: signers, push: push, deviceName: settings.deviceName ?? "iPhone (demo)",
             defaults: demo.settings,
+            // Memory only: the demo keeps no summary key and removes none of the app's.
+            summaryKeys: nil,
             onCompanionCode: { _ in DemoAppSession.notAvailableText },
             onDeviceName: { [weak settings] name in settings?.deviceName = name })
         questions.follow(vault)

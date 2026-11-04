@@ -136,6 +136,28 @@ struct JoinFlowView: View {
                     "Your Mac shows the same two words. Confirm “\(model.trimmedDeviceName)” on the Mac only if they match."
                 )
                 .multilineTextAlignment(.center)
+                if let route = model.routeText {
+                    // A node on the tailnet (contract node-pairing-v1): the route word of the Mac's sheet.
+                    VStack(spacing: 4) {
+                        Label(route, systemImage: "point.3.connected.trianglepath.dotted")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.green)
+                        if let line = model.nodeLine {
+                            Text(line)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let words = model.nodeWordsLine {
+                            Text(words)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("join.nodeWords")
+                        }
+                    }
+                    .multilineTextAlignment(.center)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("join.route")
+                }
                 VStack(spacing: 8) {
                     HStack(spacing: 10) {
                         ProgressView()
@@ -225,7 +247,14 @@ struct JoinFlowView: View {
             VStack(spacing: 20) {
                 PairingHero(
                     symbol: "checkmark.seal.fill", tint: .green, title: "“\(vault.name)” is on this iPhone",
-                    message: "Apassy syncs it with your Mac through the relay.")
+                    message: model.syncLine(for: vault))
+                if let words = model.nodeWordsLine {
+                    Text(words)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("join.doneNodeWords")
+                }
                 if let message = model.passphraseMessage {
                     CalloutView(symbol: "exclamationmark.triangle.fill", text: message)
                 }

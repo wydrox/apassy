@@ -1742,6 +1742,7 @@ fn relay_vault(dir: &std::path::Path, url: &str) -> (Mutex<Option<Vault>>, Relay
             public_key: key.public_key().to_vec(),
             key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
             created_at: 0,
+            account_key: false,
         })
         .expect("relay row");
     let config = RelayConfig::in_data_dir(dir, &vault_path, url, "relay");
@@ -1901,5 +1902,218 @@ fn an_upload_signs_in_again_when_the_token_ends_before_the_transfer_could() {
         relay.count("POST /v1/auth/token"),
         sign_ins + 1,
         "a new token for the upload"
+    );
+}
+
+// ---- A new relay copy without a team code (plans section 4.1, plan s7 unit S0). ----
+
+/// A Mac whose vault asks through a questions-only Connect team (ADR 0032), as the
+/// questions sheet makes it. Returns the team id.
+fn questions_through_connect(relay: &FakeRelay, vault: &mut Vault) -> String {
+    use apassy::relay::connect::{create_connect, prepare_connect};
+    let pending =
+        prepare_connect(vault, &relay.url, "Personal", "Synthetic MacBook").expect("prepare");
+    let membership = create_connect(&pending).expect("connect");
+    vault.keep_connect_result(&membership).expect("keep");
+    apassy::relay::membership::adopt_questions_team(vault, &membership, "Synthetic MacBook")
+        .expect("adopt");
+    membership.team_id
+}
+
+fn purposes(vault: &Vault, team: &str) -> Vec<apassy::vault::MembershipPurpose> {
+    vault
+        .relay_membership(team)
+        .expect("row")
+        .expect("membership")
+        .purposes
+        .into_iter()
+        .collect()
+}
+
+#[test]
+fn a_new_relay_copy_without_a_code_pushes_version_one() {
+    use apassy::vault::MembershipPurpose;
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    // The hosted relay's setting until Apassy Connect starts.
+    relay.set_connect_sync_bytes(fake_relay::SYNC_BYTES);
+    let a = mac(&root, "a", &relay.url);
+    let mut vault = a.create();
+    vault.add(item("Alpha", "SYNTH-alpha")).expect("add");
+    let identity = vault.sync_identity().expect("identity");
+
+    let report = a
+        .sync
+        .create_team_codeless(&mut vault, "  Personal  ", "Synthetic MacBook")
+        .expect("codeless relay copy");
+    assert_eq!(report.team, "Personal");
+    assert!(report.outcome.pushed);
+    // One Connect team, no team code, and version 1 of this vault in it.
+    assert_eq!(relay.connect_teams(), vec![report.link.team_id.clone()]);
+    assert_eq!(relay.count("POST /v1/connect"), 1);
+    assert_eq!(relay.count("POST /v1/teams"), 0);
+    assert!(
+        !relay
+            .request_bodies()
+            .iter()
+            .any(|body| body.contains("apassy_tcd_"))
+    );
+    assert_eq!(relay.version(), 1);
+    let fields = HeadFields::parse(&relay.heads()[0].text).expect("head");
+    assert_eq!(fields.vault_id, identity.vault_id);
+    assert_eq!(fields.team_id, report.link.team_id);
+    assert_eq!(fields.device_id, report.link.device_id);
+    // The membership is for sync only; the attempt keeps the team for a retry.
+    let row = vault.relay_device().expect("row").expect("a row");
+    assert_eq!(row.team_id, report.link.team_id);
+    assert_eq!(
+        purposes(&vault, &report.link.team_id),
+        vec![MembershipPurpose::Sync]
+    );
+    assert_eq!(
+        vault
+            .pending_connect()
+            .expect("pending")
+            .expect("kept")
+            .created,
+        Some((report.link.team_id.clone(), report.link.device_id))
+    );
+    let state = a.sync.state().expect("state").expect("on");
+    assert_eq!(state.last_remote_version, 1);
+    assert_eq!(
+        a.sync
+            .create_team_codeless(&mut vault, "Personal", "Mac")
+            .unwrap_err(),
+        apassy::relay::connect::ConnectError::Sync(SyncError::AlreadyEnabled)
+    );
+    // The questions then use the same team, with no relay call.
+    let calls = relay.log().len();
+    apassy::relay::membership::enable_questions(&mut vault, "Synthetic MacBook")
+        .expect("questions");
+    assert_eq!(relay.log().len(), calls);
+    assert_eq!(
+        purposes(&vault, &report.link.team_id),
+        vec![MembershipPurpose::Sync, MembershipPurpose::Questions]
+    );
+}
+
+#[test]
+fn a_new_relay_copy_without_a_code_reuses_the_questions_team_of_the_vault() {
+    use apassy::relay::connect::ConnectError;
+    use apassy::vault::MembershipPurpose;
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    let a = mac(&root, "a", &relay.url);
+    let mut vault = a.create();
+    vault.add(item("Alpha", "SYNTH-alpha")).expect("add");
+    // The questions team was made before the relay's sync setting: `sync_bytes` 0.
+    let team = questions_through_connect(&relay, &mut vault);
+    relay.set_connect_sync_bytes(fake_relay::SYNC_BYTES);
+    assert_eq!(
+        a.sync
+            .create_team_codeless(&mut vault, "Personal", "Synthetic MacBook")
+            .unwrap_err(),
+        ConnectError::Sync(SyncError::Relay(RelayRefusal::PlanRequired))
+    );
+    // Nothing turned on, no second team, the questions as they were.
+    assert!(a.sync.state().expect("state").is_none());
+    assert!(vault.relay_device().expect("row").is_none());
+    assert_eq!(relay.version(), 0);
+    assert_eq!(relay.connect_teams(), vec![team.clone()]);
+    assert_eq!(purposes(&vault, &team), vec![MembershipPurpose::Questions]);
+
+    // The operator gives the team the size (`admin limits --sync-bytes`): the same team
+    // takes the copy, with no new Connect call.
+    relay.set_team_sync_bytes(&team, fake_relay::SYNC_BYTES);
+    let report = a
+        .sync
+        .create_team_codeless(&mut vault, "Personal", "Synthetic MacBook")
+        .expect("codeless relay copy");
+    assert_eq!(report.link.team_id, team);
+    assert_eq!(relay.count("POST /v1/connect"), 1);
+    assert_eq!(relay.connect_teams(), vec![team.clone()]);
+    assert_eq!(relay.version(), 1);
+    assert_eq!(
+        purposes(&vault, &team),
+        vec![MembershipPurpose::Sync, MembershipPurpose::Questions]
+    );
+    let questions = apassy::relay::membership::questions_membership(&vault)
+        .expect("row")
+        .expect("questions stay on");
+    assert_eq!(questions.team_id, team);
+    assert_eq!(
+        vault.relay_device().expect("row").expect("sync").public_key,
+        questions.public_key
+    );
+}
+
+#[test]
+fn a_new_relay_copy_without_a_code_a_lost_answer_recovers_the_same_team() {
+    use apassy::relay::connect::ConnectError;
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    relay.set_connect_sync_bytes(fake_relay::SYNC_BYTES);
+    relay.support_connect_recovery();
+    let a = mac(&root, "a", &relay.url);
+    let mut vault = a.create();
+    // The relay makes the team, and both answers are lost on the network.
+    relay.lose_next_answers("POST /v1/connect", 2);
+    assert_eq!(
+        a.sync
+            .create_team_codeless(&mut vault, "Personal", "Synthetic MacBook")
+            .unwrap_err(),
+        ConnectError::Offline
+    );
+    assert!(a.sync.state().expect("state").is_none());
+    let made = relay.connect_teams();
+    assert_eq!(made.len(), 1);
+    let saved = vault.pending_connect().expect("pending").expect("kept");
+    assert!(saved.created.is_none());
+    // After a lock, the next try recovers the team of the saved key (F06).
+    vault.lock().expect("lock");
+    vault.unlock(PASS).expect("unlock");
+    let report = a
+        .sync
+        .create_team_codeless(&mut vault, "Personal", "Synthetic MacBook")
+        .expect("recovered");
+    assert_eq!(vec![report.link.team_id.clone()], made);
+    assert_eq!(relay.connect_teams(), made);
+    assert!(
+        relay
+            .request_bodies()
+            .iter()
+            .any(|body| body.contains("recovery_nonce"))
+    );
+    assert_eq!(relay.version(), 1);
+    let kept = vault.pending_connect().expect("pending").expect("kept");
+    assert_eq!(kept.key_pkcs8, saved.key_pkcs8);
+    assert_eq!(
+        kept.created.map(|(team, _)| team),
+        Some(report.link.team_id)
+    );
+}
+
+#[test]
+fn a_new_relay_copy_without_a_code_joins_the_team_that_another_mac_holds() {
+    use apassy::relay::connect::ConnectError;
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    relay.set_connect_sync_bytes(fake_relay::SYNC_BYTES);
+    let a = mac(&root, "a", &relay.url);
+    let mut vault = a.create();
+    // The vault names a questions team that this Mac is not in.
+    vault.set_questions_team("t_abcdefgh23").expect("team");
+    assert_eq!(
+        a.sync
+            .create_team_codeless(&mut vault, "Personal", "Synthetic MacBook")
+            .unwrap_err(),
+        ConnectError::JoinOtherMac
+    );
+    assert!(relay.log().is_empty(), "no relay call");
+    assert!(vault.pending_connect().expect("pending").is_none());
+    assert!(
+        ConnectError::JoinOtherMac
+            .to_string()
+            .contains("Join from another Mac")
     );
 }

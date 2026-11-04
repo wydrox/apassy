@@ -3,8 +3,8 @@
 //!
 //! - Vault: the open vault, its sync, its backups, and import.
 //! - Security: Touch ID and the passphrase.
-//! - Devices: this Mac, the iPhones, the other Macs, and the relay for the questions
-//!   (ADR 0025 §3e).
+//! - Devices: this Mac with its node on the tailnet, every device of every team, and
+//!   the Wi-Fi Pairing group in its notice state (plan S2–S3, unit N7).
 //! - Bouncer: the bouncer brain with its actions, and calibration and learning.
 //! - Tools: the command line and the browser extension.
 //! - Updates: the updater, the version, and the keyboard shortcuts.
@@ -35,8 +35,6 @@ use crate::desktop::notify::{self, Delivery};
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::{HELPER_MISSING_NOTE, UnlockMethod};
 use crate::desktop::{BrokerState, DesktopApp};
-use crate::relay::membership::{QuestionsAvailability, questions_availability};
-use crate::vault::{CompanionDevice, TrustedDevice, TrustedDeviceKind};
 
 #[path = "settings_rows.rs"]
 pub(crate) mod rows;
@@ -95,27 +93,18 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
                 "Unlock with the passphrase".to_owned()
             }
         }
-        SettingsSection::Devices => {
-            let mut parts = Vec::new();
-            let broken = app
-                .owner
-                .notifications
-                .as_ref()
-                .is_some_and(|center| !center.view().channel.can_deliver());
-            if broken {
-                parts.push("Notifications off".to_owned());
-            }
-            let companions = app.owner_ui.session.companion_devices().unwrap_or_default();
-            let (relay_on, relay_iphones) = relay_iphones(app);
-            parts.push(iphones_words(iphone_count(&companions, &relay_iphones)));
-            if relay_on {
-                parts.push("Relay on".to_owned());
-            }
-            parts.join(" · ")
-        }
+        SettingsSection::Devices => super::devices::status_line(app),
         SettingsSection::Bouncer => app.model_server.as_ref().map_or_else(
             || "Every run waits for you".to_owned(),
-            |server| format!("Brain: {}", model_server_words(&server.status()).0),
+            |server| {
+                let status = server.status();
+                let words = model_server_words(&status).0;
+                if status.remote {
+                    format!("Brain: {words} · My server")
+                } else {
+                    format!("Brain: {words}")
+                }
+            },
         ),
         SettingsSection::Tools => {
             if super::cli_tools::installed() {
@@ -125,60 +114,6 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
             }
         }
         SettingsSection::Updates => format!("Version {}", app.updates.build().label()),
-    }
-}
-
-/// Whether the questions of the open, unlocked vault go through the relay, and then the
-/// live iPhones of its trusted devices: the iPhones that answer them there.
-fn relay_iphones(app: &DesktopApp) -> (bool, Vec<TrustedDevice>) {
-    let vault = app.owner_ui.session.shared_vault();
-    let guard = vault
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(vault) = guard.as_ref().filter(|vault| !vault.is_locked()) else {
-        return (false, Vec::new());
-    };
-    if !matches!(
-        questions_availability(vault),
-        Ok(QuestionsAvailability::On { .. })
-    ) {
-        return (false, Vec::new());
-    }
-    let iphones = vault
-        .trusted_devices()
-        .unwrap_or_default()
-        .into_iter()
-        // An Apple Watch is no iPhone: Devices lists it with its kind (ADR 0039), and the
-        // count of iPhones leaves it out.
-        .filter(|device| device.kind == TrustedDeviceKind::Iphone)
-        .collect();
-    (true, iphones)
-}
-
-/// How many iPhones this Mac works with: the paired iPhones of this network and the
-/// iPhones of the relay. The two lists share no ID, so an iPhone of the relay with the
-/// name of a paired iPhone is that iPhone, once for each paired iPhone of that name.
-pub(super) fn iphone_count(companions: &[CompanionDevice], relay: &[TrustedDevice]) -> usize {
-    let mut unmatched: Vec<&str> = companions.iter().map(|device| device.name.trim()).collect();
-    let mut count = companions.len();
-    for device in relay {
-        let name = device.name.trim();
-        match unmatched.iter().position(|paired| *paired == name) {
-            Some(at) => {
-                unmatched.swap_remove(at);
-            }
-            None => count += 1,
-        }
-    }
-    count
-}
-
-/// "No iPhone", "1 iPhone", "2 iPhones".
-pub(super) fn iphones_words(count: usize) -> String {
-    match count {
-        0 => "No iPhone".to_owned(),
-        1 => "1 iPhone".to_owned(),
-        count => format!("{count} iPhones"),
     }
 }
 
@@ -205,344 +140,123 @@ fn show_more_button(ui: &mut egui::Ui, id: egui::Id, open: bool, name: &str) {
     }
 }
 
-/// The words of the relay row (ADR 0025 §3e, contract relay-questions-v1). Off by
-/// default: only a relay membership with the purpose `questions` turns it on.
-/// `RELAY_QUESTIONS` names its switch for VoiceOver.
-pub(super) const RELAY_QUESTIONS: &str = "Send questions through the relay";
-/// The label of the relay row.
-pub(super) const RELAY_ROW: &str = "Questions through the relay";
-pub(super) const RELAY_QUESTIONS_ON: &str = "Questions also go to your other devices of this vault. The relay sees no command and no credential.";
-pub(super) const RELAY_QUESTIONS_OFF: &str =
-    "Off. Turn it on to answer on your other devices away from this network.";
-pub(super) const RELAY_QUESTIONS_NEW_TEAM: &str = "Connect for free to approve requests on your iPhone on any network. No account or subscription needed.";
-pub(super) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it.";
-pub(super) const RELAY_QUESTIONS_JOIN: &str = "Off. Turning it on joins the questions team of this vault, with a link from a Mac that has it on.";
-pub(super) const RELAY_QUESTIONS_REMOVED: &str =
-    "Off. This Mac was removed. Turning it on again needs a link from a Mac that has it on.";
-/// The switch of the feed of the agents for the other devices of the vault (relay-feed-v1
-/// section 8). On by default; `ui.json` keeps it.
-pub(super) const SHOW_AGENTS: &str = "Show agents on my other devices";
-/// What the switch does, under it while the feed has no problem.
-pub(super) const SHOW_AGENTS_HELP: &str = "Your iPhone and your other Macs of this vault show the agents of this Mac. Only this Mac changes them.";
-/// The button that removes a device from the questions, after its confirmation.
-pub(super) const REMOVE_DEVICE: &str = "Remove…";
-/// The button that links an iPhone or another Mac to the questions team.
-pub(super) const ADD_IPHONE: &str = "Add an iPhone or a Mac…";
-
-/// What the relay row shows: the availability of the open, unlocked vault, or `None`.
-fn relay_questions_state(app: &DesktopApp) -> Option<QuestionsAvailability> {
-    let vault = app.owner_ui.session.shared_vault();
-    let guard = vault
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard
-        .as_ref()
-        .filter(|vault| !vault.is_locked())
-        .and_then(|vault| questions_availability(vault).ok())
-}
-
-/// Turn "Send questions through the relay" on or off for the open vault on this Mac. On
-/// is a new channel that can approve runs: the owner check first, for the relay sync team
-/// of the vault, or the sheet of a notifications-only team. Off needs no check and takes
-/// the purpose `questions` away; relay sync never changes.
-pub(super) fn set_relay_questions(app: &mut DesktopApp, on: bool, ctx: Option<&egui::Context>) {
-    if on {
-        app.questions_turn_on(ctx);
-    } else {
-        app.questions_turn_off();
-    }
-}
-
-/// Turn "Show agents on the iPhone" on or off. Off: the questions waiter deletes the feed
-/// of this Mac from the relay on its own thread, and takes no action from the iPhone.
-pub(super) fn set_feed_shown(app: &mut DesktopApp, on: bool) {
-    app.ui.set_feed_off(!on);
-    if let Some(questions) = &app.owner.questions {
-        questions.set_feed(on);
-    }
-}
-
 /// What the owner chose for the macOS notifications of this Mac.
-enum NotifyAction {
+#[derive(Debug, Clone, Copy)]
+pub(super) enum NotifyAction {
     Allow,
     OpenSettings,
     Check,
 }
 
-/// Settings > Devices: each device that gets the questions of the bouncer (ADR 0025
-/// §3e). This Mac with its macOS notifications, the iPhone app, the other Macs of a
-/// synced vault, and the relay that brings the questions to them away from this network.
+/// Settings > Devices (plan S2–S3, unit N7): this Mac with its node on the tailnet and
+/// its notifications, every device of every team, the add button, and the Wi-Fi Pairing
+/// group ([`super::devices`]).
 fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    this_mac_group(app, ui);
-    super::companion::draw(app, ui);
-    other_macs_group(app, ui);
-    relay_group(app, ui);
+    super::devices::section(app, ui);
 }
 
-/// "This Mac": the macOS notifications. The buttons and the note show only while they
-/// do not work (goal items N1 to N4).
-fn this_mac_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let notifications = app.owner.notifications.as_ref().map(|center| center.view());
+/// The notification rows of the This Mac group. The buttons and the note show only
+/// while they do not work (goal items N1 to N4).
+pub(super) fn notification_rows(app: &DesktopApp, g: &mut rows::Group<'_>) -> Option<NotifyAction> {
     let mut notify_action = None;
-    rows::group(ui, Some("This Mac"), |g| {
-        let Some(view) = &notifications else {
-            g.line_note(
-                "Notifications",
-                Some(rows::value("Not running")),
-                Some(rows::note(
-                    "They start with the broker. Questions still wait in Decisions.",
-                )),
-                |_| {},
-            );
-            return;
-        };
-        let channel = &view.channel;
-        let words = if channel.can_deliver() {
-            "On"
-        } else if channel.needs_permission() {
-            "Not allowed yet"
-        } else {
-            "Off"
-        };
-        let failed = view
-            .deliveries
-            .values()
-            .filter(|delivery| matches!(delivery, Delivery::Failed(_)))
-            .count();
-        g.row(|ui| {
-            rows::one_line(
-                ui,
-                rows::label_text("Notifications").into(),
-                Some(rows::value(words)),
-                |ui| {
-            if channel.needs_permission()
-                && kit::small_button(ui, "Allow…", Style::Prominent)
-                    .on_hover_text(
-                        "macOS shows a prompt for \"Apassy\" at the top right of the screen. Select \"Allow\".",
-                    )
-                    .clicked()
-            {
-                notify_action = Some(NotifyAction::Allow);
-            }
-            if channel.needs_settings()
-                && kit::small_button(ui, "Open System Settings…", Style::Bordered)
-                    .on_hover_text(
-                        "System Settings > Notifications > Apassy. Turn on \"Allow notifications\" and select \"Banners\".",
-                    )
-                    .clicked()
-            {
-                notify_action = Some(NotifyAction::OpenSettings);
-            }
-            if !channel.can_deliver()
-                && kit::small_button(ui, "Check again", Style::Bordered).clicked()
-            {
-                notify_action = Some(NotifyAction::Check);
-            }
-                },
-            );
-            // What to do, only while notifications do not work.
-            if !channel.can_deliver() {
-                ui.add(egui::Label::new(rows::note(&channel.summary())).wrap());
-            }
-            if failed > 0 {
-                ui.add(
-                    egui::Label::new(
-                        kit::text(
-                            format!(
-                                "{failed} {} failed. Questions still wait in Decisions.",
-                                if failed == 1 {
-                                    "notification"
-                                } else {
-                                    "notifications"
-                                }
-                            ),
-                            Font::Callout,
-                        )
-                        .color(Tone::Critical.text()),
-                    )
-                    .wrap(),
-                );
-            }
-        });
-    });
-    if let Some(action) = notify_action
-        && let Some(center) = &app.owner.notifications
-    {
-        match action {
-            // The notifier (Contents/Helpers/ApassyNotify.app, display name "Apassy")
-            // asks macOS. After a denial, macOS shows no new prompt.
-            NotifyAction::Allow => center.request_permission(),
-            NotifyAction::OpenSettings => match notify::open_notification_settings() {
-                Ok(()) => center.refresh_status(),
-                Err(err) => center.report_problem(format!(
-                    "Apassy cannot open System Settings ({err}). Open System Settings > Notifications > Apassy."
-                )),
-            },
-            NotifyAction::Check => center.refresh_status(),
-        }
-    }
-}
-
-/// "Other Macs": only while the open vault syncs. Through the relay, "Add a Mac…" and
-/// "Devices…" list and link them.
-fn other_macs_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let synced = app
-        .current_vault()
-        .is_some_and(|entry| entry.sync.is_some() && entry.sync_state().is_some());
-    if !synced {
-        return;
-    }
-    let others = super::sync::other_macs(app);
-    let mut sheet = None;
-    rows::group(ui, Some("Other Macs"), |g| {
-        g.line("Sync", Some(rows::value(&others.words)), |ui| {
-            if let Some(id) = &others.relay {
-                if kit::small_button(ui, "Devices…", Style::Bordered).clicked() {
-                    sheet = Some(super::sync::SyncSheet::Devices { id: id.clone() });
-                }
-                if kit::small_button(ui, "Add a Mac…", Style::Bordered).clicked() {
-                    sheet = Some(super::sync::SyncSheet::AddMac { id: id.clone() });
-                }
-            }
-        });
-    });
-    if let Some(sheet) = sheet {
-        let ctx = ui.ctx().clone();
-        app.sync_open_sheet(sheet, Some(&ctx));
-    }
-}
-
-/// "Relay": the switch that sends the questions through the relay, the devices that get
-/// them, and a new device.
-fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let relay_state = relay_questions_state(app);
-    let relay_devices = if matches!(relay_state, Some(QuestionsAvailability::On { .. })) {
-        app.questions_devices()
-    } else {
-        Vec::new()
+    let Some(view) = app.owner.notifications.as_ref().map(|center| center.view()) else {
+        g.line_note(
+            "Notifications",
+            Some(rows::value("Not running")),
+            Some(rows::note(
+                "They start with the broker. Questions still wait in Decisions.",
+            )),
+            |_| {},
+        );
+        return None;
     };
-    // The problem of the questions waiter: a relay without the questions, or this Mac
-    // removed from them.
-    let questions_view = app
-        .owner
-        .questions
-        .as_ref()
-        .map(|questions| questions.view());
-    let relay_problem = questions_view
-        .clone()
-        .filter(|view| view.unsupported)
-        .and_then(|view| view.problem);
-    // "Show agents on the iPhone", with the problem of the feed under it while it is on.
-    let mut feed_shown = !app.ui.feed_off;
-    let feed_problem = questions_view
-        .and_then(|view| view.feed_problem)
-        .filter(|_| feed_shown);
-    let mut switch_feed = None;
-    let mut switch_relay = None;
-    let mut add_relay_iphone = false;
-    let mut remove_device = None;
-    rows::section(
-        ui,
-        Some("Relay"),
-        Some("Questions reach every device."),
-        |g| {
-            // Off by default; on only with a relay membership for the questions.
-            let (mut on, enabled, note) = match &relay_state {
-                Some(QuestionsAvailability::On { .. }) => (true, true, RELAY_QUESTIONS_ON),
-                Some(QuestionsAvailability::CanTurnOn { .. }) => (false, true, RELAY_QUESTIONS_OFF),
-                Some(QuestionsAvailability::NeedsTeam) => (false, true, RELAY_QUESTIONS_NEW_TEAM),
-                Some(QuestionsAvailability::JoinTeam { .. }) => (false, true, RELAY_QUESTIONS_JOIN),
-                Some(QuestionsAvailability::Removed { sync: false, .. }) => {
-                    (false, true, RELAY_QUESTIONS_REMOVED)
+    let channel = &view.channel;
+    let words = if channel.can_deliver() {
+        "On"
+    } else if channel.needs_permission() {
+        "Not allowed yet"
+    } else {
+        "Off"
+    };
+    let failed = view
+        .deliveries
+        .values()
+        .filter(|delivery| matches!(delivery, Delivery::Failed(_)))
+        .count();
+    g.row(|ui| {
+        rows::one_line(
+            ui,
+            rows::label_text("Notifications").into(),
+            Some(rows::value(words)),
+            |ui| {
+                if channel.needs_permission()
+                    && kit::small_button(ui, "Allow…", Style::Prominent)
+                        .on_hover_text(
+                            "macOS shows a prompt for \"Apassy\" at the top right of the screen. Select \"Allow\".",
+                        )
+                        .clicked()
+                {
+                    notify_action = Some(NotifyAction::Allow);
                 }
-                Some(QuestionsAvailability::Removed { sync: true, .. }) => {
-                    (false, false, super::sync::questions::REMOVED_SYNC)
+                if channel.needs_settings()
+                    && kit::small_button(ui, "Open System Settings…", Style::Bordered)
+                        .on_hover_text(
+                            "System Settings > Notifications > Apassy. Turn on \"Allow notifications\" and select \"Banners\".",
+                        )
+                        .clicked()
+                {
+                    notify_action = Some(NotifyAction::OpenSettings);
                 }
-                None => (false, false, RELAY_QUESTIONS_LOCKED),
-            };
-            let was = on;
-            let value = was.then(|| rows::value("End-to-end encrypted"));
-            g.line_note(RELAY_ROW, value, Some(rows::note(note)), |ui| {
-                ui.add_enabled_ui(enabled, |ui| kit::toggle(ui, &mut on, RELAY_QUESTIONS));
-            });
-            if on != was {
-                switch_relay = Some(on);
-            }
-            // A relay that predates the questions, and other problems of the relay.
-            if let Some(problem) = &relay_problem {
-                g.tone_row(problem, Tone::Critical.text());
-            }
-            if was {
-                // As the relay row above: the switch on the line of its label, and the
-                // problem of the feed under them, in the warning tone (the questions go
-                // on without the feed).
-                let before = feed_shown;
-                let problem = feed_problem
-                    .as_deref()
-                    .map(|problem| kit::text(problem, Font::Callout).color(Tone::Warning.text()))
-                    .or_else(|| Some(rows::note(SHOW_AGENTS_HELP)));
-                g.line_note(SHOW_AGENTS, None, problem, |ui| {
-                    kit::toggle(ui, &mut feed_shown, SHOW_AGENTS);
-                });
-                if feed_shown != before {
-                    switch_feed = Some(feed_shown);
+                if !channel.can_deliver()
+                    && kit::small_button(ui, "Check Again", Style::Bordered).clicked()
+                {
+                    notify_action = Some(NotifyAction::Check);
                 }
-            }
-            // The devices that get the questions through the relay, "Remove…" for each
-            // other device, and a new device.
-            for device in &relay_devices {
-                g.line_note(
-                    device.name.as_str(),
-                    None,
-                    Some(rows::note(&device.words)),
-                    |ui| {
-                        // Its text ends where the switches above end.
-                        if device.removable
-                            && kit::trailing_small_button(ui, REMOVE_DEVICE, Style::Destructive)
-                                .clicked()
-                        {
-                            remove_device = Some(device.uuid.clone());
-                        }
-                    },
-                );
-            }
-            if was || matches!(relay_state, Some(QuestionsAvailability::NeedsTeam)) {
-                add_relay_iphone = g
-                    .link(if was { ADD_IPHONE } else { "Get approvals on your iPhone" })
-                    .on_hover_text(
-                        "An iPhone answers the questions with Face ID, also away from this network.",
+            },
+        );
+        // What to do, only while notifications do not work.
+        if !channel.can_deliver() {
+            ui.add(egui::Label::new(rows::note(&channel.summary())).wrap());
+        }
+        if failed > 0 {
+            ui.add(
+                egui::Label::new(
+                    kit::text(
+                        format!(
+                            "{failed} {} failed. Questions still wait in Decisions.",
+                            if failed == 1 {
+                                "notification"
+                            } else {
+                                "notifications"
+                            }
+                        ),
+                        Font::Callout,
                     )
-                    .clicked();
-            }
-        },
-    );
-    let ctx = ui.ctx().clone();
-    if let Some(on) = switch_relay {
-        set_relay_questions(app, on, Some(&ctx));
-    }
-    if let Some(on) = switch_feed {
-        set_feed_shown(app, on);
-    }
-    if let Some(uuid) = remove_device {
-        app.questions_ask_remove(&uuid, Some(&ctx));
-    } else if add_relay_iphone {
-        app.questions_add_iphone(Some(&ctx));
-    }
+                    .color(Tone::Critical.text()),
+                )
+                .wrap(),
+            );
+        }
+    });
+    notify_action
 }
 
-/// "Pair…" of the iPhone app: the iPhone listener goes on, and the pairing code shows
-/// below.
-pub(super) fn add_an_iphone(app: &mut DesktopApp, ctx: &egui::Context) {
-    let on = app
-        .owner_ui
-        .session
-        .companion_status()
-        .is_ok_and(|(setting, _)| setting.enabled);
-    if !on {
-        app.set_companion_on(true);
-    }
-    if app.companion_controller().is_some() {
-        app.open_pairing(ctx);
+/// Do what the owner chose in the notification rows.
+pub(super) fn notify(app: &DesktopApp, action: NotifyAction) {
+    let Some(center) = &app.owner.notifications else {
+        return;
+    };
+    match action {
+        // The notifier (Contents/Helpers/ApassyNotify.app, display name "Apassy") asks
+        // macOS. After a denial, macOS shows no new prompt.
+        NotifyAction::Allow => center.request_permission(),
+        NotifyAction::OpenSettings => match notify::open_notification_settings() {
+            Ok(()) => center.refresh_status(),
+            Err(err) => center.report_problem(format!(
+                "Apassy cannot open System Settings ({err}). Open System Settings > Notifications > Apassy."
+            )),
+        },
+        NotifyAction::Check => center.refresh_status(),
     }
 }
 
@@ -812,7 +526,7 @@ fn shortcuts_section(ui: &mut egui::Ui) {
             for (keys, action) in SHORTCUTS {
                 g.line(
                     action,
-                    Some(kit::text(keys, Font::Mono).color(kit::SECONDARY)),
+                    Some(kit::text(keys, Font::Mono).color(kit::palette().secondary)),
                     |_| {},
                 );
             }
@@ -869,7 +583,10 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let server = app.model_server.clone();
     let status = server.as_ref().map(|server| server.status());
     let mut action = None;
+    let mut runs_on = None;
     rows::group(ui, Some("Bouncer brain"), |g| {
+        // Who runs the bouncer brain (ADR 0035, plan 0035 J1), above its state.
+        runs_on = crate::desktop::brain_hosting_ui::runs_on_rows(app, g);
         if let Some(status) = &status {
             action = model_server_rows(g, status);
         }
@@ -927,6 +644,10 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         }
     });
+    if let Some(choice) = runs_on {
+        let ctx = ui.ctx().clone();
+        crate::desktop::brain_hosting_ui::apply(app, choice, Some(&ctx));
+    }
     crate::desktop::learning_ui::settings_panel(app, ui);
     let Some(server) = server else {
         return;
@@ -1025,6 +746,11 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
         }
         (!note.is_empty()).then_some(note)
     };
+    if status.remote
+        && let ServerState::External { up, model } = &status.state
+    {
+        return remote_server_words(*up, model.as_deref());
+    }
     match &status.state {
         ServerState::Off => (
             "Off".to_owned(),
@@ -1112,6 +838,39 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
     }
 }
 
+/// The note of the "Bouncer brain" row while the owner's server does not answer (ADR
+/// 0035 section 3: no answer is never an allowance, and there is no silent fallback).
+pub(super) const REMOTE_DOWN: &str =
+    "Your server does not answer. Until it answers, every run waits for you.";
+
+/// The state of a remote bouncer brain host (ADR 0035) in words, its tone and a note.
+/// The note names neither the address nor the token: the "Runs on" row names the host.
+pub(super) fn remote_server_words(
+    up: Option<bool>,
+    model: Option<&str>,
+) -> (String, Tone, Option<String>) {
+    match up {
+        None => (
+            "Checking".to_owned(),
+            Tone::Neutral,
+            Some("Apassy checks your server.".to_owned()),
+        ),
+        Some(true) => (
+            "Ready".to_owned(),
+            Tone::Good,
+            Some(model.map_or_else(
+                || "Your server answers.".to_owned(),
+                |model| format!("Brain: {model} on your server."),
+            )),
+        ),
+        Some(false) => (
+            "Not running".to_owned(),
+            Tone::Warning,
+            Some(REMOTE_DOWN.to_owned()),
+        ),
+    }
+}
+
 /// The install commands of `docs/operations/bouncer.md` section 1, with the paths of
 /// this Mac. The menu of the "Bouncer brain" row copies them.
 pub(super) fn install_commands(status: &Status) -> String {
@@ -1152,7 +911,12 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
     let mut action = None;
     let current = status.settings.start;
     let (words, tone, status_note) = model_server_words(status);
-    let install = install_offer(status);
+    // A server of the owner runs the brain: the install is about this Mac.
+    let install = if status.remote {
+        InstallOffer::default()
+    } else {
+        install_offer(status)
+    };
     let note = install.note.clone().or(status_note);
     let active = matches!(
         status.state,
@@ -1198,7 +962,7 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
                 {
                     action = Some(ModelAction::Install);
                 }
-            } else if current.managed() {
+            } else if current.managed() && !status.remote {
                 // A start would fail while the preflight fails, so there is no
                 // "Start now". The note names what is missing.
                 if status.owned {
@@ -1219,6 +983,13 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
     }
     if status.url_from_env {
         g.note_row("APASSY_BOUNCER_URL sets the address. It wins over the setting.");
+    }
+    if status.remote {
+        // The start rows are about a server on this Mac; they return with This Mac.
+        if let Some(next) = launch_agent_rows(g, status) {
+            action = Some(next);
+        }
+        return action;
     }
     g.field("Start the bouncer brain", |ui| {
         let mut mode = current;
@@ -1485,7 +1256,7 @@ fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 g.line_note(
                     host.name(),
                     None,
-                    Some(kit::text(&health.status, Font::Callout).color(kit::SECONDARY)),
+                    Some(kit::text(&health.status, Font::Callout).color(kit::palette().secondary)),
                     |ui| {
                         if let Some(action) = health.action
                             && kit::small_button(ui, action, Style::Bordered).clicked()

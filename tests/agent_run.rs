@@ -65,6 +65,9 @@ fn review_mcp_oversized_input_returns_a_protocol_error_before_exiting() {
 
 struct Fixture {
     dir: TempDir,
+    /// The folder of the project: on Linux in the home folder, outside `/tmp`,
+    /// where a proxied run cannot work (the sandbox refuses a shared folder).
+    _project_dir: TempDir,
     vault: SharedVault,
     socket: PathBuf,
     project: PathBuf,
@@ -87,7 +90,14 @@ fn fixture_with(
     model_gate: Option<Arc<dyn ModelGate>>,
 ) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
-    let project = dir.path().join("project");
+    // Not in the checkout either: a project in a Git repository is named after it.
+    let project_dir = if cfg!(target_os = "linux") {
+        let home = std::env::var_os("HOME").expect("HOME");
+        TempDir::new_in(home).expect("project temp dir")
+    } else {
+        TempDir::new().expect("project temp dir")
+    };
+    let project = project_dir.path().join("project");
     std::fs::create_dir_all(project.join("sub")).expect("project dir");
     let project = std::fs::canonicalize(project).expect("canonical project");
     let mut vault = Vault::create(&dir.path().join("vault.db"), PASS).expect("create");
@@ -129,6 +139,7 @@ fn fixture_with(
         token: token.expose().to_owned(),
         broker,
         dir,
+        _project_dir: project_dir,
     }
 }
 
@@ -435,6 +446,100 @@ fn approved_run_gets_the_secret_and_masks_output() {
     no_secret(&activity);
 }
 
+/// A-H1: a pasted AWS pair is a static key while runs make no lease. A run gets
+/// `AWS_ACCESS_KEY_ID` from the key id and `AWS_SECRET_ACCESS_KEY` from the secret, never
+/// the secret under the key id's name. With way C on, the run fails with `lease_failed`
+/// before the owner is asked, and gets neither value.
+#[test]
+fn a_static_aws_source_gives_both_variables_and_way_c_on_is_lease_failed() {
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(5));
+    let key_id = "AKIAEXAMPLE0EXAMPLE0";
+    let secret = format!("{:A<40}", "FAKErunAWSsecret0canary");
+    let aws = with_vault(&fx, |vault| {
+        let found = apassy::vault::detect::detect(&format!(
+            "AWS_ACCESS_KEY_ID={key_id}\nAWS_SECRET_ACCESS_KEY={secret}\n"
+        ));
+        assert_eq!(found.len(), 1);
+        let id = vault.add_detected(&found[0], None, None).expect("add").id;
+        vault
+            .set_exec_grant(
+                fx.agent_id,
+                id,
+                &fx.project.display().to_string(),
+                ExecMode::Bouncer,
+            )
+            .expect("exec grant");
+        assert!(
+            !vault
+                .short_lived(id)
+                .unwrap()
+                .expect("a source row")
+                .enabled
+        );
+        id
+    });
+    // Approve the run if the owner is asked, and keep the names that the question showed.
+    let seen = Arc::new(Mutex::new(None::<Vec<String>>));
+    let approver = {
+        let approvals = Arc::clone(fx.broker.approvals());
+        let vault = Arc::clone(&fx.vault);
+        let seen = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if let Some(run) = approvals.pending().into_iter().next() {
+                    *seen.lock().unwrap() = Some(run.env_names.clone());
+                    let _ = approvals.approve(owner_check(&vault, run));
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    let response = send_run(
+        &fx.socket,
+        &fx.token,
+        aws,
+        &fx.project,
+        "echo id=${#AWS_ACCESS_KEY_ID} secret=${#AWS_SECRET_ACCESS_KEY}",
+    );
+    assert!(response.ok, "{response:?}");
+    let result = response.result.clone().expect("result");
+    let stdout = result["stdout"].as_str().unwrap_or_default();
+    assert!(stdout.contains("id=20 secret=40"), "{stdout}");
+    let mut names: Vec<String> =
+        serde_json::from_value(result["secrets_in_environment"].clone()).unwrap();
+    names.sort();
+    assert_eq!(names, ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
+    assert!(!format!("{response:?}").contains(&secret));
+    let _ = approver.join();
+    if let Some(mut asked) = seen.lock().unwrap().take() {
+        asked.sort();
+        assert_eq!(asked, ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
+    }
+
+    // Way C on: no lease in runs yet, and no fallback to the long-lived key.
+    with_vault(&fx, |vault| {
+        vault
+            .set_short_lived_enabled(aws, true, 1_700_000_000)
+            .unwrap();
+    });
+    let response = send_run(
+        &fx.socket,
+        &fx.token,
+        aws,
+        &fx.project,
+        "echo id=${#AWS_ACCESS_KEY_ID} secret=${#AWS_SECRET_ACCESS_KEY}",
+    );
+    assert_eq!(code(&response), "lease_failed", "{response:?}");
+    assert!(
+        fx.broker.approvals().pending().is_empty(),
+        "the owner is not asked"
+    );
+    assert!(!format!("{response:?}").contains(&secret));
+    assert!(!format!("{response:?}").contains(key_id));
+}
+
 #[test]
 fn a_placeholder_variable_gets_a_placeholder_and_the_run_proxy() {
     let fx = fixture(ExecMode::Bouncer, Duration::from_secs(5));
@@ -469,7 +574,15 @@ fn a_placeholder_variable_gets_a_placeholder_and_the_run_proxy() {
     );
     assert_eq!(result["placeholders"], json!([ENV_NAME]));
     assert_eq!(result["network"]["proxy"], true);
-    assert_eq!(result["network"]["only_proxy"], cfg!(target_os = "macos"));
+    // broker-v0 `network.rule`: seatbelt on macOS; netns on Linux with bubblewrap,
+    // else none with the reason.
+    let rule = result["network"]["rule"].as_str().expect("rule");
+    if cfg!(target_os = "macos") {
+        assert_eq!(rule, "seatbelt");
+    } else if rule == "none" && cfg!(target_os = "linux") {
+        assert!(result["network"]["reason"].is_string(), "{result}");
+    }
+    assert_eq!(result["network"]["only_proxy"], rule != "none");
     assert_eq!(result["network"]["requests"], json!([]));
     no_secret(&response);
     let history = with_vault(&fx, |vault| {

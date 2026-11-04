@@ -1,6 +1,6 @@
 [package]
 name = "apassy-relay"
-version = "0.5.16"
+version = "0.5.17"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -36,6 +36,9 @@ psl = "=2.1.238"
 tiny_http = { version = "=0.12.0", path = "vendor/tiny_http", default-features = false }
 # The HTTPS client of the apassy-team CLI. `rustls` = ring + webpki roots.
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+# `apassy pair` prints the node pairing link as a QR code in the terminal (plan D8).
+# No features, so no `image`: the core's pin.
+qrcode = { version = "=0.14.1", default-features = false }
 
 [dev-dependencies]
 # A test certificate authority for the mock upstream (the core pin).

@@ -7,14 +7,21 @@
 //! - [`DesktopApp::sync_node`] compares what the vault wants with what runs: in a frame
 //!   at most once a second, at once after a new vault session, and with no frame every
 //!   [`IDLE_SYNC_INTERVAL`] while the vault is unlocked. A start needs an unlocked vault
-//!   with the public route (remote access) on (`Node::wanted`; remote agents connect by
-//!   themselves, so none is needed before); a running node goes on while the vault is
-//!   unlocked with the route on (`Node::may_run`), and a new session of the same vault
-//!   file (a passphrase change, a backup) is taken over (`Node::adopt`). It starts the
-//!   node on a worker thread (Touch ID for the node key, the Tailscale command line), or
-//!   stops it. The window calls it from `logic`, so it runs also while the window is
-//!   minimized. A start that failed is not tried again until the vault session changes
-//!   or the owner asks ([`DesktopApp::retry_node`]).
+//!   with the tailnet route on, or the public route (remote access) on (`Node::wanted`;
+//!   remote agents connect by themselves, so none is needed before); a running node goes
+//!   on while the vault is unlocked with either route on (`Node::may_run`), and a new
+//!   session of the same vault file (a passphrase change, a backup) is taken over
+//!   (`Node::adopt`). It starts the node on a worker thread (Touch ID for the node key,
+//!   the Tailscale command line), or stops it. The window calls it from `logic`, so it
+//!   runs also while the window is minimized. A start that failed is not tried again
+//!   until the vault session changes or the owner asks ([`DesktopApp::retry_node`]),
+//!   except a failure that can pass by itself (Tailscale was not up yet, a port was
+//!   taken: `Node::retry_soon`), which is tried again after [`RETRY_INTERVAL`]. The
+//!   tailnet route then comes up without the owner.
+//! - The tailnet route (plan S2–S3, unit N4) follows the same lifecycle: a lock, a quit,
+//!   and the end of waiting runs stop the front first, then the relay, then the local
+//!   route of the node origin (`Node::stop`). While the node runs for the tailnet, a
+//!   close of the window minimizes it too: the iPhone still reaches the Mac.
 //! - [`DesktopApp::stop_node`] stops it at once: the node (every session ends), the
 //!   Funnel route off, the host thread joined. The app calls it on lock, on quit, before
 //!   an update restart, and before it leaves a vault for another one. After an open, a
@@ -70,6 +77,9 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const IDLE_SYNC_INTERVAL: Duration = Duration::from_secs(10);
 /// How often a running node checks its route (tailnet name, Funnel handler).
 const MAINTAIN_INTERVAL: Duration = Duration::from_secs(60);
+/// A start that failed because Tailscale was not up (or a port was taken) is tried again
+/// after this long.
+pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// While Bouncer > Agents shows, the remote access block is read again this often (on a
 /// worker thread: it runs the Tailscale command line).
 pub(crate) const ACCESS_READ_INTERVAL: Duration = Duration::from_secs(10);
@@ -113,6 +123,8 @@ pub(crate) struct NodeFlows {
     pub(crate) running_for: Option<[u8; 32]>,
     /// A start that failed, for that vault session, and why.
     pub(crate) failed: Option<([u8; 32], String)>,
+    /// When that start failed, if it can be tried again by itself (`Node::retry_soon`).
+    retry_at: Option<Instant>,
     synced_at: Option<Instant>,
     /// The vault session of the last comparison: a new one is compared at once.
     synced_epoch: Option<[u8; 32]>,
@@ -176,6 +188,7 @@ impl DesktopApp {
     pub fn node_changed(&mut self) {
         self.node.synced_at = None;
         self.node.failed = None;
+        self.node.retry_at = None;
         self.node.access.stale = true;
         if let Some(repaint) = &self.node.repaint {
             repaint.request_repaint();
@@ -219,7 +232,10 @@ impl DesktopApp {
                     return;
                 }
                 TaskPoll::Done(Ok(())) => self.node.running_for = Some(epoch),
-                TaskPoll::Done(Err(message)) => self.node.failed = Some((epoch, message)),
+                TaskPoll::Done(Err(message)) => {
+                    self.node.failed = Some((epoch, message));
+                    self.node.retry_at = node.retry_soon().then(|| Instant::now() + RETRY_INTERVAL);
+                }
                 TaskPoll::Lost => {
                     self.node.failed = Some((epoch, "The node did not start.".to_owned()));
                 }
@@ -262,6 +278,15 @@ impl DesktopApp {
         let Some(epoch) = wanted else {
             return;
         };
+        if let Some(at) = self.node.retry_at {
+            if Instant::now() >= at {
+                // Tailscale may be up now: try the start again.
+                self.node.failed = None;
+                self.node.retry_at = None;
+            } else {
+                ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
+            }
+        }
         if self
             .node
             .failed
@@ -327,6 +352,7 @@ impl DesktopApp {
         self.node.starting = None;
         self.node.running_for = None;
         self.node.failed = None;
+        self.node.retry_at = None;
         self.node.synced_at = None;
         self.node.synced_epoch = None;
         if let Some(node) = &self.node.node {

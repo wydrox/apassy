@@ -205,28 +205,28 @@ pub(super) fn draw_float(app: &mut DesktopApp, ctx: &egui::Context, pending: &Pe
 /// rest of the window, and a hairline at its edge.
 fn paint_float_frame(ui: &egui::Ui, outside: Rect, rect: Rect) {
     let painter = ui.painter();
-    painter.rect_filled(outside, 0, FLOAT_SCRIM);
-    painter.add(FLOAT_SHADOW.as_shape(rect, 0));
-    painter.rect_filled(rect, 0, kit::SIDEBAR);
+    // The rest of the window under the floating sidebar: dimmed, so the part of the
+    // list beside the sidebar reads as behind it, and a click there closes the sidebar.
+    painter.rect_filled(outside, 0, kit::palette().float_scrim);
+    painter.add(float_shadow().as_shape(rect, 0));
+    painter.rect_filled(rect, 0, kit::palette().sidebar);
     let width = 1.0 / ui.ctx().pixels_per_point();
     painter.vline(
         rect.right() + width / 2.0,
         rect.y_range(),
-        egui::Stroke::new(width, Color32::from_black_alpha(51)),
+        egui::Stroke::new(width, kit::palette().float_edge),
     );
 }
 
 /// The shadow of the floating sidebar (the mockup: `12px 0 40px rgba(0,0,0,.18)`).
-const FLOAT_SHADOW: egui::Shadow = egui::Shadow {
-    offset: [12, 0],
-    blur: 40,
-    spread: 0,
-    color: Color32::from_black_alpha(46),
-};
-
-/// The rest of the window under the floating sidebar: dimmed, so the part of the list
-/// beside the sidebar reads as behind it, and a click there closes the sidebar.
-const FLOAT_SCRIM: Color32 = Color32::from_black_alpha(28);
+fn float_shadow() -> egui::Shadow {
+    egui::Shadow {
+        offset: [12, 0],
+        blur: 40,
+        spread: 0,
+        color: kit::palette().shadow.gamma_multiply_u8(46),
+    }
+}
 
 /// The rows and the footer of the full sidebar.
 fn full_content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
@@ -436,7 +436,10 @@ fn shared_section(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
         if shared.is_empty() {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                ui.label(kit::text("No shared vaults", kit::Font::Callout).color(kit::TERTIARY));
+                ui.label(
+                    kit::text("No shared vaults", kit::Font::Callout)
+                        .color(kit::palette().tertiary),
+                );
             });
         }
     }
@@ -613,7 +616,7 @@ fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
     ui.painter().hline(
         (rect.left() - 10.0)..=(rect.right() + 10.0),
         rect.top(),
-        egui::Stroke::new(1.0 / ui.ctx().pixels_per_point(), kit::SEPARATOR),
+        egui::Stroke::new(1.0 / ui.ctx().pixels_per_point(), kit::palette().separator),
     );
     // The vault and the Settings button share the middle line of the row. Each gets its
     // own rect: a horizontal layout centered the button on another line than the vault.
@@ -675,7 +678,7 @@ fn vault_footer(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui.add(
                 egui::Label::new(
                     kit::text(crate::desktop::DEMO_BANNER, kit::Font::Footnote)
-                        .color(kit::SECONDARY),
+                        .color(kit::palette().secondary),
                 )
                 .truncate(),
             )

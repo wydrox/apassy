@@ -11,6 +11,12 @@ pub(crate) mod fake_relay;
 
 #[cfg(feature = "vault")]
 pub(crate) mod auto_lock;
+/// The host of the bouncer brain from the vault (ADR 0035).
+#[cfg(feature = "vault")]
+mod brain_host;
+/// The "Runs on" row and the "Use My Server" sheet of Settings > Bouncer (ADR 0035).
+#[cfg(feature = "vault")]
+mod brain_hosting_ui;
 /// The browser socket (ADR 0021).
 #[cfg(feature = "vault")]
 pub(crate) mod browser;
@@ -219,6 +225,9 @@ pub struct DesktopApp {
     /// tests start nothing.
     #[cfg(feature = "vault")]
     pub(crate) model_server: Option<std::sync::Arc<crate::broker::model_server::ModelServer>>,
+    /// The host of the bouncer brain that the model server has (ADR 0035).
+    #[cfg(feature = "vault")]
+    pub(crate) bouncer_host: brain_host::BouncerHostFlows,
     /// The Mac's own node for cloud agents (ADR 0037). Only the window gets a backend,
     /// from the app binary, so tests start nothing.
     #[cfg(feature = "vault")]
@@ -300,6 +309,8 @@ impl DesktopApp {
             companion: companion::CompanionFlows::default(),
             #[cfg(feature = "vault")]
             model_server: None,
+            #[cfg(feature = "vault")]
+            bouncer_host: brain_host::BouncerHostFlows::default(),
             #[cfg(feature = "vault")]
             node: node::NodeFlows::default(),
             styled: false,
@@ -562,13 +573,15 @@ impl eframe::App for DesktopApp {
             // minimized, and a close of the window keeps the app open while it runs.
             self.sync_node(ctx);
             self.keep_open_for_node(ctx);
+            // The host of the bouncer brain follows the vault session (ADR 0035).
+            self.sync_bouncer_host();
         }
         #[cfg(not(feature = "vault"))]
         let _ = ctx;
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        ui::WINDOW_COLOR.to_normalized_gamma_f32()
+        ui::window_color().to_normalized_gamma_f32()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

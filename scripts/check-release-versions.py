@@ -5,6 +5,8 @@ import argparse
 import json
 from pathlib import Path
 import re
+import runpy
+import subprocess
 import sys
 import tomllib
 
@@ -40,6 +42,30 @@ def website_version(root, changelog):
 
 RELAY = Path("crates/apassy-relay")
 APP = Path("crates/apassy-app")
+LINUX = Path("packaging/linux")
+
+
+def linux_node_errors(root):
+    """The `linux-cli` component is the Linux node package (plan S2-S3, L3): apassy-app
+    built `--no-default-features --features node` and installed as `apassy`. Its version
+    is the relay crate's (the node commands are in the relay crate), and the packaging
+    takes it from there, never from a literal."""
+    errors = []
+    app = tomllib.loads((root / APP / "Cargo.toml").read_text(encoding="utf-8"))
+    features = app.get("features", {})
+    if "node" not in features or "window" not in features:
+        errors.append("the app crate must have the features node and window (the Linux node build)")
+    elif not {"node", "window"} <= set(features.get("default", [])):
+        errors.append("the app crate's default features must be window and node")
+    if "apassy-app" not in {binary["name"] for binary in app.get("bin", [])}:
+        errors.append("the app crate must build apassy-app, which the Linux node packages install as apassy")
+    build = (root / LINUX / "build.sh").read_text(encoding="utf-8")
+    if "crates/apassy-relay/Cargo.toml" not in build:
+        errors.append("packaging/linux/build.sh must take the node version from the relay crate")
+    control = (root / LINUX / "deb/control.in").read_text(encoding="utf-8")
+    if re.search(r"^Version: @VERSION@$", control, re.MULTILINE) is None:
+        errors.append("packaging/linux/deb/control.in must use Version: @VERSION@, not a literal version")
+    return errors
 
 
 def check(root):
@@ -59,11 +85,16 @@ def check(root):
         "iOS core package": package_version(root / "ios/ApassyCore/Cargo.toml"),
         "iOS core Cargo.lock": locked_version(root / "Cargo.lock", "apassy-core"),
         "browser extension": json.loads((root / "extension/manifest.json").read_text())["version"],
-        # The relay and the Linux CLI are one crate of this workspace (ADR 0037).
-        "relay and Linux CLI package": package_version(root / RELAY / "Cargo.toml"),
-        "relay and Linux CLI Cargo.lock": locked_version(root / "Cargo.lock", "apassy-relay"),
+        # The relay, the Linux node, and the Linux CLI are one crate of this workspace
+        # (ADR 0037); the node is packaged from the app crate, so both must agree.
+        "relay, Linux node, and Linux CLI package": package_version(root / RELAY / "Cargo.toml"),
+        "relay, Linux node, and Linux CLI Cargo.lock": locked_version(root / "Cargo.lock", "apassy-relay"),
         "relay edge Worker package": json.loads(
             (root / RELAY / "deploy/worker/package.json").read_text(encoding="utf-8")
+        )["version"],
+        # The push gateway (push-gateway-v1) is a second Worker of the relay surface.
+        "relay push gateway package": json.loads(
+            (root / RELAY / "deploy/push-gateway/package.json").read_text(encoding="utf-8")
         )["version"],
     }
     project = (root / "ios/ApassyCompanion/project.yml").read_text(encoding="utf-8")
@@ -80,12 +111,39 @@ def check(root):
     bins = {binary["name"] for binary in relay.get("bin", [])}
     if not {"apassy-relay", "apassy-team"} <= bins:
         errors.append("the relay crate must build both apassy-relay and the Linux apassy-team CLI")
+    errors.extend(linux_node_errors(root))
     return version, errors
+
+
+def release_errors(root, version):
+    """Require a new SemVer above every v* tag; callers must fetch tags first."""
+    # Share precedence rules with the public latest.json guard (including prereleases
+    # and build metadata), rather than trusting Git's lexicographic/version sorting.
+    semver = runpy.run_path(str(Path(__file__).with_name("ci-release-newer.py")))
+    compare = semver["compare_versions"]
+    semver["parse_version"](version)
+    result = subprocess.run(
+        ["git", "tag", "-l", "v*"], cwd=root, check=True,
+        capture_output=True, text=True,
+    )
+    latest = None
+    for tag in result.stdout.splitlines():
+        candidate = tag[1:]
+        # A malformed release tag is an error, not permission to publish.
+        semver["parse_version"](candidate)
+        if latest is None or compare(candidate, latest) > 0:
+            latest = candidate
+    if latest is not None and compare(version, latest) <= 0:
+        return [f"release version {version} must be newer than latest tag v{latest}; "
+                "same-version rebuilds are forbidden"]
+    return []
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--release", action="store_true",
+                        help="require a version above the latest v* tag (fetch tags first)")
     # Kept so that an old command fails clearly instead of checking the wrong tree.
     parser.add_argument("--relay-checkout", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--require-relay", action="store_true", help=argparse.SUPPRESS)
@@ -99,13 +157,15 @@ def main():
         return 1
     try:
         version, errors = check(args.root)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+        if args.release:
+            errors.extend(release_errors(args.root, version))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"Release version check failed: {error}", file=sys.stderr)
         return 1
     if errors:
         print("Release version check failed:\n- " + "\n- ".join(errors), file=sys.stderr)
         return 1
-    print(f"Release source versions match {version}, the relay and the Linux CLI included.")
+    print(f"Release source versions match {version}, the relay and the Linux node included.")
     return 0
 
 

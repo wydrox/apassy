@@ -1,0 +1,320 @@
+# The self-host images of the bouncer brain (ADR 0035 section 2, implementation plan
+# 0035 unit E2): CPU arm64, CPU x86_64 and CUDA x86_64 from tools/basemodel/Dockerfile.
+# GitHub builds them; never build on the production VPS or in a local VM.
+#
+# - Push the tag bouncer-image-<version> (the shared version of release-versions.json)
+#   on the exact tested release commit: the run builds, tests and publishes
+#   ghcr.io/wydrox/apassy-brain:<version> (CPU, arm64 + amd64), :<version>-cuda, and
+#   the two CPU archives as assets of the GitHub release <version> when it exists.
+# - Actions > Bouncer brain image > Run workflow builds and tests the same three
+#   images and keeps them as artifacts for 7 days. It publishes nothing.
+#
+# The fine-tuned heads apassy-base-v1.safetensors are not in the repository; the run
+# takes them from models/ in the R2 bucket (as the release workflow does).
+# Runbook: docs/operations/bouncer-hosting.md.
+name: Bouncer brain image
+
+on:
+  push:
+    tags: ["bouncer-image-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bouncer-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/wydrox/apassy-brain
+  BUCKET: apassy-downloads
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the version
+        id: version
+        run: |
+          version="$(python3 -c 'import json; print(json.load(open("release-versions.json"))["version"])')"
+          test -n "$version"
+          publish=false
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if [ "$GITHUB_REF_NAME" != "bouncer-image-$version" ]; then
+              echo "::error::The tag $GITHUB_REF_NAME is not bouncer-image-$version (release-versions.json)."
+              exit 1
+            fi
+            publish=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Version $version, publish $publish, commit $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install Wrangler
+        working-directory: site
+        run: npm ci
+      # The Worker does not serve models/; only this read with the account token does.
+      - name: Get the fine-tuned heads
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are needed to read models/ from the bucket."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/model"
+          npx wrangler r2 object get "$BUCKET/models/apassy-base-v1.safetensors" \
+            --file "$RUNNER_TEMP/model/apassy-base-v1.safetensors" --remote
+          python3 - <<'PY'
+          import hashlib, json, os
+          manifest = json.load(open("../tools/basemodel/manifest.json"))
+          path = os.path.join(os.environ["RUNNER_TEMP"], "model", "apassy-base-v1.safetensors")
+          digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+          assert digest == manifest["checkpoint"]["sha256"], "the bucket checkpoint is not the manifest checkpoint"
+          assert os.path.getsize(path) == manifest["checkpoint"]["size_bytes"]
+          print("checkpoint", manifest["version"])
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brain-model
+          path: ${{ runner.temp }}/model/apassy-base-v1.safetensors
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: cpu, arch: amd64, runner: ubuntu-24.04 }
+          # The GitHub arm64 runner (public repository): a native build, no QEMU.
+          - { variant: cpu, arch: arm64, runner: ubuntu-24.04-arm }
+          - { variant: cuda, arch: amd64, runner: ubuntu-24.04 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VARIANT: ${{ matrix.variant }}
+      ARCH: ${{ matrix.arch }}
+      SUFFIX: ${{ matrix.variant }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af >/dev/null || true
+          df -h /
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: brain-model
+          path: ${{ runner.temp }}/model
+      - name: Build the image
+        run: |
+          tag="apassy-brain:$VERSION-$SUFFIX"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          docker build --platform "linux/$ARCH" \
+            --build-arg "VARIANT=$VARIANT" \
+            --build-arg "APASSY_RELEASE_VERSION=$VERSION" \
+            --build-arg "APASSY_RELEASE_COMMIT=$GITHUB_SHA" \
+            --build-context "model=$RUNNER_TEMP/model" \
+            -f tools/basemodel/Dockerfile -t "$tag" .
+          docker image ls "$tag"
+      - name: Test the image
+        run: |
+          # No token: the server refuses to listen on 0.0.0.0 before it loads the model.
+          if out="$(timeout 300 docker run --rm "$TAG" 2>&1)"; then
+            echo "::error::The image started without LAYA_API_KEY."; exit 1
+          fi
+          case "$out" in
+            *"LAYA_API_KEY is not set"*) ;;
+            *) printf '%s\n' "$out"; echo "::error::No token refusal from serve.py."; exit 1 ;;
+          esac
+          docker run --rm "$TAG" bench --dry-run
+          docker run --rm "$TAG" sh -c 'cd /opt/apassy/licenses && test -s LICENSE && test -s NOTICE && test -s laya-MODEL-CARD.md'
+          # With a token from a file, as a Docker secret.
+          install -m 0644 /dev/null "$RUNNER_TEMP/brain-token"
+          openssl rand -hex 32 | tr -d '\n' > "$RUNNER_TEMP/brain-token"
+          docker run -d --name brain -p 127.0.0.1:8770:8770 \
+            -v "$RUNNER_TEMP/brain-token:/run/secrets/brain-token:ro" \
+            -e LAYA_API_KEY_FILE=/run/secrets/brain-token "$TAG"
+          trap 'docker logs brain 2>&1 | tail -n 50; docker rm -f brain >/dev/null' EXIT
+          python3 - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          token = open(os.path.join(os.environ["RUNNER_TEMP"], "brain-token")).read()
+          manifest = json.load(open("tools/basemodel/manifest.json"))
+          base = "http://127.0.0.1:8770"
+          deadline = time.time() + 600
+          while True:
+              try:
+                  health = json.load(urllib.request.urlopen(base + "/health", timeout=5))
+                  break
+              except (OSError, ValueError):
+                  if time.time() > deadline:
+                      raise SystemExit("no /health answer in 600 s")
+                  time.sleep(5)
+          print("health", health)
+          body = json.load(open("tests/fixtures/bouncer-brain-v1/request.json"))
+          body.pop("heads", None)
+          data = json.dumps(body).encode()
+          def ask(headers):
+              request = urllib.request.Request(base + "/v1/systemone", data=data, method="POST",
+                                               headers={"Content-Type": "application/json", **headers})
+              return urllib.request.urlopen(request, timeout=120)
+          try:
+              ask({})
+              raise SystemExit("an answer without the token")
+          except urllib.error.HTTPError as error:
+              assert error.code == 401, error.code
+          started = time.time()
+          answer = json.load(ask({"Authorization": "Bearer " + token}))
+          seconds = time.time() - started
+          assert answer["model"] == manifest["version"], answer["model"]
+          assert answer["heads"] == manifest["checkpoint"]["sha256"], answer["heads"]
+          assert set(answer["answers"]) == set(body["questions"]), sorted(answer["answers"])
+          for name, value in answer["answers"].items():
+              assert 0.0 <= value["noul"] <= 1.0, (name, value)
+          print("answer of %s in %.1f s" % (answer["model"], seconds))
+          PY
+      - name: Save and identify the image
+        run: |
+          base="apassy-brain-$VERSION-$SUFFIX"
+          echo "ARCHIVE=$base" >> "$GITHUB_ENV"
+          mkdir -p dist
+          docker save "$TAG" | gzip -6 > "dist/$base.tar.gz"
+          (cd dist && sha256sum "$base.tar.gz" | tee "$base.tar.gz.sha256")
+          docker image inspect "$TAG" > "dist/$base.inspect.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          base = os.environ["ARCHIVE"]
+          image = json.loads(Path("dist/%s.inspect.json" % base).read_text())[0]
+          labels = image["Config"]["Labels"]
+          assert image["Architecture"] == os.environ["ARCH"], image["Architecture"]
+          assert labels["org.opencontainers.image.version"] == os.environ["VERSION"]
+          assert labels["org.opencontainers.image.revision"] == os.environ["GITHUB_SHA"]
+          assert labels["cc.wyderka.apassy.brain.variant"] == os.environ["VARIANT"]
+          archive = Path("dist/%s.tar.gz" % base)
+          Path("dist/%s.release.json" % base).write_text(json.dumps({
+              "version": os.environ["VERSION"], "commit": os.environ["GITHUB_SHA"],
+              "variant": os.environ["VARIANT"], "architecture": image["Architecture"],
+              "tag": os.environ["TAG"], "image_id": image["Id"],
+              "archive": archive.name, "archive_bytes": archive.stat().st_size,
+              "sha256": Path("dist/%s.tar.gz.sha256" % base).read_text().split()[0],
+          }, indent=2) + "\n")
+          PY
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-brain-${{ matrix.variant }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    needs: [prepare, image]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af >/dev/null || true
+          df -h /
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: apassy-brain-*
+          path: dist
+          merge-multiple: true
+      - name: Check the archives
+        working-directory: dist
+        run: |
+          ls -l
+          for suffix in cpu-amd64 cpu-arm64 cuda-amd64; do
+            sha256sum -c "apassy-brain-$VERSION-$suffix.tar.gz.sha256"
+          done
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      # A version is published once (AGENTS.md: no same-version rebuild).
+      - name: Refuse a version that is already published
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then
+            echo "::error::$IMAGE:$VERSION already exists. A new image needs a new version."
+            exit 1
+          fi
+      - name: Push the images
+        run: |
+          short="${GITHUB_SHA:0:12}"
+          for suffix in cpu-amd64 cpu-arm64 cuda-amd64; do
+            gunzip -c "dist/apassy-brain-$VERSION-$suffix.tar.gz" | docker load
+            docker tag "apassy-brain:$VERSION-$suffix" "$IMAGE:$VERSION-$suffix"
+            docker tag "apassy-brain:$VERSION-$suffix" "$IMAGE:sha-$short-$suffix"
+            docker push "$IMAGE:$VERSION-$suffix"
+            docker push "$IMAGE:sha-$short-$suffix"
+            docker image rm "apassy-brain:$VERSION-$suffix" "$IMAGE:$VERSION-$suffix" "$IMAGE:sha-$short-$suffix" >/dev/null
+          done
+          docker buildx imagetools create -t "$IMAGE:$VERSION-cuda" "$IMAGE:$VERSION-cuda-amd64"
+          # Last: the multi-architecture CPU tag that the runbook names.
+          docker buildx imagetools create -t "$IMAGE:$VERSION-cpu" -t "$IMAGE:$VERSION" \
+            "$IMAGE:$VERSION-cpu-amd64" "$IMAGE:$VERSION-cpu-arm64"
+          {
+            echo "### Published"
+            for tag in "$VERSION" "$VERSION-cuda"; do
+              echo "- \`$IMAGE:$tag\` $(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest.Digest}}')"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      # GitHub release assets are at most 2 GiB each; the CUDA image is only on GHCR.
+      - name: Attach the CPU archives to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::warning::No GitHub release v$VERSION yet. Attach dist/apassy-brain-$VERSION-cpu-*.tar.gz and .sha256 from this run's artifacts later."
+            exit 0
+          fi
+          existing="$(gh release view "v$VERSION" --json assets --jq '.assets[].name')"
+          for suffix in cpu-amd64 cpu-arm64; do
+            for file in "dist/apassy-brain-$VERSION-$suffix.tar.gz" "dist/apassy-brain-$VERSION-$suffix.tar.gz.sha256"; do
+              name="$(basename "$file")"
+              if grep -qx -- "$name" <<< "$existing"; then
+                echo "::warning::$name is already on release v$VERSION; not replaced."
+                continue
+              fi
+              if [ "$(stat -c %s "$file")" -ge 2147483648 ]; then
+                echo "::warning::$name is 2 GiB or more, over the release asset limit; it is only on GHCR."
+                continue
+              fi
+              gh release upload "v$VERSION" "$file"
+            done
+          done

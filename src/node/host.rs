@@ -675,6 +675,21 @@ fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
             items,
         );
     }
+    // Way C on: this build makes no lease, and never releases the long-lived value
+    // instead (contract private-sharing-v1 rule 4). The owner is not asked.
+    if let Some(Some(item)) = shared.with_vault(|vault| {
+        items
+            .iter()
+            .find(|item| vault.run_needs_lease(**item).unwrap_or(true))
+            .copied()
+    }) {
+        let reason = crate::vault::RunBindingError::LeaseFailed.message(item);
+        return deny(
+            reason.clone(),
+            Some(refused_row(run, Some(agent_id), &reason)),
+            items,
+        );
+    }
 
     // 2. The broker: the owner decides, about one run of the agent at a time.
     let Some(slot) = AgentSlot::take(shared, agent_id) else {
@@ -727,6 +742,11 @@ fn outcome(shared: &Shared, run: &PendingRun) -> Outcome {
             }
             if !matches!(binding.delivery, EnvDelivery::Placeholder(_)) {
                 return Err("A credential of this run is not in placeholder mode.");
+            }
+            if vault.run_needs_lease(*item).unwrap_or(true) {
+                return Err(
+                    "A credential of this run now gives temporary credentials (lease_failed). The long-lived key is not given instead.",
+                );
             }
             let Ok(value) = vault.reveal(*item, &binding.field) else {
                 return Err("A credential of this run has no value.");

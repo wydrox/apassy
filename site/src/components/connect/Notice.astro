@@ -1,0 +1,37 @@
+---
+// The frame of the short pages of Apassy Connect: the return pages of a checkout
+// and the invite page. They stay out of search results and send no Referer
+// (also public/_headers for /connect/*).
+import Page from "../../layouts/Page.astro";
+import Mark from "../Mark.astro";
+
+interface Props {
+  title: string;
+  description: string;
+  heading: string;
+}
+const { title, description, heading } = Astro.props;
+---
+<Page title={title} description={description} noindex noReferrer>
+  <main class="container">
+    <div class="box card">
+      <Mark class="mark" />
+      <p class="eyebrow">Apassy Connect</p>
+      <h1>{heading}</h1>
+      <div class="body"><slot /></div>
+    </div>
+  </main>
+</Page>
+
+<style>
+  main { max-width: 640px; padding-top: 96px; padding-bottom: 140px; }
+  .box { padding: 44px 40px; text-align: center; display: flex; flex-direction: column; align-items: center; box-shadow: var(--shadow); }
+  .box :global(.mark) { width: 40px; height: auto; color: var(--ink); margin-bottom: 22px; }
+  h1 { margin-top: 10px; font-size: clamp(32px, 5vw, 44px); font-weight: 500; letter-spacing: -0.045em; line-height: 1.05; text-wrap: balance; }
+  .body { margin-top: 16px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .body :global(p) { color: var(--muted); text-wrap: pretty; }
+  .body :global(.btn) { margin-top: 12px; }
+  .body :global(.small) { font-size: 14px; color: var(--faint); }
+  .body :global(a:not(.btn)) { color: var(--blue); }
+  .body :global(kbd) { font-family: var(--sans); font-size: 0.95em; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--edge); background: var(--surface-2); color: var(--ink-2); }
+</style>

@@ -1,0 +1,28 @@
+Apassy bouncer brain image (ghcr.io/wydrox/apassy-brain)
+Copyright 2026 Rafal Wyderka and the Apassy contributors.
+
+This image contains software and model weights under the Apache License,
+Version 2.0. The license text is in /opt/apassy/licenses/LICENSE.
+
+1. Apassy server code: tools/basemodel/*.py and tools/finetune/local_train.py of
+   https://github.com/wydrox/apassy, Apache-2.0.
+
+2. Laya base checkpoint: convaiinnovations/laya on Hugging Face, revision
+   55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851 (files rl_agent_config.json,
+   model.safetensors, tokenizer/*, encoder/*), license Apache-2.0 (tag
+   commercial-use; checked on 2026-11-02, ADR 0035). Its model card at that
+   revision is in /opt/apassy/licenses/laya-MODEL-CARD.md. The weights are not
+   changed: the image has the published file, SHA-256
+   891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c.
+
+3. Encoder: the Laya checkpoint contains the encoder ModernBERT-large
+   (answerdotai/ModernBERT-large, Answer.AI and LightOn), license Apache-2.0.
+
+4. Fine-tuned decision heads apassy-base-v1 (/opt/apassy/models/
+   apassy-base-v1.safetensors, SHA-256
+   832249609f0cfd978cc7697326d55bc6d2676507eec13e5fb3f4bc6b35cfe850): trained by
+   Apassy on top of item 2 (docs/operations/base-model.md), Apache-2.0.
+
+5. Python packages in /usr/local/lib/python3.12/site-packages (torch,
+   transformers, laya, fastapi, uvicorn, and their dependencies): each under its
+   own license; the license files are in the .dist-info folder of each package.

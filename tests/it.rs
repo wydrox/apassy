@@ -41,6 +41,7 @@ mod companion;
 mod companion_activity;
 mod companion_owner;
 mod companion_store;
+mod connect_account;
 mod contracts;
 mod corrections;
 mod declaration_suggestions;
@@ -51,8 +52,11 @@ mod eval_harness;
 mod exceptions;
 mod first_use;
 mod folder_sync;
+mod harden;
 mod host_coverage;
 mod host_hook;
+#[path = "isolation/linux_sandbox.rs"]
+mod isolation_linux;
 #[path = "isolation/product_profile.rs"]
 mod isolation_profile;
 mod item_history;
@@ -78,6 +82,7 @@ mod provider_hosts;
 mod relay_connect;
 mod relay_connect_cards;
 mod relay_feed;
+mod relay_pinned;
 mod relay_questions;
 mod relay_sync;
 mod rule_packs;
@@ -86,6 +91,7 @@ mod shadow_mode;
 #[cfg(feature = "storage-probe")]
 mod sqlcipher_probe;
 mod sync_schema_upgrade;
+mod tls_front;
 mod trusted_devices;
 mod vault_lifecycle;
 mod vault_migration;

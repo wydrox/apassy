@@ -1,7 +1,7 @@
 //! SPEC26 Connect teams: `POST /v1/connect` without a team code, one team per device
 //! key, the relay-wide daily cap, the `connect` limits (`plan_required` on a snapshot
 //! push), questions and device links in a Connect team, operator teams as before, the
-//! directory migration from 1002 to 1004, and the idle sweep.
+//! directory migration from 1002 to 1005, and the idle sweep.
 
 #[path = "common/relay.rs"]
 mod relay;
@@ -645,6 +645,171 @@ fn a_snapshot_push_to_a_connect_team_is_plan_required() {
     assert_eq!(team_info(&relay, &team)["limits"]["sync_bytes"], 0);
 }
 
+/// A snapshot push of `body` by `mac` as the first version.
+fn push_first(relay: &TestRelay, team: &TeamId, mac: &Device, body: &[u8]) -> Answer {
+    send(
+        &relay.url,
+        "PUT",
+        "/v1/sync/snapshot",
+        Some(&mac.token),
+        &first_push(team, mac, body),
+        body.to_vec(),
+    )
+}
+
+#[test]
+fn a_connect_team_gets_the_configured_sync_bytes() {
+    // The hosted relay's setting until Apassy Connect starts (plans section 4.1).
+    let mut relay = start_with(
+        |config| config.connect_sync_bytes = 67_108_864,
+        UpstreamOptions::default(),
+    );
+    let (team, mac) = connect(&relay, "Rafal");
+    let info = team_info(&relay, &team);
+    assert_eq!(info["kind"], "connect");
+    assert_eq!(info["limits"]["sync_bytes"], 67_108_864);
+    // The rest of the preset is as before: one member, no items, no agents.
+    assert_eq!(
+        (
+            &info["limits"]["members"],
+            &info["limits"]["items"],
+            &info["limits"]["agents"]
+        ),
+        (&json!(1), &json!(0), &json!(0))
+    );
+    // The first push of a vault passes, and the head names version 1.
+    let body = vec![7u8; 4096];
+    let pushed = push_first(&relay, &team, &mac, &body);
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    let head = relay.ok("GET", "/v1/sync/head", &mac.token, None);
+    assert_eq!(head["version"], 1);
+    assert!(relay.config.sync_dir(&team).join("1.bin").exists());
+    // The file cap has room for the sync heads: 2 + 1 + 8 + 16 MiB.
+    assert_eq!(info["file_cap"], 27 * 1_048_576);
+    // A team keeps the value it was made with when the setting changes: a relay that
+    // sets 0 again makes teams with `plan_required`, and the old team still syncs.
+    relay.config.connect_sync_bytes = 0;
+    let restarted = relay.restart();
+    let (late, late_mac) = connect(&restarted, "Late");
+    assert_eq!(team_info(&restarted, &late)["limits"]["sync_bytes"], 0);
+    let refused = push_first(&restarted, &late, &late_mac, &body);
+    assert_eq!((refused.status, refused.code()), (403, "plan_required"));
+    assert_eq!(
+        team_info(&restarted, &team)["limits"]["sync_bytes"],
+        67_108_864
+    );
+}
+
+/// B-M2: a codeless Connect team pushes at most 30 snapshots an hour (403 `team_limit`)
+/// and at most 512 MiB of them (429 `rate_limited` with `Retry-After`: the seconds until
+/// enough of the hour's bytes leave the window), with one `limit_reached` row.
+#[test]
+fn a_connect_team_pushes_at_most_512_mib_and_30_snapshots_an_hour() {
+    let relay = start_with(
+        |config| config.connect_sync_bytes = 67_108_864,
+        UpstreamOptions::default(),
+    );
+    let (team, mac) = connect(&relay, "Rafal");
+    let info = team_info(&relay, &team);
+    assert_eq!(info["limits"]["sync_pushes_per_hour"], 30);
+    let body = vec![7u8; 4096];
+    let pushed = push_first(&relay, &team, &mac, &body);
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    // Eight more full snapshots of 64 MiB pushed 600 s ago fill the hour (heads only:
+    // the byte count reads the heads, before the chain checks of the next push).
+    let at = now_unix() - 600;
+    let conn = open_team_file(&relay.config, &team);
+    for version in 2..=9 {
+        conn.execute(
+            "INSERT INTO sync_head (version, vault_id, snapshot_sha256, size, previous_sha256,
+                 head_sha256, device_id, head_time, head, signature, pushed_at)
+             VALUES (?1, ?2, zeroblob(32), 67108864, zeroblob(32), zeroblob(32), ?3, 1, 'x',
+                 zeroblob(8), ?4)",
+            rusqlite::params![version, VAULT, mac.id as i64, at as i64],
+        )
+        .unwrap();
+    }
+    let refused = push_first(&relay, &team, &mac, &body);
+    assert_eq!(
+        (refused.status, refused.code()),
+        (429, "rate_limited"),
+        "{}",
+        refused.body
+    );
+    let wait: u64 = refused
+        .header("Retry-After")
+        .expect("Retry-After")
+        .parse()
+        .unwrap();
+    assert!((2990..=3000).contains(&wait), "{wait}");
+    let limits: Vec<String> = conn
+        .prepare("SELECT detail FROM audit WHERE action = 'limit_reached'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(limits, [r#"{"limit":"sync_bytes_per_hour"}"#]);
+    // 30 heads in the hour: the next push is 403 `team_limit` before the byte count.
+    conn.execute("DELETE FROM sync_head WHERE version > 1", [])
+        .unwrap();
+    for version in 2..=30 {
+        conn.execute(
+            "INSERT INTO sync_head (version, vault_id, snapshot_sha256, size, previous_sha256,
+                 head_sha256, device_id, head_time, head, signature, pushed_at)
+             VALUES (?1, ?2, zeroblob(32), 1, zeroblob(32), zeroblob(32), ?3, 1, 'x',
+                 zeroblob(8), ?4)",
+            rusqlite::params![version, VAULT, mac.id as i64, at as i64],
+        )
+        .unwrap();
+    }
+    let refused = push_first(&relay, &team, &mac, &body);
+    assert_eq!(
+        (refused.status, refused.code()),
+        (403, "team_limit"),
+        "{}",
+        refused.body
+    );
+}
+
+#[test]
+fn connect_sync_bytes_zero_keeps_plan_required() {
+    // The default of a relay that the owner runs, and of the hosted relay at the cutover.
+    let relay = start(UpstreamOptions::default());
+    assert_eq!(relay.config.connect_sync_bytes, 0);
+    let (team, mac) = connect(&relay, "Rafal");
+    assert_eq!(team_info(&relay, &team)["limits"]["sync_bytes"], 0);
+    assert_eq!(team_info(&relay, &team)["file_cap"], 11 * 1_048_576);
+    let refused = push_first(&relay, &team, &mac, &[7u8; 4096]);
+    assert_eq!((refused.status, refused.code()), (403, "plan_required"));
+}
+
+#[test]
+fn the_idle_sweep_takes_a_codeless_sync_team_only_without_a_head() {
+    let mut relay = start_with(
+        |config| config.connect_sync_bytes = 67_108_864,
+        UpstreamOptions::default(),
+    );
+    let (idle, _) = connect(&relay, "Idle");
+    let (synced, mac) = connect(&relay, "Synced");
+    let pushed = push_first(&relay, &synced, &mac, &[7u8; 4096]);
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    let old = now_unix() - 31 * DAY;
+    relay.edit_offline(|config| {
+        for team in [&idle, &synced] {
+            open_team_file(config, team)
+                .execute_batch(&format!(
+                    "UPDATE device SET last_seen_at = {old}, created_at = {old};"
+                ))
+                .unwrap();
+        }
+    });
+    // The setting's preset is a Connect preset: an idle team without a head goes; a
+    // team with a vault sync head never does.
+    assert_eq!(sweep(&relay, false)["suspended"], json!([idle]));
+    assert_eq!(team_info(&relay, &synced)["state"], "active");
+}
+
 #[test]
 fn connect_limits_one_member_no_items_no_agents() {
     let relay = start(UpstreamOptions::default());
@@ -949,7 +1114,7 @@ fn operator_teams_are_unchanged() {
 }
 
 #[test]
-fn the_directory_moves_from_1002_to_1004_and_keeps_its_teams() {
+fn the_directory_moves_from_1002_to_1005_and_keeps_its_teams() {
     let mut relay = start(UpstreamOptions::default());
     let (family_token, family_key) = relay.new_team_device("Family", "rafal");
     let family = team_of(&family_token);
@@ -974,6 +1139,7 @@ fn the_directory_moves_from_1002_to_1004_and_keeps_its_teams() {
             config,
             "ALTER TABLE team DROP COLUMN kind;
              ALTER TABLE team DROP COLUMN suspend_reason;
+             ALTER TABLE team_code DROP COLUMN kind;
              DROP INDEX connect_key_created;
              DROP TABLE connect_key;
              DROP TABLE oauth_refresh;
@@ -982,14 +1148,14 @@ fn the_directory_moves_from_1002_to_1004_and_keeps_its_teams() {
              PRAGMA user_version = 1002;",
         );
     });
-    // The restart above moved it to 1004 again.
+    // The restart above moved it to 1005 again.
     let conn = rusqlite::Connection::open(relay.config.directory_path()).unwrap();
     conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
         .unwrap();
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1004);
+    assert_eq!(version, 1005);
     let kinds: Vec<String> = conn
         .prepare("SELECT kind FROM team ORDER BY created_at")
         .unwrap()
@@ -1526,6 +1692,20 @@ fn receipts_and_push_tokens_write_audit_rows_only_when_they_change() {
     assert_eq!(audit_rows(&relay, &team, "push_token_set").len(), 3);
 }
 
+/// One maintenance pass at `now` that does not pass over `team` as idle. The relay's own
+/// maintenance thread passes every team every few seconds on the real clock. When it
+/// passed a Connect team after the last request of a test, a pass here would skip that
+/// team (no request since its last pass, for a minute) and leave the rows that the test
+/// aged in its file. So the pass counts as one after a request.
+fn maintain_after_a_request(relay: &TestRelay, team: &TeamId, now: u64) {
+    let hub = relay.hub();
+    hub.team(team)
+        .unwrap()
+        .last_request
+        .store(u64::MAX, Ordering::Relaxed);
+    apassy_relay::server::http::maintain(&hub, now);
+}
+
 #[test]
 fn expired_device_links_go_after_a_week_and_at_most_a_hundred_stay() {
     let relay = start(UpstreamOptions::default());
@@ -1537,8 +1717,7 @@ fn expired_device_links_go_after_a_week_and_at_most_a_hundred_stay() {
     let conn = open_team_file(&relay.config, &team);
     conn.execute_batch(&format!("UPDATE device_link SET expires_at = {};", now - 1))
         .unwrap();
-    let hub = relay.hub();
-    apassy_relay::server::http::maintain(&hub, now);
+    maintain_after_a_request(&relay, &team, now);
     let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
     assert_eq!(
         count("SELECT count(*) FROM device_link WHERE state = 'expired'"),
@@ -1551,8 +1730,7 @@ fn expired_device_links_go_after_a_week_and_at_most_a_hundred_stay() {
         now - 7 * DAY - 1
     ))
     .unwrap();
-    relay.ok("GET", "/v1/me", &mac.token, None);
-    apassy_relay::server::http::maintain(&hub, now + 1);
+    maintain_after_a_request(&relay, &team, now + 1);
     assert_eq!(count("SELECT count(*) FROM device_link"), 0);
 }
 
@@ -1666,7 +1844,7 @@ fn a_connect_team_file_has_a_cap_and_a_full_team_is_refused_without_losing_its_a
             Ok(())
         })
         .unwrap();
-    apassy_relay::server::http::maintain(&hub, now + 1);
+    maintain_after_a_request(&relay, &team, now + 1);
     assert_eq!(questions(), 0);
     let warned = core.cap_warning();
     assert_eq!(warned.0, CapLevel::Full);
@@ -1677,7 +1855,7 @@ fn a_connect_team_file_has_a_cap_and_a_full_team_is_refused_without_losing_its_a
     assert_eq!(info["file_cap"], (used + 2) * 4096);
     assert!(info["file_bytes"].as_u64().unwrap() >= used * 4096);
     // Again within the hour: no new warning.
-    apassy_relay::server::http::maintain(&hub, now + 120);
+    maintain_after_a_request(&relay, &team, now + 120);
     assert_eq!(core.cap_warning(), warned);
     let (status, _) = relay.call("POST", "/v1/questions", Some(&mac.token), Some(&body));
     assert_eq!(status, 403);

@@ -9,9 +9,7 @@
 use eframe::egui;
 
 use super::columns;
-#[cfg(feature = "vault")]
-use super::kit::Font;
-use super::kit::{self, Icon};
+use super::kit::{self, Font, Icon};
 use crate::desktop::{DesktopApp, Place};
 
 /// A section of Settings, in the order of the list.
@@ -24,8 +22,8 @@ pub(crate) enum SettingsSection {
     /// Touch ID and the passphrase.
     #[cfg(feature = "vault")]
     Security,
-    /// This Mac, the iPhones, the other Macs, and the relay for the questions.
-    #[cfg(feature = "vault")]
+    /// This Mac with its node on the tailnet, every device, and Wi-Fi Pairing. The
+    /// demo build shows the frames of the Devices mockup.
     Devices,
     /// The model of the bouncer, and calibration and learning.
     #[cfg(feature = "vault")]
@@ -54,7 +52,7 @@ impl SettingsSection {
         Self::Updates,
     ];
     #[cfg(not(feature = "vault"))]
-    pub(crate) const ALL: [Self; 1] = [Self::Rules];
+    pub(crate) const ALL: [Self; 2] = [Self::Devices, Self::Rules];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -62,7 +60,6 @@ impl SettingsSection {
             Self::Vault => "Vault",
             #[cfg(feature = "vault")]
             Self::Security => "Security",
-            #[cfg(feature = "vault")]
             Self::Devices => "Devices",
             #[cfg(feature = "vault")]
             Self::Bouncer => "Bouncer",
@@ -77,28 +74,26 @@ impl SettingsSection {
 
     /// The tile of the section: its icon on a color, as in System Settings.
     fn tile(self) -> kit::Tile {
-        let (red, green, blue, icon) = match self {
+        let (color, icon) = match self {
             #[cfg(feature = "vault")]
-            Self::Vault => (0, 122, 255, Icon::Database),
+            Self::Vault => (kit::fixed::SETTINGS_VAULT, Icon::Database),
             #[cfg(feature = "vault")]
-            Self::Security => (88, 86, 214, Icon::Lock),
+            Self::Security => (kit::fixed::SETTINGS_SECURITY, Icon::Lock),
+            Self::Devices => (kit::fixed::SETTINGS_DEVICES, Icon::Laptop),
             #[cfg(feature = "vault")]
-            Self::Devices => (48, 160, 200, Icon::Laptop),
+            Self::Bouncer => (kit::fixed::SETTINGS_BOUNCER, Icon::Shield),
             #[cfg(feature = "vault")]
-            Self::Bouncer => (175, 82, 222, Icon::Shield),
+            Self::Tools => (kit::fixed::SETTINGS_TOOLS, Icon::Terminal),
             #[cfg(feature = "vault")]
-            Self::Tools => (99, 99, 102, Icon::Terminal),
-            #[cfg(feature = "vault")]
-            Self::Updates => (142, 142, 147, Icon::Download),
+            Self::Updates => (kit::fixed::SETTINGS_UPDATES, Icon::Download),
             #[cfg(not(feature = "vault"))]
-            Self::Rules => (255, 149, 0, Icon::List),
+            Self::Rules => (kit::fixed::SETTINGS_RULES, Icon::List),
         };
-        kit::Tile::icon(egui::Color32::from_rgb(red, green, blue), icon)
+        kit::Tile::icon(color, icon)
     }
 }
 
 /// Show Settings with the given section.
-#[cfg(feature = "vault")]
 pub(crate) fn open(app: &mut DesktopApp, section: SettingsSection) {
     show(app);
     app.ui.settings_section = section;
@@ -116,9 +111,9 @@ fn status(app: &DesktopApp, section: SettingsSection) -> String {
     #[cfg(feature = "vault")]
     return super::settings::status_line(app, section);
     #[cfg(not(feature = "vault"))]
-    {
-        let _ = (app, section);
-        "Fixture rule interpreter".to_owned()
+    match section {
+        SettingsSection::Devices => super::demo::devices_status(app),
+        SettingsSection::Rules => "Fixture rule interpreter".to_owned(),
     }
 }
 
@@ -196,6 +191,10 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         {
             ui.add_space(12.0);
             match section {
+                SettingsSection::Devices => {
+                    header(app, ui, section);
+                    super::demo::devices_section(app, ui);
+                }
                 SettingsSection::Rules => super::demo::draw_rules(app, ui),
             }
         }
@@ -206,7 +205,6 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 /// The header of a section, as the header of an agent: its tile, its name, and its
 /// status line.
-#[cfg(feature = "vault")]
 fn header(app: &DesktopApp, ui: &mut egui::Ui, section: SettingsSection) {
     ui.add_space(12.0);
     ui.horizontal(|ui| {
@@ -214,11 +212,12 @@ fn header(app: &DesktopApp, ui: &mut egui::Ui, section: SettingsSection) {
         ui.add_space(4.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(kit::text(section.label(), Font::Title).color(kit::LABEL));
+            ui.label(kit::text(section.label(), Font::Title).color(kit::palette().label));
             let line = status(app, section);
             if !line.is_empty() {
                 ui.add(
-                    egui::Label::new(kit::text(line, Font::Body).color(kit::SECONDARY)).truncate(),
+                    egui::Label::new(kit::text(line, Font::Body).color(kit::palette().secondary))
+                        .truncate(),
                 );
             }
         });

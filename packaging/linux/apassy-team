@@ -1,0 +1,15 @@
+#!/bin/sh
+# apassy-team is `apassy team` for one more release (plan S2-S3, D8): the same words,
+# the same output. It prints one line to stderr that the name goes away, on a terminal
+# only (or with APASSY_TEAM_DEPRECATION=1), so scripts, services, and MCP clients see
+# no change.
+set -eu
+if [ "${APASSY_TEAM_DEPRECATION:-}" = 1 ] || [ -t 2 ]; then
+    # shellcheck disable=SC2016 # the backticks are text, not a command
+    printf '%s\n' 'apassy-team: this name goes away in the next version. Use `apassy team` with the same words.' >&2
+fi
+here=$(dirname -- "$0")
+if [ -x "$here/apassy" ] && [ ! -d "$here/apassy" ]; then
+    exec "$here/apassy" team "$@"
+fi
+exec apassy team "$@"

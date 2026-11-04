@@ -1,0 +1,86 @@
+# The Chrome Web Store package of the browser extension (ADR 0021), built in CI with
+# proof (ADR 0037 section 8): scripts/build-extension-zip.sh runs twice, at two paths with
+# another umask and time zone, and both zips must have the same SHA-256. Then the zip gets a
+# build provenance attestation and an attested SPDX SBOM of its contents. The owner uploads
+# this zip to the store and attaches it and its SBOM to the GitHub release v<version>
+# (docs/operations/release.md, "Attestations and SBOMs"). Nothing is published here.
+name: Extension package
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - extension/**
+      - scripts/build-extension-zip.sh
+      - Cargo.toml
+      - .github/actions/attest/**
+      - .github/workflows/extension-package.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extension-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the zip twice and compare
+        run: |
+          version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
+          zip="target/dist/apassy-extension-$version.zip"
+          scripts/build-extension-zip.sh
+          second="$RUNNER_TEMP/second-build"
+          rm -rf "$second"
+          mkdir -p "$second/scripts"
+          cp -R extension Cargo.toml "$second/"
+          cp scripts/build-extension-zip.sh "$second/scripts/"
+          (cd "$second" && umask 077 && TZ=Pacific/Auckland scripts/build-extension-zip.sh >/dev/null)
+          first_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
+          second_sha="$(sha256sum "$second/$zip" | cut -d' ' -f1)"
+          if [ "$first_sha" != "$second_sha" ]; then
+            echo "::error::Two builds of the extension zip differ: $first_sha and $second_sha."
+            exit 1
+          fi
+          (cd target/dist && sha256sum "apassy-extension-$version.zip" > "apassy-extension-$version.zip.sha256")
+          rm -rf target/extension-contents
+          mkdir -p target/extension-contents
+          unzip -q "$zip" -d target/extension-contents
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          {
+            echo "### apassy-extension-$version.zip"
+            echo
+            echo "SHA-256 \`$first_sha\`, the same in two builds."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest the zip
+        uses: ./.github/actions/attest
+        with:
+          subject-path: target/dist/apassy-extension-${{ env.VERSION }}.zip
+          sbom-path: target/extension-contents
+          sbom-all-files: "true"
+          sbom-output: target/dist/apassy-extension-${{ env.VERSION }}.spdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-extension-${{ env.VERSION }}
+          path: |
+            target/dist/apassy-extension-${{ env.VERSION }}.zip
+            target/dist/apassy-extension-${{ env.VERSION }}.zip.sha256
+            target/dist/apassy-extension-${{ env.VERSION }}.spdx.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0

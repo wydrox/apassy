@@ -895,6 +895,40 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 34 {
+        // Schema 34: the key source of relay memberships (`src/vault/schema34.rs`).
+        conn.execute_batch("ALTER TABLE relay_membership DROP COLUMN key_source;")
+            .unwrap();
+    }
+    if version < 32 {
+        // Schema 32: short-lived credentials and member keys (`src/vault/schema32.rs`).
+        conn.execute_batch("DROP TABLE member_key; DROP TABLE short_lived;")
+            .unwrap();
+    }
+    if version < 29 {
+        // Schema 29: the host of the bouncer brain (`src/vault/schema29.rs`).
+        conn.execute_batch(
+            "DROP TABLE bouncer_host;
+             ALTER TABLE model_candidate DROP COLUMN origin;
+             ALTER TABLE model_candidate DROP COLUMN job_host;
+             ALTER TABLE model_candidate DROP COLUMN job_id;
+             ALTER TABLE model_candidate DROP COLUMN uploaded_to;
+             ALTER TABLE model_activation DROP COLUMN heads_sha256;",
+        )
+        .unwrap();
+    }
+    if version < 28 {
+        // Schema 28: the pinned trust of a relay membership (`src/vault/schema28.rs`).
+        conn.execute_batch(
+            "ALTER TABLE cloud_node DROP COLUMN push_gateway;
+             ALTER TABLE cloud_node DROP COLUMN node_origin;
+             ALTER TABLE cloud_node DROP COLUMN tailnet_port;
+             ALTER TABLE cloud_node DROP COLUMN tailnet_on;
+             ALTER TABLE relay_membership DROP COLUMN alt;
+             ALTER TABLE relay_membership DROP COLUMN pin;",
+        )
+        .unwrap();
+    }
     if version < 27 {
         // Schema 27: the Bouncer figures (`src/vault/schema27.rs`).
         conn.execute_batch(

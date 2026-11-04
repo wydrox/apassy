@@ -157,8 +157,10 @@ fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
         kit::icon_tile_sized(ui, icon, color, 40.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(kit::text(&details.name, Font::Title).color(kit::LABEL));
-            ui.label(kit::text(details.kind.label(), Font::Callout).color(kit::SECONDARY));
+            ui.label(kit::text(&details.name, Font::Title).color(kit::palette().label));
+            ui.label(
+                kit::text(details.kind.label(), Font::Callout).color(kit::palette().secondary),
+            );
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             edit = kit::button(ui, "Edit", Style::Bordered).clicked();
@@ -178,9 +180,9 @@ fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 ui,
                 |ui| {
                     let color = if details.revealed {
-                        kit::LABEL
+                        kit::palette().label
                     } else {
-                        kit::SECONDARY
+                        kit::palette().secondary
                     };
                     ui.label(kit::text(&details.display_value, Font::Mono).color(color));
                 },
@@ -213,11 +215,14 @@ fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     .collect();
     kit::section(ui, Some("Details"), Some(details.agent_use_label), |s| {
         for (label, value) in rows {
-            s.labeled(label, kit::text(value, Font::Body).color(kit::SECONDARY));
+            s.labeled(
+                label,
+                kit::text(value, Font::Body).color(kit::palette().secondary),
+            );
         }
         s.labeled(
             "Revision",
-            kit::text(details.revision.to_string(), Font::Body).color(kit::SECONDARY),
+            kit::text(details.revision.to_string(), Font::Body).color(kit::palette().secondary),
         );
     });
     let mut delete = false;
@@ -532,7 +537,9 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     s.row(|ui| {
                         ui.horizontal(|ui| {
                             kit::tag(ui, clause.kind_label, Tone::Accent);
-                            ui.label(kit::text(&clause.text, Font::Body).color(kit::LABEL));
+                            ui.label(
+                                kit::text(&clause.text, Font::Body).color(kit::palette().label),
+                            );
                         });
                         kit::note(ui, &clause.meaning);
                     });
@@ -546,15 +553,15 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 if let Some(examples) = &draft.examples {
                     s.labeled(
                         "Permit",
-                        kit::text(&examples.allow, Font::Callout).color(kit::SECONDARY),
+                        kit::text(&examples.allow, Font::Callout).color(kit::palette().secondary),
                     );
                     s.labeled(
                         "Wait",
-                        kit::text(&examples.ask, Font::Callout).color(kit::SECONDARY),
+                        kit::text(&examples.ask, Font::Callout).color(kit::palette().secondary),
                     );
                     s.labeled(
                         "Deny",
-                        kit::text(&examples.deny, Font::Callout).color(kit::SECONDARY),
+                        kit::text(&examples.deny, Font::Callout).color(kit::palette().secondary),
                     );
                 }
             },
@@ -564,27 +571,28 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
         kit::section(ui, Some("Active rule"), Some(&rule.original_text), |s| {
             s.labeled(
                 "Status",
-                kit::text(rule.status, Font::Body).color(kit::SECONDARY),
+                kit::text(rule.status, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Agent",
-                kit::text(&rule.agent_name, Font::Body).color(kit::SECONDARY),
+                kit::text(&rule.agent_name, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Item",
-                kit::text(&rule.item_name, Font::Body).color(kit::SECONDARY),
+                kit::text(&rule.item_name, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Destination",
-                kit::text(rule.destination, Font::Body).color(kit::SECONDARY),
+                kit::text(rule.destination, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Denied",
-                kit::text(rule.denied_destinations.join(", "), Font::Body).color(kit::SECONDARY),
+                kit::text(rule.denied_destinations.join(", "), Font::Body)
+                    .color(kit::palette().secondary),
             );
             s.labeled(
                 "Operation",
-                kit::text(rule.operation, Font::Body).color(kit::SECONDARY),
+                kit::text(rule.operation, Font::Body).color(kit::palette().secondary),
             );
             s.labeled(
                 "Expiry",
@@ -592,7 +600,7 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     format!("{} ({})", rule.expiry_iso, rule.time_zone),
                     Font::Body,
                 )
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
             );
             s.labeled(
                 "Uses",
@@ -600,7 +608,7 @@ pub(super) fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     format!("{} of {}", rule.use_count, rule.usage_limit),
                     Font::Body,
                 )
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
             );
         });
     }
@@ -674,7 +682,7 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 let (label, tone) = decision_tone(current);
                 ui.horizontal(|ui| {
                     kit::tag(ui, label, tone);
-                    ui.label(kit::medium(&alert.title, Font::Body).color(kit::LABEL));
+                    ui.label(kit::medium(&alert.title, Font::Body).color(kit::palette().label));
                 });
                 if let Some(request) = &request
                     && request.initial_decision != request.decision
@@ -687,7 +695,7 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         ),
                     );
                 }
-                kit::paragraph(ui, &alert.message, Font::Callout, kit::LABEL);
+                kit::paragraph(ui, &alert.message, Font::Callout, kit::palette().label);
                 kit::note(
                     ui,
                     format!(
@@ -736,7 +744,10 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         for event in events {
             s.row(|ui| {
-                ui.add(Label::new(kit::text(&event.message, Font::Body).color(kit::LABEL)).wrap());
+                ui.add(
+                    Label::new(kit::text(&event.message, Font::Body).color(kit::palette().label))
+                        .wrap(),
+                );
                 kit::note(ui, format!("{} · {}", event.at_iso, event.kind));
             });
         }
@@ -1494,6 +1505,587 @@ fn bouncer_events(now: u64, waiting: bool) -> Vec<super::bouncer::LogEvent> {
     events
 }
 
+// ---- Settings > Devices (mockup docs/design/devices-settings-mockup.html). ----
+
+/// The frame of the Devices mockup that Settings > Devices shows in the demo build. The
+/// menu at the top of the section picks it, and `APASSY_DEMO_DEVICES` (1, 2a, 2b, 2c, 3a,
+/// 3b, 3c, 3d, 3f, 3g, 3h, 4, 4b, 4c, 4d, 4d+, 5a, 5b, 5c, 6a, 6b, 6d, 7, R) sets it at
+/// start and opens the section, for screenshots. 3e and 6c are frame 1 with the ⓘ of the switch or of Wi-Fi Pairing open.
+/// Frames 2a–2c and 4b–4d are the steps of the add and move sheets, drawn by the same
+/// functions as the vault build (`devices::link_step` and the others); "4d+" is frame 1
+/// after "Later" of 4d, and "R" frame 1 with the Relay group (not in the mockup).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum DevicesFrame {
+    /// 1: the route on, every kind of device, the Wi-Fi group.
+    #[default]
+    TailnetOn,
+    /// 3a.
+    NoTailscale,
+    /// 3b.
+    NotConnected,
+    /// 3c.
+    RouteOff,
+    /// 3d.
+    Starting,
+    /// 3f.
+    Locked,
+    /// 3g.
+    PortTaken,
+    /// 3h.
+    AddressChanged,
+    /// 2a: the link of "Add an iPhone or a Mac…".
+    AddLink,
+    /// 2b: the safety words.
+    AddWords,
+    /// 2c: the device was added.
+    Added,
+    /// 4: the approvals go through Apassy relay.
+    Move,
+    /// 4b: the move sheet.
+    MoveSheet,
+    /// 4c: the approvals moved.
+    Moved,
+    /// 4d: the old entry is still on Apassy relay.
+    OldEntry,
+    /// After "Later" of 4d: the row in the This Mac group.
+    OldEntryRow,
+    /// 5a: Revoke an iPhone with a watch.
+    RevokeIphone,
+    /// 5b: Revoke another Mac.
+    RevokeMac,
+    /// 5c: after the revoke.
+    AfterRevoke,
+    /// 6a: the Wi-Fi notice with the route on.
+    NoticeTailnet,
+    /// 6b: the Wi-Fi notice without the route.
+    NoticeRelay,
+    /// 6d: the Wi-Fi group of the next release.
+    NextVersion,
+    /// 7: first run, no Tailscale.
+    FirstRun,
+    /// Frame 1 with the Relay group: the questions through the relay, the feed, the
+    /// other Macs, and the end of the free approvals.
+    Relay,
+}
+
+impl DevicesFrame {
+    const ALL: [Self; 24] = [
+        Self::TailnetOn,
+        Self::AddLink,
+        Self::AddWords,
+        Self::Added,
+        Self::NoTailscale,
+        Self::NotConnected,
+        Self::RouteOff,
+        Self::Starting,
+        Self::Locked,
+        Self::PortTaken,
+        Self::AddressChanged,
+        Self::Move,
+        Self::MoveSheet,
+        Self::Moved,
+        Self::OldEntry,
+        Self::OldEntryRow,
+        Self::RevokeIphone,
+        Self::RevokeMac,
+        Self::AfterRevoke,
+        Self::NoticeTailnet,
+        Self::NoticeRelay,
+        Self::NextVersion,
+        Self::FirstRun,
+        Self::Relay,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::TailnetOn => "Frame 1: Tailnet On",
+            Self::NoTailscale => "Frame 3a: No Tailscale",
+            Self::NotConnected => "Frame 3b: Not Connected",
+            Self::RouteOff => "Frame 3c: Route Off",
+            Self::Starting => "Frame 3d: Starting",
+            Self::Locked => "Frame 3f: Vault Locked",
+            Self::PortTaken => "Frame 3g: Port in Use",
+            Self::AddressChanged => "Frame 3h: Address Changed",
+            Self::AddLink => "Frame 2a: Add, the Link",
+            Self::AddWords => "Frame 2b: Add, the Words",
+            Self::Added => "Frame 2c: Added",
+            Self::Move => "Frame 4: Move Approvals",
+            Self::MoveSheet => "Frame 4b: Move Sheet",
+            Self::Moved => "Frame 4c: Approvals Moved",
+            Self::OldEntry => "Frame 4d: Old Entry on Relay",
+            Self::OldEntryRow => "Frame 4d+: After Later",
+            Self::RevokeIphone => "Frame 5a: Revoke iPhone",
+            Self::RevokeMac => "Frame 5b: Revoke Mac",
+            Self::AfterRevoke => "Frame 5c: After Revoke",
+            Self::NoticeTailnet => "Frame 6a: Notice, Tailnet",
+            Self::NoticeRelay => "Frame 6b: Notice, Relay",
+            Self::NextVersion => "Frame 6d: Next Version",
+            Self::FirstRun => "Frame 7: First Run",
+            Self::Relay => "Frame R: Relay Group",
+        }
+    }
+
+    /// The frame of `APASSY_DEMO_DEVICES`.
+    fn from_env() -> Option<Self> {
+        let value = std::env::var("APASSY_DEMO_DEVICES").ok()?;
+        let value = value.trim();
+        Self::ALL.into_iter().find(|frame| {
+            let number = frame.label().trim_start_matches("Frame ");
+            number.split(':').next() == Some(value)
+        })
+    }
+}
+
+/// "Now" of the Devices fixtures: Tue 3 Nov 2026, 14:20 UTC, as the mockup.
+const DEVICES_NOW: u64 = 1_793_715_600;
+/// 12 Sep 2026: the Wi-Fi iPhone paired.
+const WIFI_PAIRED: u64 = 1_789_203_600;
+
+fn demo_device(
+    name: &str,
+    kind: super::devices::Kind,
+    role: &str,
+    route: Option<super::devices::Route>,
+    ago: Option<u64>,
+    target: super::devices::Target,
+) -> super::devices::DeviceEntry {
+    super::devices::DeviceEntry {
+        name: name.to_owned(),
+        kind,
+        roles: vec![role.to_owned()],
+        route,
+        last_contact: ago.map(|ago| DEVICES_NOW - ago),
+        target,
+        failed: false,
+    }
+}
+
+fn node_target(id: u64) -> super::devices::Target {
+    super::devices::Target::Node {
+        team_id: "t_demo".to_owned(),
+        id,
+        uuid: None,
+    }
+}
+
+fn hosted_target(uuid: &str) -> super::devices::Target {
+    super::devices::Target::Hosted {
+        team_id: "t_demo".to_owned(),
+        id: None,
+        uuid: uuid.to_owned(),
+    }
+}
+
+/// The view of a frame of the Devices mockup. Synthetic data only.
+pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
+    use super::devices::{
+        Address, DevicesView, Kind, NodeProblem, NodeState, OtherMacsRow, Questions, RelayView,
+        Route, Target, WifiDevice, WifiEnd, WifiView,
+    };
+    let address = |ipv4: &str| Address {
+        ipv4: ipv4.to_owned(),
+        origin: format!("https://{ipv4}:8444"),
+        port: 8444,
+        words: Some("harbor lemon quartz otter cedar mango".to_owned()),
+    };
+    let moving = matches!(frame, DevicesFrame::Move | DevicesFrame::MoveSheet);
+    let first_run = frame == DevicesFrame::FirstRun;
+    let (approvals, phone_route) = if moving {
+        ("Asks for approvals", Route::Relay)
+    } else {
+        ("Hosts approvals", Route::Mac)
+    };
+    let this_mac = demo_device(
+        "Mac mini (office)",
+        Kind::Mac,
+        if first_run {
+            "Asks for approvals"
+        } else {
+            approvals
+        },
+        None,
+        Some(0),
+        Target::ThisMac,
+    );
+    let phone_target = |id, uuid| {
+        if moving {
+            hosted_target(uuid)
+        } else {
+            node_target(id)
+        }
+    };
+    let mut devices = vec![this_mac];
+    if !first_run {
+        devices.extend([
+            demo_device(
+                "Rafal's iPhone",
+                Kind::Iphone,
+                "Approves runs",
+                Some(phone_route),
+                Some(10),
+                phone_target(2, "iphone"),
+            ),
+            demo_device(
+                "Rafal's Apple Watch",
+                Kind::Watch,
+                "Sees requests",
+                Some(phone_route),
+                Some(if moving { 9 * 60 } else { 4 * 60 }),
+                phone_target(3, "watch"),
+            ),
+            demo_device(
+                "MacBook Pro",
+                Kind::Mac,
+                "Syncs Personal",
+                Some(Route::Relay),
+                Some(2 * 60),
+                hosted_target("macbook"),
+            ),
+            demo_device(
+                "Mac mini (studio)",
+                Kind::Mac,
+                "Syncs Personal",
+                Some(Route::Relay),
+                Some(3_600),
+                hosted_target("studio"),
+            ),
+        ]);
+        if !moving {
+            devices.push(demo_device(
+                "build-box",
+                Kind::LinuxNode,
+                "Syncs Acme team",
+                Some(Route::Tailnet),
+                Some(5 * 60),
+                Target::Linux {
+                    vault: "acme".to_owned(),
+                    team_id: "t_acme".to_owned(),
+                    device_id: 7,
+                    origin: "https://100.88.4.20:8444".to_owned(),
+                },
+            ));
+        }
+    }
+    if frame == DevicesFrame::AfterRevoke {
+        devices.retain(|device| device.kind != Kind::Iphone && device.kind != Kind::Watch);
+        devices.retain(|device| device.name != "Mac mini (studio)");
+        for device in &mut devices {
+            device.last_contact = None;
+        }
+        if let Some(this_mac) = devices.first_mut() {
+            this_mac.last_contact = Some(DEVICES_NOW);
+        }
+    }
+    let (node, problem) = match frame {
+        DevicesFrame::NoTailscale | DevicesFrame::FirstRun => (NodeState::Missing, None),
+        DevicesFrame::NotConnected => (NodeState::NotConnected, None),
+        DevicesFrame::RouteOff | DevicesFrame::NoticeRelay => (NodeState::Off, None),
+        DevicesFrame::Starting => (NodeState::On { address: None }, None),
+        DevicesFrame::Locked => (NodeState::Locked, None),
+        DevicesFrame::PortTaken => (
+            NodeState::On { address: None },
+            Some(NodeProblem::PortTaken {
+                port: 8444,
+                before_pairing: true,
+            }),
+        ),
+        DevicesFrame::AddressChanged => (
+            NodeState::On {
+                address: Some(address("100.77.20.5")),
+            },
+            Some(NodeProblem::AddressChanged),
+        ),
+        _ => (
+            NodeState::On {
+                address: Some(address("100.101.7.12")),
+            },
+            None,
+        ),
+    };
+    let wifi = (!moving && !first_run).then(|| WifiView {
+        listening: true,
+        starting: false,
+        failed: None,
+        devices: vec![WifiDevice {
+            id: "wifi-phone".to_owned(),
+            name: "Rafal's iPhone".to_owned(),
+            paired_at: WIFI_PAIRED,
+            last_seen_at: Some(DEVICES_NOW - 3 * 3_600),
+        }],
+        end: if frame == DevicesFrame::NextVersion {
+            WifiEnd::NextVersion
+        } else {
+            WifiEnd::TwoVersions
+        },
+    });
+    let relay = (frame == DevicesFrame::Relay).then(|| RelayView {
+        questions: Questions::On,
+        feed_shown: true,
+        other_macs: Some(OtherMacsRow {
+            words: "Through the Apassy relay".to_owned(),
+            relay: true,
+        }),
+        free_end: Some("0.5.19".to_owned()),
+    });
+    DevicesView {
+        node,
+        problem,
+        locked: frame == DevicesFrame::Locked,
+        can_move: moving,
+        devices,
+        notes: Vec::new(),
+        wifi,
+        relay,
+        old_relay_entry: frame == DevicesFrame::OldEntryRow,
+        now: DEVICES_NOW,
+    }
+}
+
+/// The link of frames 2a and 4b: the node origin of the mockup, 9:41 left.
+fn demo_link_step() -> super::devices::LinkStep {
+    super::devices::LinkStep {
+        route: super::devices::Route::Mac,
+        shown: Some(super::devices::shown_link(
+            "https://100.101.7.12:8444/link#apassy_lnk_demo",
+        )),
+        seconds_left: Some(9 * 60 + 41),
+    }
+}
+
+/// A synthetic QR code of 29 modules: the three finder patterns and a fixed scatter, in
+/// the fixed QR colors. It encodes nothing.
+fn demo_qr(ui: &mut egui::Ui, size: f32) {
+    use super::kit::fixed;
+    const WIDTH: usize = 29;
+    const QUIET: usize = 2;
+    let total = WIDTH + 2 * QUIET;
+    let unit = (size / total as f32).floor().max(1.0);
+    let side = unit * total as f32;
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0, fixed::QR_LIGHT);
+    let finder = |x: usize, y: usize| {
+        [(0, 0), (WIDTH - 7, 0), (0, WIDTH - 7)]
+            .iter()
+            .find_map(|&(left, top)| {
+                (x >= left && x < left + 7 && y >= top && y < top + 7).then(|| {
+                    let (dx, dy) = (x - left, y - top);
+                    let ring = dx == 0 || dy == 0 || dx == 6 || dy == 6;
+                    let core = (2..=4).contains(&dx) && (2..=4).contains(&dy);
+                    ring || core
+                })
+            })
+    };
+    for y in 0..WIDTH {
+        for x in 0..WIDTH {
+            let dark = finder(x, y).unwrap_or((x * 7 + y * 13 + x * y) % 5 < 2);
+            if dark {
+                let min =
+                    rect.min + egui::vec2((x + QUIET) as f32 * unit, (y + QUIET) as f32 * unit);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(min, egui::Vec2::splat(unit)),
+                    0,
+                    fixed::QR_DARK,
+                );
+            }
+        }
+    }
+}
+
+/// Frames 2a–2c and 4b–4d: the steps of the add and move sheets, from fixtures. Returns
+/// the frame that the choice leads to.
+fn demo_step_sheet(ctx: &egui::Context, frame: DevicesFrame) -> Option<DevicesFrame> {
+    use super::devices::{self, Kind, MovePhase, Route, StepChoice};
+    let mut choice = None;
+    let response = kit::sheet(ctx, "demo-devices-step", 440.0, |ui| {
+        choice = match frame {
+            DevicesFrame::AddLink => {
+                devices::link_step(ui, &demo_link_step(), |ui| demo_qr(ui, 180.0), |_| {})
+            }
+            DevicesFrame::AddWords => devices::join_step(
+                ui,
+                "Rafal's iPhone",
+                Kind::Iphone,
+                "amber falcon",
+                Route::Mac,
+                true,
+                |_| {},
+            ),
+            DevicesFrame::Added => devices::added_step(ui, "Rafal's iPhone", false, true, |_| {}),
+            DevicesFrame::MoveSheet => devices::move_step(
+                ui,
+                "Rafal's iPhone",
+                MovePhase::Scan,
+                Some(&demo_link_step()),
+                |ui| demo_qr(ui, 140.0),
+                |_| {},
+            ),
+            DevicesFrame::Moved => devices::moved_step(
+                ui,
+                &["Rafal's iPhone".to_owned()],
+                true,
+                &["Rafal's Apple Watch".to_owned()],
+            ),
+            DevicesFrame::OldEntry => devices::old_entry_step(ui, false),
+            _ => None,
+        };
+    });
+    let choice = choice.or(response.escape.then_some(StepChoice::Cancel))?;
+    Some(match (frame, choice) {
+        (DevicesFrame::AddLink, StepChoice::Copy) => {
+            ctx.copy_text("https://100.101.7.12:8444/link#apassy_lnk_demo".to_owned());
+            return None;
+        }
+        (DevicesFrame::AddWords, StepChoice::Confirm) => DevicesFrame::Added,
+        (DevicesFrame::MoveSheet, StepChoice::Cancel) => DevicesFrame::Move,
+        (DevicesFrame::OldEntry, StepChoice::Later) => DevicesFrame::OldEntryRow,
+        _ => DevicesFrame::TailnetOn,
+    })
+}
+
+/// The status line of Settings > Devices in the demo build.
+pub(super) fn devices_status(app: &DesktopApp) -> String {
+    devices_view(app.ui.devices.demo).status_line()
+}
+
+/// Pick a frame of the Devices mockup, with its sheet.
+fn select_devices_frame(app: &mut DesktopApp, frame: DevicesFrame) {
+    use super::devices::{DevicesSheet, Kind, WatchChoice};
+    app.ui.devices.demo = frame;
+    let view = devices_view(frame);
+    let find = |kind: Kind| view.devices.iter().position(|device| device.kind == kind);
+    app.ui.devices.sheet = match frame {
+        DevicesFrame::RevokeIphone => find(Kind::Iphone).map(|index| DevicesSheet::Revoke {
+            device: view.devices[index].clone(),
+            vault: None,
+            watches: find(Kind::Watch)
+                .map(|index| WatchChoice {
+                    index,
+                    name: view.devices[index].name.clone(),
+                    revoke: true,
+                })
+                .into_iter()
+                .collect(),
+        }),
+        DevicesFrame::RevokeMac => view
+            .devices
+            .iter()
+            .find(|device| device.name == "MacBook Pro")
+            .map(|device| DevicesSheet::Revoke {
+                device: device.clone(),
+                vault: Some("Personal".to_owned()),
+                watches: Vec::new(),
+            }),
+        DevicesFrame::NoticeTailnet => Some(DevicesSheet::WifiNotice { tailnet: true }),
+        DevicesFrame::NoticeRelay => Some(DevicesSheet::WifiNotice { tailnet: false }),
+        _ => None,
+    };
+    if frame == DevicesFrame::AfterRevoke {
+        app.set_ok("Rafal's iPhone revoked");
+    }
+}
+
+/// Settings > Devices in the demo build: the frame menu and the frame.
+pub(super) fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::devices::{self, Action, Kind, rows};
+    ui.add_space(8.0);
+    let mut frame = app.ui.devices.demo;
+    let options: Vec<(DevicesFrame, String)> = DevicesFrame::ALL
+        .iter()
+        .map(|frame| (*frame, frame.label().to_owned()))
+        .collect();
+    let shown = frame.label();
+    kit::picker(ui, "demo-devices-frame", &mut frame, &options, shown, 240.0);
+    if frame != app.ui.devices.demo {
+        select_devices_frame(app, frame);
+    }
+    let view = devices_view(app.ui.devices.demo);
+    let action = devices::draw(ui, &view, |g| {
+        g.labeled("Notifications", rows::value("On"));
+    });
+    let next = match action {
+        Some(Action::SetRoute(true)) => Some(DevicesFrame::TailnetOn),
+        Some(Action::SetRoute(false)) => Some(DevicesFrame::RouteOff),
+        Some(Action::CheckAgain) => Some(DevicesFrame::TailnetOn),
+        Some(Action::Revoke(index)) => match view.devices.get(index).map(|device| device.kind) {
+            Some(Kind::Iphone) => Some(DevicesFrame::RevokeIphone),
+            Some(Kind::Mac) => Some(DevicesFrame::RevokeMac),
+            _ => None,
+        },
+        Some(Action::Copy(origin)) => {
+            ui.ctx().copy_text(origin);
+            None
+        }
+        Some(Action::Add) => Some(DevicesFrame::AddLink),
+        Some(Action::Move | Action::PairAgain) => Some(DevicesFrame::MoveSheet),
+        _ => None,
+    };
+    if let Some(next) = next {
+        select_devices_frame(app, next);
+    }
+}
+
+/// The sheets of the Devices frames 2a–2c, 4b–4d, 5a, 5b, 6a, and 6b, and
+/// `APASSY_DEMO_DEVICES`.
+pub(super) fn devices_overlays(app: &mut DesktopApp, ctx: &egui::Context) {
+    use super::devices::{Choice, DevicesSheet};
+    use std::sync::Once;
+    static FROM_ENV: Once = Once::new();
+    FROM_ENV.call_once(|| {
+        if let Some(frame) = DevicesFrame::from_env() {
+            super::settings_view::open(app, super::settings_view::SettingsSection::Devices);
+            select_devices_frame(app, frame);
+        }
+    });
+    let frame = app.ui.devices.demo;
+    if matches!(
+        frame,
+        DevicesFrame::AddLink
+            | DevicesFrame::AddWords
+            | DevicesFrame::Added
+            | DevicesFrame::MoveSheet
+            | DevicesFrame::Moved
+            | DevicesFrame::OldEntry
+    ) {
+        if let Some(next) = demo_step_sheet(ctx, frame) {
+            select_devices_frame(app, next);
+        }
+        return;
+    }
+    let Some(sheet) = app.ui.devices.sheet.clone() else {
+        return;
+    };
+    let (choice, escape, sheet) = match sheet {
+        DevicesSheet::Revoke {
+            device,
+            vault,
+            mut watches,
+        } => {
+            let (choice, escape) =
+                super::devices::revoke_sheet(ctx, &device, vault.as_deref(), &mut watches);
+            (
+                choice,
+                escape,
+                DevicesSheet::Revoke {
+                    device,
+                    vault,
+                    watches,
+                },
+            )
+        }
+        DevicesSheet::WifiNotice { tailnet } => {
+            let (choice, escape) = super::devices::wifi_notice(ctx, tailnet);
+            (choice, escape, DevicesSheet::WifiNotice { tailnet })
+        }
+        DevicesSheet::Linux { .. } => (Some(Choice::Cancel), false, sheet),
+    };
+    match choice.or(escape.then_some(Choice::Cancel)) {
+        Some(Choice::Confirm) => select_devices_frame(app, DevicesFrame::AfterRevoke),
+        Some(_) => select_devices_frame(app, DevicesFrame::TailnetOn),
+        None => app.ui.devices.sheet = Some(sheet),
+    }
+}
+
 // ---- Agents and Decisions of the Bouncer section in the demo. ----
 
 /// The MCP address of the demo (the mockup's).
@@ -1715,7 +2307,9 @@ pub(super) fn decisions_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    ui.label(kit::medium("Waiting  2", Font::Callout).color(kit::SECONDARY));
+                    ui.label(
+                        kit::medium("Waiting  2", Font::Callout).color(kit::palette().secondary),
+                    );
                 });
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(8, 2))
@@ -1862,11 +2456,11 @@ fn demo_week(app: &DesktopApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             kit::paint_icon_in(ui, Icon::CheckCircle, 16.0, Tone::Good.mark());
-            ui.label(kit::medium("All clear", Font::Body).color(kit::LABEL));
+            ui.label(kit::medium("All clear", Font::Body).color(kit::palette().label));
         });
         ui.add_space(14.0);
     }
-    ui.label(kit::text("This week", Font::Title3).color(kit::LABEL));
+    ui.label(kit::text("This week", Font::Title3).color(kit::palette().label));
     ui.add_space(6.0);
     let totals = data.totals(scope);
     let width = ((ui.available_width() - 8.0) / 2.0).floor();

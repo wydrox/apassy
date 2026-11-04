@@ -1,0 +1,19 @@
+{
+  "name": "apassy-push-gateway",
+  "version": "0.5.17",
+  "private": true,
+  "type": "module",
+  "description": "The push gateway of Apassy: holds the APNs key, turns sealed handles into notifications, and stores nothing.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "node --test 'test/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260929.1",
+    "@types/node": "22.20.4",
+    "typescript": "7.0.2",
+    "wrangler": "4.144.0"
+  }
+}

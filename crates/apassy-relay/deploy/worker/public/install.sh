@@ -1,5 +1,8 @@
 #!/bin/sh
-# Install apassy-team after a SHA-256 check against dl/SHA256SUMS.
+# Install after a SHA-256 check against dl/SHA256SUMS.
+# - Linux (x86_64, aarch64): the Apassy node `apassy` and the `apassy-team` shim (which
+#   runs `apassy team`) from apassy-<version>-linux-<arch>.tar.gz. Then run `apassy up`.
+# - macOS (arm64): the team CLI apassy-team. On a Mac the node runs inside the app.
 # APASSY_RELAY_URL: download origin (default: https://apassy-relay.wyderka.cc).
 #   A file:// URL can point to a local directory for tests.
 # APASSY_INSTALL_DIR: target directory (default: $HOME/.local/bin).
@@ -29,9 +32,13 @@ case "$machine" in
 esac
 
 case "$os-$arch" in
-    darwin-arm64|linux-x86_64) ;;
-    *) fail "Unsupported platform: $system/$machine. Supported platforms: macOS arm64 and Linux x86_64." ;;
+    darwin-arm64|linux-x86_64|linux-arm64) ;;
+    *) fail "Unsupported platform: $system/$machine. Supported platforms: macOS arm64, Linux x86_64, and Linux aarch64." ;;
 esac
+if [ "$os" = linux ]; then
+    command -v tar >/dev/null 2>&1 || fail 'Install tar first.'
+    command -v gzip >/dev/null 2>&1 || fail 'Install gzip first.'
+fi
 
 if command -v curl >/dev/null 2>&1; then
     downloader=curl
@@ -56,12 +63,15 @@ case "$target" in
     /*) ;;
     *) target="$(pwd)/$target" ;;
 esac
-filename="apassy-team-$os-$arch"
 stage=
+stage_shim=
 work=$(mktemp -d "${TMPDIR:-/tmp}/apassy-install.XXXXXXXX") || fail 'Cannot make the temporary directory.'
 cleanup() {
     if [ -n "$stage" ]; then
         rm -f "$stage"
+    fi
+    if [ -n "$stage_shim" ]; then
+        rm -f "$stage_shim"
     fi
     rm -rf "$work"
 }
@@ -81,6 +91,31 @@ download() {
 }
 
 download "$base/dl/SHA256SUMS" "$work/SHA256SUMS" || fail 'Cannot download SHA256SUMS.'
+if [ "$os" = linux ]; then
+    # The node tarball: exactly one apassy-<x.y.z>-linux-<arch>.tar.gz in SHA256SUMS.
+    case "$arch" in
+        arm64) node_arch=aarch64 ;;
+        *) node_arch=x86_64 ;;
+    esac
+    filename=$(awk -v arch="$node_arch" '
+        {
+            name = $2
+            sub(/^\*/, "", name)
+            if (name ~ ("^apassy-[0-9]+\\.[0-9]+\\.[0-9]+-linux-" arch "\\.tar\\.gz$")) {
+                count++
+                found = name
+            }
+        }
+        END {
+            if (count != 1) exit 1
+            print found
+        }
+    ' "$work/SHA256SUMS") || fail "SHA256SUMS has no single node package for Linux $node_arch."
+    package_version=${filename#apassy-}
+    package_version=${package_version%-linux-"$node_arch".tar.gz}
+else
+    filename="apassy-team-$os-$arch"
+fi
 # Accept the exact filename in the standard text or binary checksum format.
 # Refuse missing entries, duplicate entries, and invalid SHA-256 values.
 expected=$(awk -v name="$filename" '
@@ -105,21 +140,59 @@ actual=${checksum%% *}
 [ "$actual" = "$expected" ] || fail "The SHA-256 check failed for $filename."
 
 mkdir -p "$target" || fail "Cannot make the target directory: $target"
-installed="$target/apassy-team"
+if [ "$os" = linux ]; then
+    # Only the two programs leave the archive, after a check of its entries: one
+    # directory of that name, no absolute path, no `..`, no link.
+    top=${filename%.tar.gz}
+    tar -tzf "$work/$filename" > "$work/entries" || fail "Cannot read $filename."
+    awk -v top="$top" '
+        $0 != top && $0 != top "/" && index($0, top "/") != 1 { bad = 1 }
+        $0 ~ /(^|\/)\.\.(\/|$)/ { bad = 1 }
+        END { exit bad ? 1 : 0 }
+    ' "$work/entries" || fail "$filename has entries outside $top/."
+    tar -tvzf "$work/$filename" | awk '$1 ~ /^[lhcbp]/ { bad = 1 } END { exit bad ? 1 : 0 }' ||
+        fail "$filename has a link or a special file."
+    mkdir "$work/unpacked" || fail 'Cannot make the unpack directory.'
+    tar -xzf "$work/$filename" -C "$work/unpacked" "$top/apassy" "$top/apassy-team" ||
+        fail "Cannot unpack $filename."
+    program=apassy
+    source="$work/unpacked/$top/apassy"
+    version_pattern="^apassy $package_version\$"
+else
+    program=apassy-team
+    source="$work/$filename"
+    version_pattern='^apassy-team [0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$'
+fi
+installed="$target/$program"
 [ ! -d "$installed" ] || fail "The target is a directory: $installed"
-stage=$(mktemp "$target/.apassy-team.XXXXXXXX") || fail 'Cannot make the temporary installation file.'
-cp "$work/$filename" "$stage" || fail 'Cannot copy apassy-team.'
+stage=$(mktemp "$target/.$program.XXXXXXXX") || fail 'Cannot make the temporary installation file.'
+cp "$source" "$stage" || fail "Cannot copy $program."
 chmod 0755 "$stage" || fail 'Cannot set the file mode.'
 # Validate the executable before touching a previous installation.
 staged_version=$("$stage" --version) || fail 'The staged executable cannot run on this platform; the previous installation is unchanged.'
 version_lines=$(printf '%s\n' "$staged_version" | wc -l)
 [ "$version_lines" -eq 1 ] || fail 'The staged executable returned multiple version lines; the previous installation is unchanged.'
-printf '%s\n' "$staged_version" | LC_ALL=C grep -Eq '^apassy-team [0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$' || fail 'The staged executable returned an invalid version; the previous installation is unchanged.'
-mv -f "$stage" "$installed" || fail 'Cannot install apassy-team.'
+printf '%s\n' "$staged_version" | LC_ALL=C grep -Eq "$version_pattern" || fail 'The staged executable returned an invalid version; the previous installation is unchanged.'
+if [ "$os" = linux ]; then
+    shim="$target/apassy-team"
+    [ ! -d "$shim" ] || fail "The target is a directory: $shim"
+    stage_shim=$(mktemp "$target/.apassy-team.XXXXXXXX") || fail 'Cannot make the temporary installation file.'
+    cp "$work/unpacked/$top/apassy-team" "$stage_shim" || fail 'Cannot copy the apassy-team shim.'
+    chmod 0755 "$stage_shim" || fail 'Cannot set the file mode.'
+fi
+mv -f "$stage" "$installed" || fail "Cannot install $program."
 stage=
+if [ -n "$stage_shim" ]; then
+    # apassy-team becomes the shim that runs `apassy team` in the same directory.
+    mv -f "$stage_shim" "$target/apassy-team" || fail 'Cannot install the apassy-team shim.'
+    stage_shim=
+fi
 
 printf 'Installed: %s\n' "$installed"
 printf '%s\n' "$staged_version"
+if [ "$os" = linux ]; then
+    printf 'Installed: %s (it runs apassy team)\n' "$target/apassy-team"
+fi
 case ":${PATH:-}:" in
     *":$target:"*) ;;
     *)
@@ -130,20 +203,30 @@ case ":${PATH:-}:" in
         ;;
 esac
 
+config_dir=${XDG_CONFIG_HOME:-"$HOME/.config"}
+if [ "$os" = linux ]; then
+    if [ -f "$config_dir/systemd/user/apassy-node.service" ]; then
+        printf '%s\n' 'The node keeps its old executable until it restarts: systemctl --user restart apassy-node.service' >&2
+    else
+        printf '%s\n' 'Next: apassy up (it starts the node as a systemd user service and prints a pairing link).' >&2
+    fi
+    team_command='apassy team'
+else
+    team_command='apassy-team'
+fi
 # Replacing the file does not replace a running process. Reinstall each saved
 # team's service to restart it and migrate an old single service if necessary.
 printf '%s\n' 'Running hosts keep their old executable until restarted.' >&2
-config_dir=${XDG_CONFIG_HOME:-"$HOME/.config"}
 for service in "$HOME"/Library/LaunchAgents/com.wydrox.apassy.team-host*.plist "$config_dir"/systemd/user/apassy-team-host*.service; do
     [ -f "$service" ] || continue
     name=${service##*/}
     case "$name" in
         com.wydrox.apassy.team-host.t_*.plist) team=${name#com.wydrox.apassy.team-host.}; team=${team%.plist} ;;
         apassy-team-host-t_*.service) team=${name#apassy-team-host-}; team=${team%.service} ;;
-        *) printf '%s\n' 'Legacy host service found: use apassy-team --team TEAM_ID host install to migrate and restart its team.' >&2; continue ;;
+        *) printf 'Legacy host service found: use %s --team TEAM_ID host install to migrate and restart its team.\n' "$team_command" >&2; continue ;;
     esac
     printf '%s\n' "$team" | LC_ALL=C grep -Eq '^t_[a-z2-7]{10}$' || continue
-    printf 'Restart: apassy-team --team %s host install\n' "$team" >&2
-    printf 'Check: apassy-team --team %s host status\n' "$team" >&2
+    printf 'Restart: %s --team %s host install\n' "$team_command" "$team" >&2
+    printf 'Check: %s --team %s host status\n' "$team_command" "$team" >&2
 done
-printf '%s\n' 'For any foreground host, stop it and start it again. Check apassy-team --version and each team with apassy-team --team TEAM_ID host status.' >&2
+printf 'For any foreground host, stop it and start it again. Check %s --version and each team with %s --team TEAM_ID host status.\n' "$team_command" "$team_command" >&2

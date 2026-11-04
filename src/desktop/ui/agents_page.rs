@@ -480,7 +480,10 @@ fn draw_section(
             egui::Frame::NONE
                 .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
-                    ui.add(Label::new(kit::text(note, Font::Callout).color(kit::SECONDARY)).wrap());
+                    ui.add(
+                        Label::new(kit::text(note, Font::Callout).color(kit::palette().secondary))
+                            .wrap(),
+                    );
                 });
         });
     }
@@ -590,10 +593,13 @@ fn access_block(ui: &mut Ui, access: &AccessView, has_remote: bool) -> Option<Ac
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
-                            ui.label(kit::medium("Remote Access", Font::Body).color(kit::LABEL));
+                            ui.label(
+                                kit::medium("Remote Access", Font::Body)
+                                    .color(kit::palette().label),
+                            );
                             ui.label(
                                 kit::text("Cloud agents can reach this Mac", Font::Callout)
-                                    .color(kit::SECONDARY),
+                                    .color(kit::palette().secondary),
                             );
                         });
                         kit::help_button(ui, "Remote Access", &ACCESS_HELP);
@@ -616,7 +622,10 @@ fn access_block(ui: &mut Ui, access: &AccessView, has_remote: bool) -> Option<Ac
             s.row(|ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(kit::text("Checking Tailscale…", Font::Callout).color(kit::SECONDARY));
+                    ui.label(
+                        kit::text("Checking Tailscale…", Font::Callout)
+                            .color(kit::palette().secondary),
+                    );
                 });
             });
             return;
@@ -662,10 +671,11 @@ fn access_block(ui: &mut Ui, access: &AccessView, has_remote: bool) -> Option<Ac
                     ui,
                     |ui| {
                         // The mockup's label of the row (frame 2): "MCP address".
-                        ui.label(kit::text("MCP address", Font::Body).color(kit::LABEL));
+                        ui.label(kit::text("MCP address", Font::Body).color(kit::palette().label));
                         ui.add_space(12.0);
                         ui.add(
-                            Label::new(kit::text(address, Font::Mono).color(kit::LABEL)).truncate(),
+                            Label::new(kit::text(address, Font::Mono).color(kit::palette().label))
+                                .truncate(),
                         );
                     },
                     |ui| {
@@ -744,7 +754,9 @@ fn section_empty_block(ui: &mut Ui, empty: &SectionEmpty) -> Option<Action> {
                         "Turn on Settings > Devices > Relay > \"Show agents on my other devices\".",
                     ],
                 );
-                ui.label(kit::text("How to turn it on", Font::Footnote).color(kit::TERTIARY));
+                ui.label(
+                    kit::text("How to turn it on", Font::Footnote).color(kit::palette().tertiary),
+                );
             });
             ui.add_space(12.0);
             None
@@ -1070,7 +1082,7 @@ pub(crate) fn draw_agent(ui: &mut Ui, page: &AgentPage, now: u64) -> Option<Acti
                 ui.label(
                     kit::text(&page.name, Font::Title)
                         .size(20.0)
-                        .color(kit::LABEL),
+                        .color(kit::palette().label),
                 );
                 if page.remote {
                     kit::remote_cap(ui);
@@ -1083,7 +1095,10 @@ pub(crate) fn draw_agent(ui: &mut Ui, page: &AgentPage, now: u64) -> Option<Acti
                     kit::help_button(ui, &page.name, &lines);
                 }
             });
-            ui.add(Label::new(kit::text(&page.line, Font::Body).color(kit::SECONDARY)).wrap());
+            ui.add(
+                Label::new(kit::text(&page.line, Font::Body).color(kit::palette().secondary))
+                    .wrap(),
+            );
         });
     });
     ui.add_space(16.0);
@@ -1140,7 +1155,7 @@ pub(crate) fn draw_agent(ui: &mut Ui, page: &AgentPage, now: u64) -> Option<Acti
     kit::section(ui, None, None, |s| {
         if page.runs.is_empty() {
             s.row(|ui| {
-                ui.label(kit::text("No runs yet", Font::Body).color(kit::SECONDARY));
+                ui.label(kit::text("No runs yet", Font::Body).color(kit::palette().secondary));
             });
         }
         for run in &page.runs {
@@ -1159,7 +1174,8 @@ pub(crate) fn draw_agent(ui: &mut Ui, page: &AgentPage, now: u64) -> Option<Acti
         kit::section(ui, None, None, |s| {
             s.row(|ui| {
                 ui.add(
-                    Label::new(kit::text(page.note.trim(), Font::Body).color(kit::LABEL)).wrap(),
+                    Label::new(kit::text(page.note.trim(), Font::Body).color(kit::palette().label))
+                        .wrap(),
                 );
             });
         });
@@ -1213,16 +1229,16 @@ fn run_row(ui: &mut Ui, run: &RunLine, now: u64) {
             ui.spacing_mut().item_spacing.y = 3.0;
             ui.spacing_mut().interact_size.y = 0.0;
             let font = if run.mono { Font::Mono } else { Font::Body };
-            ui.add(Label::new(kit::text(&run.first, font).color(kit::LABEL)).truncate());
+            ui.add(Label::new(kit::text(&run.first, font).color(kit::palette().label)).truncate());
             let second = if run.outcome.denied() {
                 kit::text(&run.second, Font::Callout).color(Tone::Critical.text())
             } else {
-                kit::text(&run.second, Font::Callout).color(kit::SECONDARY)
+                kit::text(&run.second, Font::Callout).color(kit::palette().secondary)
             };
             ui.add(Label::new(second).truncate());
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            ui.label(kit::text(&when, Font::Callout).color(kit::TERTIARY));
+            ui.label(kit::text(&when, Font::Callout).color(kit::palette().tertiary));
         });
     });
 }
@@ -1237,7 +1253,7 @@ fn can_see(ui: &mut Ui, agent: u64, see: &CanSee, disconnected: bool) -> Option<
             s.row(|ui| {
                 ui.label(
                     kit::text("All credential names, never values", Font::Body)
-                        .color(kit::SECONDARY),
+                        .color(kit::palette().secondary),
                 );
             });
         }
@@ -1250,8 +1266,10 @@ fn can_see(ui: &mut Ui, agent: u64, see: &CanSee, disconnected: bool) -> Option<
                             ui.spacing_mut().item_spacing.x = 8.0;
                             kit::tile(ui, &kit::Tile::icon(Tone::Neutral.mark(), Icon::Key), 20.0);
                             ui.add(
-                                Label::new(kit::text(&row.name, Font::Body).color(kit::LABEL))
-                                    .truncate(),
+                                Label::new(
+                                    kit::text(&row.name, Font::Body).color(kit::palette().label),
+                                )
+                                .truncate(),
                             );
                             match row.kind {
                                 SeeKind::Never => {
@@ -1285,7 +1303,7 @@ fn can_see(ui: &mut Ui, agent: u64, see: &CanSee, disconnected: bool) -> Option<
         }
         if !disconnected {
             let response = s.clickable_row("Choose Credentials…", |ui| {
-                ui.label(kit::text("Choose Credentials…", Font::Body).color(kit::ACCENT));
+                ui.label(kit::text("Choose Credentials…", Font::Body).color(kit::palette().accent));
             });
             if response.clicked() {
                 action = Some(Action::ChooseCredentials(agent));

@@ -32,4 +32,23 @@ public protocol WatchService: Sendable {
     func accessRequestCancelPrepared() async
     /// A long poll: waits up to `timeout` seconds (1 to 25) for new or changed requests.
     func wait(timeout: Int) async throws -> Bool
+
+    /// "Notifications on this watch" (push-gateway-v1 section 11): the core exchanges the APNs
+    /// token of the watch at the push gateway for a handle of the kind `watch` and gives the node
+    /// the handle, never the token. The hosted relay has no watch push: `push_unavailable`.
+    func pushTokenSet(token: Data, environment: PushEnvironment) async throws
+    /// Take the handle off the node.
+    func pushTokenClear() async throws
+    /// The summary key of the watch's questions team, for its Notification Service Extension.
+    func pushSummaryKeys() async throws -> [PushSummaryKey]
+}
+
+extension WatchService {
+    public func pushTokenSet(token: Data, environment: PushEnvironment) async throws {
+        throw VaultError(.notAllowed, "Notifications on this watch are not available in this build.")
+    }
+
+    public func pushTokenClear() async throws {}
+
+    public func pushSummaryKeys() async throws -> [PushSummaryKey] { [] }
 }

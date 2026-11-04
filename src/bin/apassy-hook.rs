@@ -14,6 +14,11 @@ use std::io::Read;
 use apassy::agent::{client, hook};
 
 fn main() {
+    // ADR 0011 stage 6: first. The hook always exits with 0 so as not to block the
+    // prompt, so a failure here is a warning and not an exit.
+    if let Err(err) = apassy::harden::harden_process() {
+        eprintln!("apassy-hook: cannot harden the process: {err}");
+    }
     let args: Vec<_> = std::env::args().skip(1).collect();
     if !args.is_empty() {
         match args.as_slice() {

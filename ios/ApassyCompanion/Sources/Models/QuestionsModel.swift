@@ -90,6 +90,28 @@ struct LockedVault: Equatable, Identifiable {
     }
 }
 
+/// A vault whose questions team is on a node (the relay inside a Mac app on the tailnet, a pinned
+/// origin) that this iPhone cannot reach now: most often Tailscale is off on this iPhone. Requests
+/// shows one quiet line for these, never a card (plan S2–S3, unit N6).
+struct UnreachableNode: Equatable, Identifiable {
+    /// The vault ID.
+    let id: String
+    let vaultName: String
+    /// The node's name from its pairing link, when the vault entry keeps one.
+    let nodeName: String?
+}
+
+/// The route of the questions of one vault, for Settings > Devices.
+struct QuestionRoute: Equatable, Identifiable {
+    let vault: QuestionsVault
+    let route: DeviceRoute
+
+    var id: String { vault.vaultID }
+
+    /// "Node words to compare: …" for a team on a node, to compare with the Mac. Nil for a hosted team.
+    var nodeWordsLine: String? { DeviceRoute.nodeWordsLine(vault.status.node) }
+}
+
 /// Questions through the relay on this iPhone (contract relay-questions-v1, section 13): the list
 /// of the questions of the vaults, the answer bar, Face ID for the answers that give authority, the
 /// answer key of each questions team, the notifications, and the connection of a vault from iCloud
@@ -203,12 +225,17 @@ final class QuestionsModel {
     private(set) var lockedVaults: [LockedVault] = []
     /// The locked vaults whose questions open now (Face ID, then the core).
     private(set) var opening: Set<String> = []
+    /// The vaults whose node did not answer at the last read (`UnreachableNode`). Empty when every
+    /// node answered, and for the vaults of a hosted relay: their failure keeps its own row.
+    private(set) var unreachableNodes: [UnreachableNode] = []
     /// The vault whose passphrase sheet shows; nil closes it.
     var unlockPrompt: LockedVault?
 
     @ObservationIgnored private let service: any VaultService
     @ObservationIgnored private let signers: any AnswerSigners
     @ObservationIgnored private weak var push: (any PushPermission)?
+    /// The summary keys for the Notification Service Extension (push-gateway-v1 section 12).
+    @ObservationIgnored private let summaryKeys: (any PushSummaryKeyStore)?
     @ObservationIgnored private let defaults: any SettingsStore
     /// Keeps the name of a connection for the next one.
     @ObservationIgnored private let onDeviceName: @MainActor (String) -> Void
@@ -250,6 +277,7 @@ final class QuestionsModel {
         service: any VaultService, signers: any AnswerSigners, push: (any PushPermission)?, deviceName: String,
         defaults: any SettingsStore = UserDefaults.standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
+        summaryKeys: (any PushSummaryKeyStore)? = KeychainPushSummaryKeyStore.forThisApp(watch: false),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
             "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."
         },
@@ -259,6 +287,7 @@ final class QuestionsModel {
         self.signers = signers
         self.access = AccessRequestsModel(service:service,signers:signers)
         self.push = push
+        self.summaryKeys = summaryKeys
         self.deviceName = deviceName
         self.onDeviceName = onDeviceName
         self.defaults = defaults
@@ -305,9 +334,62 @@ final class QuestionsModel {
     var canConnect: Bool {
         switch phase {
         case .off, .failed: true
-        case .ready: !status.enabled || status.removed
+        // A node that does not answer is no missing team: the list did not read it.
+        case .ready: unreachableNodes.isEmpty && (!status.enabled || status.removed)
         case .loading, .locked: false
         }
+    }
+
+    /// Whether the failure of `vault` is its node that does not answer: shown by the quiet line of
+    /// `tailscaleOffLine`, not as "unavailable".
+    func isUnreachableNode(_ vault: QuestionsVault) -> Bool {
+        vault.status.node != nil && vault.error == VaultError.Code.relayUnreachable.rawValue
+    }
+
+    /// The quiet line of Requests and Settings > Devices while a node does not answer, or nil.
+    var tailscaleOffLine: String? { DeviceRoute.tailscaleOffLine(unreachableNodes) }
+
+    /// The route of the questions of each vault, for Settings > Devices: "via your Mac" for a team
+    /// on a node, else "via Apassy relay". Only the vaults with a questions team.
+    var questionRoutes: [QuestionRoute] {
+        let entries = vault?.vaults ?? []
+        return contexts.filter { $0.status.enabled && !$0.status.removed }.map { context in
+            QuestionRoute(vault: context, route: DeviceRoute.of(context.status, entries: entries))
+        }
+    }
+
+    /// The vaults among `contexts` whose node does not answer, with the node's name of their entry.
+    private func unreachable(in contexts: [QuestionsVault]) -> [UnreachableNode] {
+        let entries = vault?.vaults ?? []
+        return contexts.filter(isUnreachableNode).map { context in
+            UnreachableNode(
+                id: context.vaultID, vaultName: context.vaultName,
+                nodeName: DeviceRoute.nodeName(of: context.status, entries: entries))
+        }
+    }
+
+    /// The whole list failed with no answer of the relay: when every vault that it reads is on a
+    /// node, the nodes do not answer (Tailscale is off on this iPhone). Nil otherwise.
+    private func unreachableNodesOnly(after error: any Error) -> [UnreachableNode]? {
+        guard (error as? VaultError)?.code == .relayUnreachable else { return nil }
+        let known: [QuestionsVault]
+        if !vaults.isEmpty {
+            known = vaults.filter { $0.status.enabled && !$0.status.removed }
+        } else if let entry = vault?.vault, entry.isNode {
+            // The first read, or an older core: the selected vault syncs through its node.
+            known = [QuestionsVault(
+                vaultID: entry.id, vaultName: entry.name,
+                status: QuestionsStatus(enabled: true, node: NodeInfo(origin: entry.relayURL ?? "", name: entry.nodeName)))]
+        } else {
+            return nil
+        }
+        guard !known.isEmpty, known.allSatisfy({ $0.status.node != nil }) else { return nil }
+        let failed = known.map { context -> QuestionsVault in
+            var failed = context
+            failed.error = VaultError.Code.relayUnreachable.rawValue
+            return failed
+        }
+        return unreachable(in: failed)
     }
 
     /// ADR 0028 stage 1: the vaults whose requests do not come through the relay to this iPhone
@@ -382,6 +464,7 @@ final class QuestionsModel {
             }
             lastUpdated = now()
             refreshError = nil
+            unreachableNodes = unreachable(in: vaults)
             updateLockedVaults()
             let enabled = contexts.contains { $0.status.enabled }
             phase = enabled ? .ready : .off
@@ -399,7 +482,12 @@ final class QuestionsModel {
         } catch {
             guard generation == openGeneration, request == listGeneration else { return }
             refreshError = error.localizedDescription
-            if case .ready = phase {
+            if let nodes = unreachableNodesOnly(after: error) {
+                // Tailscale is off on this iPhone: one quiet line, no card and no notice. The
+                // answers wait for the next read (`refreshError`).
+                unreachableNodes = nodes
+                phase = .ready
+            } else if case .ready = phase {
                 notice = error.localizedDescription
             } else {
                 phase = .failed(error.localizedDescription)
@@ -1012,6 +1100,7 @@ final class QuestionsModel {
         lastUpdated = nil
         refreshError = nil
         vaults = []
+        unreachableNodes = []
         phase = .locked
         push?.setRequestsVisible(false)
         guard let vault else {
@@ -1094,6 +1183,7 @@ final class QuestionsModel {
         sentAt = [:]
         lastUpdated = nil
         refreshError = nil
+        unreachableNodes = []
         phase = .loading
         reopenTask?.cancel()
         reopenTask = nil
@@ -1351,6 +1441,7 @@ final class QuestionsModel {
             notificationsOn = false
             defaults.set(false, forKey: Self.notificationsKey)
             push?.unregisterForPushes()
+            summaryKeys?.removeAll()
             pushToken = nil
             registrationFailure = nil
             defaults.set(true, forKey: Self.pushClearKey)
@@ -1396,7 +1487,21 @@ final class QuestionsModel {
     private func updatePushToken() async {
         await clearPushToken()
         await sendPushToken()
+        await syncSummaryKeys()
         updateNotificationStatus()
+    }
+
+    /// Keep the summary key of each questions team for the Notification Service Extension while
+    /// notifications are on (push-gateway-v1 section 12); a team that was left loses its key, and
+    /// all go when notifications are off. The extension shows the fixed text without a key.
+    private func syncSummaryKeys() async {
+        guard let summaryKeys else { return }
+        guard notificationsOn else {
+            summaryKeys.removeAll()
+            return
+        }
+        guard let keys = try? await service.pushSummaryKeys() else { return }
+        summaryKeys.sync(keys, known: Set(contexts.compactMap(\.status.teamID)))
     }
 
     /// Send the token to the teams of the list that do not have it in this launch. A core that keeps

@@ -45,12 +45,16 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .resizable(false)
         .exact_size(columns.sidebar_width())
         .show_separator_line(false)
-        .frame(Frame::NONE.fill(kit::SIDEBAR).inner_margin(Margin {
-            left: side_margin(columns.sidebar),
-            right: side_margin(columns.sidebar),
-            top: 0,
-            bottom: 10,
-        }))
+        .frame(
+            Frame::NONE
+                .fill(kit::palette().sidebar)
+                .inner_margin(Margin {
+                    left: side_margin(columns.sidebar),
+                    right: side_margin(columns.sidebar),
+                    top: 0,
+                    bottom: 10,
+                }),
+        )
         .show(ui, |ui| {
             super::sidebar::draw(app, ui, &pending, columns.sidebar)
         })
@@ -62,7 +66,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             .resizable(false)
             .exact_size(columns.list_width)
             .show_separator_line(false)
-            .frame(Frame::NONE.fill(kit::LIST))
+            .frame(Frame::NONE.fill(kit::palette().list))
             .show(ui, |ui| list_column(app, ui, &pending))
             .response
             .rect
@@ -71,7 +75,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         column_edge(ui, rect);
     }
     egui::CentralPanel::default()
-        .frame(Frame::NONE.fill(kit::DETAIL))
+        .frame(Frame::NONE.fill(kit::palette().detail))
         .show(ui, |ui| {
             if wide {
                 wide_pane(app, ui, &pending);
@@ -101,7 +105,7 @@ fn column_edge(ui: &egui::Ui, rect: egui::Rect) {
     ui.painter().vline(
         x,
         rect.y_range(),
-        egui::Stroke::new(width, kit::COLUMN_EDGE),
+        egui::Stroke::new(width, kit::palette().column_edge),
     );
 }
 
@@ -356,7 +360,7 @@ fn approval_banner(
         ui.add(
             egui::Label::new(
                 kit::text(super::decisions::shell_words(&run.command), kit::Font::Mono)
-                    .color(kit::LABEL),
+                    .color(kit::palette().label),
             )
             .truncate(),
         );
@@ -391,6 +395,8 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
     if app.pending_delete && app.selected_item_id.is_some() {
         super::demo::draw_delete_alert(app, ctx);
     }
+    // Settings > Devices: its sheets and the once-only Wi-Fi notice (plan S2–S3, N7).
+    super::devices::overlays(app, ctx);
     let Some(sheet) = app.ui.sheet.clone() else {
         return;
     };
@@ -453,6 +459,8 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         Sheet::DeleteFolder { uuid } => super::folders::delete_sheet(app, ctx, &uuid),
         #[cfg(feature = "vault")]
         Sheet::Share { item_id } => super::items::share_sheet(app, ctx, item_id),
+        #[cfg(feature = "vault")]
+        Sheet::BrainHosting => crate::desktop::brain_hosting_ui::sheet(app, ctx),
         #[cfg(not(feature = "vault"))]
         Sheet::AddItem { kind_chosen } => super::demo::add_sheet(app, ctx, kind_chosen),
         #[cfg(not(feature = "vault"))]

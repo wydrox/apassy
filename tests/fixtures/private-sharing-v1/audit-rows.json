@@ -1,0 +1,9 @@
+[
+  {"id": 101, "at": 1793700000, "actor": "relay", "action": "lease_made", "run_id": 12, "detail": {"item_id": 8, "kind": "github_app", "expires_at": 1793703600}},
+  {"id": 102, "at": 1793700300, "actor": "relay", "action": "lease_revoked", "run_id": 12, "detail": {"item_id": 8, "kind": "github_app"}},
+  {"id": 103, "at": 1793700300, "actor": "relay", "action": "lease_revoke_failed", "run_id": 13, "detail": {"item_id": 10, "kind": "oauth_refresh", "status": "503"}},
+  {"id": 104, "at": 1793700310, "actor": "relay", "action": "lease_failed", "run_id": 14, "detail": {"item_id": 11, "kind": "aws_sts", "status": "timeout"}},
+  {"id": 105, "at": 1793700020, "actor": "member:4", "action": "sign_request", "run_id": 12, "detail": {"session_id": 7, "item_id": 9, "method": "GET", "path": "/", "service": "service", "region": "us-east-1"}},
+  {"id": 106, "at": 1793700400, "actor": "relay", "action": "member_key_made", "detail": {"item_id": 20, "source_item_id": 9, "member_id": 4, "manager": "aws_iam"}},
+  {"id": 107, "at": 1793700500, "actor": "relay", "action": "member_key_deleted", "detail": {"item_id": 20, "source_item_id": 9, "member_id": 4, "manager": "aws_iam"}}
+]

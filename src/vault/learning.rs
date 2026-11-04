@@ -1429,6 +1429,10 @@ fn export_line(entry: &DecisionEntry) -> Value {
     if let (Some(model), Some(line)) = (entry.model_version(), line.as_object_mut()) {
         line.insert("model_version".to_owned(), json!(model));
     }
+    // The fine-tune shortens this folder in the command as the broker does (ADR 0035).
+    if let (false, Some(line)) = (entry.project_dir.is_empty(), line.as_object_mut()) {
+        line.insert("project_dir".to_owned(), json!(entry.project_dir));
+    }
     line
 }
 

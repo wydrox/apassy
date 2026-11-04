@@ -247,7 +247,7 @@ fn filter_control(ui: &mut Ui, value: HistoryFilter) -> Option<HistoryFilter> {
     let height = 22.0;
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(segment * count + 4.0, height), Sense::hover());
-    ui.painter().rect_filled(rect, 7, kit::FILL);
+    ui.painter().rect_filled(rect, 7, kit::palette().fill);
     let mut chosen = None;
     for (index, filter) in HistoryFilter::ALL.iter().enumerate() {
         let segment_rect = Rect::from_min_size(
@@ -265,22 +265,23 @@ fn filter_control(ui: &mut Ui, value: HistoryFilter) -> Option<HistoryFilter> {
         });
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(segment_rect, 5, kit::SURFACE);
+            painter.rect_filled(segment_rect, 5, kit::palette().surface);
         }
         if response.has_focus() {
             kit::inner_focus_ring(painter, segment_rect, 5);
         }
-        let galley = WidgetText::from(kit::text(filter.label(), Font::Footnote).color(kit::LABEL))
-            .into_galley(
-                ui,
-                Some(TextWrapMode::Truncate),
-                segment - 4.0,
-                TextStyle::Body,
-            );
+        let galley =
+            WidgetText::from(kit::text(filter.label(), Font::Footnote).color(kit::palette().label))
+                .into_galley(
+                    ui,
+                    Some(TextWrapMode::Truncate),
+                    segment - 4.0,
+                    TextStyle::Body,
+                );
         ui.painter().galley(
             segment_rect.center() - galley.size() / 2.0,
             galley,
-            kit::LABEL,
+            kit::palette().label,
         );
         if response.clicked() && !selected {
             chosen = Some(*filter);
@@ -306,7 +307,7 @@ pub(crate) fn draw_history(
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            ui.label(kit::medium("Nothing waits for you", Font::Body).color(kit::LABEL));
+            ui.label(kit::medium("Nothing waits for you", Font::Body).color(kit::palette().label));
         });
     }
     if view.none_yet && state.filter == HistoryFilter::All && state.agent.is_none() {
@@ -314,7 +315,7 @@ pub(crate) fn draw_history(
         if nothing_waits {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.label(kit::text("No decisions yet", Font::Title3).color(kit::LABEL));
+                ui.label(kit::text("No decisions yet", Font::Title3).color(kit::palette().label));
             });
         }
         for note in notes {
@@ -325,7 +326,7 @@ pub(crate) fn draw_history(
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(16.0);
-        ui.label(kit::medium("History", Font::Callout).color(kit::SECONDARY));
+        ui.label(kit::medium("History", Font::Callout).color(kit::palette().secondary));
     });
     ui.add_space(4.0);
     Frame::NONE
@@ -374,7 +375,7 @@ pub(crate) fn draw_history(
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            ui.label(kit::medium(title, Font::Footnote).color(kit::SECONDARY));
+            ui.label(kit::medium(title, Font::Footnote).color(kit::palette().secondary));
         });
         for row in rows {
             let response = ui
@@ -413,9 +414,9 @@ fn history_row(ui: &mut Ui, row: &HistoryRow, selected: bool) -> egui::Response 
     }
     let painter = ui.painter();
     if selected {
-        painter.rect_filled(rect, 8, kit::SELECTION);
+        painter.rect_filled(rect, 8, kit::palette().selection);
     } else if response.hovered() {
-        painter.rect_filled(rect, 8, egui::Color32::from_rgb(247, 247, 248));
+        painter.rect_filled(rect, 8, kit::palette().list_hover);
     }
     if response.has_focus() {
         kit::inner_focus_ring(painter, rect, 8);
@@ -429,13 +430,21 @@ fn history_row(ui: &mut Ui, row: &HistoryRow, selected: bool) -> egui::Response 
         kit::paint_cloud_badge(painter, avatar);
     }
     kit::paint_tile_ring(painter, avatar, true, selected);
-    let white = egui::Color32::WHITE;
+    let white = kit::palette().on_accent;
     let (title_color, sub_color, outcome_color) = if selected {
-        (white, egui::Color32::from_white_alpha(210), white)
+        (white, kit::palette().on_selection_secondary, white)
     } else if row.denied {
-        (kit::LABEL, kit::SECONDARY, Tone::Critical.text())
+        (
+            kit::palette().label,
+            kit::palette().secondary,
+            Tone::Critical.text(),
+        )
     } else {
-        (kit::LABEL, kit::SECONDARY, kit::SECONDARY)
+        (
+            kit::palette().label,
+            kit::palette().secondary,
+            kit::palette().secondary,
+        )
     };
     let galley = |value: egui::RichText, max: f32| {
         WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)
@@ -502,7 +511,7 @@ pub(crate) fn history_detail(
                 Label::new(
                     kit::text(format!("{agent} · {credential}"), Font::Title)
                         .size(20.0)
-                        .color(kit::LABEL),
+                        .color(kit::palette().label),
                 )
                 .wrap(),
             );
@@ -515,7 +524,7 @@ pub(crate) fn history_detail(
                     ),
                     Font::Callout,
                 )
-                .color(kit::SECONDARY),
+                .color(kit::palette().secondary),
             );
         });
     });
@@ -547,7 +556,10 @@ pub(crate) fn history_detail(
             for (label, value) in why {
                 if label.is_empty() {
                     s.row(|ui| {
-                        ui.add(Label::new(kit::text(value, Font::Body).color(kit::LABEL)).wrap());
+                        ui.add(
+                            Label::new(kit::text(value, Font::Body).color(kit::palette().label))
+                                .wrap(),
+                        );
                     });
                 } else {
                     s.labeled(label, value.as_str());
@@ -558,7 +570,10 @@ pub(crate) fn history_detail(
     if !event.command.is_empty() {
         kit::section(ui, Some("Command"), None, |s| {
             s.row(|ui| {
-                ui.add(Label::new(kit::text(&event.command, Font::Mono).color(kit::LABEL)).wrap());
+                ui.add(
+                    Label::new(kit::text(&event.command, Font::Mono).color(kit::palette().label))
+                        .wrap(),
+                );
             });
         });
     }
@@ -606,14 +621,23 @@ fn card_header(ui: &mut Ui, agent: &str, title: &str, mac: &str, left: &str) {
         kit::agent_avatar(ui, agent, 56.0, true);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(Label::new(kit::text(title, Font::Title).size(20.0).color(kit::LABEL)).wrap());
+            ui.add(
+                Label::new(
+                    kit::text(title, Font::Title)
+                        .size(20.0)
+                        .color(kit::palette().label),
+                )
+                .wrap(),
+            );
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                ui.label(kit::text(format!("{mac} · "), Font::Body).color(kit::SECONDARY));
+                ui.label(
+                    kit::text(format!("{mac} · "), Font::Body).color(kit::palette().secondary),
+                );
                 ui.label(
                     kit::text(format!("{left} left"), Font::Body)
                         .variation(b"wght", 500.0)
-                        .color(egui::Color32::from_rgb(200, 106, 0)),
+                        .color(kit::palette().countdown),
                 );
             });
         });
@@ -631,7 +655,10 @@ pub(crate) fn connect_card(ui: &mut Ui, card: &ConnectCard) {
         &card.left,
     );
     kit::section(ui, None, None, |s| {
-        s.labeled("Code", kit::text(&card.code, Font::Mono).color(kit::LABEL));
+        s.labeled(
+            "Code",
+            kit::text(&card.code, Font::Mono).color(kit::palette().label),
+        );
     });
     if card.local {
         // Two sentences, as in the Touch ID prompt of the same request.
@@ -640,7 +667,10 @@ pub(crate) fn connect_card(ui: &mut Ui, card: &ConnectCard) {
         ui.horizontal(|ui| {
             ui.add_space(2.0);
             ui.add(
-                Label::new(kit::text(&card.returns_to, Font::Callout).color(kit::SECONDARY)).wrap(),
+                Label::new(
+                    kit::text(&card.returns_to, Font::Callout).color(kit::palette().secondary),
+                )
+                .wrap(),
             );
         });
     }
@@ -688,15 +718,17 @@ pub(crate) fn cloud_card(ui: &mut Ui, card: &CloudCard) {
     kit::section(ui, None, None, |s| {
         s.row(|ui| {
             ui.horizontal(|ui| {
-                ui.label(kit::text("Credential", Font::Body).color(kit::LABEL));
+                ui.label(kit::text("Credential", Font::Body).color(kit::palette().label));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if let Some((label, red)) = &card.environment {
                         kit::cap(ui, label, *red);
                     }
                     ui.add(
-                        Label::new(kit::text(&card.credential, Font::Body).color(kit::LABEL))
-                            .truncate(),
+                        Label::new(
+                            kit::text(&card.credential, Font::Body).color(kit::palette().label),
+                        )
+                        .truncate(),
                     );
                     kit::tile(ui, &kit::Tile::icon(Tone::Neutral.mark(), Icon::Key), 20.0);
                 });
@@ -704,23 +736,23 @@ pub(crate) fn cloud_card(ui: &mut Ui, card: &CloudCard) {
         });
         s.row(|ui| {
             ui.horizontal(|ui| {
-                ui.label(kit::text("Agent", Font::Body).color(kit::LABEL));
+                ui.label(kit::text("Agent", Font::Body).color(kit::palette().label));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     kit::remote_cap(ui);
-                    ui.label(kit::text(&card.agent, Font::Body).color(kit::LABEL));
+                    ui.label(kit::text(&card.agent, Font::Body).color(kit::palette().label));
                 });
             });
         });
         if !card.sends_to.is_empty() {
             s.labeled(
                 "Sends To",
-                kit::text(&card.sends_to, Font::Body).color(kit::SECONDARY),
+                kit::text(&card.sends_to, Font::Body).color(kit::palette().secondary),
             );
         }
         s.row(|ui| {
             ui.horizontal(|ui| {
-                ui.label(kit::text("Request", Font::Body).color(kit::LABEL));
+                ui.label(kit::text("Request", Font::Body).color(kit::palette().label));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     kit::cap_toned(ui, "Not verified", Tone::Warning);
@@ -729,7 +761,10 @@ pub(crate) fn cloud_card(ui: &mut Ui, card: &CloudCard) {
                     } else {
                         format!("\"{}\"", card.request.trim())
                     };
-                    ui.add(Label::new(kit::text(request, Font::Body).color(kit::LABEL)).truncate());
+                    ui.add(
+                        Label::new(kit::text(request, Font::Body).color(kit::palette().label))
+                            .truncate(),
+                    );
                 });
             });
         });
@@ -738,13 +773,16 @@ pub(crate) fn cloud_card(ui: &mut Ui, card: &CloudCard) {
     kit::section(ui, None, None, |s| {
         s.row(|ui| {
             Frame::NONE
-                .fill(egui::Color32::from_rgb(242, 242, 244))
+                .fill(kit::palette().code)
                 .corner_radius(6)
                 .inner_margin(Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.add(
-                        Label::new(kit::text(&card.command, Font::Mono).color(kit::LABEL)).wrap(),
+                        Label::new(
+                            kit::text(&card.command, Font::Mono).color(kit::palette().label),
+                        )
+                        .wrap(),
                     );
                 });
         });
@@ -765,7 +803,7 @@ pub(crate) fn card_bar(
         .show_separator_line(true)
         .frame(
             Frame::NONE
-                .fill(egui::Color32::from_rgb(246, 246, 247))
+                .fill(kit::palette().detail)
                 .inner_margin(Margin::symmetric(16, 10)),
         )
         .show(ui, |ui| {
@@ -794,9 +832,6 @@ pub(crate) fn card_bar(
 mod tests;
 
 // ---- The rows of what waits (both builds: the demo draws its waiting rows with them). ----
-
-/// The color of the time left, as in the mockup (#c86a00).
-pub(crate) const TIMER: egui::Color32 = egui::Color32::from_rgb(200, 106, 0);
 
 /// The time left in the orange of the mockup, at weight 500.
 pub(crate) fn timer_text(value: impl Into<String>, font: Font) -> egui::RichText {
@@ -847,9 +882,9 @@ pub(crate) fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Re
     }
     let painter = ui.painter();
     if row.selected {
-        painter.rect_filled(rect, 8, kit::SELECTION);
+        painter.rect_filled(rect, 8, kit::palette().selection);
     } else if response.hovered() {
-        painter.rect_filled(rect, 8, egui::Color32::from_rgb(247, 247, 248));
+        painter.rect_filled(rect, 8, kit::palette().list_hover);
     }
     if response.has_focus() {
         kit::inner_focus_ring(painter, rect, 8);
@@ -877,10 +912,15 @@ pub(crate) fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Re
     };
     kit::paint_tile_ring(painter, tile_rect, round, row.selected);
     let (title_color, sub_color, time_color, dot) = if row.selected {
-        let white = egui::Color32::WHITE;
-        (white, egui::Color32::from_white_alpha(210), white, white)
+        let white = kit::palette().on_accent;
+        (white, kit::palette().on_selection_secondary, white, white)
     } else {
-        (kit::LABEL, kit::SECONDARY, TIMER, kit::PRODUCTION)
+        (
+            kit::palette().label,
+            kit::palette().secondary,
+            kit::palette().countdown,
+            kit::palette().production,
+        )
     };
     let galley = |value: egui::RichText, max: f32| {
         WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)

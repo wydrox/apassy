@@ -662,6 +662,80 @@ mod tests {
         assert!(!proof.is_fresh());
     }
 
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn the_owner_window_never_covers_a_hosting_change() {
+        use super::super::{LocalWindowSource, OwnerAction, OwnerCheck, OwnerGate};
+        use crate::vault::{BouncerHostKind, HOSTING_CONSENT_VERSION};
+        const PASS: &str = "synthetic-window-host-pass";
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("synthetic.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let epoch = vault.epoch();
+        let shared = Arc::new(Mutex::new(Some(vault)));
+        let (w, _) = fixture();
+        w.configure(OwnerFrequency::UntilLock);
+        w.seed(epoch, super::super::CheckMethod::TouchId, w.generation());
+        let gate = OwnerGate::new(shared, None).with_window(w.clone());
+        // The window is open: it covers another action of the local owner.
+        assert!(
+            gate.reuse_local(
+                OwnerAction::ChangeCalibration { level: 80 },
+                LocalWindowSource::LocalOwner
+            )
+            .is_some()
+        );
+        let sources = [
+            LocalWindowSource::LocalOwner,
+            LocalWindowSource::BrowserDebuggingClick,
+            LocalWindowSource::BrowserGesture,
+            LocalWindowSource::AutoFill,
+            LocalWindowSource::AllowOnceClick,
+            LocalWindowSource::DevelopmentClick,
+        ];
+        for kind in BouncerHostKind::ALL {
+            let (url, consent_version) = match kind {
+                BouncerHostKind::ThisMac => (String::new(), 0),
+                _ => (
+                    "https://brain.synthetic.ts.net".to_owned(),
+                    HOSTING_CONSENT_VERSION,
+                ),
+            };
+            for action in [
+                OwnerAction::ChangeBouncerHosting {
+                    kind,
+                    url: url.clone(),
+                    consent_version,
+                },
+                OwnerAction::ChangeBouncerTraining {
+                    kind,
+                    url: url.clone(),
+                    consent_version,
+                },
+            ] {
+                assert!(action.needs_fresh_local_check(), "{action:?}");
+                for source in sources {
+                    assert!(
+                        gate.reuse_local(action.clone(), source).is_none(),
+                        "{action:?}: the window covered a hosting change"
+                    );
+                }
+                // A fresh check gives a proof for exactly this change.
+                let proof = gate
+                    .authorize(action.clone(), OwnerCheck::passphrase(PASS))
+                    .unwrap();
+                assert_eq!(proof.check(&action, &epoch), Ok(()));
+                // The fresh check also seeds the window, which still does not cover the
+                // next change.
+                assert!(
+                    gate.reuse_local(action.clone(), LocalWindowSource::LocalOwner)
+                        .is_none()
+                );
+            }
+        }
+    }
+
     /// Review 0.5.16: an open window covers a token rotation of the local owner, but
     /// never a new remote agent, whose bearer token works from the internet.
     #[cfg(feature = "desktop")]

@@ -470,6 +470,25 @@ pub enum OwnerRequest {
         from: String,
         to: String,
     },
+    /// Change who hosts the bouncer brain (ADR 0035 section 1). `change` has the bearer
+    /// of an own server (redacted in `Debug`); the proof names the kind, the address and
+    /// the consent screen (`OwnerAction::ChangeBouncerHosting`). The global owner window
+    /// never covers it.
+    ChangeBouncerHosting {
+        change: crate::vault::BouncerHostChange,
+    },
+    /// Change who trains the bouncer brain (ADR 0035 section 1), with the same rules.
+    ChangeBouncerTraining {
+        change: crate::vault::BouncerHostChange,
+    },
+    /// Turn temporary credentials (way C) on or off for one source item
+    /// (`OwnerAction::ChangeDelivery`). `name` is the item title for the texts.
+    ChangeDelivery {
+        item_id: u64,
+        name: String,
+        kind: crate::vault::ShortLivedKind,
+        on: bool,
+    },
     AllowOperation {
         agent_id: u64,
         item_id: u64,
@@ -629,6 +648,58 @@ pub enum OwnerRequest {
         choice: Choice,
         action: OwnerAction,
     },
+    /// Add a device to the Apassy Connect account (connect-account-v1 section 7.1): the
+    /// join exactly as "Add a device…" showed it, with the six safety words. The proof
+    /// goes to [`OwnerFlows::take_connect_proof`] for the Connect view (unit M2), which passes it
+    /// to `ConnectAccount::confirm_join`.
+    ConfirmConnectDevice {
+        account_id: String,
+        join_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
+        words: String,
+    },
+    /// Revoke a device of the Apassy Connect account (section 7.4); `this_device` is
+    /// "Forget this device".
+    RevokeConnectDevice {
+        account_id: String,
+        device_id: String,
+        device_name: String,
+        this_device: bool,
+    },
+    /// Delete the Apassy Connect account (section 6).
+    DeleteConnectAccount {
+        account_id: String,
+    },
+    /// Delete the vault store (relay copy) `team_id` of the vault `vault_name` at Apassy
+    /// Connect (section 8).
+    DeleteVaultStore {
+        team_id: String,
+        vault_name: String,
+    },
+    /// Add the device `device_id` ("`device_name`") of the account `account_id` to the
+    /// vault store `team_id` of the vault `vault_name` (section 8).
+    AddStoreDevice {
+        team_id: String,
+        device_id: String,
+        account_id: String,
+        device_name: String,
+        vault_name: String,
+    },
+    /// Change the Family or Team group (connect-billing-v1 section 6).
+    ChangeConnectGroup {
+        account_id: String,
+        group_id: String,
+        change: crate::broker::approvals::ConnectGroupChange,
+    },
+    /// Turn the tailnet route of this Mac's node on or off (Settings > Devices, plan
+    /// S2–S3, unit N7). The node checks nothing itself: the caller asks first.
+    SetTailnetRoute {
+        on: bool,
+    },
+    /// Revoke… in Settings > Devices (unit N7): a device of the node team, a device of
+    /// another relay, or a Linux node, as the sheet named it.
+    RevokeNodeDevice(super::ui::devices::RevokeRequest),
     /// "Allow" on a connect request in Decisions (plan "Bouncer section" decision 6):
     /// connect the remote agent of the request to this Mac. The values are the request
     /// exactly as the card showed it; the app allows it only while the node still has it
@@ -919,6 +990,21 @@ impl OwnerRequest {
             Self::RollbackModel { activation_id, .. } => OwnerAction::RollbackModel {
                 activation_id: *activation_id,
             },
+            Self::ChangeBouncerHosting { change } => crate::broker::brain_host::owner_action(
+                crate::vault::BouncerHostRole::Hosting,
+                change,
+            ),
+            Self::ChangeBouncerTraining { change } => crate::broker::brain_host::owner_action(
+                crate::vault::BouncerHostRole::Training,
+                change,
+            ),
+            Self::ChangeDelivery {
+                item_id, kind, on, ..
+            } => OwnerAction::ChangeDelivery {
+                item: *item_id,
+                kind: *kind,
+                on: *on,
+            },
             Self::AllowOperation {
                 agent_id, item_id, ..
             }
@@ -1050,6 +1136,56 @@ impl OwnerRequest {
                 }
             }
             Self::AnswerRemoteQuestion { action, .. } => action.clone(),
+            Self::ConfirmConnectDevice {
+                account_id,
+                join_id,
+                device_name,
+                public_key,
+                words,
+            } => OwnerAction::ConfirmConnectDevice {
+                account_id: account_id.clone(),
+                join_id: *join_id,
+                device_name: device_name.clone(),
+                public_key: public_key.clone(),
+                words: words.clone(),
+            },
+            Self::RevokeConnectDevice {
+                account_id,
+                device_id,
+                device_name,
+                ..
+            } => OwnerAction::RevokeConnectDevice {
+                account_id: account_id.clone(),
+                device_id: device_id.clone(),
+                device_name: device_name.clone(),
+            },
+            Self::DeleteConnectAccount { account_id } => OwnerAction::DeleteConnectAccount {
+                account_id: account_id.clone(),
+            },
+            Self::DeleteVaultStore { team_id, .. } => OwnerAction::DeleteVaultStore {
+                team_id: team_id.clone(),
+            },
+            Self::AddStoreDevice {
+                team_id,
+                device_id,
+                account_id,
+                ..
+            } => OwnerAction::AddStoreDevice {
+                team_id: team_id.clone(),
+                device_id: device_id.clone(),
+                account_id: account_id.clone(),
+            },
+            Self::ChangeConnectGroup {
+                account_id,
+                group_id,
+                change,
+            } => OwnerAction::ChangeConnectGroup {
+                account_id: account_id.clone(),
+                group_id: group_id.clone(),
+                change: change.clone(),
+            },
+            Self::SetTailnetRoute { on } => OwnerAction::SetTailnetRoute { on: *on },
+            Self::RevokeNodeDevice(request) => request.action(),
             Self::AllowConnect {
                 id,
                 client_name,
@@ -1270,6 +1406,11 @@ impl OwnerRequest {
             Self::RollbackModel { from, to, .. } => {
                 format!("Roll back the bouncer brain from {from} to {to}.")
             }
+            Self::ChangeBouncerHosting { change } => hosting_words(change),
+            Self::ChangeBouncerTraining { change } => training_words(change),
+            Self::ChangeDelivery {
+                name, kind, on, ..
+            } => delivery_words(name, *kind, *on),
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
             }
@@ -1460,6 +1601,62 @@ impl OwnerRequest {
                     page_text(asker)
                 )
             }
+            Self::ConfirmConnectDevice {
+                device_name, words, ..
+            } => format!(
+                "\"{}\" asks to join your Apassy Connect account. Both devices show: {}. Confirm only if the other device shows the same words. It can then sign in to your account; it still needs the passphrase to open a vault.",
+                page_text(device_name),
+                page_text(words)
+            ),
+            Self::RevokeConnectDevice {
+                device_name,
+                this_device: true,
+                ..
+            } => format!(
+                "Forget this Mac (\"{}\") in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this Mac.",
+                page_text(device_name)
+            ),
+            Self::RevokeConnectDevice { device_name, .. } => format!(
+                "Remove \"{}\" from your Apassy Connect account? It signs out at once and leaves every vault store of the account.",
+                page_text(device_name)
+            ),
+            Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
+            Self::DeleteVaultStore { vault_name, .. } => format!(
+                "Delete the relay copy of \"{}\" at Apassy Connect? Its snapshots go, and your devices stop syncing this vault through Connect. The vault stays on your devices.",
+                page_text(vault_name)
+            ),
+            Self::AddStoreDevice {
+                device_name,
+                vault_name,
+                ..
+            } => format!(
+                "Let \"{}\" sync the relay copy of \"{}\" at Apassy Connect? It can then read and change the encrypted copy; it still needs the passphrase to open the vault.",
+                page_text(device_name),
+                page_text(vault_name)
+            ),
+            Self::ChangeConnectGroup { change, .. } => match change {
+                crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
+                    "Add \"{}\" to your Apassy Connect family or team? They get the plan and can join the vaults that you share.",
+                    page_text(name)
+                ),
+                crate::broker::approvals::ConnectGroupChange::RemoveMember { name, .. } => format!(
+                    "Remove \"{}\" from your Apassy Connect family or team? They keep a free account and leave the vaults that you share.",
+                    page_text(name)
+                ),
+                crate::broker::approvals::ConnectGroupChange::SetSeats { quantity } => format!(
+                    "Change your Apassy Connect plan to {quantity} people or seats? Stripe charges the difference."
+                ),
+            },
+            Self::SetTailnetRoute { on: true } => "Make this Mac reachable on your tailnet. Your iPhone and Macs then reach it directly over Tailscale. Only devices on your tailnet can connect, and each signs in with its own key.".to_owned(),
+            Self::SetTailnetRoute { on: false } => "Stop the tailnet route of this Mac. Approvals then go through Apassy relay.".to_owned(),
+            Self::RevokeNodeDevice(request) if request.linux_vault.is_some() => format!(
+                "Revoke \"{}\". This Mac stops syncing through it. Its copy stays there.",
+                page_text(&request.device_name)
+            ),
+            Self::RevokeNodeDevice(request) => format!(
+                "Revoke \"{}\". It can no longer see or answer questions. To use it again, pair it again.",
+                page_text(&request.device_name)
+            ),
             Self::AllowConnect {
                 client_name,
                 code,
@@ -1499,6 +1696,78 @@ impl OwnerRequest {
                 }
             ),
         }
+    }
+}
+
+/// The owner check text of a change of the bouncer brain host: what leaves the Mac and
+/// the trust warning (ADR 0035 sections 1, 4 and 5). No bearer.
+fn hosting_words(change: &crate::vault::BouncerHostChange) -> String {
+    use crate::vault::BouncerHostKind;
+    let url = page_text(&change.normalized_url());
+    let sent = "Each bouncer request goes there: the user request, purpose, and shell command, with item values masked and project and home paths shortened. The bouncer heads trained on your decisions go there too: numbers, no text. No secret value, the vault, or a full path of your project or home folder leaves this Mac, and the bouncer gate still decides on this Mac.";
+    let trust = crate::desktop::brain_hosting_ui::TRUST_WARNING;
+    match change.kind {
+        BouncerHostKind::ThisMac => {
+            "Run the bouncer brain on this Mac again. Bouncer requests stay on this Mac.".to_owned()
+        }
+        BouncerHostKind::OwnServer => {
+            format!("Use the bouncer brain on your server at {url}. {sent} {trust}")
+        }
+        BouncerHostKind::Connect => format!(
+            "Use the bouncer brain of Apassy Connect at {url}. {sent} Apassy keeps a request in memory only while it answers it. {trust}"
+        ),
+    }
+}
+
+/// The owner check text of a change of the bouncer brain trainer (ADR 0035 sections 1
+/// and 4). No bearer.
+/// The text of a change of the delivery of a source item. It names the item and what
+/// each run gets, never a value.
+fn delivery_words(name: &str, kind: crate::vault::ShortLivedKind, on: bool) -> String {
+    let name = dialog_cut(name);
+    let lease = match kind {
+        crate::vault::ShortLivedKind::GithubApp => "a GitHub token that is revoked after the run",
+        crate::vault::ShortLivedKind::AwsSts
+        | crate::vault::ShortLivedKind::GoogleServiceAccount => {
+            "a credential that expires in 15 minutes"
+        }
+        _ => "a credential made for that run",
+    };
+    // While runs make no lease, the text promises none (plan s6 unit F flips it).
+    if on && !crate::vault::LEASES_IN_RUNS {
+        format!(
+            "Use temporary credentials for \"{name}\". This version of Apassy does not make them in runs yet: runs of this item fail until it does, and they never get the long-lived key instead."
+        )
+    } else if on {
+        format!(
+            "Use temporary credentials for \"{name}\". Each run gets {lease}; the long-lived key stays in Apassy."
+        )
+    } else if let Some(names) = crate::vault::static_variable_names(kind) {
+        format!(
+            "Stop temporary credentials for \"{name}\". Runs then get the long-lived key itself in {names}."
+        )
+    } else {
+        format!(
+            "Stop temporary credentials for \"{name}\". Runs then get the long-lived key as the variable says (a placeholder or the value)."
+        )
+    }
+}
+
+fn training_words(change: &crate::vault::BouncerHostChange) -> String {
+    use crate::vault::BouncerHostKind;
+    let url = page_text(&change.normalized_url());
+    let sent = "For each training, the training examples go there: your past decisions with their requests, without secret values. A new head set always starts in shadow mode, and only you promote it.";
+    match change.kind {
+        BouncerHostKind::ThisMac => {
+            "Train the bouncer brain on this Mac again. Training examples stay on this Mac."
+                .to_owned()
+        }
+        BouncerHostKind::OwnServer => {
+            format!("Train the bouncer brain on your server at {url}. {sent}")
+        }
+        BouncerHostKind::Connect => format!(
+            "Train the bouncer brain at Apassy Connect ({url}). {sent} Apassy deletes the examples when the job ends, and at the latest after 24 hours."
+        ),
     }
 }
 
@@ -1676,9 +1945,28 @@ pub struct OwnerFlows {
     pub(crate) acknowledged: BTreeSet<EventKey>,
     /// A copied one-time code and its clear.
     pub(crate) clipboard: CodeClipboard,
+    /// The proof of the last Apassy Connect account check (`OwnerRequest::
+    /// ConfirmConnectDevice` and the other Connect requests), until the Connect view
+    /// takes it ([`OwnerFlows::take_connect_proof`]): the account call takes the proof
+    /// by value, so it works once. A lock drops it; it is bound to the vault session and
+    /// lives 60 s.
+    connect_proof: Option<OwnerProof>,
 }
 
 impl OwnerFlows {
+    /// Take the proof of the last Connect account check, once: the slot is empty after
+    /// it, also when the account call then fails (B-L1).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the Connect view of plan s7 unit M2 takes the proof"
+        )
+    )]
+    pub(crate) fn take_connect_proof(&mut self) -> Option<OwnerProof> {
+        self.connect_proof.take()
+    }
+
     /// Text about Touch ID for the owner check. `None` when Touch ID can run.
     pub(crate) fn touch_id_note(&self) -> Option<String> {
         if self.helper.is_none() {
@@ -2196,6 +2484,18 @@ impl DesktopApp {
             OwnerRequest::RollbackModel { activation_id, .. } => {
                 super::learning_ui::roll_back_model(self, activation_id, proof);
             }
+            OwnerRequest::ChangeBouncerHosting { change } => {
+                self.change_bouncer_host(crate::vault::BouncerHostRole::Hosting, change, proof);
+            }
+            OwnerRequest::ChangeBouncerTraining { change } => {
+                self.change_bouncer_host(crate::vault::BouncerHostRole::Training, change, proof);
+            }
+            OwnerRequest::ChangeDelivery {
+                item_id,
+                name,
+                kind,
+                on,
+            } => self.complete_change_delivery(item_id, &name, kind, on, proof),
             OwnerRequest::AllowOperation {
                 agent_id,
                 item_id,
@@ -2426,6 +2726,18 @@ impl DesktopApp {
             OwnerRequest::AnswerRemoteQuestion {
                 remote_id, choice, ..
             } => self.answer_remote_question(remote_id, choice, Some(proof)),
+            // The Connect view takes the proof and runs the step (plan s7 M1/M2); the
+            // account checks it again against the exact action before it calls Connect.
+            OwnerRequest::ConfirmConnectDevice { .. }
+            | OwnerRequest::RevokeConnectDevice { .. }
+            | OwnerRequest::DeleteConnectAccount { .. }
+            | OwnerRequest::DeleteVaultStore { .. }
+            | OwnerRequest::AddStoreDevice { .. }
+            | OwnerRequest::ChangeConnectGroup { .. } => {
+                self.owner.connect_proof = Some(proof);
+            }
+            OwnerRequest::SetTailnetRoute { on } => self.devices_set_route(on, proof),
+            OwnerRequest::RevokeNodeDevice(request) => self.devices_revoke(&request, proof),
             OwnerRequest::AllowConnect {
                 id,
                 client_name,
@@ -2543,6 +2855,57 @@ impl DesktopApp {
                 self.reload_declaration_form(item_id);
                 self.set_ok(format!("{name} is marked as {}.", environment.as_str()));
             }
+            Some(Err(message)) => self.set_err(message),
+            None => self.set_err("The vault is locked."),
+        }
+    }
+
+    /// Turn way C on or off for a source item with `proof` (contract private-sharing-v1
+    /// rule 3). The proof must name the item, the kind of its row, and the new state; the
+    /// row keeps its kind and settings.
+    fn complete_change_delivery(
+        &mut self,
+        item_id: u64,
+        name: &str,
+        kind: crate::vault::ShortLivedKind,
+        on: bool,
+        proof: OwnerProof,
+    ) {
+        let action = OwnerAction::ChangeDelivery {
+            item: item_id,
+            kind,
+            on,
+        };
+        let result = self.owner_ui.session.with_vault(|vault| {
+            proof
+                .check(&action, &vault.epoch())
+                .map_err(|refusal| refusal.message().to_owned())?;
+            // The stored kind must be the kind that the owner confirmed.
+            match vault.short_lived(item_id) {
+                Ok(Some(row)) if row.kind == kind => {}
+                Ok(_) => return Err("The item changed. Nothing changed.".to_owned()),
+                Err(err) => return Err(format!("The delivery did not change: {err}.")),
+            }
+            vault
+                .set_short_lived_enabled(
+                    item_id,
+                    on,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |elapsed| elapsed.as_secs()),
+                )
+                .map_err(|err| format!("The delivery did not change: {err}."))
+        });
+        match result {
+            Some(Ok(())) if on => self.set_ok(format!("{name} now gives temporary credentials.")),
+            Some(Ok(())) => self.set_ok(match crate::vault::static_variable_names(kind) {
+                Some(names) => format!(
+                    "{name} no longer gives temporary credentials. Runs get its long-lived key in {names}."
+                ),
+                None => format!(
+                    "{name} no longer gives temporary credentials. Runs get its long-lived key."
+                ),
+            }),
             Some(Err(message)) => self.set_err(message),
             None => self.set_err("The vault is locked."),
         }
@@ -3080,6 +3443,8 @@ impl DesktopApp {
         }
         // The feeds of the other Macs go with the session (relay-feed-v1).
         self.forget_remote_feeds();
+        // A Connect proof of this session is worthless after the lock.
+        self.owner.connect_proof = None;
         self.erase_typed_secrets(ctx);
     }
 
@@ -3136,6 +3501,124 @@ impl DesktopApp {
         }
         // A local fine-tune stops with the app (goal item B9).
         self.learning.stop_training();
+    }
+}
+
+#[cfg(test)]
+mod change_delivery_tests {
+    use super::*;
+    use crate::vault::ShortLivedKind;
+
+    #[test]
+    fn the_delivery_request_names_its_exact_action_and_no_value() {
+        for on in [true, false] {
+            let request = OwnerRequest::ChangeDelivery {
+                item_id: 7,
+                name: "Synthetic AWS".to_owned(),
+                kind: ShortLivedKind::AwsSts,
+                on,
+            };
+            assert_eq!(
+                request.action(),
+                OwnerAction::ChangeDelivery {
+                    item: 7,
+                    kind: ShortLivedKind::AwsSts,
+                    on,
+                }
+            );
+            assert!(request.is_ready());
+            assert!(!request.needs_live_ticket());
+            let text = request.describe();
+            assert!(text.contains("\"Synthetic AWS\""), "{text}");
+            if on && crate::vault::LEASES_IN_RUNS {
+                assert!(text.contains("15 minutes"), "{text}");
+            } else if on {
+                // No promise of a lease while runs make none.
+                assert!(!text.contains("15 minutes"), "{text}");
+                assert!(text.contains("does not make them in runs yet"), "{text}");
+            } else {
+                // The static form names the variables of the long-lived key.
+                assert!(text.contains("long-lived key"), "{text}");
+                assert!(
+                    text.contains("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"),
+                    "{text}"
+                );
+            }
+            assert!(!text.contains("AKIA") && !text.contains("secret_access_key"));
+        }
+        let google = OwnerRequest::ChangeDelivery {
+            item_id: 8,
+            name: "Synthetic service account".to_owned(),
+            kind: ShortLivedKind::GoogleServiceAccount,
+            on: false,
+        }
+        .describe();
+        assert!(google.contains("in GOOGLE_API_KEY"), "{google}");
+        assert!(!google.contains("CLOUDSDK_AUTH_ACCESS_TOKEN"), "{google}");
+    }
+}
+
+#[cfg(test)]
+mod connect_proof_tests {
+    use super::*;
+
+    /// B-L1: the Connect view takes the proof once; the slot is then empty, so a second
+    /// account call has no proof to use.
+    #[test]
+    fn the_connect_proof_is_taken_once() {
+        let mut flows = OwnerFlows::default();
+        assert!(flows.take_connect_proof().is_none());
+        let action = OwnerAction::DeleteVaultStore {
+            team_id: "t".repeat(32),
+        };
+        flows.connect_proof = Some(OwnerProof::issue_for_test(
+            action.clone(),
+            [1; 32],
+            std::time::Instant::now(),
+        ));
+        let proof = flows.take_connect_proof().expect("the proof");
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        assert!(flows.take_connect_proof().is_none());
+    }
+
+    /// B-M1: the store requests name their exact actions, and their texts name the vault
+    /// and the device, never an id.
+    #[test]
+    fn the_store_requests_name_their_actions() {
+        let team = "t".repeat(32);
+        let delete = OwnerRequest::DeleteVaultStore {
+            team_id: team.clone(),
+            vault_name: "Personal".to_owned(),
+        };
+        assert_eq!(
+            delete.action(),
+            OwnerAction::DeleteVaultStore {
+                team_id: team.clone()
+            }
+        );
+        assert!(delete.action().needs_fresh_local_check());
+        assert!(delete.describe().contains("\"Personal\""));
+        let add = OwnerRequest::AddStoreDevice {
+            team_id: team.clone(),
+            device_id: "dev_p4n6r2t7bc".to_owned(),
+            account_id: "acc_m3n5p7q2rb".to_owned(),
+            device_name: "iPhone".to_owned(),
+            vault_name: "Personal".to_owned(),
+        };
+        assert_eq!(
+            add.action(),
+            OwnerAction::AddStoreDevice {
+                team_id: team,
+                device_id: "dev_p4n6r2t7bc".to_owned(),
+                account_id: "acc_m3n5p7q2rb".to_owned(),
+            }
+        );
+        assert!(add.action().needs_fresh_local_check());
+        let text = add.describe();
+        assert!(
+            text.contains("\"iPhone\"") && !text.contains("dev_"),
+            "{text}"
+        );
     }
 }
 

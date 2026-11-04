@@ -1,0 +1,59 @@
+{
+  "kinds": [
+    "aws_sts",
+    "github_app",
+    "google_service_account",
+    "oauth_refresh",
+    "cloudflare_token",
+    "planetscale_password",
+    "neon_role"
+  ],
+  "reserved": ["cloudflare_token", "planetscale_password", "neon_role"],
+  "fields": {
+    "aws_sts": [
+      {"name": "access_key_id", "secret": false, "required": true},
+      {"name": "secret_access_key", "secret": true, "required": true}
+    ],
+    "github_app": [
+      {"name": "app_id", "secret": false, "required": true},
+      {"name": "installation_id", "secret": false, "required": true},
+      {"name": "private_key", "secret": true, "required": true}
+    ],
+    "google_service_account": [
+      {"name": "key_json", "secret": true, "required": true}
+    ],
+    "oauth_refresh": [
+      {"name": "client_id", "secret": false, "required": true},
+      {"name": "client_secret", "secret": true, "required": false},
+      {"name": "refresh_token", "secret": true, "required": true}
+    ]
+  },
+  "settings": {
+    "aws_sts": ["role_arn", "policy", "region", "services"],
+    "github_app": ["repositories", "permissions", "api_url"],
+    "google_service_account": ["scopes", "impersonate"],
+    "oauth_refresh": ["token_url", "client_auth", "revoke_url", "scope"]
+  },
+  "lease": {
+    "aws_sts": {
+      "secrets": ["$binding", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"],
+      "plain": ["AWS_CREDENTIAL_EXPIRATION"],
+      "max_secs": 900,
+      "revoke": null
+    },
+    "github_app": {"secrets": ["$binding"], "plain": [], "max_secs": 3600, "revoke": "github"},
+    "google_service_account": {"secrets": ["$binding"], "plain": [], "max_secs": 900, "revoke": null},
+    "oauth_refresh": {"secrets": ["$binding"], "plain": [], "max_secs": null, "revoke": "oauth"}
+  },
+  "credential_form": ["placeholder", "temporary_credentials", "signed_requests"],
+  "codes": ["lease_failed", "lease_revoke_failed", "sign_refused"],
+  "audit_actions": [
+    "lease_made",
+    "lease_revoked",
+    "lease_revoke_failed",
+    "lease_failed",
+    "sign_request",
+    "member_key_made",
+    "member_key_deleted"
+  ]
+}

@@ -93,6 +93,11 @@ extension CoreVaultService {
 
     public func pushTokenClear() async throws -> PushCleared { try await call("push_token_clear") }
 
+    public func pushSummaryKeys() async throws -> [PushSummaryKey] {
+        let answer: PushSummaryKeys = try await call("push_summary_keys")
+        return answer.keys
+    }
+
     public func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
         try await call(
             "join_attach",

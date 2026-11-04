@@ -13,7 +13,7 @@ mod questions_fixture;
 use apassy::sync::{DeviceKey, decode_b64u, encode_b64u, verify_signature};
 use apassy::vault::TrustedDeviceKind;
 use questions_fixture::*;
-use questions_relay::now;
+use questions_relay::{FakeGateway, now};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,8 @@ fn an_iphone_attaches_reads_a_card_and_answers_with_face_id_and_without() {
     let uuid = attach(&setup);
     let list = call(&setup.core, json!({"op": "questions_list"}));
     assert_eq!(list["status"]["answer_key"], ANSWER_PUBLIC);
+    // A team without a pin is no node: the status names none (unit N6).
+    assert!(list["status"].get("node").is_none(), "{list}");
     assert_eq!(list["questions"].as_array().unwrap().len(), 0);
     // A second attach of the same vault is refused.
     let (link, _) = setup.relay.link();
@@ -956,4 +958,192 @@ fn connect_handoff_registers_the_confirmed_phone_without_waiting_for_icloud() {
     let list = call(&setup.core, json!({"op":"questions_list"}));
     assert_eq!(list["questions"].as_array().unwrap().len(), 1);
     assert_eq!(list["questions"][0]["card"]["digest"], DIGEST);
+}
+
+// ---- Push handles of a node team (push-gateway-v1 sections 6 and 10). ----
+
+fn push_file(setup: &Setup) -> String {
+    std::fs::read_to_string(setup.data.join("questions-push.json")).unwrap_or_default()
+}
+
+/// A node team gets a handle of the push gateway, never the token: the token goes to the
+/// gateway only, the node gets the handle and the secret, and `questions-push.json`
+/// keeps the handle without the token. The same token reuses the handle; a new token
+/// makes a new one; a clear takes the handle off the node and forgets it.
+#[test]
+fn a_node_team_gets_a_push_handle_and_never_the_token() {
+    let setup = setup();
+    attach(&setup);
+    setup.relay.set_gateway_mode(true);
+    let gateway = FakeGateway::start();
+    let token = "0a".repeat(32);
+    let set = call(
+        &setup.core,
+        json!({"op": "push_token_set", "token": token, "environment": "development",
+               "gateway": gateway.url}),
+    );
+    assert_eq!(set["device_id"], 2);
+    assert_eq!(set["vaults"][0]["error"], Value::Null);
+    assert_eq!(
+        gateway.requests(),
+        vec![
+            json!({"v": 1, "kind": "iphone", "token": token, "environment": "development",
+                    "bundle_id": "com.wydrox.apassy.companion"})
+        ]
+    );
+    let (device, body) = setup.relay.push_handle().expect("the node has the handle");
+    assert_eq!(device, 2);
+    assert_eq!(
+        body,
+        json!({"v": 1, "gateway": gateway.url, "handle": FakeGateway::handle(1),
+               "secret": FakeGateway::secret(1)})
+    );
+    assert!(setup.relay.push_token().is_none());
+    let log = setup.relay.log();
+    assert!(
+        !log.iter().any(|line| line.ends_with("/v1/push/token")),
+        "a node team never gets the token: {log:?}"
+    );
+    let file = push_file(&setup);
+    assert!(file.contains(&FakeGateway::handle(1)), "{file}");
+    assert!(!file.contains(&token), "the file holds no token");
+
+    // The same token: the kept handle, no new gateway call.
+    call(
+        &setup.core,
+        json!({"op": "push_token_set", "token": token, "environment": "development",
+               "gateway": gateway.url}),
+    );
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(
+        setup.relay.push_handle().unwrap().1["handle"],
+        FakeGateway::handle(1)
+    );
+
+    // A new token (a reinstall): a new handle, and the file forgets the old one.
+    let new_token = "0b".repeat(32);
+    call(
+        &setup.core,
+        json!({"op": "push_token_set", "token": new_token, "environment": "development",
+               "gateway": gateway.url}),
+    );
+    assert_eq!(gateway.requests().len(), 2);
+    assert_eq!(gateway.requests()[1]["token"], new_token.as_str());
+    assert_eq!(
+        setup.relay.push_handle().unwrap().1["handle"],
+        FakeGateway::handle(2)
+    );
+    let file = push_file(&setup);
+    assert!(file.contains(&FakeGateway::handle(2)) && !file.contains(&FakeGateway::handle(1)));
+    assert!(!file.contains(&new_token) && !file.contains(&token));
+
+    // Notifications off: the handle leaves the node and the file.
+    let cleared = call(&setup.core, json!({"op": "push_token_clear"}));
+    assert_eq!(cleared["pending"], json!([]));
+    assert!(setup.relay.push_handle().is_none());
+    assert!(!push_file(&setup).contains(&FakeGateway::handle(2)));
+    let log = setup.relay.log();
+    assert!(log.iter().any(|line| line == "DELETE /v1/push/handle"));
+    assert!(
+        !log.iter().any(|line| line.ends_with("/v1/push/token")),
+        "{log:?}"
+    );
+}
+
+/// A relay without the handle route (404: before team schema 8, so no node) gets the token
+/// as before; a gateway that refuses this app, or cannot be reached, leaves the node
+/// without a handle and says so.
+#[test]
+fn a_relay_without_the_handle_route_gets_the_token_and_gateway_failures_are_named() {
+    let setup = setup();
+    attach(&setup);
+    let gateway = FakeGateway::start();
+    let token = "0c".repeat(32);
+    call(
+        &setup.core,
+        json!({"op": "push_token_set", "token": token, "environment": "development",
+               "gateway": gateway.url}),
+    );
+    let (_, body) = setup.relay.push_token().expect("the token, as before");
+    assert_eq!(body["token"], token.as_str());
+    let log = setup.relay.log();
+    let handle = log.iter().position(|line| line == "PUT /v1/push/handle");
+    let tokened = log.iter().position(|line| line == "PUT /v1/push/token");
+    assert!(handle.is_some() && handle < tokened, "{log:?}");
+    call(&setup.core, json!({"op": "push_token_clear"}));
+    assert!(setup.relay.push_token().is_none());
+
+    // A node with a gateway that refuses this bundle id: no handle, `push_unavailable`.
+    setup.relay.set_gateway_mode(true);
+    gateway.refuse(Some((409, "wrong_bundle")));
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op": "push_token_set", "token": "0d".repeat(32),
+                   "environment": "development", "gateway": gateway.url})
+        ),
+        "push_unavailable"
+    );
+    assert!(setup.relay.push_handle().is_none());
+    // A gateway that cannot be reached.
+    gateway.refuse(Some((503, "push_unavailable")));
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op": "push_token_set", "token": "0d".repeat(32),
+                   "environment": "development", "gateway": gateway.url})
+        ),
+        "push_gateway_unreachable"
+    );
+    // Back: the next refresh registers the handle.
+    gateway.refuse(None);
+    call(
+        &setup.core,
+        json!({"op": "push_token_set", "token": "0d".repeat(32),
+               "environment": "development", "gateway": gateway.url}),
+    );
+    assert!(setup.relay.push_handle().is_some());
+    assert!(setup.relay.push_token().is_none());
+    // A gateway that is not an origin.
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op": "push_token_set", "token": "0d".repeat(32),
+                   "environment": "development", "gateway": "ftp://push.example"})
+        ),
+        "invalid_input"
+    );
+}
+
+/// The summary key of the questions team (push-gateway-v1 section 12): HKDF-SHA256 of
+/// the question key with the info `apassy-push-summary-v1`.
+#[test]
+fn the_summary_key_of_the_questions_team_comes_from_the_question_key() {
+    let setup = setup();
+    attach(&setup);
+    let keys = call(&setup.core, json!({"op": "push_summary_keys"}));
+    let keys = keys["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["team_id"], setup.relay.team_id.as_str());
+    assert_eq!(keys[0]["key"], summary_key_of(&QUESTION_KEY).as_str());
+    call(&setup.core, json!({"op": "lock"}));
+    assert_eq!(
+        call(&setup.core, json!({"op": "push_summary_keys"}))["keys"],
+        json!([])
+    );
+}
+
+/// HKDF-SHA256, empty salt, info `apassy-push-summary-v1`, 32 bytes, b64u.
+fn summary_key_of(question_key: &[u8]) -> String {
+    struct Len32;
+    impl ring::hkdf::KeyType for Len32 {
+        fn len(&self) -> usize {
+            32
+        }
+    }
+    let prk = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, &[]).extract(question_key);
+    let info: [&[u8]; 1] = [b"apassy-push-summary-v1"];
+    let mut out = [0u8; 32];
+    prk.expand(&info, Len32).unwrap().fill(&mut out).unwrap();
+    encode_b64u(&out)
 }

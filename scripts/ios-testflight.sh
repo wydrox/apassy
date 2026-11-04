@@ -19,13 +19,15 @@
 # Optional:
 #   APASSY_IOS_BUILD       the build number. Default: minutes since 1970, so each run
 #                          has a new, higher number.
-#   APASSY_IOS_PROFILE, APASSY_IOS_AUTOFILL_PROFILE, APASSY_IOS_WATCH_PROFILE
+#   APASSY_IOS_PROFILE, APASSY_IOS_AUTOFILL_PROFILE, APASSY_IOS_WATCH_PROFILE,
+#   APASSY_IOS_NOTIFICATIONS_PROFILE, APASSY_IOS_WATCH_NOTIFICATIONS_PROFILE
 #                          the names of App Store provisioning profiles of the app, the
-#                          AutoFill extension and the Apple Watch app, made with the
+#                          AutoFill extension, the Apple Watch app, and the notification
+#                          extensions of the app and of the watch, made with the
 #                          "Apple Distribution" certificate of this Mac. With them, the
 #                          export signs manually: an API key without access to
 #                          cloud-managed distribution certificates cannot let Xcode
-#                          make them. Set all three or none.
+#                          make them. Set all five or none.
 #
 # The version is MARKETING_VERSION of ios/ApassyCompanion/project.yml.
 # The app declares ITSAppUsesNonExemptEncryption = true (its own standard encryption).
@@ -33,6 +35,13 @@
 # in "Missing Compliance" until the encryption declaration is attached to it through the
 # API: docs/store/app-store/export-compliance.md, section 2.2. This script does not do it.
 # See ios/README.md, "TestFlight".
+#
+# It also writes target/ios/build-record.json: version, build number, commit, Xcode and
+# SDK, the SHA-256 of the .ipa when the export wrote one, and the SHA-256 of each Mach-O of
+# the archive (scripts/macos-binaries.py). The owner publishes it with the workflow
+# ios-build-record.yml, which attests it (docs/operations/release.md, "Attestations and
+# SBOMs"). The App Store re-signs and encrypts the app, so the record is a signed claim of
+# the build, not a check that a user can repeat.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -99,10 +108,12 @@ destination=export
 signing="<key>signingStyle</key>
   <string>automatic</string>"
 if [ -n "${APASSY_IOS_PROFILE:-}" ] || [ -n "${APASSY_IOS_AUTOFILL_PROFILE:-}" ] \
-  || [ -n "${APASSY_IOS_WATCH_PROFILE:-}" ]; then
+  || [ -n "${APASSY_IOS_WATCH_PROFILE:-}" ] || [ -n "${APASSY_IOS_NOTIFICATIONS_PROFILE:-}" ] \
+  || [ -n "${APASSY_IOS_WATCH_NOTIFICATIONS_PROFILE:-}" ]; then
   [ -n "${APASSY_IOS_PROFILE:-}" ] && [ -n "${APASSY_IOS_AUTOFILL_PROFILE:-}" ] \
-    && [ -n "${APASSY_IOS_WATCH_PROFILE:-}" ] \
-    || fail "set APASSY_IOS_PROFILE, APASSY_IOS_AUTOFILL_PROFILE and APASSY_IOS_WATCH_PROFILE together"
+    && [ -n "${APASSY_IOS_WATCH_PROFILE:-}" ] && [ -n "${APASSY_IOS_NOTIFICATIONS_PROFILE:-}" ] \
+    && [ -n "${APASSY_IOS_WATCH_NOTIFICATIONS_PROFILE:-}" ] \
+    || fail "set APASSY_IOS_PROFILE, APASSY_IOS_AUTOFILL_PROFILE, APASSY_IOS_WATCH_PROFILE, APASSY_IOS_NOTIFICATIONS_PROFILE and APASSY_IOS_WATCH_NOTIFICATIONS_PROFILE together"
   signing="<key>signingStyle</key>
   <string>manual</string>
   <key>signingCertificate</key>
@@ -115,6 +126,10 @@ if [ -n "${APASSY_IOS_PROFILE:-}" ] || [ -n "${APASSY_IOS_AUTOFILL_PROFILE:-}" ]
     <string>$APASSY_IOS_AUTOFILL_PROFILE</string>
     <key>com.wydrox.apassy.companion.watchkitapp</key>
     <string>$APASSY_IOS_WATCH_PROFILE</string>
+    <key>com.wydrox.apassy.companion.notifications</key>
+    <string>$APASSY_IOS_NOTIFICATIONS_PROFILE</string>
+    <key>com.wydrox.apassy.companion.watchkitapp.notifications</key>
+    <string>$APASSY_IOS_WATCH_NOTIFICATIONS_PROFILE</string>
   </dict>"
 fi
 options="$out/ExportOptions.plist"
@@ -143,8 +158,52 @@ xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$options"
   -exportPath "$out/export" "${auth[@]}" -quiet
 
 version=$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$archive/Info.plist")
+
+echo "ios-testflight: the build record"
+apps=("$archive"/Products/Applications/*.app)
+[ "${#apps[@]}" = 1 ] && [ -d "${apps[0]}" ] || fail "expected one app in $archive/Products/Applications"
+record="$out/build-record.json"
+python3 -I scripts/macos-binaries.py "${apps[0]}" --version "$version" --commit "$commit" \
+  --output "$out/archive-binaries.json" >/dev/null
+xcode="$(xcodebuild -version | tr '\n' ' ' | sed 's/ *$//')"
+sdk="$(xcrun --sdk iphoneos --show-sdk-version)"
+python3 -I - "$out/archive-binaries.json" "$out/export/ApassyCompanion.ipa" "$record" \
+  "$version" "$build" "$commit" "$xcode" "$sdk" "$upload" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+binaries, ipa, record, version, build, commit, xcode, sdk, upload = sys.argv[1:]
+# With the destination "upload", the export sends the .ipa and may keep no copy.
+ipa_sha256 = None
+if Path(ipa).is_file():
+    digest = hashlib.sha256()
+    with open(ipa, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    ipa_sha256 = digest.hexdigest()
+data = {
+    "format": 1,
+    "kind": "apassy-ios-build-record",
+    "version": version,
+    "build": build,
+    "commit": commit,
+    "xcode": xcode,
+    "sdk": sdk,
+    "uploaded": upload == "1",
+    "ipa_sha256": ipa_sha256,
+    "binaries": json.loads(Path(binaries).read_text())["files"],
+}
+text = json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
+if len(text.encode()) > 64 * 1024:
+    sys.exit(f"ios-testflight: the build record has {len(text.encode())} bytes, more than 64 KiB")
+Path(record).write_text(text)
+PY
+rm -f "$out/archive-binaries.json"
+
 if [ "$upload" = 1 ]; then
   echo "ios-testflight: uploaded Apassy $version ($build). App Store Connect processes it for TestFlight in a few minutes."
+  echo "ios-testflight: when the commit is on main, publish the build record:"
+  echo "  gh workflow run ios-build-record.yml --ref main -f record=\"\$(cat $record)\""
 else
   echo "ios-testflight: $out/export/ApassyCompanion.ipa, Apassy $version ($build)"
+  echo "ios-testflight: $record (a test build: do not publish its record)"
 fi

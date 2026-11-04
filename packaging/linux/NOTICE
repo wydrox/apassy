@@ -1,0 +1,9 @@
+Apassy
+Copyright 2026 the Apassy authors.
+
+This product is licensed under the Apache License, Version 2.0 (LICENSE).
+
+The binary includes third-party software. Their licenses and notices are in
+licenses/ (THIRD-PARTY-NOTICES.md lists them): SQLCipher (BSD-3-Clause), OpenSSL
+(Apache-2.0), rustls, ring, and the other crates named there. The complete list
+of crates is the Cargo.lock of the source commit in release-linux-<arch>.json.

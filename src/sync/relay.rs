@@ -30,10 +30,15 @@
 //! [`devices`].
 
 mod devices;
+mod link;
 mod member;
 
 pub use devices::{DeviceView, KeySource, LinkCode, PendingLink};
-pub use member::{RelayCallError, RelayMember};
+pub use link::{
+    LINK_INVALID_TEXT, LINK_UPDATE_TEXT, LinkKind, LinkRefusal, MAX_LINK_BYTES,
+    MAX_NODE_NAME_CHARS, PIN_CHANGED_TEXT, PairedLink, clean_node_name, encode_node_name,
+};
+pub use member::{RelayCallError, RelayMember, membership_relay_url};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -42,7 +47,7 @@ use std::io::Seek;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -54,7 +59,7 @@ use super::relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, decode_b64u, hash_from_hex,
     link_code_team, safety_words, same_words, sha256_hex, sign_in_message, valid_team_code,
 };
-use super::relay_http::{self, Answer, Body, Cancel, HttpError, RelayUrl, Request};
+use super::relay_http::{self, Answer, Body, Cancel, HttpError, RelayUrl, Request, TlsTrust};
 use super::state::{self, SyncState, TransportKind};
 use super::transport::{Precondition, Remote, RemoteHead, SyncTransport};
 use super::{RelayRefusal, SyncError, SyncOutcome, TempFile, copy_error, device_name, unix_now};
@@ -155,6 +160,7 @@ pub(crate) fn sync_error(error: ApiError) -> SyncError {
             (403, "join_refused") => SyncError::Relay(RelayRefusal::JoinRefused),
             (403, "sync_head_invalid") => SyncError::Relay(RelayRefusal::HeadInvalid),
             (403, "team_limit") => SyncError::Relay(RelayRefusal::TeamLimit),
+            (403, "plan_required") => SyncError::Relay(RelayRefusal::PlanRequired),
             (403, _) => SyncError::Relay(RelayRefusal::Forbidden),
             (400, _) => SyncError::Relay(RelayRefusal::InvalidRequest),
             (404, _) => SyncError::Relay(RelayRefusal::NotFound),
@@ -245,6 +251,7 @@ fn envelope(answer: &Answer) -> Result<Value, ApiError> {
 fn http_error(error: HttpError) -> ApiError {
     match error {
         HttpError::Connect | HttpError::Protocol => ApiError::Unreachable,
+        HttpError::PinMismatch => ApiError::Sync(SyncError::PinMismatch),
         HttpError::Broken => ApiError::Broken,
     }
 }
@@ -433,6 +440,51 @@ impl Removal {
     }
 }
 
+/// One sign-in of a [`Session`] at a time ([`Session::bearer_until`]).
+#[derive(Debug, Default)]
+struct SignIns {
+    running: Mutex<bool>,
+    ended: Condvar,
+}
+
+/// The turn of one caller to sign in. The next caller goes when it ends.
+struct SignInTurn<'a>(&'a SignIns);
+
+impl Drop for SignInTurn<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0.running) = false;
+        self.0.ended.notify_all();
+    }
+}
+
+impl SignIns {
+    /// Wait while another caller signs in, at most until `deadline`, then take the turn.
+    /// `Unreachable` when the deadline passed first, as a call that ran out of time.
+    fn take(&self, deadline: Option<Instant>) -> Result<SignInTurn<'_>, ApiError> {
+        let mut running = lock(&self.running);
+        while *running {
+            running = match deadline {
+                None => self
+                    .ended
+                    .wait(running)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(ApiError::Unreachable);
+                    }
+                    self.ended
+                        .wait_timeout(running, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
+        }
+        *running = true;
+        Ok(SignInTurn(self))
+    }
+}
+
 /// A device of one team on one relay: its key, and an access token while it lasts.
 /// Debug is redacted.
 pub(crate) struct Session {
@@ -447,6 +499,9 @@ pub(crate) struct Session {
     /// Set when the relay refused this device ([`Removal`]). [`RelaySync`] shares it
     /// with each session of its vault, so it outlives a lock.
     removed: Arc<Removal>,
+    /// One sign-in at a time: the waiter of the worker and a sync can need a token at
+    /// the same moment.
+    sign_ins: SignIns,
 }
 
 impl fmt::Debug for Session {
@@ -474,6 +529,7 @@ impl Session {
             devices: Mutex::new(None),
             cancel: Cancel::default(),
             removed: Arc::new(Removal::new(REMOVED_PROBE_EVERY)),
+            sign_ins: SignIns::default(),
         }
     }
 
@@ -595,25 +651,24 @@ impl Session {
     /// [`Self::bearer`] with a token in memory only when it lasts past `until` too: an
     /// upload needs a token that lasts to its end, since the relay reads it again after
     /// the body (contract section 5).
+    ///
+    /// One sign-in of the session runs at a time. A caller that needs a token while
+    /// another signs in (the waiter of the worker beside a sync) waits for it, at most
+    /// until its own `deadline`, and then takes its answer: its token, or the refusal
+    /// that marked the device. So a refusal and a sign-in that works never cross: two
+    /// sign-ins at once could leave a refused sync with no mark, or a mark with a
+    /// token in memory, which no later sign-in would clear.
     fn bearer_until(
         &self,
         deadline: Option<Instant>,
         until: Option<Instant>,
     ) -> Result<Zeroizing<String>, ApiError> {
-        if self.cancel.is_closed() {
-            return Err(SyncError::Vault(VaultErrorKind::Locked).into());
+        if let Some(ready) = self.bearer_ready(until) {
+            return ready;
         }
-        // A removed device signs in no more until its next try ([`Removal`]), the owner
-        // turns sync off, or joins again (contract section 13).
-        if self.removed.holds() {
-            return Err(SyncError::RemovedFromRelay.into());
-        }
-        let margin = Instant::now() + TOKEN_MARGIN;
-        let needed = until.map_or(margin, |until| until.max(margin));
-        if let Some(token) = lock(&self.token).as_ref()
-            && token.until > needed
-        {
-            return Ok(token.value.clone());
+        let _turn = self.sign_ins.take(deadline)?;
+        if let Some(ready) = self.bearer_ready(until) {
+            return ready;
         }
         let token = self.sign_in(deadline)?;
         let value = token.value.clone();
@@ -621,6 +676,26 @@ impl Session {
             *lock(&self.token) = Some(token);
         }
         Ok(value)
+    }
+
+    /// The answer of [`Self::bearer_until`] without a sign-in: a closed session, a
+    /// removed device before its next try, or a token in memory that lasts past
+    /// `until`. `None`: a sign-in is needed.
+    fn bearer_ready(&self, until: Option<Instant>) -> Option<Result<Zeroizing<String>, ApiError>> {
+        if self.cancel.is_closed() {
+            return Some(Err(SyncError::Vault(VaultErrorKind::Locked).into()));
+        }
+        // A removed device signs in no more until its next try ([`Removal`]), the owner
+        // turns sync off, or joins again (contract section 13).
+        if self.removed.holds() {
+            return Some(Err(SyncError::RemovedFromRelay.into()));
+        }
+        let margin = Instant::now() + TOKEN_MARGIN;
+        let needed = until.map_or(margin, |until| until.max(margin));
+        lock(&self.token)
+            .as_ref()
+            .filter(|token| token.until > needed)
+            .map(|token| Ok(token.value.clone()))
     }
 
     /// A call with the access token. A `401` signs in again once and repeats the call
@@ -1227,11 +1302,17 @@ pub struct RelayConfig {
     pub state_path: PathBuf,
     /// A private folder for the copies that a merge reads and a push strips.
     pub work_dir: PathBuf,
+    /// How the client checks the relay's certificate: pinned for a node
+    /// (node-pairing-v1). [`TlsTrust::System`] from [`Self::in_data_dir`].
+    pub trust: TlsTrust,
+    /// The alternative destinations of a pinned relay, `host:port` each, in order.
+    pub alt: Vec<String>,
 }
 
 impl RelayConfig {
     /// The usual layout: the state file `<data_dir>/sync/<state_name>.json`, and the
-    /// work folder `<data_dir>/sync`.
+    /// work folder `<data_dir>/sync`. The relay has system trust ([`Self::with_trust`]
+    /// pins it).
     pub fn in_data_dir(data_dir: &Path, vault_path: &Path, url: &str, state_name: &str) -> Self {
         let dir = data_dir.join("sync");
         Self {
@@ -1239,8 +1320,86 @@ impl RelayConfig {
             url: url.to_owned(),
             state_path: dir.join(format!("{state_name}.json")),
             work_dir: dir,
+            trust: TlsTrust::System,
+            alt: Vec::new(),
         }
     }
+
+    /// [`Self::in_data_dir`] for the relay link `link` of the vault list: its origin,
+    /// and its pin and alternatives when it has them. A stored pin that is not a pin is
+    /// `InvalidRelayAddress`: it never falls back to system trust.
+    pub fn for_link(
+        data_dir: &Path,
+        vault_path: &Path,
+        link: &RelayLink,
+        state_name: &str,
+    ) -> Result<Self, SyncError> {
+        let trust = TlsTrust::from_pin_text(link.pin.as_deref())?;
+        let config = Self::in_data_dir(data_dir, vault_path, &link.url, state_name)
+            .with_trust(trust, &link.alt);
+        config.relay_url()?;
+        Ok(config)
+    }
+
+    /// The same layout with the trust `trust` and the alternatives `alt` of the relay.
+    #[must_use]
+    pub fn with_trust(mut self, trust: TlsTrust, alt: &[String]) -> Self {
+        self.trust = trust;
+        self.alt = alt.to_vec();
+        self
+    }
+
+    /// The same layout with the trust and the alternatives of `url` (a pinned link).
+    #[must_use]
+    pub fn with_url_trust(self, url: &RelayUrl) -> Self {
+        self.with_trust(url.trust(), &url.alternative_list())
+    }
+
+    /// The relay address with its trust and alternatives.
+    pub fn relay_url(&self) -> Result<RelayUrl, SyncError> {
+        RelayUrl::parse_with_trust(&self.url, self.trust)?.alternatives(&self.alt)
+    }
+}
+
+/// The relay link of the vault list for a device of `team_id` at `url`: its origin, and
+/// its pin and alternatives when the address is pinned.
+pub(crate) fn relay_link(url: &RelayUrl, team_id: &str, device_id: u64) -> RelayLink {
+    RelayLink::new(url.as_str(), team_id, device_id)
+        .with_trust(url.trust().pin_text(), url.alternative_list())
+}
+
+/// The address of the vault's membership of `team_id` on `url`: a membership with a pin
+/// (vault schema 28) connects only with that pin and its alternatives, also when the
+/// settings have none (node-pairing-v1 section 9 step 5). A pin in the settings that
+/// differs from the stored one is `WrongVault`.
+pub(crate) fn membership_url(
+    vault: &Vault,
+    url: RelayUrl,
+    team_id: &str,
+) -> Result<RelayUrl, SyncError> {
+    let Some(membership) = vault.relay_membership(team_id)? else {
+        return Ok(url);
+    };
+    let stored = TlsTrust::from_pin_text(membership.pin.as_deref())?;
+    match (stored, url.trust()) {
+        (TlsTrust::System, _) => Ok(url),
+        (stored, TlsTrust::System) => url.with_trust(stored)?.alternatives(&membership.alt),
+        (stored, given) if stored == given => Ok(url),
+        _ => Err(SyncError::WrongVault),
+    }
+}
+
+/// Keep the pin and the alternatives of a pinned `url` with the membership of `team_id`
+/// in the vault (vault schema 28). A hosted address leaves the membership as it is.
+pub(crate) fn keep_membership_trust(
+    vault: &mut Vault,
+    url: &RelayUrl,
+    team_id: &str,
+) -> Result<(), SyncError> {
+    if let Some(pin) = url.pin() {
+        vault.set_membership_trust(team_id, Some(&pin.text()), &url.alternative_list())?;
+    }
+    Ok(())
 }
 
 /// The result of turning relay sync on.
@@ -1472,10 +1631,11 @@ impl RelaySync {
             return Ok(session);
         }
         let row = vault.relay_device()?.ok_or(SyncError::NotEnabled)?;
-        let url = RelayUrl::parse(&self.config.url)?;
+        let url = self.config.relay_url()?;
         if row.relay_url != url.as_str() {
             return Err(SyncError::WrongVault);
         }
+        let url = membership_url(vault, url, &row.team_id)?;
         let key = DeviceKey::from_pkcs8(row.key_pkcs8)?;
         if key.public_key() != row.public_key.as_slice() {
             return Err(SyncError::Damaged);
@@ -2099,7 +2259,7 @@ impl RelaySync {
             self.require_unlocked(vault)?;
             Ok(vault.sync_identity()?)
         })?;
-        let url = RelayUrl::parse(&self.config.url)?;
+        let url = self.config.relay_url()?;
         let team_code = team_code.trim();
         if !valid_team_code(team_code) {
             return Err(SyncError::Relay(RelayRefusal::InviteInvalid));
@@ -2115,6 +2275,108 @@ impl RelaySync {
             Some(created.device_id),
         ));
         self.finish_enable(vault, session, &local.vault_id, team, None)
+    }
+
+    /// Turn relay sync on without a team code (plans section 4.1): a relay that gives new
+    /// Connect teams a sync size (`APASSY_RELAY_CONNECT_SYNC_BYTES`, the hosted relay until
+    /// Apassy Connect starts) takes a Connect team with the purpose `sync`. The team is
+    /// the vault's one Connect team:
+    ///
+    /// - this Mac's questions membership on the same relay, when the vault asks through
+    ///   one: no relay call; the membership gets the purpose `sync` with the first push;
+    /// - else the saved Connect attempt of the vault (`Vault::pending_connect`), also one
+    ///   that a questions attempt left: its key is committed before `POST /v1/connect`,
+    ///   and a lost answer recovers the same team at the next try (ADR 0032 F06);
+    /// - a vault with a questions team that another Mac holds: `JoinOtherMac`.
+    ///
+    /// Then the sign-in and the push of version 1, as [`Self::create_team`]. A team made
+    /// before the relay's setting answers 403 `plan_required`
+    /// (`RelayRefusal::PlanRequired`); nothing turns on, and the attempt stays for a retry.
+    pub fn create_team_codeless(
+        &self,
+        vault: &mut Vault,
+        vault_name: &str,
+        device: &str,
+    ) -> Result<RelayEnableReport, crate::relay::connect::ConnectError> {
+        let _run = self.try_run()?;
+        self.create_team_codeless_in(vault, vault_name, device)
+    }
+
+    /// [`Self::create_team_codeless`] with the shared vault slot of the app, as
+    /// [`Self::sync_shared`]: `POST /v1/connect` and the upload of version 1 run without
+    /// the slot's mutex.
+    pub fn create_team_codeless_shared(
+        &self,
+        slot: &Mutex<Option<Vault>>,
+        accept: impl Fn(&Vault) -> bool,
+        vault_name: &str,
+        device: &str,
+    ) -> Result<RelayEnableReport, crate::relay::connect::ConnectError> {
+        let _run = self.run_shared()?;
+        self.create_team_codeless_in(&mut SharedSlot { slot, accept }, vault_name, device)
+    }
+
+    fn create_team_codeless_in<A: VaultAccess + ?Sized>(
+        &self,
+        vault: &mut A,
+        vault_name: &str,
+        device: &str,
+    ) -> Result<RelayEnableReport, crate::relay::connect::ConnectError> {
+        use crate::relay::connect::{self, ConnectError};
+        use crate::vault::MembershipPurpose;
+        if self.state()?.is_some() {
+            return Err(SyncError::AlreadyEnabled.into());
+        }
+        let url = self.config.relay_url()?;
+        let team = clean_name(vault_name, "Vault");
+        let device = clean_name(device, "Mac");
+        // The team of the vault on this relay, or its saved attempt with a committed key.
+        enum Staged {
+            Team(crate::vault::RelayMembership),
+            Attempt(crate::vault::PendingConnect),
+            Refused(ConnectError),
+        }
+        // One local step.
+        let (local, staged) = vault.with(|vault| {
+            self.require_unlocked(vault)?;
+            let local = vault.sync_identity()?;
+            let staged = match crate::relay::membership::questions_team_for_sync(vault, &url)? {
+                Some(membership) => Staged::Team(membership),
+                None => match connect::prepare_connect_for(
+                    vault,
+                    url.as_str(),
+                    &team,
+                    &device,
+                    MembershipPurpose::Sync,
+                ) {
+                    Ok(pending) => Staged::Attempt(pending),
+                    Err(error) => Staged::Refused(error),
+                },
+            };
+            Ok((local, staged))
+        })?;
+        let membership = match staged {
+            Staged::Team(membership) => membership,
+            Staged::Refused(error) => return Err(error),
+            Staged::Attempt(pending) => {
+                // No vault lock across the relay call; the answer is kept before the push.
+                let membership = connect::create_connect_for(&pending, MembershipPurpose::Sync)?;
+                vault.with(|vault| Ok(vault.keep_connect_result(&membership)?))?;
+                membership
+            }
+        };
+        if membership.relay_url != url.as_str() {
+            return Err(ConnectError::OriginChanged);
+        }
+        let key = DeviceKey::from_pkcs8(membership.key_pkcs8.clone())?;
+        let session = Arc::new(Session::new(
+            url,
+            &membership.team_id,
+            key,
+            Some(membership.device_id),
+        ));
+        *lock(&self.refused) = None;
+        Ok(self.finish_enable(vault, session, &local.vault_id, team, None)?)
     }
 
     /// Turn relay sync on for a vault that is already on the relay, with a device that
@@ -2192,7 +2454,7 @@ impl RelaySync {
             self.require_unlocked(vault)?;
             Ok(vault.sync_identity()?)
         })?;
-        if RelayUrl::parse(&self.config.url)?.as_str() != joined.session.url.as_str() {
+        if self.config.relay_url()?.as_str() != joined.session.url.as_str() {
             return Err(SyncError::WrongVault);
         }
         *lock(&self.refused) = None;
@@ -2260,13 +2522,17 @@ impl RelaySync {
             public_key: session.key.public_key().to_vec(),
             key_pkcs8: key,
             created_at: 0,
+            account_key: false,
         };
-        vault.with(|vault| Ok(vault.set_relay_device(&row)?))?;
+        vault.with(|vault| {
+            vault.set_relay_device(&row)?;
+            keep_membership_trust(vault, &session.url, &session.team_id)
+        })?;
         self.write_state(&state)?;
         if outcome.merge.is_some() {
             transport.send_receipt(state.last_remote_version);
         }
-        let link = RelayLink::new(session.url.as_str(), &session.team_id, device_id);
+        let link = relay_link(&session.url, &session.team_id, device_id);
         Ok(RelayEnableReport {
             link,
             team,
@@ -2310,7 +2576,17 @@ impl RelaySync {
                     public_key: session.key.public_key().to_vec(),
                     key_pkcs8: session.key.pkcs8().cloned().unwrap_or_default(),
                     created_at: 0,
+                    account_key: false,
                 })
+            })
+            // A pinned node: its pin and alternatives stay with the membership.
+            .and_then(|()| match session.url.pin() {
+                Some(pin) => vault.set_membership_trust(
+                    &session.team_id,
+                    Some(&pin.text()),
+                    &session.url.alternative_list(),
+                ),
+                None => Ok(()),
             })
             .and_then(|()| vault.lock());
         if let Err(error) = stored {
@@ -2335,7 +2611,7 @@ impl RelaySync {
         Ok((
             vault,
             RelayAdoptReport {
-                link: RelayLink::new(session.url.as_str(), &session.team_id, device_id),
+                link: relay_link(&session.url, &session.team_id, device_id),
                 identity: adopted.identity,
             },
         ))
@@ -2435,24 +2711,48 @@ struct LinkBody<'a> {
 }
 
 impl PendingJoin {
-    /// Parse the pasted text: `<relay URL>/link#<code>`, or a bare code with the relay
-    /// address `relay_url` from the field above it.
+    /// Parse the pasted or scanned text: a device link `<origin>/link#<code>` with its
+    /// parameters (contract node-pairing-v1: `pin`, `alt`, `name`, `handoff`), or a bare
+    /// code with the relay address `relay_url` from the field above it. The address of a
+    /// pinned link carries its pin and alternatives; the handoff, the pin, and the name
+    /// never reach the relay. A link that the grammar refuses is `LinkInvalid` with its
+    /// reason, also a node pairing link (`/pair#`, not a device link), and makes no
+    /// request.
     pub fn parse_link(
         text: &str,
         relay_url: &str,
     ) -> Result<(RelayUrl, Zeroizing<String>), SyncError> {
-        let parsed = crate::relay::pairing::PairingChannel::parse(text);
-        let text = parsed.as_ref().map_or(text, |(raw, _)| *raw);
+        let paired = Self::parse_paired(text, relay_url)?;
+        Ok((paired.url()?, paired.code))
+    }
 
-        let text = text.trim();
-        let (url, code) = match text.split_once("/link#") {
-            Some((url, code)) => (RelayUrl::parse(url)?, code),
-            None => (RelayUrl::parse(relay_url)?, text),
-        };
-        if link_code_team(code).is_none() {
-            return Err(SyncError::Relay(RelayRefusal::Forbidden));
+    /// [`Self::parse_link`] with every part of the link: the origin, the code, the pin,
+    /// the alternatives, the node name, and the handoff. A bare code is a hosted link of
+    /// `relay_url`.
+    pub fn parse_paired(text: &str, relay_url: &str) -> Result<PairedLink, SyncError> {
+        let trimmed = text.trim();
+        if !trimmed.contains('#') {
+            // A bare code: a hosted relay of the field above it, as before.
+            let url = RelayUrl::parse(relay_url)?;
+            if link_code_team(trimmed).is_none() {
+                return Err(SyncError::Relay(RelayRefusal::Forbidden));
+            }
+            return Ok(PairedLink {
+                kind: LinkKind::Device,
+                origin: url.as_str().to_owned(),
+                code: Zeroizing::new(trimmed.to_owned()),
+                pin: None,
+                alt: Vec::new(),
+                name: None,
+                handoff: None,
+                without_handoff: Zeroizing::new(format!("{}/link#{trimmed}", url.as_str())),
+            });
         }
-        Ok((url, Zeroizing::new(code.to_owned())))
+        let paired = PairedLink::parse(text).map_err(SyncError::LinkInvalid)?;
+        if paired.kind != LinkKind::Device {
+            return Err(SyncError::LinkInvalid(LinkRefusal::BadCode));
+        }
+        Ok(paired)
     }
 
     /// Make a device key and send the link (`POST /v1/devices/link`). The relay's

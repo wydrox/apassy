@@ -1,0 +1,10 @@
+#!/bin/sh
+# The package installs files only. The node is a systemd user service of one user:
+# that user runs `apassy up`, which writes and starts it. Nothing runs as root here.
+set -e
+case "$1" in
+    configure)
+        printf '%s\n' 'Apassy node installed. As your own user (not root), run: apassy up' >&2
+        ;;
+esac
+exit 0

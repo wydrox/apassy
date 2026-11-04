@@ -8,11 +8,18 @@ pub mod browser;
 /// The `apassy` owner command line (ADR 0017).
 #[cfg(feature = "desktop")]
 pub mod cli;
+/// The Apassy Connect account of this Mac (ADR 0037 stage 7, contract
+/// connect-account-v1): the account device key in the Keychain, sign-in, device links,
+/// recovery, and the entitlement token. It needs the vault.
+#[cfg(feature = "vault")]
+pub mod connect;
 pub mod contracts;
 /// CSV framing shared by the owner CLI and the vault import preview.
 pub mod csv;
 /// The bouncer decision log file for debugging (`apassy decisions log`).
 pub mod decision_log;
+/// Process hardening: no core dumps, not dumpable on Linux (ADR 0011 stage 6).
+pub mod harden;
 
 /// Local agent broker (ADR 0004). It needs the vault.
 #[cfg(feature = "vault")]
@@ -21,6 +28,11 @@ pub mod broker;
 /// The iPhone companion, Mac side (ADR 0020). It needs the vault.
 #[cfg(feature = "vault")]
 pub mod companion;
+/// The TLS front of the node and the tailnet addresses (ADR 0037 D4). The Wi-Fi
+/// companion shares its TLS configuration, limits, and pin. It needs the vault
+/// (rustls, ring, rcgen).
+#[cfg(feature = "vault")]
+pub mod net;
 /// Sync of a vault through a folder (ADR 0014). It needs the vault.
 #[cfg(feature = "vault")]
 pub mod sync;
@@ -41,9 +53,19 @@ pub mod relay {
 #[cfg(feature = "desktop")]
 pub mod desktop;
 
+/// Process isolation outside Seatbelt: the bubblewrap sandbox of Linux (ADR 0011
+/// stage 2, ADR 0037 stage 8). It needs no feature, so `apassy-sandbox` uses it.
+pub mod isolation;
+
 /// Import from 1Password (1PUX and CSV exports). It needs the vault types.
 #[cfg(feature = "vault")]
 pub mod import;
+
+/// Short-lived credentials, "way C" (ADR 0037 stage 6, contract private-sharing-v1):
+/// the lease providers, AWS SigV4, and the no-secret scan of the tests. It needs the
+/// vault (`ring`, the broker's HTTP client, the field types).
+#[cfg(feature = "vault")]
+pub mod lease;
 
 /// Time-based one-time passwords shared by the desktop and iPhone vaults.
 #[cfg(feature = "vault")]

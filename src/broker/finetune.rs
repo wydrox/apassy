@@ -267,6 +267,13 @@ fn fnv(text: &str) -> u64 {
 ///   weight).
 /// - A hash of the command puts 20% of the commands in the validation part.
 pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
+    examples_from_export_in(jsonl, home.as_deref().map(Path::new))
+}
+
+/// [`examples_from_export`] with the home folder that [`bouncer::shorten_paths`] uses.
+/// The project root is the `project_dir` of the line, when the line has one.
+fn examples_from_export_in(jsonl: &str, home: Option<&Path>) -> Result<ExampleSet, String> {
     let questions: BTreeMap<&str, &str> = bouncer::questions().into_iter().collect();
     let question = |name: &str| questions.get(name).copied().unwrap_or_default().to_owned();
     let mut stats = ExampleStats::default();
@@ -309,6 +316,11 @@ pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
         }
         let command = texts(&value, "command")?.join(" ");
         let instruction = text(&value, "instruction")?;
+        let project_root = value
+            .get("project_dir")
+            .and_then(Value::as_str)
+            .filter(|dir| !dir.is_empty())
+            .map(Path::new);
         let request = BouncerRequest {
             user_request: user_request.to_owned(),
             command: command.clone(),
@@ -317,7 +329,8 @@ pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
             env_names: texts(&value, "env_names")?,
             instruction: instruction.to_owned(),
             task_provenance: String::new(),
-        };
+        }
+        .sanitized(project_root, home, str::to_owned);
         lines.push(OwnerLine {
             state: bouncer::state_text(&request),
             command,
@@ -664,12 +677,11 @@ fn log_tail(path: &Path) -> String {
 
 /// Run the gate, the trainer, and the registration. `power` gives the power source.
 /// The broker calls it again every `limits.power_every` during the training. `stop`
-/// stops the trainer. `candidate_url` is the loopback address where the owner serves
-/// the candidate.
+/// stops the trainer. The candidate starts in shadow mode on no host: it answers once
+/// `heads_place::place` has put its head set on the bouncer brain (plan 0035 unit G).
 pub fn train(
     vault: &SharedVault,
     trainer: &Trainer,
-    candidate_url: &str,
     limits: Limits,
     power: &dyn Fn() -> Power,
     stop: &AtomicBool,
@@ -807,7 +819,9 @@ pub fn train(
             .register_candidate(
                 &NewCandidate {
                     version: result.version,
-                    url: candidate_url.to_owned(),
+                    // The 8775 candidate server is gone (plan 0035 unit F): the
+                    // candidate answers in the request of the active model.
+                    url: String::new(),
                     checkpoint: result.checkpoint.display().to_string(),
                     checkpoint_sha256: result.sha256,
                     report,
@@ -917,6 +931,94 @@ mod tests {
             "remembered": false,
         })
         .to_string()
+    }
+
+    /// ADR 0035: a training state shortens the project root and the home folder as the
+    /// broker does, so the heads learn the state that a brain receives.
+    #[test]
+    fn training_states_shorten_the_project_and_home_folders() {
+        // Two distinct commands, so the set has a training and a validation part.
+        let export: Vec<String> = [
+            "cat /srv/home/ann/app/.env /srv/home/ann/.ssh/id",
+            "ls /srv/home/ann/app/src ~/x",
+        ]
+        .iter()
+        .map(|command| {
+            let mut value: Value =
+                serde_json::from_str(&line("deny", "owner", command, "Show the config.", &[]))
+                    .expect("json");
+            value["project_dir"] = json!("/srv/home/ann/app");
+            value["user_request"] =
+                json!("  Check /srv/home/ann/app/src\nand /srv/home/ann/notes [apassy:secret].  ");
+            value["purpose"] =
+                json!("  Read /srv/home/ann/app/src and /srv/home/ann/notes [apassy:secret].  ");
+            value.to_string()
+        })
+        .collect();
+        let set = examples_from_export_in(&export.join("\n"), Some(Path::new("/srv/home/ann")))
+            .expect("examples");
+        let states: BTreeSet<&str> = set
+            .train
+            .iter()
+            .chain(&set.val)
+            .map(|example| example.state.as_str())
+            .collect();
+        assert!(!states.is_empty());
+        let dir = tempfile::tempdir().expect("temp");
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("vault.db"), "brain-state-test-pass")
+                .expect("vault");
+        vault.unlock("brain-state-test-pass").expect("unlock");
+        let item = vault
+            .add(crate::vault::ItemDraft {
+                title: "Synthetic".to_owned(),
+                kind: crate::contracts::CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![crate::vault::Field {
+                    name: "token".to_owned(),
+                    value: crate::vault::SecretValue::new("FAKE-literal-314159".to_owned()),
+                    secret: true,
+                }],
+            })
+            .expect("item");
+        let mask = vault.command_mask(&[item.id]).expect("mask");
+        for line in &export {
+            let value: Value = serde_json::from_str(line).expect("line");
+            let runtime = BouncerRequest {
+                user_request: text(&value, "user_request")
+                    .unwrap()
+                    .replace("[apassy:secret]", "FAKE-literal-314159"),
+                command: texts(&value, "command")
+                    .unwrap()
+                    .join(" ")
+                    .replace("[apassy:secret]", "FAKE-literal-314159"),
+                relative_dir: ".".to_owned(),
+                purpose: text(&value, "purpose")
+                    .unwrap()
+                    .replace("[apassy:secret]", "FAKE-literal-314159"),
+                env_names: vec!["DEMO_KEY".to_owned()],
+                instruction: String::new(),
+                task_provenance: String::new(),
+            }
+            .sanitized(
+                Some(Path::new("/srv/home/ann/app")),
+                Some(Path::new("/srv/home/ann")),
+                |text| mask.summary(text, usize::MAX),
+            );
+            assert!(states.contains(bouncer::state_text(&runtime).as_str()));
+        }
+        for state in &states {
+            assert!(!state.contains("/srv/home/ann"), "{state}");
+        }
+        assert!(
+            states.iter().any(|s| s.contains("`cat ./.env ~/.ssh/id`")),
+            "{states:?}"
+        );
+        assert!(
+            states.iter().any(|s| s.contains("`ls ./src ~/x`")),
+            "{states:?}"
+        );
     }
 
     /// Gate 1 (B-3): a run that a remembered answer allowed is no owner label. Its

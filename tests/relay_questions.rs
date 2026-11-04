@@ -3001,6 +3001,8 @@ fn a_second_mac_joins_the_questions_team_of_the_vault() {
         key_pkcs8: joined.key_pkcs8().unwrap(),
         purposes: BTreeSet::from([MembershipPurpose::Questions]),
         created_at: 0,
+        pin: None,
+        alt: Vec::new(),
     };
     let me = join_questions_team(&mut vault_b, &membership, "Synthetic Mac mini").expect("join");
     assert_eq!(me.kind, TrustedDeviceKind::Mac);

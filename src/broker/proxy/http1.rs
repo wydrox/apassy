@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The largest request or response head.
 pub(super) const MAX_HEAD_BYTES: usize = 64 * 1024;
@@ -31,9 +31,31 @@ impl<S: Read> Conn<S> {
         }
     }
 
+    /// A stream whose first bytes another reader took already. They come first. The
+    /// given buffer is erased, because it can hold the proxy password.
+    pub fn with_buffered(inner: S, mut bytes: Vec<u8>) -> Self {
+        let mut buf = Zeroizing::new(Vec::with_capacity(READ_CHUNK.max(bytes.len())));
+        buf.extend_from_slice(&bytes);
+        bytes.zeroize();
+        Self {
+            inner,
+            buf,
+            start: 0,
+        }
+    }
+
     /// The bytes read from the stream but not used yet.
     pub fn buffered(&self) -> &[u8] {
         &self.buf[self.start..]
+    }
+
+    /// Takes the bytes read from the stream but not used yet, for a protocol that
+    /// follows the HTTP heads (a WebSocket). The buffer is erased.
+    pub fn take_buffered(&mut self) -> Zeroizing<Vec<u8>> {
+        let rest = Zeroizing::new(self.buffered().to_vec());
+        self.buf.zeroize();
+        self.start = 0;
+        rest
     }
 
     fn consume(&mut self, count: usize) {
@@ -65,6 +87,15 @@ impl<S: Read> Conn<S> {
     /// A head up to and with the empty line. `None` at the end of the stream before
     /// the first byte.
     pub fn read_head(&mut self) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.read_head_with(|_| Ok(()))
+    }
+
+    /// As [`Conn::read_head`]; `before_read` runs before each read of the stream,
+    /// for a deadline of the whole head. Its error ends the read.
+    pub fn read_head_with(
+        &mut self,
+        mut before_read: impl FnMut(&S) -> io::Result<()>,
+    ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
         loop {
             if let Some(end) = find(self.buffered(), b"\r\n\r\n") {
                 let head = Zeroizing::new(self.buffered()[..end + 4].to_vec());
@@ -74,6 +105,7 @@ impl<S: Read> Conn<S> {
             if self.buffered().len() > MAX_HEAD_BYTES {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "head too large"));
             }
+            before_read(&self.inner)?;
             if self.fill()? == 0 {
                 return if self.buffered().is_empty() {
                     Ok(None)
@@ -145,6 +177,23 @@ impl RequestHead {
 
     pub fn wants_close(&self) -> bool {
         wants_close(&self.headers, self.http10)
+    }
+
+    /// How many headers have this name.
+    pub fn header_count(&self, name: &str) -> usize {
+        self.headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+            .count()
+    }
+
+    /// The target is in origin form (`/path?query`, RFC 9112 §3.2.1), or `*` for
+    /// `OPTIONS`. An absolute form (`https://other.example/`) or an authority could
+    /// name another host than the connection, so the proxy refuses it on an
+    /// intercepted connection. `//x` is refused too: some servers read it as a host.
+    pub fn has_origin_form(&self) -> bool {
+        (self.target.starts_with('/') && !self.target.starts_with("//"))
+            || (self.target == "*" && self.method.eq_ignore_ascii_case("OPTIONS"))
     }
 }
 
@@ -291,6 +340,17 @@ pub(super) struct ResponseHead {
     pub upgrade: bool,
     /// The body is compressed, so the proxy cannot find a real value in it.
     pub encoded: bool,
+    /// A transfer coding other than `chunked` alone (`gzip, chunked`): the proxy
+    /// cannot find a real value in it either.
+    pub transfer_coded: bool,
+}
+
+impl ResponseHead {
+    /// The proxy cannot read the body for a real value: a content coding other
+    /// than `identity`, or a transfer coding other than `chunked`.
+    pub fn unreadable(&self) -> bool {
+        self.encoded || self.transfer_coded
+    }
 }
 
 pub(super) fn parse_response_head(raw: &[u8], method: &str) -> Result<ResponseHead, &'static str> {
@@ -328,14 +388,20 @@ pub(super) fn parse_response_head(raw: &[u8], method: &str) -> Result<ResponseHe
             None => BodyLen::UntilClose,
         }
     };
-    let encoded = header(&headers, "content-encoding")
-        .is_some_and(|coding| !coding.trim().eq_ignore_ascii_case("identity"));
+    let encoded = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"));
+    let transfer_coded = !codings.is_empty() && codings != ["chunked"];
     Ok(ResponseHead {
         status,
         close: wants_close(&headers, http10) || body == BodyLen::UntilClose,
         body,
         upgrade: status == 101,
         encoded,
+        transfer_coded,
     })
 }
 
@@ -378,71 +444,49 @@ impl<'a> Scanner<'a> {
 /// Swaps real values for placeholders in a response that comes in pieces. Each pair
 /// has the same length, so the body keeps its length. It holds back only an end of a
 /// piece that can be the start of a value, so a stream (server-sent events) flows.
-pub(super) struct Replacer<'a> {
-    pairs: &'a [(&'a [u8], &'a [u8])],
-    pending: Zeroizing<Vec<u8>>,
+pub(super) struct Replacer {
+    inner: super::echo::Replacer,
     pub replaced: bool,
 }
 
-impl<'a> Replacer<'a> {
-    pub fn new(pairs: &'a [(&'a [u8], &'a [u8])]) -> Self {
-        debug_assert!(pairs.iter().all(|(from, to)| from.len() == to.len()));
+impl Replacer {
+    pub fn new(pairs: &[(&[u8], &[u8])]) -> Self {
+        use super::echo::{Pair, Pattern};
+        // Request-specific encoded echoes follow raw values in `pairs` and win
+        // ties, keeping redirected query placeholders usable after URL decoding.
+        let patterns = pairs
+            .iter()
+            .rev()
+            .filter_map(|(from, to)| Pattern::escaped(from, to))
+            .collect();
+        let pairs = pairs
+            .iter()
+            .filter(|(from, _)| !from.is_empty())
+            .map(|(from, to)| Pair {
+                from: Zeroizing::new(from.to_vec()),
+                to: to.to_vec(),
+            })
+            .collect();
         Self {
-            pairs,
-            pending: Zeroizing::new(Vec::new()),
+            inner: super::echo::Replacer::new(pairs).with_patterns(patterns),
             replaced: false,
         }
     }
 
-    /// Replace in place. Returns true when a value was found.
     pub fn replace_all(pairs: &[(&[u8], &[u8])], data: &mut [u8]) -> bool {
-        let mut found = false;
-        for (from, to) in pairs {
-            if from.is_empty() {
-                continue;
-            }
-            let mut offset = 0;
-            while let Some(position) = find(&data[offset..], from) {
-                let at = offset + position;
-                data[at..at + to.len()].copy_from_slice(to);
-                offset = at + to.len();
-                found = true;
-            }
-        }
-        found
+        Self::new(pairs).inner.replace_all(data)
     }
 
-    /// The length of the longest end of `data` that is the start of a value.
-    fn open_end(&self, data: &[u8]) -> usize {
-        self.pairs
-            .iter()
-            .map(|(from, _)| {
-                (1..from.len().min(data.len() + 1))
-                    .rev()
-                    .find(|&k| data[data.len() - k..] == from[..k])
-                    .unwrap_or(0)
-            })
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// Add `data`. Returns the bytes that are final: no value can start in them.
     pub fn feed(&mut self, data: &[u8]) -> Zeroizing<Vec<u8>> {
-        let mut window = Zeroizing::new(Vec::with_capacity(self.pending.len() + data.len()));
-        window.extend_from_slice(&self.pending);
-        window.extend_from_slice(data);
-        self.replaced |= Self::replace_all(self.pairs, &mut window);
-        let split = window.len() - self.open_end(&window);
-        self.pending = Zeroizing::new(window[split..].to_vec());
-        window.truncate(split);
-        window
+        let out = self.inner.feed(data);
+        self.replaced = self.inner.replaced;
+        out
     }
 
-    /// The rest, at the end of the body.
     pub fn finish(&mut self) -> Zeroizing<Vec<u8>> {
-        let mut rest = std::mem::replace(&mut self.pending, Zeroizing::new(Vec::new()));
-        self.replaced |= Self::replace_all(self.pairs, &mut rest);
-        rest
+        let out = self.inner.finish();
+        self.replaced = self.inner.replaced;
+        out
     }
 }
 
@@ -541,7 +585,7 @@ pub(super) fn copy_response_body<U: Read, C: Write>(
     from: &mut Conn<U>,
     to: &mut C,
     body: BodyLen,
-    replacer: &mut Replacer<'_>,
+    replacer: &mut Replacer,
 ) -> io::Result<()> {
     match body {
         BodyLen::None => Ok(()),
@@ -586,7 +630,7 @@ pub(super) fn copy_response_body<U: Read, C: Write>(
                     to.write_all(b"0\r\n")?;
                     loop {
                         let mut trailer = from.read_line()?;
-                        replacer.replaced |= Replacer::replace_all(replacer.pairs, &mut trailer);
+                        replacer.replaced |= replacer.inner.replace_all(&mut trailer);
                         to.write_all(&trailer)?;
                         if trailer.as_slice() == b"\r\n" {
                             return Ok(());
@@ -613,6 +657,74 @@ pub(super) fn copy_response_body<U: Read, C: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoded_echoes_keep_length_at_every_read_boundary() {
+        for (value, echoes) in [
+            (
+                "synthetic+secret/ending=",
+                vec![
+                    "synthetic%2Bsecret%2Fending%3D",
+                    "synthetic%2bsecret%2fending%3d",
+                    r"synthetic+secret\/ending=",
+                    r"synthetic\u002bsecret\u002Fending\u003d",
+                ],
+            ),
+            (
+                "synthetic<&>\"'/secret&",
+                vec![
+                    "synthetic&lt;&amp;&gt;&quot;&#39;&#x2F;secret&amp;",
+                    "synthetic&#60;&#038;&#x003e;&#34;&#039;&#X2F;secret&#38;",
+                ],
+            ),
+            (
+                "synthetic\"\\é€😀\n\t\u{1}",
+                vec![
+                    r#"synthetic\"\\\u00e9\u20ac\ud83d\ude00\n\t\u0001"#,
+                    r#"synthetic\u0022\u005C\u00E9\u20AC\uD83D\uDE00\u000A\u0009\u0001"#,
+                ],
+            ),
+        ] {
+            let placeholder = vec![b'Q'; value.len()];
+            let pairs = [(value.as_bytes(), placeholder.as_slice())];
+            for echo in echoes.into_iter().chain(std::iter::once(value)) {
+                let input = format!("before {echo} after {echo}");
+                let shown = "Q".repeat(echo.len());
+                let expected = format!("before {shown} after {shown}");
+                let mut whole = input.as_bytes().to_vec();
+                assert!(Replacer::replace_all(&pairs, &mut whole));
+                assert_eq!(whole, expected.as_bytes(), "{echo}");
+                for split in 0..=input.len() {
+                    let mut replacer = Replacer::new(&pairs);
+                    let mut out = replacer.feed(&input.as_bytes()[..split]).to_vec();
+                    out.extend_from_slice(&replacer.feed(&input.as_bytes()[split..]));
+                    out.extend_from_slice(&replacer.finish());
+                    assert_eq!(out, expected.as_bytes(), "{echo}, split {split}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn longest_echo_wins_without_rescanning_replacements() {
+        let pairs: &[(&[u8], &[u8])] = &[
+            (b"token", b"short"),
+            (b"token&", b"longQQ"),
+            (b"longQQ", b"oopsQQ"),
+        ];
+        let mut replacer = Replacer::new(pairs);
+        assert!(replacer.feed(b"token").is_empty());
+        assert!(replacer.feed(b"&am").is_empty());
+        let mut out = replacer.feed(b"p;!").to_vec();
+        out.extend_from_slice(&replacer.finish());
+        assert_eq!(out, b"longQQQQQQ!");
+        let mut same = b"duplicate".to_vec();
+        assert!(Replacer::replace_all(
+            &[(b"duplicate", b"firstQQQQ"), (b"duplicate", b"otherQQQQ")],
+            &mut same
+        ));
+        assert_eq!(same, b"firstQQQQ");
+    }
 
     #[test]
     fn request_heads_are_strict() {
@@ -668,6 +780,20 @@ mod tests {
             .body,
             BodyLen::Chunked
         );
+        let plain = head(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "GET",
+        );
+        assert!(!plain.unreadable());
+        for coded in [
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 3\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Encoding: br\r\nContent-Length: 3\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Encoding: identity, deflate\r\nContent-Length: 3\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n",
+        ] {
+            assert!(head(coded, "GET").unreadable(), "{coded}");
+        }
         let until = head("HTTP/1.1 200 OK\r\n\r\n", "GET");
         assert_eq!(until.body, BodyLen::UntilClose);
         assert!(until.close);

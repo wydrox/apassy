@@ -331,9 +331,9 @@ fn unread(row: &TeamRow) -> TeamRollback {
 fn directory_teams(config: &RelayConfig) -> RelayResult<Vec<TeamRow>> {
     let store = Store::open_read_only(&config.directory_path(), &config.master_key)?;
     if store.user_version()? != DIRECTORY_VERSION {
-        return Err(RelayError::internal(
-            "relay.db is not the directory of this relay version (1004).",
-        ));
+        return Err(RelayError::internal(format!(
+            "relay.db is not the directory of this relay version ({DIRECTORY_VERSION})."
+        )));
     }
     store.with(directory::read_teams)
 }
@@ -383,13 +383,14 @@ pub fn check(config: &RelayConfig) -> RelayResult<Vec<TeamRollback>> {
     Ok(answers)
 }
 
-/// What `downgrade-schema-6` did to one team file.
+/// What `downgrade-schema-6` or `downgrade-schema-7` did to one team file.
 #[derive(Debug, Serialize)]
 pub struct Downgraded {
     pub team: TeamId,
     /// The schema version of the file before, when it could be read.
     pub from: Option<i64>,
-    /// The schema version of the file after: 6 when it was 7, else as it was.
+    /// The schema version of the file after: the target when it was above it, else as it
+    /// was.
     pub to: Option<i64>,
     /// The agents with an item list that were revoked (`Store::downgrade_to_v6`).
     pub agents_revoked: u64,
@@ -398,11 +399,40 @@ pub struct Downgraded {
 }
 
 /// `apassy-relay downgrade-schema-6` (docs/OPERATIONS.md section 23.3): with the relay
-/// stopped (it takes `relay.lock`), every team file of version 7 goes back to version 6
-/// in place, for the image of schema 6. Each agent with an item list is revoked, since
-/// that image would give it every item of its member's grants. A file of another version
-/// is left as it is. One team that fails does not stop the others: its `error` says why.
+/// stopped (it takes `relay.lock`), every team file of version 7 or 8 goes back to
+/// version 6 in place, for the image of schema 6. Each agent with an item list is
+/// revoked, since that image would give it every item of its member's grants. A file of
+/// another version is left as it is. One team that fails does not stop the others: its
+/// `error` says why.
 pub fn downgrade_to_6(config: &RelayConfig) -> RelayResult<Vec<Downgraded>> {
+    downgrade_each(config, |store, now| {
+        if matches!(store.user_version()?, 7 | 8) {
+            return store.downgrade_to_v6(now);
+        }
+        Ok(0)
+    })
+}
+
+/// `apassy-relay downgrade-schema-7` (docs/OPERATIONS.md section 25.2): with the relay
+/// stopped (it takes `relay.lock`), every team file of version 8 goes back to version 7
+/// in place, for the image of schema 7. Only the version changes: the push handles stay
+/// for the next start of schema 8 (`Store::downgrade_to_v7`). A file of another version
+/// is left as it is. One team that fails does not stop the others.
+pub fn downgrade_to_7(config: &RelayConfig) -> RelayResult<Vec<Downgraded>> {
+    downgrade_each(config, |store, _| {
+        if store.user_version()? == 8 {
+            store.downgrade_to_v7()?;
+        }
+        Ok(0)
+    })
+}
+
+/// Runs `step` on the file of every team of the directory, with the relay stopped.
+/// `step` returns the agents it revoked.
+fn downgrade_each(
+    config: &RelayConfig,
+    step: impl Fn(&Store, u64) -> RelayResult<u64>,
+) -> RelayResult<Vec<Downgraded>> {
     let _lock = crate::server::hub::lock_data_dir(config)?;
     let rows = directory::Directory::open(config)?.teams()?;
     let now = crate::now_unix();
@@ -418,11 +448,8 @@ pub fn downgrade_to_6(config: &RelayConfig) -> RelayResult<Vec<Downgraded>> {
             };
             let result = (|| -> RelayResult<()> {
                 let store = Store::open_at(&config.team_path(&row.id), &row.file_key)?;
-                let version = store.user_version()?;
-                answer.from = Some(version);
-                if version == 7 {
-                    answer.agents_revoked = store.downgrade_to_v6(now)?;
-                }
+                answer.from = Some(store.user_version()?);
+                answer.agents_revoked = step(&store, now)?;
                 answer.to = Some(store.user_version()?);
                 Ok(())
             })();

@@ -18,7 +18,7 @@ use apassy::sync::{DeviceKey, decode_b64u, encode_b64u};
 use apassy::vault::{TrustedDeviceKind, Vault};
 use apassy_core::Core;
 use questions_fixture::*;
-use questions_relay::{QuestionsRelay, now};
+use questions_relay::{FakeGateway, QuestionsRelay, now};
 use serde_json::{Value, json};
 
 const WATCH_PASS: &str = "synthetic-watch-replica-pass";
@@ -107,8 +107,6 @@ fn a_watch_core_refuses_every_call_but_its_own() {
         "question_answer_string",
         "question_answer",
         "answer_key_register",
-        "push_token_set",
-        "push_token_clear",
         "join_attach",
         "join_attach_poll",
         "join_attach_cancel",
@@ -364,6 +362,38 @@ fn a_watch_connects_answers_an_access_request_and_forgets_its_replica() {
         ),
         "already_connected"
     );
+    // The watch's own push (push-gateway-v1 section 11): a handle of the kind `watch` for
+    // the watch app's topic, and never a token to the relay.
+    mac.relay.set_gateway_mode(true);
+    let gateway = FakeGateway::start();
+    let token = "c3".repeat(32);
+    let set = call(
+        &watch,
+        json!({"op": "push_token_set", "token": token, "environment": "production",
+               "gateway": gateway.url}),
+    );
+    assert_eq!(set["device_id"], device_id);
+    assert_eq!(
+        gateway.requests(),
+        vec![
+            json!({"v": 1, "kind": "watch", "token": token, "environment": "production",
+                    "bundle_id": "com.wydrox.apassy.companion.watchkitapp"})
+        ]
+    );
+    let (pushed_device, body) = mac.relay.push_handle().unwrap();
+    assert_eq!(pushed_device, device_id);
+    assert_eq!(body["handle"], FakeGateway::handle(1));
+    assert!(mac.relay.push_token().is_none());
+    let kept = std::fs::read_to_string(data.join("questions-push.json")).unwrap();
+    assert!(kept.contains(&FakeGateway::handle(1)) && !kept.contains(&token));
+    // The summary key of its one team, for its Notification Service Extension.
+    let keys = call(&watch, json!({"op": "push_summary_keys"}));
+    assert_eq!(keys["keys"].as_array().unwrap().len(), 1);
+    assert_eq!(keys["keys"][0]["team_id"], TEAM);
+    // Notifications on this watch off: the handle leaves the node.
+    call(&watch, json!({"op": "push_token_clear"}));
+    assert!(mac.relay.push_handle().is_none());
+    mac.relay.set_gateway_mode(false);
     // A run question never shows on the watch; an access request does.
     post(&mac.relay, &QUESTION_KEY, QID, CARD, now() + 300);
     let allow_qid = encode_b64u(&[0x11; 16]);

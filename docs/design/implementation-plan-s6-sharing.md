@@ -209,7 +209,8 @@ that secret and fails if it is there.
   Deadline 20 s for the whole exchange. Every secret in `Zeroizing`. The STS request is SigV4-signed
   with the long-lived key (service `sts`, region from the settings or `us-east-1`, endpoint
   `sts.<region>.amazonaws.com`). The answer's `Expiration` must be at most 900 s after the request,
-  else `LeaseError` (a provider that ignores the duration never gives a longer lease). The session
+  plus the 300 s clock-skew window of contract section 3.3, else `LeaseError` (a provider that ignores
+  the duration never gives a longer lease); `expires_at = min(Expiration, made_at + 900)`. The session
   policy, when given, must parse as JSON and be at most 2048 bytes (the STS limit).
 - Owner: implementer (opus, high). Depends on B. Judge panel: 2× opus + 1× fable.
 - Acceptance (unit tests in the files, with a fake STS on the loopback that verifies the incoming
@@ -229,7 +230,9 @@ that secret and fails if it is there.
 - Design: as S6-5, S6-6, S6-7. GitHub: `api_url` default `https://api.github.com`; the answer's
   `token` (`ghs_…`) and `expires_at`; `Revoke::Github { token }`. Google: the bootstrap token is
   dropped after the second call; `expireTime` of the answer must be at most 900 s ahead. OAuth:
-  `expires_in` missing → 900 s assumed and the activity row says so; `Revoke::Oauth { revoke_url,
+  `expires_in` is the real expiry; without a revoke URL, a missing `expires_in` or one over 3600 s
+  is `lease_failed`, and with one a missing `expires_in` shows one hour and the activity row says the
+  expiry is unknown (C1/C2 security review, 2026-11-03); `Revoke::Oauth { revoke_url,
   token }` when the item has a revoke URL. A rotated refresh token is returned in
   `Lease.update_field: Option<(field, value)>` for the caller to store (F and G store it before
   delivery).
@@ -275,9 +278,12 @@ that secret and fails if it is there.
   `settings` never holds a secret (role ARN, policy, scopes, URLs, repository names). A device on
   schema 31 or earlier refuses a copy of schema 32 (`UnsupportedSchema`), as 26 does for 25.
 - Detection: a paste with both AWS variables, or an `AKIA…` key next to a 40-character secret, makes
-  one `ApiKey` item with `access_key_id` and `secret_access_key`, the variable `AWS_ACCESS_KEY_ID`,
-  and `short_lived` `aws_sts` on. A service-account JSON makes one item with `key_json`, the variable
-  `CLOUDSDK_AUTH_ACCESS_TOKEN`, and `google_service_account` on. A `ghr_` token or an
+  one `Custom` item with `access_key_id` and `secret_access_key`, the variable `AWS_ACCESS_KEY_ID`,
+  and `short_lived` `aws_sts` on. A service-account JSON makes one `Custom` item with `key_json`, the
+  variable `CLOUDSDK_AUTH_ACCESS_TOKEN`, and `google_service_account` on. The kind is `Custom`, not
+  `ApiKey`: an `ApiKey` item needs a secret `token` field, so the vault refused these items and the
+  whole paste with them (C1/C2 security review, 2026-11-03). The main secret of a `Custom` item is its
+  first secret field (`secret_access_key`, `key_json`), the field of the variable. A `ghr_` token or an
   `app_id`/`installation_id`/PEM paste is not detected (the owner fills the sheet, unit I).
 - Owner: implementer (opus, high). Depends on A. Judge panel: 2× opus + 1× fable (migration, sync).
 - Acceptance: `vault_migration::schema_32_adds_short_lived_and_member_key` (31→32, and a failed
@@ -349,7 +355,9 @@ that secret and fails if it is there.
   `LeaseSource`, `acquire`, push each lease secret into `env` and `masks` and each plain variable into
   `env`; collisions of lease names with other bindings or `RESERVED_VARIABLES` are `invalid_request`
   before the owner is asked; a rotated refresh token is stored with `Vault::update` before the
-  process starts; after `exec` returns, `revoke` each lease, best effort; the activity reason gets
+  process starts (through `lease::holder::KeyHolder`: one flight per item, a compare-and-swap store,
+  and a rotated token of a failed answer stored before the run fails); after `exec` returns, `revoke`
+  each lease, best effort; the activity reason gets
   "temporary credentials for N minutes"; the wire answer gets `leases: [{item_id, kind, env_names,
   expires_at}]`), `src/broker/decide.rs` (`BrokerContext.providers: Arc<ProviderEndpoints>`),
   `src/broker/server.rs` (`BrokerOptions.providers`, production by default),
@@ -363,6 +371,10 @@ that secret and fails if it is there.
   item; the command does not run. The long-lived value is read into a `Zeroizing` buffer for the
   call and dropped before the process spawns. The evaluation entry point `evaluate_run` makes no
   provider call.
+- Required by the C1/C2 review (2026-11-03, judge finding 7): revoke every live lease also when the
+  vault locks and when the app quits, not only when `exec` returns; and keep what the revocation
+  needs (the token and, for a confidential OAuth client, the client credentials) in `Zeroizing`
+  buffers with the lease until it is revoked, instead of reading the source again at run end.
 - Owner: implementer (opus, high). Depends on C1, C2, D. Judge panel: 2× opus + 1× fable.
 - Acceptance (proposed `tests/short_lived_runs.rs`, a module of `tests/it.rs`, with the loopback
   fakes of a proposed `tests/support/fake_providers.rs`: `FakeSts` verifies SigV4 with the test
@@ -401,6 +413,10 @@ that secret and fails if it is there.
   stderr and refuse to start a child whose lease has expired), `docs/contracts/cloud-agents-v1.md`
   §6.1 and §8 tables, `crates/apassy-relay/docs/SPEC.md` §11, §30.3, §30.4, §30.6, the relay
   changelog.
+- Required by the C1/C2 review (2026-11-03, judge finding 7): revoke every live lease of the node's
+  sessions also when the vault locks and when the app quits, not only when a session ends; keep what
+  the revocation needs in `Zeroizing` buffers with the lease until it is revoked; store a rotated
+  refresh token through `lease::holder::KeyHolder`, as F does.
 - Owner: implementer (opus, high). Depends on A, C1, C2, D, F (for `read_secrets` shape; F owns
   `src/broker/run.rs`, G does not edit it). Judge panel: 2× opus + 1× fable.
 - Acceptance: core `node::tests::a_short_lived_item_is_released_as_a_lease` (the fake backend

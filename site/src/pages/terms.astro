@@ -1,0 +1,239 @@
+---
+// The terms of Apassy Connect: the contract, the right of withdrawal, the consent
+// to start at once, and the refund policy (implementation plan s7, owner-needed
+// step 3). A DRAFT: the owner gives the facts in lib/legal.ts and has the text
+// checked before it comes into force. Then remove `draft`, link it from the footer
+// and from the Stripe settings. The prices come from lib/plans.ts.
+import Legal from "../layouts/Legal.astro";
+import OwnerFact from "../components/OwnerFact.astro";
+import { FAMILY_EXTRA, FAMILY_INCLUDED_PEOPLE, PLANS, YEAR_MONTHS, eur } from "../lib/plans";
+import { REPO } from "../lib/site";
+const UPDATED = "2026-11-03";
+---
+<Legal
+  draft
+  title="Terms of Apassy Connect · apassy"
+  description="The terms of Apassy Connect, the hosted service of the Apassy project."
+  eyebrow="Terms"
+  heading="Terms of Apassy Connect"
+  updated={UPDATED}
+>
+  <Fragment slot="lead">
+    These terms apply to Apassy Connect, the paid hosted service. The Apassy apps and everything that you host yourself
+    are free and open source, and these terms do not apply to them.
+  </Fragment>
+
+  <h2>1. Who we are</h2>
+  <p>
+    Apassy Connect is sold by <OwnerFact name="legalName" what="legal name of the seller" />,
+    <OwnerFact name="register" what="legal form and register entry" />,
+    <OwnerFact name="address" what="postal address" />, VAT id <OwnerFact name="vatId" what="EU VAT id" />
+    ("we"). Contact: <OwnerFact name="email" what="e-mail for contracts, withdrawal, and refunds" />. More in the
+    <a href="/imprint">imprint</a>.
+  </p>
+  <p>
+    You are a <strong>consumer</strong> if you buy Connect mainly for purposes outside your trade, business, craft, or
+    profession. Where the law of your country gives a sole trader the rights of a consumer for a contract that is not of
+    a professional character for them, as Polish law does, those rights apply to you too. Rules marked "consumers" apply
+    to those buyers. All other buyers are <strong>business customers</strong>.
+  </p>
+
+  <h2>2. What Connect is</h2>
+  <p>Apassy Connect is optional. It gives the Apassy apps these hosted functions:</p>
+  <ul>
+    <li>Reachability without Tailscale: a byte relay between your devices, with TLS end to end.</li>
+    <li>An always-on sync home: a store for the encrypted copy of a vault.</li>
+    <li>The hosted bouncer brain, only if you turn it on.</li>
+    <li>Support.</li>
+  </ul>
+  <p>
+    Connect never receives your vault passphrase or a key that opens a credential, a vault, a question, or an answer.
+    What Connect sees is in the <a href="/pricing#sees">pricing page</a> and the
+    <a href="/privacy-connect">privacy policy</a>. Each function can also be hosted by you, at no cost, with the open
+    source code at <a href={REPO}>GitHub</a> (Apache-2.0). That code comes with its own license, not with these terms.
+  </p>
+
+  <h2>3. Account and devices</h2>
+  <ul>
+    <li>
+      You make a Connect account in Apassy on your Mac. The account has no password. Each device has its own key, and you
+      confirm each new device on a device that you already have.
+    </li>
+    <li>
+      When you make the account, Apassy shows a recovery code once. Keep it safe. If you lose every device and the
+      recovery code, we cannot give you access again. With the recovery code, you get access to the account, but the
+      stored vault copies are deleted, because a new device cannot check them.
+    </li>
+    <li>
+      You alone know your vault passphrase. We cannot read, reset, or recover it, or the contents of a vault. Keep
+      your own copy of your vaults: Connect is a sync home, not your only backup.
+    </li>
+    <li>In a Connect Family, the organizer adds and removes members. In a Connect Team, the owner and the admins do.</li>
+  </ul>
+
+  <h2>4. Plans and prices</h2>
+  <table>
+    <thead><tr><th scope="col">Plan</th><th scope="col">A month</th><th scope="col">A year</th></tr></thead>
+    <tbody>
+      {PLANS.map((plan) => (
+        <tr><td>{plan.name}{plan.per && <>, {plan.per}</>}</td><td>{eur(plan.price.month)}</td><td>{eur(plan.price.year)}</td></tr>
+      ))}
+      <tr>
+        <td>Connect Family, each person after {FAMILY_INCLUDED_PEOPLE}</td><td>{eur(FAMILY_EXTRA.month)}</td><td>{eur(FAMILY_EXTRA.year)}</td>
+      </tr>
+    </tbody>
+  </table>
+  <ul>
+    <li>Prices are in euro and include VAT. You pay the price that you see. A year costs {YEAR_MONTHS} months.</li>
+    <li>You buy Connect in Apassy on your Mac, through a checkout page of our payment processor, Stripe.</li>
+    <li>
+      Your plan renews automatically at the end of each month or year, until you cancel it. We charge the payment method
+      that you gave at the start of each period.
+    </li>
+    <li>
+      When you add people to a Connect Family or seats to a Connect Team, we charge the share of the price for the rest
+      of the current period. When you remove them, the next charge is lower; you get a credit for the rest of the period
+      on your next invoice.
+    </li>
+    <li>
+      We can change a price for the next period. We tell you at least 30 days before. If you do not agree, cancel before
+      the new price applies.
+    </li>
+    <li>Stripe sends the receipts and the invoices by e-mail. Connect Team customers can add a VAT id at the checkout.</li>
+  </ul>
+
+  <h2>5. Cancel your plan</h2>
+  <ul>
+    <li>
+      You can cancel at any time in Apassy on your Mac (Settings › Connect) or in the customer portal of Stripe. The plan
+      then ends at the end of the period that you paid for.
+    </li>
+    <li>
+      When a plan ends, or a payment fails and is not made good in 14 days, your account becomes read-only: you can still
+      download your vault copies for 30 days, but not send new ones. 90 days after the end, we delete the stored vault
+      copies. Apassy tells you before.
+    </li>
+    <li>
+      When you delete your account in Apassy, we cancel the plan at once and delete your vault copies and devices. We
+      keep the invoices for as long as tax law requires.
+    </li>
+  </ul>
+
+  <h2 id="withdrawal">6. Right of withdrawal (consumers)</h2>
+  <p>
+    You have the right to withdraw from this contract within 14 days without giving any reason. The withdrawal period
+    expires after 14 days from the day of the conclusion of the contract: the day of your first payment for a plan.
+  </p>
+  <p>
+    To exercise the right of withdrawal, you must inform us (<OwnerFact name="legalName" what="legal name" />,
+    <OwnerFact name="address" what="postal address" />, <OwnerFact name="email" what="e-mail" />) of your decision
+    to withdraw from this contract by an unequivocal statement, for example an e-mail. You may use the model withdrawal
+    form below, but it is not obligatory. To meet the withdrawal deadline, it is sufficient for you to send your
+    communication before the withdrawal period has expired.
+  </p>
+  <h3>Effects of withdrawal</h3>
+  <p>
+    If you withdraw from this contract, we shall reimburse to you all payments received from you without undue delay and
+    in any event not later than 14 days from the day on which we are informed about your decision to withdraw. We will
+    carry out such reimbursement using the same means of payment as you used for the initial transaction, unless you have
+    expressly agreed otherwise; in any event, you will not incur any fees as a result of such reimbursement.
+  </p>
+  <p>
+    If you requested to begin the performance of the service during the withdrawal period, you shall pay us an amount
+    which is in proportion to what has been provided until you have communicated to us your withdrawal from this
+    contract, in comparison with the full coverage of the contract.
+  </p>
+  <h3 id="consent">Starting at once</h3>
+  <p>
+    Connect starts as soon as you pay, so the checkout asks for your request and your acknowledgement. The checkbox says:
+  </p>
+  <blockquote>
+    I agree to the Terms of Apassy Connect. I ask that Connect starts at once. I know that if I withdraw within 14 days,
+    I pay for the days that I used, and that I lose the right of withdrawal when the service is fully performed.
+  </blockquote>
+  <p>We confirm the contract, these terms, and your request by e-mail after the payment.</p>
+  <h3>Model withdrawal form</h3>
+  <blockquote>
+    To <OwnerFact name="legalName" what="legal name" />, <OwnerFact name="address" what="postal address" />,
+    <OwnerFact name="email" what="e-mail" />:<br />
+    I hereby give notice that I withdraw from my contract for the provision of the following service: Apassy Connect
+    (plan: …).<br />
+    Ordered on: … / Account id (shown in Apassy › Settings › Connect): …<br />
+    Name of consumer: … / Address of consumer: …<br />
+    Signature of consumer (only if this form is notified on paper): …<br />
+    Date: …
+  </blockquote>
+
+  <h2 id="refunds">7. Refunds</h2>
+  <ul>
+    <li>A withdrawal within 14 days: as section 6 says.</li>
+    <li>We refund in full a charge that we made by mistake, a double charge, and a charge after a cancellation that took effect.</li>
+    <li>
+      If we end Connect or your plan for a reason that is not your fault (section 9), we refund the part of the period that
+      you paid for and cannot use.
+    </li>
+    <li>
+      Apart from that, we do not refund the rest of a period after you cancel: the plan stays active until the end of the
+      period. Your rights under the law (for example when the service does not conform to the contract) are not limited
+      by this.
+    </li>
+    <li>Ask for a refund at <OwnerFact name="email" what="e-mail" />. The refund goes to the payment method of the charge.</li>
+  </ul>
+
+  <h2>8. Fair use and our service</h2>
+  <ul>
+    <li>
+      Use Connect only for your own devices, your family, or your team, and only in a legal way. Do not use it to attack,
+      overload, or probe Connect or other people, or to relay traffic that is not of Apassy.
+    </li>
+    <li>
+      Each plan has limits for vault stores, devices, and data, shown in Apassy. We may slow down or stop traffic that
+      harms the service or other customers, and we tell you why.
+    </li>
+    <li>
+      We run Connect with care and fix faults as fast as we can, but we do not promise that it is always available.
+      Without Connect, your Apassy apps keep working on your devices, and the free ways to sync and to approve stay open.
+    </li>
+    <li>We may change the functions of Connect. If a change takes away a main function of your plan, you can cancel and we refund the rest of the period.</li>
+  </ul>
+
+  <h2>9. When we can end the contract</h2>
+  <p>
+    We can end the contract with 30 days of notice, or at once if you seriously break section 8. If we stop Connect as a
+    whole, we tell you at least 60 days before, and you can download your vault copies until the end.
+  </p>
+
+  <h2>10. Liability</h2>
+  <ul>
+    <li>
+      We are liable without limit for intent and gross negligence, for harm to life, body, or health, and where the law
+      does not allow a limit.
+    </li>
+    <li>
+      For other harm, we are liable to business customers only for foreseeable damage typical for this contract, and at
+      most for the amount that the customer paid in the 12 months before the damage.
+    </li>
+    <li>For consumers, the rights under the law of the country where you live are not limited by these terms.</li>
+  </ul>
+
+  <h2>11. Changes to these terms</h2>
+  <p>
+    We tell you about a change of these terms at least 30 days before it applies, in Apassy and by e-mail. If you do not
+    agree, you can cancel before the change applies.
+  </p>
+
+  <h2>12. Law and disputes</h2>
+  <ul>
+    <li>
+      These terms are governed by <OwnerFact name="governingLaw" what="governing law" />. If you are a consumer, you also
+      keep the protection of the mandatory law of the country where you live.
+    </li>
+    <li>
+      Business customers: the courts of <OwnerFact name="courts" what="courts for business customers" /> decide disputes.
+      Consumers can also go to the courts of the country where they live, and to a consumer body for an out-of-court
+      settlement.
+    </li>
+    <li>Write to us first: <OwnerFact name="email" what="e-mail" />. We answer within 14 days.</li>
+  </ul>
+  <p>These terms apply from <OwnerFact name="effectiveDate" what="date in force" />.</p>
+</Legal>

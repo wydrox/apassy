@@ -3,6 +3,7 @@
 Date: 2026-11-02.
 Status: frozen for wave 1 of [implementation plan 0035](../design/implementation-plan-0035.md) (unit A). Unit D1 implements the server side in `tools/basemodel/`; units C, F and G implement the client side in Apassy. Not implemented yet. Fixtures: `tests/fixtures/bouncer-brain-v1/`, checked by `tests/bouncer_brain_contract.rs`.
 Decision: [ADR 0035](../adr/0035-bouncer-hosting-and-training-choice.md).
+Version 2 ([bouncer-brain-v2](bouncer-brain-v2.md), 2026-11-03) adds the training jobs, the Connect sign-in and owner namespaces that section 1 and 7 reserve. It does not change this version for existing clients: every route, field, status and code below keeps its meaning on a v2 server (v2 section 1).
 
 Words ([bouncer.md](../operations/bouncer.md), Words): the **bouncer brain** is the model server. It gives a probability for each question. The **bouncer gate** is the decision in Apassy on the Mac. It turns those answers into "run" or "ask the owner". This contract is the protocol between the two. The owner's server and the Apassy Connect service use the same protocol; only the address and the credential are different. MUST/MUST NOT below are implementation requirements.
 
@@ -154,7 +155,7 @@ After a 204, a `GET` of a deleted head set gives 404, and a request with its has
 
 ## 7. Training jobs
 
-**Planned (stage 4), not served in version 1. Version 1 servers answer 404 on these routes.** This section gives only the intent.
+**Planned (stage 4), not served in version 1. Version 1 servers answer 404 on these routes.** This section gives only the intent; [bouncer-brain-v2](bouncer-brain-v2.md) section 4 defines the routes.
 
 - `POST /v1/train` starts a job. The three files of [fine-tune.md](../operations/fine-tune.md) section 6.1 step 4 go up: `train.jsonl`, `val.jsonl` and `stats.json`.
 - `GET /v1/train/<id>` gives the state of the job.
@@ -166,7 +167,7 @@ A later version defines the bodies, the limits and the states.
 
 ## 8. Rules
 
-- The client MUST NOT send a secret value, the vault path or an absolute project path. The `state` is the state of ADR 0007 only: the user request, the command, the directory relative to the project, the purpose, the environment variable names and the owner rule.
+- The client MUST NOT send a secret value, the vault path, or the full path of the project or of the home folder of the Mac. The `state` is `bouncer::state_text` only: the user request, the shell command and the stated purpose of the agent. In the command, `bouncer::shorten_paths` writes the project root as `.` and the home folder as `~` (the longest first, only at a path boundary), for a local and a remote brain alike. The broker sends no owner rule (its `instruction` is empty).
 - The server MUST NOT log the `state`, the questions, the answers or the token. It may log counts, latency, status codes and hashes.
 - The whole response of `POST /v1/systemone`, headers included, is at most 64 KiB (the client's cap). With a shadow, the server replaces the shadow with `shadow.error: "shadow_failed"` when the answer would be larger.
 - The deadlines belong to the client: 10 s for each attempt to the bouncer brain on this Mac, 20 s for each attempt to a remote bouncer brain, and one retry after a transport timeout. The server has no deadline field. After the deadline, the bouncer gate asks the owner. On macOS the platform certificate check may take longer than the deadline in rare cases; the result is then a failure, never an allowance.

@@ -46,15 +46,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+pub use crate::net::pin::{PIN_TEXT_CHARS, Pin, parse as parse_pin};
 pub use cloud::{CloudDownload, CloudFileStatus, CloudProbe, SystemCloud};
 pub use folder::{
     FOLDER_NAME, FolderEntry, PUSH_SUFFIX, SYNC_FILE_EXTENSION, SyncFolder, detect_folders_in,
     file_name_for, list_folder_vaults, start_download,
 };
 pub use relay::{
-    DeviceView, JoinedDevice, KeySource, LinkCode, PendingJoin, PendingLink, Receipt,
-    RelayAdoptReport, RelayCallError, RelayConfig, RelayDownload, RelayEnableReport, RelayMember,
-    RelayPoll, RelaySync, RelayTransport, clear_relay_work,
+    DeviceView, JoinedDevice, KeySource, LINK_INVALID_TEXT, LINK_UPDATE_TEXT, LinkCode, LinkKind,
+    LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS, PIN_CHANGED_TEXT, PairedLink, PendingJoin,
+    PendingLink, Receipt, RelayAdoptReport, RelayCallError, RelayConfig, RelayDownload,
+    RelayEnableReport, RelayMember, RelayPoll, RelaySync, RelayTransport, clean_node_name,
+    clear_relay_work, encode_node_name, membership_relay_url,
 };
 pub use relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, WORDS, decode_b64u,
@@ -62,8 +65,9 @@ pub use relay_crypto::{
     valid_team_code, verify_signature,
 };
 pub use relay_http::{
-    Cancel, DEFAULT_RELAY_URL, ExternalAnswer, ExternalRequest, HttpError, HttpTransport, RelayUrl,
-    set_http_transport,
+    Cancel, DEFAULT_RELAY_URL, ExternalAnswer, ExternalRequest, HttpError, HttpTransport,
+    MAX_ALTERNATIVES, RelayUrl, TlsTrust, clear_local_route, post_json, set_http_transport,
+    set_local_route,
 };
 pub use state::{SyncState, TransportKind};
 pub use transport::{FolderTransport, Precondition, Remote, RemoteHead, SyncTransport, Transport};
@@ -315,6 +319,13 @@ pub enum SyncError {
     RelayEmpty,
     /// The safety words of the relay differ from the ones that this Mac computes.
     SafetyMismatch,
+    /// A pinned relay (a node) presented another certificate than its pin (contract
+    /// node-pairing-v1 section 4). No byte of the request went out; the device pairs
+    /// again with a new link.
+    PinMismatch,
+    /// A pasted or scanned link does not follow node-pairing-v1 (sections 5 to 7). No
+    /// request was made.
+    LinkInvalid(LinkRefusal),
     /// The relay refused a request.
     Relay(RelayRefusal),
 }
@@ -336,6 +347,9 @@ pub enum RelayRefusal {
     HeadInvalid,
     /// `403 team_limit`: the pushes of this hour are used up.
     TeamLimit,
+    /// `403 plan_required`: the team keeps no vault copy on this relay (its `sync_bytes`
+    /// is 0, a Connect team made before the relay's sync setting).
+    PlanRequired,
     /// `404 not_found`.
     NotFound,
     /// `409 conflict`.
@@ -360,6 +374,9 @@ impl fmt::Display for RelayRefusal {
             Self::JoinRefused => "the other Mac refused, or the link expired",
             Self::HeadInvalid => "the relay refused the signed head of this push",
             Self::TeamLimit => "the relay limits the pushes of this vault for this hour",
+            Self::PlanRequired => {
+                "the relay does not keep vault copies for this connection yet. Ask the operator of the relay to turn on relay sync for it"
+            }
             Self::NotFound => "the relay does not have this item",
             Self::Conflict => {
                 "the relay's record of this Mac does not match. Nothing was added"
@@ -423,6 +440,8 @@ impl fmt::Display for SyncError {
             Self::SafetyMismatch => f.write_str(
                 "the relay's words differ from this Mac's. Cancel and make a new link",
             ),
+            Self::PinMismatch => f.write_str(PIN_CHANGED_TEXT),
+            Self::LinkInvalid(refusal) => f.write_str(refusal.message()),
             Self::Relay(refusal) => fmt::Display::fmt(refusal, f),
         }
     }

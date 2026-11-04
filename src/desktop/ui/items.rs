@@ -692,7 +692,7 @@ fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, duplicates: usize) {
             } else {
                 app.ui.credential_filter.label()
             };
-            ui.label(kit::text(label, Font::Footnote).color(kit::SECONDARY));
+            ui.label(kit::text(label, Font::Footnote).color(kit::palette().secondary));
             if app.ui.credential_filter == Filter::Duplicates
                 && duplicates > 0
                 && kit::small_button(ui, "Merge…", Style::Link)
@@ -735,9 +735,9 @@ fn credential_row(ui: &mut egui::Ui, item: &ListedItem, selected: bool) -> egui:
             Vec2::splat(14.0),
         );
         let color = if selected {
-            egui::Color32::WHITE
+            kit::palette().on_accent
         } else {
-            kit::SECONDARY
+            kit::palette().secondary
         };
         kit::paint_icon(ui.painter(), rect, Icon::People, color);
     }
@@ -1248,8 +1248,8 @@ pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
     };
     let title = kit::text(&details.name, Font::Title)
         .size(20.0)
-        .color(kit::LABEL);
-    let subtitle = kit::text(subtitle, Font::Body).color(kit::SECONDARY);
+        .color(kit::palette().label);
+    let subtitle = kit::text(subtitle, Font::Body).color(kit::palette().secondary);
     let cap = looks.environment.cap();
     let caps = cap.is_some() || details.archived || !looks.shared.is_empty();
     let width = (ui.available_width() - TILE - 14.0).max(40.0);
@@ -1509,14 +1509,19 @@ fn secret_value(ui: &mut egui::Ui, app: &DesktopApp, id: u64, name: &str) {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.add(
-                    Label::new(kit::text(value, Font::Mono).size(14.0).color(kit::LABEL)).wrap(),
+                    Label::new(
+                        kit::text(value, Font::Mono)
+                            .size(14.0)
+                            .color(kit::palette().label),
+                    )
+                    .wrap(),
                 );
             });
     } else {
         ui.label(
             kit::text(MASKED_VALUE, Font::Mono)
                 .size(17.0)
-                .color(kit::LABEL),
+                .color(kit::palette().label),
         );
     }
 }
@@ -1561,7 +1566,7 @@ fn secret_row(
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.set_min_size(Vec2::new(width, 24.0));
-                    ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+                    ui.label(kit::text(label, Font::Body).color(kit::palette().label));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         let toggle = mask_button(ui, revealed);
@@ -1668,7 +1673,7 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
             pair_row(
                 s,
                 "Variable",
-                kit::text(variable, Font::Mono).color(kit::SECONDARY),
+                kit::text(variable, Font::Mono).color(kit::palette().secondary),
             );
         }
         // The other rows of a login are empty, so this is the place of its Website row.
@@ -1681,7 +1686,11 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                     open_site = Some(url);
                 }
             } else {
-                pair_row(s, label, kit::text(value, Font::Body).color(kit::SECONDARY));
+                pair_row(
+                    s,
+                    label,
+                    kit::text(value, Font::Body).color(kit::palette().secondary),
+                );
             }
         }
         // A one-time password has its row above. A visible setup key is not drawn.
@@ -1697,7 +1706,7 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                     Some(value) => pair_row(
                         s,
                         &detail.label,
-                        kit::text(value, Font::Body).color(kit::SECONDARY),
+                        kit::text(value, Font::Body).color(kit::palette().secondary),
                     ),
                     None => {
                         toggle |= secret_row(
@@ -1736,7 +1745,7 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
     if !details.notes.is_empty() {
         rows::group_label(ui, "Notes", None);
         rows::group(ui, |s| {
-            s.row(|ui| kit::paragraph(ui, &details.notes, Font::Body, kit::LABEL));
+            s.row(|ui| kit::paragraph(ui, &details.notes, Font::Body, kit::palette().label));
         });
         ui.add_space(rows::GROUP_GAP);
     }
@@ -1776,13 +1785,16 @@ const ADD_WEBSITE: &str = "Add website…";
 /// after a click on "Copy".
 fn username_row(group: &mut rows::Group<'_>, username: &str) -> bool {
     group.line(|ui| {
-        ui.label(kit::text("Username", Font::Body).color(kit::LABEL));
+        ui.label(kit::text("Username", Font::Body).color(kit::palette().label));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let copy = rows::pill_button(ui, "Copy", "Copy Username")
                 .on_hover_text(USERNAME_COPY_HINT)
                 .clicked();
-            ui.add(Label::new(kit::text(username, Font::Body).color(kit::SECONDARY)).truncate())
-                .on_hover_text(username);
+            ui.add(
+                Label::new(kit::text(username, Font::Body).color(kit::palette().secondary))
+                    .truncate(),
+            )
+            .on_hover_text(username);
             copy
         })
         .inner
@@ -1793,7 +1805,7 @@ fn username_row(group: &mut rows::Group<'_>, username: &str) -> bool {
 /// true after a click on it.
 fn add_website_row(group: &mut rows::Group<'_>) -> bool {
     group.line(|ui| {
-        ui.label(kit::text("Website", Font::Body).color(kit::LABEL));
+        ui.label(kit::text("Website", Font::Body).color(kit::palette().label));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             row_link(ui, ADD_WEBSITE, "Add website")
                 .on_hover_text(
@@ -1808,7 +1820,7 @@ fn add_website_row(group: &mut rows::Group<'_>) -> bool {
 /// A link in the accent color at the size of a row value. `name` is its name for
 /// VoiceOver.
 fn row_link(ui: &mut egui::Ui, label: &str, name: &str) -> egui::Response {
-    let galley = kit::galley(ui, kit::text(label, Font::Body).color(rows::LINK));
+    let galley = kit::galley(ui, kit::text(label, Font::Body).color(kit::palette().link));
     let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
     let enabled = ui.is_enabled();
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, enabled, name));
@@ -1824,10 +1836,10 @@ fn row_link(ui: &mut egui::Ui, label: &str, name: &str) -> egui::Response {
             painter.hline(
                 rect.x_range(),
                 rect.bottom() - 0.5,
-                egui::Stroke::new(1.0, rows::LINK),
+                egui::Stroke::new(1.0, kit::palette().link),
             );
         }
-        painter.galley(rect.min, galley, rows::LINK);
+        painter.galley(rect.min, galley, kit::palette().link);
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1860,18 +1872,20 @@ fn website_row(group: &mut rows::Group<'_>, value: &str) -> Option<String> {
         pair_row(
             group,
             "Website",
-            kit::text(value, Font::Body).color(kit::SECONDARY),
+            kit::text(value, Font::Body).color(kit::palette().secondary),
         );
         return None;
     };
     group.line(|ui| {
-        ui.label(kit::text("Website", Font::Body).color(kit::LABEL));
+        ui.label(kit::text("Website", Font::Body).color(kit::palette().label));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let open = rows::pill_button(ui, "Open", &format!("Open {host} in the browser"))
                 .on_hover_text("Open in your default browser")
                 .clicked();
-            ui.add(Label::new(kit::text(&host, Font::Body).color(kit::SECONDARY)).truncate())
-                .on_hover_text(&url);
+            ui.add(
+                Label::new(kit::text(&host, Font::Body).color(kit::palette().secondary)).truncate(),
+            )
+            .on_hover_text(&url);
             open.then_some(url)
         })
         .inner
@@ -2035,7 +2049,9 @@ fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
     rows::group(ui, |s| {
         if uses.is_empty() {
             s.line(|ui| {
-                ui.label(kit::text("No agent used it yet.", Font::Body).color(kit::SECONDARY))
+                ui.label(
+                    kit::text("No agent used it yet.", Font::Body).color(kit::palette().secondary),
+                )
             });
         }
         for item_use in uses.iter().take(shown) {
@@ -2058,14 +2074,15 @@ fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
                         // control height.
                         ui.spacing_mut().interact_size.y = 0.0;
                         ui.add(
-                            Label::new(kit::text(&who, Font::Body).color(kit::LABEL)).truncate(),
+                            Label::new(kit::text(&who, Font::Body).color(kit::palette().label))
+                                .truncate(),
                         );
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 0.0;
                             ui.add(
                                 Label::new(
                                     kit::text(&item_use.command_summary, Font::Mono)
-                                        .color(kit::SECONDARY),
+                                        .color(kit::palette().secondary),
                                 )
                                 .truncate(),
                             );
@@ -2073,7 +2090,7 @@ fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
                         });
                     });
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        ui.label(kit::text(&when, Font::Callout).color(kit::TERTIARY));
+                        ui.label(kit::text(&when, Font::Callout).color(kit::palette().tertiary));
                     });
                 });
             });
@@ -2113,7 +2130,7 @@ fn evaluation_scopes_group(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64
             s.line(|ui| {
                 ui.vertical(|ui| {
                     ui.set_width((ui.available_width() - 80.0).max(80.0));
-                    ui.add(Label::new(kit::text(&title, Font::Body).color(kit::LABEL)).wrap());
+                    ui.add(Label::new(kit::text(&title, Font::Body).color(kit::palette().label)).wrap());
                     ui.add(Label::new(rows::small(format!("{} · {hosts}", scope.project.key))).wrap());
                     if scope.command_binding.is_some() {
                         ui.add(Label::new(rows::small("Only this exact command, execution context and directly selected script version.")).wrap());
@@ -2244,7 +2261,7 @@ fn rules_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) 
             s.line(|ui| {
                 ui.label(
                     kit::text("None. The bouncer decides each use.", Font::Body)
-                        .color(kit::SECONDARY),
+                        .color(kit::palette().secondary),
                 )
             });
         }
@@ -2256,7 +2273,7 @@ fn rules_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) 
             };
             s.line(|ui| {
                 let button_width = 80.0;
-                let title_text = kit::text(&title, Font::Body).color(kit::LABEL);
+                let title_text = kit::text(&title, Font::Body).color(kit::palette().label);
                 match &line {
                     // A title alone stays on the center line of the row, with Remove.
                     None => {
@@ -2585,7 +2602,7 @@ fn noted_row<R>(
 ) -> R {
     let Some(note) = note else {
         return s.line(|ui| {
-            ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+            ui.label(kit::text(label, Font::Body).color(kit::palette().label));
             ui.with_layout(Layout::right_to_left(Align::Center), right)
                 .inner
         });
@@ -2603,7 +2620,7 @@ fn noted_row<R>(
 fn label_with_note(ui: &mut egui::Ui, label: &str, note: &str) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+        ui.label(kit::text(label, Font::Body).color(kit::palette().label));
         ui.add(Label::new(rows::small(note)).wrap());
     });
 }
@@ -2623,8 +2640,10 @@ fn chevron_with_note(
         label_with_note(ui, label, note);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            kit::paint_icon_in(ui, Icon::ChevronRight, 10.0, kit::TERTIARY);
-            ui.add(Label::new(kit::text(value, Font::Body).color(kit::SECONDARY)).truncate());
+            kit::paint_icon_in(ui, Icon::ChevronRight, 10.0, kit::palette().tertiary);
+            ui.add(
+                Label::new(kit::text(value, Font::Body).color(kit::palette().secondary)).truncate(),
+            );
         });
     });
     response
@@ -2808,18 +2827,21 @@ fn environment_question(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
             ui.spacing_mut().item_spacing.x = 12.0;
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
             ui.painter()
-                .rect_filled(rect, 7, egui::Color32::from_rgb(255, 244, 229));
+                .rect_filled(rect, 7, kit::palette().warning_tile);
             kit::paint_icon(
                 ui.painter(),
                 Rect::from_center_size(rect.center(), Vec2::splat(16.0)),
                 Icon::Warning,
-                egui::Color32::from_rgb(200, 106, 0),
+                kit::palette().countdown,
             );
             let buttons = 200.0;
             ui.vertical(|ui| {
                 ui.set_width((ui.available_width() - buttons).max(80.0));
                 ui.spacing_mut().item_spacing.y = 1.0;
-                ui.label(kit::medium("Is this a development key?", Font::Body).color(kit::LABEL));
+                ui.label(
+                    kit::medium("Is this a development key?", Font::Body)
+                        .color(kit::palette().label),
+                );
                 ui.add(Label::new(rows::small(&message)).wrap());
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2891,7 +2913,7 @@ fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let line = parts.join(" · ");
     if imported.is_empty() {
         ui.vertical_centered(|ui| {
-            ui.label(kit::text(line, Font::Footnote).color(kit::TERTIARY));
+            ui.label(kit::text(line, Font::Footnote).color(kit::palette().tertiary));
         });
         ui.add_space(8.0);
         return;
@@ -2909,12 +2931,15 @@ fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-            ui.add(Label::new(kit::text(words, Font::Footnote).color(kit::TERTIARY)).extend());
+            ui.add(
+                Label::new(kit::text(words, Font::Footnote).color(kit::palette().tertiary))
+                    .extend(),
+            );
             toggle_open = footer_link(ui, IMPORT_DETAILS, open).clicked();
         });
     } else {
         ui.vertical_centered(|ui| {
-            ui.label(kit::text(line, Font::Footnote).color(kit::TERTIARY));
+            ui.label(kit::text(line, Font::Footnote).color(kit::palette().tertiary));
             toggle_open = footer_link(ui, IMPORT_DETAILS, open).clicked();
         });
     }
@@ -2952,7 +2977,10 @@ fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
 /// A small link in the accent color, as "Import details…" of the footer. It tells
 /// VoiceOver whether its part is open.
 fn footer_link(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response {
-    let galley = kit::galley(ui, kit::text(label, Font::Footnote).color(kit::ACCENT_TEXT));
+    let galley = kit::galley(
+        ui,
+        kit::text(label, Font::Footnote).color(kit::palette().accent_text),
+    );
     let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
     let enabled = ui.is_enabled();
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
@@ -2969,10 +2997,10 @@ fn footer_link(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response {
             painter.hline(
                 rect.x_range(),
                 rect.bottom() - 0.5,
-                egui::Stroke::new(1.0, kit::ACCENT_TEXT),
+                egui::Stroke::new(1.0, kit::palette().accent_text),
             );
         }
-        painter.galley(rect.min, galley, kit::ACCENT_TEXT);
+        painter.galley(rect.min, galley, kit::palette().accent_text);
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -2980,8 +3008,15 @@ fn footer_link(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response {
 /// Labels and values share one reading edge, including paths and long identifiers.
 fn value_row(section: &mut Section<'_>, label: &str, value: &str) {
     section.row(|ui| {
-        ui.label(kit::text(label, Font::Callout).color(kit::SECONDARY));
-        ui.add(Label::new(kit::text(value, Font::Mono).size(14.0).color(kit::LABEL)).wrap());
+        ui.label(kit::text(label, Font::Callout).color(kit::palette().secondary));
+        ui.add(
+            Label::new(
+                kit::text(value, Font::Mono)
+                    .size(14.0)
+                    .color(kit::palette().label),
+            )
+            .wrap(),
+        );
     });
 }
 
@@ -3014,7 +3049,7 @@ fn custom_value_row(
             let mut toggle = false;
             egui::Sides::new().show(
                 ui,
-                |ui| ui.label(kit::text(&detail.label, Font::Callout).color(kit::SECONDARY)),
+                |ui| ui.label(kit::text(&detail.label, Font::Callout).color(kit::palette().secondary)),
                 |ui| {
                     toggle = mask_button(ui, revealed);
                     if app.owner_ui.session.can_copy_field(id, &detail.name, details.revision)
@@ -3073,14 +3108,14 @@ fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: Creden
                         ),
                         Font::Callout,
                     )
-                    .color(kit::SECONDARY),
+                    .color(kit::palette().secondary),
                 ),
                 None => (
                     "Every agent run with this credential waits for you.".to_owned(),
                     kit::medium("Not set", Font::Callout).color(Tone::Warning.text()),
                 ),
             };
-            let shield = (Icon::Shield, egui::Color32::from_rgb(52, 120, 246));
+            let shield = (Icon::Shield, kit::fixed::DECLARATION);
             if s.nav(Some(shield), "Declaration", Some(&subtitle), Some(detail))
                 .clicked()
             {
@@ -3098,7 +3133,8 @@ fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: Creden
                         } else {
                             &binding.env_name
                         };
-                        kit::text(format!("{name}{mode}"), Font::Mono).color(kit::SECONDARY)
+                        kit::text(format!("{name}{mode}"), Font::Mono)
+                            .color(kit::palette().secondary)
                     }
                     None => kit::text(
                         if automatic_ready {
@@ -3108,9 +3144,9 @@ fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: Creden
                         },
                         Font::Callout,
                     )
-                    .color(kit::SECONDARY),
+                    .color(kit::palette().secondary),
                 };
-                let terminal = (Icon::Terminal, egui::Color32::from_rgb(88, 86, 214));
+                let terminal = (Icon::Terminal, kit::fixed::COMMAND);
                 if s.nav(
                     Some(terminal),
                     "Command settings",
@@ -3124,12 +3160,11 @@ fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: Creden
             }
             if kind == CredentialKind::ApiKey {
                 let detail = match &connector {
-                    Some(destination) => {
-                        kit::text(&destination.base_url, Font::Callout).color(kit::SECONDARY)
-                    }
-                    None => kit::text("None", Font::Callout).color(kit::SECONDARY),
+                    Some(destination) => kit::text(&destination.base_url, Font::Callout)
+                        .color(kit::palette().secondary),
+                    None => kit::text("None", Font::Callout).color(kit::palette().secondary),
                 };
-                let globe = (Icon::Globe, egui::Color32::from_rgb(48, 176, 199));
+                let globe = (Icon::Globe, kit::fixed::CONNECTOR);
                 if s.nav(
                     Some(globe),
                     "Connector",
@@ -3243,8 +3278,8 @@ fn review_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
                         ("Environment variable", &variable),
                         ("Connector", &connector),
                     ] {
-                        ui.label(kit::medium(term, Font::Callout).color(kit::LABEL));
-                        ui.label(kit::text(value, Font::Callout).color(kit::LABEL));
+                        ui.label(kit::medium(term, Font::Callout).color(kit::palette().label));
+                        ui.label(kit::text(value, Font::Callout).color(kit::palette().label));
                         ui.end_row();
                     }
                 });
@@ -3472,7 +3507,7 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
         ui.horizontal(|ui| {
             let (icon, color) = kind_icon(kind);
             kit::icon_tile(ui, icon, color);
-            ui.label(kit::text(new_title(kind), Font::Title3).color(kit::LABEL));
+            ui.label(kit::text(new_title(kind), Font::Title3).color(kit::palette().label));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if kit::small_button(ui, "Change kind", Style::Link).clicked() {
                     action = FormAction::Back;
@@ -3610,17 +3645,17 @@ fn kind_card(ui: &mut egui::Ui, kind: CredentialKind, width: f32) -> egui::Respo
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let fill = if response.is_pointer_button_down_on() {
-            kit::FILL_PRESSED
+            kit::palette().fill_pressed
         } else if response.hovered() {
-            kit::FILL
+            kit::palette().fill
         } else {
-            kit::SURFACE
+            kit::palette().surface
         };
         painter.rect_filled(rect, 10, fill);
         painter.rect_stroke(
             rect,
             10,
-            egui::Stroke::new(1.0, kit::SECTION_EDGE),
+            egui::Stroke::new(1.0, kit::palette().section_edge),
             egui::StrokeKind::Inside,
         );
         let (icon, color) = kind_icon(kind);
@@ -3635,9 +3670,13 @@ fn kind_card(ui: &mut egui::Ui, kind: CredentialKind, width: f32) -> egui::Respo
         painter.galley(
             Pos2::new(x, rect.center().y - title.size().y + 1.0),
             title,
-            kit::LABEL,
+            kit::palette().label,
         );
-        painter.galley(Pos2::new(x, rect.center().y + 2.0), blurb, kit::SECONDARY);
+        painter.galley(
+            Pos2::new(x, rect.center().y + 2.0),
+            blurb,
+            kit::palette().secondary,
+        );
         if response.has_focus() {
             kit::focus_ring(painter, rect, 10);
         }
@@ -3880,8 +3919,9 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
             |s| {
                 s.row(|ui| {
                     ui.horizontal(|ui| {
-                        let caption =
-                            |text: &str| kit::text(text, Font::Footnote).color(kit::SECONDARY);
+                        let caption = |text: &str| {
+                            kit::text(text, Font::Footnote).color(kit::palette().secondary)
+                        };
                         ui.allocate_ui(Vec2::new(150.0, 14.0), |ui| {
                             ui.set_min_width(150.0);
                             ui.label(caption("Name"));
@@ -3914,7 +3954,8 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                                     egui::TextEdit::singleline(&mut detail.label)
                                         .id_salt(format!("{salt}-detail-label-{index}"))
                                         .hint_text(
-                                            kit::text("Name", Font::Body).color(kit::TERTIARY),
+                                            kit::text("Name", Font::Body)
+                                                .color(kit::palette().tertiary),
                                         )
                                         .char_limit(
                                             crate::desktop::owner_store::MAX_DETAIL_LABEL_BYTES,
@@ -4186,7 +4227,7 @@ fn passkey_section(ui: &mut egui::Ui, details: &OwnerDetails, passkey: &PasskeyI
                 (
                     format!("{REMOVE_PASSKEY}…"),
                     "Apassy keeps the password and the other fields.",
-                    kit::LABEL,
+                    kit::palette().label,
                 )
             } else {
                 (
@@ -4273,21 +4314,21 @@ fn removal_sheet(
                     "The login “{shown}” has a passkey and no password. Apassy cannot keep a login with neither. So Apassy deletes the whole login."
                 ),
                 Font::Callout,
-                kit::LABEL,
+                kit::palette().label,
             );
             ui.add_space(8.0);
             kit::paragraph(
                 ui,
                 "You lose the passkey and all other fields: notes, tags, website, one-time passwords, custom details, agent access, and history. Your other devices lose them too after sync. You cannot undo this.",
                 Font::Callout,
-                kit::SECONDARY,
+                kit::palette().secondary,
             );
             ui.add_space(8.0);
             kit::paragraph(
                 ui,
                 "To keep the fields, press Cancel. Then add a password to the login, or archive the login.",
                 Font::Callout,
-                kit::SECONDARY,
+                kit::palette().secondary,
             );
         } else {
             kit::sheet_title(ui, "Remove this passkey?", None);
@@ -4297,14 +4338,14 @@ fn removal_sheet(
                     "Apassy deletes the passkey of the login “{shown}”. The password and the other fields stay. You cannot undo this."
                 ),
                 Font::Callout,
-                kit::LABEL,
+                kit::palette().label,
             );
             ui.add_space(8.0);
             kit::paragraph(
                 ui,
                 "The website can still list the passkey. Remove it on the website too.",
                 Font::Callout,
-                kit::SECONDARY,
+                kit::palette().secondary,
             );
         }
         kit::sheet_buttons(
@@ -4384,7 +4425,9 @@ pub(super) fn declaration_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bo
                     ui.add_space(4.0);
                     kit::section(ui, None, None, |s| {
                         for reason in &reasons {
-                            s.row(|ui| kit::paragraph(ui, reason, Font::Callout, kit::LABEL));
+                            s.row(|ui| {
+                                kit::paragraph(ui, reason, Font::Callout, kit::palette().label)
+                            });
                         }
                     });
                 } else {
@@ -4846,7 +4889,7 @@ pub(super) fn connector_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool
             |s| {
                 s.labeled(
                     "Profile",
-                    kit::text(REPORTING_API_V0.label, Font::Body).color(kit::SECONDARY),
+                    kit::text(REPORTING_API_V0.label, Font::Body).color(kit::palette().secondary),
                 );
                 s.field("Address", |ui| {
                     kit::text_input(

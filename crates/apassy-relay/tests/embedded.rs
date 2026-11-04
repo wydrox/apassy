@@ -330,6 +330,10 @@ fn edge_off_is_refused_unless_every_listener_is_on_the_loopback() {
         master_key: SecretString::new(MASTER_KEY.to_string()),
         public_url: PUBLIC_URL.to_string(),
         public_listen: public.map(|addr| addr.parse().unwrap()),
+        node_origin: None,
+        tailnet_listen: None,
+        tailnet_agents: false,
+        push_gateway: None,
     };
     for public in ["0.0.0.0:0", "[::]:0", "192.0.2.10:8443"] {
         let error = RelayConfig::embedded(options(Some(public))).unwrap_err();
@@ -913,6 +917,10 @@ fn a_node_goes_back_to_schema_6_and_its_listed_agents_are_revoked() {
         master_key: SecretString::new(MASTER_KEY.to_string()),
         public_url: PUBLIC_URL.to_string(),
         public_listen: Some(loopback()),
+        node_origin: None,
+        tailnet_listen: None,
+        tailnet_agents: false,
+        push_gateway: None,
     })
     .unwrap();
     let node = EmbeddedNode::start(config.clone()).unwrap();
@@ -936,9 +944,9 @@ fn a_node_goes_back_to_schema_6_and_its_listed_agents_are_revoked() {
     let answer = serde_json::to_value(&teams).unwrap();
     assert_eq!(
         answer,
-        json!([{"team": team.0, "from": 7, "to": 6, "agents_revoked": 1}])
+        json!([{"team": team.0, "from": 8, "to": 6, "agents_revoked": 1}])
     );
-    // The image of schema 7 moves the file up again; the agent stays revoked.
+    // The image of schema 8 moves the file up again; the agent stays revoked.
     let node = EmbeddedNode::start(config).unwrap();
     let public = node.running().public_listener_url().unwrap();
     let (status, _) = mcp(&public, &token, "apassy_list_access", json!({}));

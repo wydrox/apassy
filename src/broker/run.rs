@@ -83,7 +83,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::json;
 
@@ -92,14 +92,16 @@ use super::approvals::{
     AnswerChoice, AnswerKind, ApprovalOutcome, CheckMethod, EvaluationChoice, PendingRun,
     QuestionInfo, QuestionItem, QuestionRefusal, Settled, action_words, baseline_of,
 };
-use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, Learned, decide_routed};
+use super::bouncer::{
+    BouncerClient, BouncerRequest, BouncerVerdict, DecisionContext, Learned, decide_routed,
+};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, Network, SecretEnv};
 use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
 use super::project::{Project, project_of};
 use super::proxy::{
-    HostRule, OtherHosts, ProxyEvent, ProxyOptions, ProxyOutcome, ProxySecret, RunProxy,
-    mint_placeholder,
+    HostRule, NetworkRule, OtherHosts, ProxyEvent, ProxyOptions, ProxyOutcome, ProxySecret,
+    RunNetwork, RunProxy, mint_placeholder,
 };
 use super::shadow::{self, ShadowInput};
 use super::shell_risk::{self, Analysis, DB_HOST_FLAG, ProviderHosts, analyze_run, injection_flag};
@@ -120,9 +122,6 @@ use crate::vault::{
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod tests;
-
-/// A shadow thread waits this long after the owner time limit for the real outcome.
-const SHADOW_MARGIN: Duration = Duration::from_secs(30);
 
 const MAX_ITEMS: usize = 16;
 const MAX_ARGS: usize = 64;
@@ -515,6 +514,9 @@ struct RunFacts<'a> {
     action: ActionKind,
     /// The destination hosts of the run, in the form of [`normal_host`].
     hosts: &'a [String],
+    /// The active bouncer brain runs on another host (ADR 0035). Then every production
+    /// declaration, read-only too, is a hard rule: a hostile host never allows one.
+    remote_brain: bool,
 }
 
 /// The bouncer runs: a model is set, and the gate of Settings > Agents lets it answer.
@@ -615,13 +617,18 @@ fn hard_rules(
                 .get(index)
                 .and_then(Option::as_ref)
                 .is_some_and(Declaration::is_production);
-        if production
-            && !checked
-                .declarations
-                .get(index)
-                .and_then(Option::as_ref)
-                .is_some_and(|d| d.scope == crate::vault::Scope::ReadOnly)
-        {
+        let read_only = checked
+            .declarations
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|d| d.scope == crate::vault::Scope::ReadOnly);
+        if production && read_only && run.remote_brain {
+            why.push((format!(
+                "\"{}\" is a production credential and the bouncer brain runs on another host: you approve each run in {place}: {}.",
+                facts.name,
+                action_words(run.action)
+            ), ReasonKind::Production));
+        } else if production && !read_only {
             let mut text = format!(
                 "\"{}\" is a production credential with write or admin scope: you approve each run in {place}: {}.",
                 facts.name,
@@ -1229,15 +1236,19 @@ fn run_inner(
     };
     // Goal item B9: the active model (the default bouncer or a promoted model) and the
     // candidate in shadow mode come from the vault, together with execution answers
-    // (ADR 0031); stored evaluation scopes no longer affect routing.
-    let (learned, models, known) = lock(&ctx.vault)
+    // (ADR 0031); stored evaluation scopes no longer affect routing. The bouncer brain
+    // client is the current one of this request (ADR 0035): a hosting change in
+    // Settings applies at the next run. It is read before the vault lock.
+    let bouncer = super::decide::current_bouncer(ctx);
+    let (learned, models, known, brain_mask) = lock(&ctx.vault)
         .as_ref()
         .filter(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
         .map(|vault| {
             (
                 learning::lookup(vault, pattern.as_ref(), now),
-                shadow::models(vault, ctx.bouncer.as_ref()),
+                shadow::models(vault, bouncer.as_ref()),
                 known_state(vault, &items, &checked, action, certain, &hosts),
+                vault.command_mask(&items).ok(),
             )
         })
         .unwrap_or_else(|| {
@@ -1245,6 +1256,7 @@ fn run_inner(
                 learning::LearningState::default(),
                 shadow::Models::default(),
                 known_nothing(items.len()),
+                None,
             )
         });
     let always_asks = checked.facts.iter().any(ItemFacts::asks_always);
@@ -1263,6 +1275,7 @@ fn run_inner(
         pattern: learned.learned.pattern.is_some(),
         action,
         hosts: &hosts,
+        remote_brain: models.active.as_ref().is_some_and(BouncerClient::is_remote),
     };
     let route = match cloud {
         Some(_) => cloud_route(&checked, &run_facts, &known),
@@ -1276,35 +1289,42 @@ fn run_inner(
         env_names: checked.env_names.clone(),
         instruction: String::new(),
         task_provenance: resolved.provenance.unwrap_or_default().to_owned(),
-    };
-    // Shadow mode (ADR 0010): for a request that reaches the model step, the candidate
-    // answers on its own thread. Its answer goes only to the vault. The decision below
-    // uses the active model only, and the broker does not wait for the candidate.
-    let mut shadow_call = if route == Route::Model {
-        models.candidate.clone().and_then(|candidate| {
-            shadow::begin(
-                Arc::clone(&ctx.vault),
-                checked.epoch,
-                candidate,
-                bouncer_request.clone(),
-                ShadowInput {
-                    analysis: analysis.clone(),
-                    declarations: checked.declarations.clone(),
-                    has_user_request: context.has_user_request,
-                    thresholds: learned.learned.thresholds,
-                    routed: true,
-                    default_source,
-                },
-                ctx.approval_timeout + SHADOW_MARGIN,
-            )
-        })
-    } else {
-        None
-    };
+    }
+    .sanitized(Some(&checked.project_dir), home_dir().as_deref(), |text| {
+        brain_mask.as_ref().map_or_else(
+            || "[masked]".to_owned(),
+            |mask| mask.summary(text, usize::MAX),
+        )
+    });
     diagnostic.event.inference_attempted = route == Route::Model && models.active.is_some();
-    let verdict = match (&route, &models.active) {
-        (Route::Model, Some(bouncer)) => bouncer.evaluate(&bouncer_request),
-        _ => BouncerVerdict::Unavailable("not asked".to_owned()),
+    // Shadow mode (ADR 0010, ADR 0035): for a request that reaches the model step, the
+    // candidate rides in the same request as `shadow_heads` when the host has its head
+    // file. Its answer goes only to the vault. The decision below uses the active answer
+    // only; a shadow failure never changes it.
+    let shadow_pin = models
+        .candidate
+        .as_ref()
+        .and_then(|candidate| candidate.pin.as_ref());
+    let (verdict, shadow_verdict) = match (&route, &models.active) {
+        (Route::Model, Some(bouncer)) => bouncer.evaluate_with_shadow(&bouncer_request, shadow_pin),
+        _ => (BouncerVerdict::Unavailable("not asked".to_owned()), None),
+    };
+    let mut shadow_call = match (&route, &models.candidate) {
+        (Route::Model, Some(candidate)) => Some(shadow::begin(
+            Arc::clone(&ctx.vault),
+            checked.epoch,
+            candidate,
+            shadow_verdict.as_ref(),
+            &ShadowInput {
+                analysis: analysis.clone(),
+                declarations: checked.declarations.clone(),
+                has_user_request: context.has_user_request,
+                thresholds: learned.learned.thresholds,
+                routed: true,
+                default_source,
+            },
+        )),
+        _ => None,
     };
     // The model step: a remembered pattern never acts here, it acted in `route`.
     let route = if route == Route::Model {
@@ -2020,7 +2040,7 @@ fn run_inner(
                 }
                 secrets
             }
-            Err(reason) => {
+            Err((code, reason)) => {
                 record(
                     vault,
                     &agent,
@@ -2029,7 +2049,7 @@ fn run_inner(
                     ActivityDecision::Deny,
                     &reason,
                 );
-                return WireResponse::failure("missing_secret", reason);
+                return WireResponse::failure(code, reason);
             }
         }
     };
@@ -2072,10 +2092,7 @@ fn run_inner(
         &secrets.env,
         &secrets.masks,
         &secrets.codes,
-        network.map_or_else(Network::default, |network| Network {
-            env: &network.env,
-            sandbox_profile: network.sandbox_profile.as_deref(),
-        }),
+        network.map_or_else(Network::default, Network::from),
         ctx.run_timeout,
         |cmd, prepare| {
             if let Some(a) = &access_admission {
@@ -2095,7 +2112,8 @@ fn run_inner(
             }
         },
     );
-    let enforced = network.is_some_and(|network| network.sandbox_profile.is_some());
+    let enforced = network.is_some_and(|network| network.rule != NetworkRule::None);
+    let rule = network.map(RunNetwork::report);
     let requests = proxy.map(RunProxy::finish).unwrap_or_default();
     drop(secrets);
     let proxy_note = proxy_summary(&requests);
@@ -2146,6 +2164,14 @@ fn run_inner(
             if !checked.placeholder_names.is_empty() {
                 answer["placeholders"] = json!(checked.placeholder_names);
                 answer["network"] = network_report(enforced, &requests, !request.codes.is_empty());
+                // broker-v0 `network.rule` (unit X2): the rule, and without one on
+                // Linux the reason and the fix.
+                if let (Some(report), Some(fields)) = (
+                    rule.as_ref().and_then(serde_json::Value::as_object),
+                    answer["network"].as_object_mut(),
+                ) {
+                    fields.extend(report.clone());
+                }
                 answer["note"] = json!(if request.codes.is_empty() {
                     PLACEHOLDER_NOTE
                 } else {
@@ -2154,15 +2180,17 @@ fn run_inner(
             }
             WireResponse::success(answer)
         }
-        Err(_) => {
-            let reason = "The command did not start. Check the program name and PATH.";
+        Err(err) => {
+            let reason = exec::sandbox_refusal(&err).unwrap_or_else(|| {
+                "The command did not start. Check the program name and PATH.".to_owned()
+            });
             record_locked(
                 ctx,
                 &checked,
                 request,
                 &label,
                 ActivityDecision::Error,
-                reason,
+                &reason,
             );
             WireResponse::failure("start_failed", reason)
         }
@@ -2316,6 +2344,15 @@ fn check_inner(
             fill.validate_site(vault)
                 .map_err(|reason| ("refused", reason))?;
         }
+        // Way C on without a lease in this build is `lease_failed` before the owner is
+        // asked; a static source adds the variables of its static form (S6, rule 4).
+        let extra = if browser_fill.is_none() && request.items.contains(item_id) {
+            vault
+                .run_extra_bindings(*item_id)
+                .map_err(|error| (error.code(), error.message(*item_id)))?
+        } else {
+            Vec::new()
+        };
         let binding = if browser_fill.is_some() && request.items.contains(item_id) {
             Some(EnvBinding { item_id: *item_id, env_name: format!("APASSY_BROWSER_{item_id}"), field: "password".to_owned(), delivery: EnvDelivery::Value })
         } else if !request.items.contains(item_id) {
@@ -2328,15 +2365,19 @@ fn check_inner(
         ))?;
         // Old synced records can have a name that belongs to another local item.
         // Never let one item replace another item's value in the process environment.
-        if !unique_env_names.insert(binding.env_name.clone()) {
-            return Err((
-                "duplicate_env_name",
-                format!(
-                    "Two requested credentials use the process variable {}. The owner must select different variable names in Apassy before this run.",
-                    binding.env_name
-                ),
-            ));
+        for name in
+            std::iter::once(&binding.env_name).chain(extra.iter().map(|extra| &extra.env_name))
+        {
+            if !unique_env_names.insert(name.clone()) {
+                return Err((
+                    "duplicate_env_name",
+                    format!(
+                        "Two requested credentials use the process variable {name}. The owner must select different variable names in Apassy before this run.",
+                    ),
+                ));
+            }
         }
+        env_names.extend(extra.into_iter().map(|extra| extra.env_name));
         if includes_code && request.items.contains(item_id) {
             if !unique_env_names.insert(code_name.clone()) {
                 return Err((
@@ -2765,7 +2806,21 @@ struct RunSecrets {
     codes: Vec<(String, crate::otp::Totp)>,
 }
 
-fn read_secrets(vault: &Vault, items: &[u64], codes: &[u64]) -> Result<RunSecrets, String> {
+fn read_secrets(
+    vault: &Vault,
+    items: &[u64],
+    codes: &[u64],
+) -> Result<RunSecrets, (&'static str, String)> {
+    // The second check of rule 4: way C turned on after the plan still gets no value.
+    for item_id in items {
+        if let Err(error) = vault.run_extra_bindings(*item_id) {
+            return Err((error.code(), error.message(*item_id)));
+        }
+    }
+    read_secret_values(vault, items, codes).map_err(|reason| ("missing_secret", reason))
+}
+
+fn read_secret_values(vault: &Vault, items: &[u64], codes: &[u64]) -> Result<RunSecrets, String> {
     let mut secrets = RunSecrets {
         env: Vec::new(),
         masks: Vec::new(),
@@ -2791,42 +2846,47 @@ fn read_secrets(vault: &Vault, items: &[u64], codes: &[u64]) -> Result<RunSecret
             .ok_or_else(|| {
                 format!("The owner must select one secret field for item {item_id} in Apassy.")
             })?;
-        let value = vault
-            .reveal(*item_id, &binding.field)
-            .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?
-            .into_zeroizing();
-        let EnvDelivery::Placeholder(hosts) = &binding.delivery else {
-            secrets.env.push(SecretEnv {
-                name: binding.env_name,
-                value,
-            });
-            continue;
-        };
-        let placeholder = mint_placeholder(&value).ok_or_else(|| {
+        let extra = vault
+            .run_extra_bindings(*item_id)
+            .map_err(|error| error.message(*item_id))?;
+        for binding in std::iter::once(binding).chain(extra) {
+            let value = vault
+                .reveal(*item_id, &binding.field)
+                .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?
+                .into_zeroizing();
+            let EnvDelivery::Placeholder(hosts) = &binding.delivery else {
+                secrets.env.push(SecretEnv {
+                    name: binding.env_name,
+                    value,
+                });
+                continue;
+            };
+            let placeholder = mint_placeholder(&value).ok_or_else(|| {
             format!(
                 "The value of item {item_id} is too short for a placeholder. The owner can use the real value mode for {}.",
                 binding.env_name
             )
         })?;
-        let hosts = hosts
-            .iter()
-            .map(|host| HostRule::parse(host))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| format!("Item {item_id} has a host that is not valid."))?;
-        secrets.env.push(SecretEnv {
-            name: binding.env_name.clone(),
-            value: zeroize::Zeroizing::new(placeholder.clone()),
-        });
-        secrets.masks.push(SecretEnv {
-            name: binding.env_name.clone(),
-            value: value.clone(),
-        });
-        secrets.proxied.push(ProxySecret {
-            name: binding.env_name,
-            placeholder,
-            value,
-            hosts,
-        });
+            let hosts = hosts
+                .iter()
+                .map(|host| HostRule::parse(host))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| format!("Item {item_id} has a host that is not valid."))?;
+            secrets.env.push(SecretEnv {
+                name: binding.env_name.clone(),
+                value: zeroize::Zeroizing::new(placeholder.clone()),
+            });
+            secrets.masks.push(SecretEnv {
+                name: binding.env_name.clone(),
+                value: value.clone(),
+            });
+            secrets.proxied.push(ProxySecret {
+                name: binding.env_name,
+                placeholder,
+                value,
+                hosts,
+            });
+        }
     }
     Ok(secrets)
 }

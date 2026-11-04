@@ -404,7 +404,7 @@ fn item_row(ui: &mut egui::Ui, index: usize, item: &ImportItem, format: Format, 
             ui,
             |ui| {
                 ui.vertical(|ui| {
-                    ui.label(kit::text(&item.title, Font::Body).color(kit::LABEL));
+                    ui.label(kit::text(&item.title, Font::Body).color(kit::palette().label));
                     let source = if item.source_vault.is_empty() {
                         format.label().to_owned()
                     } else {
@@ -469,7 +469,7 @@ fn report_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                 kit::section(ui, Some("Problems"), None, |s| {
                     for (title, why) in &report.failed {
                         s.row(|ui| {
-                            ui.label(kit::text(title, Font::Body).color(kit::LABEL));
+                            ui.label(kit::text(title, Font::Body).color(kit::palette().label));
                             kit::tone_note(ui, why, Tone::Critical);
                         });
                     }
@@ -501,7 +501,7 @@ fn report_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                         s.labeled(
                             "File",
                             kit::text(file.display().to_string(), Font::MonoSmall)
-                                .color(kit::SECONDARY),
+                                .color(kit::palette().secondary),
                         );
                         s.row(|ui| match &report.deleted {
                             Some(Ok(())) => {

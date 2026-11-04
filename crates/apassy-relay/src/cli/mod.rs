@@ -6,7 +6,9 @@
 //! JSON-RPC message to the relay's `/mcp`.
 //!
 //! The public interface below is fixed by the skeleton: `src/bin/apassy-team.rs`
-//! calls `main`.
+//! calls `main`. `apassy team ...` (the node binary, `crate::node::team`) calls
+//! `main_as(Program::NodeTeam, ...)`: the same commands, with `apassy team` in its
+//! messages and in the host services it writes.
 //!
 //! Exit codes: 0 success (or the child's code for `run`), 2 usage error,
 //! 3 run denied or timed out, 4 relay or network error.
@@ -83,8 +85,49 @@ impl CliError {
     }
 }
 
+/// Which binary runs the team command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Program {
+    /// `apassy-team ...`.
+    Team,
+    /// `apassy team ...`, the node binary (plan S2-S3, D8).
+    NodeTeam,
+}
+
+impl Program {
+    /// The command as a person types it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Team => "apassy-team",
+            Self::NodeTeam => "apassy team",
+        }
+    }
+
+    /// The words between the executable and the team command line in a service file.
+    pub fn service_prefix(self) -> &'static [&'static str] {
+        match self {
+            Self::Team => &[],
+            Self::NodeTeam => &["team"],
+        }
+    }
+}
+
+static PROGRAM: std::sync::OnceLock<Program> = std::sync::OnceLock::new();
+
+/// The program of this process: `Program::Team` unless `main_as` said otherwise.
+pub fn program() -> Program {
+    PROGRAM.get().copied().unwrap_or(Program::Team)
+}
+
 /// Runs the command line `args` (without the program name) and returns the exit code.
 pub fn main(args: Vec<String>) -> i32 {
+    main_as(Program::Team, args)
+}
+
+/// `main` for `program`. The first call of a process sets the program.
+pub fn main_as(program_name: Program, args: Vec<String>) -> i32 {
+    let _ = PROGRAM.set(program_name);
+    let name = program().name();
     // Never consume flags after the child's delimiter.
     let boundary = args
         .iter()
@@ -146,9 +189,9 @@ pub fn main(args: Vec<String>) -> i32 {
         output::redact(&mut envelope);
         std::println!("{envelope}");
     } else if let Err(error) = result {
-        eprintln!("apassy-team: {}", error.message);
+        eprintln!("{name}: {}", error.message);
         if show_help_hint {
-            eprintln!("Run `apassy-team help` for the commands.");
+            eprintln!("Run `{name} help` for the commands.");
         }
     }
     code
