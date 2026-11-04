@@ -1259,11 +1259,18 @@ mod tests {
             6
         );
         assert_eq!(
-            Store::open_team(&path, &key)
+            Store::open_at(&dir.path().join("team.db.pre-v8"), &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
             7
+        );
+        assert_eq!(
+            Store::open_team(&path, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            8
         );
     }
 
@@ -1285,13 +1292,13 @@ mod tests {
         );
         assert!(!dir.path().join("team.db.pre-v3.tmp").exists());
         drop(store);
-        // A version 7 file opens again and keeps its backup.
+        // A version 8 file opens again and keeps its backup.
         assert_eq!(
             Store::open_team(&path, &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
@@ -1393,7 +1400,7 @@ mod tests {
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(fs::read(&backup).unwrap(), original);
     }
@@ -1496,7 +1503,7 @@ mod tests {
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(fs::read(&backup).unwrap(), original);
     }
@@ -1627,13 +1634,13 @@ mod tests {
                 .unwrap(),
             5
         );
-        // A version 7 file opens again and keeps its backup.
+        // A version 8 file opens again and keeps its backup.
         assert_eq!(
             Store::open_team(&path, &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(fs::read(&backup).unwrap(), original);
     }

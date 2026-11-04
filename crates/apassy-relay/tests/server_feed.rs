@@ -1982,7 +1982,7 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
             &before["revocations"],
             &before["changes"]
         ),
-        (&json!(true), &json!(7), &json!([]), &json!([]))
+        (&json!(true), &json!(8), &json!([]), &json!([]))
     );
     let lost = before["audit_rows_lost"].as_u64().unwrap();
     assert!(lost > 0, "{before}");
@@ -2085,7 +2085,7 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
             &later["revocations"],
             &later["clean"]
         ),
-        (&json!(false), &json!(7), &json!([]), &json!(false))
+        (&json!(false), &json!(8), &json!([]), &json!(false))
     );
     // The rollback of OPERATIONS 21.3: the copy goes back over the file, which is then
     // version 5 again with its question, and the image of schema 6 moves it once more.
