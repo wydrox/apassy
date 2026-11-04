@@ -121,7 +121,8 @@ class ReplayTests(unittest.TestCase):
         views[2]['secrets'][0]['hosts'] = 'unknown'
         views[3]['secrets'][0]['project'] = 'other'
         prepared = replay.baseline_lower_bound(views, binary)
-        self.assertEqual(prepared['pre_ask'], [False, True, True, True])
+        self.assertEqual(prepared['pre_ask'], [False, True, True, True],
+                         msg=json.dumps(prepared['diagnostics'], sort_keys=True))
         from context_v1 import state_text
         self.assertEqual(prepared['systemone_body'][0]['state'], state_text(views[0]['request']))
         for probabilities in itertools.product((0., 1.), repeat=5):

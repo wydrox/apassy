@@ -187,8 +187,13 @@ fn replay(v: &View, body: Option<&Value>) -> Result<Value, &'static str> {
         task_provenance: String::new(),
     };
     let systemone = bouncer::request_body(&request);
-    let mut result =
-        json!({"pre_ask":reason.is_some(), "pre_reason":reason, "systemone_body":systemone});
+    let mut result = json!({
+        "pre_ask":reason.is_some(), "pre_reason":reason, "systemone_body":systemone,
+        // before_model emits only fixed explanations and typed analysis flags.
+        // No input text, metadata, paths or credential values enter diagnostics.
+        "pre_note":pre.as_ref().map(|d| d.note.as_str()),
+        "analysis_flags":&analysis.flags,
+    });
     if let Some(body) = body {
         let asked = bouncer::questions();
         let asked: Vec<_> = asked
