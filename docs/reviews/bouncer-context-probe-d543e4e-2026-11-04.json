@@ -1,0 +1,43 @@
+{
+  "base_revision": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+  "context_contract_sha256": "01a9340c6404684050788e233690a53f81fa5a48b0aae000a4a06239206ea51d",
+  "cost": "NOT_MEASURED",
+  "feasibility_quality": "NOT_MEASURED",
+  "gate_b": "UNSUPPORTED",
+  "harness_revision": "before_Opus_F1_F9_repairs",
+  "heldout_opened": false,
+  "job_id": 126616192188,
+  "kind": "bounded_training_probe",
+  "run_url": "https://github.com/wydrox/apassy/actions/runs/41842107693",
+  "source_commit": "d543e4ee6aff3d5e506b5264ff35f06e4ba56e95",
+  "training_report": {
+    "freeze_sha256": "7dbbb865c935a14b50f4399a093ee444898dc7b43bd5ec7aed65ffa0e98c2b26",
+    "mode": "probe",
+    "outcome": "UNSUPPORTED",
+    "reason": "training_only_no_heldout_opened",
+    "threshold": 0.7100831270217897,
+    "training": {
+      "context": {
+        "mean_loss": 0.9580159485340118,
+        "refused": 0,
+        "rows": 60,
+        "seconds": 4.344948864000003,
+        "steps": 4,
+        "trainable_parameters": 26248193
+      },
+      "control": {
+        "mean_loss": 1.2510391548275948,
+        "refused": 0,
+        "rows": 60,
+        "seconds": 4.086527271000023,
+        "steps": 4,
+        "trainable_parameters": 26248193
+      }
+    },
+    "training_completed": true,
+    "validation": {
+      "fitting_scored": 48,
+      "total": 52
+    }
+  }
+}

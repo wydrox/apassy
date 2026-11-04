@@ -1,122 +1,189 @@
-# Bouncer context: CI CPU probe
+# Bouncer context: supervised CPU experiment in CI
 
-Status (2026-11-04): **not run**. This workflow is validation of bounded synthetic
-training feasibility. A green job is never gate B PASS and does not unlock C/D/E,
-production activation, deployment, or publication. The parent reviews and runs PR CI.
+Status (2026-11-04): runtime **not run**. This workflow implements the CI boundary
+in Opus review §4.9 and Configuration, with integration decision R3. A probe is
+training and cost feasibility evidence only. It never evaluates held-out quality,
+never reports B PASS, and never unlocks C/D/E. A full run still requires review of
+this revision by Opus before the parent starts it.
 
-## Triggers and isolation
+## Entry points and event boundary
 
-`.github/workflows/bouncer-context-experiment.yml` runs on pull requests
-`opened`, `synchronize`, and `reopened` when the listed context implementation,
-contract, fixtures, dependency/base-fetch inputs, evidence, or workflow paths change.
-The new workflow itself matches the filter on the implementation branch. It also
-supports `workflow_dispatch` with no inputs: only the same probe can run. There is
-no full-training or held-out mode in the workflow. No dispatch was performed here.
+The existing pull-request trigger runs the bounded probe on opened, synchronized
+and reopened PRs matching the listed paths. It does not start full training.
+`workflow_dispatch` has a choice input `mode`, default `probe`, with choices
+`probe` and `full`. `workflow_call` has a string input `mode`, also default `probe`.
+Both full jobs require **both** `inputs.mode == 'full'` and the actual
+`github.event_name == 'workflow_dispatch'`. Thus a reusable call from a PR cannot
+start full training even if its caller supplies `full`.
 
-The job uses the existing `ubuntu-24.04` runner type, Python 3.12, and checkout,
-setup-python, and upload-artifact SHAs copied from `ci.yml`. Permissions are only
-`contents: read`; checkout does not persist credentials. No repository secrets,
-owner data, endpoints, Docker, paid services, new runners, or publication are used.
-An artifact upload is CI evidence storage only. Concurrency cancels the older run
-for the same PR/ref; the job timeout is 30 minutes. Cancellation or timeout may
-prevent evidence upload; `always()` is best effort, not a guarantee after termination.
-
-All model files, venv and caches live under `$RUNNER_TEMP/bouncer-context` (`EXP`).
-`HF_HOME`, `HF_HUB_CACHE`, `XDG_CACHE_HOME`, and `PIP_CACHE_DIR` are isolated there.
-A Bash startup file unsets `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`,
-`HUGGINGFACE_HUB_TOKEN`, `HF_TOKEN_PATH`, `APASSY_BASE_MODEL`, and `LAYA_API_KEY`
-for subsequent run steps. Implicit HF token use and telemetry are disabled.
-No environment dump is logged. CPU math threads are limited to two and CUDA is hidden.
-
-## Exact probe sequence
-
-These commands describe future CI execution, not commands run locally:
+After this workflow is registered on the default branch, the manual entry points
+are, for the reviewed committed revision on the implementation branch:
 
 ```bash
-python -m venv "$EXP/venv"
-PY="$EXP/venv/bin/python"
-"$PY" -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
-"$PY" -m pip install -r tools/basemodel/requirements.txt
-"$PY" -m pip check
-"$PY" -B tools/basemodel/fetch_weights.py
+gh workflow run bouncer-context-experiment.yml --ref feat/bouncer-secret-context -f mode=probe
+gh workflow run bouncer-context-experiment.yml --ref feat/bouncer-secret-context -f mode=full
 ```
 
-The workflow then calls `common.base_dir()` to record the exact resolved snapshot
-path as `APASSY_CONTEXT_TOKENIZER_BASE` and in `base-identity.json`. It compares
-`common.BASE_REPO` and `BASE_REVISION` with `manifest.json`, and hashes the weights
-against its `base.weights_sha256`. The public base is
-`convaiinnovations/laya@55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851`.
-After fetch, `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are set for later steps.
-These flags prevent library downloads; they are not an OS network sandbox.
+These commands are instructions for the parent; neither was executed here.
+A newly added workflow may be unavailable for dispatch until its file exists on
+the default branch. The parent may later add a minimal reusable call from the
+registered `ci.yml`, after Opus review. This change does not edit `ci.yml`. Such a
+bridge must expose/forward the mode from its manual trigger; the original event
+must still be `workflow_dispatch`. No PR label, publication or other trigger is
+used to bypass registration or the manual-only full boundary.
 
-The inline unittest runner discovers only `tests/basemodel/test_context_tokens.py`
-using `APASSY_CONTEXT_TOKENIZER_BASE`. It requires at least one executed test,
-success, and zero skips. It then independently calls
-`context_v1.measure(base, contract, fuzz=10000)` and requires exact equality of
-the proposed and canonical `budget`, including header and segment measurements.
-`token-report.json` records unittest counts, measurements and the contract hash.
-No encoder training precedes this check.
+## Isolation and pinned inputs
+
+All three jobs use the existing `ubuntu-24.04` runner type, Python 3.12 and only
+`contents: read`. Checkout disables persisted credentials. Checkout, setup-python
+and upload-artifact action SHAs match `ci.yml`; the download-artifact SHA is the
+existing v8.0.2 pin in `bouncer-image.yml` (there is no download pin in `ci.yml`).
+No repository secret, R2 read, owner data, endpoint, paid service or publication is
+introduced. Dependency installation and the Rust build occur only in CI.
+
+Each fresh job creates a private venv, public-model HF cache and package caches
+under `$RUNNER_TEMP/bouncer-context` (`EXP`). It unsets the known HF/Laya owner
+credential and base overrides, disables implicit HF credentials and telemetry,
+hides CUDA and fixes math threads. It installs existing requirements after
+CPU-only `torch==2.14.0`, checks dependency consistency and CPU/thread identity,
+fetches the pinned public base, verifies its manifest revision and weights hash,
+and then sets the HF/Transformers offline flags. These are library offline flags,
+not an operating-system network sandbox. No owner cache is restored.
+
+The probe builds the real baseline example using
+`cargo build --locked --features vault --example context_route_replay` with a
+job-private target directory. `APASSY_CONTEXT_REPLAY_BINARY` points at that binary.
+The replay unittest suite, including compiled fixture parity, must pass with zero
+skips. The tokenizer unittest suite must also pass with zero skips; an independent
+10,000-context measurement must exactly match the canonical budget. A skip or
+budget mismatch stops the job. Source-only unit tests are not quality evidence.
+
+## Probe and projection
+
+The 40-minute probe generates only G1 data with `--groups 40 --seed 7`. It uses the
+current generator's validation split of ten groups. The trainer receives exactly:
 
 ```bash
-"$PY" -B tools/basemodel/context_data.py --out "$EXP/synthetic" --groups 40 --seed 7
-/usr/bin/time -v -o "$EXP/evidence/training-time.txt" \
-  timeout --signal=TERM --kill-after=30s 1250s \
-  "$PY" -B tools/basemodel/context_train.py \
-  --data "$EXP/synthetic" --out "$EXP/probe" \
-  --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" \
-  --mode probe --limit 64 --epochs 1 --max-steps 4 --batch 1 \
-  --threads 2 --seconds-per-head 600 --seed 7
+--mode probe --limit 64 --epochs 1 --max-steps 4 --batch 1 \
+--threads 2 --seconds-per-head 600 --seed 7
 ```
 
-G1 train/validation generation uses 40 training groups and the generator's minimum
-10 validation groups; these are groups, not row counts. The trainer limits each
-split to 64 rows, trains context and facts-blind control heads with at most four
-steps each, and selects a threshold using validation only. The 600-second limit
-is checked between training batches per head; it excludes setup and validation.
-The external 1250-second timeout bounds the whole training invocation, including
-validation and writes; the training step also has a 23-minute timeout. A slow CPU
-may fail to finish. Partial checkpoints are diagnostic evidence only.
+The whole training invocation has an external 1,250-second timeout and a
+23-minute step limit, including setup, validation and writes. The per-head limit
+is not a limit on the whole invocation. Exit 3 is accepted only with an exact
+`training_completed=true`, probe/UNSUPPORTED training-only report and matching
+freeze/data/checkpoint hashes at the expected paths. Configuration, contract,
+tokenizer, base, source commit, harness/helper hashes and installed package
+versions are independently verified.
 
-The training CLI returns **3 even on successful training-only completion**. The
-workflow rejects every other exit, including timeout, and accepts 3 only if
-`training_completed` is exactly true, mode is `probe`, outcome is `UNSUPPORTED`,
-reason is `training_only_no_heldout_opened`, and freeze/report hashes match.
-It requires nonempty context/control checkpoints and train/val files at the exact
-expected paths with matching SHA-256, and checks the frozen configuration limits.
-Errors caught by the CLI still yield 3 but lack completion evidence and fail CI.
-Unexpected exceptions, absent reports and malformed freezes also fail.
+The report must contain finite positive `projected_full_seconds`, additive
+projection components, and encoder timings for 32 validation rows at batches one
+and eight. Projection provenance records 800 groups, four epochs and two heads.
+The probe publishes the freeze SHA and report SHA as job outputs. The training
+job verifies both external hashes, all probe artifacts and code/package identity
+before accepting the projection. `budget.json` records the checked provenance
+and largest integer group count in 400..800 satisfying:
 
-No evaluator CLI is invoked and no `tests/evals` data, held-out generator or
-held-out templates are opened. The trainer imports shared helpers from
-`context_eval.py` for golden validation and validation-threshold selection only;
-it does not call the held-out evaluation function.
+```text
+projected_full_seconds * groups / 800 * 1.3 <= 0.6 * 300 * 60
+```
 
-## Evidence and limits
+If 800 fits, it is selected. If no count at least 400 fits, full training stops as
+`UNSUPPORTED(budget)` and evaluation never starts. No held-out data influences the
+projection or group selection.
 
-The explicit artifact allowlist includes the synthetic training report, freeze,
-context/control checkpoints, data manifest, base identity, tokenizer report,
-freeze verification, training exit, `/usr/bin/time -v` resource output and probe
-costs. Costs contain elapsed time and directory sizes, not an estimated bill.
-They identify both the source branch head and the tested SHA (the synthetic merge
-commit for a pull request).
-Step stdout/stderr remain in Actions logs without an owner environment dump.
-The upload excludes synthetic row files, HF cache/base weights, venv and package
-caches. Retention is seven days; resource collection and upload use `always()`
-so failures retain whatever evidence exists. Missing files never imply completion.
-Freeze paths are runner-local and cease to be usable after the job; the hashes
-remain useful for audit. Artifacts are experimental and must not replace shipped heads.
+After freeze verification, `context_replay.py` benchmarks G1 `val.jsonl` using
+`--mode probe --threads 2` and the context checkpoint SHA read from
+`freeze['context']['sha256']`. It uses a fresh subprocess per arm and secret count,
+CPU, three warmups, N=20 for each of one and three secrets. The benchmark step has
+the same 40-minute ceiling as the job; the job deadline also covers all prior
+steps. It reports measured p50/p95 and RSS plus head/base/contract/tokenizer
+provenance. It does not manufacture PASS. The public stock baseline heads are
+compute-shape evidence only. The combined-process measurement remains explicitly
+NOT_RUN/informational in the current harness.
 
-Package availability, successful CPU installation, model runtime compatibility,
-training completion, elapsed CPU/RAM costs and artifact delivery remain unmeasured
-until CI runs. This probe provides no held-out quality, gate B acceptance,
-same-device baseline latency, owner preference or production evidence.
+## Manual full training and frozen handoff
 
-## Source validation performed
+The full sequence is probe → train (300 minutes) → evaluate (120 minutes).
+Immediately after checkout, before setup-python or any Python command, the
+training job removes exactly these three paths in its disposable CI checkout:
+`tests/evals/secret-context-heldout-v1.jsonl`,
+`tests/evals/secret-context-heldout-v1.manifest.json`, and
+`tests/evals/secret_context_heldout_v1.py`. No glob or owner checkout deletion is
+used. The trainer's existing audit hook independently refuses held-out opens.
 
-`heavy-check actionlint .github/workflows/bouncer-context-experiment.yml` passed.
-A lightweight Python/PyYAML source check through `heavy-check` parsed the YAML,
-verified triggers, permissions, runner, timeout, concurrency and action pins against
-`ci.yml`, ran `bash -n` on seven shell blocks, and parsed five inline Python blocks
-with `ast.parse`. These checks did not execute those scripts or import model code.
-No dependencies were installed, weights fetched, model tests/training run, or
-Actions dispatched. Runtime evidence is still **not run**.
+The train job downloads the probe evidence, verifies its external identities,
+copies the verified report to `$EXP/evidence/verified-probe-report.json`, and
+replaces only the generated G1 data with the selected group count. Its trainer
+configuration is exactly:
+
+```bash
+--mode full --limit 0 --epochs 4 --max-steps 0 --batch 32 --threads 4 \
+--lr .0003 --wd .01 --warmup 100 --seconds-per-head 5400 --seed 7 \
+--probe-report "$EXP/evidence/verified-probe-report.json"
+```
+
+The invocation is additionally capped at 17,000 seconds within the 300-minute
+job. Exit 3 requires completion and all frozen data/checkpoint/configuration,
+code, base and package checks, including the harness's full freeze verifier.
+Feature caching is bounded at 6 GiB by the trainer and removed at exit. Before
+any evaluation job starts, the training job writes the full freeze SHA to its
+job output and the Actions summary. It does not publish a model release.
+
+The allowlisted artifacts retain experimental context/control heads, G1 train/val,
+data manifest, training report, verified probe report, freeze, budget, tokenizer,
+base identity and timing/cost evidence for seven days. They exclude base weights,
+HF/package caches, venv, feature caches and Rust build outputs. Upload on failure
+is best effort; cancellation or a hard job timeout may prevent it.
+
+Evaluation uses a fresh checkout/job and restores the full artifact directly
+under `$RUNNER_TEMP/bouncer-context`, preserving the frozen absolute paths for
+`synthetic/{train,val}.jsonl`, the manifest and `full/{context,control}.safetensors`.
+It never rewrites `freeze.json`. A different runner path, package version, code
+hash, data hash or checkpoint hash fails verification. The external train job SHA
+is checked before any held-out open. Evaluation builds the baseline example,
+requires replay parity without skips, then benchmarks full-mode cost at N=50,
+three warmups, one and three secrets, four threads, fresh CPU subprocesses.
+
+The evaluator receives `--expect-freeze-sha256`, `--baseline-binary` and
+`--cost-json`. It independently verifies the full freeze before its first held-out
+read. Full cost failure is retained as a failed benchmark step but permits quality
+evaluation to report its separate result; missing/invalid cost stays UNSUPPORTED.
+The final evaluator exit follows gate B: 0 PASS, 1 FAIL, 3 UNSUPPORTED. The summary
+prints `feasibility_quality` and `gate_b` separately, with missing evidence. Quality
+PASS alone never unlocks C/D/E. The baseline is proven by the Rust lower bound or
+remains `baseline_shipped` UNSUPPORTED when H_ship is needed but unavailable.
+Stock public heads cannot satisfy that gate. This workflow neither fetches shipped
+heads through R2/secrets nor publishes them.
+
+## Integration blocker and evidence status
+
+At source inspection, `context_data.default_secret()` still combines known
+`env=development` with `scope=unknown`/`scope_from=none` and unknown sensitivity.
+Strict replay rejects that declaration combination as `row_incoherent`; variants
+can inherit it. The parent owns the correction in data/replay files. This workflow
+does not weaken validation or claim the benchmark has run. Re-review the corrected
+harness and this workflow together before full execution.
+
+Local validation is limited to actionlint and YAML, Bash syntax and inline Python
+AST checks through heavy-check. No local model test, install, encoder inference,
+training or Rust build was run. The parent's earlier 46 PASS / 2 SKIP context tests
+are source checks, not quality or cost evidence. CI runtime compatibility,
+completion, projections, CPU/RSS costs, artifact restore, held-out quality and
+gate B remain unmeasured. Missing shipped-head evidence, CI costs, full quality and
+subsequent Opus approval remain gates; Mac/MPS cost belongs to C.
+
+Source checks on this revision completed successfully:
+
+- `~/.local/bin/heavy-check actionlint .github/workflows/bouncer-context-experiment.yml`: exit 0.
+- `~/.local/bin/heavy-check python3 /tmp/bouncer-context-static.py`: exit 0;
+  YAML/event/permissions/action-pin/artifact/gating/order assertions, `bash -n`
+  for 26 shell blocks, `ast.parse` for 15 inline Python blocks, and three
+  group-selection boundary examples (800, 553 and no fitting group). The temporary
+  checker did not execute workflow scripts or import the harness/model.
+- `git diff --check -- .github/workflows/bouncer-context-experiment.yml docs/evaluation/bouncer-context-ci-probe.md`: exit 0.
+
+Only the two owned files were edited. No commit, push, PR, Actions dispatch,
+subagent, package install or build was performed. No local build directory was
+created. Available disk after checks was approximately 11.6 GiB; cleanup of other
+sessions' files is outside this two-file task.

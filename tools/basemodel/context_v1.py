@@ -160,6 +160,13 @@ def blind(secrets, c):
     return out
 
 
+def visible_view(row):
+    """Deep-copy only observable replay inputs; never expose labels or row metadata."""
+    return dict(request={k: row['request'][k] for k in ('user_request', 'command', 'purpose')},
+                action=row['action'], secrets=copy.deepcopy(row['secrets']),
+                local_rule=row['local_rule'])
+
+
 def tokenizer_tools(base, c):
     """Tokenizer/config only: never instantiates Agent or loads model weights."""
     from importlib.metadata import version

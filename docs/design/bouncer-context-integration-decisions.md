@@ -48,3 +48,29 @@ fits the reviewed CPU/time/cache budget.
 R1 and HostFit/ProjectFit are pinned in the human contract without changing
 serializer bytes. C must separately decide missing-agent scope evidence and
 map evidence/storage failures to an owner question.
+
+## Parent integration R4
+
+The repaired G1 generator now produces coherent declaration states accepted by
+the strict replay: a known environment has a known scope/source and sensitivity;
+production is sensitive; absent declaration resets environment/scope/provenance,
+sensitivity and project together. A generated-view regression checks both splits.
+
+The evaluator masks every non-null local rule, including an empty string. Injection
+and agent-use probes reject any ask-to-allow flip, including normal-label rows.
+The held-out fact-label audit runs after freeze verification and overlap checks,
+before constructing a scorer. An invalid dataset is UNSUPPORTED(label_audit).
+The CPU workflow explicitly builds its replay with the existing Rust 1.97.0 pin.
+
+CI passed all 16 checks for d543e4e. Its four-step-per-head CPU probe completed:
+context training 4.345 seconds, control 4.087 seconds, 60 scored training rows per
+arm. This used the old harness and provides no quality, baseline or cost gate.
+Exact report and provenance are in the corresponding probe evidence JSON.
+
+Manual entry is still a review item. GitHub's documentation requires a
+workflow_dispatch file on the default branch:
+https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow
+The proposed patch below adds only an explicit off/probe/full manual input and a
+reusable call to the existing registered CI file. It changes no existing job or
+runner and is NOT applied or dispatched yet. Opus must review this concrete patch
+with the repaired revision before the parent applies it.
