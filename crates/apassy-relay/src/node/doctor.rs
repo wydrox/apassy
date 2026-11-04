@@ -18,7 +18,7 @@ use super::status::{self, Probe, SystemProbe};
 use super::{NodeCliError, PROGRAM, keys, node_dir, parse_options, printable};
 
 /// The ids of the checks, in their order.
-pub const CHECK_IDS: [&str; 11] = [
+pub const CHECK_IDS: [&str; 13] = [
     "tailscale_installed",
     "tailscale_running",
     "tailscale_address",
@@ -30,6 +30,8 @@ pub const CHECK_IDS: [&str; 11] = [
     "linger",
     "clock",
     "old_host_service",
+    "serve_peer_addresses",
+    "coding_agents",
 ];
 
 /// A clock further than this from the gateway's gets a warning.
@@ -529,6 +531,48 @@ fn old_host_service_check(probe: &dyn Probe) -> Check {
     }
 }
 
+fn serve_peer_check(without_peer_addresses: bool) -> Check {
+    if without_peer_addresses {
+        check(
+            "serve_peer_addresses",
+            CheckStatus::Warn,
+            apassy::net::tailnet::SERVE_WITHOUT_PEER_ADDRESSES,
+        )
+    } else {
+        check(
+            "serve_peer_addresses",
+            CheckStatus::Pass,
+            "No Serve peer-address warning.",
+        )
+    }
+}
+
+fn coding_agents_check(home: Option<&Path>) -> Check {
+    let Some(home) = home else {
+        return check(
+            "coding_agents",
+            CheckStatus::Skip,
+            "No home directory to check.",
+        );
+    };
+    if [".claude", ".codex", ".cursor", ".config/opencode"]
+        .iter()
+        .any(|folder| home.join(folder).is_dir())
+    {
+        check(
+            "coding_agents",
+            CheckStatus::Warn,
+            "Coding agents run as this user; they can reach the node's operator socket and key. Run the node as its own user.",
+        )
+    } else {
+        check(
+            "coding_agents",
+            CheckStatus::Pass,
+            "No known coding-agent config folders in this user's home.",
+        )
+    }
+}
+
 /// Runs every check on the node in `dir`.
 pub fn collect(dir: &Path, probe: &dyn Probe) -> Result<Report, NodeCliError> {
     let settings = NodeSettings::load(dir)?;
@@ -547,6 +591,13 @@ pub fn collect(dir: &Path, probe: &dyn Probe) -> Result<Report, NodeCliError> {
     checks.push(linger_check(probe));
     checks.push(clock_check(probe, settings.push_gateway.as_deref()));
     checks.push(old_host_service_check(probe));
+    checks.push(serve_peer_check(
+        state
+            .as_ref()
+            .is_some_and(|state| state.serve_without_peer_addresses),
+    ));
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    checks.push(coding_agents_check(home.as_deref()));
     let ok = checks.iter().all(|check| check.status != CheckStatus::Fail);
     Ok(Report { ok, checks })
 }
@@ -584,6 +635,33 @@ pub fn command(args: &[String]) -> Result<i32, NodeCliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coding_agents_in_a_temporary_home_warn() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            coding_agents_check(Some(home.path())).status,
+            CheckStatus::Pass
+        );
+        for folder in [".claude", ".codex", ".cursor", ".config/opencode"] {
+            let path = home.path().join(folder);
+            fs::create_dir_all(&path).unwrap();
+            let found = coding_agents_check(Some(home.path()));
+            assert_eq!(found.status, CheckStatus::Warn);
+            assert!(found.detail.contains("Run the node as its own user."));
+            fs::remove_dir(&path).unwrap();
+        }
+    }
+
+    #[test]
+    fn missing_serve_peer_addresses_warn() {
+        assert_eq!(serve_peer_check(true).status, CheckStatus::Warn);
+        assert_eq!(
+            serve_peer_check(true).detail,
+            apassy::net::tailnet::SERVE_WITHOUT_PEER_ADDRESSES
+        );
+        assert_eq!(serve_peer_check(false).status, CheckStatus::Pass);
+    }
 
     #[test]
     fn the_ids_are_unique() {

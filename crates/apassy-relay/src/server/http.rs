@@ -70,6 +70,8 @@ const IDLE_MAINTENANCE_SECS: u64 = 60;
 /// on `/mcp` and `/p/` (`AgentAuthFailures`), and that one tailnet peer takes on the
 /// tailnet listener. One more request in the window gets 429 `rate_limited`.
 pub const AUTH_FAILURES_MAX: u32 = 20;
+/// Shared tailnet bucket when Serve supplies no peer address (old Tailscale).
+pub const AUTH_FAILURES_WITHOUT_PEER_MAX: u32 = 200;
 /// The window of `AUTH_FAILURES_MAX`, in seconds, and the `Retry-After` of its 429.
 pub const AUTH_FAILURE_WINDOW_SECS: u64 = 60;
 /// Bad bearer tokens and session keys on `/mcp` and `/p/` of one listener without a
@@ -224,7 +226,7 @@ impl Window {
 /// listener (`AuthFailures::limited`, `AuthFailures::record`). The tailnet listener that
 /// the TLS front forwards to uses the tailnet peer of each request for every path
 /// (`Listener::counted`, N8-1), so one peer with bad tokens never locks out another
-/// peer.
+/// peer. With no PROXY address, the shared loopback key has a higher 200/min limit.
 #[derive(Debug, Default)]
 pub struct AuthFailures {
     /// For each key: its window.
@@ -258,7 +260,12 @@ impl AuthFailures {
             windows.remove(&key);
             return false;
         }
-        window.count >= AUTH_FAILURES_MAX
+        window.count
+            >= if key.is_loopback() {
+                AUTH_FAILURES_WITHOUT_PEER_MAX
+            } else {
+                AUTH_FAILURES_MAX
+            }
     }
 
     /// Counts one bad bearer token or session key of `key`.

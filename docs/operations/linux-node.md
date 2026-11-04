@@ -35,6 +35,14 @@ Exit codes: 0 success; 1 a check failed (`doctor`) or the node did not start; 2 
 - The `.deb` installs `/usr/bin/apassy`, `/usr/bin/apassy-team`, `/usr/lib/systemd/user/apassy-node.service`, and `/usr/share/doc/apassy/`. It starts nothing: each user who runs a node runs `apassy up`.
 - Check a download: `sha256sum -c --ignore-missing SHA256SUMS`, and its build attestation: `gh attestation verify <file> --repo wydrox/apassy --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml` ([release](release.md), "Attestations and SBOMs").
 
+## Use a separate user for the node
+
+Run the node as its own Linux user. Keep coding agents off that account: any process of
+that user can reach `admin.sock` and the node's key (`master.key`, or the systemd user
+credential). File modes and encryption at rest do not separate processes of the same
+user. `apassy doctor` warns when it finds `~/.claude`, `~/.codex`, `~/.cursor`, or
+`~/.config/opencode`; missing folders do not prove that no agent runs as this user.
+
 ## Set up
 
 1. Install Tailscale and sign in: `curl -fsSL https://tailscale.com/install.sh | sh`, then `sudo tailscale up`.
@@ -146,6 +154,7 @@ When the service cannot decrypt the credential, it does not start (`systemctl --
       "origin": "https://100.64.0.7:8444",
       "port": 8444,
       "route": "direct",
+      "serve_without_peer_addresses": false,
       "bound": ["100.64.0.7:8444", "[fd7a:115c:a1e0::7]:8444"],
       "alternatives": ["build-box.tail0123.ts.net", "[fd7a:115c:a1e0::7]"]
     },
@@ -163,6 +172,7 @@ When the service cannot decrypt the credential, it does not start (`systemctl --
 
 - `running` is true when a `serve` answers on the control socket; the exit code is then 0, else 3. A stopped node has `pid`, `started_at` null, `bound` empty, `teams` empty, and `origin` of its last start.
 - `service.enabled` and `service.active` are the words of `systemctl --user is-enabled` and `is-active`, or null without systemd.
+- `routes.tailnet.serve_without_peer_addresses` flags a running Serve fallback without PROXY v1; `status` and `doctor` show "Tailscale Serve without peer addresses: update Tailscale".
 - `pin` is null before the first start.
 - `teams` come from the running relay's operator socket (counts and the last activity only). When they cannot be read, `teams_error` says why. The devices of a team with their last contact are not in `status` yet: the operator socket shows no device by design, and a read-only device list for the node is a follow-up.
 - `key.source` is `credential` (the service got it from systemd), `encrypted` (the encrypted `master.key.cred`, read outside the service), `file` (the 0600 `master.key`), or `none` (no key yet).
@@ -194,6 +204,8 @@ Each check has `id`, `status` (`pass`, `warn`, `fail`, `skip`), `detail`, and, w
 | `linger` | `loginctl` says linger is on |
 | `clock` | The clock is within 60 s of the push gateway's `Date` (a fail from 240 s: the gateway refuses pushes 5 minutes off) |
 | `old_host_service` | No `apassy-team-host*.service` still runs the `apassy-team` binary (else: `apassy team host install`, which writes the same service for `apassy team host`) |
+| `serve_peer_addresses` | Warns when the running Serve fallback has no peer addresses: update Tailscale; failed authentications then share a 200/min limit instead of 20/min per peer |
+| `coding_agents` | Warns when known coding-agent config folders exist in this user's home; run the node as its own user |
 
 ## `pair --json`
 

@@ -317,7 +317,27 @@ pub struct ServeTcp {
     cli: std::sync::Arc<dyn crate::node::funnel::TailscaleCli>,
 }
 
+/// Shown when Serve cannot name the tailnet peers.
+pub const SERVE_WITHOUT_PEER_ADDRESSES: &str =
+    "Tailscale Serve without peer addresses: update Tailscale";
+
 impl ServeTcp {
+    /// Whether the active forward lacks PROXY v1 peer addresses. Unknown is degraded.
+    pub fn without_peer_addresses(&self, port: u16) -> bool {
+        self.cli
+            .run(&["serve", "status", "--json"])
+            .filter(|output| output.success)
+            .and_then(|output| serde_json::from_str::<serde_json::Value>(&output.stdout).ok())
+            .and_then(|value| {
+                value
+                    .get("TCP")?
+                    .get(port.to_string())?
+                    .get("ProxyProtocol")?
+                    .as_u64()
+            })
+            != Some(1)
+    }
+
     pub fn new(cli: std::sync::Arc<dyn crate::node::funnel::TailscaleCli>) -> Self {
         Self { cli }
     }
@@ -682,6 +702,7 @@ mod tests {
             "tcp://127.0.0.1:51000".to_owned(),
         ]));
         assert_eq!(serve.state(8444, 51000), Ok(ServeTcpState::Ours));
+        assert!(!serve.without_peer_addresses(8444));
         serve.enable(8444, 51000).expect("already on");
         assert_eq!(serve.disable(8444, 51001), Ok(false), "not our target");
         assert_eq!(serve.disable(8444, 51000), Ok(true));
@@ -712,6 +733,7 @@ mod tests {
         });
         let serve = ServeTcp::new(cli.clone());
         serve.enable(8444, 51000).expect("on");
+        assert!(serve.without_peer_addresses(8444));
         assert_eq!(serve.state(8444, 51000), Ok(ServeTcpState::Ours));
         assert!(cli.calls.lock().unwrap().contains(&vec![
             "serve".to_owned(),

@@ -307,3 +307,24 @@ fn the_local_route_listener_counts_its_own_failures() {
             .any(|(action, detail)| action == "rate_limited" && detail.contains("local_route"))
     );
 }
+
+#[test]
+fn serve_without_peer_addresses_shares_a_higher_limit() {
+    let node = Node::start(NodeOptions::default());
+    let tailnet = node.node().tailnet_addr().unwrap();
+    let local = node.node().running().tailnet_local_addr.unwrap();
+    let limit = apassy_relay::server::http::AUTH_FAILURES_WITHOUT_PEER_MAX;
+    assert_eq!(limit, 200);
+    assert!(limit > AUTH_FAILURES_MAX);
+    for _ in 0..limit {
+        assert_eq!(
+            bad_token_from(tailnet, Some("127.0.0.1".parse().unwrap())),
+            401
+        );
+    }
+    assert_eq!(
+        bad_token_from(tailnet, Some("127.0.0.1".parse().unwrap())),
+        429
+    );
+    assert_eq!(bad_token_from(local, None), 401);
+}

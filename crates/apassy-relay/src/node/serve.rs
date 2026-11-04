@@ -68,6 +68,8 @@ pub struct ServeState {
     /// The pin of the node certificate, b64u of its SHA-256.
     pub pin: String,
     pub route: Route,
+    #[serde(default)]
+    pub serve_without_peer_addresses: bool,
     /// The addresses the front listens on now (at the start).
     pub bound: Vec<String>,
     /// The loopback address of the relay's tailnet listener: the front's target.
@@ -575,6 +577,7 @@ impl Serving {
             }
         };
         let mut serve_tcp = None;
+        let mut serve_without_peer_addresses = false;
         match settings.route {
             Route::Direct if !options.test_loopback => {
                 if front
@@ -597,6 +600,7 @@ impl Serving {
                         "Tailscale Serve did not forward port {port}: {error} If Tailscale needs root for this, run `sudo tailscale set --operator=$USER` once."
                     )));
                 }
+                serve_without_peer_addresses = serve.without_peer_addresses(port);
                 serve_tcp = Some((port, local_port));
             }
         }
@@ -609,6 +613,7 @@ impl Serving {
             port,
             pin: pin.text(),
             route: settings.route,
+            serve_without_peer_addresses,
             bound: front.bound().iter().map(ToString::to_string).collect(),
             tailnet_listen: target.to_string(),
             alternatives,
