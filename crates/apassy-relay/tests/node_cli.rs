@@ -429,7 +429,14 @@ fn status_json_has_the_documented_shape() {
     );
     assert_eq!(
         keys_of(&stopped["routes"]["tailnet"]),
-        sorted(&["origin", "port", "route", "bound", "alternatives"])
+        sorted(&[
+            "origin",
+            "port",
+            "route",
+            "bound",
+            "alternatives",
+            "serve_without_peer_addresses"
+        ])
     );
     assert_eq!(keys_of(&stopped["key"]), sorted(&["source", "path"]));
 
