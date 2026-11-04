@@ -1,0 +1,18 @@
+{
+  "request": {
+    "user_request": "Check status",
+    "command": "tool status",
+    "purpose": "",
+    "relative_dir": ".",
+    "env_names": [],
+    "instruction": "NEVER_SEND_OWNER_RULE",
+    "task_provenance": ""
+  },
+  "action": "read",
+  "secrets": [],
+  "model_text": "User request: \"Check status\". Shell command: `tool status`. Context: action=read secrets=0 history=local_device window=30d.",
+  "token_bound": 84,
+  "refusal": {
+    "kind": "NoSecrets"
+  }
+}
