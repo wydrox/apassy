@@ -27,7 +27,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "bouncer-rules-pass-ok";
-const SECRET: &str = "FAKE-bouncer-secret-8812-canary";
+const SECRET: &str = "FAKE-brain-secret-8812-canary";
 
 struct Fixture {
     _dir: TempDir,
@@ -305,6 +305,46 @@ fn an_item_of_another_project_asks_also_with_a_placeholder() {
     assert_eq!(result["decided_by"], "Bouncer allowed");
     assert_eq!(result["stdout"], "done\n");
     assert!(fx.broker.approvals().pending().is_empty());
+}
+
+#[test]
+fn brain_body_masks_literal_values_and_shortens_prompt_and_purpose_paths() {
+    let bouncer = common::fake_bouncer(&[]);
+    let fx = fixture(Some(&bouncer.url));
+    let home = std::env::var("HOME").expect("home");
+    let response = client::send(
+        &fx.socket,
+        &fx.token,
+        Action::Run {
+            access_request_id: None,
+            codes: Default::default(),
+            items: vec![fx.item_id],
+            command: ["sh", "-c", "node -e 0", SECRET]
+                .map(str::to_owned)
+                .to_vec(),
+            cwd: fx.project.display().to_string(),
+            purpose: format!(
+                "Check {}/src and {home}/notes with {SECRET}.",
+                fx.project.display()
+            ),
+            path: Some("/usr/bin:/bin".to_owned()),
+            user_request: Some(format!(
+                "Check {}/src and {home}/notes with {SECRET}.",
+                fx.project.display()
+            )),
+        },
+    )
+    .expect("answer");
+    assert!(response.ok, "{response:?}");
+    let bodies = bouncer.bodies.lock().expect("bodies");
+    assert_eq!(bodies.len(), 1);
+    let body = &bodies[0];
+    assert!(!body.contains(SECRET), "literal value reached brain");
+    assert!(!body.contains(&fx.project.display().to_string()));
+    assert!(!body.contains(&home));
+    assert!(body.contains("./src"), "{body}");
+    assert!(body.contains("~/notes"), "{body}");
+    assert!(body.contains("[apassy:secret]"), "{body}");
 }
 
 #[test]

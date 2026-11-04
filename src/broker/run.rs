@@ -1240,7 +1240,7 @@ fn run_inner(
     // client is the current one of this request (ADR 0035): a hosting change in
     // Settings applies at the next run. It is read before the vault lock.
     let bouncer = super::decide::current_bouncer(ctx);
-    let (learned, models, known) = lock(&ctx.vault)
+    let (learned, models, known, brain_mask) = lock(&ctx.vault)
         .as_ref()
         .filter(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
         .map(|vault| {
@@ -1248,6 +1248,7 @@ fn run_inner(
                 learning::lookup(vault, pattern.as_ref(), now),
                 shadow::models(vault, bouncer.as_ref()),
                 known_state(vault, &items, &checked, action, certain, &hosts),
+                vault.command_mask(&items).ok(),
             )
         })
         .unwrap_or_else(|| {
@@ -1255,6 +1256,7 @@ fn run_inner(
                 learning::LearningState::default(),
                 shadow::Models::default(),
                 known_nothing(items.len()),
+                None,
             )
         });
     let always_asks = checked.facts.iter().any(ItemFacts::asks_always);
@@ -1281,19 +1283,19 @@ fn run_inner(
     };
     let bouncer_request = BouncerRequest {
         user_request: user_request.to_owned(),
-        // ADR 0035: the paths of the project root and the home folder are shortened, for a
-        // local and a remote brain alike, so a state does not carry them.
-        command: super::bouncer::shorten_paths(
-            &request.command.join(" "),
-            Some(&checked.project_dir),
-            home_dir().as_deref(),
-        ),
+        command: request.command.join(" "),
         relative_dir: checked.relative_dir.clone(),
         purpose: request.purpose.trim().to_owned(),
         env_names: checked.env_names.clone(),
         instruction: String::new(),
         task_provenance: resolved.provenance.unwrap_or_default().to_owned(),
-    };
+    }
+    .sanitized(Some(&checked.project_dir), home_dir().as_deref(), |text| {
+        brain_mask.as_ref().map_or_else(
+            || "[masked]".to_owned(),
+            |mask| mask.summary(text, usize::MAX),
+        )
+    });
     diagnostic.event.inference_attempted = route == Route::Model && models.active.is_some();
     // Shadow mode (ADR 0010, ADR 0035): for a request that reaches the model step, the
     // candidate rides in the same request as `shadow_heads` when the host has its head

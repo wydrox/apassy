@@ -84,8 +84,8 @@ pub(crate) const CONSENT_TITLE: &str = "What Leaves This Mac";
 /// the command of `bouncer::shorten_paths`, and the head sets that the trainer uploads
 /// (ADR 0035 sections 4 and 7, ADR 0007 state). The broker sends no owner rule.
 pub(crate) const SENT: [&str; 3] = [
-    "The user request and the purpose",
-    "The shell command, with paths in your project and home folder shortened",
+    "The user request and purpose, with item values masked and project and home paths shortened",
+    "The shell command, with item values masked and project and home paths shortened",
     "The bouncer heads trained on your decisions (numbers, no text)",
 ];
 /// What never leaves this Mac (ADR 0035 section 3).

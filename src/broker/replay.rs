@@ -297,21 +297,28 @@ fn evaluate(
     {
         BouncerVerdict::Unavailable("not asked".to_owned())
     } else {
-        model(&BouncerRequest {
-            user_request: user_request.to_owned(),
-            command: super::bouncer::shorten_paths(
-                &request.command.join(" "),
+        let mask = vault.command_mask(scope.items).ok();
+        model(
+            &BouncerRequest {
+                user_request: user_request.to_owned(),
+                command: request.command.join(" "),
+                relative_dir: request.cwd_rel.clone(),
+                purpose: request.purpose.trim().to_owned(),
+                env_names: vec![setup.env_name.clone()],
+                instruction: setup.instruction.clone(),
+                task_provenance: String::new(),
+            }
+            .sanitized(
                 Some(scope.project_dir),
-                std::env::var_os("HOME")
-                    .as_deref()
-                    .map(std::path::Path::new),
+                std::env::var_os("HOME").as_deref().map(Path::new),
+                |text| {
+                    mask.as_ref().map_or_else(
+                        || "[masked]".to_owned(),
+                        |mask| mask.summary(text, usize::MAX),
+                    )
+                },
             ),
-            relative_dir: request.cwd_rel.clone(),
-            purpose: request.purpose.trim().to_owned(),
-            env_names: vec![setup.env_name.clone()],
-            instruction: setup.instruction.clone(),
-            task_provenance: String::new(),
-        })
+        )
     };
     let decision = decide_learned(&verdict, &context, &state.learned);
     Step {
@@ -413,4 +420,58 @@ fn lexical_join(base: &Path, relative: &str) -> PathBuf {
         }
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::{Environment, Reversibility, RiskLevel, Scope};
+
+    #[test]
+    fn replay_masks_literals_and_shortens_all_prompt_paths() {
+        let dir = tempfile::tempdir().expect("temp");
+        let mut vault =
+            Vault::create(&dir.path().join("vault.db"), "brain-state-test-pass").expect("vault");
+        vault.unlock("brain-state-test-pass").expect("unlock");
+        let setup = ReplaySetup {
+            project_dir: PathBuf::from("/synthetic/project"),
+            declaration: Declaration {
+                project: "project".to_owned(),
+                environment: Environment::Development,
+                risk: RiskLevel::Low,
+                scope: Scope::ReadWrite,
+                reversibility: Reversibility::Reversible,
+            },
+            env_name: "DEMO_KEY".to_owned(),
+            instruction: String::new(),
+            learning: false,
+            window: 1,
+        };
+        let request = ReplayRequest {
+            at: 1,
+            command: vec![
+                "node".to_owned(),
+                "-e".to_owned(),
+                "0".to_owned(),
+                REPLAY_SECRET.to_owned(),
+            ],
+            cwd_rel: ".".to_owned(),
+            purpose: format!("Check /synthetic/project/src {REPLAY_SECRET}"),
+            user_request: format!("Check /synthetic/project/src {REPLAY_SECRET}"),
+            owner_approves: true,
+        };
+        let mut calls = 0;
+        replay(&mut vault, &setup, &[request], &mut |request| {
+            calls += 1;
+            let state = super::super::bouncer::state_text(request);
+            assert!(!state.contains(REPLAY_SECRET));
+            assert!(!state.contains("/synthetic/project"));
+            assert!(request.user_request.contains("./src [apassy:secret]"));
+            assert!(request.purpose.contains("./src [apassy:secret]"));
+            assert!(request.command.contains("[apassy:secret]"));
+            BouncerVerdict::Unavailable("test".to_owned())
+        })
+        .expect("replay");
+        assert!(calls > 0);
+    }
 }

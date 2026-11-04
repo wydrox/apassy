@@ -103,6 +103,36 @@ pub struct BouncerRequest {
     pub task_provenance: String,
 }
 
+impl BouncerRequest {
+    /// Mask before shortening paths, for both live requests and exported training data.
+    /// Exports already mask values; live callers must mask with all run items and
+    /// replace text entirely if those values cannot be read.
+    pub(super) fn sanitized(
+        mut self,
+        project_root: Option<&Path>,
+        home: Option<&Path>,
+        mask: impl Fn(&str) -> String,
+    ) -> Self {
+        let clean = |text: &str| {
+            let masked = mask(text);
+            let visible: String = masked
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            shorten_paths(visible.trim(), project_root, home)
+        };
+        self.user_request = clean(&self.user_request);
+        self.command = clean(&self.command);
+        self.purpose = clean(&self.purpose);
+        self
+    }
+}
+
+/// A bounded, visible field in an unavailable note, including untrusted server text.
+fn note_field(text: &str) -> String {
+    crate::text::strip_hidden(text).chars().take(200).collect()
+}
+
 /// One model answer: the probability that the fact is true.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fact {
@@ -742,7 +772,7 @@ impl BouncerClient {
             Err(SendFailure::NoCredential) => {
                 return both(format!(
                     "no credential for the bouncer brain at {}; nothing was sent",
-                    self.url
+                    note_field(&self.url)
                 ));
             }
             Err(SendFailure::Http(_)) => {
@@ -761,11 +791,11 @@ impl BouncerClient {
                 }
                 (401, _) => format!(
                     "the bouncer brain at {} refused the credential (status 401)",
-                    self.url
+                    note_field(&self.url)
                 ),
                 (409, _) => format!(
                     "the bouncer brain at {} does not have the pinned head set (status 409)",
-                    self.url
+                    note_field(&self.url)
                 ),
                 (status, _) => format!("status {status}"),
             });
@@ -796,7 +826,7 @@ impl BouncerClient {
             {
                 BouncerVerdict::Unavailable(format!(
                     "the answer of the model at {} is not from the pinned head set",
-                    self.url
+                    note_field(&self.url)
                 ))
             }
             _ => verdict,
@@ -809,9 +839,10 @@ impl BouncerClient {
                 if model.as_deref() != Some(expected.as_str()) =>
             {
                 BouncerVerdict::Unavailable(format!(
-                    "the model at {} is {}, not the active version {expected}",
-                    self.url,
-                    model.as_deref().unwrap_or("unnamed")
+                    "the model at {} is {}, not the active version {}",
+                    note_field(&self.url),
+                    note_field(model.as_deref().unwrap_or("unnamed")),
+                    note_field(expected)
                 ))
             }
             _ => verdict,
@@ -2416,6 +2447,23 @@ mod tests {
             BouncerVerdict::Unavailable(reason) => reason,
             BouncerVerdict::Scored { .. } => panic!("expected unavailable: {verdict:?}"),
         }
+    }
+
+    #[test]
+    fn unavailable_note_fields_are_visible_and_capped_by_characters() {
+        let hostile = format!("\n\u{202e}{}\u{200b}", "é".repeat(300));
+        assert_eq!(note_field(&hostile), "é".repeat(200));
+        let mut client = BouncerClient::new("http://127.0.0.1:9").expect("client");
+        client.url = hostile.clone();
+        client.expected_model = Some("active".to_owned());
+        let verdict = client.check_model(BouncerVerdict::Scored {
+            facts: Vec::new(),
+            model: Some(hostile),
+        });
+        let note = reason(&verdict);
+        assert_eq!(note.matches(&"é".repeat(200)).count(), 2);
+        assert!(!note.chars().any(crate::text::is_hidden_char));
+        assert!(note.len() < 1000);
     }
 
     #[test]
