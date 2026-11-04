@@ -68,7 +68,8 @@ def convert_rows(rows, contract, *, facts_blind=False):
             continue
         secrets = blind(row['secrets'], contract) if facts_blind else row['secrets']
         try:
-            text, _ = serialize(row['request'], row['action'], secrets, contract)
+            text, _ = serialize(row['request'], row['action'], secrets, contract,
+                                enforce_budget=not facts_blind)
         except Refusal as exc:
             if exc.code != 'OverBudget':
                 raise

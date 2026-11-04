@@ -53,6 +53,21 @@ class TrainRowsTests(unittest.TestCase):
         self.assertEqual(row, before)
         self.assertEqual(counts['selected'], 1)
 
+    def test_control_keeps_rows_beyond_conservative_bound_for_exact_preflight(self):
+        row = copy.deepcopy(self.row)
+        row['request']['purpose'] = 'x' * 1000
+        secrets = C.blind(row['secrets'], self.c)
+        with self.assertRaises(C.Refusal):
+            C.serialize(row['request'], row['action'], secrets, self.c)
+        expected, _ = C.serialize(row['request'], row['action'], secrets, self.c,
+                                  enforce_budget=False)
+        control, counts = A.convert_rows([row], self.c, facts_blind=True)
+        self.assertEqual(control[0]['state'], expected)
+        self.assertEqual(counts, dict(input=1, selected=1, local_rule=0, OverBudget=0))
+        self.assertEqual(A.convert_rows([row], self.c)[1]['OverBudget'], 1)
+        # Conversion retains all bytes; it does not claim exact tokenizer fit.
+        self.assertIn('x' * 1000, control[0]['state'])
+
     def test_exporter_writes_exact_golden_train_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, out = Path(tmp) / 'source', Path(tmp) / 'out'

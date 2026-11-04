@@ -39,7 +39,8 @@ def environment(base, c):
     return manifest, measurement
 
 
-SOURCE_FILES = ('context_v1.py', 'context_data.py', 'context_train.py', 'context_eval.py', 'train.py', 'common.py')
+SOURCE_FILES = ('context_v1.py', 'context_data.py', 'context_train.py', 'context_eval.py', 'train.py', 'common.py',
+                'context_train_rows.py', 'context_existing_freeze.py')
 CACHE_BYTES = 6 * 1024**3
 
 
@@ -613,9 +614,40 @@ class Scorer:
             raise
 
 
+def context_meta_ok(meta, which, c, weights_sha):
+    """Shared checkpoint pin predicate for existing training and evaluation."""
+    if which not in ('context', 'control'):
+        raise Unsupported('unknown context arm')
+    return (meta.get('context_contract_sha256') == contract_hash(c)
+            and meta.get('question') == 'owner_accepts_use'
+            and meta.get('facts_blind') == (which == 'control')
+            and meta.get('tokenizer_sha256') == c['tokenizer']['sha256']
+            and meta.get('base_revision') == REVISION
+            and meta.get('base_weights_sha256') == weights_sha)
+
+
+def fit_threshold(scorer, val, which):
+    """Fit on validation only with the existing refusal/nonfinite policy."""
+    if which not in ('context', 'control'):
+        raise Unsupported('unknown context arm')
+    validation_scores = scorer.scores(val, facts_blind=which == 'control')
+    from context_eval import threshold, probability
+    if any((score is None and r['local_rule'] is None and refusal is None)
+           or (score is not None and not probability(score))
+           for r, score, refusal in zip(val, validation_scores, scorer.last_refusals)):
+        raise Unsupported('nonfinite validation scores')
+    fitting = [(r, score) for r, score in zip(val, validation_scores)
+               if probability(score) and r['local_rule'] is None]
+    return threshold([r for r, _ in fitting], [score for _, score in fitting]), len(fitting)
+
+
 def verify_freeze(freeze_path, c, expect_freeze_sha256):
     """All source, configuration and artifact checks precede any held-out IO."""
-    if not expect_freeze_sha256 or sha256(freeze_path) != expect_freeze_sha256:
+    from context_train_rows import safe_path
+    if not expect_freeze_sha256:
+        raise Unsupported('external freeze SHA required/mismatch')
+    safe_path(freeze_path)
+    if sha256(freeze_path) != expect_freeze_sha256:
         raise Unsupported('external freeze SHA required/mismatch')
     frozen = json.loads(Path(freeze_path).read_text())
     if frozen.get('mode') != 'full' or frozen.get('config', {}).get('mode') != 'full':
@@ -629,9 +661,23 @@ def verify_freeze(freeze_path, c, expect_freeze_sha256):
     if frozen.get('package_versions') != package_versions():
         raise Unsupported('frozen package versions differ')
     cfg = frozen['config']
+    if 'trainer' in cfg and cfg['trainer'] != 'train.py':
+        raise Unsupported('unknown frozen trainer')
+    if cfg.get('trainer') == 'train.py':
+        if (cfg.get('amp') is not False or cfg.get('batch') != 32
+                or cfg.get('limit') != 0 or cfg.get('max_steps') != 0
+                or any(cfg.get(k) for k in ('init', 'lora', 'lora_layers', 'lora_rank',
+                                            'lora_alpha', 'teacher_rows'))):
+            raise Unsupported('existing trainer configuration differs')
     expected = dict(epochs=4, lr=.0003, wd=.01, warmup=100, threads=4, seed=7, max_steps=0, seconds_per_head=5400)
     if any(cfg.get(k) != v for k, v in expected.items()) or not 1 <= cfg['batch'] <= 64:
         raise Unsupported('full configuration differs')
+    # Validate the entire path set before hashing even the first artifact.
+    for name in ('train', 'val', 'context', 'control', 'data_manifest'):
+        safe_path(frozen[name]['path'])
+    if cfg.get('trainer') == 'train.py':
+        for which in ('context', 'control'):
+            safe_path(frozen['training_reports'][which]['path'])
     for name in ('train', 'val', 'context', 'control', 'data_manifest'):
         record = frozen[name]
         if sha256(record['path']) != record['sha256']:
@@ -646,6 +692,9 @@ def verify_freeze(freeze_path, c, expect_freeze_sha256):
     for name in ('threshold', 'control_threshold'):
         if not math.isfinite(frozen[name]) or not 0 <= frozen[name] <= math.nextafter(1., math.inf):
             raise Unsupported('frozen threshold')
+    if cfg.get('trainer') == 'train.py':
+        from context_existing_freeze import verify_conversion
+        verify_conversion(frozen, c)
     return frozen
 
 
@@ -668,11 +717,7 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
     checkpoints = {}
     for which in ('context', 'control'):
         tensors, meta = common.load_checkpoint(frozen[which]['path'])
-        if (meta.get('context_contract_sha256') != contract_hash(c) or meta.get('question') != 'owner_accepts_use'
-                or meta.get('facts_blind') != (which == 'control')
-                or meta.get('tokenizer_sha256') != c['tokenizer']['sha256']
-                or meta.get('base_revision') != REVISION
-                or meta.get('base_weights_sha256') != frozen['base']['weights_sha256']):
+        if not context_meta_ok(meta, which, c, frozen['base']['weights_sha256']):
             raise Unsupported('not matching context heads')
         checkpoints[which] = tensors
     # First held-out IO; external freeze identity and all code/pins were checked above.
@@ -816,15 +861,7 @@ def main(argv=None):
                 base_weights_sha256=manifest['base']['weights_sha256'], facts_blind=which == 'control',
                 noul_temperature=scorer.temperature, config=config, training=summaries[which]))
             artifacts[which] = {'path': str(path), 'sha256': sha256(path)}
-            validation_scores = scorer.scores(val, facts_blind=which == 'control')
-            from context_eval import threshold, probability
-            if any((score is None and r['local_rule'] is None and refusal is None)
-                   or (score is not None and not probability(score))
-                   for r, score, refusal in zip(val, validation_scores, scorer.last_refusals)):
-                raise Unsupported('nonfinite validation scores')
-            fitting = [(r, score) for r, score in zip(val, validation_scores)
-                       if probability(score) and r['local_rule'] is None]
-            thresholds[which] = threshold([r for r, _ in fitting], [score for _, score in fitting])
+            thresholds[which], fitting_scored = fit_threshold(scorer, val, which)
         tau = thresholds['context']
         frozen = dict(mode=a.mode, source_commit=source_commit(), source_hashes=source_identity(),
                       package_versions=package_versions(),
@@ -839,7 +876,7 @@ def main(argv=None):
             report.update(encoder_timings=timings, **project_workload(timings, counts))
         (out / 'freeze.json').write_bytes(canonical(frozen))
         report.update(training_completed=True, reason='training_only_no_heldout_opened', freeze_sha256=sha256(out / 'freeze.json'),
-                      threshold=tau, control_threshold=thresholds['control'], validation={'total': len(val), 'fitting_scored': len(fitting)}, training=summaries)
+                      threshold=tau, control_threshold=thresholds['control'], validation={'total': len(val), 'fitting_scored': fitting_scored}, training=summaries)
     except (Unsupported, OSError, ValueError, KeyError, ImportError, RuntimeError) as e:
         report['reason'] = str(e) if isinstance(e, Unsupported) else type(e).__name__
         partial = getattr(scorer, 'diagnostics', {}).get('cached_head_partial')

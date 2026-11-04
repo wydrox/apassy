@@ -44,6 +44,27 @@ import common  # noqa: E402
 QUESTIONS = ["task_match", "writes", "remote", "leak", "destroy", "rule_break", "owner_accepts_use"]
 
 
+# Every key authored by the trainer is reserved, including the base pin.
+RESERVED_METADATA = frozenset(('name', 'base_repo', 'base_revision', 'trained',
+                               'noul_temperature', 'epoch'))
+
+
+def extra_metadata(raw):
+    """Parse caller fields before any training; trainer-owned fields cannot collide."""
+    if raw is None:
+        return {}
+    if os.path.isfile(raw):
+        with open(raw, encoding="utf-8") as source:
+            fields = json.load(source)
+    else:
+        fields = json.loads(raw)
+    if not isinstance(fields, dict):
+        raise ValueError('metadata must be a JSON object')
+    if RESERVED_METADATA.intersection(fields):
+        raise ValueError('metadata collides with reserved trainer keys')
+    return fields
+
+
 def on_ac_power():
     try:
         out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
@@ -321,6 +342,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="folder with train.jsonl and val.jsonl")
     ap.add_argument("--out", required=True, help="checkpoint path (.safetensors)")
+    ap.add_argument("--base-dir", default="", help="existing local base directory; caller verifies weight pins")
+    ap.add_argument("--metadata", default=None, help="extra checkpoint fields: JSON object or local JSON file")
     ap.add_argument("--init", default="", help="start from the heads of this checkpoint (goal B9)")
     ap.add_argument("--name", default=common.MODEL_NAME, help="model name in the version <name>+<hash8>")
     ap.add_argument("--report", default="", help="JSON report path (default: <out>.report.json)")
@@ -331,6 +354,7 @@ def main(argv=None):
     ap.add_argument("--warmup", type=int, default=100)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--device", default="mps")
+    ap.add_argument("--require-device", action="store_true", help="refuse device fallback")
     ap.add_argument("--limit", type=int, default=0, help="use only the first N training rows (a probe)")
     ap.add_argument("--max-steps", type=int, default=0)
     ap.add_argument("--no-amp", action="store_true")
@@ -343,10 +367,19 @@ def main(argv=None):
     ap.add_argument("--keep-cache", action="store_true", help="keep the encoder cache after training")
     args = ap.parse_args(argv)
 
+    if args.metadata is not None:
+        from context_train import install_training_audit
+        install_training_audit()
+    metadata = extra_metadata(args.metadata)
+    if args.base_dir and not os.path.isdir(args.base_dir):
+        raise ValueError('base-dir must be an existing local directory')
+
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
     device = torch.device(args.device if (args.device != "mps" or torch.backends.mps.is_available()) else "cpu")
+    if args.require_device and str(device) != args.device:
+        raise ValueError('requested device unavailable; fallback refused')
     amp = device.type in ("mps", "cuda") and not args.no_amp
     ac = on_ac_power()
     print("AC power: %s" % ac, flush=True)
@@ -354,7 +387,7 @@ def main(argv=None):
     from laya.agent import Agent
 
     t0 = time.time()
-    base = common.base_dir()
+    base = args.base_dir or common.base_dir()
     agent = Agent(base, device=str(device))
     model = agent.model
     pad = agent.tok.pad_token_id
@@ -505,6 +538,7 @@ def main(argv=None):
                 "noul_temperature": temperature,
                 "epoch": epoch + 1,
             }
+            meta.update(metadata)
             common.save_checkpoint(model, args.out, meta)
         if args.max_steps and step >= args.max_steps:
             break
@@ -547,6 +581,10 @@ def main(argv=None):
         report["versions"].update({"laya": laya.__version__, "transformers": transformers.__version__})
     except Exception:
         pass
+    if args.metadata is not None:
+        # Read installed distribution versions, never caller assertions.
+        from context_train import package_versions
+        report["versions"] = package_versions()
     path = args.report or args.out + ".report.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

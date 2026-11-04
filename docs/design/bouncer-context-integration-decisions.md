@@ -238,3 +238,38 @@ and refuses an empty trainable split. Output provenance describes input data;
 it is not a model freeze. Complete context checkpoint metadata and freeze
 compatibility still need acceptance before any model execution. All quality,
 baseline and cost gates remain; B is UNSUPPORTED and production is unchanged.
+
+## Existing trainer checkpoint preparation R11
+
+The data-only package on `009e7999d976a63a45ac65c7c3cfc270ff49b7fe` passed draft
+CI and received Opus ACCEPT. The next source-only preparation follows
+`existing-trainer-data-review-2026-11-04.md`, retained outside the checkout with
+the CI receipt. That acceptance did not authorize model execution.
+
+The existing trainer accepts an explicitly pinned local base directory and
+additional checkpoint metadata, refusing collisions with its own fields before
+training. Its default learning loop, optimizer and device behavior are preserved.
+The contextual caller requests `apassy-context-v1` names and strict device
+selection; an unavailable selected MPS device refuses instead of falling back to
+CPU. Training with explicit metadata installs the held-out read guard in the
+child process as well as the parent.
+
+`context_existing_freeze.py` validates original G1 hashes, labels and class
+coverage, exports each arm, and checks exact token/occurrence selection before
+calling the existing trainer. Each arm has its existing 5400-second subprocess
+limit and a fresh cache cleaned on success or failure. Saved checkpoints and
+reports are checked before thresholds are fitted on validation using a fresh
+CPU scorer. The freeze retains original G1 paths and conversion/report hashes.
+The converter and integration module are included in source identity. The
+control arm follows the evaluator's exact-token policy, with no truncation.
+
+Freeze verification checks every artifact path before any artifact read, then
+recomputes the conversion and trainer-report evidence before held-out IO. Tests
+use synthetic data and fake runtimes; import guards run in isolated child
+processes so they do not alter unrelated test modules.
+
+This is preparation for a distinct, subsequently approved training run. It
+neither repeats W8 nor supplies its eligibility result. Resources, compatible
+training/evaluation packages, supervision, quality, baseline and CPU cost
+evidence remain required. No model, held-out evaluation, paid service, R2 read,
+runtime activation or release was performed by this package.
