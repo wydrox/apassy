@@ -27,3 +27,24 @@ Result: header_tokens=43; 99 segment entries; 10 000 deterministic random contex
 To preserve one editor, the parent authorizes the still-running W1 editor to copy exactly `proposed_budget` from that evidence into its canonical contract, recalculate the contract hash and update only its owned pins/wire fixtures. This is the parent's measured contract revision, applied by the current editor. W2 has completed; the parent will regenerate its golden budget outcomes after W1 finishes. W4 must use the new hash and verify the tokenizer/header/segment properties in the full B environment before accepting them.
 
 W1 had already completed when the steering message arrived. The parent read its final result, took over its files and applied R2 directly: header 43, 99 measured segments, new contract hash and wire pins, regenerated W2 budget outcomes. The serialized text did not change. Of 21 golden fixtures, 18 now fit, while NoSecrets, TooManySecrets and a long-request OverBudget remain explicit refusals.
+
+## Review corrections R3
+
+The parent accepts the source findings and implementation scope in
+`docs/reviews/bouncer-context-ab-review-2026-11-04.md`. The parent approves the new
+`context_route_replay` example stanza in Cargo.toml, with no dependency changes.
+The next workers may repair data, training/evaluation and isolated replay in
+disjoint files. The machine contract/hash, runtime and held-out files stay fixed.
+
+The full report must separate `feasibility_quality` from `gate_b`. Quality PASS
+alone never unlocks C/D/E. The baseline may pass through the proven model-free
+lower bound; otherwise unavailable shipped heads produce the named
+`baseline_shipped` UNSUPPORTED gate. Public stock heads cannot impersonate shipped
+heads. No release publication, R2 access or new credential use is authorized by
+this decision. Cost measurements may use equal-shaped public heads with explicit
+provenance. Full training starts only after a bounded probe establishes that it
+fits the reviewed CPU/time/cache budget.
+
+R1 and HostFit/ProjectFit are pinned in the human contract without changing
+serializer bytes. C must separately decide missing-agent scope evidence and
+map evidence/storage failures to an owner question.

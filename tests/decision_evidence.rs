@@ -52,7 +52,10 @@ fn vault_to_wire_keeps_secret_and_free_text_out_of_context() {
     use apassy::broker::secret_facts::{
         ContextV1, HostFit, ItemRunMatch, ProjectFit, build_input, facts_from_evidence,
     };
-    use apassy::vault::{Declaration, Environment, Reversibility, RiskLevel, Scope};
+    use apassy::vault::{
+        Declaration, Environment, NewItemUse, Reversibility, RiskLevel, Scope, UseDecidedBy,
+        UseOutcome,
+    };
 
     let dir = tempfile::TempDir::new().unwrap();
     let mut vault =
@@ -64,15 +67,22 @@ fn vault_to_wire_keeps_secret_and_free_text_out_of_context() {
             kind: CredentialKind::ApiKey,
             notes: "private-notes-canary".into(),
             tags: vec![],
-            fields: vec![Field {
-                name: "private-field-canary".into(),
-                value: SecretValue::new("synthetic-value-canary".into()),
-                secret: true,
-            }],
+            fields: vec![
+                Field {
+                    name: "token".into(),
+                    value: SecretValue::new("synthetic-value-canary".into()),
+                    secret: true,
+                },
+                Field {
+                    name: "private_field_canary".into(),
+                    value: SecretValue::new("private-metadata-canary".into()),
+                    secret: false,
+                },
+            ],
         })
         .unwrap();
     vault
-        .set_declaration(
+        .save_declaration(
             item.id,
             &Declaration {
                 project: "private-project-canary".into(),
@@ -81,8 +91,39 @@ fn vault_to_wire_keeps_secret_and_free_text_out_of_context() {
                 scope: Scope::ReadOnly,
                 reversibility: Reversibility::Reversible,
             },
+            Some("stripe"),
+            None,
         )
         .unwrap();
+    vault
+        .record_item_use(&NewItemUse {
+            item_id: item.id,
+            agent_id: None,
+            agent_name: "private-agent-canary".into(),
+            project_key: "private-project-canary".into(),
+            project_label: "private-label-canary".into(),
+            action: ActionKind::Read,
+            command_summary: "private-command-canary".into(),
+            hosts: vec!["private-host-canary.test".into()],
+            outcome: UseOutcome::Denied,
+            decided_by: UseDecidedBy::Owner,
+            answered_on: "private-device-canary".into(),
+            decision_log_id: None,
+        })
+        .unwrap();
+    vault
+        .record_fill(item.id, "https://private-history-canary.test")
+        .unwrap();
+    assert_eq!(vault.item_uses(item.id, 1).unwrap().len(), 1);
+    assert!(
+        vault.item_events(item.id, 1).unwrap()[0]
+            .detail
+            .contains("canary")
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let evidence = vault
         .decision_evidence(&EvidenceQuery {
             item_id: item.id,
@@ -90,7 +131,7 @@ fn vault_to_wire_keeps_secret_and_free_text_out_of_context() {
             project_key: "private-project-canary",
             action: ActionKind::Read,
             hosts: &[],
-            now: 1,
+            now,
         })
         .unwrap();
     let facts = facts_from_evidence(
@@ -99,7 +140,7 @@ fn vault_to_wire_keeps_secret_and_free_text_out_of_context() {
             project: ProjectFit::Match,
             hosts: HostFit::None,
         },
-        1,
+        now,
     );
     let input = build_input(
         &BouncerRequest {
@@ -132,4 +173,6 @@ fn vault_to_wire_keeps_secret_and_free_text_out_of_context() {
             .contains("env=development env_from=legacy_unknown")
     );
     assert!(input.model_text().contains("project=match hosts=none"));
+    assert!(input.model_text().contains("provider=stripe"));
+    assert!(input.model_text().contains("owner_denied_other=1"));
 }

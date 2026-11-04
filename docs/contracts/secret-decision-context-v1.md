@@ -30,6 +30,18 @@ only explicit owner allowed/denied outcomes in the same agent, nonempty project,
 action and covering hosts. Other-scope denials stay separate. Capped history can
 be `unknown`. `conflict=yes` means both same-scope allow and deny counts are positive.
 
+`project=undeclared` means no declaration or an empty declared project. For a named
+project, `match` means the current project fits the existing `run::foreign_project`
+comparison (canonical root/path or normalized label/folder name); `other` means it
+does not fit, including a missing current project. The existing NotProject check
+remains separate. No project string is serialized.
+
+`hosts=none` means no destination host was detected for this run. With destinations,
+`known` means every normalized destination is covered by this item's own known
+hosts under the existing `run::host_matches` comparison; `unknown` means at least
+one is uncovered or coverage cannot be established. Another item's hosts cannot
+establish this item's coverage. No hostname is serialized.
+
 ## Labeling rubric
 
 Rubric version: `secret-context-rubric-v1`. Apply in this order, across every secret;
@@ -51,6 +63,14 @@ policy, not measured owner preferences.
    serving the request, `local_rule=null`, and no other must_ask condition. Unknown
    with changing or uncertain action remains must_ask. Missing declaration keeps
    env/scope unknown and sources none; never fabricate development/read-only facts.
+
+For R1, "clean, established read" describes the command, not a hidden history bit:
+the existing fixed read-command classifier can establish `action=read`, without
+redirects, inline code, output files, program-running settings or analysis flags,
+and the command visibly serves the request. Authors must express that relationship
+in the request/command text. An unobservable author-only boolean cannot change a
+label. `owner_denied=unknown` is missing evidence, not proof of no denial; v1 may
+label a row allow_ok only from its other visible evidence, and reports this case.
 
 Chronological denial/allow evidence is not encoded by bucket counts. Authors must
 keep its intended rationale consistent; conflict remains must_ask regardless of
