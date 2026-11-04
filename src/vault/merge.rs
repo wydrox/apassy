@@ -2169,18 +2169,26 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
                         )
                         .map_err(storage)?;
                     }
-                    // Way C is a safety switch too: when both sides hold the same kind of
-                    // source and either has it on, it stays on, so a concurrent edit never
-                    // turns it off. Both Macs get the same result.
-                    if let (Some(a), Some(b)) = (&ours.short_lived, &theirs.short_lived)
-                        && a.kind == b.kind
-                        && (a.enabled == 1 || b.enabled == 1)
-                    {
-                        tx.execute(
-                            "UPDATE short_lived SET enabled = 1 WHERE item_id = ?1 AND kind = ?2",
-                            (ours.id, &a.kind),
-                        )
-                        .map_err(storage)?;
+                    // Keep an enabled source even when the winning edit has no row.
+                    // Conflict copies remain archived credentials without source rows.
+                    match (&ours.short_lived, &theirs.short_lived) {
+                        (Some(a), Some(b))
+                            if a.kind == b.kind && (a.enabled == 1 || b.enabled == 1) =>
+                        {
+                            tx.execute(
+                                "UPDATE short_lived SET enabled = 1 WHERE item_id = ?1 AND kind = ?2",
+                                (ours.id, &a.kind),
+                            ).map_err(storage)?;
+                        }
+                        (Some(row), None) | (None, Some(row)) if row.enabled == 1 => {
+                            tx.execute(
+                                "INSERT INTO short_lived (item_id, kind, settings, enabled, created_at, updated_at)
+                                 VALUES (?1, ?2, ?3, 1, ?4, ?5)
+                                 ON CONFLICT(item_id) DO UPDATE SET enabled = 1",
+                                rusqlite::params![ours.id, row.kind, row.settings, row.created_at, row.updated_at],
+                            ).map_err(storage)?;
+                        }
+                        _ => {}
                     }
                 }
             },
@@ -2424,6 +2432,7 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::to_sql_id;
 
     const PASS: &str = "synthetic-conflict-pass";
 
@@ -2444,6 +2453,81 @@ mod tests {
     fn edit(vault: &mut Vault, id: u64, title: &str, value: &str) {
         let revision = vault.details(id).unwrap().summary.revision;
         vault.update(id, revision, draft(title, value)).unwrap();
+    }
+
+    #[test]
+    fn short_lived_one_sided_conflicts_keep_enabled_sources() {
+        // Exercise each winner, each source side, and disabled rows (unchanged).
+        for source_on_a in [false, true] {
+            for a_wins in [false, true] {
+                for enabled in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut a = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
+                    a.unlock(PASS).unwrap();
+                    let id = a.add(draft("Seed", "SYNTH-seed")).unwrap().id;
+                    let seed = dir.path().join("seed.db");
+                    a.write_sync_copy(&seed, "Mac A").unwrap();
+                    let (mut b, _) =
+                        Vault::adopt_sync_copy(&seed, &dir.path().join("b.db"), PASS).unwrap();
+                    b.unlock(PASS).unwrap();
+                    let b_id = b.search("").unwrap()[0].id;
+                    edit(&mut a, id, "A", "SYNTH-a");
+                    edit(&mut b, b_id, "B", "SYNTH-b");
+                    let source = if source_on_a { &a } else { &b };
+                    let source_id = if source_on_a { id } else { b_id };
+                    source.conn_ref().unwrap().execute(
+                        "INSERT INTO short_lived (item_id, kind, settings, enabled, created_at, updated_at)
+                         VALUES (?1, 'aws_sts', '{}', ?2, 1, 2)",
+                        (to_sql_id(source_id).unwrap(), i64::from(enabled)),
+                    ).unwrap();
+                    // Deterministic conflict winner independent of wall-clock timing.
+                    for (vault, at) in [
+                        (&a, if a_wins { 20 } else { 10 }),
+                        (&b, if a_wins { 10 } else { 20 }),
+                    ] {
+                        vault
+                            .conn_ref()
+                            .unwrap()
+                            .execute("UPDATE item SET updated_at = ?1", [at])
+                            .unwrap();
+                    }
+                    let from_b = dir.path().join("from-b.db");
+                    b.write_sync_copy(&from_b, "Mac B").unwrap();
+                    let report = a.merge_from(&from_b, &SyncScope::vault()).unwrap();
+                    assert_eq!(report.conflicts.len(), 1);
+                    let from_a = dir.path().join("from-a.db");
+                    a.write_sync_copy(&from_a, "Mac A").unwrap();
+                    b.merge_from(&from_a, &SyncScope::vault()).unwrap();
+                    for (vault, item) in [(&a, id), (&b, b_id)] {
+                        let row: Option<i64> = vault
+                            .conn_ref()
+                            .unwrap()
+                            .query_row(
+                                "SELECT enabled FROM short_lived WHERE item_id = ?1",
+                                [to_sql_id(item).unwrap()],
+                                |r| r.get(0),
+                            )
+                            .optional()
+                            .unwrap();
+                        let expected = if enabled {
+                            Some(1)
+                        } else if source_on_a == a_wins {
+                            Some(0)
+                        } else {
+                            None
+                        };
+                        assert_eq!(
+                            row, expected,
+                            "source_on_a={source_on_a}, a_wins={a_wins}, enabled={enabled}"
+                        );
+                        for copy in vault.conflict_copies().unwrap().keys() {
+                            assert!(vault.is_archived(*copy).unwrap());
+                            assert!(vault.short_lived(*copy).unwrap().is_none());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Two actual device versions of one credential, with a merge-created copy.
