@@ -144,22 +144,57 @@ def project_workload(timings, counts):
     """
     try:
         cached = timings['cached_head']
-        if (cached['batch_size'] != 32 or cached['sequence_length'] != 512
-                or cached['unit'] != 'seconds_per_batch' or cached['warmups'] < 1
-                or cached['encoder_in_measured_step'] is not False):
+        if cached.get('method') != 'batch8x4_max_batch32_spot_v1':
+            raise Unsupported('cached timing method')
+        def positive_float(value):
+            if type(value) is not float or not math.isfinite(value) or value <= 0:
+                raise Unsupported('invalid budget measurement')
+            return value
+        def exact(value, expected):
+            if type(value) is not type(expected) or value != expected:
+                raise Unsupported('cached timing provenance')
+        for key, value in dict(projection_batch_size=32, sequence_length=512,
+                unit='seconds_per_batch', warmups=2, encoder_in_measured_step=False,
+                provenance='frozen_fp16_disk_cache_fp32_head_logits_adamw',
+                includes='cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax').items():
+            exact(cached[key], value)
+        if ('batch_size' in cached or type(cached['threads']) is not int
+                or not 1 <= cached['threads'] <= 4 or positive_float(cached['seconds']) > 120):
             raise Unsupported('cached timing provenance')
-        def p95(record):
+        def p95(record, batch=None):
             a, b = record['p50_seconds'], record['p95_seconds']
+            if batch is not None:
+                exact(record['samples'], 3)
+                exact(record['batch_size'], batch)
+                positive_float(a)
+                positive_float(b)
             if (record['samples'] < 3 or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0 for v in (a, b)) or b < a):
                 raise Unsupported('invalid budget measurement')
             return b
-        encode = p95(timings['1'])  # Existing unit: seconds per row, uncached.
-        cache_write = p95(timings['cache_write'])  # serialization + disk write, per row
-        train_step = p95(cached['training'])
-        val_step = p95(cached['validation'])
-        score_step = p95(cached['scoring'])  # batch 1, matching Scorer.scores
-        if cached['scoring']['batch_size'] != 1:
-            raise Unsupported('cached scoring batch')
+        def derived(value, expected):
+            if not math.isclose(positive_float(value), expected, rel_tol=1e-12, abs_tol=0.):
+                raise Unsupported('cached timing derived conflict')
+        encode = p95(timings['1'])
+        cache_write = p95(timings['cache_write'])
+        exact(cached['scaled_batch8_to32']['factor'], 4)
+        exact(cached['projection_step_seconds']['source'], 'max(scaled_batch8_to32, spot32)')
+        steps = {}
+        for name in ('training', 'validation'):
+            scaled = 4 * p95(cached[name], 8)
+            spot = cached['spot32'][name]
+            for key, value in dict(batch_size=32, samples=1, warmups=0).items():
+                exact(spot[key], value)
+            if 'p50_seconds' in spot or 'p95_seconds' in spot:
+                raise Unsupported('cached timing spot distribution')
+            single = positive_float(spot['single_sample_seconds'])
+            derived(cached['scaled_batch8_to32'][name], scaled)
+            steps[name] = max(scaled, single)
+            derived(cached['projection_step_seconds'][name], steps[name])
+            if single > 1.3 * scaled:
+                raise Unsupported('batch scaling outside calibrated regime')
+        train_step, val_step = steps['training'], steps['validation']
+        score_step = p95(cached['scoring'], 1)
+        derived(cached['scoring']['p95_seconds_per_row'], score_step)
         n, v = counts['train_rows'], counts['validation_rows']
         if any(type(x) is not int or x <= 0 for x in (n, v)):
             raise Unsupported('budget workload counts')
@@ -178,7 +213,9 @@ def project_workload(timings, counts):
         return dict(projected_full_seconds=sum(components.values()), projection_components=components,
                     projection_groups=800, projection_epochs=4, projection_heads=2,
                     projection_counts=counts)
-    except (KeyError, TypeError, ValueError, OverflowError) as e:
+    except Unsupported:
+        raise
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError) as e:
         raise Unsupported('invalid budget measurement') from e
 
 
@@ -485,49 +522,95 @@ class Scorer:
         def deadline():
             if time.monotonic() - started > seconds:
                 raise Unsupported('cached timing wall limit')
-        rng, py_rng = torch.get_rng_state(), random.getstate()
-        named = list(self.model.named_parameters())
-        params = [p for n, p in named if n.startswith(common.TRAINED_PREFIXES)]
-        modes = [(m, m.training) for m in self.model.modules()]
-        flags = [(p, p.requires_grad, p.grad) for _, p in named]
-        weights = [(p, p.detach().clone()) for p in params]
+        phase, completed_calls = 'setup', 0
+        weights, flags, modes = [], [], []
+        rng = py_rng = None
+        # Clear diagnostics from any previous attempt; never expose partial timings.
+        self.diagnostics = {}
         try:
-            deadline()
-            if not params or any(p.dtype != torch.float32 for p in params):
-                raise Unsupported('cached timing requires FP32 heads')
-            for _, p in named:
-                p.requires_grad_(False)
-                p.grad = None
-            for p in params:
-                p.requires_grad_(True)
-            optimizer = torch.optim.AdamW(params, lr=.0003, weight_decay=.01)
-            result = dict(batch_size=32, sequence_length=512, unit='seconds_per_batch',
-                          warmups=2, encoder_in_measured_step=False,
-                          provenance='frozen_fp16_disk_cache_fp32_head_logits_adamw',
-                          includes='cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax',
-                          threads=torch.get_num_threads())
-            for name, training, chosen, scoring in (
-                    ('training', True, items, False), ('validation', False, items, False),
-                    ('scoring', False, items[:1], True)):
-                result[name] = measure_cached_steps(
-                    lambda: self._cached_head_step(chosen, optimizer, params, training, scoring), deadline)
-                result[name]['batch_size'] = len(chosen)
-                result[name]['p95_seconds_per_row'] = result[name]['p95_seconds'] / len(chosen)
-            deadline()
+            try:
+                rng, py_rng = torch.get_rng_state(), random.getstate()
+                named = list(self.model.named_parameters())
+                params = [p for n, p in named if n.startswith(common.TRAINED_PREFIXES)]
+                modes = [(m, m.training) for m in self.model.modules()]
+                flags = [(p, p.requires_grad, p.grad) for _, p in named]
+                weights = [(p, p.detach().clone()) for p in params]
+                deadline()
+                if not params or any(p.dtype != torch.float32 for p in params):
+                    raise Unsupported('cached timing requires FP32 heads')
+                for _, p in named:
+                    p.requires_grad_(False)
+                    p.grad = None
+                for p in params:
+                    p.requires_grad_(True)
+                optimizer = torch.optim.AdamW(params, lr=.0003, weight_decay=.01)
+                result = dict(method='batch8x4_max_batch32_spot_v1', projection_batch_size=32,
+                              sequence_length=512, unit='seconds_per_batch',
+                              warmups=2, encoder_in_measured_step=False,
+                              provenance='frozen_fp16_disk_cache_fp32_head_logits_adamw',
+                              includes='cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax',
+                              threads=torch.get_num_threads())
+                deadline()
+                for name, training, chosen, scoring in (
+                        ('training', True, items[:8], False), ('validation', False, items[:8], False),
+                        ('scoring', False, items[:1], True),
+                        ('spot32.training', True, items, False), ('spot32.validation', False, items, False)):
+                    phase = dict(training='training8', validation='validation8', scoring='scoring1').get(name, name)
+                    def step():
+                        nonlocal completed_calls
+                        self._cached_head_step(chosen, optimizer, params, training, scoring)
+                        completed_calls += 1
+                    if name.startswith('spot32.'):
+                        deadline()
+                        tick = time.monotonic()
+                        step()
+                        elapsed = time.monotonic() - tick
+                        deadline()
+                        if type(elapsed) is not float or not math.isfinite(elapsed) or elapsed <= 0:
+                            raise Unsupported('invalid cached timing measurement')
+                        result.setdefault('spot32', {})[name.split('.')[1]] = dict(
+                            batch_size=32, samples=1, warmups=0, single_sample_seconds=elapsed)
+                    else:
+                        result[name] = dict(measure_cached_steps(step, deadline, clock=time.monotonic),
+                                            batch_size=len(chosen))
+                        if scoring:
+                            result[name]['p95_seconds_per_row'] = result[name]['p95_seconds']
+                result['scaled_batch8_to32'] = dict(factor=4, **{
+                    name: 4 * result[name]['p95_seconds'] for name in ('training', 'validation')})
+                result['projection_step_seconds'] = dict(source='max(scaled_batch8_to32, spot32)', **{
+                    name: max(result['scaled_batch8_to32'][name], result['spot32'][name]['single_sample_seconds'])
+                    for name in ('training', 'validation')})
+                deadline()
+            finally:
+                primary = sys.exc_info()[0] is not None
+                if not primary:
+                    phase = 'restore'
+                try:
+                    with torch.no_grad():
+                        for p, value in weights:
+                            p.copy_(value)
+                    for p, flag, grad in flags:
+                        p.requires_grad_(flag)
+                        p.grad = grad
+                    for module, mode in modes:
+                        module.training = mode
+                    if rng is not None:
+                        torch.set_rng_state(rng)
+                    if py_rng is not None:
+                        random.setstate(py_rng)
+                except BaseException:
+                    if not primary:
+                        raise
+                if not primary:
+                    deadline()
             result['seconds'] = time.monotonic() - started
+            if result['seconds'] > seconds:
+                raise Unsupported('cached timing wall limit')
             return result
-        finally:
-            with torch.no_grad():
-                for p, value in weights:
-                    p.copy_(value)
-            for p, flag, grad in flags:
-                p.requires_grad_(flag)
-                p.grad = grad
-            for module, mode in modes:
-                module.training = mode
-            torch.set_rng_state(rng)
-            random.setstate(py_rng)
-            deadline()
+        except BaseException:
+            self.diagnostics['cached_head_partial'] = dict(phase=phase, completed_calls=completed_calls,
+                elapsed_seconds=time.monotonic() - started, eligibility=False)
+            raise
 
 
 def verify_freeze(freeze_path, c, expect_freeze_sha256):
@@ -684,6 +767,7 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=False)
     report = {'outcome': 'UNSUPPORTED', 'mode': a.mode}
     cache = None
+    scorer = None
     try:
         c = load_contract(a.contract)
         manifest, measurement = environment(a.base_dir, c)
@@ -758,6 +842,9 @@ def main(argv=None):
                       threshold=tau, control_threshold=thresholds['control'], validation={'total': len(val), 'fitting_scored': len(fitting)}, training=summaries)
     except (Unsupported, OSError, ValueError, KeyError, ImportError, RuntimeError) as e:
         report['reason'] = str(e) if isinstance(e, Unsupported) else type(e).__name__
+        partial = getattr(scorer, 'diagnostics', {}).get('cached_head_partial')
+        if partial is not None:
+            report['diagnostics'] = {'cached_head_partial': dict(partial)}
     finally:
         if cache is not None:
             cache.close()

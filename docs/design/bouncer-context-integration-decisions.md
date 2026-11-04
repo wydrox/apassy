@@ -107,3 +107,34 @@ compiled-replay tests and the explicit full-tokenizer test. The experiment CI
 requires all four to run without skips. Source approval of N2–N4 and the separate
 cached-head budget calibration remains pending the limited Opus re-read; these
 local results do not measure feasibility quality or gate B.
+
+## Supervisor calibration decision R6
+
+The limited source review closed N2–N4 and accepted the cost/budget repairs in
+`docs/reviews/bouncer-context-n2-budget-review-2026-11-04.md`. Hosted probe
+41852508456 on head `1b9cbd98` passed compiled replay/G1-host tests and the full
+tokenizer without skips, then returned `UNSUPPORTED(cached timing wall limit)`
+before training. Its checkout was the PR merge commit; the evidence JSON records
+both identities. No freeze, cost benchmark or held-out result was produced.
+
+Opus accepted one changed calibration method in
+`docs/reviews/bouncer-context-calibration-method-review-2026-11-04.md`: batch-eight
+timings scaled by four, guarded by real batch-32 spot checks. The report identifies
+raw measurements and estimates separately. A spot exceeding 1.3 times its scaled
+estimate refuses eligibility. The shared 120-second limit includes restoration;
+partial diagnostics cannot supply a projection. All four workflow validators also
+enforce the 5400-second per-head estimate alongside the existing total budget.
+
+W8 permits one real probe on the final new revision. Any outcome other than
+ELIGIBLE ends this experimental path with B UNSUPPORTED, without another attempt
+or method change to obtain eligibility. Quality, baseline, cost and the further
+review before C remain separate gates.
+
+Opus accepted `docs/reviews/bouncer-context-single-probe-entry-proposal.patch` in
+`docs/reviews/bouncer-context-single-probe-entry-review-2026-11-04.md`. The parent
+applied it and both small conditions in the same revision: an explicit eligibility
+summary and documentation of the single full-mode dispatch. The existing `ci.yml`
+bridge is unchanged. PRs run only compiled/tokenizer preflight; after green CI on
+the final revision, one manual pipeline runs the probe and starts training only
+after the whole probe job succeeds with nonempty eligible groups. Any other
+outcome ends this path without a retry. No manual dispatch has occurred.

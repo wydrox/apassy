@@ -1,45 +1,55 @@
 # Bouncer context: supervised CPU experiment in CI
 
-Status (2026-11-04): runtime for this revision **not run**. This workflow implements the CI boundary
-in Opus review §4.9 and Configuration, with integration decision R3. A probe is
-training and cost feasibility evidence only. It never evaluates held-out quality,
-never reports B PASS, and never unlocks C/D/E. A full run still requires review of
-this revision by Opus before the parent starts it.
+Status (2026-11-04): the actual probe for source HEAD `1b9cbd98` ended
+**UNSUPPORTED** at the 120-second cached-head calibration limit. Compiled Rust/G1
+checks (24 tests) and tokenizer checks (3 tests) passed without skips in that run;
+these are not quality evidence. Source HEAD and Actions tested SHA are distinct,
+as recorded in the timeout analysis. The new calibration method below is
+**NOT_RUN**. B remains UNSUPPORTED; C/D/E remain blocked.
+
+This implements the method accepted under W1–W8 in
+[the calibration review](../reviews/bouncer-context-calibration-method-review-2026-11-04.md).
+The entry flow follows the accepted
+[single-probe review](../reviews/bouncer-context-single-probe-entry-review-2026-11-04.md),
+including its explicit eligibility summary and documentation conditions.
+A probe provides runtime eligibility evidence only, never B PASS. Existing
+quality, safety, schema, freeze and runtime gates remain unchanged.
 
 ## Entry points and event boundary
 
-The existing pull-request trigger runs the bounded probe on opened, synchronized
-and reopened PRs matching the listed paths. It does not start full training.
-`workflow_dispatch` has a choice input `mode`, default `probe`, with choices
-`probe` and `full`. `workflow_call` has a string input `mode`, also default `probe`.
-Both full jobs require **both** `inputs.mode == 'full'` and the actual
-`github.event_name == 'workflow_dispatch'`. Thus a reusable call from a PR cannot
-start full training even if its caller supplies `full`.
+The pull-request trigger runs **preflight only** on opened, synchronized and
+reopened PRs matching the listed paths. The job is named `preflight` and requires
+compiled replay, G1 host extraction and tokenizer checks without skips. It makes
+no runtime calibration, checkpoint, freeze or eligibility result. Its resource
+artifact has scope `synthetic_preflight_only`; a green preflight is not a probe
+result or gate B PASS.
 
-After this workflow is registered on the default branch, the manual entry points
-are, for the reviewed committed revision on the implementation branch:
-
-```bash
-gh workflow run bouncer-context-experiment.yml --ref feat/bouncer-secret-context -f mode=probe
-gh workflow run bouncer-context-experiment.yml --ref feat/bouncer-secret-context -f mode=full
-```
-
-These commands are instructions for the parent; neither was executed here.
-A newly added workflow may be unavailable for dispatch until its file exists on
-the default branch. The minimal bridge from the already registered `ci.yml` was
-approved in recheck R5 and applied exactly as proposed. Before registration, use:
+`workflow_dispatch` and `workflow_call` retain the `mode` input (`probe`/`full`,
+default `probe`) for compatibility. **Do not dispatch probe mode.** Under the
+accepted W8 entry review, commit every change into the final revision X, wait for
+green CI and preflight on X, then send exactly one command through the already
+registered, unchanged `ci.yml` bridge:
 
 ```bash
-gh workflow run ci.yml --ref feat/bouncer-secret-context -f context_experiment=probe
 gh workflow run ci.yml --ref feat/bouncer-secret-context -f context_experiment=full
 ```
 
-Dispatch at most one probe and one full run per commit, with no earlier run on the
-same ref still active. This bridge also runs the existing full CI suite, including
-macOS jobs. It passes no secrets and preserves the actual `workflow_dispatch`
-boundary. No manual dispatch has occurred. Full still requires the R5 conditions:
-fixed N2–N4, green CI with compiled parity executed, and an eligible probe on the
-same commit. No PR label or publication trigger bypasses these conditions.
+No manual dispatch has occurred. Do not push between green CI and this dispatch.
+Do not dispatch while an earlier run on the same ref remains active. Identify the
+new run and verify its head SHA is X. The bridge also runs the existing full CI
+suite, including macOS jobs, with no secrets or publication.
+
+This single pipeline runs one real probe on X, followed automatically by full
+training only when the **whole probe job succeeds** and exports a nonempty group
+count meeting both budget constraints. Train and evaluate also require the actual
+`workflow_dispatch` event and `mode=full`; a PR call cannot start them. No standalone
+probe followed by another full dispatch is allowed. Any non-ELIGIBLE result ends
+the path with B UNSUPPORTED, without a rerun. Existing N2–N4, same-revision CI,
+freeze, quality and further-review requirements remain in force.
+
+The probe summary explicitly records ELIGIBLE or UNSUPPORTED. Read eligibility
+from `budget.json` and job states, never from the run's overall conclusion: a
+budget refusal can leave the run green while train and evaluate are skipped.
 
 ## Isolation and pinned inputs
 
@@ -89,12 +99,38 @@ versions are independently verified.
 The report must contain finite positive `projected_full_seconds`, additive
 projection components, and encoder timings for 32 validation rows at batches one
 and eight. Projection provenance records 800 groups, four epochs and two heads.
-It also measures four fp16 cache-write batches and cached FP32 head work at a
-512-token padded shape: two warm-ups and three samples for training batch 32,
-validation batch 32 and scoring batch 1. The encoder is excluded from these
-cached steps. Head weights, gradients, flags, module modes and RNG are restored;
-the calibration cache is disposable. This calibration has a separate 120-second
-deadline and does not change the four-step training policy of the probe.
+It also measures four fp16 cache-write batches. Cached FP32 head calibration
+uses method `batch8x4_max_batch32_spot_v1` at sequence length 512, on two threads,
+with the encoder excluded. Its five ordered phases share one 120-second limit,
+including setup and restore:
+
+1. Training batch 8: two warmups, then three raw samples.
+2. Validation batch 8: two warmups, then three raw samples.
+3. Scoring batch 1: two warmups, then three samples (including p95 per row).
+4. Training spot batch 32: one sample, zero warmups.
+5. Validation spot batch 32: one sample, zero warmups.
+
+Raw training/validation p50 and p95 describe batch 8 only. Each spot records
+`single_sample_seconds`, never p50/p95. The top-level record has
+`projection_batch_size=32` and no `batch_size`. For training and validation,
+`scaled_batch8_to32` is four times the raw p95; `projection_step_seconds` is
+`max(scaled_batch8_to32, spot32)`. A spot greater than 1.3 times its scaled value
+always makes the result UNSUPPORTED. The workflow checks all fields and derived
+values with relative tolerance 1e-12 and recomputes `T.project_workload` from raw
+measurements and counts, rejecting the old method.
+
+This is a runtime estimate for eligibility, never a batch32 p95, training cost
+or performance result. Measured work retains provenance
+`frozen_fp16_disk_cache_fp32_head_logits_adamw` and includes disk cache lookup,
+collate, forward/loss, backward, gradient clipping and AdamW; validation includes
+loss and scoring includes softmax. Public base identity and private-weight
+provenance are unchanged.
+
+Head weights, gradients, flags, module modes and RNG are restored on success and
+failure; the cache is disposable. A failure preserves the original exception.
+Optional `diagnostics.cached_head_partial` has phase, completed calls, elapsed
+seconds and `eligibility=false`; it never substitutes for completed `cached_head`
+and never receives a group count. The four-step probe training policy is unchanged.
 
 `g1_workload_counts` counts serialized context/control cache identities using only
 G1 at 800 training and 200 validation groups. For every selectable prefix of
@@ -110,10 +146,11 @@ before accepting the projection. `budget.json` records the checked provenance
 and largest integer group count in 400..800 satisfying:
 
 ```text
-projected_full_seconds * groups / 800 * 1.3 <= 0.6 * 300 * 60
+projected_full_seconds * groups / 800 * 1.3 <= 0.6 * 300 * 60  # 10800 seconds
+(encoder_cache_seconds + training_cache_io_seconds / 2) * groups / 800 * 1.3 <= 5400
 ```
 
-If 800 fits, it is selected. If no count at least 400 fits, full training stops as
+If 800 fits, it is selected. If no count at least 400 fits, full training is skipped as
 `UNSUPPORTED(budget)` and evaluation never starts. No held-out data influences the
 projection or group selection.
 
@@ -181,34 +218,25 @@ remains `baseline_shipped` UNSUPPORTED when H_ship is needed but unavailable.
 Stock public heads cannot satisfy that gate. This workflow neither fetches shipped
 heads through R2/secrets nor publishes them.
 
-## Integration blocker and evidence status
+## W8 and evidence status
 
-At source inspection, `context_data.default_secret()` still combines known
-`env=development` with `scope=unknown`/`scope_from=none` and unknown sensitivity.
-Strict replay rejects that declaration combination as `row_incoherent`; variants
-can inherit it. The parent owns the correction in data/replay files. This workflow
-does not weaken validation or claim the benchmark has run. Re-review the corrected
-harness and this workflow together before full execution.
+The accepted entry flow resolves the duplicate-probe issue: PRs perform preflight
+only, and the one manual full-mode pipeline performs the sole runtime probe before
+conditional training. The existing `ci.yml` bridge, artifact handoff, external
+freeze checks and held-out isolation remain unchanged.
 
-Local validation is limited to actionlint and YAML, Bash syntax and inline Python
-AST checks through heavy-check. No local model test, install, encoder inference,
-training or Rust build was run. The parent's earlier 46 PASS / 2 SKIP context tests
-are source checks, not quality or cost evidence. CI runtime compatibility,
-completion, projections, CPU/RSS costs, artifact restore, held-out quality and
-gate B remain unmeasured. Missing shipped-head evidence, CI costs, full quality and
-subsequent Opus approval remain gates; Mac/MPS cost belongs to C.
+W8 allows exactly one actual bounded new-method probe on final SHA X with green
+CI, within the existing 120-second head and 40-minute probe limits, offline,
+without private weights or R2. Full must consume eligible evidence on that same X.
+Any noneligible result ends this research path with B UNSUPPORTED: no automatic
+retry or method adjustment to obtain eligibility. No eligible group means
+`UNSUPPORTED`/`budget` and no full training. The added L1 inequality only tightens
+the existing limits; 300 minutes, 5400 seconds per head, 6 GiB cache, four epochs,
+full batch32, thresholds and the single held-out pass remain unchanged.
 
-Source checks on this revision completed successfully:
-
-- `~/.local/bin/heavy-check actionlint .github/workflows/bouncer-context-experiment.yml`: exit 0.
-- `~/.local/bin/heavy-check python3 /tmp/bouncer-context-static.py`: exit 0;
-  YAML/event/permissions/action-pin/artifact/gating/order assertions, `bash -n`
-  for 26 shell blocks, `ast.parse` for 15 inline Python blocks, and three
-  group-selection boundary examples (800, 553 and no fitting group). The temporary
-  checker did not execute workflow scripts or import the harness/model.
-- `git diff --check -- .github/workflows/bouncer-context-experiment.yml docs/evaluation/bouncer-context-ci-probe.md`: exit 0.
-
-Only the two owned files were edited. No commit, push, PR, Actions dispatch,
-subagent, package install or build was performed. No local build directory was
-created. Available disk after checks was approximately 11.6 GiB; cleanup of other
-sessions' files is outside this two-file task.
+The integrated local context suite passed 87 tests and skipped four requiring an
+explicit compiled Rust binary or tokenizer. Fake and stdlib checks cover state
+restoration, refusal, projection arithmetic and all four workflow validators.
+They do not execute a model, weights, training, held-out or a real probe and do
+not establish runtime eligibility or gate B. Hosted CI must execute the compiled
+and tokenizer checks without skips on the final revision before the one dispatch.

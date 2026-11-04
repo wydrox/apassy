@@ -47,6 +47,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   probe:
+    name: ${{ github.event_name == 'workflow_dispatch' && 'probe' || 'preflight' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     defaults:
@@ -166,12 +167,18 @@ jobs:
                       budget_matches=True)
         evidence.write_text(json.dumps(report, sort_keys=True) + '\n')
         PY
+    - name: Record preflight-only boundary
+      if: ${{ github.event_name != 'workflow_dispatch' }}
+      run: |
+        echo 'Preflight passed: compiled replay, G1 host extraction and tokenizer. No runtime calibration, training or eligibility result.' >> "$GITHUB_STEP_SUMMARY"
     - name: Generate only G1 synthetic train and validation
+      if: ${{ github.event_name == 'workflow_dispatch' }}
       run: |
         set -euo pipefail
         "$PY" -B tools/basemodel/context_data.py --out "$EXP/synthetic" --groups 40 --seed 7
         cp "$EXP/synthetic/data-manifest.json" "$EXP/evidence/data-manifest.json"
     - name: Bounded training-only probe and verified exit 3
+      if: ${{ github.event_name == 'workflow_dispatch' }}
       timeout-minutes: 23
       run: |
         set -euo pipefail
@@ -188,6 +195,7 @@ jobs:
         echo "$rc" > "$EXP/evidence/training-exit.txt"
         test "$rc" -eq 3
     - name: Verify completion, exact paths, config, source, packages and hashes
+      if: ${{ github.event_name == 'workflow_dispatch' }}
       id: verify
       env:
         VERIFY_MODE: probe
@@ -261,22 +269,48 @@ jobs:
             assert write['samples'] == 4 and write['unit'] == 'seconds_per_row'
             assert write['provenance'] == 'fp16_feature_cache_serialization_disk_write'
             cached = timings['cached_head']
-            assert cached['batch_size'] == 32 and cached['sequence_length'] == 512
+            assert cached['method'] == 'batch8x4_max_batch32_spot_v1'
+            assert cached['projection_batch_size'] == 32 and 'batch_size' not in cached
+            assert cached['sequence_length'] == 512
             assert cached['unit'] == 'seconds_per_batch' and cached['warmups'] == 2
             assert cached['encoder_in_measured_step'] is False and cached['threads'] == 2
             assert cached['provenance'] == 'frozen_fp16_disk_cache_fp32_head_logits_adamw'
-            assert 0 < cached['seconds'] <= 120
-            for name, batch in [('training', 32), ('validation', 32), ('scoring', 1)]:
+            assert cached['includes'] == 'cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax'
+            assert type(cached['seconds']) is float and math.isfinite(cached['seconds']) and 0 < cached['seconds'] <= 120
+            for name, batch in [('training', 8), ('validation', 8), ('scoring', 1)]:
                 record = cached[name]
                 assert record['samples'] == 3 and record['batch_size'] == batch
-                assert math.isclose(record['p95_seconds_per_row'], record['p95_seconds'] / batch, rel_tol=1e-12)
+                assert all(type(record[k]) is float and math.isfinite(record[k]) and record[k] > 0
+                           for k in ('p50_seconds', 'p95_seconds'))
+                assert record['p95_seconds'] >= record['p50_seconds']
+            score = cached['scoring']
+            assert type(score['p95_seconds_per_row']) is float and math.isfinite(score['p95_seconds_per_row'])
+            assert math.isclose(score['p95_seconds_per_row'], score['p95_seconds'], rel_tol=1e-12)
+            scaled = cached['scaled_batch8_to32']
+            steps = cached['projection_step_seconds']
+            assert scaled['factor'] == 4 and steps['source'] == 'max(scaled_batch8_to32, spot32)'
+            for name in ('training', 'validation'):
+                spot = cached['spot32'][name]
+                assert spot['batch_size'] == 32 and spot['samples'] == 1 and spot['warmups'] == 0
+                assert 'p50_seconds' not in spot and 'p95_seconds' not in spot
+                single = spot['single_sample_seconds']
+                assert type(single) is float and math.isfinite(single) and single > 0
+                derived = 4 * cached[name]['p95_seconds']
+                assert type(scaled[name]) is float and math.isfinite(scaled[name]) and scaled[name] > 0
+                assert math.isclose(scaled[name], derived, rel_tol=1e-12)
+                assert single <= 1.3 * derived
+                assert type(steps[name]) is float and math.isfinite(steps[name]) and steps[name] > 0
+                assert math.isclose(steps[name], max(derived, single), rel_tol=1e-12)
             counts = report['projection_counts']
             assert counts['candidate_groups_min'] == 400 and counts['candidate_groups_max'] == 800
             assert counts['provenance'] == 'G1_exact_serialized_context_control_union_prefixes_400_to_800'
             recomputed = T.project_workload(timings, counts)
             assert math.isclose(recomputed['projected_full_seconds'], projection, rel_tol=1e-12)
             assert recomputed['projection_components'] == components
-            groups = next((g for g in range(800, 399, -1) if projection * g / 800 * 1.3 <= .6 * 300 * 60), None)
+            groups = next((g for g in range(800, 399, -1)
+                           if projection * g / 800 * 1.3 <= .6 * 300 * 60
+                           and (components['encoder_cache_seconds'] + components['training_cache_io_seconds'] / 2)
+                           * g / 800 * 1.3 <= 5400), None)
             budget = {'outcome': 'ELIGIBLE' if groups else 'UNSUPPORTED', 'reason': None if groups else 'budget',
                       'groups': groups, 'projection_groups': 800, 'projected_full_seconds': projection,
                       'probe_freeze_sha256': sha, 'probe_report_sha256': digest(out / 'training-report.json'),
@@ -294,7 +328,18 @@ jobs:
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
             f.write(f'{mode} external freeze SHA-256: `{sha}`. Training completed; gate B unmeasured.\n')
         PY
+    - name: Record probe eligibility (not gate B)
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      env:
+        GROUPS_SELECTED: ${{ steps.verify.outputs.groups }}
+      run: |
+        if [[ -n "$GROUPS_SELECTED" ]]; then
+          echo "Probe ELIGIBLE by budget: groups=$GROUPS_SELECTED. Train still requires the cost bench to pass. Gate B unmeasured."
+        else
+          echo 'Probe UNSUPPORTED(budget): train and evaluate skipped. B UNSUPPORTED; path ends, no retry.'
+        fi >> "$GITHUB_STEP_SUMMARY"
     - name: Measure fresh CPU arms on G1 val (no quality verdict)
+      if: ${{ github.event_name == 'workflow_dispatch' }}
       timeout-minutes: 40
       run: |
         set -euo pipefail
@@ -318,7 +363,9 @@ jobs:
         (root / 'evidence/probe-costs.json').write_text(json.dumps({
             'elapsed_seconds': time.time() - int(start.read_text()) if start.exists() else None,
             'directory_bytes': sizes, 'cpu_threads': 2, 'job_timeout_minutes': 40,
-            'gate_B': 'UNSUPPORTED', 'scope': 'synthetic_training_probe_only',
+            'gate_B': 'UNSUPPORTED',
+            'scope': ('synthetic_training_probe_only' if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+                      else 'synthetic_preflight_only'),
             'head_sha': os.environ['SOURCE_HEAD_SHA'],
             'tested_sha': os.environ['GITHUB_SHA']}, sort_keys=True) + '\n')
         PY
@@ -344,8 +391,9 @@ jobs:
     outputs:
       freeze_sha256: ${{ steps.verify.outputs.freeze_sha256 }}
       probe_report_sha256: ${{ steps.verify.outputs.probe_report_sha256 }}
+      groups: ${{ steps.verify.outputs.groups }}
   train:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'full' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'full' && needs.probe.outputs.groups != '' }}
     needs: probe
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -511,22 +559,48 @@ jobs:
             assert write['samples'] == 4 and write['unit'] == 'seconds_per_row'
             assert write['provenance'] == 'fp16_feature_cache_serialization_disk_write'
             cached = timings['cached_head']
-            assert cached['batch_size'] == 32 and cached['sequence_length'] == 512
+            assert cached['method'] == 'batch8x4_max_batch32_spot_v1'
+            assert cached['projection_batch_size'] == 32 and 'batch_size' not in cached
+            assert cached['sequence_length'] == 512
             assert cached['unit'] == 'seconds_per_batch' and cached['warmups'] == 2
             assert cached['encoder_in_measured_step'] is False and cached['threads'] == 2
             assert cached['provenance'] == 'frozen_fp16_disk_cache_fp32_head_logits_adamw'
-            assert 0 < cached['seconds'] <= 120
-            for name, batch in [('training', 32), ('validation', 32), ('scoring', 1)]:
+            assert cached['includes'] == 'cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax'
+            assert type(cached['seconds']) is float and math.isfinite(cached['seconds']) and 0 < cached['seconds'] <= 120
+            for name, batch in [('training', 8), ('validation', 8), ('scoring', 1)]:
                 record = cached[name]
                 assert record['samples'] == 3 and record['batch_size'] == batch
-                assert math.isclose(record['p95_seconds_per_row'], record['p95_seconds'] / batch, rel_tol=1e-12)
+                assert all(type(record[k]) is float and math.isfinite(record[k]) and record[k] > 0
+                           for k in ('p50_seconds', 'p95_seconds'))
+                assert record['p95_seconds'] >= record['p50_seconds']
+            score = cached['scoring']
+            assert type(score['p95_seconds_per_row']) is float and math.isfinite(score['p95_seconds_per_row'])
+            assert math.isclose(score['p95_seconds_per_row'], score['p95_seconds'], rel_tol=1e-12)
+            scaled = cached['scaled_batch8_to32']
+            steps = cached['projection_step_seconds']
+            assert scaled['factor'] == 4 and steps['source'] == 'max(scaled_batch8_to32, spot32)'
+            for name in ('training', 'validation'):
+                spot = cached['spot32'][name]
+                assert spot['batch_size'] == 32 and spot['samples'] == 1 and spot['warmups'] == 0
+                assert 'p50_seconds' not in spot and 'p95_seconds' not in spot
+                single = spot['single_sample_seconds']
+                assert type(single) is float and math.isfinite(single) and single > 0
+                derived = 4 * cached[name]['p95_seconds']
+                assert type(scaled[name]) is float and math.isfinite(scaled[name]) and scaled[name] > 0
+                assert math.isclose(scaled[name], derived, rel_tol=1e-12)
+                assert single <= 1.3 * derived
+                assert type(steps[name]) is float and math.isfinite(steps[name]) and steps[name] > 0
+                assert math.isclose(steps[name], max(derived, single), rel_tol=1e-12)
             counts = report['projection_counts']
             assert counts['candidate_groups_min'] == 400 and counts['candidate_groups_max'] == 800
             assert counts['provenance'] == 'G1_exact_serialized_context_control_union_prefixes_400_to_800'
             recomputed = T.project_workload(timings, counts)
             assert math.isclose(recomputed['projected_full_seconds'], projection, rel_tol=1e-12)
             assert recomputed['projection_components'] == components
-            groups = next((g for g in range(800, 399, -1) if projection * g / 800 * 1.3 <= .6 * 300 * 60), None)
+            groups = next((g for g in range(800, 399, -1)
+                           if projection * g / 800 * 1.3 <= .6 * 300 * 60
+                           and (components['encoder_cache_seconds'] + components['training_cache_io_seconds'] / 2)
+                           * g / 800 * 1.3 <= 5400), None)
             budget = {'outcome': 'ELIGIBLE' if groups else 'UNSUPPORTED', 'reason': None if groups else 'budget',
                       'groups': groups, 'projection_groups': 800, 'projected_full_seconds': projection,
                       'probe_freeze_sha256': sha, 'probe_report_sha256': digest(out / 'training-report.json'),
@@ -642,22 +716,48 @@ jobs:
             assert write['samples'] == 4 and write['unit'] == 'seconds_per_row'
             assert write['provenance'] == 'fp16_feature_cache_serialization_disk_write'
             cached = timings['cached_head']
-            assert cached['batch_size'] == 32 and cached['sequence_length'] == 512
+            assert cached['method'] == 'batch8x4_max_batch32_spot_v1'
+            assert cached['projection_batch_size'] == 32 and 'batch_size' not in cached
+            assert cached['sequence_length'] == 512
             assert cached['unit'] == 'seconds_per_batch' and cached['warmups'] == 2
             assert cached['encoder_in_measured_step'] is False and cached['threads'] == 2
             assert cached['provenance'] == 'frozen_fp16_disk_cache_fp32_head_logits_adamw'
-            assert 0 < cached['seconds'] <= 120
-            for name, batch in [('training', 32), ('validation', 32), ('scoring', 1)]:
+            assert cached['includes'] == 'cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax'
+            assert type(cached['seconds']) is float and math.isfinite(cached['seconds']) and 0 < cached['seconds'] <= 120
+            for name, batch in [('training', 8), ('validation', 8), ('scoring', 1)]:
                 record = cached[name]
                 assert record['samples'] == 3 and record['batch_size'] == batch
-                assert math.isclose(record['p95_seconds_per_row'], record['p95_seconds'] / batch, rel_tol=1e-12)
+                assert all(type(record[k]) is float and math.isfinite(record[k]) and record[k] > 0
+                           for k in ('p50_seconds', 'p95_seconds'))
+                assert record['p95_seconds'] >= record['p50_seconds']
+            score = cached['scoring']
+            assert type(score['p95_seconds_per_row']) is float and math.isfinite(score['p95_seconds_per_row'])
+            assert math.isclose(score['p95_seconds_per_row'], score['p95_seconds'], rel_tol=1e-12)
+            scaled = cached['scaled_batch8_to32']
+            steps = cached['projection_step_seconds']
+            assert scaled['factor'] == 4 and steps['source'] == 'max(scaled_batch8_to32, spot32)'
+            for name in ('training', 'validation'):
+                spot = cached['spot32'][name]
+                assert spot['batch_size'] == 32 and spot['samples'] == 1 and spot['warmups'] == 0
+                assert 'p50_seconds' not in spot and 'p95_seconds' not in spot
+                single = spot['single_sample_seconds']
+                assert type(single) is float and math.isfinite(single) and single > 0
+                derived = 4 * cached[name]['p95_seconds']
+                assert type(scaled[name]) is float and math.isfinite(scaled[name]) and scaled[name] > 0
+                assert math.isclose(scaled[name], derived, rel_tol=1e-12)
+                assert single <= 1.3 * derived
+                assert type(steps[name]) is float and math.isfinite(steps[name]) and steps[name] > 0
+                assert math.isclose(steps[name], max(derived, single), rel_tol=1e-12)
             counts = report['projection_counts']
             assert counts['candidate_groups_min'] == 400 and counts['candidate_groups_max'] == 800
             assert counts['provenance'] == 'G1_exact_serialized_context_control_union_prefixes_400_to_800'
             recomputed = T.project_workload(timings, counts)
             assert math.isclose(recomputed['projected_full_seconds'], projection, rel_tol=1e-12)
             assert recomputed['projection_components'] == components
-            groups = next((g for g in range(800, 399, -1) if projection * g / 800 * 1.3 <= .6 * 300 * 60), None)
+            groups = next((g for g in range(800, 399, -1)
+                           if projection * g / 800 * 1.3 <= .6 * 300 * 60
+                           and (components['encoder_cache_seconds'] + components['training_cache_io_seconds'] / 2)
+                           * g / 800 * 1.3 <= 5400), None)
             budget = {'outcome': 'ELIGIBLE' if groups else 'UNSUPPORTED', 'reason': None if groups else 'budget',
                       'groups': groups, 'projection_groups': 800, 'projected_full_seconds': projection,
                       'probe_freeze_sha256': sha, 'probe_report_sha256': digest(out / 'training-report.json'),
@@ -854,22 +954,48 @@ jobs:
             assert write['samples'] == 4 and write['unit'] == 'seconds_per_row'
             assert write['provenance'] == 'fp16_feature_cache_serialization_disk_write'
             cached = timings['cached_head']
-            assert cached['batch_size'] == 32 and cached['sequence_length'] == 512
+            assert cached['method'] == 'batch8x4_max_batch32_spot_v1'
+            assert cached['projection_batch_size'] == 32 and 'batch_size' not in cached
+            assert cached['sequence_length'] == 512
             assert cached['unit'] == 'seconds_per_batch' and cached['warmups'] == 2
             assert cached['encoder_in_measured_step'] is False and cached['threads'] == 2
             assert cached['provenance'] == 'frozen_fp16_disk_cache_fp32_head_logits_adamw'
-            assert 0 < cached['seconds'] <= 120
-            for name, batch in [('training', 32), ('validation', 32), ('scoring', 1)]:
+            assert cached['includes'] == 'cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax'
+            assert type(cached['seconds']) is float and math.isfinite(cached['seconds']) and 0 < cached['seconds'] <= 120
+            for name, batch in [('training', 8), ('validation', 8), ('scoring', 1)]:
                 record = cached[name]
                 assert record['samples'] == 3 and record['batch_size'] == batch
-                assert math.isclose(record['p95_seconds_per_row'], record['p95_seconds'] / batch, rel_tol=1e-12)
+                assert all(type(record[k]) is float and math.isfinite(record[k]) and record[k] > 0
+                           for k in ('p50_seconds', 'p95_seconds'))
+                assert record['p95_seconds'] >= record['p50_seconds']
+            score = cached['scoring']
+            assert type(score['p95_seconds_per_row']) is float and math.isfinite(score['p95_seconds_per_row'])
+            assert math.isclose(score['p95_seconds_per_row'], score['p95_seconds'], rel_tol=1e-12)
+            scaled = cached['scaled_batch8_to32']
+            steps = cached['projection_step_seconds']
+            assert scaled['factor'] == 4 and steps['source'] == 'max(scaled_batch8_to32, spot32)'
+            for name in ('training', 'validation'):
+                spot = cached['spot32'][name]
+                assert spot['batch_size'] == 32 and spot['samples'] == 1 and spot['warmups'] == 0
+                assert 'p50_seconds' not in spot and 'p95_seconds' not in spot
+                single = spot['single_sample_seconds']
+                assert type(single) is float and math.isfinite(single) and single > 0
+                derived = 4 * cached[name]['p95_seconds']
+                assert type(scaled[name]) is float and math.isfinite(scaled[name]) and scaled[name] > 0
+                assert math.isclose(scaled[name], derived, rel_tol=1e-12)
+                assert single <= 1.3 * derived
+                assert type(steps[name]) is float and math.isfinite(steps[name]) and steps[name] > 0
+                assert math.isclose(steps[name], max(derived, single), rel_tol=1e-12)
             counts = report['projection_counts']
             assert counts['candidate_groups_min'] == 400 and counts['candidate_groups_max'] == 800
             assert counts['provenance'] == 'G1_exact_serialized_context_control_union_prefixes_400_to_800'
             recomputed = T.project_workload(timings, counts)
             assert math.isclose(recomputed['projected_full_seconds'], projection, rel_tol=1e-12)
             assert recomputed['projection_components'] == components
-            groups = next((g for g in range(800, 399, -1) if projection * g / 800 * 1.3 <= .6 * 300 * 60), None)
+            groups = next((g for g in range(800, 399, -1)
+                           if projection * g / 800 * 1.3 <= .6 * 300 * 60
+                           and (components['encoder_cache_seconds'] + components['training_cache_io_seconds'] / 2)
+                           * g / 800 * 1.3 <= 5400), None)
             budget = {'outcome': 'ELIGIBLE' if groups else 'UNSUPPORTED', 'reason': None if groups else 'budget',
                       'groups': groups, 'projection_groups': 800, 'projected_full_seconds': projection,
                       'probe_freeze_sha256': sha, 'probe_report_sha256': digest(out / 'training-report.json'),
