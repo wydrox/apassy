@@ -240,3 +240,56 @@ restoration, refusal, projection arithmetic and all four workflow validators.
 They do not execute a model, weights, training, held-out or a real probe and do
 not establish runtime eligibility or gate B. Hosted CI must execute the compiled
 and tokenizer checks without skips on the final revision before the one dispatch.
+
+## Manual cost-only checkpoint input (runtime NOT_RUN)
+
+`cost-only` is a separate optional entry for a checkpoint trained with the existing
+`train.py` on the Mac. Quality evaluation remains on that same Mac/venv. It skips
+probe/train/evaluate and requires the actual `workflow_dispatch` event, including
+through `ci.yml` (`context_experiment=cost-only`). Ordinary CI jobs remain unchanged.
+Supply `source_sha` (exact lowercase 40 hex, equal to both Actions SHA and checkout
+HEAD), `checkpoint_asset` (positive numeric `release_id/asset_id` in `wydrox/apassy`),
+`checkpoint_sha256` and `val_sha256` (external lowercase 64 hex from the Mac
+checkpoint/freeze), and `groups` (400..800). Seed is fixed at 7. The final source
+revision must include this workflow; the original task HEAD is not a dispatch target.
+
+The owner must explicitly approve any later local upload to a **draft** GitHub
+release. This implementation only reads. Before model training, one separately
+approved transport preflight must establish that the workflow's `GITHUB_TOKEN`
+with **Contents read** can see the draft release and download its asset. Draft
+visibility with this token is **RUNTIME UNVERIFIED**; inaccessible metadata fails
+closed. No credential or permission expansion is implied. GitHub documents
+[release metadata](https://docs.github.com/en/rest/releases/releases#get-a-release)
+and [asset download](https://docs.github.com/en/rest/releases/assets#get-a-release-asset)
+with Contents read; download may return 200 or 302.
+
+For that preflight, use `context_experiment=cost-only` with `transport_only=true`
+in `ci.yml` (or `mode=cost-only` in the direct workflow). Supply only `source_sha`,
+`checkpoint_asset` and `checkpoint_sha256`. The approved test asset may contain
+small synthetic bytes; no model checkpoint is needed. This uses the same guarded
+download, limited to five minutes within a ten-minute job. It ends by uploading
+only `transport-receipt.json`, before dependency installation, base download, G1
+generation or benchmark. `val_sha256` and `groups` are unused in that path. The
+default `transport_only=false` retains the full cost measurement. No transport
+preflight or asset upload has been performed.
+
+The helper verifies draft status, release/asset membership, uploaded state and a
+positive size no larger than 256 MiB. It streams into a new file with exact size
+and external SHA-256 checks, removing partial files on failure. Only API requests
+to `api.github.com` receive the token. Redirects use fresh unauthenticated requests
+to exact HTTPS hosts `release-assets.githubusercontent.com`,
+`objects.githubusercontent.com`, or `github-releases.githubusercontent.com`;
+other hosts, userinfo, non-HTTPS, nonstandard ports and loops are refused. Errors
+omit credentials, signed URLs, query strings and raw response bodies.
+
+The fresh `ubuntu-24.04` job uses the existing pinned CPU dependencies and verified
+public base, then HF/Transformers offline flags. It regenerates only G1 train/val
+on the exact source with the supplied group count/seed, checks manifest hashes and
+the external validation hash, and calls the unchanged replay in full mode, four
+CPU threads, 50 samples, fresh arms. No control checkpoint, full freeze, H1 or
+private shipped heads are needed. Stock baseline heads provide cost shape only.
+The full cost job is bounded at 120 minutes and the benchmark at 110 minutes. Only completed
+`cost-full.json` and a compact identity/device/budget receipt are upload-allowlisted;
+checkpoint, G1, base/cache and token are excluded. Failures mean **cost unmeasured**.
+Success is **cost evidence only**, never quality PASS or B PASS. Actual download,
+training, models, hosted benchmark and artifact upload are **NOT_RUN** here.

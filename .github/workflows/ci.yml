@@ -16,8 +16,35 @@ on:
           - off
           - probe
           - full
+          - cost-only
         default: off
         required: true
+      source_sha:
+        description: Exact lowercase source commit SHA (cost-only)
+        type: string
+        required: false
+      checkpoint_asset:
+        description: Draft release ID/asset ID in wydrox/apassy (cost-only)
+        type: string
+        required: false
+      checkpoint_sha256:
+        description: External checkpoint SHA-256 (cost-only)
+        type: string
+        required: false
+      transport_only:
+        description: Check draft asset transport only; no models or benchmark (cost-only)
+        type: boolean
+        default: false
+        required: false
+      val_sha256:
+        description: External Mac freeze validation SHA-256 (cost-only)
+        type: string
+        required: false
+      groups:
+        description: G1 groups 400..800; seed fixed at 7 (cost-only)
+        type: string
+        required: false
+        default: '400'
   push:
     branches: [main]
     paths-ignore:
@@ -40,10 +67,16 @@ concurrency:
 
 jobs:
   context-experiment:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.context_experiment == 'probe' || inputs.context_experiment == 'full') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.context_experiment == 'probe' || inputs.context_experiment == 'full' || inputs.context_experiment == 'cost-only') }}
     uses: ./.github/workflows/bouncer-context-experiment.yml
     with:
       mode: ${{ inputs.context_experiment }}
+      source_sha: ${{ inputs.source_sha }}
+      checkpoint_asset: ${{ inputs.checkpoint_asset }}
+      checkpoint_sha256: ${{ inputs.checkpoint_sha256 }}
+      transport_only: ${{ inputs.transport_only }}
+      val_sha256: ${{ inputs.val_sha256 }}
+      groups: ${{ inputs.groups }}
 
   reuse-pr:
     runs-on: ubuntu-24.04

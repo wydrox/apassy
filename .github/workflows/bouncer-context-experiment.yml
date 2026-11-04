@@ -31,8 +31,35 @@ name: Bouncer context supervised experiment (probe is not gate B)
         options:
         - probe
         - full
+        - cost-only
         default: probe
         required: true
+      source_sha:
+        description: Exact lowercase source commit SHA (cost-only)
+        type: string
+        required: false
+      checkpoint_asset:
+        description: Draft release ID/asset ID in wydrox/apassy (cost-only)
+        type: string
+        required: false
+      checkpoint_sha256:
+        description: External checkpoint SHA-256 (cost-only)
+        type: string
+        required: false
+      transport_only:
+        description: Check draft asset transport only; no models or benchmark (cost-only)
+        type: boolean
+        default: false
+        required: false
+      val_sha256:
+        description: External Mac freeze validation SHA-256 (cost-only)
+        type: string
+        required: false
+      groups:
+        description: G1 groups 400..800; seed fixed at 7 (cost-only)
+        type: string
+        required: false
+        default: '400'
   workflow_call:
     inputs:
       mode:
@@ -40,6 +67,32 @@ name: Bouncer context supervised experiment (probe is not gate B)
         type: string
         default: probe
         required: false
+      source_sha:
+        description: Exact lowercase source commit SHA (cost-only)
+        type: string
+        required: false
+      checkpoint_asset:
+        description: Draft release ID/asset ID in wydrox/apassy (cost-only)
+        type: string
+        required: false
+      checkpoint_sha256:
+        description: External checkpoint SHA-256 (cost-only)
+        type: string
+        required: false
+      transport_only:
+        description: Check draft asset transport only; no models or benchmark (cost-only)
+        type: boolean
+        default: false
+        required: false
+      val_sha256:
+        description: External Mac freeze validation SHA-256 (cost-only)
+        type: string
+        required: false
+      groups:
+        description: G1 groups 400..800; seed fixed at 7 (cost-only)
+        type: string
+        required: false
+        default: '400'
 permissions:
   contents: read
 concurrency:
@@ -47,6 +100,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   probe:
+    if: ${{ inputs.mode != 'cost-only' && !inputs.transport_only }}
     name: ${{ github.event_name == 'workflow_dispatch' && 'probe' || 'preflight' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -1075,3 +1129,204 @@ jobs:
         if-no-files-found: warn
         compression-level: 0
         path: ${{ runner.temp }}/bouncer-context/evidence/*.json
+
+  cost-only:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'cost-only' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.transport_only && 10 || 120 }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      CHECKPOINT_ASSET: ${{ inputs.checkpoint_asset }}
+      CHECKPOINT_SHA256: ${{ inputs.checkpoint_sha256 }}
+      VAL_SHA256: ${{ inputs.val_sha256 }}
+      COST_GROUPS: ${{ inputs.groups }}
+      TRANSPORT_ONLY: ${{ inputs.transport_only }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Require exact source and cost inputs before setup
+      run: |
+        set -euo pipefail
+        python3 -B - <<'PY'
+        import os, subprocess, sys
+        sys.path.insert(0, 'tools/basemodel')
+        from context_cost_asset import inputs
+        inputs(os.environ, subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+        PY
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Read draft-release checkpoint (transport preflight required)
+      timeout-minutes: 5
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/context_cost_asset.py
+    - name: Record verified transport only
+      if: inputs.transport_only
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import hashlib, json, os
+        from pathlib import Path
+        root = Path(os.environ['EXP'])
+        checkpoint = root / 'context.safetensors'
+        with checkpoint.open('rb') as f:
+            sha = hashlib.file_digest(f, 'sha256').hexdigest()
+        assert sha == os.environ['CHECKPOINT_SHA256']
+        receipt = dict(source_sha=os.environ['SOURCE_SHA'], checkpoint_sha256=sha,
+                       checkpoint_size=checkpoint.stat().st_size,
+                       evidence='transport_only', job_budget_minutes=10,
+                       download_budget_minutes=5, models='NOT_RUN', gate_b='UNMEASURED')
+        (root / 'evidence/transport-receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+        PY
+    - name: Upload transport receipt only
+      if: inputs.transport_only
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-transport-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: error
+        path: ${{ runner.temp }}/bouncer-context/evidence/transport-receipt.json
+    - name: Install existing dependencies with CPU torch first
+      if: ${{ !inputs.transport_only }}
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+        "$PY" -m pip install -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PY'
+        import torch
+        assert torch.__version__.split('+')[0] == '2.14.0'
+        assert torch.version.cuda is None, 'CPU-only torch required'
+        assert torch.get_num_threads() == 4, 'four CPU threads required'
+        PY
+    - name: Fetch and verify the pinned public base, then go offline
+      if: ${{ !inputs.transport_only }}
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/fetch_weights.py
+        "$PY" -B - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import common
+        manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        assert common.BASE_REPO == manifest['repo']
+        assert common.BASE_REVISION == manifest['revision']
+        base = Path(common.base_dir()).resolve()
+        assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+            f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+        Path(os.environ['EXP'], 'evidence/base-identity.json').write_text(json.dumps({
+            'base_dir': str(base), 'manifest_base': manifest}, sort_keys=True) + '\n')
+        PY
+    - name: Recreate G1 and verify external validation hash and manifest
+      if: ${{ !inputs.transport_only }}
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/context_data.py --out "$EXP/synthetic" --groups "$COST_GROUPS" --seed 7
+        "$PY" -B - <<'PY'
+        import hashlib, json, os
+        from pathlib import Path
+        root = Path(os.environ['EXP']) / 'synthetic'
+        dm = json.loads((root / 'data-manifest.json').read_text())
+        assert dm['groups'] == int(os.environ['COST_GROUPS']) and dm['seed'] == 7
+        assert dm['rubric'] == 'v1-R1-text-catalog'
+        for name in ('train.jsonl', 'val.jsonl'):
+            with (root / name).open('rb') as f:
+                sha = hashlib.file_digest(f, 'sha256').hexdigest()
+            assert dm['files'][name]['sha256'] == sha
+            if name == 'val.jsonl':
+                assert sha == os.environ['VAL_SHA256'], 'cost unmeasured: G1 validation mismatch'
+        PY
+    - name: Measure fresh CPU arms on regenerated G1 (cost evidence only)
+      if: ${{ !inputs.transport_only }}
+      timeout-minutes: 110
+      run: |
+        set -euo pipefail
+        timeout --signal=TERM --kill-after=30s 6570s \
+          "$PY" -B tools/basemodel/context_replay.py \
+          --val "$EXP/synthetic/val.jsonl" --base "$APASSY_CONTEXT_TOKENIZER_BASE" \
+          --context-heads "$EXP/context.safetensors" --expect-context-sha256 "$CHECKPOINT_SHA256" \
+          --mode full --threads 4 --out "$EXP/evidence/cost-full.json"
+    - name: Write compact cost receipt
+      if: ${{ !inputs.transport_only }}
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import hashlib, json, os
+        from pathlib import Path
+        root = Path(os.environ['EXP'])
+        checkpoint = root / 'context.safetensors'
+        with checkpoint.open('rb') as f:
+            sha = hashlib.file_digest(f, 'sha256').hexdigest()
+        assert sha == os.environ['CHECKPOINT_SHA256']
+        json.loads((root / 'evidence/cost-full.json').read_text())
+        receipt = dict(source_sha=os.environ['SOURCE_SHA'], checkpoint_sha256=sha,
+                       checkpoint_size=checkpoint.stat().st_size, val_sha256=os.environ['VAL_SHA256'],
+                       groups=int(os.environ['COST_GROUPS']), seed=7, device='cpu', threads=4,
+                       runner='ubuntu-24.04', job_budget_minutes=120, bench_budget_minutes=110,
+                       evidence='cost_only', gate_b='UNMEASURED')
+        (root / 'evidence/cost-receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+        PY
+    - name: Upload only completed cost evidence and compact receipt
+      if: ${{ !inputs.transport_only }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-cost-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: error
+        path: |
+          ${{ runner.temp }}/bouncer-context/evidence/cost-full.json
+          ${{ runner.temp }}/bouncer-context/evidence/cost-receipt.json
+    - name: Record cost-only boundary
+      if: always()
+      env:
+        COST_STATUS: ${{ job.status }}
+      run: |
+        if [[ "$TRANSPORT_ONLY" == true && "$COST_STATUS" == success ]]; then
+          echo 'Transport verified only; no model or benchmark ran. Quality and Gate B unmeasured.' >> "$GITHUB_STEP_SUMMARY"
+        elif [[ "$COST_STATUS" == success ]]; then
+          echo 'Cost evidence only; quality and Gate B unmeasured. No B PASS.' >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo 'Cost unmeasured: cost-only job did not complete. No B PASS.' >> "$GITHUB_STEP_SUMMARY"
+        fi

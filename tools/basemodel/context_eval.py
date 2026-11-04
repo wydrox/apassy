@@ -256,6 +256,7 @@ def main(argv=None):
     p.add_argument('--heldout-manifest')
     p.add_argument('--expect-freeze-sha256', required=False)
     p.add_argument('--baseline-binary')
+    p.add_argument('--shipped-heads', help='optional explicit pinned shipped checkpoint; never fetched')
     p.add_argument('--cost-json')
     a = p.parse_args(argv)
     out = Path(a.out).resolve()
@@ -276,7 +277,8 @@ def main(argv=None):
                     raise Unsupported('freeze/heldout/manifest/base-dir required')
                 from context_train import evaluate_frozen
                 report = evaluate_frozen(a.freeze, a.heldout, a.heldout_manifest, a.base_dir, c,
-                    expect_freeze_sha256=a.expect_freeze_sha256, baseline_binary=a.baseline_binary, cost_path=a.cost_json)
+                    expect_freeze_sha256=a.expect_freeze_sha256, baseline_binary=a.baseline_binary, cost_path=a.cost_json,
+                    shipped_heads=a.shipped_heads)
     except (Unsupported, OSError, ValueError, KeyError, ImportError, RuntimeError) as e:
         report = {'outcome': 'UNSUPPORTED', 'reason': str(e) if isinstance(e, Unsupported) else type(e).__name__}
     report.setdefault('feasibility_quality', 'UNSUPPORTED')

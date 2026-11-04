@@ -707,8 +707,23 @@ def heldout_overlap(development, rows):
 
 
 def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
-                    expect_freeze_sha256=None, baseline_binary=None, cost_path=None):
+                    expect_freeze_sha256=None, baseline_binary=None, cost_path=None, shipped_heads=None):
     frozen = verify_freeze(freeze_path, c, expect_freeze_sha256)
+    shipped_sha = None
+    if shipped_heads is not None:
+        # Explicit pins fail closed before the first held-out IO (or model setup).
+        try:
+            from context_train_rows import safe_path
+            from context_replay import SHIPPED_SHA
+            shipped_heads = safe_path(shipped_heads)
+            if not shipped_heads.is_file():
+                raise Unsupported('shipped_heads_pin')
+            shipped_sha = sha256(shipped_heads)
+            shipped_manifest = json.loads((Path(__file__).parent / 'manifest.json').read_text())
+            if shipped_sha != SHIPPED_SHA or SHIPPED_SHA != shipped_manifest['checkpoint']['sha256']:
+                raise Unsupported('shipped_heads_pin')
+        except (Unsupported, OSError, ValueError, KeyError, TypeError, ImportError):
+            raise Unsupported('shipped_heads_pin') from None
     manifest_base, _ = environment(base, c)
     if manifest_base['base'] != frozen['base']:
         raise Unsupported('frozen base differs')
@@ -753,6 +768,8 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
         report = gates(rows, scores, control, reinforced, fits, frozen['threshold'],
                        control_tau=frozen['control_threshold'], control_overflow=control_overflow)
         baseline, cost, evidence_errors = None, None, {}
+        baseline_is_lower_bound = True
+        baseline_evidence = dict(provenance='lower_bound', status='UNSUPPORTED', heads_sha256=None)
         if baseline_binary:
             try:
                 from context_replay import baseline_lower_bound
@@ -761,8 +778,30 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
                 if len(pre_ask) != len(rows) or any(type(v) is not bool for v in pre_ask):
                     raise Unsupported('baseline alignment')
                 baseline = [not v for v in pre_ask]
-            except (Unsupported, OSError, ValueError, KeyError, ImportError, RuntimeError):
+                baseline_evidence['status'] = 'MEASURED'
+            except (Unsupported, OSError, ValueError, KeyError, TypeError, ImportError, RuntimeError):
                 evidence_errors['baseline_shipped'] = 'baseline evidence unavailable'
+        if shipped_heads is not None:
+            baseline_evidence['shipped_attempt'] = dict(status='UNSUPPORTED', heads_sha256=shipped_sha)
+            try:
+                if not baseline_binary:
+                    raise Unsupported('baseline binary unavailable')
+                from context_replay import baseline_with_heads
+                replay = baseline_with_heads([visible_view(r) for r in rows], baseline_binary,
+                                             base, shipped_heads=shipped_heads, threads=4)
+                if (not isinstance(replay, dict) or replay.get('status') != 'MEASURED'
+                        or replay.get('heads_sha256') != shipped_sha
+                        or type(replay.get('ask')) is not list
+                        or len(replay['ask']) != len(rows)
+                        or any(type(v) is not bool for v in replay['ask'])):
+                    raise Unsupported('shipped baseline alignment')
+                baseline = [not v for v in replay['ask']]
+                baseline_is_lower_bound = False
+                baseline_evidence.update(provenance='shipped', status='MEASURED', heads_sha256=shipped_sha,
+                                         shipped_attempt=dict(status='MEASURED', heads_sha256=shipped_sha))
+                evidence_errors.pop('baseline_shipped', None)
+            except (Unsupported, OSError, ValueError, KeyError, TypeError, ImportError, RuntimeError):
+                evidence_errors['baseline_shipped'] = 'shipped baseline evidence unavailable'
         if cost_path:
             try:
                 from context_eval import validate_cost_evidence
@@ -773,10 +812,10 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
                 evidence_errors['cost'] = 'cost evidence unavailable'
         report = gates(rows, scores, control, reinforced, fits, frozen['threshold'], baseline=baseline,
                        cost=cost, control_tau=frozen['control_threshold'], control_overflow=control_overflow,
-                       baseline_is_lower_bound=True)
+                       baseline_is_lower_bound=baseline_is_lower_bound)
         report.update(context_contract_sha256=contract_hash(c), freeze_sha256=expect_freeze_sha256,
                       heldout_sha256=expected_hash, overlap=collision, threshold=frozen['threshold'],
-                      evidence_errors=evidence_errors, unlocks_c=False,
+                      evidence_errors=evidence_errors, baseline_evidence=baseline_evidence, unlocks_c=False,
                       quality_scope='feasibility quality only; C/D/E require B and supervisor review')
         return report
     finally:
