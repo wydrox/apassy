@@ -174,3 +174,43 @@ Cargo package selection, formatting, workflow syntax and whitespace were checked
 Rust compilation and runtime tests still require CI. Browser E2E uses the existing
 macOS Helium harness on the approved Intel fallback; no Ubuntu browser result is
 claimed. These repairs do not establish gate B or unlock C/D/E.
+
+## Delivery review and dormant adapter R9
+
+Draft CI on `a6d0fee1ec87de3bb9560d68d3193610439c7845` passed all 20 checks.
+The subsequent single W8 pipeline, run `41874913253` on that exact revision,
+completed calibration but returned `UNSUPPORTED(budget)` with no eligible group.
+Full training and held-out evaluation were skipped. Three ordinary ARM macOS
+jobs in that manual run were cancelled for runner capacity; the approved Intel
+jobs passed. W8 is consumed and will not be repeated or adjusted for eligibility.
+The small evidence JSON files are retained outside the checkout at
+`/Users/rafalw/Dev/apassy-bouncer-context-evidence/41874913253/`.
+
+Opus reviewed the delivery gap in
+`docs/reviews/bouncer-context-delivery-plan-review-2026-11-04.md`. The parent
+corrected the audit's obsolete quality thresholds and its overly literal reading
+of the full-record requirement. The local builder reads metadata and history;
+the brain receives the existing closed projection without secret values or free
+metadata text. The review's shorter C/D path remains a proposal for later review.
+
+The only newly accepted implementation package is a dormant run-to-context
+adapter, with no call-site in the decision path. Sol-1 owns the new
+`src/broker/context_adapter.rs`, its module declaration, and only the visibility
+change of `run::host_matches` to `pub(super)`. Sol-2 owns the new synthetic
+`tests/context_adapter.rs`; the parent registers it in `tests/it.rs`. These are
+the five code paths allowed by review §4. This decision record, corrected audit
+and review are supporting documentation, not extra runtime changes.
+
+The adapter consumes the already sanitized request, preserves request item
+order, computes per-item project/host fit, reads metadata-only evidence, and
+returns either a complete ContextInput or a closed ContextAsk reason. No new
+feature flag, server route, schema, shadow or production invocation is included.
+Golden parity, synthetic canaries, fit boundaries and all refusal variants must
+run in draft CI on the new exact SHA, followed by a short Opus diff review.
+Local Rust compilation is not part of this package.
+
+B remains UNSUPPORTED and C/D/E are not unlocked. A new B2 experiment needs a
+concrete executor, verified cost and resource limits, explicit owner approval
+including one read of shipped heads from R2, and supervision before any compute.
+No such experiment, secret access, runner change or publication is authorized
+by this adapter package.

@@ -13,6 +13,7 @@ pub mod bouncer;
 pub mod brain_host;
 pub mod browser_fill;
 pub mod calibration;
+pub mod context_adapter;
 pub mod context_brain;
 pub mod corrections;
 pub mod decide;

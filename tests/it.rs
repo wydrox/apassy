@@ -42,6 +42,7 @@ mod companion_activity;
 mod companion_owner;
 mod companion_store;
 mod connect_account;
+mod context_adapter;
 mod contracts;
 mod corrections;
 #[cfg(feature = "vault")]
