@@ -722,9 +722,20 @@ fn netns_cannot_see_outside_processes() {
             .expect("sleep"),
     );
     let pid = outside.0.id();
-    // Control: the process and its arguments are visible outside.
-    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).expect("control cmdline");
-    assert!(String::from_utf8_lossy(&cmdline).contains(&marker));
+    // Control: the process and its arguments are visible outside. Until the child has
+    // run exec, its cmdline is still the one of this test, so wait for it.
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let cmdline = fs::read(format!("/proc/{pid}/cmdline")).expect("control cmdline");
+        if String::from_utf8_lossy(&cmdline).contains(&marker) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < end,
+            "the control process never showed its marker"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let sandbox = run_sandbox(&layout, NetPlan::Bridged(Vec::new()));
     let script = r#"
         n=0
