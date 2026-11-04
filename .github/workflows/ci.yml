@@ -8,6 +8,16 @@ name: CI
 # runs the full suite; only that run can be reused on main.
 on:
   workflow_dispatch:
+    inputs:
+      context_experiment:
+        description: Optional supervised bouncer experiment
+        type: choice
+        options:
+          - off
+          - probe
+          - full
+        default: off
+        required: true
   push:
     branches: [main]
     paths-ignore:
@@ -29,6 +39,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  context-experiment:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.context_experiment == 'probe' || inputs.context_experiment == 'full') }}
+    uses: ./.github/workflows/bouncer-context-experiment.yml
+    with:
+      mode: ${{ inputs.context_experiment }}
+
   reuse-pr:
     runs-on: ubuntu-24.04
     timeout-minutes: 5

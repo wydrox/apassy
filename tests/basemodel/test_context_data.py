@@ -1,14 +1,16 @@
-"""Pure synthetic-author checks; no held-out files, tokenizer, torch or subprocesses."""
+"""Synthetic-author checks; optional compiled replay, no model or held-out access."""
 import copy
 import json
+import os
+import re
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools' / 'basemodel'))
-from context_data import CLASSES, _program_key, generate, main, overlap, read_rows, rubric
-from context_v1 import Unsupported, canonical, load_contract, serialize, validate_secret
+from context_data import CLASSES, _CATALOG, default_secret, _program_key, generate, main, overlap, read_rows, rubric
+from context_v1 import Refusal, Unsupported, canonical, load_contract, serialize, validate_secret
 
 
 class ContextDataTests(unittest.TestCase):
@@ -44,6 +46,15 @@ class ContextDataTests(unittest.TestCase):
         self.assertEqual(_program_key('aws ec2 describe-instances'),
                          _program_key('aws ec2 describe-instances --region test'))
 
+    def test_explicit_destination_catalog_and_default(self):
+        self.assertEqual(default_secret()['hosts'], 'none')
+        for action, entries in _CATALOG.items():
+            destinations = [(request, command) for request, command in entries
+                            if re.search(r'https://[^/\s]+\.example\.test(?:/|$)', command)]
+            self.assertGreaterEqual(len(destinations), 2, action)
+            self.assertEqual(len({_program_key(command) for _, command in destinations}),
+                             len(destinations), action)
+
     def test_positive_action_environment_coverage(self):
         for rows in (self.train, self.val):
             positives = [r for r in rows if r['label'] == 'allow_ok']
@@ -65,6 +76,64 @@ class ContextDataTests(unittest.TestCase):
         from context_replay import validate_view, visible_view
         for row in self.train + self.val:
             validate_view(visible_view(row), self.c)
+            # Independent observation limited to this finite URL-only catalog.
+            # This deliberately does not implement Rust's general shell parser.
+            urls = re.findall(r'https://([^/\s]+)', row['request']['command'])
+            self.assertTrue(all(host.endswith('.example.test') for host in urls))
+            for secret in row['secrets']:
+                self.assertEqual(secret['hosts'] == 'none', not urls,
+                                 (row['id'], secret['hosts'], len(urls)))
+                if secret['hosts'] == 'unknown' or secret['project'] == 'other':
+                    self.assertEqual(row['label'], 'must_ask', row['id'])
+            if row['id'].endswith(':agent-none'):
+                self.assertFalse(urls, row['id'])
+                self.assertEqual(row['secrets'][-1]['made_by_agent'], 'yes')
+
+    def test_positive_hosts_in_every_class_split_and_tiny_cost_probe(self):
+        from context_replay import visible_view, validate_view
+        for seed in (0, 7, 81):
+            for split, groups in (('train', 400), ('val', 100)):
+                rows = generate(seed, groups, split)
+                for cls in CLASSES:
+                    positives = [r for r in rows if r['class'] == cls and r['label'] == 'allow_ok']
+                    for host in ('none', 'known'):
+                        self.assertTrue(any(all(s['hosts'] == host for s in r['secrets'])
+                                            for r in positives), (seed, split, cls, host))
+        for split in ('train', 'val'):
+            rows = generate(7, 10, split)
+            for n in (1, 3):
+                fitting = []
+                for row in rows:
+                    v = visible_view(row)
+                    validate_view(v, self.c)
+                    if len(v['secrets']) == n:
+                        try:
+                            serialize(v['request'], v['action'], v['secrets'], self.c)
+                        except Refusal:
+                            continue
+                        fitting.append(v)
+                self.assertTrue(fitting, (split, n))
+
+    @unittest.skipUnless(os.environ.get('APASSY_CONTEXT_REPLAY_BINARY'), 'Rust binary absent; CI opt-in')
+    def test_generated_views_replay_with_real_host_extractor(self):
+        from context_replay import _replay, visible_view, MAX_BYTES
+        binary = os.environ['APASSY_CONTEXT_REPLAY_BINARY']
+        # Replay all rows, including injections and not-serving rows. Their asks
+        # are valid output, not incoherence. Each call is bounded independently.
+        for rows in (self.train, self.val):
+            views = [visible_view(r) for r in rows]
+            for start in range(0, len(views), 256):
+                batch = views[start:start + 256]
+                self.assertLessEqual(len(batch), 4096)
+                self.assertLessEqual(len(json.dumps({'op': 'prepare', 'views': batch},
+                                                   allow_nan=False).encode()), MAX_BYTES)
+                actual = _replay(batch, binary)
+                for offset, (v, result) in enumerate(zip(batch, actual)):
+                    count = len(set(re.findall(r'https://([^/\s]+)', v['request']['command'])))
+                    self.assertIs(type(result['actual_host_count']), int)
+                    self.assertEqual(result['actual_host_count'], count, (start + offset, count))
+                    for secret in v['secrets']:
+                        self.assertEqual(secret['hosts'] == 'none', result['actual_host_count'] == 0)
 
     def test_every_factual_counterfactual_and_textual_clause(self):
         for rows in (self.train, self.val):
@@ -81,7 +150,7 @@ class ContextDataTests(unittest.TestCase):
                 clauses.add(r['id'].rsplit(':', 1)[-1])
             self.assertTrue({'denial', 'conflict', 'env-production', 'env-unknown',
                              'delete-one', 'delete-zero', 'delete-unknown', 'agent-unknown', 'agent-none',
-                             'created-host'} <= clauses)
+                             'created-host', 'unrecorded-host', 'foreign-project'} <= clauses)
             for r in rows:
                 self.assertEqual(rubric(r), r['label'])
                 for s in r['secrets']:

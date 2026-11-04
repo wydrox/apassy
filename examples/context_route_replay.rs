@@ -152,6 +152,11 @@ fn replay(v: &View, body: Option<&Value>) -> Result<Value, &'static str> {
     // Host strings are absent. For hosts=known reconstruct per-item covering
     // destinations from command_hosts; hosts=unknown is an explicit route ask.
     let hosts = shell_risk::command_hosts(&argv);
+    for secret in &v.secrets {
+        if (secret["hosts"] == "none") != hosts.is_empty() {
+            return Err("row_incoherent");
+        }
+    }
     let providers: Vec<_> = names
         .iter()
         .map(|name| shell_risk::ProviderHosts {
@@ -193,6 +198,7 @@ fn replay(v: &View, body: Option<&Value>) -> Result<Value, &'static str> {
         // No input text, metadata, paths or credential values enter diagnostics.
         "pre_note":pre.as_ref().map(|d| d.note.as_str()),
         "analysis_flags":&analysis.flags,
+        "actual_host_count":hosts.len(),
     });
     if let Some(body) = body {
         let asked = bouncer::questions();

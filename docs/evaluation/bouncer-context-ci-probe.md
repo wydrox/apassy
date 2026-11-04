@@ -1,6 +1,6 @@
 # Bouncer context: supervised CPU experiment in CI
 
-Status (2026-11-04): runtime **not run**. This workflow implements the CI boundary
+Status (2026-11-04): runtime for this revision **not run**. This workflow implements the CI boundary
 in Opus review §4.9 and Configuration, with integration decision R3. A probe is
 training and cost feasibility evidence only. It never evaluates held-out quality,
 never reports B PASS, and never unlocks C/D/E. A full run still requires review of
@@ -26,11 +26,20 @@ gh workflow run bouncer-context-experiment.yml --ref feat/bouncer-secret-context
 
 These commands are instructions for the parent; neither was executed here.
 A newly added workflow may be unavailable for dispatch until its file exists on
-the default branch. The parent may later add a minimal reusable call from the
-registered `ci.yml`, after Opus review. This change does not edit `ci.yml`. Such a
-bridge must expose/forward the mode from its manual trigger; the original event
-must still be `workflow_dispatch`. No PR label, publication or other trigger is
-used to bypass registration or the manual-only full boundary.
+the default branch. The minimal bridge from the already registered `ci.yml` was
+approved in recheck R5 and applied exactly as proposed. Before registration, use:
+
+```bash
+gh workflow run ci.yml --ref feat/bouncer-secret-context -f context_experiment=probe
+gh workflow run ci.yml --ref feat/bouncer-secret-context -f context_experiment=full
+```
+
+Dispatch at most one probe and one full run per commit, with no earlier run on the
+same ref still active. This bridge also runs the existing full CI suite, including
+macOS jobs. It passes no secrets and preserves the actual `workflow_dispatch`
+boundary. No manual dispatch has occurred. Full still requires the R5 conditions:
+fixed N2–N4, green CI with compiled parity executed, and an eligible probe on the
+same commit. No PR label or publication trigger bypasses these conditions.
 
 ## Isolation and pinned inputs
 
@@ -53,8 +62,9 @@ not an operating-system network sandbox. No owner cache is restored.
 The probe builds the real baseline example using
 `cargo build --locked --features vault --example context_route_replay` with a
 job-private target directory. `APASSY_CONTEXT_REPLAY_BINARY` points at that binary.
-The replay unittest suite, including compiled fixture parity, must pass with zero
-skips. The tokenizer unittest suite must also pass with zero skips; an independent
+The replay and G1 data suites, including compiled fixture parity and both generated
+splits checked with Rust's actual host extractor, must pass with zero skips.
+The tokenizer unittest suite must also pass with zero skips; an independent
 10,000-context measurement must exactly match the canonical budget. A skip or
 budget mismatch stops the job. Source-only unit tests are not quality evidence.
 
@@ -79,6 +89,21 @@ versions are independently verified.
 The report must contain finite positive `projected_full_seconds`, additive
 projection components, and encoder timings for 32 validation rows at batches one
 and eight. Projection provenance records 800 groups, four epochs and two heads.
+It also measures four fp16 cache-write batches and cached FP32 head work at a
+512-token padded shape: two warm-ups and three samples for training batch 32,
+validation batch 32 and scoring batch 1. The encoder is excluded from these
+cached steps. Head weights, gradients, flags, module modes and RNG are restored;
+the calibration cache is disposable. This calibration has a separate 120-second
+deadline and does not change the four-step training policy of the probe.
+
+`g1_workload_counts` counts serialized context/control cache identities using only
+G1 at 800 training and 200 validation groups. For every selectable prefix of
+400..800 groups it computes encoder, training, validation and scoring workloads,
+then takes conservative 800-group equivalents. This preserves the existing
+linear group-selection inequality without assuming linear cache deduplication.
+The workflow validates timing provenance and recomputes the projection from the
+measured timings and recorded counts. Encoder work is counted once; cached head
+passes and final validation scoring are separate positive components.
 The probe publishes the freeze SHA and report SHA as job outputs. The training
 job verifies both external hashes, all probe artifacts and code/package identity
 before accepting the projection. `budget.json` records the checked provenance

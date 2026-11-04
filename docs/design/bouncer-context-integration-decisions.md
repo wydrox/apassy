@@ -74,3 +74,36 @@ The proposed patch below adds only an explicit off/probe/full manual input and a
 reusable call to the existing registered CI file. It changes no existing job or
 runner and is NOT applied or dispatched yet. Opus must review this concrete patch
 with the repaired revision before the parent applies it.
+
+## Supervisor recheck R5
+
+Opus accepted the manual-entry patch and conditionally approved full start in
+`docs/reviews/bouncer-context-ab-recheck-2026-11-04.md`. The parent applied exactly
+that patch, with no other existing CI job or runner change. A manual run remains
+limited to one probe and one full dispatch per commit, without a concurrent run
+on the same ref. No dispatch has occurred.
+
+Before the first held-out pass, one commit X must fix N2 (host facts and replay
+coherence), N3 (held-out overlap scope), and N4 (allow-label audit), pass CI with
+compiled parity executed, and have a measured eligible probe for 400–800 groups.
+N3 keeps strict program disjointness inside G1 train/validation, while held-out
+refuses shared families and identical request/command pairs only. Its program
+overlap remains reported. N4 extends the positive-label audit without changing
+the narrower textual-clause reporting predicate.
+
+The optional budget repair approved by the reviewer must measure cached head
+work separately from encoder work; it must preserve hard time/cache limits,
+external probe provenance and the existing group-selection inequality. It may
+not lower a bound merely to turn an unsupported projection into eligibility.
+
+N2 now derives destination coverage from the finite G1 command catalog and checks
+the invariant against the real Rust host extractor in CI. Unknown destinations
+and foreign projects cannot receive positive G1 labels. Cost sampling excludes
+only explicit OverBudget refusals, retains coverage counts for both arms, and
+returns only fixed diagnostic codes from child processes.
+
+The integrated local context suite reports 70 passed and four skipped: three
+compiled-replay tests and the explicit full-tokenizer test. The experiment CI
+requires all four to run without skips. Source approval of N2–N4 and the separate
+cached-head budget calibration remains pending the limited Opus re-read; these
+local results do not measure feasibility quality or gate B.

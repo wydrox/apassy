@@ -99,6 +99,24 @@ class Serializer(unittest.TestCase):
             view['secrets'][0]['kind'] = 'custom'
             self.assertIsNot(view['secrets'], row['secrets'])
 
+    def test_heldout_can_share_program_but_not_family_or_exact_pair(self):
+        import context_train as T
+        development = D.generate(7, 10)
+        candidate = copy.deepcopy(development[0])
+        candidate['family'] = 'H1:independently-authored'
+        candidate['request'].update(user_request='Show a different fixture repository.',
+                                    command=candidate['request']['command'] + ' --short')
+        collision = T.heldout_overlap(development, [candidate])
+        self.assertGreater(collision['shared_program_subcommands'], 0)
+        self.assertEqual(collision['shared_request_command_pairs'], 0)
+        identical = copy.deepcopy(development[0])
+        identical['family'] = candidate['family']
+        with self.assertRaisesRegex(C.Unsupported, 'held-out overlap'):
+            T.heldout_overlap(development, [identical])
+        candidate['family'] = development[0]['family']
+        with self.assertRaisesRegex(C.Unsupported, 'held-out overlap'):
+            T.heldout_overlap(development, [candidate])
+
     def test_freeze_refusal_before_any_heldout_io(self):
         import context_train as T
         with tempfile.TemporaryDirectory() as t:
@@ -405,6 +423,16 @@ class GateMath(unittest.TestCase):
         self.assertEqual(r['label_audit']['invalid_allow'], 1)
         self.assertIsNone(r['gates']['label_audit'])
         self.assertEqual(r['feasibility_quality'], 'UNSUPPORTED')
+
+    def test_positive_label_audit_covers_deterministic_fact_exclusions(self):
+        for change in ({'hosts': 'unknown'}, {'project': 'other'},
+                       {'env': 'production', 'scope': 'read_write', 'sensitive': 'yes'}):
+            with self.subTest(change=change):
+                row = copy.deepcopy(self.rows[0])
+                row['secrets'][0].update(change)
+                self.assertTrue(E.invalid_allow_label(C.visible_view(row)))
+        row['secrets'][0].update(env='production', scope='read_only', hosts='none', project='undeclared')
+        self.assertFalse(E.invalid_allow_label(C.visible_view(row)))
 
     def test_missing_denominators_are_unsupported(self):
         r = E.gates([], [], [], [], [], .5, control_tau=.5)

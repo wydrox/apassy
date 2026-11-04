@@ -20,7 +20,7 @@ import sys
 import time
 from types import SimpleNamespace
 
-from context_v1 import (Unsupported, load_contract, validate_secret, serialize,
+from context_v1 import (Refusal, Unsupported, load_contract, validate_secret, serialize,
                         contract_hash, sha256, REVISION)
 
 ASSUMPTIONS = [
@@ -99,7 +99,8 @@ def baseline_lower_bound(views, binary_path):
     return {'pre_ask': [r['pre_ask'] for r in rows],
             'pre_reason': [r['pre_reason'] for r in rows],
             'diagnostics': [{'reason': r['pre_reason'], 'note': r.get('pre_note'),
-                             'flags': r.get('analysis_flags')} for r in rows],
+                             'flags': r.get('analysis_flags'),
+                             'actual_host_count': r.get('actual_host_count')} for r in rows],
             'systemone_body': [r['systemone_body'] for r in rows],
             'assumptions': list(ASSUMPTIONS), 'contract': 'sdc-baseline-replay-v1'}
 
@@ -255,7 +256,7 @@ def cost_record(baseline, context):
                for key in ('p50_ms', 'p95_ms', 'peak_rss_bytes')}, 'samples': context['samples']}
 
 
-def validation_views(path, n):
+def validation_views(path, n, *, counts=None):
     # CLI accepts only generated validation data, not arbitrary replay/test rows.
     path = Path(path)
     if path.name != 'val.jsonl':
@@ -264,18 +265,82 @@ def validation_views(path, n):
     if manifest['files']['val.jsonl']['sha256'] != sha256(path):
         raise Unsupported('validation_pin')
     views = []
+    selection = {'candidate_views': 0, 'fitting_views': 0, 'budget_refusals': 0}
+    c = load_contract()
     with open(path) as f:
         for line in f:
             row = json.loads(line)
             if not str(row.get('family', '')).startswith('G1:') or row.get('split', 'val') != 'val':
                 raise Unsupported('G1_validation_required')
             v = visible_view(row)
-            validate_view(v, load_contract())
+            validate_view(v, c)
             if len(v['secrets']) == n:
+                selection['candidate_views'] += 1
+                # Cost compares the same supported views in both arms. Coverage
+                # refusals are not encoder timings and cannot be benchmarked.
+                try:
+                    serialize(v['request'], v['action'], v['secrets'], c)
+                except Refusal as error:
+                    if error.code != 'OverBudget':
+                        raise Unsupported('validation_refusal') from None
+                    selection['budget_refusals'] += 1
+                    continue
                 views.append(v)
+    selection['fitting_views'] = len(views)
+    if counts is not None:
+        counts.update(selection)
     if not views:
         raise Unsupported('validation_secret_count')
     return views
+
+
+# Only fixed codes cross the child/parent diagnostic boundary. Never include
+# exception strings from dependencies, stdout/stderr, model paths or input text.
+_COST_REASONS = frozenset({
+    'threads_limit', 'github_ubuntu_24_cpu_required', 'G1_validation_required',
+    'validation_pin', 'validation_secret_count', 'validation_refusal',
+    'row_incoherent', 'laya_version', 'invalid_arm', 'base_pin',
+    'head_parameter_count', 'heads_pin', 'context_heads_metadata',
+    'context_heads_unavailable', 'cost_samples', 'cost_evidence_unavailable',
+    'cost_arm_failed', 'cost_arm_timeout', 'cost_arm_start_failed',
+    'cost_child_report_unavailable', 'cost_child_report_invalid',
+})
+
+
+def _safe_cost_reason(reason):
+    return reason if isinstance(reason, str) and reason in _COST_REASONS else 'cost_evidence_unavailable'
+
+
+class CostArmFailure(Unsupported):
+    def __init__(self, arm, n, child_reason):
+        super().__init__('cost_arm_failed')
+        self.arm, self.n = arm, n
+        self.child_reason = _safe_cost_reason(child_reason)
+
+
+def _run_cost_arm(args, out, arm, n):
+    try:
+        proc = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=3600, check=False)
+    except subprocess.TimeoutExpired:
+        raise CostArmFailure(arm, n, 'cost_arm_timeout') from None
+    except OSError:
+        raise CostArmFailure(arm, n, 'cost_arm_start_failed') from None
+    try:
+        # Both success and failure use the child's bounded JSON artifact.
+        if Path(out).stat().st_size > 65536:
+            raise ValueError
+        child = json.loads(Path(out).read_text())
+        if not isinstance(child, dict):
+            raise ValueError
+    except OSError:
+        raise CostArmFailure(arm, n, 'cost_child_report_unavailable') from None
+    except (ValueError, UnicodeError):
+        raise CostArmFailure(arm, n, 'cost_child_report_invalid') from None
+    if proc.returncode:
+        reason = child.get('reason') if child.get('status') == 'UNSUPPORTED' else 'cost_child_report_invalid'
+        raise CostArmFailure(arm, n, reason)
+    return child
 
 
 def main(argv=None):
@@ -299,12 +364,14 @@ def main(argv=None):
             raise Unsupported('github_ubuntu_24_cpu_required')
         samples = 20 if a.mode == 'probe' else 50
         if a.arm:
-            views = validation_views(a.val, a.secrets)
+            selection = {}
+            views = validation_views(a.val, a.secrets, counts=selection)
             with contextlib.redirect_stdout(io.StringIO()):
                 scorer = Predictor(a.base, a.arm, a.threads, a.context_heads,
                                    a.expect_context_sha256, a.shipped_heads)
                 result = measure_arm(views, scorer, samples)
-            result.update(head_provenance=scorer.provenance, heads_sha256=scorer.heads_sha256)
+            result.update(head_provenance=scorer.provenance, heads_sha256=scorer.heads_sha256,
+                          validation_selection=selection)
         else:
             result = {'device': 'github-ubuntu-24.04-cpu', 'mode': a.mode,
                       'threads': a.threads, 'warmups': 3, 'head_provenance': {},
@@ -325,23 +392,29 @@ def main(argv=None):
                                 '--threads', str(a.threads), '--out', out, '--arm', arm, '--secrets', str(n)]
                         if a.shipped_heads:
                             args.extend(['--shipped-heads', a.shipped_heads])
-                        proc = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                              timeout=3600, check=False)
-                        if proc.returncode:
-                            raise Unsupported('cost_arm_failed')
-                        arms[arm] = json.loads(Path(out).read_text())
+                        arms[arm] = _run_cost_arm(args, out, arm, n)
                         result['head_provenance'][arm] = arms[arm]['head_provenance']
                         result['pins'][arm + '_heads_sha256'] = arms[arm]['heads_sha256']
+                    if arms['baseline']['validation_selection'] != arms['context']['validation_selection']:
+                        raise Unsupported('validation_pin')
                     result[str(n)] = cost_record(arms['baseline'], arms['context'])
+                    result[str(n)]['validation_selection'] = arms['context']['validation_selection']
         Path(a.out).write_text(json.dumps(result, indent=2, allow_nan=False) + '\n')
         return 0
     except Unsupported as error:
-        print(json.dumps({'status': 'UNSUPPORTED', 'reason': str(error)}))
-        return 2
+        failure = {'status': 'UNSUPPORTED', 'reason': _safe_cost_reason(str(error))}
+        if isinstance(error, CostArmFailure):
+            failure.update(arm=error.arm, secrets=error.n, child_reason=error.child_reason)
     except Exception:
-        # No path, command, model diagnostic or user text in errors.
-        print(json.dumps({'status': 'UNSUPPORTED', 'reason': 'cost_evidence_unavailable'}))
-        return 2
+        failure = {'status': 'UNSUPPORTED', 'reason': 'cost_evidence_unavailable'}
+    if a.arm:
+        failure.update(arm=a.arm, secrets=a.secrets)
+    try:
+        Path(a.out).write_text(json.dumps(failure) + '\n')
+    except OSError:
+        pass
+    print(json.dumps(failure))
+    return 2
 
 
 if __name__ == '__main__':

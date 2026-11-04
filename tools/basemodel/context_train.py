@@ -68,6 +68,120 @@ def install_training_audit():
     sys.addaudithook(guard)
 
 
+def timing_summary(samples):
+    if len(samples) < 3 or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0 for v in samples):
+        raise Unsupported('invalid cached timing measurement')
+    ordered = sorted(samples)
+    return dict(samples=len(samples), p50_seconds=ordered[len(ordered)//2],
+                p95_seconds=ordered[math.ceil(.95*len(ordered))-1])
+
+
+def measure_cached_steps(step, deadline, clock=time.monotonic, warmups=2, samples=3):
+    """Warm-ups consume the deadline but never enter the measured distribution."""
+    if warmups < 1 or samples < 3:
+        raise Unsupported('cached timing sample coverage')
+    values = []
+    for i in range(warmups + samples):
+        deadline()
+        tick = clock()
+        step()
+        elapsed = clock() - tick
+        deadline()
+        if i >= warmups:
+            values.append(elapsed)
+    return timing_summary(values)
+
+
+def g1_workload_counts(c, seed):
+    """Exact serialized cache identities, no tokenizer/encoder and no held-out.
+
+    G1 generation is prefix-stable in its group index. Accumulate both arms in
+    one set, as FeatureCache does, then bound *every* candidate after the existing
+    g/800 scaling. Never assume unique-text counts scale linearly with groups.
+    """
+    from context_data import generate
+    splits = {}
+    for split, groups in (('train', 800), ('val', 200)):
+        buckets = [[] for _ in range(groups)]
+        for row in generate(seed, groups, split):
+            group = int(row['id'].split(':')[3])
+            buckets[group].append(row)
+        splits[split] = buckets
+    keys, counts, candidates = set(), dict(train=0, val=0), []
+    for group in range(800):
+        for split in ('train', 'val') if group % 4 == 3 else ('train',):
+            index = group if split == 'train' else group // 4
+            for row in splits[split][index]:
+                counts[split] += 1
+                for facts_blind in (False, True):
+                    secrets = blind(row['secrets'], c) if facts_blind else row['secrets']
+                    try:
+                        text, _ = serialize(row['request'], row['action'], secrets, c,
+                                            enforce_budget=not facts_blind)
+                    except Refusal:
+                        continue
+                    # Question and immutable cache pins are identical for both
+                    # arms. Blind overflows/local rules retained as upper bounds.
+                    keys.add(hashlib.sha256(text.encode()).digest())
+        g = group + 1
+        if g >= 400:
+            candidates.append((g, len(keys), counts['train'], counts['val']))
+    return dict(train_rows=counts['train'], validation_rows=counts['val'],
+                unique_encoder_inputs=len(keys), candidate_groups_min=400, candidate_groups_max=800,
+                encoder_inputs_800_equivalent=max(u * 800 / g for g, u, _, _ in candidates),
+                training_batches_800_equivalent=max(math.ceil(n / 32) * 800 / g for g, _, n, _ in candidates),
+                validation_batches_800_equivalent=max(math.ceil(v / 32) * 800 / g for g, _, _, v in candidates),
+                scoring_rows_800_equivalent=max(v * 800 / g for g, _, _, v in candidates),
+                provenance='G1_exact_serialized_context_control_union_prefixes_400_to_800')
+
+
+def project_workload(timings, counts):
+    """Seconds, conservative at every selectable group count after g/800 scaling.
+
+    counts describe G1 at exactly 800 train / 200 validation groups. Four epochs
+    times two heads = eight train+validation passes; threshold scoring is another
+    single-row validation pass per head, with no new encoder work.
+    """
+    try:
+        cached = timings['cached_head']
+        if (cached['batch_size'] != 32 or cached['sequence_length'] != 512
+                or cached['unit'] != 'seconds_per_batch' or cached['warmups'] < 1
+                or cached['encoder_in_measured_step'] is not False):
+            raise Unsupported('cached timing provenance')
+        def p95(record):
+            a, b = record['p50_seconds'], record['p95_seconds']
+            if (record['samples'] < 3 or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0 for v in (a, b)) or b < a):
+                raise Unsupported('invalid budget measurement')
+            return b
+        encode = p95(timings['1'])  # Existing unit: seconds per row, uncached.
+        cache_write = p95(timings['cache_write'])  # serialization + disk write, per row
+        train_step = p95(cached['training'])
+        val_step = p95(cached['validation'])
+        score_step = p95(cached['scoring'])  # batch 1, matching Scorer.scores
+        if cached['scoring']['batch_size'] != 1:
+            raise Unsupported('cached scoring batch')
+        n, v = counts['train_rows'], counts['validation_rows']
+        if any(type(x) is not int or x <= 0 for x in (n, v)):
+            raise Unsupported('budget workload counts')
+        equivalents = [counts[k] for k in ('encoder_inputs_800_equivalent', 'training_batches_800_equivalent',
+                                           'validation_batches_800_equivalent', 'scoring_rows_800_equivalent')]
+        if any(type(x) not in (int, float) or not math.isfinite(x) or x <= 0 for x in equivalents):
+            raise Unsupported('budget workload equivalents')
+        encoder_n, train_batches, val_batches, scoring_n = equivalents
+        # Each normalized workload is independently maximized over 400..800.
+        # This sum upper-bounds every candidate after the unchanged g/800 scaling.
+        components = dict(encoder_cache_seconds=encoder_n * (encode + cache_write),
+                          training_cache_io_seconds=8 * (train_batches * train_step + val_batches * val_step),
+                          inference_seconds=2 * scoring_n * score_step)
+        if any(not math.isfinite(x) or x <= 0 for x in components.values()):
+            raise Unsupported('invalid projected cost')
+        return dict(projected_full_seconds=sum(components.values()), projection_components=components,
+                    projection_groups=800, projection_epochs=4, projection_heads=2,
+                    projection_counts=counts)
+    except (KeyError, TypeError, ValueError, OverflowError) as e:
+        raise Unsupported('invalid budget measurement') from e
+
+
 class FeatureCache:
     """Disposable fp16 features keyed by observable text, question and immutable pins."""
     def __init__(self, limit=CACHE_BYTES):
@@ -280,28 +394,140 @@ class Scorer:
                     pass
             if len(items) == 32:
                 break
-        if len(items) < 8:
+        if len(items) != 32:
             raise Unsupported('probe timing coverage')
-        started, result = time.monotonic(), {}
-        with self.torch.no_grad():
-            for size in (1, 8):
-                samples = []
-                for offset in range(0, len(items), size):
-                    if time.monotonic() - started > seconds:
-                        raise Unsupported('probe timing wall limit')
-                    chosen = items[offset:offset + size]
-                    b = train.collate(chosen, self.pad)
-                    tick = time.monotonic()
-                    h = train.encoder_states(self.model, b, self.torch.device('cpu'), False)
-                    samples.append((time.monotonic() - tick) / len(chosen))
-                    if time.monotonic() - started > seconds:
-                        raise Unsupported('probe timing wall limit')
-                    del h
-                ordered = sorted(samples)
-                result[str(size)] = dict(samples=len(samples), p50_seconds=ordered[len(ordered)//2],
-                                        p95_seconds=ordered[math.ceil(.95*len(ordered))-1])
-        result['seconds'] = time.monotonic() - started
-        return result
+        original_cache = self.cache
+        self.cache = FeatureCache()
+        try:
+            started, result = time.monotonic(), {}
+            cache_writes = []
+            with self.torch.no_grad():
+                for size in (1, 8):
+                    samples = []
+                    for offset in range(0, len(items), size):
+                        if time.monotonic() - started > seconds:
+                            raise Unsupported('probe timing wall limit')
+                        chosen = items[offset:offset + size]
+                        b = train.collate(chosen, self.pad)
+                        tick = time.monotonic()
+                        h = train.encoder_states(self.model, b, self.torch.device('cpu'), False)
+                        samples.append((time.monotonic() - tick) / len(chosen))
+                        if time.monotonic() - started > seconds:
+                            raise Unsupported('probe timing wall limit')
+                        if size == 8 and self.cache is not None:
+                            tick = time.monotonic()
+                            for i, it in enumerate(chosen):
+                                self.cache.put(it['cache_key'], h[i, :len(it['ids'])], self.torch)
+                            cache_writes.append((time.monotonic() - tick) / len(chosen))
+                        del h
+                    ordered = sorted(samples)
+                    result[str(size)] = dict(samples=len(samples), p50_seconds=ordered[len(ordered)//2],
+                                            p95_seconds=ordered[math.ceil(.95*len(ordered))-1])
+            if time.monotonic() - started > seconds:
+                raise Unsupported('probe timing wall limit')
+            result['cache_write'] = dict(timing_summary(cache_writes), unit='seconds_per_row',
+                                         provenance='fp16_feature_cache_serialization_disk_write')
+            result['seconds'] = time.monotonic() - started
+            result['cached_head'] = self.cached_head_timings(items)
+            return result
+        finally:
+            try:
+                self.cache.close()
+            finally:
+                self.cache = original_cache
+
+    def _cached_head_step(self, items, optimizer, params, training, scoring=False):
+        """Same FP32 head path and disk-cache IO as train/scores; never fill cache."""
+        import train
+        import torch.nn.functional as F
+        torch = self.torch
+        if self.cache is None or any(it['cache_key'] not in self.cache.records for it in items):
+            raise Unsupported('cached timing requires precomputed features')
+        self.model.eval()
+        if training:
+            self.model.head.train()
+        with torch.set_grad_enabled(training):
+            b = train.collate(items, self.pad)
+            # Maximum supported shape is conservative for all G1 lengths. Preserve
+            # the real attention mask and markers while expanding padding only.
+            pad = 512 - b['input_ids'].shape[1]
+            b['input_ids'] = F.pad(b['input_ids'], (0, pad), value=self.pad)
+            b['attention_mask'] = F.pad(b['attention_mask'], (0, pad))
+            with torch.no_grad():
+                h = self.features(items, b)
+            logits = train.head_logits(self.model, h, b, 'cpu') / self.temperature
+            if scoring:
+                value = float(torch.softmax(logits, -1)[0, 1])
+                if not math.isfinite(value):
+                    raise Unsupported('nonfinite cached scoring')
+            else:
+                loss = F.cross_entropy(logits, train.targets(b['y']))
+                if not torch.isfinite(loss):
+                    raise Unsupported('nonfinite cached loss')
+                if training:
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(params, 1.)
+                    optimizer.step()
+                float(loss.detach())
+
+    def cached_head_timings(self, items, seconds=120):
+        """Calibration only; restore weights, gradients, modes and CPU/Python RNG.
+
+        Cache must already contain frozen encoder outputs from probe_timings.
+        The deadline covers setup, warm-ups and all measured head operations.
+        """
+        import common
+        torch = self.torch
+        if not 0 < seconds <= 120 or len(items) != 32:
+            raise Unsupported('cached timing bounds/coverage')
+        started = time.monotonic()
+        def deadline():
+            if time.monotonic() - started > seconds:
+                raise Unsupported('cached timing wall limit')
+        rng, py_rng = torch.get_rng_state(), random.getstate()
+        named = list(self.model.named_parameters())
+        params = [p for n, p in named if n.startswith(common.TRAINED_PREFIXES)]
+        modes = [(m, m.training) for m in self.model.modules()]
+        flags = [(p, p.requires_grad, p.grad) for _, p in named]
+        weights = [(p, p.detach().clone()) for p in params]
+        try:
+            deadline()
+            if not params or any(p.dtype != torch.float32 for p in params):
+                raise Unsupported('cached timing requires FP32 heads')
+            for _, p in named:
+                p.requires_grad_(False)
+                p.grad = None
+            for p in params:
+                p.requires_grad_(True)
+            optimizer = torch.optim.AdamW(params, lr=.0003, weight_decay=.01)
+            result = dict(batch_size=32, sequence_length=512, unit='seconds_per_batch',
+                          warmups=2, encoder_in_measured_step=False,
+                          provenance='frozen_fp16_disk_cache_fp32_head_logits_adamw',
+                          includes='cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax',
+                          threads=torch.get_num_threads())
+            for name, training, chosen, scoring in (
+                    ('training', True, items, False), ('validation', False, items, False),
+                    ('scoring', False, items[:1], True)):
+                result[name] = measure_cached_steps(
+                    lambda: self._cached_head_step(chosen, optimizer, params, training, scoring), deadline)
+                result[name]['batch_size'] = len(chosen)
+                result[name]['p95_seconds_per_row'] = result[name]['p95_seconds'] / len(chosen)
+            deadline()
+            result['seconds'] = time.monotonic() - started
+            return result
+        finally:
+            with torch.no_grad():
+                for p, value in weights:
+                    p.copy_(value)
+            for p, flag, grad in flags:
+                p.requires_grad_(flag)
+                p.grad = grad
+            for module, mode in modes:
+                module.training = mode
+            torch.set_rng_state(rng)
+            random.setstate(py_rng)
+            deadline()
 
 
 def verify_freeze(freeze_path, c, expect_freeze_sha256):
@@ -340,6 +566,14 @@ def verify_freeze(freeze_path, c, expect_freeze_sha256):
     return frozen
 
 
+def heldout_overlap(development, rows):
+    """Programs may generalize; families and identical request/command pairs may not."""
+    collision = overlap(development, rows)
+    if collision.get('shared_families', 0) or collision.get('shared_request_command_pairs', 0):
+        raise Unsupported('held-out overlap')
+    return collision
+
+
 def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
                     expect_freeze_sha256=None, baseline_binary=None, cost_path=None):
     frozen = verify_freeze(freeze_path, c, expect_freeze_sha256)
@@ -347,7 +581,7 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
     if manifest_base['base'] != frozen['base']:
         raise Unsupported('frozen base differs')
     import common
-    from context_eval import gates, fact_clause
+    from context_eval import gates, invalid_allow_label
     checkpoints = {}
     for which in ('context', 'control'):
         tensors, meta = common.load_checkpoint(frozen[which]['path'])
@@ -365,10 +599,8 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
         raise Unsupported('held-out manifest hash')
     rows = read_rows(heldout_path, c)
     development = read_rows(frozen['train']['path'], c) + read_rows(frozen['val']['path'], c)
-    collision = overlap(development, rows)
-    if any(collision.values()):
-        raise Unsupported('held-out overlap')
-    if any(r['label'] == 'allow_ok' and fact_clause(visible_view(r)) for r in rows):
+    collision = heldout_overlap(development, rows)
+    if any(r['label'] == 'allow_ok' and invalid_allow_label(visible_view(r)) for r in rows):
         raise Unsupported('label_audit')
     cache = FeatureCache()
     try:
@@ -519,18 +751,8 @@ def main(argv=None):
                       train={'path': str(train_path), 'sha256': sha256(train_path)},
                       val={'path': str(val_path), 'sha256': sha256(val_path)}, **artifacts)
         if timings:
-            # Deliberately conservative: batch-1 p95, both encodings, eight training passes,
-            # cache I/O, validation/inference and observed end-to-end training cost.
-            rows_per_group = len(read_rows(train_path, c)) / data_manifest['groups']
-            full_rows = rows_per_group * 1000  # 800 train + 200 val groups
-            encoder_cache = full_rows * 2 * timings['1']['p95_seconds']
-            observed = sum(v['seconds'] for v in summaries.values()) / max(1, len(training))
-            head_cache_io = full_rows * 8 * observed
-            inference = full_rows * 3 * timings['1']['p95_seconds']
-            report.update(encoder_timings=timings, projected_full_seconds=encoder_cache + head_cache_io + inference,
-                          projection_components=dict(encoder_cache_seconds=encoder_cache,
-                              training_cache_io_seconds=head_cache_io, inference_seconds=inference),
-                          projection_groups=800, projection_epochs=4, projection_heads=2)
+            counts = g1_workload_counts(c, a.seed)
+            report.update(encoder_timings=timings, **project_workload(timings, counts))
         (out / 'freeze.json').write_bytes(canonical(frozen))
         report.update(training_completed=True, reason='training_only_no_heldout_opened', freeze_sha256=sha256(out / 'freeze.json'),
                       threshold=tau, control_threshold=thresholds['control'], validation={'total': len(val), 'fitting_scored': len(fitting)}, training=summaries)
