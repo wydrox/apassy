@@ -50,7 +50,7 @@ PURCHASES
 The app has no purchase, no price, and no link or instruction to buy. All features in this app work without payment.
 
 ENCRYPTION
-The app includes its own standard encryption, in addition to Apple's: SQLCipher with OpenSSL for the vault, TLS with rustls, ChaCha20-Poly1305 and ECDSA P-256. Its purpose is the confidentiality of the owner's data. Only standard algorithms; no proprietary cryptography. The Info.plist says ITSAppUsesNonExemptEncryption = YES, and the export compliance answers say the same (mass market). The app is not offered in France until the ANSSI declaration is filed. The source code is public under Apache-2.0: https://github.com/wydrox/apassy
+The app includes its own standard encryption, in addition to Apple's: SQLCipher with OpenSSL for the vault, TLS with rustls, ChaCha20-Poly1305 and ECDSA P-256. Its purpose is the confidentiality of the owner's data. Only standard algorithms; no proprietary cryptography. The export compliance answers say standard encryption, mass market; App Store Connect needs no documentation for that outside France, so the Info.plist says ITSAppUsesNonExemptEncryption = NO. The app is not offered in France until the ANSSI declaration is filed. The source code is public under Apache-2.0: https://github.com/wydrox/apassy
 
 PRIVACY
 No tracking. The relay that carries sync and requests keeps device ids, device names, public keys and push tokens for app functionality; the App Privacy answers declare them as linked to the user. The vault, the requests and the answers are end-to-end encrypted. Privacy policy: https://apassy.wyderka.cc/privacy
@@ -129,5 +129,5 @@ iPhone app has no paid content, and today every feature of the iPhone app works 
 | 4.5.4 Push notifications | Notifications must not be required | They are optional and only after the owner turns them on |
 | AutoFill and passkeys | The extension asks for Face ID for each fill | ADR 0023 §5 |
 | 5.1.2 Data use | What is sent to the relay | [app-privacy.md](app-privacy.md) section 2: device ids, names, public keys and push tokens, declared as linked, App Functionality; content only end-to-end encrypted |
-| Export compliance | The build says `ITSAppUsesNonExemptEncryption = YES` | [export-compliance.md](export-compliance.md) §2: standard algorithms, mass market, no France until the ANSSI declaration |
+| Export compliance | The build says `ITSAppUsesNonExemptEncryption = NO` (standard algorithms outside France need no documentation) | [export-compliance.md](export-compliance.md) §2: standard algorithms, mass market, no France until the ANSSI declaration |
 | 2.3.10 Other platforms | The description names the Mac | The Mac app is the developer's own app; the text names it to say what the iPhone app needs |

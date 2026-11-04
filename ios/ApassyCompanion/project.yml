@@ -112,7 +112,7 @@ targets:
             LSHandlerRank: Owner
             LSItemContentTypes:
               - com.wydrox.apassy.vault
-        ITSAppUsesNonExemptEncryption: true
+        ITSAppUsesNonExemptEncryption: false
         ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         UILaunchScreen: {}
         UIApplicationSceneManifest:
@@ -283,7 +283,7 @@ targets:
         ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         WKApplication: true
         WKCompanionAppBundleIdentifier: com.wydrox.apassy.companion
-        ITSAppUsesNonExemptEncryption: true
+        ITSAppUsesNonExemptEncryption: false
         # A node on the tailnet (node-pairing-v1): the watch reaches `https://<Tailscale IPv4>:8444`
         # with the pinned certificate of the node (URLSessionCoreTransport), as the iPhone app.
         NSAppTransportSecurity:

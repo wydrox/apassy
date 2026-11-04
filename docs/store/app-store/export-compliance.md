@@ -42,13 +42,14 @@ encryption (SQLCipher with OpenSSL, rustls, ring, the ChaCha20-Poly1305 sealing 
 purpose of that encryption is the confidentiality of data. It is not limited to the encryption of
 Apple's operating system, and it is not one of the narrow exemptions. So:
 
-- `ITSAppUsesNonExemptEncryption` is **`true`** for the iPhone app and the watch app:
+**What App Store Connect accepts (checked 2026-11-04).** With `true` and no code, Apple's upload check refuses the build (`altool` error 90592, "Invalid Export Compliance Code"), and the API refuses to make a declaration for these answers: `409 Cannot create appEncryptionDeclarations unless either containsProprietaryCryptography is True or containsThirdPartyCryptography and availableOnFrenchStore are both True`. Apple's system needs no documentation and no code for standard algorithms outside France, and it records that answer as `false`. So both `Info.plist` files say **`false`**, and the facts stay as section 1 and the answers of section 2.1 say: standard encryption, mass market, no France. The U.S. obligations of section 3 (the self-classification report) do not depend on this key and stay with the owner. When France is added (section 4), Apple makes a declaration and a code, and the key becomes `true` with `ITSEncryptionExportComplianceCode`.
+
+- `ITSAppUsesNonExemptEncryption` is **`false`** for the iPhone app and the watch app (see above):
   `ios/ApassyCompanion/project.yml` (the `info` properties of the targets `ApassyCompanion` and
   `ApassyWatch`), and the generated `ios/ApassyCompanion/Info.plist` and
   `ios/ApassyCompanion/Watch/Info.plist`. The AutoFill extension's `Info.plist` has no such key;
   App Store Connect reads the key of the app bundle, and the extension ships inside it.
-- `ITSEncryptionExportComplianceCode` is **not set yet**. It is set when Apple gives the code
-  (section 2.3).
+- `ITSEncryptionExportComplianceCode` is not set: Apple gives no code for these answers (section 2.3).
 
 ### 2.1 The App Store Connect answers
 
@@ -74,7 +75,7 @@ With the API (section 2.2) the same answers are the attributes of the declaratio
 | `containsThirdPartyCryptography` | `true` (OpenSSL, rustls, ring are third-party libraries) |
 | `availableOnFrenchStore` | `false` (section 4) |
 
-### 2.2 TestFlight: each build needs the answer until there is a code
+### 2.2 TestFlight (superseded on 2026-11-04: with `false` a build needs no answer)
 
 - A build that says `true` and has no `ITSEncryptionExportComplianceCode` stops in App Store Connect
   with **"Missing Compliance"** after processing. Until a declaration is attached, TestFlight does not

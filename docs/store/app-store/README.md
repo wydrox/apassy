@@ -31,7 +31,7 @@ decisions (CLAUDE.md "Git i deploy", AGENTS.md "Apassy releases").
 ### Before the build
 
 1. **Export answer: decided 2026-11-03** ([export-compliance.md](export-compliance.md) §2):
-   `ITSAppUsesNonExemptEncryption` is `true` for the app and the watch. Each TestFlight build needs the
+   `ITSAppUsesNonExemptEncryption` is `false` for the app and the watch (export-compliance.md §2: what App Store Connect accepts for standard encryption outside France). Each TestFlight build needs the
    encryption declaration attached through the API until `ITSEncryptionExportComplianceCode` is set
    (§2.2, §2.3).
 2. **France: left out by default** of the first version's availability (§4). The owner can file the
@@ -54,8 +54,8 @@ decisions (CLAUDE.md "Git i deploy", AGENTS.md "Apassy releases").
    `CURRENT_PROJECT_VERSION` than every build in App Store Connect. Upload it with
    `scripts/ios-testflight.sh`. The App Store export signs `aps-environment` as production, and a
    release build registers its push token as `.production` (`PushRegistrar.environment`).
-8. Watch the build process in App Store Connect. The build shows "Missing Compliance" until the
-   encryption declaration is attached ([export-compliance.md](export-compliance.md) §2.2).
+8. Watch the build process in App Store Connect. With `ITSAppUsesNonExemptEncryption = false` it
+   needs no compliance answer ([export-compliance.md](export-compliance.md) §2).
 
 ### App Store Connect (the owner's account)
 
@@ -92,7 +92,7 @@ decisions (CLAUDE.md "Git i deploy", AGENTS.md "Apassy releases").
 
 ## Open questions (legal and policy, for the owner)
 
-Decided on 2026-11-03 ("describe the app correctly"): `ITSAppUsesNonExemptEncryption = true`, France
+Decided on 2026-11-03 ("describe the app correctly"), changed on 2026-11-04 to what App Store Connect accepts: `ITSAppUsesNonExemptEncryption = false`, France
 left out until an ANSSI declaration, App Privacy all linked with User ID, device names as Other Data.
 
 1. The U.S. treatment of an open-source app distributed as a signed App Store binary, and whether the
