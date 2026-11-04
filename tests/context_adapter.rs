@@ -165,11 +165,26 @@ fn golden_one_unknown_from_fresh_vault() {
 }
 
 #[test]
-fn golden_legacy_from_public_declaration_api() {
+fn golden_unicode_from_fresh_vault() {
+    let (_dir, mut vault, agent) = vault();
+    let items = [item(add(&mut vault, CredentialKind::ApiKey))];
+    let (fixture, request) = golden(include_bytes!(
+        "fixtures/secret-decision-context-v1/serializer/unicode.json"
+    ));
+    assert_golden(
+        &context_input(&vault, &run(&request, &items, agent, now())).unwrap(),
+        &fixture,
+    );
+}
+
+#[test]
+fn legacy_declaration_keeps_unknown_provenance_and_requires_current_project() {
     let (_dir, mut vault, agent) = vault();
     let id = add(&mut vault, CredentialKind::ApiKey);
     // save_declaration records no source provenance; no raw SQL or owner proof needed.
-    let mut declared = declaration("");
+    // Its public API requires a named project; the serializer's legacy golden has
+    // an empty project and cannot be recreated with this API.
+    let mut declared = declaration("synthetic-legacy-project");
     declared.environment = Environment::Production;
     declared.scope = Scope::Admin;
     vault.save_declaration(id, &declared, None, None).unwrap();
@@ -178,12 +193,12 @@ fn golden_legacy_from_public_declaration_api() {
         declaration: Some(&declared),
         known_hosts: &[],
     }];
-    let (fixture, request) = golden(include_bytes!(
-        "fixtures/secret-decision-context-v1/serializer/legacy.json"
-    ));
-    assert_golden(
-        &context_input(&vault, &run(&request, &items, agent, now())).unwrap(),
-        &fixture,
+    let request = request();
+    let input = context_input(&vault, &run(&request, &items, agent, now())).unwrap();
+    assert!(
+        input.model_text().contains(
+            "env=production env_from=legacy_unknown scope=admin scope_from=legacy_unknown sensitive=yes project=other hosts=none"
+        )
     );
 }
 
