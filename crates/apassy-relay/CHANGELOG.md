@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.5.17] - 2026-11-04
+
+Coordinated Apassy 0.5.17 release. Most new code serves a node on a tailnet: the
+relay inside the Mac app and the Linux node `apassy serve` (SPEC section 32). The
+hosted relay gets two migrations, relay sync without a team code, and the Connect
+team limits.
+
+- Team schema 8: the table `push_handle`, after a copy `<team>.db.pre-v8`.
+  `apassy-relay downgrade-schema-7` is the way back; `downgrade-schema-6` takes 7 or
+  8. The hosted relay keeps the table empty and answers 409 `push_unavailable` on
+  `PUT`/`DELETE /v1/push/handle` (OPERATIONS section 25).
+- Directory 1005: `team_code.kind` (`operator` or `node`) and one-use node pairing
+  codes of 1 to 10 minutes (`apassy-relay admin node-code`), which only a relay with
+  a tailnet listener takes. `apassy-relay downgrade-directory-1004` is the way back.
+- Node on the tailnet: a tailnet listener with the device routes (and with agents the
+  team routes, never OAuth or `/v1/connect`), the node origin as a sign-in origin,
+  teams of devices, and push through the push gateway with one handle per device. A
+  401 of `POST /mcp` on that listener carries no `WWW-Authenticate`. Failed sign-ins
+  count per tailnet peer, as the node's TLS front saw it; the Mac's local route has a
+  listener and a count of its own.
+- `APASSY_RELAY_CONNECT_SYNC_BYTES` (default `0`): the `sync_bytes` of each new
+  Connect team, so the hosted relay can keep a relay copy made without a team code.
+  A team keeps the value it was made with (OPERATIONS section 20.6).
+- Connect teams: at most 30 snapshot pushes and 512 MiB of snapshots an hour (403
+  `team_limit`, 429 `rate_limited` with `Retry-After`).
+- Push gateway Worker (`deploy/push-gateway`, push-gateway-v1): seals APNs tokens
+  into handles and sends one APNs request per proof, with hourly and per-token
+  limits in a Durable Object counter. Not deployed yet.
+- The proxy shares its echo scrub with the Mac's run proxy (`echo.rs`).
+- Linux node packages: `apassy-<version>-linux-<arch>.tar.gz` and
+  `apassy_<version>_<arch>.deb` for x86_64 and aarch64 (glibc 2.31). `apassy-team`
+  stays one release as an alias of `apassy team`.
+
 ## [0.5.16] - 2026-11-03
 
 Coordinated Apassy 0.5.16 release. The hosted relay goes from 0.5.14 to 0.5.16.

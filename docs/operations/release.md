@@ -91,6 +91,41 @@ The `linux-cli` component of `release-versions.json` is the Linux node from 0.5.
 
 To stage `/dl/` for the Worker deploy, download the artifacts of the run (`gh run download RUN_ID -n apassy-node-linux-x86_64 -n apassy-node-linux-aarch64 -n apassy-node-sha256sums -n apassy-team-linux-x86_64 -n apassy-team-darwin-arm64`), copy the four packages and both team CLIs into `crates/apassy-relay/deploy/worker/public/dl/`, write `dl/SHA256SUMS` with all six lines (`SHA256SUMS-node`, `SHA256SUMS-linux`, `SHA256SUMS-darwin`), and `dl/release.json` with `version`, `commit`, `artifacts` (the two team CLIs, as before), and `node` (a map from each package's file name to its `sha256` and `size`). `check-public-assets.py` refuses a staging that misses one of them, and reads every file back from the public origin. `install.sh` picks the single `apassy-<x.y.z>-linux-<arch>.tar.gz` of `SHA256SUMS` on Linux and the team CLI on macOS.
 
+## 0.5.17 coordinated release
+
+0.5.17 collects the release branch `release/0.5.17`: the Mac as the node on your
+tailnet (pinned TLS front, node words, approvals through the node, Move Approvals,
+Settings › Devices), the Linux node (`apassy serve`, `up`, `pair`, `status`,
+`doctor`, the systemd user service, the `.tar.gz` and `.deb` packages), the push
+gateway Worker, the bouncer brain on your own server, WebSocket and the Linux sandbox
+in the run proxy, the encoded-echo fix of the Mac proxy (present in 0.5.16), the
+codeless relay copy on the hosted relay, the D14 notice of the free relay paths, and
+the groundwork of temporary credentials (`LEASES_IN_RUNS` is false) and Apassy
+Connect. All six components move to 0.5.17. The vault schema goes from 27 to 34
+(28, 29, 32, 34), relay team schema to 8, and the relay directory to 1005. The Linux
+CLI component is the Linux node from this release: publish the four node packages
+with both team CLIs ([Linux node packages](#linux-node-packages)).
+
+- Relay: build the image with `relay-image.yml` (tag `image-release-0.5.17`; test it
+  first with an `image-test-0.5.17-<n>` tag) and deploy it only after the owner
+  approves the exact image and backup. Set `APASSY_RELAY_CONNECT_SYNC_BYTES` only
+  after the disk check of relay `docs/OPERATIONS.md` section 20.6; the relay deploys
+  before the apps. Teams made before it need `admin limits <id> --sync-bytes`.
+- Push gateway: not live until the owner sets its DNS name, gateway key and APNs
+  secrets, and deploys the Worker with the `LimitCounter` migration
+  ([push-gateway.md](push-gateway.md)). Until then a node sends no push.
+- TestFlight: the notification extensions need the App IDs
+  `com.wydrox.apassy.companion.notifications` and
+  `com.wydrox.apassy.companion.watchkitapp.notifications` with their profiles
+  (`APASSY_IOS_NOTIFICATIONS_PROFILE`, `APASSY_IOS_WATCH_NOTIFICATIONS_PROFILE`).
+  `ITSAppUsesNonExemptEncryption` stays NO.
+- Attestations: before the release tag, run `release.yml` with
+  `ci_run_id=provider-check` and push an `image-test-*` tag to prove the attestation steps.
+
+State on 2026-11-04: prepared, not published. The version bump and the changelog
+are on `r17/version-bump` (from `release/0.5.17`). No component is live at 0.5.17
+and there is no tag `v0.5.17`.
+
 ## 0.5.16 coordinated release
 
 0.5.16 collects the work on main since 0.5.15 (Apple Watch, passkey PRF and
