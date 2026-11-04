@@ -69,7 +69,8 @@ class CoreArchivePackagingTests(unittest.TestCase):
                 executable = tools / name
                 executable.write_text(text)
                 executable.chmod(0o755)
-            env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", APASSY_PACKAGING_ROOT=str(root))
+            env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", APASSY_PACKAGING_ROOT=str(root),
+                       APASSY_CORE_PROFILE="release")
             subprocess.run(["bash", str(root / "scripts/build-ios-core.sh")], env=env, check=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
