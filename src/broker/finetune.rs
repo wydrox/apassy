@@ -323,13 +323,14 @@ fn examples_from_export_in(jsonl: &str, home: Option<&Path>) -> Result<ExampleSe
             .map(Path::new);
         let request = BouncerRequest {
             user_request: user_request.to_owned(),
-            command: bouncer::shorten_paths(&command, project_root, home),
+            command: command.clone(),
             relative_dir: text(&value, "cwd_rel")?.to_owned(),
             purpose: text(&value, "purpose")?.to_owned(),
             env_names: texts(&value, "env_names")?,
             instruction: instruction.to_owned(),
             task_provenance: String::new(),
-        };
+        }
+        .sanitized(project_root, home, str::to_owned);
         lines.push(OwnerLine {
             state: bouncer::state_text(&request),
             command,
@@ -947,6 +948,10 @@ mod tests {
                 serde_json::from_str(&line("deny", "owner", command, "Show the config.", &[]))
                     .expect("json");
             value["project_dir"] = json!("/srv/home/ann/app");
+            value["user_request"] =
+                json!("  Check /srv/home/ann/app/src\nand /srv/home/ann/notes [apassy:secret].  ");
+            value["purpose"] =
+                json!("  Read /srv/home/ann/app/src and /srv/home/ann/notes [apassy:secret].  ");
             value.to_string()
         })
         .collect();
@@ -959,6 +964,50 @@ mod tests {
             .map(|example| example.state.as_str())
             .collect();
         assert!(!states.is_empty());
+        let dir = tempfile::tempdir().expect("temp");
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("vault.db"), "brain-state-test-pass")
+                .expect("vault");
+        vault.unlock("brain-state-test-pass").expect("unlock");
+        let item = vault
+            .add(crate::vault::ItemDraft {
+                title: "Synthetic".to_owned(),
+                kind: crate::contracts::CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![crate::vault::Field {
+                    name: "token".to_owned(),
+                    value: crate::vault::SecretValue::new("FAKE-literal-314159".to_owned()),
+                    secret: true,
+                }],
+            })
+            .expect("item");
+        let mask = vault.command_mask(&[item.id]).expect("mask");
+        for line in &export {
+            let value: Value = serde_json::from_str(line).expect("line");
+            let runtime = BouncerRequest {
+                user_request: text(&value, "user_request")
+                    .unwrap()
+                    .replace("[apassy:secret]", "FAKE-literal-314159"),
+                command: texts(&value, "command")
+                    .unwrap()
+                    .join(" ")
+                    .replace("[apassy:secret]", "FAKE-literal-314159"),
+                relative_dir: ".".to_owned(),
+                purpose: text(&value, "purpose")
+                    .unwrap()
+                    .replace("[apassy:secret]", "FAKE-literal-314159"),
+                env_names: vec!["DEMO_KEY".to_owned()],
+                instruction: String::new(),
+                task_provenance: String::new(),
+            }
+            .sanitized(
+                Some(Path::new("/srv/home/ann/app")),
+                Some(Path::new("/srv/home/ann")),
+                |text| mask.summary(text, usize::MAX),
+            );
+            assert!(states.contains(bouncer::state_text(&runtime).as_str()));
+        }
         for state in &states {
             assert!(!state.contains("/srv/home/ann"), "{state}");
         }
