@@ -164,7 +164,8 @@ fn a_device_pairs_with_the_pinned_link_and_answers_a_question_through_the_front(
         assert!(Instant::now() < end, "the join was not confirmed");
         std::thread::sleep(Duration::from_millis(100));
     };
-    assert_eq!(joined.team(), membership.team_id);
+    // `team()` is the name of the team; the member has its id.
+    assert_eq!(joined.member().team_id(), membership.team_id);
     assert_eq!(joined.device_id(), device.id);
     let phone = QuestionsClient::from_member(joined.member());
 
