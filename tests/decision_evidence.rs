@@ -52,10 +52,8 @@ fn vault_to_wire_keeps_secret_and_free_text_out_of_context() {
     use apassy::broker::secret_facts::{
         ContextV1, HostFit, ItemRunMatch, ProjectFit, build_input, facts_from_evidence,
     };
-    use apassy::vault::{
-        Declaration, Environment, NewItemUse, Reversibility, RiskLevel, Scope, UseDecidedBy,
-        UseOutcome,
-    };
+    use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
+    use apassy::vault::{Declaration, Environment, Reversibility, RiskLevel, Scope};
 
     let dir = tempfile::TempDir::new().unwrap();
     let mut vault =
