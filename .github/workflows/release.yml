@@ -63,17 +63,19 @@ jobs:
           python3 scripts/ci-release-ready.py --cargo Cargo.toml
           --changelog CHANGELOG.md --github-output "$GITHUB_OUTPUT"
 
-      # Full checkout above fetches tags before deciding whether publication is safe.
-      - name: Require a new coordinated release version
-        if: steps.ready.outputs.production == 'true'
-        run: python3 scripts/check-release-versions.py --release
-
       - name: Require a version newer than the public Mac release
         if: steps.ready.outputs.production == 'true'
         id: newer
         env:
           VERSION: ${{ steps.ready.outputs.version }}
         run: python3 scripts/ci-release-newer.py --version "$VERSION" --github-output "$GITHUB_OUTPUT"
+
+      # A new public version must also be above every v* tag, with all six components at
+      # it. The full checkout above fetched the tags. An equal Mac version skipped above,
+      # so a later push of the released version (docs, a changelog fix) stays green.
+      - name: Require a new coordinated release version
+        if: steps.newer.outputs.production == 'true'
+        run: python3 scripts/check-release-versions.py --release
 
   macos:
     needs: ready
