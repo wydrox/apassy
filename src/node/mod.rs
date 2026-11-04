@@ -355,7 +355,8 @@ pub struct NodeStatus {
     /// The public route switch of the open vault (off when no vault is open).
     pub route_on: bool,
     pub running: bool,
-    /// The MCP URL for agents: `https://<DNSName>:8443/mcp`.
+    /// The MCP URL for agents, `https://<DNSName>:<Funnel port>/mcp`, while the public route
+    /// is on.
     pub url: Option<String>,
     /// The loopback port of the public listener.
     pub port: Option<u16>,
@@ -1236,12 +1237,17 @@ impl Node {
                 .map_or((false, None), |setting| (setting.route_on, setting.port))
         };
         let running = self.is_running();
-        let url = self.mcp_url().or_else(|| match &tailscale {
-            Tailscale::Connected { dns_name } => {
-                Some(format!("{}/mcp", self.funnel.origin(dns_name)))
-            }
-            _ => None,
-        });
+        // The MCP URL only while the public route is on: a node that runs for the tailnet
+        // only has no address for remote agents.
+        let url = self
+            .mcp_url()
+            .or_else(|| match &tailscale {
+                Tailscale::Connected { dns_name } => {
+                    Some(format!("{}/mcp", self.funnel.origin(dns_name)))
+                }
+                _ => None,
+            })
+            .filter(|_| route_on);
         let mut warnings = Vec::new();
         let notes = lock(&self.notes);
         if let Some(failure) = &notes.failure {
