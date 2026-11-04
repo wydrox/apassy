@@ -178,7 +178,7 @@ impl fmt::Debug for RelayMembership {
 }
 
 impl RelayMembership {
-    fn is_valid(&self) -> bool {
+    pub(super) fn is_valid(&self) -> bool {
         valid_relay_identity(
             &self.relay_url,
             &self.team_id,

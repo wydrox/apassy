@@ -101,14 +101,9 @@ impl Vault {
         let recipient = membership.public_key.as_slice();
         let device_id = membership.device_id;
         let invalid = || err(VaultErrorKind::InvalidInput);
-        if !super::relay_device::valid_relay_identity(
-            &membership.relay_url,
-            &membership.team_id,
-            membership.device_id,
-            &membership.public_key,
-            &membership.key_pkcs8,
-        ) || membership.purposes
-            != std::collections::BTreeSet::from([super::MembershipPurpose::Questions])
+        if !membership.is_valid()
+            || membership.purposes
+                != std::collections::BTreeSet::from([super::MembershipPurpose::Questions])
             || handoff.team_id != membership.team_id
             || handoff.v != 1
             || handoff.vault_id != self.sync_identity()?.vault_id
@@ -197,10 +192,13 @@ impl Vault {
             tx.execute("DELETE FROM relay_membership WHERE team_id = ?1", [team])
                 .map_err(|_| err(VaultErrorKind::Storage))?;
         }
-        tx.execute("INSERT INTO relay_membership (team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, '[\"questions\"]', ?6)",
+        // Trust belongs to this pairing, alongside the local membership, not the
+        // synced handoff. Dropping it makes a node replica use system trust on reopen.
+        tx.execute("INSERT INTO relay_membership (team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at, pin, alt)
+            VALUES (?1, ?2, ?3, ?4, ?5, '[\"questions\"]', ?6, ?7, ?8)",
             rusqlite::params![membership.team_id, membership.relay_url, i64::try_from(device_id).map_err(|_| invalid())?,
-                membership.public_key, membership.key_pkcs8.as_slice(), super::agents::to_sql_time(super::agents::now_unix())?])
+                membership.public_key, membership.key_pkcs8.as_slice(), super::agents::to_sql_time(super::agents::now_unix())?,
+                membership.pin, serde_json::to_string(&membership.alt).map_err(|_| invalid())?])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }

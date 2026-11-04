@@ -10,14 +10,7 @@ import WatchConnectivity
 @MainActor @Observable
 final class AppleWatchLink {
     /// What the watch said about a Connect code.
-    enum SendResult: Equatable, Sendable {
-        /// The watch took it and shows the words.
-        case sent
-        /// The watch refused it, with its sentence.
-        case refused(String)
-        /// The message did not reach the watch.
-        case failed
-    }
+    typealias SendResult = WatchConnectScan.SendResult
 
     static let shared = AppleWatchLink()
 

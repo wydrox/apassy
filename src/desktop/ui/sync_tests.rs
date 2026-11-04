@@ -3455,33 +3455,56 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
 /// key, and the relay revokes it.
 #[test]
 fn connect_an_apple_watch_shows_its_kind_and_removes_like_an_iphone() {
+    connect_watch_from_devices(false);
+}
+
+/// Devices must offer a Connect handoff even when this team also carries the vault
+/// copy. A plain vault-sync link has no keys for the watch's questions-only replica.
+#[test]
+fn connect_an_apple_watch_from_a_relay_synced_vault() {
+    connect_watch_from_devices(true);
+}
+
+fn connect_watch_from_devices(relay_sync: bool) {
     use crate::broker::approvals::{OwnerAction, OwnerCheck};
     use crate::desktop::owner_check::OwnerRequest;
     use crate::sync::PendingJoin;
     use crate::vault::TrustedDeviceKind;
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
-    let mut a = folders.mac("mac-a");
-    create(&mut a, "Personal", PASS, Some(&folders.icloud));
-    let id = current_id(&a);
-    super::open_settings(&mut a, super::SettingsSection::Devices);
-    let entry = a.vault_list.registry.get(&id).cloned().expect("entry");
-    a.questions_ask_new_team(
-        &entry,
-        &relay.url,
-        Zeroizing::new(relay.team_code()),
-        "Synthetic MacBook",
-        None,
-    )
-    .expect("fields");
+    let (mut a, id) = if relay_sync {
+        let (mut a, id) = relay_mac_a(&folders, &relay);
+        a.questions_turn_on(None);
+        (a, id)
+    } else {
+        let mut a = folders.mac("mac-a");
+        create(&mut a, "Personal", PASS, Some(&folders.icloud));
+        let id = current_id(&a);
+        let entry = a.vault_list.registry.get(&id).cloned().expect("entry");
+        a.questions_ask_new_team(
+            &entry,
+            &relay.url,
+            Zeroizing::new(relay.team_code()),
+            "Synthetic MacBook",
+            None,
+        )
+        .expect("fields");
+        (a, id)
+    };
     a.confirm_owner_now(OwnerCheck::passphrase(PASS))
         .expect("owner check");
     a.questions_settle_for_test();
     let membership = questions_of(&a).expect("on");
 
+    super::open_settings(&mut a, super::SettingsSection::Devices);
     a.questions_add_iphone(None);
     settled_frames(&mut a);
     let link = a.relay_add_mac_link_for_test().expect("a link");
+    assert!(
+        crate::relay::pairing::PairingChannel::parse(&link).is_some(),
+        "Devices must show a handoff that can connect a watch"
+    );
+    assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("QR"), &link);
     let watch_key = crate::sync::DeviceKey::generate().expect("key");
     let watch_name =
         crate::questions::device_link::watch_link_device_name("Test Watch", watch_key.public_key())
@@ -3562,18 +3585,24 @@ fn connect_an_apple_watch_shows_its_kind_and_removes_like_an_iphone() {
         "a watch never offers to remove an iPhone: {text}"
     );
 
-    // Devices names the kind.
+    // Devices names the kind. Enabling questions on an existing sync team registers
+    // this Mac with its system name; the standalone fixture supplied a name itself.
     a.ui.sheet = None;
     a.questions_settle_for_test();
     let text = frames(&mut a);
     assert!(text.contains("Test Watch (Apple Watch)"), "{text}");
     let rows = a.questions_devices();
+    let mac_name = if relay_sync {
+        crate::sync::device_name()
+    } else {
+        "Synthetic MacBook".to_owned()
+    };
     assert_eq!(
         rows.iter()
             .map(|row| (row.name.as_str(), row.removable))
             .collect::<Vec<_>>(),
         [
-            ("Synthetic MacBook", false),
+            (mac_name.as_str(), false),
             ("Test Watch (Apple Watch)", true)
         ]
     );

@@ -198,6 +198,118 @@ fn a_watch_connects_only_with_a_handoff_code() {
     );
 }
 
+/// The exact Mac 0.5.17 path: LinkCode::for_origin adds the node trust and name,
+/// PairingChannel::link adds the handoff. The watch must keep that trust throughout
+/// enrollment and in its replica, rather than accepting only the old hosted QR.
+#[test]
+fn a_watch_connects_to_a_pinned_mac_and_keeps_its_trust() {
+    use apassy::net::certificate::NodeCertificate;
+    use apassy::net::pin::Pin;
+    use apassy::net::tls_front::{Front, FrontOptions};
+    use apassy::sync::{LinkCode, RelayUrl, TlsTrust};
+    use std::net::{IpAddr, Ipv4Addr};
+    use zeroize::Zeroizing;
+
+    let mut mac = mac();
+    let target = mac
+        .relay
+        .url
+        .strip_prefix("http://")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let certificate = NodeCertificate::generate("Synthetic Mac").unwrap();
+    let pin = certificate.pin;
+    let mut options = FrontOptions::new(
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        0,
+        certificate,
+        target,
+    );
+    options.allow_loopback_bind = true;
+    options.allow_test_peers = true;
+    let front = Front::start(options).unwrap();
+    let origin = format!("https://127.0.0.1:{}", front.bound()[0].port());
+    mac.relay.set_origin(&origin);
+    let alt = vec!["apassy-mini.tail0123.ts.net:8444".to_owned()];
+    let url = RelayUrl::parse_with_trust(&origin, TlsTrust::Pinned(pin))
+        .unwrap()
+        .alternatives(&alt)
+        .unwrap();
+    let (raw, code) = mac.relay.link();
+    let code = LinkCode {
+        link: Zeroizing::new(raw),
+        code: Zeroizing::new(code),
+        expires_at: now() + 600,
+    }
+    .for_origin(&url, Some("Mac mini"))
+    .unwrap();
+    let channel = PairingChannel::generate(&code.link).unwrap();
+    let link = channel.link(&code.link);
+    assert!(link.contains("&name=Mac%20mini&handoff="));
+
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("Watch");
+    let watch = watch_core(&data, Arc::default());
+    let request = |link: &str| {
+        json!({"op": "watch_connect_start", "link": link,
+        "name": "Test Watch", "answer_key": ANSWER_PUBLIC, "passphrase": WATCH_PASS})
+    };
+    let wrong = link.replace(
+        &pin.text(),
+        &Pin::of_certificate(b"another synthetic node").text(),
+    );
+    let seen = mac.relay.log().len();
+    assert_eq!(failure(&watch, request(&wrong)).0, "pin_mismatch");
+    assert_eq!(mac.relay.log().len(), seen, "wrong pin sends no request");
+
+    let waiting = call(&watch, request(&link));
+    assert_eq!(waiting["state"], "waiting");
+    mac.relay.confirm_links();
+    let (id, name, public) = mac.relay.confirmed().pop().unwrap();
+    let words = waiting["words"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|word| word.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        channel.mac_safety(TEAM, &public, &name).as_deref(),
+        Some(words.as_str())
+    );
+    register_linked_device(&mut mac.vault, TEAM, id, &name, &public)
+        .unwrap()
+        .unwrap();
+    let sealed = channel.seal(&mac.vault, TEAM, &public).unwrap();
+    mac.relay.post_question(
+        channel.qid(),
+        &sealed.key_id,
+        &sealed.nonce,
+        &sealed.ciphertext,
+        now() + 600,
+    );
+    assert_eq!(
+        call(&watch, json!({"op": "watch_connect_poll"}))["state"],
+        "attached"
+    );
+    let status = call(
+        &watch,
+        json!({"op": "watch_status", "answer_key": ANSWER_PUBLIC}),
+    );
+    assert_eq!(status["state"], "ready");
+    assert_eq!(status["own"]["answer_key_matches"], true);
+    let vault_id = mac.vault.sync_identity().unwrap().vault_id;
+    call(&watch, json!({"op": "lock"}));
+    let file = data.join("vaults").join(format!("{vault_id}.apassy"));
+    let mut vault = Vault::open(&file).unwrap();
+    vault.unlock(WATCH_PASS).unwrap();
+    let membership = vault.relay_membership(TEAM).unwrap().unwrap();
+    assert_eq!(membership.relay_url, origin);
+    assert_eq!(membership.pin.as_deref(), Some(pin.text().as_str()));
+    assert_eq!(membership.alt, alt);
+}
+
 /// The asking Mac: a vault with the question key and its own row (device 1 of the
 /// team), and the fake relay.
 struct Mac {
