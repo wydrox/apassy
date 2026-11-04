@@ -693,12 +693,17 @@ impl Core {
             | "question_answer_string"
             | "question_answer"
             | "answer_key_register"
-            | "push_token_set"
-            | "push_token_clear"
             | "join_attach"
             | "join_attach_poll"
             | "join_attach_cancel" => {
                 self.require_app()?;
+                self.questions_call(&op, request)
+            }
+            // The push handle of the device (push-gateway-v1 sections 10 and 11) and the
+            // summary keys of its notification extension (section 12): the app and the
+            // watch, never AutoFill.
+            "push_token_set" | "push_token_clear" | "push_summary_keys" => {
+                self.require_app_or_watch()?;
                 self.questions_call(&op, request)
             }
             // 5.12 The agent feeds of the Macs: the app only.
