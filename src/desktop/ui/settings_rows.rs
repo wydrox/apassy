@@ -94,6 +94,12 @@ pub(crate) fn group<R>(
         Some(header) => group_label(ui, header),
         None => ui.add_space(LABEL_TOP),
     }
+    group_box(ui, add)
+}
+
+/// The rows of a group without the space above: for a group under its own label, such
+/// as "Devices ⓘ 6", which has the space of a group label already.
+pub(crate) fn group_box<R>(ui: &mut Ui, add: impl FnOnce(&mut Group<'_>) -> R) -> R {
     Frame::NONE
         .fill(kit::palette().surface)
         .stroke(Stroke::new(0.5, kit::palette().group_edge))

@@ -339,6 +339,11 @@ fn a_sheet_of_settings_shows_over_the_window() {
 /// The painted texts of the Devices section for `view`, in a tall window, after three
 /// frames.
 fn view_texts(view: &DevicesView) -> String {
+    joined(&view_rects(view))
+}
+
+/// The painted texts of the Devices section for `view`, with their rectangles.
+fn view_rects(view: &DevicesView) -> Vec<(String, Rect)> {
     let ctx = egui::Context::default();
     let mut texts = Vec::new();
     for _ in 0..3 {
@@ -359,7 +364,7 @@ fn view_texts(view: &DevicesView) -> String {
         }
         output.drop_without_applying_deltas();
     }
-    joined(&texts)
+    texts
 }
 
 fn joined(texts: &[(String, Rect)]) -> String {
@@ -987,6 +992,11 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
 
 /// The texts of the steps of the add and move sheets, inside a sheet.
 fn step_texts(draw: impl Fn(&mut egui::Ui)) -> String {
+    joined(&step_rects(draw))
+}
+
+/// The painted texts of a sheet step, with their rectangles.
+fn step_rects(draw: impl Fn(&mut egui::Ui)) -> Vec<(String, Rect)> {
     let ctx = egui::Context::default();
     let mut texts = Vec::new();
     for _ in 0..3 {
@@ -1003,7 +1013,101 @@ fn step_texts(draw: impl Fn(&mut egui::Ui)) -> String {
         }
         output.drop_without_applying_deltas();
     }
-    joined(&texts)
+    texts
+}
+
+/// The rectangle of the first painted text equal to `text`.
+fn rect_of(texts: &[(String, Rect)], text: &str) -> Rect {
+    texts
+        .iter()
+        .find(|(painted, _)| painted == text)
+        .map(|(_, rect)| *rect)
+        .unwrap_or_else(|| panic!("{text} not painted: {}", joined(texts)))
+}
+
+/// A stand-in for the QR code: a 120-point square with the text "QR" in its center.
+fn fake_qr(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(120.0), egui::Sense::hover());
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "QR",
+        egui::FontId::proportional(12.0),
+        egui::Color32::BLACK,
+    );
+}
+
+/// Frames 2a and 4b: the route chip sits under the QR code, centered on it.
+#[test]
+fn devices_route_chip_sits_under_the_qr_code() {
+    use devices::{LinkStep, MovePhase};
+    let node = LinkStep {
+        route: Route::Mac,
+        shown: Some(devices::shown_link("https://100.101.7.12:8444/link#code")),
+        seconds_left: Some(9 * 60 + 41),
+    };
+    let add = step_rects(|ui| {
+        devices::link_step(ui, &node, fake_qr, |_| {});
+    });
+    let moving = step_rects(|ui| {
+        devices::move_step(
+            ui,
+            "Rafal's iPhone",
+            MovePhase::Scan,
+            Some(&node),
+            fake_qr,
+            |_| {},
+        );
+    });
+    for (frame, texts) in [("2a", &add), ("4b", &moving)] {
+        let qr = rect_of(texts, "QR");
+        let chip = rect_of(texts, "via your Mac");
+        assert!(
+            chip.top() > qr.bottom() + 40.0,
+            "{frame}: the chip is under the QR code: {chip:?} {qr:?}"
+        );
+        assert!(
+            (chip.center().x - qr.center().x).abs() < 2.0,
+            "{frame}: the chip is centered on the QR code: {chip:?} {qr:?}"
+        );
+    }
+    // Expired: no QR code, the chip stays under the lead.
+    let expired = LinkStep {
+        seconds_left: Some(0),
+        ..node
+    };
+    let texts = step_rects(|ui| {
+        devices::link_step(ui, &expired, fake_qr, |_| {});
+    });
+    assert!(!joined(&texts).contains("QR"), "{}", joined(&texts));
+    assert!(
+        joined(&texts).contains("via your Mac"),
+        "{}",
+        joined(&texts)
+    );
+}
+
+/// "Devices ⓘ 6" has the space of a group label above it, and its rows follow at the
+/// same distance as under "This Mac": no second space between the label and the rows.
+#[test]
+fn devices_rows_follow_their_label_as_under_this_mac() {
+    let texts = view_rects(&frame_one());
+    let this_mac = rect_of(&texts, "This Mac");
+    let reachable = rect_of(&texts, devices::ROUTE_SWITCH);
+    let first = rect_of(&texts, "Mac mini (office)");
+    // The group label: the last "Devices" above the first row.
+    let label = texts
+        .iter()
+        .rev()
+        .find(|(text, rect)| text == "Devices" && rect.bottom() < first.top())
+        .map(|(_, rect)| *rect)
+        .expect("the Devices label");
+    let under_this_mac = reachable.top() - this_mac.bottom();
+    let under_devices = first.top() - label.bottom();
+    assert!(
+        (under_devices - under_this_mac).abs() < 6.0,
+        "the rows follow the label: {under_devices} vs {under_this_mac}"
+    );
 }
 
 /// Frames 2a–2c and 4b–4d use the exact texts of the mockup table.
