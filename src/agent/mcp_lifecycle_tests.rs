@@ -14,6 +14,8 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-mcp-passphrase";
 const SECRET: &str = "FAKE-mcp-vault-canary-73109";
 const UNRELATED: &str = "FAKE-unrelated-output-canary-88902";
+/// How often the adapter of a test connection repeats its progress note.
+const CADENCE: Duration = Duration::from_millis(25);
 
 struct Fixture {
     dir: TempDir,
@@ -149,7 +151,7 @@ impl Host {
                 &config,
                 io::BufReader::new(server_input),
                 server_output,
-                Duration::from_millis(25),
+                CADENCE,
             )
         });
         Self {
@@ -412,10 +414,12 @@ fn execution_cancellation_is_honest_and_reconnect_retrieves_final_outcome() {
 fn progress_repeats_without_arguments_and_eof_withdraws_question() {
     let fx = Fixture::new();
     let mut host = fx.connect();
+    // The clock starts before the call: the notes that the adapter wrote while the
+    // question appeared wait in the socket, and the test reads them at once.
+    let started = Instant::now();
     host.call(1, fx.run("printf secret-argument-canary"));
     let id = host.operation();
     fx.pending();
-    let started = Instant::now();
     let mut values = Vec::new();
     while values.len() < 3 {
         let message = host.next();
@@ -427,7 +431,10 @@ fn progress_repeats_without_arguments_and_eof_withdraws_question() {
         }
     }
     assert!(values.windows(2).all(|v| v[0] < v[1]));
-    assert!(started.elapsed() >= Duration::from_millis(50));
+    // Note n (the first is 0) leaves the adapter n cadences after the call at the
+    // earliest: the notes repeat at their pace, not in a burst.
+    let last = u32::try_from(*values.last().unwrap()).unwrap();
+    assert!(started.elapsed() >= CADENCE * last, "{values:?}");
     let closing = Instant::now();
     host.close();
     assert!(
