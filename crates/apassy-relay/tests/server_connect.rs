@@ -1692,6 +1692,20 @@ fn receipts_and_push_tokens_write_audit_rows_only_when_they_change() {
     assert_eq!(audit_rows(&relay, &team, "push_token_set").len(), 3);
 }
 
+/// One maintenance pass at `now` that does not pass over `team` as idle. The relay's own
+/// maintenance thread passes every team every few seconds on the real clock. When it
+/// passed a Connect team after the last request of a test, a pass here would skip that
+/// team (no request since its last pass, for a minute) and leave the rows that the test
+/// aged in its file. So the pass counts as one after a request.
+fn maintain_after_a_request(relay: &TestRelay, team: &TeamId, now: u64) {
+    let hub = relay.hub();
+    hub.team(team)
+        .unwrap()
+        .last_request
+        .store(u64::MAX, Ordering::Relaxed);
+    apassy_relay::server::http::maintain(&hub, now);
+}
+
 #[test]
 fn expired_device_links_go_after_a_week_and_at_most_a_hundred_stay() {
     let relay = start(UpstreamOptions::default());
@@ -1703,8 +1717,7 @@ fn expired_device_links_go_after_a_week_and_at_most_a_hundred_stay() {
     let conn = open_team_file(&relay.config, &team);
     conn.execute_batch(&format!("UPDATE device_link SET expires_at = {};", now - 1))
         .unwrap();
-    let hub = relay.hub();
-    apassy_relay::server::http::maintain(&hub, now);
+    maintain_after_a_request(&relay, &team, now);
     let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
     assert_eq!(
         count("SELECT count(*) FROM device_link WHERE state = 'expired'"),
@@ -1717,8 +1730,7 @@ fn expired_device_links_go_after_a_week_and_at_most_a_hundred_stay() {
         now - 7 * DAY - 1
     ))
     .unwrap();
-    relay.ok("GET", "/v1/me", &mac.token, None);
-    apassy_relay::server::http::maintain(&hub, now + 1);
+    maintain_after_a_request(&relay, &team, now + 1);
     assert_eq!(count("SELECT count(*) FROM device_link"), 0);
 }
 
@@ -1832,7 +1844,7 @@ fn a_connect_team_file_has_a_cap_and_a_full_team_is_refused_without_losing_its_a
             Ok(())
         })
         .unwrap();
-    apassy_relay::server::http::maintain(&hub, now + 1);
+    maintain_after_a_request(&relay, &team, now + 1);
     assert_eq!(questions(), 0);
     let warned = core.cap_warning();
     assert_eq!(warned.0, CapLevel::Full);
@@ -1843,7 +1855,7 @@ fn a_connect_team_file_has_a_cap_and_a_full_team_is_refused_without_losing_its_a
     assert_eq!(info["file_cap"], (used + 2) * 4096);
     assert!(info["file_bytes"].as_u64().unwrap() >= used * 4096);
     // Again within the hour: no new warning.
-    apassy_relay::server::http::maintain(&hub, now + 120);
+    maintain_after_a_request(&relay, &team, now + 120);
     assert_eq!(core.cap_warning(), warned);
     let (status, _) = relay.call("POST", "/v1/questions", Some(&mac.token), Some(&body));
     assert_eq!(status, 403);
