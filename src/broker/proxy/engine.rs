@@ -32,7 +32,7 @@ use super::http1::{
     parse_request_head, parse_response_head, request_body,
 };
 use super::public_addr::is_public_ip;
-use super::swap::{EchoPair, Refusal, SwapSecret, Swapped, json_escaped_pair, swap_request};
+use super::swap::{Refusal, SwapSecret, Swapped, swap_request};
 use super::ws;
 use super::{OtherHosts, ProxyEvent, ProxyOutcome, ProxySecret};
 use crate::broker::access_once::Admission;
@@ -797,21 +797,10 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
         .iter()
         .map(|secret| secret.placeholder.as_bytes())
         .collect();
-    // The JSON form of a value with `/` (`\/`) is replaced too (judge finding L1).
-    let escaped: Vec<EchoPair> = proxy
-        .secrets
-        .iter()
-        .filter_map(|secret| json_escaped_pair(&secret.value, &secret.placeholder))
-        .collect();
     let pairs: Vec<(&[u8], &[u8])> = proxy
         .secrets
         .iter()
         .map(|secret| (secret.value.as_bytes(), secret.placeholder.as_bytes()))
-        .chain(
-            escaped
-                .iter()
-                .map(|(from, to)| (from.as_slice(), to.as_slice())),
-        )
         .collect();
     let mut service: Option<(Conn<ServiceSide>, Tracked<'_>)> = None;
     // A real value went out on this connection: an answer that the proxy cannot

@@ -801,6 +801,7 @@ fn direction(
 /// current message.
 struct Boundary<'a> {
     pairs: &'a [(&'a [u8], &'a [u8])],
+    patterns: Vec<(usize, super::echo::Pattern)>,
     keep: usize,
     /// The last `keep` bytes of the data stream, before this frame.
     tail: Zeroizing<Vec<u8>>,
@@ -812,14 +813,23 @@ struct Boundary<'a> {
 
 impl<'a> Boundary<'a> {
     fn new(pairs: &'a [(&'a [u8], &'a [u8])]) -> Self {
+        let patterns: Vec<_> = pairs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (from, to))| {
+                super::echo::Pattern::escaped(from, to).map(|p| (index, p))
+            })
+            .collect();
         let keep = pairs
             .iter()
             .map(|(from, _)| from.len())
+            .chain(patterns.iter().map(|(_, pattern)| pattern.max_len()))
             .max()
             .unwrap_or(1)
             .saturating_sub(1);
         Self {
             pairs,
+            patterns,
             keep,
             tail: Zeroizing::new(Vec::new()),
             before: Zeroizing::new(Vec::new()),
@@ -844,6 +854,16 @@ impl<'a> Boundary<'a> {
                     self.before.ends_with(&value[..k]) && self.start.starts_with(&value[k..])
                 })
             });
+            if found.is_none() {
+                let mut window = Zeroizing::new(self.before.to_vec());
+                window.extend_from_slice(&self.start);
+                found = self.patterns.iter().find_map(|(index, pattern)| {
+                    (0..self.before.len()).any(|start| {
+                        matches!(pattern.match_at(&window, start, true), super::echo::Step::Full(len)
+                            if start + len > self.before.len())
+                    }).then_some(*index)
+                });
+            }
         }
         let mut window = Zeroizing::new(Vec::with_capacity(self.tail.len() + payload.len()));
         window.extend_from_slice(&self.tail);
@@ -861,6 +881,32 @@ mod tests {
 
     use super::super::http1::parse_request_head;
     use super::*;
+
+    #[test]
+    fn encoded_values_cannot_cross_websocket_message_boundaries() {
+        let value = b"FAKE+token/value&";
+        let placeholder = vec![b'Q'; value.len()];
+        let pairs = [(value.as_slice(), placeholder.as_slice())];
+        for echo in [
+            "FAKE%2Btoken%2Fvalue%26",
+            "FAKE%2btoken%2fvalue%26",
+            r"FAKE+token\/value&",
+            "FAKE+token&#x2F;value&amp;",
+        ] {
+            for split in 1..echo.len() {
+                let mut boundary = Boundary::new(&pairs);
+                assert_eq!(boundary.feed(false, &echo.as_bytes()[..split]), None);
+                assert_eq!(
+                    boundary.feed(false, &echo.as_bytes()[split..]),
+                    Some(0),
+                    "{echo}, {split}"
+                );
+                let mut boundary = Boundary::new(&pairs);
+                assert_eq!(boundary.feed(false, &echo.as_bytes()[..split]), None);
+                assert_eq!(boundary.feed(true, &echo.as_bytes()[split..]), None);
+            }
+        }
+    }
 
     const VALUE: &[u8] = b"sk_test_FAKE-ws-value-0123456789";
     const PLACEHOLDER: &[u8] = b"sk_test_PHPH-ws-phold-abcdefghij";

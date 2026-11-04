@@ -444,71 +444,49 @@ impl<'a> Scanner<'a> {
 /// Swaps real values for placeholders in a response that comes in pieces. Each pair
 /// has the same length, so the body keeps its length. It holds back only an end of a
 /// piece that can be the start of a value, so a stream (server-sent events) flows.
-pub(super) struct Replacer<'a> {
-    pairs: &'a [(&'a [u8], &'a [u8])],
-    pending: Zeroizing<Vec<u8>>,
+pub(super) struct Replacer {
+    inner: super::echo::Replacer,
     pub replaced: bool,
 }
 
-impl<'a> Replacer<'a> {
-    pub fn new(pairs: &'a [(&'a [u8], &'a [u8])]) -> Self {
-        debug_assert!(pairs.iter().all(|(from, to)| from.len() == to.len()));
+impl Replacer {
+    pub fn new(pairs: &[(&[u8], &[u8])]) -> Self {
+        use super::echo::{Pair, Pattern};
+        // Request-specific encoded echoes follow raw values in `pairs` and win
+        // ties, keeping redirected query placeholders usable after URL decoding.
+        let patterns = pairs
+            .iter()
+            .rev()
+            .filter_map(|(from, to)| Pattern::escaped(from, to))
+            .collect();
+        let pairs = pairs
+            .iter()
+            .filter(|(from, _)| !from.is_empty())
+            .map(|(from, to)| Pair {
+                from: Zeroizing::new(from.to_vec()),
+                to: to.to_vec(),
+            })
+            .collect();
         Self {
-            pairs,
-            pending: Zeroizing::new(Vec::new()),
+            inner: super::echo::Replacer::new(pairs).with_patterns(patterns),
             replaced: false,
         }
     }
 
-    /// Replace in place. Returns true when a value was found.
     pub fn replace_all(pairs: &[(&[u8], &[u8])], data: &mut [u8]) -> bool {
-        let mut found = false;
-        for (from, to) in pairs {
-            if from.is_empty() {
-                continue;
-            }
-            let mut offset = 0;
-            while let Some(position) = find(&data[offset..], from) {
-                let at = offset + position;
-                data[at..at + to.len()].copy_from_slice(to);
-                offset = at + to.len();
-                found = true;
-            }
-        }
-        found
+        Self::new(pairs).inner.replace_all(data)
     }
 
-    /// The length of the longest end of `data` that is the start of a value.
-    fn open_end(&self, data: &[u8]) -> usize {
-        self.pairs
-            .iter()
-            .map(|(from, _)| {
-                (1..from.len().min(data.len() + 1))
-                    .rev()
-                    .find(|&k| data[data.len() - k..] == from[..k])
-                    .unwrap_or(0)
-            })
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// Add `data`. Returns the bytes that are final: no value can start in them.
     pub fn feed(&mut self, data: &[u8]) -> Zeroizing<Vec<u8>> {
-        let mut window = Zeroizing::new(Vec::with_capacity(self.pending.len() + data.len()));
-        window.extend_from_slice(&self.pending);
-        window.extend_from_slice(data);
-        self.replaced |= Self::replace_all(self.pairs, &mut window);
-        let split = window.len() - self.open_end(&window);
-        self.pending = Zeroizing::new(window[split..].to_vec());
-        window.truncate(split);
-        window
+        let out = self.inner.feed(data);
+        self.replaced = self.inner.replaced;
+        out
     }
 
-    /// The rest, at the end of the body.
     pub fn finish(&mut self) -> Zeroizing<Vec<u8>> {
-        let mut rest = std::mem::replace(&mut self.pending, Zeroizing::new(Vec::new()));
-        self.replaced |= Self::replace_all(self.pairs, &mut rest);
-        rest
+        let out = self.inner.finish();
+        self.replaced = self.inner.replaced;
+        out
     }
 }
 
@@ -607,7 +585,7 @@ pub(super) fn copy_response_body<U: Read, C: Write>(
     from: &mut Conn<U>,
     to: &mut C,
     body: BodyLen,
-    replacer: &mut Replacer<'_>,
+    replacer: &mut Replacer,
 ) -> io::Result<()> {
     match body {
         BodyLen::None => Ok(()),
@@ -652,7 +630,7 @@ pub(super) fn copy_response_body<U: Read, C: Write>(
                     to.write_all(b"0\r\n")?;
                     loop {
                         let mut trailer = from.read_line()?;
-                        replacer.replaced |= Replacer::replace_all(replacer.pairs, &mut trailer);
+                        replacer.replaced |= replacer.inner.replace_all(&mut trailer);
                         to.write_all(&trailer)?;
                         if trailer.as_slice() == b"\r\n" {
                             return Ok(());
@@ -679,6 +657,74 @@ pub(super) fn copy_response_body<U: Read, C: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoded_echoes_keep_length_at_every_read_boundary() {
+        for (value, echoes) in [
+            (
+                "synthetic+secret/ending=",
+                vec![
+                    "synthetic%2Bsecret%2Fending%3D",
+                    "synthetic%2bsecret%2fending%3d",
+                    r"synthetic+secret\/ending=",
+                    r"synthetic\u002bsecret\u002Fending\u003d",
+                ],
+            ),
+            (
+                "synthetic<&>\"'/secret&",
+                vec![
+                    "synthetic&lt;&amp;&gt;&quot;&#39;&#x2F;secret&amp;",
+                    "synthetic&#60;&#038;&#x003e;&#34;&#039;&#X2F;secret&#38;",
+                ],
+            ),
+            (
+                "synthetic\"\\é€😀\n\t\u{1}",
+                vec![
+                    r#"synthetic\"\\\u00e9\u20ac\ud83d\ude00\n\t\u0001"#,
+                    r#"synthetic\u0022\u005C\u00E9\u20AC\uD83D\uDE00\u000A\u0009\u0001"#,
+                ],
+            ),
+        ] {
+            let placeholder = vec![b'Q'; value.len()];
+            let pairs = [(value.as_bytes(), placeholder.as_slice())];
+            for echo in echoes.into_iter().chain(std::iter::once(value)) {
+                let input = format!("before {echo} after {echo}");
+                let shown = "Q".repeat(echo.len());
+                let expected = format!("before {shown} after {shown}");
+                let mut whole = input.as_bytes().to_vec();
+                assert!(Replacer::replace_all(&pairs, &mut whole));
+                assert_eq!(whole, expected.as_bytes(), "{echo}");
+                for split in 0..=input.len() {
+                    let mut replacer = Replacer::new(&pairs);
+                    let mut out = replacer.feed(&input.as_bytes()[..split]).to_vec();
+                    out.extend_from_slice(&replacer.feed(&input.as_bytes()[split..]));
+                    out.extend_from_slice(&replacer.finish());
+                    assert_eq!(out, expected.as_bytes(), "{echo}, split {split}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn longest_echo_wins_without_rescanning_replacements() {
+        let pairs: &[(&[u8], &[u8])] = &[
+            (b"token", b"short"),
+            (b"token&", b"longQQ"),
+            (b"longQQ", b"oopsQQ"),
+        ];
+        let mut replacer = Replacer::new(pairs);
+        assert!(replacer.feed(b"token").is_empty());
+        assert!(replacer.feed(b"&am").is_empty());
+        let mut out = replacer.feed(b"p;!").to_vec();
+        out.extend_from_slice(&replacer.finish());
+        assert_eq!(out, b"longQQQQQQ!");
+        let mut same = b"duplicate".to_vec();
+        assert!(Replacer::replace_all(
+            &[(b"duplicate", b"firstQQQQ"), (b"duplicate", b"otherQQQQ")],
+            &mut same
+        ));
+        assert_eq!(same, b"firstQQQQ");
+    }
 
     #[test]
     fn request_heads_are_strict() {

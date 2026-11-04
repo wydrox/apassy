@@ -34,6 +34,7 @@
 
 pub mod base_env;
 mod ca;
+pub mod echo;
 mod engine;
 mod http1;
 mod listener;

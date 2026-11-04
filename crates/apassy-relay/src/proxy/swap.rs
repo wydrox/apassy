@@ -12,6 +12,7 @@
 //! returns. A placeholder that goes to a host it is not for stops the request too.
 
 use apassy::broker::proxy::HostRule;
+use apassy::broker::proxy::echo::{Echo, query_echoes};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use zeroize::Zeroizing;
 
@@ -57,14 +58,6 @@ pub(super) enum Refusal {
     /// The encoded value of secret `index` has no encoded placeholder of the same
     /// length, so the relay could not hide it in the response.
     NoEcho { index: usize },
-}
-
-/// An encoded form of a value that the relay sent upstream, and the same form of
-/// the placeholder. Both have the same length. The response gets `shown` in place
-/// of `sent`, so an upstream host that echoes the request gives back no value.
-pub(super) struct Echo {
-    pub sent: Zeroizing<String>,
-    pub shown: String,
 }
 
 /// The request for the service after the swap, and the secrets that went into it.
@@ -393,62 +386,6 @@ fn hex(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
-}
-
-/// True for a byte that stays as it is in a query value.
-fn unreserved(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"-._~".contains(&byte)
-}
-
-/// Writes `text` percent-encoded. A byte is escaped when it is not unreserved or
-/// when `escape_at` is true for its position. `upper` picks the case of the hex digits.
-fn percent_encode_into(
-    text: &str,
-    escape_at: impl Fn(usize) -> bool,
-    upper: bool,
-    out: &mut String,
-) {
-    let hex: &[u8; 16] = if upper {
-        b"0123456789ABCDEF"
-    } else {
-        b"0123456789abcdef"
-    };
-    for (position, byte) in text.bytes().enumerate() {
-        if unreserved(byte) && !escape_at(position) {
-            out.push(char::from(byte));
-        } else {
-            out.push('%');
-            out.push(char::from(hex[usize::from(byte >> 4)]));
-            out.push(char::from(hex[usize::from(byte & 15)]));
-        }
-    }
-}
-
-/// The percent-encoded forms of a value in a query parameter, with the same forms of
-/// its placeholder: first the form the relay sends (upper-case hex), then the
-/// lower-case one when it differs. The placeholder is escaped at each position where
-/// the value is, so each pair has the same length. `None` when the placeholder needs
-/// an escape where the value does not (a placeholder from `mint` never does).
-fn query_echoes(value: &str, placeholder: &str) -> Option<Vec<Echo>> {
-    if value.len() != placeholder.len() {
-        return None;
-    }
-    let escaped = |position: usize| !unreserved(value.as_bytes()[position]);
-    let mut echoes = Vec::with_capacity(2);
-    for upper in [true, false] {
-        let mut sent = Zeroizing::new(String::with_capacity(value.len() * 3));
-        percent_encode_into(value, |_| false, upper, &mut sent);
-        let mut shown = String::with_capacity(sent.len());
-        percent_encode_into(placeholder, escaped, upper, &mut shown);
-        if sent.len() != shown.len() {
-            return None;
-        }
-        if !upper && echoes.iter().any(|echo: &Echo| *echo.sent == *sent) {
-            continue;
-        }
-        echoes.push(Echo { sent, shown });
-    }
-    Some(echoes)
 }
 
 #[cfg(test)]
@@ -790,10 +727,15 @@ mod tests {
     fn percent_coding_round_trips() {
         assert_eq!(percent_decode("a%2Fb+c%zz%4"), "a/b c%zz%4");
         let mut out = String::new();
-        percent_encode_into("a/b c~-._", |_| false, true, &mut out);
+        apassy::broker::proxy::echo::percent_encode_into("a/b c~-._", |_| false, true, &mut out);
         assert_eq!(out, "a%2Fb%20c~-._");
         let mut out = String::new();
-        percent_encode_into("a/b", |position| position == 0, false, &mut out);
+        apassy::broker::proxy::echo::percent_encode_into(
+            "a/b",
+            |position| position == 0,
+            false,
+            &mut out,
+        );
         assert_eq!(out, "%61%2fb");
     }
 }

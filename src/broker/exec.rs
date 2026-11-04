@@ -2,9 +2,9 @@
 //!
 //! The process gets a small base environment, the requested `PATH`, and the
 //! bound secrets. There is no shell. Output is limited and masked. The masking
-//! finds only exact secret values. It cannot stop a process that encodes or
-//! sends a secret. When the main process ends, the broker stops its process
-//! group, so no descendant keeps the secrets after the run. A descendant that
+//! covers raw values and common JSON, HTML, and percent escapes. It cannot stop
+//! a process that uses other encodings or sends a secret. When the main process ends,
+//! the broker stops its process group, so no descendant keeps the secrets after the run. A descendant that
 //! leaves the group is not stopped.
 //!
 //! A proxied run (ADR 0011) also gets the variables of its run proxy, and on macOS
@@ -484,31 +484,52 @@ pub fn mask(text: &str, secrets: &[SecretEnv]) -> String {
 }
 
 fn mask_all(text: &str, secrets: &[&SecretEnv], truncated: bool) -> String {
-    let mut ordered: Vec<&SecretEnv> = secrets
+    use super::proxy::echo::{Pattern, Step};
+    let ordered: Vec<_> = secrets
         .iter()
         .copied()
         .filter(|secret| !secret.value.is_empty())
+        .map(|secret| {
+            let pattern =
+                Pattern::escaped(secret.value.as_bytes(), &vec![b'x'; secret.value.len()]);
+            (secret, pattern)
+        })
         .collect();
-    ordered.sort_by_key(|secret| std::cmp::Reverse(secret.value.len()));
     let mut out = String::new();
     let mut pos = 0;
     let word = |c: char| c.is_alphanumeric() || c == '_';
     while pos < text.len() {
-        let matched = ordered.iter().find(|secret| {
-            let value = secret.value.as_str();
-            // Collection may cut a complete printed code at the output limit.
-            // Redact any remaining prefix at that cut too; otherwise up to all
-            // but one of its digits could escape the ordinary literal matcher.
-            let clipped = truncated && value.starts_with(&text[pos..]);
-            clipped
-                || text[pos..].starts_with(value)
-                    && (value.len() >= MIN_MASK_BYTES
-                        || (!text[..pos].chars().next_back().is_some_and(word)
-                            && !text[pos + value.len()..].chars().next().is_some_and(word)))
-        });
-        if let Some(secret) = matched {
+        let matched = ordered
+            .iter()
+            .rev()
+            .filter_map(|(secret, pattern)| {
+                let value = secret.value.as_str();
+                let rest = &text[pos..];
+                let len = if truncated && value.starts_with(rest) {
+                    rest.len()
+                } else if let Some(pattern) = pattern {
+                    match pattern.match_at(text.as_bytes(), pos, !truncated) {
+                        Step::Full(len) => len,
+                        Step::Partial if truncated => rest.len(),
+                        _ => return None,
+                    }
+                } else if rest.starts_with(value) {
+                    value.len()
+                } else {
+                    return None;
+                };
+                // Keep the original short-secret token rule, even for longer encodings.
+                let clipped = truncated && len == rest.len();
+                (clipped
+                    || value.len() >= MIN_MASK_BYTES
+                    || (!text[..pos].chars().next_back().is_some_and(word)
+                        && !text[pos + len..].chars().next().is_some_and(word)))
+                .then_some((*secret, len))
+            })
+            .max_by_key(|(_, len)| *len);
+        if let Some((secret, len)) = matched {
             out.push_str(&format!("[apassy:{}]", secret.name));
-            pos += secret.value.len().min(text.len() - pos);
+            pos += len;
         } else {
             let c = text[pos..].chars().next().expect("character boundary");
             out.push(c);
@@ -520,6 +541,76 @@ fn mask_all(text: &str, secrets: &[&SecretEnv], truncated: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_masks_encoded_echoes_and_clipped_escapes() {
+        for (value, echo) in [
+            ("synthetic+secret/ending=", "synthetic%2Bsecret%2Fending%3D"),
+            ("synthetic+secret/ending=", "synthetic%2bsecret%2fending%3d"),
+            (
+                "synthetic<&>\"'/secret&",
+                "synthetic&lt;&amp;&gt;&quot;&#39;&#x2F;secret&amp;",
+            ),
+            (
+                "synthetic\"\\é€😀\n\u{1}",
+                r#"synthetic\"\\\u00e9\u20ac\ud83d\ude00\n\u0001"#,
+            ),
+        ] {
+            let secrets = [secret("TOKEN", value)];
+            assert_eq!(
+                mask(&format!("value={echo}"), &secrets),
+                "value=[apassy:TOKEN]"
+            );
+            for split in 1..=echo.len() {
+                if echo.is_char_boundary(split) {
+                    assert_eq!(
+                        mask_output(&echo.as_bytes()[..split], &[&secrets[0]], true),
+                        "[apassy:TOKEN]",
+                        "{echo}, {split}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            mask("prefix%2fsuffix / %2F", &[secret("TOKEN", "/")]),
+            "prefix%2fsuffix [apassy:TOKEN] [apassy:TOKEN]"
+        );
+        assert_eq!(
+            mask(
+                "token&amp;",
+                &[secret("SHORT", "token"), secret("LONG", "token&")]
+            ),
+            "[apassy:LONG]"
+        );
+        assert_eq!(
+            mask(
+                "duplicate",
+                &[secret("FIRST", "duplicate"), secret("SECOND", "duplicate")]
+            ),
+            "[apassy:FIRST]"
+        );
+    }
+
+    #[test]
+    fn output_masks_an_encoded_echo_split_between_process_writes() {
+        let cwd = tempfile::tempdir().unwrap();
+        let out = run_with(
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'synthetic%%2Bsecret'; sleep 0.1; printf '%%2Fending%%3D'".into(),
+            ],
+            cwd.path(),
+            None,
+            &[],
+            &[secret("TOKEN", "synthetic+secret/ending=")],
+            Network::default(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(out.stdout, "[apassy:TOKEN]");
+        assert_eq!(out.exit_code, Some(0));
+    }
+
     #[test]
     fn auto_lock_between_secret_preparation_and_spawn_refuses_delivery() {
         let dir = tempfile::tempdir().unwrap();
