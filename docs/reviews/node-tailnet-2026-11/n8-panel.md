@@ -207,6 +207,18 @@ What held up under attack:
 
 ## Fixes
 
+Follow-up on `r17/fix-trust-docs`: Serve without PROXY peer addresses keeps a shared
+listener-wide failed-auth limit of **200 in 60 s**, versus **20 in 60 s per peer**
+when addresses are available. One peer can still exhaust the shared limit. Node status
+flags `serve_without_peer_addresses`; Mac Devices and Linux `apassy doctor` show
+"Tailscale Serve without peer addresses: update Tailscale". The separate local route
+keeps its own 20/min limit. Tests cover 200 failures, the local route isolation, the
+Serve status flag for old and current CLIs, and the doctor warning.
+
+The trust model also records the authority of both remote bouncer hosts: they can cause
+development and staging runs without asking, within the hard gate. The Linux guide and
+doctor warn against running coding agents as the node's user (known config folders only).
+
 Date: 2026-11-03. Branch `r17/fix-n8`, based on `release/0.5.17` at `32ec1d6e`. N8-6 belongs to
 unit L4 and is not in this branch.
 

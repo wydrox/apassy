@@ -313,6 +313,8 @@ pub struct TailnetRoute {
     pub route: FrontRoute,
     /// The relay's tailnet listener: the front's target.
     pub target: SocketAddr,
+    /// Status flag: Serve is running without PROXY v1 peer addresses.
+    pub serve_without_peer_addresses: bool,
 }
 
 impl std::fmt::Debug for TailnetRoute {
@@ -361,6 +363,7 @@ impl TailnetRoute {
         }
         let mut front = Front::start(front_options).map_err(|error| front_error(&error, port))?;
         let mut serve_tcp = None;
+        let mut serve_without_peer_addresses = false;
         match here.route {
             FrontRoute::Direct if !here.test_loopback => {
                 // A failed follow thread leaves the front on its first addresses: the route
@@ -377,12 +380,15 @@ impl TailnetRoute {
                         format!("Tailscale Serve did not forward port {port} to the node: {error}"),
                     ));
                 }
+                serve_without_peer_addresses =
+                    ServeTcp::new(Arc::clone(&cli)).without_peer_addresses(port);
                 serve_tcp = Some((port, local_port));
             }
         }
         let mut route = Self {
             front: Some(front),
             serve_tcp,
+            serve_without_peer_addresses,
             cli,
             local_route: false,
             alt: if here.test_loopback {
@@ -456,6 +462,16 @@ impl Drop for TailnetRoute {
     fn drop(&mut self) {
         self.stop_front();
         self.clear_route();
+    }
+}
+
+impl super::Node {
+    /// Status flag for the running Mac node; false for direct and stopped routes.
+    pub fn serve_without_peer_addresses(&self) -> bool {
+        super::lock(&self.running)
+            .as_ref()
+            .and_then(|running| running.tailnet.as_ref())
+            .is_some_and(|route| route.serve_without_peer_addresses)
     }
 }
 

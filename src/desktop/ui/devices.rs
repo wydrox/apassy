@@ -2290,15 +2290,26 @@ mod live {
 
     /// The problems of the questions waiter and of the feed, one line each.
     fn notes(app: &DesktopApp) -> Vec<(String, super::Tone)> {
+        let mut notes = Vec::new();
+        if app
+            .node
+            .node
+            .as_ref()
+            .is_some_and(|node| node.serve_without_peer_addresses())
+        {
+            notes.push((
+                crate::net::tailnet::SERVE_WITHOUT_PEER_ADDRESSES.to_owned(),
+                super::Tone::Warning,
+            ));
+        }
         let Some(view) = app
             .owner
             .questions
             .as_ref()
             .map(|questions| questions.view())
         else {
-            return Vec::new();
+            return notes;
         };
-        let mut notes = Vec::new();
         if view.unsupported
             && let Some(problem) = view.problem
         {

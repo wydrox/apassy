@@ -207,6 +207,7 @@ pub struct TailnetRoute {
     pub origin: Option<String>,
     pub port: u16,
     pub route: Route,
+    pub serve_without_peer_addresses: bool,
     /// The addresses the front listens on; empty when the node does not run.
     pub bound: Vec<String>,
     pub alternatives: Vec<String>,
@@ -340,6 +341,7 @@ pub fn collect(dir: &Path, probe: &dyn Probe) -> Result<Status, NodeCliError> {
             origin: Some(state.origin.clone()),
             port: state.port,
             route: state.route,
+            serve_without_peer_addresses: state.serve_without_peer_addresses,
             bound: state.bound.clone(),
             alternatives: state.alternatives.clone(),
         },
@@ -347,6 +349,7 @@ pub fn collect(dir: &Path, probe: &dyn Probe) -> Result<Status, NodeCliError> {
             origin: settings.last_origin.clone(),
             port: settings.port,
             route: settings.route,
+            serve_without_peer_addresses: false,
             bound: Vec::new(),
             alternatives: Vec::new(),
         },
@@ -406,6 +409,9 @@ pub fn print_text(status: &Status) {
         ),
         (Some(origin), true) => println!("Tailnet:  {origin} (not listening)"),
         (None, _) => println!("Tailnet:  port {} (never started)", tailnet.port),
+    }
+    if tailnet.serve_without_peer_addresses {
+        println!("{}", apassy::net::tailnet::SERVE_WITHOUT_PEER_ADDRESSES);
     }
     println!("Funnel:   {}", status.routes.funnel);
     println!("LAN:      {}", status.routes.lan);
