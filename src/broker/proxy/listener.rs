@@ -199,7 +199,9 @@ mod tests {
         )
         .expect("socket");
         // On macOS a peer reset can make a later timeout setter return EINVAL.
-        socket.set_read_timeout(Some(read_timeout)).expect("timeout");
+        socket
+            .set_read_timeout(Some(read_timeout))
+            .expect("timeout");
         socket.connect(&addr.into()).expect("connect");
         socket.into()
     }
