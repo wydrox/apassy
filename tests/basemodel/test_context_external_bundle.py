@@ -4,6 +4,7 @@ import copy
 import hashlib
 import io
 import json
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -280,13 +281,20 @@ class BundleTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
-    def run_cpu_preflight(self, *, default_threads=1, versions=None, cuda=False,
-                          honors_setter=True, tensor_sum=64, fails=False):
+    def cpu_preflight_source(self, job_name):
         workflow = (REPO / '.github/workflows/bouncer-context-experiment.yml').read_text()
-        job = workflow.split('  cuda-preflight:\n', 1)[1].split('  external-evaluate:\n', 1)[0]
+        job = re.split(r'\n  [a-zA-Z0-9_-]+:\n', workflow.split(f'  {job_name}:\n', 1)[1], maxsplit=1)[0]
         block = job.split('    - name: Install pinned CUDA distribution on CPU\n', 1)[1]
         body = block.split("<<'PYCODE'\n", 1)[1].split('        PYCODE', 1)[0]
-        source = '\n'.join(line[8:] for line in body.splitlines())
+        return '\n'.join(line[8:] for line in body.splitlines())
+
+    def test_cpu_preflight_blocks_identical(self):
+        self.assertEqual(self.cpu_preflight_source('cuda-preflight'), self.cpu_preflight_source('external-evaluate'))
+
+    def run_cpu_preflight(self, *, default_threads=1, versions=None, cuda=False,
+                          honors_setter=True, tensor_sum=64, fails=False):
+        source = self.cpu_preflight_source('cuda-preflight')
+        self.assertEqual(source, self.cpu_preflight_source('external-evaluate'))
         code = compile(ast.parse(source), '<cuda-preflight>', 'exec')
         calls, output = [], []
         state = {'threads': default_threads}
@@ -338,7 +346,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(calls, [4])
         metadata = json.loads(output[0])
         self.assertEqual(metadata, dict(versions=modules['context_train'].package_versions(),
-                                       cuda_available=cuda, observed_threads=state['threads'],
+                                       cuda_available=cuda, default_threads=default_threads, observed_threads=state['threads'],
                                        tensor_sum=tensor_sum))
         return metadata
 

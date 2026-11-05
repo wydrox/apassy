@@ -1413,12 +1413,13 @@ jobs:
         sys.path.insert(0, 'tools/basemodel')
         from context_external_bundle import PACKAGE_VERSIONS
         from context_train import package_versions
+        default_threads = torch.get_num_threads()
         torch.set_num_threads(4)
         versions = package_versions()
         cuda_available = torch.cuda.is_available()
         observed_threads = torch.get_num_threads()
         tensor_sum = (torch.ones(4, 4) @ torch.ones(4, 4)).sum().item()
-        print(json.dumps(dict(versions=versions, cuda_available=cuda_available,
+        print(json.dumps(dict(versions=versions, cuda_available=cuda_available, default_threads=default_threads,
                               observed_threads=observed_threads, tensor_sum=tensor_sum), sort_keys=True))
         assert versions == PACKAGE_VERSIONS
         assert torch.cuda.is_available() is False
@@ -1537,14 +1538,23 @@ jobs:
         "$PY" -m pip install --no-cache-dir -r tools/basemodel/requirements-cu130.txt -r tools/basemodel/requirements.txt
         "$PY" -m pip check
         "$PY" -B - <<'PYCODE'
-        import sys, torch
+        import json, sys, torch
         sys.path.insert(0, 'tools/basemodel')
         from context_external_bundle import PACKAGE_VERSIONS
         from context_train import package_versions
-        assert package_versions() == PACKAGE_VERSIONS
+        default_threads = torch.get_num_threads()
+        torch.set_num_threads(4)
+        versions = package_versions()
+        cuda_available = torch.cuda.is_available()
+        observed_threads = torch.get_num_threads()
+        tensor_sum = (torch.ones(4, 4) @ torch.ones(4, 4)).sum().item()
+        print(json.dumps(dict(versions=versions, cuda_available=cuda_available, default_threads=default_threads,
+                              observed_threads=observed_threads, tensor_sum=tensor_sum), sort_keys=True))
+        assert versions == PACKAGE_VERSIONS
         assert torch.cuda.is_available() is False
         assert torch.get_num_threads() == 4
-        assert (torch.ones(4, 4) @ torch.ones(4, 4)).sum().item() == 64
+        assert tensor_sum == 64
+        print('CPU runtime preflight PASS')
         PYCODE
     - name: Verify receipt git versions paths and G1 before base or held-out IO
       run: |
