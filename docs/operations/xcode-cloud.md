@@ -1,8 +1,38 @@
 # Manual macOS quality pilot
 
-Status: code preparation only; Apple account configuration, project discovery and
-Cloud execution **NOT_RUN**. GitHub `macos` remains active. This package neither
-publishes a product nor authorizes replacing a required check.
+Status: one manual Cloud pilot passed on
+`c6f416653580cf511e548199a469c81282ddc69a` on 2026-11-05. The framework was discovered,
+the helper completed all 25 recorded steps, and the framework Build succeeded.
+GitHub `macos` remains active. This package publishes no app and replaces no
+required GitHub check.
+
+## Measured pilot
+
+Product `ApassyCIPilot`, workflow `Apassy macOS quality pilot`, Build 1 ran on
+arm64 after a 15-second queue. The helper took 161.242 seconds; the native report
+rounded active Build time to 3 minutes. Expected and actual source SHAs matched.
+The host used Xcode 27.2 (27B52), macOS 27.2 (26B123), macOS/watch SDK 27.2 and
+the pinned Rust 1.97.0 toolchain. Complete exported logs contained exactly one
+matching JSON receipt and the subsequent `BUILD SUCCEEDED` result. Compute-hour
+consumption was not exposed in the inspected native reports or logs.
+
+GitHub run [42020717024](https://github.com/wydrox/apassy/actions/runs/42020717024)
+ran the same helper successfully on that exact source SHA: 202.807 seconds,
+arm64, Xcode 16.4, macOS SDK 15.5 and watch SDK 11.5. Cloud included four extra
+bootstrap steps. SDK versions and cache conditions differ, so these raw durations
+do not establish a clean speedup. The pilot proves execution of this quality
+contract, not equivalence of the other macOS runtime tests or release steps.
+
+Build 1 completed with one traditional-headermap configuration warning. The
+project now explicitly sets `ALWAYS_SEARCH_USER_PATHS=NO`; this setting and the
+shared Cloud product manifest were recorded after the measured pilot. No second
+Cloud run was performed. Cloud execution evidence applies to the SHA above;
+GitHub validates subsequent commits separately.
+
+Local evidence is retained outside build directories at
+`/Users/rafalw/Dev/apassy-ci-cloud-evidence/2026-11-05/`: `cloud-build-1-quality.json`,
+`cloud-build-1-report.md`, exported `cloud-build-1-logs.zip` and
+`cloud-build-1-xcresult.zip`, plus `github-head-c6f4166-quality.json`.
 
 ## Coverage and identity
 
@@ -97,16 +127,17 @@ files for `aarch64-apple-darwin` and `x86_64-apple-darwin`. Networking and toolc
 availability remain measured pilot risks.
 No dependency cache is added. Cold Cloud vs cached GitHub timings must be labeled.
 
-Apple's documented general onboarding requirements include an App Store Connect
-record/permissions and automatic signing for app projects. Eligibility of this
-unsigned framework in the actual account is **unverified**. Root must inspect
-onboarding; if it insists on an app, signing, archive or distribution, stop and
-report the blocker. Do not silently convert this into an app/release project.
+The actual account accepted this unsigned framework in team `7S3F9767BM` without
+an app upload, signing or distribution. The Xcode onboarding UI states that
+build/test-only products require Xcode 27 or later. The workflow was saved with
+only Manual Start - Branch and one Build action; its initial Branch Changes
+condition was removed before the first build. The committed Cloud manifest binds
+the project to the discovered product; it contains identifiers, not credentials.
 
 ## One-run procedure and evidence
 
-1. Review and commit this package, publish through the separately approved PR
-   process, and choose the remote source SHA. Record a GitHub run ID/attempt with
+1. Review and commit the package, open a draft PR, and choose the remote source
+   SHA. Record a GitHub run ID/attempt with
    actual helper execution at the same SHA. Set the Cloud expected-SHA variable.
 2. Configure the manual workflow above; review action count/start conditions.
    Check account quota/billing before starting; no availability or free quota is
@@ -143,12 +174,12 @@ from downloadable artifacts. The JSON **log line** is the evidence transport;
 no persistence claim is made for the local JSON file or rustup directories. No
 upload, xcresult injection or external storage is used.
 
-Acceptance of this one pilot requires root's review of the measured evidence.
-Until then GitHub macOS stays authoritative and active. Even a successful pilot
-does not establish ARM runtime test equivalence or authorize moving more jobs.
-Actual Apple silicon allocation, speed, quota and cloud success remain unknown
-until read from this run. Current local verification proves only static structure
-and fixture boundaries, not Apple onboarding or execution.
+The root review independently matched the exported log receipt against the JSON,
+verified the exact SHA and ordered successful steps, and checked framework Build
+success. GitHub macOS stays authoritative and active. This quality pilot does not
+establish ARM runtime test equivalence for other jobs. Local fixture checks prove
+the script boundaries; the Cloud export is the execution evidence for the measured
+SHA. Quota/compute consumption and performance under repeated load remain unknown.
 
 ## Primary references
 
