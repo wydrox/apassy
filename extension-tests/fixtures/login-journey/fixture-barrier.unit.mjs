@@ -89,15 +89,18 @@ test("request-only boundary reproduces the CI duplicate through the real state h
   assert.equal(result.toolbar.state, "empty");
 });
 
-test("answer barrier keeps exact downstream commands despite late popup continuation", async () => {
+test("answer barrier keeps exact downstream commands despite late popup continuation", async (t) => {
+  const output = t.mock.method(console, "error", () => {});
   const result = await interleave(grantWithStoppedHost);
   assert.deepEqual(result.commands, ["status", "logins"]);
   assert.equal(result.downstream.state, "empty");
   assert.equal(result.toolbar.state, "not_running");
+  assert.equal(output.mock.callCount(), 0);
 });
 
 for (const answer of [null, { ok: true, code: "ok" }, { ok: false, code: "host_failed" }]) {
-  test(`missing or wrong status acknowledgement fails closed: ${answer?.code || "missing"}`, async () => {
+  test(`missing or wrong status acknowledgement fails closed: ${answer?.code || "missing"}`, async (t) => {
+    t.mock.method(console, "error", () => {});
     let scenario = { vault: "unlocked" }, clears = 0, closed = false;
     const h = {
       scenario: () => scenario,
@@ -114,3 +117,76 @@ for (const answer of [null, { ok: true, code: "ok" }, { ok: false, code: "host_f
     assert.equal(closed, false);
   });
 }
+
+for (const mode of ["timeout", "wrong_ack", "partial_requests", "partial_answers", "malformed_answer"]) {
+  test(`barrier failure metadata is private and keeps stopped evidence: ${mode}`, async (t) => {
+    const lines = [];
+    t.mock.method(console, "error", (...args) => lines.push(args.join(" ")));
+    const canary = "RAW_REQUEST_ANSWER_CODE_CAUGHT_EXCEPTION";
+    const readError = new SyntaxError(canary);
+    let scenario = { secret: canary }, clears = 0, closes = 0, polls = 0, waits = 0;
+    const answers = [
+      { ok: false, code: "not_running", secret: canary },
+      { ok: true, code: "ok" }, { ok: false, code: "host_failed" },
+      { ok: false, code: "timeout" }, { ok: false, code: canary },
+    ];
+    const h = {
+      scenario: () => scenario,
+      setScenario: (value) => { scenario = value; },
+      clearRequests: () => { clears++; },
+      requests: (cmd) => {
+        assert.equal(cmd, "status");
+        if (mode === "partial_requests") throw readError;
+        return [{ cmd, raw: canary }, { cmd, raw: canary }];
+      },
+      answers: (cmd) => {
+        assert.equal(cmd, "status");
+        polls++;
+        if (mode === "partial_answers") throw readError;
+        if (mode === "malformed_answer") return [null];
+        return mode === "wrong_ack" ? answers : [];
+      },
+      closeRealPopup: async () => { closes++; },
+    };
+    await assert.rejects(grantWithStoppedHost(h, async () => {}, {
+      attempts: 2, wait: async (ms) => { assert.equal(ms, 20); waits++; },
+    }), (error) => mode === "partial_answers" ? error === readError :
+      mode === "malformed_answer" ? error instanceof TypeError :
+      error.message === (mode === "wrong_ack" ? "toolbar setup status did not acknowledge not_running" : "toolbar setup status answer did not arrive"));
+    assert.deepEqual(scenario, { notRunning: true });
+    assert.equal(clears, 1);
+    assert.equal(closes, 0);
+    assert.equal(polls, ["wrong_ack", "partial_answers", "malformed_answer"].includes(mode) ? 1 : 2);
+    assert.equal(waits, ["timeout", "partial_requests"].includes(mode) ? 2 : 0);
+    assert.equal(lines.length, 1);
+    assert.ok(lines[0].startsWith("[fixture-barrier] "));
+    assert.ok(!lines[0].includes(canary));
+    assert.ok(lines[0].length < 400);
+    const record = JSON.parse(lines[0].slice("[fixture-barrier] ".length));
+    assert.deepEqual(Object.keys(record).sort(), ["codes", "elapsedMs", "reason", "statusAnswers", "statusRequests"]);
+    assert.ok(Number.isInteger(record.elapsedMs) && record.elapsedMs >= 0);
+    assert.equal(record.statusRequests, mode === "partial_requests" ? "unreadable" : 2);
+    if (["partial_answers", "malformed_answer"].includes(mode)) {
+      assert.equal(record.statusAnswers, "unreadable");
+      assert.equal(record.codes, "unreadable");
+      assert.equal(record.reason, "unreadable");
+    } else {
+      assert.equal(record.reason, mode === "wrong_ack" ? "wrong_ack" : "timeout");
+      assert.equal(record.statusAnswers, mode === "wrong_ack" ? 5 : 0);
+      assert.deepEqual(record.codes, mode === "wrong_ack"
+        ? { not_running: 1, ok: 1, host_failed: 1, timeout: 1, other: 1 }
+        : { not_running: 0, ok: 0, host_failed: 0, timeout: 0, other: 0 });
+    }
+  });
+}
+
+test("a broken diagnostic sink cannot replace the original barrier timeout", async (t) => {
+  t.mock.method(console, "error", () => { throw new Error("private sink error"); });
+  const h = {
+    scenario: () => ({}), setScenario: () => {}, clearRequests: () => {},
+    answers: () => [], requests: () => [],
+    closeRealPopup: async () => assert.fail("must retain stopped scenario"),
+  };
+  await assert.rejects(grantWithStoppedHost(h, async () => {}, { attempts: 1, wait: async () => {} }),
+    { message: "toolbar setup status answer did not arrive" });
+});
