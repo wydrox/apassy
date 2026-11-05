@@ -217,6 +217,11 @@ jobs:
         set -euo pipefail
         h2_rc=0
         if [[ -e tests/evals/secret-context-heldout-v2.jsonl || -e tests/evals/secret-context-heldout-v2.manifest.json ]]; then
+          "$PY" -I -B tests/evals/secret_context_heldout_v2.py --check || h2_rc=$?
+          git diff --quiet -- tests/evals/secret_context_heldout_v2.py \
+            tests/evals/secret-context-heldout-v2.jsonl \
+            tests/evals/secret-context-heldout-v2.manifest.json \
+            docs/evaluation/secret-context-heldout-v2.md || h2_rc=$?
           "$PY" -B tests/evals/secret_context_heldout_preflight.py \
             --data tests/evals/secret-context-heldout-v2.jsonl \
             --manifest tests/evals/secret-context-heldout-v2.manifest.json \
