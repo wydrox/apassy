@@ -350,6 +350,13 @@ allow fit is at least 70 percent per class. At least 40 allow rows use an explic
 HTTPS `.example.test` host. Text stays natural rather than being shortened to
 fit the budget.
 
+Necessary class conditions use visible facts: every cold-start secret has
+`env_from=none`, and every multi-secret row has at least two secrets. Positive
+known-history rows have a positive owner-allow bucket; positive changed/rotated
+rows have a `secret_changed` or `access_changed` bucket within 30 days; positive
+repeat rows have `agent_used=yes`. These conditions qualify the synthetic
+populations without claiming that they fully define a representative class.
+
 Preflight checks schema, provenance and host coherence, the unchanged positive
 label exclusions, local-rule/label consistency, pair and injection structure,
 populations and budget arithmetic, blinded-context fit, and disjointness from
