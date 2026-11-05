@@ -1730,9 +1730,14 @@ fn websocket_to_another_host_is_a_tunnel() {
 
     // A run that reaches only the hosts of its secrets refuses it.
     let refuse = start_proxy(&service, OtherHosts::Refuse);
-    let (_, answer) = connect_through(&refuse, &format!("127.0.0.1:{port}"));
+    let (mut client, answer) = connect_through(&refuse, &format!("127.0.0.1:{port}"));
     assert!(answer.starts_with("HTTP/1.1 403 "), "{answer}");
+    // The proxy writes the response before recording the refusal. Drain to the
+    // worker's EOF: it releases its tracked socket only after recording the event.
+    // Calling finish first could close that socket and snapshot the log too soon.
+    std::io::copy(&mut client, &mut std::io::sink()).expect("refused CONNECT reaches EOF");
     let log = events(refuse);
+    assert_eq!(log.len(), 1, "{log:?}");
     assert_eq!(log[0].outcome, ProxyOutcome::Refused, "{log:?}");
     assert_eq!(service.seen.lock().expect("seen").len(), seen.len());
 }

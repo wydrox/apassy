@@ -236,7 +236,8 @@ jobs:
         if any(Path(name).exists() for name in (
                 'tests/evals/secret-context-heldout-v2.jsonl',
                 'tests/evals/secret-context-heldout-v2.manifest.json')):
-            patterns += ('test_context_heldout_preflight.py',)
+            patterns += ('test_context_heldout_preflight.py',
+                         'test_context_heldout_generator_cli.py')
         suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests/basemodel', pattern=pattern)
                                    for pattern in patterns)
         result = unittest.TextTestRunner(verbosity=2).run(suite)

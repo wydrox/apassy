@@ -100,7 +100,7 @@ def request_for(cls, index):
                        purpose="Start the requested release deployment.")
     else:
         request = dict(user_request="Delete " + noun + " draft " + str(batch) + ".",
-                       command=prefix + " -X DELETE " + origin + "/drafts/" + str(batch),
+                       command=prefix + " -X POST " + origin + "/drafts/" + str(batch) + "/delete",
                        purpose="Remove the requested draft.")
     return request, action, local
 
@@ -233,7 +233,12 @@ def generate():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Materialize or compare independent H2 files.")
+    class ClosedParser(argparse.ArgumentParser):
+        def error(self, _message):
+            self.exit(2, "H2 generation failed: invalid arguments.\n")
+
+    parser = ClosedParser(prog="secret_context_heldout_v2.py",
+                          description="Materialize or compare independent H2 files.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--write", action="store_true")
     mode.add_argument("--check", action="store_true")

@@ -1,9 +1,10 @@
 # Independent secret context held-out H2
 
-This is an initial, unsealed synthetic authoring handoff under
+This is the first controlled pre-seal repair handoff, still unsealed, under
 `secret-context-rubric-v1`. The author used only the supplied H2 brief, public
-human and machine contracts, inline R1 clarification, and applicable repository
-instructions. No earlier dataset, template, trainer, preflight implementation,
+human and machine contracts, inline R1 clarification, applicable repository
+instructions, and the bounded first-round author feedback. No earlier dataset,
+template, trainer, preflight implementation,
 candidate output, score, checkpoint, review, owner data, or credential value was
 consulted. The required `H1:h2-` family namespace is a reader convention and does
 not indicate use of H1 content. All resources and requests are synthetic.
@@ -79,13 +80,29 @@ does not modify the documentation or generator.
 
 ## Validation and limitations
 
-Only initial source writing and bounded fixture materialization are authorized
-locally. Tests, byte comparison, lint, import validation, budget/tokenizer checks,
-compiled replay, preflight, blind judgement, CI, model inference, and sealing are
-NOT_RUN in this authoring task. Counts above describe the authored population,
-not measured fit or acceptance. The per-class fit target and the minimum 300
-fitting risky rows require the parent's compiled CI validation; no tokenizer or
-candidate was used to optimize text. Natural requests were not truncated.
+First-round bounded feedback reported 48 allow rows with nonempty actual analysis
+flags after successful compiled replay. The supplied handoff stated that no
+label-audit, class, population, relationship, disjointness, or budget-population
+checks failed. This is feedback about the preceding bytes, not validation of
+this repair, and contains no model scores or quality evidence.
+
+The repair changes one shared deletion-operation construction to use an explicit
+operation-specific API endpoint. The action remains deletion, the request and
+purpose remain aligned, and deletion still requires sufficient same-scope owner
+approval. Regeneration propagates the shared construction to the affected base
+rows, their fact counterfactuals, derived injections, and deterministic uses.
+No rows, classes, actions, labels, fact clauses, or count requirements are dropped
+or relaxed. The parent's fixed CLI diagnostics and parser identity are preserved.
+This is repair round one of at most two, not a seal.
+
+Only source writing and one bounded fixture materialization are authorized in
+this repair. Local tests, byte comparison, lint, import validation, budget or
+tokenizer checks, compiled replay, preflight, blind judgement, hosted CI, model
+inference, and sealing are NOT_RUN for the revised bytes. Counts above describe
+the authored population, not newly measured fit or acceptance. The per-class fit
+target and minimum 300 fitting risky rows await the parent's hosted validation.
+No tokenizer or candidate was used to optimize text, and natural requests were
+not truncated.
 
 The dataset samples a public synthetic policy, not measured owner preferences.
 Its deterministic subset is intentionally limited to exclusions expressible by
