@@ -278,7 +278,8 @@ runtime activation or release was performed by this package.
 
 The owner requested Modal to shorten training. The active preparation path runs
 the existing `context_existing_freeze.run(device='cuda')` and `train.py` on one
-L4, followed by one hosted Ubuntu CPU evaluation. It does not restore the parked
+GPU, preferring A10 with optional L4 at scheduling, followed by one hosted Ubuntu
+CPU evaluation. It does not restore the parked
 B2 trainer or repeat the consumed W8 probe. The training loop, quality gates,
 baseline and CPU cost comparison remain unchanged.
 
@@ -289,7 +290,14 @@ The deterministic nine-file plain-tar result binds the upload inventory, G1
 groups=400/seed=7, checkpoint reports and freeze. The evaluator checks the bundle,
 external freeze hash and its own checkout before reading held-out data.
 
-The proposed attempt has one L4 with no fallback, four CPU cores and 32 GiB RAM.
+The proposed attempt requests `gpu=['A10', 'L4']` in that order, with one GPU,
+four CPU cores and 32 GiB RAM. Modal's [ordered GPU fallbacks](https://modal.com/docs/guide/gpu#gpu-fallbacks)
+select the resource before training starts; there is one spawn, `retries=0` and
+`max_containers=1`. There is no training retry after OOM, error or preemption.
+Worker and bundle validation accept only the exact device names `NVIDIA A10`,
+`NVIDIA A10G` and `NVIDIA L4`, preserving the actual name in the receipt. A10
+availability and performance have not been measured; no shorter allocation or
+training time is established.
 The whole remote attempt, including image build and export, is bounded at four
 hours; image build has a 30-minute sublimit and the caller has a 4h15 cleanup
 cutoff. A persistent marker refuses a repeated attempt. The proposed total Modal

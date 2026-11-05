@@ -108,7 +108,7 @@ import context_modal_existing, context_external_bundle
         for case in ('deadline', 'inventory', 'versions', 'cuda', 'gpu', 'duplicate'):
             core.package_versions.return_value = {} if case == 'versions' else B.PACKAGE_VERSIONS
             fake_torch.cuda.is_available.return_value = case != 'cuda'
-            fake_torch.cuda.get_device_name.return_value = 'A10G' if case == 'gpu' else 'NVIDIA L4'
+            fake_torch.cuda.get_device_name.return_value = 'NVIDIA A100' if case == 'gpu' else 'NVIDIA L4'
             with self.subTest(case=case), patch.dict(sys.modules, {'torch': fake_torch, 'modal': fake_modal, 'context_train': core}), \
                  patch.object(M, 'REMOTE_SRC', str(self.root)), patch.object(M.subprocess, 'Popen') as process:
                 with self.assertRaises((ValueError, TimeoutError)):
@@ -118,11 +118,29 @@ import context_modal_existing, context_external_bundle
         marker.put.assert_called_once()
         self.assertTrue(marker.put.call_args.kwargs['skip_if_exists'])
 
+    def test_worker_rejects_unsupported_gpu_before_marker_root_or_child(self):
+        for name in ('NVIDIA A100', 'NVIDIA T4', 'NVIDIA H100', 'NVIDIA L40S',
+                     'unknown', 'A10', 'NVIDIA A10 extra', '', None):
+            core = NS(package_versions=lambda: B.PACKAGE_VERSIONS)
+            torch = NS(cuda=NS(is_available=lambda: True, get_device_name=lambda _: name))
+            modal = NS(Dict=NS(from_name=Mock()))
+            with self.subTest(gpu_name=name), patch.dict(sys.modules, {
+                    'context_train': core, 'torch': torch, 'modal': modal}), \
+                 patch.object(M, 'REMOTE_SRC', str(self.repo)), \
+                 patch.object(B, 'run_root') as root, patch.object(Path, 'mkdir') as mkdir, \
+                 patch.object(M, '_child') as child:
+                with self.assertRaisesRegex(ValueError, 'unsupported GPU'):
+                    M.worker('run', SHA, M.time.time()+2000, B.inventory_sha256({}))
+                modal.Dict.from_name.assert_not_called()
+                root.assert_not_called()
+                mkdir.assert_not_called()
+                child.assert_not_called()
+
     def test_worker_success_and_timeout_cleanup(self):
-        for timeout in (False, True):
+        for gpu_name, timeout in [(name, False) for name in B.SUPPORTED_GPU_NAMES] + [('NVIDIA L4', True)]:
             run_root = self.root / ('failed' if timeout else 'success')
             core = NS(package_versions=lambda: B.PACKAGE_VERSIONS)
-            torch = NS(cuda=NS(is_available=lambda: True, get_device_name=lambda _: 'NVIDIA L4'))
+            torch = NS(cuda=NS(is_available=lambda: True, get_device_name=lambda _: gpu_name))
             marker = NS(put=Mock(return_value=True))
             modal = NS(Dict=NS(from_name=Mock(return_value=marker)))
             volume = NS(commit=Mock())
@@ -139,11 +157,12 @@ import context_modal_existing, context_external_bundle
                     (run_root/'full/freeze.json').write_bytes(b'fake freeze')
             def pack(root, receipt, output):
                 self.assertEqual(receipt['config'], dict(groups=400, seed=7, device='cuda'))
+                self.assertEqual(receipt['gpu_name'], gpu_name)
                 self.assertEqual(receipt['inventory'], {})
                 self.assertEqual(set(receipt), B.RECEIPT_KEYS)
                 self.assertEqual(output, Path('/export/bundle.tar'))
                 return dict(sha256='c'*64, size=10240)
-            with self.subTest(timeout=timeout), patch.dict(sys.modules, {'context_train': core, 'torch': torch,
+            with self.subTest(gpu_name=gpu_name, timeout=timeout), patch.dict(sys.modules, {'context_train': core, 'torch': torch,
                     'modal': modal, 'common': NS(base_dir=lambda: '/public/base')}), \
                  patch.object(M, 'REMOTE_SRC', str(self.repo)), patch.object(B, 'run_root', return_value=run_root), \
                  patch.object(M, '_child', side_effect=child), patch.object(B, 'pack', side_effect=pack) as packed, \
@@ -258,7 +277,7 @@ import context_modal_existing, context_external_bundle
         modal.App.assert_called_once_with(M.APP_NAME, include_source=False)
         options = app.function.call_args.kwargs
         self.assertEqual({k: options[k] for k in ('gpu','cpu','memory','timeout','retries','max_containers','secrets','serialized','include_source')},
-                         dict(gpu='L4', cpu=(4.,4.), memory=(32768,32768), timeout=14400,
+                         dict(gpu=['A10', 'L4'], cpu=(4.,4.), memory=(32768,32768), timeout=14400,
                               retries=0, max_containers=1, secrets=[], serialized=True, include_source=False))
         self.assertEqual(set(options['volumes']), {'/export'})
         call.get.aio.assert_awaited_once()

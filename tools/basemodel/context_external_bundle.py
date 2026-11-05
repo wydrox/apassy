@@ -31,6 +31,7 @@ UPLOAD_PATHS = tuple(sorted(
 BUNDLE_MEMBERS = ('g1/data-manifest.json', 'g1/train.jsonl', 'g1/val.jsonl',
                   'full/freeze.json', 'full/context.safetensors', 'full/control.safetensors',
                   'full/context-report.json', 'full/control-report.json', 'receipt.json')
+SUPPORTED_GPU_NAMES = ('NVIDIA A10', 'NVIDIA A10G', 'NVIDIA L4')
 MAX_BUNDLE_BYTES = 256 * 1024**2
 RECEIPT_KEYS = frozenset(('schema', 'run_id', 'source_sha', 'inventory', 'inventory_sha256',
                          'package_versions', 'torch_wheel_sha256', 'gpu_name', 'freeze_sha256',
@@ -121,7 +122,7 @@ def _receipt(r):
             and all(_hex(v) for v in r['inventory'].values()))
     require(r['inventory_sha256'] == inventory_sha256(r['inventory']))
     require(r['package_versions'] == PACKAGE_VERSIONS and r['torch_wheel_sha256'] == TORCH_SHA256)
-    require(isinstance(r['gpu_name'], str) and 'L4' in r['gpu_name'])
+    require(isinstance(r['gpu_name'], str) and r['gpu_name'] in SUPPORTED_GPU_NAMES)
     require(r['config'] == {'groups': 400, 'seed': 7, 'device': 'cuda'}
             and all(type(r['config'][k]) is int for k in ('groups', 'seed')))
     require(r['env'] == {'NVIDIA_TF32_OVERRIDE': '0'})
@@ -209,6 +210,11 @@ def restore(bundle, expected_bundle_sha, expected_freeze_sha, run_id, scratch=SC
             require(size <= MAX_BUNDLE_BYTES, 'bundle too large')
             require(hashlib.file_digest(f, 'sha256').hexdigest() == expected_bundle_sha, 'bundle SHA mismatch')
             entries = _headers(f, size)  # Complete prevalidation before mkdir or file writes.
+            # Validate the bounded receipt before restoring any payload to disk.
+            info, offset = entries[-1]
+            f.seek(offset)
+            receipt = _receipt(_json(f.read(info.size)))
+            require(receipt['freeze_sha256'] == expected_freeze_sha and receipt['run_id'] == run_id)
             root.parent.mkdir(parents=True, exist_ok=True)
             root.mkdir(mode=0o700)
             created = True

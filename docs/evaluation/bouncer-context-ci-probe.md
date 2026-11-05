@@ -301,7 +301,8 @@ training, models, hosted benchmark and artifact upload are **NOT_RUN** here.
 ## Existing trainer on Modal (runtime NOT_RUN)
 
 The current preparation uses the existing `train.py` through
-`context_existing_freeze.py`, on one Modal L4. It generates only G1 with 400 groups
+`context_existing_freeze.py`, on one Modal GPU, preferring A10 with optional L4
+at scheduling. It generates only G1 with 400 groups
 and seed 7, trains context and facts-blind heads with the existing fixed settings,
 and fits both thresholds on validation using CPU. It does not run W8 again or
 change the gates. Modal receives an explicit source inventory without `.git`, H1
@@ -322,8 +323,15 @@ requires CPython 3.12 with Modal SDK 1.5.4 and a clean tracked checkout at that 
 SHA. Other interpreter or SDK versions are refused before provider calls; the
 serialized launcher and remote container must use the same Python minor version.
 The proposed envelope is USD 8 total for Modal, including setup/storage/egress;
-GitHub usage is separate. Limits are fixed: one L4, no fallback or retry, four CPU
-cores, 32 GiB RAM, 30-minute image build, four hours for the whole remote attempt
+GitHub usage is separate; USD 8 is an approval envelope, not a provider spend cap.
+The fixed request is `gpu=['A10', 'L4']`: Modal respects this [preference order](https://modal.com/docs/guide/gpu#gpu-fallbacks)
+when scheduling one GPU before training starts. There is one spawn, `retries=0`
+and `max_containers=1`, with no training retry after OOM, error or preemption.
+Worker and bundle validation accept only exact `NVIDIA A10`, `NVIDIA A10G` or
+`NVIDIA L4` names and preserve the actual device name in the receipt. A10
+availability and performance remain unmeasured; no shorter allocation or training
+time is established. Other limits stay fixed: four CPU cores, 32 GiB RAM,
+30-minute image build, four hours for the whole remote attempt
 including export, and a 4h15 caller cleanup cutoff. A durable attempt marker
 prevents a restart from repeating training. A budget argument does not raise the
 resource or time limits.

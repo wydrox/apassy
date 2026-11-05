@@ -4,6 +4,7 @@ import copy
 import hashlib
 import io
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -60,17 +61,24 @@ class BundleTests(unittest.TestCase):
         return output
 
     def test_deterministic_roundtrip(self):
-        other = self.base / 'other.tar'
-        self.assertEqual(B.pack(self.root, self.receipt, other), self.packed)
-        self.assertEqual(self.restore(), self.receipt)
-        root = B.run_root(self.run, self.scratch)
-        self.assertEqual(root.stat().st_mode & 0o777, 0o700)
-        for name in B.BUNDLE_MEMBERS[:-1]:
-            self.assertEqual((root / name).read_bytes(), (self.root / name).read_bytes())
-        with tarfile.open(self.bundle) as tar:
-            self.assertEqual(tuple(t.name for t in tar), B.BUNDLE_MEMBERS)
-            for t in tar.getmembers():
-                self.assertEqual((t.uid, t.gid, t.mtime, t.mode, t.uname, t.gname), (0, 0, 0, 0o644, '', ''))
+        for gpu_name in B.SUPPORTED_GPU_NAMES:
+            with self.subTest(gpu_name=gpu_name):
+                self.receipt['gpu_name'] = gpu_name
+                self.bundle.unlink()
+                self.packed = B.pack(self.root, self.receipt, self.bundle)
+                other = self.base / 'other.tar'
+                self.assertEqual(B.pack(self.root, self.receipt, other), self.packed)
+                self.assertEqual(self.restore(), self.receipt)
+                root = B.run_root(self.run, self.scratch)
+                self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+                for name in B.BUNDLE_MEMBERS[:-1]:
+                    self.assertEqual((root / name).read_bytes(), (self.root / name).read_bytes())
+                with tarfile.open(self.bundle) as tar:
+                    self.assertEqual(tuple(t.name for t in tar), B.BUNDLE_MEMBERS)
+                    for t in tar.getmembers():
+                        self.assertEqual((t.uid, t.gid, t.mtime, t.mode, t.uname, t.gname), (0, 0, 0, 0o644, '', ''))
+                other.unlink()
+                shutil.rmtree(root)
 
     def test_hashes_existing_root_and_cleanup(self):
         with self.assertRaises(ValueError):
@@ -79,7 +87,7 @@ class BundleTests(unittest.TestCase):
             self.restore(freeze='0' * 64)
         self.assertFalse((self.scratch / self.run).exists())
         root = self.scratch / self.run
-        root.mkdir()
+        root.mkdir(parents=True)
         sentinel = root / 'sentinel'
         sentinel.write_text('preserve')
         with self.assertRaises(ValueError):
@@ -154,6 +162,25 @@ class BundleTests(unittest.TestCase):
         with patch.object(B, '_limit', return_value=1), self.assertRaises(ValueError):
             self.restore()
         self.assertFalse(self.scratch.exists())
+
+    def test_gpu_names_are_exact_and_refused_before_restore(self):
+        self.assertEqual(B.SUPPORTED_GPU_NAMES, ('NVIDIA A10', 'NVIDIA A10G', 'NVIDIA L4'))
+        for name in ('NVIDIA A100', 'NVIDIA T4', 'NVIDIA H100', 'NVIDIA L40S',
+                     'unknown', 'A10', 'NVIDIA A10 extra', '', None):
+            with self.subTest(gpu_name=name):
+                receipt = dict(self.receipt, gpu_name=name)
+                with self.assertRaises(ValueError):
+                    B.pack(self.root, receipt, self.base / 'refused.tar')
+                # Forge the transport directly so pack's guard cannot mask restore's.
+                self.receipt['gpu_name'] = name
+                path = self.archive()
+                with patch.object(Path, 'mkdir') as mkdir, \
+                     patch.object(tarfile.TarFile, 'extractfile') as extract:
+                    with self.assertRaises(ValueError):
+                        self.restore(path)
+                    mkdir.assert_not_called()
+                    extract.assert_not_called()
+                self.assertFalse(self.scratch.exists())
 
     def test_bad_receipt_cleanup(self):
         for mutate in (lambda r: r.update(extra=True), lambda r: r.update(package_versions={}),

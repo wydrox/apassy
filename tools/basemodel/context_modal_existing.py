@@ -20,7 +20,7 @@ import time
 
 APP_NAME = 'apassy-context-existing'
 MARKER_DICT = 'apassy-context-run-markers'
-GPU = 'L4'
+GPU_PREFERENCES = ['A10', 'L4']
 CPU = (4.0, 4.0)
 MEMORY_MIB = (32768, 32768)
 FUNCTION_TIMEOUT = 14400
@@ -95,7 +95,6 @@ def worker(run_id, source_sha, deadline_epoch, inventory_sha256):
     sys.path.insert(0, str(Path(REMOTE_SRC) / 'tools/basemodel'))
     import context_external_bundle as bundle
     import context_train as core
-    root = bundle.run_root(run_id)
     versions = core.package_versions()
     if versions != bundle.PACKAGE_VERSIONS:
         raise ValueError('package versions mismatch')
@@ -103,8 +102,9 @@ def worker(run_id, source_sha, deadline_epoch, inventory_sha256):
     if not torch.cuda.is_available():
         raise ValueError('CUDA unavailable')
     gpu_name = torch.cuda.get_device_name(0)
-    if 'L4' not in gpu_name:
-        raise ValueError('L4 required')
+    if not isinstance(gpu_name, str) or gpu_name not in bundle.SUPPORTED_GPU_NAMES:
+        raise ValueError('unsupported GPU')
+    root = bundle.run_root(run_id)
     import modal
     marker = modal.Dict.from_name(MARKER_DICT, create_if_missing=True, environment_name='main')
     if marker.put(run_id, dict(source_sha=source_sha, started_epoch=started), skip_if_exists=True) is not True:
@@ -225,7 +225,7 @@ async def _execute(staging, evidence, source_sha, run_id, inv_sha, start):
                 _save(evidence, 'volume.json', dict(volume_id=volume.object_id))
                 image = _image(modal, staging)
                 function = app.function(image=image, serialized=True, include_source=False,
-                                        gpu=GPU, cpu=CPU, memory=MEMORY_MIB, timeout=FUNCTION_TIMEOUT,
+                                        gpu=GPU_PREFERENCES, cpu=CPU, memory=MEMORY_MIB, timeout=FUNCTION_TIMEOUT,
                                         retries=0, max_containers=1, volumes={'/export': volume},
                                         secrets=[])(_serialized_entry(volume))
                 # App entry eagerly resolves the image. Bound entry AND explicit build,
