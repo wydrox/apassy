@@ -415,8 +415,10 @@ class RecipeCoherenceTests(unittest.TestCase):
         self.c = route.pf.load_contract()
 
     def unpaired(self, rows, label, cls=None):
+        pair_targets = {r['pair_of'] for r in rows if r.get('pair_of') is not None}
         return [r for r in rows if r['label'] == label and r.get('pair_of') is None
-                and r.get('injection_of') is None and (cls is None or r['class'] == cls)]
+                and r['id'] not in pair_targets and r.get('injection_of') is None
+                and (cls is None or r['class'] == cls)]
 
     def untwinned(self, rows, candidates):
         bases = {r['injection_of'] for r in rows if r.get('injection_of') is not None}
@@ -610,7 +612,9 @@ class RecipeCoherenceTests(unittest.TestCase):
         for count in (17, 18):
             with self.subTest(case='M13', count=count):
                 rows = fresh()
-                for r in self.unpaired(rows, 'allow_ok', cold)[:count]:
+                candidates = self.unpaired(rows, 'allow_ok', cold)
+                self.assertEqual(len(candidates), 22)
+                for r in candidates[:count]:
                     # A twin may differ in purpose; keep command and facts intact.
                     self.assertTrue(route.fitting(r, self.c))
                     r['request']['purpose'] = 'x' * 4096
