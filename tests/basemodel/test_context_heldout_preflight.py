@@ -273,8 +273,11 @@ class PreflightTests(unittest.TestCase):
             self.failure('injections')
 
     def test_view_incoherence(self):
-        self.rows[0]['secrets'][0]['env_from'] = 'none'
-        self.failure('validate_view')
+        r = next(r for r in self.rows if r['label'] == 'allow_ok'
+                 and r['secrets'][0]['env_from'] != 'none')
+        r['secrets'][0]['env_from'] = 'none'
+        result = self.failure('validate_view')
+        self.assertEqual(result['failures']['validate_view'], [r['id']])
 
     def test_replay_error_is_redacted(self):
         with patch.object(pf.replay, 'baseline_lower_bound', side_effect=ValueError('PRIVATE TEXT')) as call:
