@@ -420,6 +420,12 @@ class WorkflowTests(unittest.TestCase):
                         body = chunk.split('        ' + delimiter, 1)[0]
                         ast.parse('\n'.join(line[8:] for line in body.splitlines()))
                 ext = current[current.index('  external-evaluate:\n'):]
+                shipped = ext.index('Fetch explicitly requested shipped evidence')
+                self.assertLess(ext.index('Download and restore pinned external bundle'), shipped)
+                self.assertLess(shipped, ext.index('Install pinned CUDA distribution on CPU'))
+                self.assertLess(shipped, ext.index('Build actual Rust baseline replay'))
+                self.assertLess(ext.index('Verify receipt git versions paths and G1'),
+                                ext.index('Fetch and verify the pinned public base'))
                 self.assertLess(ext.index('rm -rf -- "$RUNNER_TEMP/context-external-route-target"'), ext.index('Fetch and verify the pinned public base'))
                 self.assertIn('      continue-on-error: true',ext)
                 self.assertIn('      timeout-minutes: 120',ext)

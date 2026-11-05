@@ -1525,6 +1525,7 @@ jobs:
         date +%s > "$EXP/evidence/start-epoch.txt"
         python -m venv "$EXP/venv"
     - name: Download and restore pinned external bundle
+      timeout-minutes: 10
       env:
         APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
         CHECKPOINT_ASSET: ${{ inputs.bundle_asset }}
@@ -1544,6 +1545,37 @@ jobs:
         receipt = restore(bundle, e['BUNDLE_SHA256'], e['FREEZE_SHA256'], e['RUN_ID'])
         (Path(e['EXP']) / 'receipt.json').write_text(json.dumps(receipt))
         bundle.unlink()
+        PYCODE
+    - name: Fetch explicitly requested shipped evidence and verify before held-out IO
+      if: ${{ inputs.shipped_baseline }}
+      env:
+        SHIPPED_URL: ${{ secrets.APASSY_CONTEXT_SHIPPED_HEADS_URL }}
+      run: |
+        set -euo pipefail
+        test -n "$SHIPPED_URL"
+        # Fetch short-lived URLs before package installation and Rust compilation.
+        # This copies and hashes bytes only; model loading keeps its later gates.
+        "$PY" -B - <<'PYCODE'
+        import hashlib, os, subprocess, sys
+        from pathlib import Path
+        from urllib.parse import urlsplit
+        sys.path.insert(0, 'tools/basemodel')
+        from context_replay import SHIPPED_SHA
+        url = os.environ['SHIPPED_URL']
+        p = urlsplit(url)
+        if (p.scheme != 'https' or not p.hostname or p.username or p.password or
+                any(ord(c) <= 32 or ord(c) >= 127 for c in url) or any(c in url for c in '\"\\')):
+            raise SystemExit('shipped URL refused')
+        destination = Path(os.environ['EXP']) / 'shipped.safetensors'
+        result = subprocess.run(['curl', '--config', '-', '--proto', '=https', '--proto-redir', '=https',
+                                 '--fail', '--silent', '--max-time', '300', '--connect-timeout', '30',
+                                 '--max-filesize', '268435456', '--output', str(destination)],
+                                input='url = "' + url + '"\n', text=True, capture_output=True, timeout=330)
+        if result.returncode or not destination.is_file() or destination.stat().st_size > 268435456:
+            raise SystemExit('shipped download refused')
+        with destination.open('rb') as f:
+            if hashlib.file_digest(f, 'sha256').hexdigest() != SHIPPED_SHA:
+                raise SystemExit('shipped SHA mismatch')
         PYCODE
     - name: Install pinned CUDA distribution on CPU
       run: |
@@ -1624,36 +1656,6 @@ jobs:
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
         PY
-    - name: Fetch explicitly requested shipped evidence and verify before held-out IO
-      if: ${{ inputs.shipped_baseline }}
-      env:
-        SHIPPED_URL: ${{ secrets.APASSY_CONTEXT_SHIPPED_HEADS_URL }}
-      run: |
-        set -euo pipefail
-        test -n "$SHIPPED_URL"
-        # URL is passed through a config pipe, never echoed or included in logs.
-        "$PY" -B - <<'PYCODE'
-        import hashlib, os, subprocess, sys
-        from pathlib import Path
-        from urllib.parse import urlsplit
-        sys.path.insert(0, 'tools/basemodel')
-        from context_replay import SHIPPED_SHA
-        url = os.environ['SHIPPED_URL']
-        p = urlsplit(url)
-        if (p.scheme != 'https' or not p.hostname or p.username or p.password or
-                any(ord(c) <= 32 or ord(c) >= 127 for c in url) or any(c in url for c in '\"\\')):
-            raise SystemExit('shipped URL refused')
-        destination = Path(os.environ['EXP']) / 'shipped.safetensors'
-        result = subprocess.run(['curl', '--config', '-', '--proto', '=https', '--proto-redir', '=https',
-                                 '--fail', '--silent', '--max-time', '300', '--connect-timeout', '30',
-                                 '--max-filesize', '268435456', '--output', str(destination)],
-                                input='url = "' + url + '"\n', text=True, capture_output=True, timeout=330)
-        if result.returncode or not destination.is_file() or destination.stat().st_size > 268435456:
-            raise SystemExit('shipped download refused')
-        with destination.open('rb') as f:
-            if hashlib.file_digest(f, 'sha256').hexdigest() != SHIPPED_SHA:
-                raise SystemExit('shipped SHA mismatch')
-        PYCODE
     - name: Measure fresh CPU arms on G1 val (no quality verdict)
       timeout-minutes: 110
       run: |

@@ -275,6 +275,11 @@ from download validation. Boolean values do not substitute for integer fields.
 Every field and the URL are validated before any network request or file creation.
 Missing, expired, malformed or mismatched attestations fail closed. Prepare a fresh
 attestation close to execution; a delayed run may need a new approved preflight.
+The local operator limits expiry by the URL's SAS `se`, its JWT `exp`, and its own
+short cap, recording the limiting clock without the URL or JWT. Observed GitHub
+JWTs allow about five minutes, so apply and dispatch immediately. External input
+and shipped baseline bytes are fetched before package installation or compilation;
+all later package, source, model and held-out gates remain in place.
 The repository is public, so model weights must never be put in Actions artifacts.
 They remain in the private draft; the URL grants temporary read access to one object.
 
