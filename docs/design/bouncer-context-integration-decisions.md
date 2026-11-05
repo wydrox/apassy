@@ -310,3 +310,72 @@ approval must cover those dispatches, draft uploads and the paid attempt. Any
 requested private baseline URL is confined to the hosted evaluator and checked
 against the shipped SHA before held-out reads. Training, transport, CPU cost,
 quality and runtime activation remain unmeasured until their actual runs.
+
+## Independent held-out validation R13
+
+R12 ended with `UNSUPPORTED(label_audit)` on hosted run 42100538530. Its H1
+rows were loaded, but no candidate scores were computed. H1 is consumed and
+stays unchanged. The row, clause and count behind the audit failure are unknown.
+The auditor agrees with the visible-facts contract; its exclusions stay fixed.
+
+Root interprets the owner's instruction to train and test the bouncer as covering
+preparation and one CPU-only evaluation on an independent H2 set. The presented
+approval asked about one A10/L4 attempt and its USD 8 cost; the subsequent owner
+instruction did not restrict independent CPU test data. This is a protocol
+decision under that request, not a new owner instruction or payment approval.
+The one paid training attempt remains consumed. No new GPU, Modal allocation,
+budget, threshold, head training, activation, merge or release is part of R13.
+
+The candidate remains the original bundle and freeze from training source
+`7a63ffad557ace5e396c4a709ad8453fb611b565`. Its weights, thresholds, training
+reports and data are immutable. H2 uses that source's unchanged evaluator and
+the same quality, shipped-baseline and CPU cost gates. The facts gate uses the
+current implementation's AUROC and normal-rate deltas of at least 0.15; the
+older supervision table's control-ordering delta is superseded.
+
+Before H2 exists, a worker who never sees it implements a candidate-free
+preflight. A fresh author may read only the public context contract, R1 and a
+fixed author brief. The author must not read H1, G1 templates/data, experiment
+reviews, checkpoints, freezes, model scores or baseline ask rates. A separate
+read-only judge checks command/request alignment with labels and relationship
+annotations removed. Independence is procedural in a shared checkout; all
+examples are synthetic and make no claim about production preferences.
+
+H2 has at most 1000 rows and families `H1:h2-*`, as required by the frozen
+reader. Its manifest has a top-level lowercase SHA-256 and no `file` key. Target
+populations are at least 340 allow rows, 60 per mandatory class, 340 risky rows
+with at least 300 fitting rows, 110 deterministic rows, 170 counterfactual pairs
+and 120 injection variants. Each mandatory class has at least 30 risky rows;
+allow fit is at least 70 percent per class. At least 40 allow rows use an explicit
+HTTPS `.example.test` host. Text stays natural rather than being shortened to
+fit the budget.
+
+Preflight checks schema, provenance and host coherence, the unchanged positive
+label exclusions, local-rule/label consistency, pair and injection structure,
+populations and budget arithmetic, blinded-context fit, and disjointness from
+the exact original G1 generation. Compiled replay checks must run without skips
+in CI. Fake label-derived scores may test gate structure only: their results
+must never be emitted as model quality or a Gate B verdict. Preflight and judge
+feedback to the author contains only check names, counts and at most 50 H2 IDs.
+Two unsuccessful repair rounds return to supervisor review before further work.
+
+After preflight and judging pass, the author commits H2 and its generator and
+manifest. Root records the byte hash and commit before dispatch and does not
+read H2 rows. No bytes change after the seal. The hosted workflow copies and
+hash-checks sealed H2 outside the checkout, then switches to immutable training
+source. Separate binding evidence records the workflow and training commits,
+H2 seal and original bundle/freeze hashes. No source pin is bypassed or rewritten.
+
+One hosted Ubuntu CPU evaluation follows green CI and supervisor review. Only
+the evaluate step may use 240 minutes; the outer job stays bounded at 300
+minutes. CPU cost is freshly measured. Temporary read URLs are restricted to
+the original draft assets; owned transport secrets are deleted after download.
+The report preserves the evaluator's measured FAIL and UNSUPPORTED outcomes.
+
+Once the evaluator loads any H2 row, H2 is consumed regardless of outcome,
+including audit failure, timeout or missing evidence. There is no automatic
+repeat, H2 repair, H3, retraining or threshold adjustment after that point. A
+failure before row loading stops for supervisor review; at most one retry may
+be considered with unchanged H2 bytes. Any further training or evaluation needs
+a new owner decision. A synthetic Gate B PASS permits only supervisor review
+before C; it is not activation or a production-quality claim.

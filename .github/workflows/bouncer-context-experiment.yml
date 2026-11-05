@@ -219,11 +219,23 @@ jobs:
         import os, unittest
         from pathlib import Path
         assert Path(os.environ['APASSY_CONTEXT_REPLAY_BINARY']).is_file()
+        patterns = ('test_context_replay.py', 'test_context_data.py')
+        if any(Path(name).exists() for name in (
+                'tests/evals/secret-context-heldout-v2.jsonl',
+                'tests/evals/secret-context-heldout-v2.manifest.json')):
+            patterns += ('test_context_heldout_preflight.py',)
         suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests/basemodel', pattern=pattern)
-                                   for pattern in ('test_context_replay.py', 'test_context_data.py'))
+                                   for pattern in patterns)
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
         PY
+        if [[ -e tests/evals/secret-context-heldout-v2.jsonl || -e tests/evals/secret-context-heldout-v2.manifest.json ]]; then
+          "$PY" -B tests/evals/secret_context_heldout_preflight.py \
+            --data tests/evals/secret-context-heldout-v2.jsonl \
+            --manifest tests/evals/secret-context-heldout-v2.manifest.json \
+            --replay-binary "$APASSY_CONTEXT_REPLAY_BINARY" \
+            --out "$EXP/evidence/h2-preflight.json"
+        fi
     - name: Require tokenizer unittest without skips and exact canonical measurement
       run: |
         set -euo pipefail
