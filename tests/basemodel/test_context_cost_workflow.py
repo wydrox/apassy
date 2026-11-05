@@ -152,6 +152,72 @@ class CostAsset(unittest.TestCase):
             self.assertEqual(C.main(), 1)
         self.assertEqual(stderr.getvalue(), 'cost unmeasured: checkpoint input or transport refused\n')
 
+    def cli_with_responses(self, responses):
+        stderr = io.StringIO()
+        requests = []
+        download = C.download
+        def fake(request):
+            requests.append(request)
+            return responses.pop(0)
+        def transport(asset, sha, destination, token):
+            return download(asset, sha, destination, token, fake)
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(self.env(), EXP=tmp, GH_TOKEN='CANARY_TOKEN')
+            with patch.dict(os.environ, env), \
+                 patch.object(C.subprocess, 'check_output', return_value='a'*40), \
+                 patch.object(C, 'download', side_effect=transport), redirect_stderr(stderr):
+                result = C.main()
+            destination = Path(tmp) / 'context.safetensors'
+            body = destination.read_bytes() if destination.exists() else None
+        return result, stderr.getvalue(), requests, body
+
+    def assert_http_diagnostic(self, responses, phase, status):
+        result, stderr, _, body = self.cli_with_responses(responses)
+        self.assertEqual(result, 1)
+        self.assertIsNone(body)
+        lines = stderr.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], 'cost unmeasured: checkpoint input or transport refused')
+        self.assertEqual(json.loads(lines[1]), dict(phase=phase, status=status))
+        self.assertLess(len(lines[1]), 80)
+        for canary in ('CANARY_TOKEN', 'CANARY_URL', 'CANARY_BODY'):
+            self.assertNotIn(canary, stderr)
+
+    def test_cli_http_refusals_identify_only_phase_and_status(self):
+        metadata = json.dumps(self.metadata()).encode()
+        private = b'CANARY_BODY https://private.test/CANARY_URL?token=CANARY_TOKEN'
+        for status in (401, 403, 404):
+            with self.subTest(status=status, phase='release_metadata'):
+                self.assert_http_diagnostic([Response(private, status)], 'release_metadata', status)
+            with self.subTest(status=status, phase='asset'):
+                self.assert_http_diagnostic([Response(metadata), Response(private, status)], 'asset', status)
+            with self.subTest(status=status, phase='cdn'):
+                self.assert_http_diagnostic([Response(metadata), Response(status=302, headers={
+                    'Location': 'https://objects.githubusercontent.com/CANARY_URL?token=CANARY_TOKEN'}),
+                    Response(private, status)], 'asset', status)
+
+    def test_cli_malformed_http_status_is_closed_unknown(self):
+        for status in (None, True, 200.0, -1, 600, 'CANARY_TOKEN CANARY_URL CANARY_BODY',
+                       {'CANARY_TOKEN': 'CANARY_URL CANARY_BODY'}):
+            for phase in ('release_metadata', 'asset'):
+                with self.subTest(status=status, phase=phase):
+                    responses = [Response(b'CANARY_BODY', status)]
+                    if phase == 'asset':
+                        responses.insert(0, Response(json.dumps(self.metadata()).encode()))
+                    self.assert_http_diagnostic(responses, phase, 'unknown')
+
+    def test_cli_success_preserves_bytes_and_redirect_authorization(self):
+        result, stderr, requests, body = self.cli_with_responses([
+            Response(json.dumps(self.metadata()).encode()), Response(status=302, headers={
+                'Location': 'https://objects.githubusercontent.com/checkpoint?sig=CANARY_URL'}),
+            Response(BODY)])
+        self.assertEqual(result, 0)
+        self.assertEqual(stderr, '')
+        self.assertEqual(body, BODY)
+        self.assertTrue(all(request.get_header('Authorization') == 'Bearer CANARY_TOKEN'
+                            for request in requests[:2]))
+        self.assertIsNone(requests[2].get_header('Authorization'))
+
 
 class Workflow(unittest.TestCase):
     def setUp(self):
@@ -172,8 +238,7 @@ class Workflow(unittest.TestCase):
             self.assertEqual(self.source.count('      '+key+':\n'), 2)
             self.assertIn(f'{key}: ${{{{ inputs.{key} }}}}', self.ci)
         for source in (self.source, self.ci):
-            self.assertIn('permissions:\n  contents: read', source)
-            self.assertNotRegex(source, r'(?m)^\s+\w+: write\s*$')
+            self.assertRegex(source, r'(?m)^permissions:\n  contents: read\n')
         self.assertIn('runs-on: ubuntu-24.04', self.cost)
         self.assertIn('timeout-minutes: ${{ inputs.transport_only && 10 || 120 }}', self.cost)
         self.assertIn('timeout-minutes: 110', self.cost)

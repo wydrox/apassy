@@ -1156,6 +1156,9 @@ jobs:
 
   cost-only:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'cost-only' }}
+    # GitHub requires push access to see drafts; the download helper uses GET only.
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.transport_only && 10 || 120 }}
     defaults:
@@ -1451,6 +1454,9 @@ jobs:
 
   external-evaluate:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'external-evaluate' }}
+    # GitHub requires push access to see drafts; the download helper uses GET only.
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     defaults:

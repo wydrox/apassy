@@ -1,5 +1,6 @@
 """Read one draft-release checkpoint; stdlib only, no upload capability."""
 import hashlib
+from enum import Enum
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,26 @@ API = 'https://api.github.com/repos/wydrox/apassy'
 
 class Refused(ValueError):
     """Safe fixed-message failure."""
+
+
+class HTTPPhase(Enum):
+    RELEASE_METADATA = 'release_metadata'
+    ASSET = 'asset'
+
+
+class HTTPRefused(Refused):
+    """Closed transport diagnostics, without response-derived text."""
+
+    def __init__(self, phase, status):
+        super().__init__('cost unmeasured: checkpoint input or transport refused')
+        self.phase = HTTPPhase(phase)
+        self.status = status if type(status) is int and 100 <= status <= 599 else 'unknown'
+
+
+def require_http(response, phase, expected):
+    status = getattr(response, 'status', None)
+    if type(status) is not int or status not in expected:
+        raise HTTPRefused(phase, status)
 
 
 def require(ok):
@@ -80,7 +101,7 @@ def download(asset, expected_sha, destination, token, open_fn=open_request):
     release_id, asset_id = map(int, asset.split('/'))
     require(bool(token))
     with open_fn(api_request(f'/releases/{release_id}', token, 'application/vnd.github+json')) as r:
-        require(r.status == 200)
+        require_http(r, HTTPPhase.RELEASE_METADATA, (200,))
         raw = r.read(1024 * 1024 + 1)
         require(len(raw) <= 1024 * 1024)
         release = json.loads(raw)
@@ -98,6 +119,7 @@ def download(asset, expected_sha, destination, token, open_fn=open_request):
     try:
         for hop in range(4):
             with open_fn(request) as r:
+                require_http(r, HTTPPhase.ASSET, (200, 302))
                 if r.status == 302:
                     url = cdn_url(r.headers.get('Location'))
                     require(url not in seen and hop < 3)
@@ -105,7 +127,6 @@ def download(asset, expected_sha, destination, token, open_fn=open_request):
                     # Fresh request: never copy Authorization onto CDN requests.
                     request = Request(url, headers={'Accept': 'application/octet-stream'})
                     continue
-                require(r.status == 200)
                 digest = hashlib.sha256()
                 size = 0
                 with destination.open('xb') as f:
@@ -130,9 +151,11 @@ def main():
         inputs(os.environ, head)
         download(os.environ['CHECKPOINT_ASSET'], os.environ['CHECKPOINT_SHA256'],
                  Path(os.environ['EXP']) / 'context.safetensors', os.environ['GH_TOKEN'])
-    except Exception:
+    except Exception as error:
         # Do not print exception URLs, response bodies, signed queries or credentials.
         print('cost unmeasured: checkpoint input or transport refused', file=sys.stderr)
+        if isinstance(error, HTTPRefused):
+            print(json.dumps({'phase': error.phase.value, 'status': error.status}), file=sys.stderr)
         return 1
     return 0
 

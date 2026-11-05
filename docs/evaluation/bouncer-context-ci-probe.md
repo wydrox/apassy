@@ -256,9 +256,17 @@ revision must include this workflow; the original task HEAD is not a dispatch ta
 The owner must explicitly approve any later local upload to a **draft** GitHub
 release. This implementation only reads. Before model training, one separately
 approved transport preflight must establish that the workflow's `GITHUB_TOKEN`
-with **Contents read** can see the draft release and download its asset. Draft
-visibility with this token is **RUNTIME UNVERIFIED**; inaccessible metadata fails
-closed. No credential or permission expansion is implied. GitHub documents
+can see the draft release and download its asset. The first Contents-read attempt
+was refused before model execution; its HTTP status was not recorded. GitHub
+limits [draft visibility](https://docs.github.com/en/rest/releases/releases#list-releases)
+to users with push access. The manual `cost-only` and `external-evaluate` jobs
+therefore request **Contents write**, with a matching maximum grant on their
+reusable-workflow caller. Both workflow defaults and all other called jobs retain
+Contents read. The existing manual event/mode guards remain in place, and the
+downloader still issues GET requests only. The token is scoped to its job and
+passed only to its download step; there is no persistent PAT or publication step.
+This correction requires a successful transport preflight before training;
+inaccessible metadata still fails closed. GitHub documents
 [release metadata](https://docs.github.com/en/rest/releases/releases#get-a-release)
 and [asset download](https://docs.github.com/en/rest/releases/assets#get-a-release-asset)
 with Contents read; download may return 200 or 302.
@@ -274,8 +282,11 @@ small synthetic bytes; no model checkpoint is needed. This uses the same guarded
 download, limited to five minutes within a ten-minute job. It ends by uploading
 only `transport-receipt.json`, before dependency installation, base download, G1
 generation or benchmark. `val_sha256` and `groups` are unused in that path. The
-default `transport_only=false` retains the full cost measurement. No transport
-preflight or asset upload has been performed.
+default `transport_only=false` retains the full cost measurement. A small synthetic
+asset is already in an owner-approved private draft. Transport under the scoped
+write grant remains unmeasured until its new preflight succeeds. Failed HTTP
+responses emit only a closed phase and sanitized status code alongside the generic
+error; response bodies, URLs and credentials are never logged.
 
 The helper verifies draft status, release/asset membership, uploaded state and a
 positive size no larger than 256 MiB. It streams into a new file with exact size
