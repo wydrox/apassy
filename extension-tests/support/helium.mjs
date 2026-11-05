@@ -1,10 +1,13 @@
 import { setTimeout as delay } from "node:timers/promises";
 
-function failureType(error) {
+function failureType(error, url) {
   try {
-    if (String(error.message).includes("net::ERR_ABORTED")) return "aborted";
     if (error.name === "TimeoutError") return "timeout";
     if (error.name === "TargetClosedError" || /Target closed|Target page, context or browser has been closed/.test(error.message)) return "target_closed";
+    if (String(error.message).includes("net::ERR_ABORTED")) return "aborted";
+    // Match Playwright's first line only; its optional call log is not a signal.
+    const blank = /^page\.goto: Navigation to "([^"\r\n]+)" is interrupted by another navigation to "about:blank"$/.exec(String(error.message).split(/\r?\n/, 1)[0]);
+    if (blank && blank[1] === url) return "startup_blank";
   } catch {}
   return "other";
 }
@@ -34,10 +37,11 @@ export async function goto(page, url) {
       try {
         return await page.goto(url);
       } catch (error) {
-        if (attempt >= 3 || !String(error.message).includes("net::ERR_ABORTED")) {
+        const errorType = failureType(error, url);
+        if (attempt >= 3 || (errorType !== "aborted" && errorType !== "startup_blank")) {
           try {
             console.error("[fixture-goto] " + JSON.stringify({
-              elapsedMs: Math.round(performance.now() - started), attempt, errorType: failureType(error), events,
+              elapsedMs: Math.round(performance.now() - started), attempt, errorType, events,
             }));
           } catch {}
           throw error;

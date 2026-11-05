@@ -280,6 +280,88 @@ class BundleTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def run_cpu_preflight(self, *, default_threads=1, versions=None, cuda=False,
+                          honors_setter=True, tensor_sum=64, fails=False):
+        workflow = (REPO / '.github/workflows/bouncer-context-experiment.yml').read_text()
+        job = workflow.split('  cuda-preflight:\n', 1)[1].split('  external-evaluate:\n', 1)[0]
+        block = job.split('    - name: Install pinned CUDA distribution on CPU\n', 1)[1]
+        body = block.split("<<'PYCODE'\n", 1)[1].split('        PYCODE', 1)[0]
+        source = '\n'.join(line[8:] for line in body.splitlines())
+        code = compile(ast.parse(source), '<cuda-preflight>', 'exec')
+        calls, output = [], []
+        state = {'threads': default_threads}
+
+        def set_threads(count):
+            calls.append(count)
+            if honors_setter:
+                state['threads'] = count
+
+        class Tensor:
+            def __matmul__(self, other):
+                return self
+
+            def sum(self):
+                return self
+
+            def item(self):
+                return tensor_sum
+
+        def ones(*shape):
+            self.assertEqual(shape, (4, 4))
+            return Tensor()
+
+        # Resolve imports only in this exec; never install fakes in sys.modules.
+        modules = {
+            'json': json,
+            'sys': types.SimpleNamespace(path=[]),
+            'torch': types.SimpleNamespace(
+                set_num_threads=set_threads, get_num_threads=lambda: state['threads'],
+                cuda=types.SimpleNamespace(is_available=lambda: cuda), ones=ones),
+            'context_external_bundle': types.SimpleNamespace(PACKAGE_VERSIONS=B.PACKAGE_VERSIONS),
+            'context_train': types.SimpleNamespace(
+                package_versions=lambda: dict(B.PACKAGE_VERSIONS) if versions is None else versions),
+        }
+
+        def import_fake(name, *args, **kwargs):
+            return modules[name]
+
+        builtins = dict(vars(__import__('builtins')), __import__=import_fake,
+                        print=lambda value: output.append(value))
+        namespace = {'__builtins__': builtins}
+        if fails:
+            with self.assertRaises(AssertionError):
+                exec(code, namespace)
+            self.assertNotIn('CPU runtime preflight PASS', output)
+        else:
+            exec(code, namespace)
+            self.assertEqual(output[-1], 'CPU runtime preflight PASS')
+        self.assertEqual(calls, [4])
+        metadata = json.loads(output[0])
+        self.assertEqual(metadata, dict(versions=modules['context_train'].package_versions(),
+                                       cuda_available=cuda, observed_threads=state['threads'],
+                                       tensor_sum=tensor_sum))
+        return metadata
+
+    def test_cpu_preflight_sets_four_threads(self):
+        for default in (1, 2):
+            with self.subTest(default_threads=default):
+                self.assertEqual(self.run_cpu_preflight(default_threads=default)['observed_threads'], 4)
+
+    def test_cpu_preflight_rejects_wrong_versions(self):
+        for package in B.PACKAGE_VERSIONS:
+            with self.subTest(package=package):
+                versions = dict(B.PACKAGE_VERSIONS, **{package: 'wrong'})
+                self.run_cpu_preflight(versions=versions, fails=True)
+
+    def test_cpu_preflight_rejects_visible_cuda(self):
+        self.run_cpu_preflight(cuda=True, fails=True)
+
+    def test_cpu_preflight_requires_four_observed_threads(self):
+        self.run_cpu_preflight(honors_setter=False, fails=True)
+
+    def test_cpu_preflight_requires_tensor_sum(self):
+        self.run_cpu_preflight(tensor_sum=63, fails=True)
+
     def test_import_stdlib_only(self):
         tree = ast.parse((REPO / 'tools/basemodel/context_external_bundle.py').read_text())
         modules = [n.names[0].name if isinstance(n, ast.Import) else n.module
