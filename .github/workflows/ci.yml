@@ -17,6 +17,8 @@ on:
           - probe
           - full
           - cost-only
+          - cuda-preflight
+          - external-evaluate
         default: off
         required: true
       source_sha:
@@ -45,6 +47,27 @@ on:
         type: string
         required: false
         default: '400'
+      run_id:
+        description: Attested external run ID
+        type: string
+        required: false
+      bundle_asset:
+        description: Draft release ID/asset ID for external bundle
+        type: string
+        required: false
+      bundle_sha256:
+        description: External bundle SHA-256
+        type: string
+        required: false
+      freeze_sha256:
+        description: External freeze SHA-256
+        type: string
+        required: false
+      shipped_baseline:
+        description: Require optional pinned shipped baseline evidence
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main]
     paths-ignore:
@@ -67,7 +90,7 @@ concurrency:
 
 jobs:
   context-experiment:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.context_experiment == 'probe' || inputs.context_experiment == 'full' || inputs.context_experiment == 'cost-only') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.context_experiment == 'probe' || inputs.context_experiment == 'full' || inputs.context_experiment == 'cost-only' || inputs.context_experiment == 'cuda-preflight' || inputs.context_experiment == 'external-evaluate') }}
     uses: ./.github/workflows/bouncer-context-experiment.yml
     with:
       mode: ${{ inputs.context_experiment }}
@@ -77,6 +100,13 @@ jobs:
       transport_only: ${{ inputs.transport_only }}
       val_sha256: ${{ inputs.val_sha256 }}
       groups: ${{ inputs.groups }}
+      run_id: ${{ inputs.run_id }}
+      bundle_asset: ${{ inputs.bundle_asset }}
+      bundle_sha256: ${{ inputs.bundle_sha256 }}
+      freeze_sha256: ${{ inputs.freeze_sha256 }}
+      shipped_baseline: ${{ inputs.shipped_baseline }}
+    secrets:
+      APASSY_CONTEXT_SHIPPED_HEADS_URL: ${{ secrets.APASSY_CONTEXT_SHIPPED_HEADS_URL }}
 
   reuse-pr:
     runs-on: ubuntu-24.04

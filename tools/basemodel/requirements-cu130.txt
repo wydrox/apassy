@@ -1,0 +1,1 @@
+torch @ https://download-r2.pytorch.org/whl/cu130/torch-2.14.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=9c5693d3ca91743202034094ad3b3df20b5eb1373d5e0bc8a5d976be12c35302

@@ -297,3 +297,52 @@ The full cost job is bounded at 120 minutes and the benchmark at 110 minutes. On
 checkpoint, G1, base/cache and token are excluded. Failures mean **cost unmeasured**.
 Success is **cost evidence only**, never quality PASS or B PASS. Actual download,
 training, models, hosted benchmark and artifact upload are **NOT_RUN** here.
+
+## Existing trainer on Modal (runtime NOT_RUN)
+
+The current preparation uses the existing `train.py` through
+`context_existing_freeze.py`, on one Modal L4. It generates only G1 with 400 groups
+and seed 7, trains context and facts-blind heads with the existing fixed settings,
+and fits both thresholds on validation using CPU. It does not run W8 again or
+change the gates. Modal receives an explicit source inventory without `.git`, H1
+or private shipped weights. Automatic source mounts are disabled.
+
+Use the registered `ci.yml` bridge for the new manual modes. `cuda-preflight`
+installs the hash-pinned `requirements-cu130.txt` distribution and the existing
+dependencies on hosted Ubuntu, checks exact package versions and CPU-only tensor
+execution, and records source and disk evidence. It executes no model. The
+existing `cost-only` with `transport_only=true` separately checks access to a
+small owner-approved draft asset before training. Both dispatches also start
+ordinary CI. Neither preflight has been run for this package.
+
+After source review, green CI and owner approval, the launch entrypoint is
+`context_modal_existing.py launch` with `--source-sha`, a unique `--run-id`,
+`--approved-budget-usd` and a fresh `--evidence-dir` outside the checkout. It
+requires the configured Modal SDK and a clean tracked checkout at that exact SHA.
+The proposed envelope is USD 8 total for Modal, including setup/storage/egress;
+GitHub usage is separate. Limits are fixed: one L4, no fallback or retry, four CPU
+cores, 32 GiB RAM, 30-minute image build, four hours for the whole remote attempt
+including export, and a 4h15 caller cleanup cutoff. A durable attempt marker
+prevents a restart from repeating training. A budget argument does not raise the
+resource or time limits.
+
+The result is a deterministic, uncompressed tar of exactly nine regular files,
+at most 256 MiB. It includes both checkpoints, reports, original G1, freeze and an
+inventory receipt. The owner-approved draft upload supplies `bundle_asset` as
+numeric `release_id/asset_id`. Dispatch `ci.yml` with
+`context_experiment=external-evaluate`, `source_sha`, `run_id`, `bundle_asset`,
+`bundle_sha256` and `freeze_sha256`. These hashes come from the launch evidence,
+outside the downloaded bundle. Restore validates all headers before any write;
+verification compares the receipt with the actual git checkout before H1.
+
+The hosted evaluator uses the same CUDA distribution on CPU, removes its Rust
+build directory after copying the replay binary, then performs the unchanged CPU
+cost comparison and one held-out evaluation. Its job limit is 300 minutes, with
+110 minutes for cost and 120 for quality. Cost failure does not discard measured
+quality. Set `shipped_baseline=true` only with an approved
+`APASSY_CONTEXT_SHIPPED_HEADS_URL`; this HTTPS URL is confined to that job and the
+download must match the shipped SHA before H1. It is never sent to Modal. Without
+a conclusive baseline or cost, gate B remains UNSUPPORTED even if quality passes.
+Only compact evidence JSON is published by the evaluator. Training, paid calls,
+draft transport, private baseline access, hosted evaluation and release remain
+**NOT_RUN** by this source preparation.

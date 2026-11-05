@@ -156,12 +156,16 @@ class CostAsset(unittest.TestCase):
 class Workflow(unittest.TestCase):
     def setUp(self):
         self.source = (ROOT / '.github/workflows/bouncer-context-experiment.yml').read_text()
-        self.cost = self.source.split('\n  cost-only:\n')[1]
+        self.cost = re.split(r'\n  [a-zA-Z0-9_-]+:\n',
+                             self.source.split('\n  cost-only:\n', 1)[1], maxsplit=1)[0]
         self.ci = (ROOT / '.github/workflows/ci.yml').read_text()
 
     def test_manual_guard_permissions_bridge_and_allowlist(self):
         self.assertIn("if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'cost-only' }}", self.cost)
-        self.assertIn("probe:\n    if: ${{ inputs.mode != 'cost-only' && !inputs.transport_only }}", self.source)
+        probe = self.source.split('\n  probe:\n', 1)[1].split('\n  train:\n', 1)[0]
+        guard = re.search(r'^    if: (.+)$', probe, re.M).group(1)
+        self.assertIn("inputs.mode != 'cost-only'", guard)
+        self.assertIn('!inputs.transport_only', guard)
         self.assertEqual(self.source.count("inputs.mode == 'full'"), 2)
         self.assertIn("inputs.context_experiment == 'cost-only'", self.ci)
         for key in ('source_sha', 'checkpoint_asset', 'checkpoint_sha256', 'val_sha256', 'groups', 'transport_only'):

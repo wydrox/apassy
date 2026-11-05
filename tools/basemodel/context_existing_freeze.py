@@ -8,6 +8,7 @@ import argparse
 import gc
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -206,9 +207,11 @@ def train_arm(base, data, checkpoint, metadata, report, cache, device):
             shutil.rmtree(cache)
 
 
-def run(data, out, base, device, contract=CONTRACT):
+def run(data, out, base, device, contract=CONTRACT, source_sha=None):
     """Explicit future run only; caller must obtain resource/owner approval first."""
     # Path checks and exclusive output precede any model imports.
+    if source_sha is not None and (not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', source_sha)):
+        raise Unsupported('invalid source SHA')
     paths = [safe_path(p) for p in (data, out, base, contract)]
     if paths[1].exists() or paths[1].is_symlink():
         raise Unsupported('output exists')
@@ -218,6 +221,13 @@ def run(data, out, base, device, contract=CONTRACT):
     if out.exists() or out.is_symlink():
         raise Unsupported('output exists')
     import context_train as core
+    if source_sha is not None:
+        try:
+            actual_sha = core.source_commit()
+        except (OSError, subprocess.CalledProcessError):
+            actual_sha = source_sha
+        if actual_sha != source_sha:
+            raise Unsupported('source commit mismatch')
     core.install_training_audit()
     for name in ('train.jsonl', 'val.jsonl', 'data-manifest.json'):
         safe_path(data / name)
@@ -235,7 +245,7 @@ def run(data, out, base, device, contract=CONTRACT):
         require_device(device, torch)
         manifest, measurement = core.environment(base, c)
         out.mkdir()
-        frozen.update(mode='full', source_commit=core.source_commit(), source_hashes=core.source_identity(),
+        frozen.update(mode='full', source_commit=core.source_commit() if source_sha is None else actual_sha, source_hashes=core.source_identity(),
                       package_versions=core.package_versions(), base=manifest['base'], measurement=measurement,
                       context_contract_sha256=contract_hash(c), tokenizer_sha256=c['tokenizer']['sha256'],
                       config=dict(CONFIG, device=device), converted=provenance, training_reports={})
@@ -300,8 +310,9 @@ def main(argv=None):
     for name in ('data', 'out', 'base-dir', 'device'):
         p.add_argument('--' + name, required=True)
     p.add_argument('--contract', default=str(CONTRACT))
+    p.add_argument('--source-sha', default=None)
     a = p.parse_args(argv)
-    run(a.data, a.out, a.base_dir, a.device, a.contract)
+    run(a.data, a.out, a.base_dir, a.device, a.contract, a.source_sha)
     return 0
 
 

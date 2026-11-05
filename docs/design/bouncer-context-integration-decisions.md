@@ -273,3 +273,32 @@ neither repeats W8 nor supplies its eligibility result. Resources, compatible
 training/evaluation packages, supervision, quality, baseline and CPU cost
 evidence remain required. No model, held-out evaluation, paid service, R2 read,
 runtime activation or release was performed by this package.
+
+## Existing trainer on Modal R12
+
+The owner requested Modal to shorten training. The active preparation path runs
+the existing `context_existing_freeze.run(device='cuda')` and `train.py` on one
+L4, followed by one hosted Ubuntu CPU evaluation. It does not restore the parked
+B2 trainer or repeat the consumed W8 probe. The training loop, quality gates,
+baseline and CPU cost comparison remain unchanged.
+
+The source upload contains only an explicit git-verified inventory at commit S,
+including all 21 serializer goldens. It excludes `.git`, held-out data and private
+weights. A gitless worker receives S explicitly; a checkout with git must match S.
+The deterministic nine-file plain-tar result binds the upload inventory, G1
+groups=400/seed=7, checkpoint reports and freeze. The evaluator checks the bundle,
+external freeze hash and its own checkout before reading held-out data.
+
+The proposed attempt has one L4 with no fallback, four CPU cores and 32 GiB RAM.
+The whole remote attempt, including image build and export, is bounded at four
+hours; image build has a 30-minute sublimit and the caller has a 4h15 cleanup
+cutoff. A persistent marker refuses a repeated attempt. The proposed total Modal
+envelope is USD 8; this is not an account-level billing cap or a GitHub Actions
+cost quote. No paid execution has been approved by this preparation package.
+
+Before allocation: narrow source review, green CI on S, the hosted CUDA-package
+preflight, and a draft-asset transport preflight must succeed. The owner's run
+approval must cover those dispatches, draft uploads and the paid attempt. Any
+requested private baseline URL is confined to the hosted evaluator and checked
+against the shipped SHA before held-out reads. Training, transport, CPU cost,
+quality and runtime activation remain unmeasured until their actual runs.
