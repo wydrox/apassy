@@ -81,6 +81,31 @@ class ShippedBaselineTests(unittest.TestCase):
         self.assertEqual(report['feasibility_quality'], 'PASS')
         self.assertEqual(report['gates']['baseline_shipped'], None)
 
+    def test_top_level_manifest_hash_allows_a_filename_string(self):
+        expected = T.sha256(self.data)
+        self.manifest.write_text(json.dumps({'sha256': expected, 'file': self.data.name}))
+        report, _, _, _ = self.evaluate(explicit=False)
+        self.assertEqual(report['heldout_sha256'], expected)
+
+    def test_legacy_nested_manifest_hash_still_works(self):
+        expected = T.sha256(self.data)
+        self.manifest.write_text(json.dumps({'file': {'sha256': expected}}))
+        report, _, _, _ = self.evaluate(explicit=False)
+        self.assertEqual(report['heldout_sha256'], expected)
+
+    def test_invalid_top_level_hash_cannot_fall_back_to_nested_hash(self):
+        for invalid in (None, False, '', '0' * 64):
+            with self.subTest(hash=invalid):
+                self.manifest.write_text(json.dumps({
+                    'sha256': invalid, 'file': {'sha256': T.sha256(self.data)}}))
+                with self.assertRaisesRegex(T.Unsupported, 'held-out manifest hash'):
+                    self.evaluate(explicit=False)
+
+    def test_missing_hash_with_a_filename_string_is_refused(self):
+        self.manifest.write_text(json.dumps({'file': self.data.name}))
+        with self.assertRaisesRegex(T.Unsupported, 'held-out manifest hash'):
+            self.evaluate(explicit=False)
+
     def test_measured_accepts_exact_boolean_alignment_after_quality(self):
         reply = self.measured()
         report, full, _, gates = self.evaluate(reply)

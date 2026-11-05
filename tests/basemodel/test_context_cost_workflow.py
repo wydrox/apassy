@@ -508,6 +508,116 @@ class Workflow(unittest.TestCase):
         self.assertNotIn('bundle.tar', upload)
         self.assertLess(self.cost.index('torch.set_num_threads(4)'), self.cost.index('assert torch.get_num_threads() == 4'))
 
+    def test_external_evaluation_uses_immutable_source_and_hash_only_manifest(self):
+        training_sha = '7a63ffad557ace5e396c4a709ad8453fb611b565'
+        self.assertIn("if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'external-evaluate' }}",
+                      self.external)
+        self.assertIn('    permissions:\n      contents: read\n', self.external)
+        self.assertIn(f'      TRAINING_SOURCE_SHA: {training_sha}\n', self.external)
+        self.assertIn('      SOURCE_SHA: ${{ inputs.source_sha }}\n', self.external)
+        checkout = self.external.split('    - uses: actions/checkout@', 1)[1].split('    - name:', 1)[0]
+        self.assertIn('        persist-credentials: false\n        fetch-depth: 0\n', checkout)
+        self.assertNotRegex(checkout, r'(?m)^\s*ref:')
+        # Transport still binds E to the real GitHub identity; only HEAD switches to S.
+        self.assertNotRegex(self.external, r'(?m)^\s*GITHUB_SHA:')
+        self.assertEqual(re.findall(r'(?m)^\s*SOURCE_SHA: (.+)$', self.external),
+                         ['${{ inputs.source_sha }}'])
+        self.assertNotRegex(self.external, r'(?m)^\s*(?:export\s+)?(?:GITHUB_SHA|SOURCE_SHA)=')
+        self.assertNotRegex(self.external, r'''(?:os\.environ|e)\[['"](?:GITHUB_SHA|SOURCE_SHA)['"]\]\s*=''')
+        self.assertNotRegex(self.external, r'''(?:echo|write\().*['"](?:GITHUB_SHA|SOURCE_SHA)=''')
+
+        steps = self.external.split('    - name: ')[1:]
+        names = [step.splitlines()[0] for step in steps]
+        by_name = dict(zip(names, steps))
+        download = 'Download and restore pinned external bundle'
+        shipped = 'Fetch explicitly requested shipped evidence and verify before held-out IO'
+        switch = 'Switch to immutable training source before evaluator code'
+        install = 'Install pinned CUDA distribution on CPU'
+        verify = 'Verify receipt git versions paths and G1 before base or held-out IO'
+        evaluate = 'Evaluate held-out only after external freeze verification'
+        order = [download, shipped, switch, install, verify, evaluate]
+        for name in order:
+            self.assertEqual(names.count(name), 1, name)
+        self.assertEqual(sorted(order, key=names.index), order)
+        self.assertEqual(names.index(switch) + 1, names.index(install))
+        switch_step = by_name[switch]
+        for guard in (
+                'test "$BUNDLE_SHA256" = 6de84990fb29a99c8e23eb51b67066d6344c644fbf5e634ea4f23425a85fb974',
+                'test "$FREEZE_SHA256" = 7e8391a63aaba4afb84300788474be8e3ffdfb46b4aa3206801c0dbba550368c',
+                'test "$RUN_ID" = bouncer-bbee8f21-20261105t124513z',
+                'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
+                'git merge-base --is-ancestor "$TRAINING_SOURCE_SHA" HEAD',
+                'git checkout --quiet --detach "$TRAINING_SOURCE_SHA"',
+                'test "$(git rev-parse HEAD)" = "$TRAINING_SOURCE_SHA"',
+                'test -z "$(git status --porcelain --untracked-files=no)"'):
+            self.assertIn(guard, switch_step)
+        allowlist = ('.github/workflows/bouncer-context-experiment.yml '
+                     'src/broker/proxy/listener.rs '
+                     'tests/basemodel/test_context_cost_workflow.py '
+                     'tests/basemodel/test_context_shipped_baseline.py '
+                     'tools/basemodel/context_train.py ')
+        self.assertIn('test "$(git diff --name-only "$TRAINING_SOURCE_SHA" HEAD | '
+                      'LC_ALL=C sort | tr \'\\n\' \' \')" = \\\n'
+                      f'          "{allowlist}"', switch_step)
+        self.assertLess(switch_step.index('git diff --name-only'),
+                        switch_step.index('git checkout --quiet --detach'))
+        self.assertIn("verify_restored(Path(e['CONTEXT_ROOT']), receipt, e['RUN_ID'], "
+                      "e['TRAINING_SOURCE_SHA'], e['FREEZE_SHA256'], Path.cwd())", by_name[verify])
+        self.assertNotIn("e['SOURCE_SHA']", by_name[verify])
+
+        evaluate_step = by_name[evaluate]
+        shell = textwrap.dedent(evaluate_step.split('      run: |\n', 1)[1])
+        marker = '\"$PY\" -B - \"$EXP/heldout-hash-only.manifest.json\" <<\'PY\'\n'
+        self.assertEqual(shell.count(marker), 1)
+        self.assertLess(shell.index(marker), shell.index('set +e'))
+        self.assertLess(shell.index(marker), shell.index('tools/basemodel/context_eval.py'))
+        code = shell.split(marker, 1)[1].split('\nPY\n', 1)[0]
+        self.assertEqual(re.findall(r'--heldout-manifest\s+(\S+)', shell),
+                         ['"$EXP/heldout-hash-only.manifest.json"'])
+        self.assertNotIn('--heldout-manifest tests/evals/', shell)
+        self.assertIn('--heldout tests/evals/secret-context-heldout-v1.jsonl', shell)
+
+        # Run the workflow's actual view writer, with no imports or cwd changes in
+        # this process and no production manifest, dataset, or model available.
+        digest = '0123456789abcdef' * 4
+        nested = {'sha256': 'f' * 64}
+        cases = [('top-level with string file', {'sha256': digest, 'file': 'synthetic.jsonl'}, True),
+                 ('top-level wins', {'sha256': digest, 'file': nested}, True),
+                 ('missing', {}, False), ('nested only', {'file': nested}, False)]
+        for label, value in [('null', None), ('bool', False), ('true', True),
+                             ('empty', ''), ('uppercase', digest.upper()),
+                             ('short', digest[:-1]), ('newline', digest + '\n'),
+                             ('integer', 1), ('array', []), ('object', {})]:
+            cases.append((label, {'sha256': value, 'file': nested}, False))
+        for value in (None, False, True, [], [nested], 'synthetic', 1):
+            cases.append((f'non-object {value!r}', value, False))
+        for label, manifest, accepted in cases:
+            with self.subTest(manifest=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                tracked = root / 'tests/evals/secret-context-heldout-v1.manifest.json'
+                tracked.parent.mkdir(parents=True)
+                tracked.write_text(json.dumps(manifest))
+                runtime = root / 'runtime'
+                runtime.mkdir()
+                output = runtime / 'heldout-hash-only.manifest.json'
+                result = subprocess.run([sys.executable, '-I', '-B', '-', str(output)],
+                                        input=code, cwd=root, text=True, capture_output=True,
+                                        timeout=10)
+                self.assertEqual(result.stdout, '')
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, '')
+                    view = json.loads(output.read_text())
+                    self.assertEqual(view, {'sha256': digest})
+                    # S evaluates the default eagerly: this used to crash when
+                    # file was a string, even with a valid top-level hash.
+                    self.assertEqual(view.get('sha256', view.get('file', {}).get('sha256')), digest)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr, 'held-out manifest top-level hash refused\n')
+                    self.assertFalse(output.exists())
+                self.assertEqual(tracked.read_text(), json.dumps(manifest))
+
     def test_regenerated_validation_check_with_fake_data(self):
         code = self.cost.split("root = Path(os.environ['EXP']) / 'synthetic'\n")[1].split('\n        PY')[0]
         code = "root = Path(os.environ['EXP']) / 'synthetic'\n" + textwrap.dedent(code)

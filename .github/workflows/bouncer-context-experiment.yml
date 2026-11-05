@@ -1476,6 +1476,7 @@ jobs:
       CUDA_VISIBLE_DEVICES: ''
       SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       SOURCE_SHA: ${{ inputs.source_sha }}
+      TRAINING_SOURCE_SHA: 7a63ffad557ace5e396c4a709ad8453fb611b565
       RUN_ID: ${{ inputs.run_id }}
       BUNDLE_ASSET: ${{ inputs.bundle_asset }}
       BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
@@ -1486,6 +1487,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         persist-credentials: false
+        fetch-depth: 0
     - name: Require exact source and external inputs before setup
       run: |
         set -euo pipefail
@@ -1577,6 +1579,29 @@ jobs:
             if hashlib.file_digest(f, 'sha256').hexdigest() != SHIPPED_SHA:
                 raise SystemExit('shipped SHA mismatch')
         PYCODE
+    - name: Switch to immutable training source before evaluator code
+      run: |
+        set -euo pipefail
+        test "$BUNDLE_SHA256" = 6de84990fb29a99c8e23eb51b67066d6344c644fbf5e634ea4f23425a85fb974
+        test "$FREEZE_SHA256" = 7e8391a63aaba4afb84300788474be8e3ffdfb46b4aa3206801c0dbba550368c
+        test "$RUN_ID" = bouncer-bbee8f21-20261105t124513z
+        test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+        git merge-base --is-ancestor "$TRAINING_SOURCE_SHA" HEAD
+        test "$(git diff --name-only "$TRAINING_SOURCE_SHA" HEAD | LC_ALL=C sort | tr '\n' ' ')" = \
+          ".github/workflows/bouncer-context-experiment.yml src/broker/proxy/listener.rs tests/basemodel/test_context_cost_workflow.py tests/basemodel/test_context_shipped_baseline.py tools/basemodel/context_train.py "
+        git checkout --quiet --detach "$TRAINING_SOURCE_SHA"
+        test "$(git rev-parse HEAD)" = "$TRAINING_SOURCE_SHA"
+        test -z "$(git status --porcelain --untracked-files=no)"
+        "$PY" -B - <<'PYCODE'
+        import json, os
+        from pathlib import Path
+        e = os.environ
+        Path(e['EXP'], 'evidence/evaluation-binding.json').write_text(json.dumps(dict(
+            schema='apassy-context-evaluation-binding-v1', training_source_sha=e['TRAINING_SOURCE_SHA'],
+            evaluation_workflow_sha=e['GITHUB_SHA'], prior_failed_run=42089531893, run_id=e['RUN_ID'],
+            bundle_sha256=e['BUNDLE_SHA256'], freeze_sha256=e['FREEZE_SHA256'],
+            heldout_manifest_view='top-level sha256 only'), sort_keys=True) + '\n')
+        PYCODE
     - name: Install pinned CUDA distribution on CPU
       run: |
         set -euo pipefail
@@ -1611,7 +1636,7 @@ jobs:
         from context_external_bundle import verify_restored
         e = os.environ
         receipt = json.loads((Path(e['EXP']) / 'receipt.json').read_text())
-        verify_restored(Path(e['CONTEXT_ROOT']), receipt, e['RUN_ID'], e['SOURCE_SHA'], e['FREEZE_SHA256'], Path.cwd())
+        verify_restored(Path(e['CONTEXT_ROOT']), receipt, e['RUN_ID'], e['TRAINING_SOURCE_SHA'], e['FREEZE_SHA256'], Path.cwd())
         (Path(e['EXP']) / 'evidence/external-receipt.json').write_text(json.dumps(receipt, sort_keys=True))
         PYCODE
     - name: Build actual Rust baseline replay (CI only)
@@ -1676,12 +1701,21 @@ jobs:
         set -euo pipefail
         shipped=()
         if [[ "$SHIPPED_BASELINE" == true ]]; then shipped=(--shipped-heads "$EXP/shipped.safetensors"); fi
+        "$PY" -B - "$EXP/heldout-hash-only.manifest.json" <<'PY'
+        import json, re, sys
+        from pathlib import Path
+        m = json.loads(Path('tests/evals/secret-context-heldout-v1.manifest.json').read_text())
+        h = m.get('sha256') if type(m) is dict else None
+        if not (isinstance(h, str) and re.fullmatch('[0-9a-f]{64}', h)):
+            raise SystemExit('held-out manifest top-level hash refused')
+        Path(sys.argv[1]).write_text(json.dumps({'sha256': h}) + '\n')
+        PY
         set +e
         "$PY" -B tools/basemodel/context_eval.py --freeze "$CONTEXT_ROOT/full/freeze.json" \
           --expect-freeze-sha256 "$FREEZE_SHA" --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" \
           "${shipped[@]}" --baseline-binary "$APASSY_CONTEXT_REPLAY_BINARY" --cost-json "$EXP/evidence/cost-full.json" \
           --heldout tests/evals/secret-context-heldout-v1.jsonl \
-          --heldout-manifest tests/evals/secret-context-heldout-v1.manifest.json \
+          --heldout-manifest "$EXP/heldout-hash-only.manifest.json" \
           --out "$EXP/evidence/evaluation.json"
         rc=$?
         set -e

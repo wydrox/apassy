@@ -737,7 +737,11 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
         checkpoints[which] = tensors
     # First held-out IO; external freeze identity and all code/pins were checked above.
     manifest = json.loads(Path(heldout_manifest).read_text())
-    expected_hash = manifest.get('sha256', manifest.get('file', {}).get('sha256'))
+    if 'sha256' in manifest:
+        expected_hash = manifest['sha256']
+    else:
+        file_record = manifest.get('file')
+        expected_hash = file_record.get('sha256') if isinstance(file_record, dict) else None
     if expected_hash != sha256(heldout_path):
         raise Unsupported('held-out manifest hash')
     rows = read_rows(heldout_path, c)

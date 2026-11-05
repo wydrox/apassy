@@ -191,12 +191,22 @@ mod tests {
         .expect("proxy")
     }
 
+    fn connect_client(addr: SocketAddr, read_timeout: Duration) -> TcpStream {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .expect("socket");
+        // On macOS a peer reset can make a later timeout setter return EINVAL.
+        socket.set_read_timeout(Some(read_timeout)).expect("timeout");
+        socket.connect(&addr.into()).expect("connect");
+        socket.into()
+    }
+
     /// True when the proxy closes `stream` without an answer; false on an answer
-    /// or when nothing happens for 15 s.
+    /// or when its preconfigured read timeout expires.
     fn closed_without_answer(stream: &mut TcpStream) -> bool {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(15)))
-            .expect("timeout");
         let mut buf = [0u8; 64];
         match stream.read(&mut buf) {
             Ok(read) => read == 0,
@@ -215,7 +225,7 @@ mod tests {
             .map(|_| Slot::take(&proxy.active).expect("a free place"))
             .collect();
         assert!(Slot::take(&proxy.active).is_none());
-        let mut stream = TcpStream::connect(proxy.addr).expect("connect");
+        let mut stream = connect_client(proxy.addr, Duration::from_secs(15));
         let _ = stream.write_all(b"CONNECT a.example:443 HTTP/1.1\r\n\r\n");
         assert!(
             closed_without_answer(&mut stream),
@@ -224,13 +234,10 @@ mod tests {
         drop(slots);
         assert_eq!(proxy.active.load(Ordering::SeqCst), 0);
         // With a free place, the proxy answers (here: the password is missing).
-        let mut stream = TcpStream::connect(proxy.addr).expect("connect");
+        let mut stream = connect_client(proxy.addr, Duration::from_secs(10));
         stream
             .write_all(b"CONNECT a.example:443 HTTP/1.1\r\n\r\n")
             .expect("write");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("timeout");
         let mut answer = [0u8; 12];
         stream.read_exact(&mut answer).expect("answer");
         assert_eq!(&answer, b"HTTP/1.1 407");
@@ -241,7 +248,7 @@ mod tests {
     #[test]
     fn a_slow_first_request_head_is_closed_after_the_deadline() {
         let proxy = proxy();
-        let mut stream = TcpStream::connect(proxy.addr).expect("connect");
+        let mut stream = connect_client(proxy.addr, Duration::from_secs(15));
         let started = Instant::now();
         let mut closed = false;
         for byte in b"CONNECT a.example:443 HTTP/1.1\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaa" {
