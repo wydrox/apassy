@@ -479,6 +479,9 @@ mod tests {
             while Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Accepted sockets can inherit the listener's mode on
+                        // macOS; request reads use the finite read timeout.
+                        stream.set_nonblocking(false).unwrap();
                         requests.push(read_request(&mut stream));
                         match replies.get(requests.len() - 1).and_then(Option::as_ref) {
                             Some((status, body)) => {
