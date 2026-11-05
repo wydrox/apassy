@@ -318,7 +318,9 @@ ordinary CI. Neither preflight has been run for this package.
 After source review, green CI and owner approval, the launch entrypoint is
 `context_modal_existing.py launch` with `--source-sha`, a unique `--run-id`,
 `--approved-budget-usd` and a fresh `--evidence-dir` outside the checkout. It
-requires the configured Modal SDK and a clean tracked checkout at that exact SHA.
+requires CPython 3.12 with Modal SDK 1.5.4 and a clean tracked checkout at that exact
+SHA. Other interpreter or SDK versions are refused before provider calls; the
+serialized launcher and remote container must use the same Python minor version.
 The proposed envelope is USD 8 total for Modal, including setup/storage/egress;
 GitHub usage is separate. Limits are fixed: one L4, no fallback or retry, four CPU
 cores, 32 GiB RAM, 30-minute image build, four hours for the whole remote attempt

@@ -56,6 +56,20 @@ import context_modal_existing, context_external_bundle
         with self.assertRaises(ValueError):
             M.launch(SHA, 'test-run', 8, self.repo / 'evidence', self.repo)
 
+    def test_launcher_python_must_match_remote_before_staging(self):
+        for name, version in [('cpython', (3, 11, 9)), ('cpython', (3, 13, 0)),
+                              ('pypy', (3, 12, 0))]:
+            with self.subTest(name=name, version=version), \
+                 patch.object(M.sys, 'implementation', NS(name=name)), \
+                 patch.object(M.sys, 'version_info', version), \
+                 patch.object(B, 'git_inventory') as inventory, \
+                 patch.object(M, '_execute') as execute:
+                with self.assertRaisesRegex(ValueError, 'CPython 3.12'):
+                    M.launch(SHA, 'test-run', 8, self.evidence, self.repo)
+            inventory.assert_not_called()
+            execute.assert_not_called()
+            self.assertFalse(self.evidence.exists())
+
     def test_git_refusal_before_modal(self):
         for message in ('dirty tracked tree', 'source HEAD mismatch'):
             with patch.object(B, 'git_inventory', side_effect=ValueError(message)):
@@ -219,9 +233,21 @@ import context_modal_existing, context_external_bundle
         image.build = Method(lambda app: image)
         app = NS(app_id='ap-own', function=Mock(return_value=lambda entry: function), run=Mock())
         app.run.return_value = Context(app)
-        modal = NS(App=Mock(return_value=app), Image=NS(debian_slim=Mock(return_value=image)),
+        modal = NS(__version__='1.5.4', App=Mock(return_value=app), Image=NS(debian_slim=Mock(return_value=image)),
                    Volume=NS(ephemeral=Mock(return_value=Context(volume))))
         return modal, app, call, image
+
+    def test_launcher_sdk_refused_before_any_provider_calls(self):
+        for version in (None, '1.5.3', '1.6.0'):
+            modal, app, call, image = self.fake_sdk()
+            modal.__version__ = version
+            with self.subTest(version=version), patch.dict(sys.modules, {'modal': modal}), \
+                 patch.object(M, '_snapshot', AsyncMock()) as snapshot:
+                with self.assertRaisesRegex(ValueError, 'Modal 1.5.4'):
+                    asyncio.run(M._execute(self.repo, self.evidence, SHA, 'run', 'c'*64, M.time.time()))
+            snapshot.assert_not_awaited()
+            modal.App.assert_not_called()
+            self.assertFalse(self.evidence.exists())
 
     def test_one_spawn_fixed_options_and_export(self):
         modal, app, call, image = self.fake_sdk()

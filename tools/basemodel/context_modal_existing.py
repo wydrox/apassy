@@ -212,6 +212,8 @@ def _image(modal, staging):
 
 async def _execute(staging, evidence, source_sha, run_id, inv_sha, start):
     import modal  # Only guarded execution imports the SDK.
+    if getattr(modal, '__version__', None) != '1.5.4':
+        raise ValueError('Modal 1.5.4 launcher required')
     _save(evidence, 'before.json', await _snapshot())
     app = modal.App(APP_NAME, include_source=False)
     call = None
@@ -306,6 +308,8 @@ async def _execute(staging, evidence, source_sha, run_id, inv_sha, start):
 
 def launch(source_sha, run_id, approved_budget_usd, evidence_dir, repo_root):
     start = time.time()
+    if sys.implementation.name != 'cpython' or sys.version_info[:2] != (3, 12):
+        raise ValueError('CPython 3.12 launcher required')
     _sha(source_sha)
     if (isinstance(approved_budget_usd, bool) or not isinstance(approved_budget_usd, (int, float))
             or not math.isfinite(approved_budget_usd) or approved_budget_usd < ENVELOPE_USD):
