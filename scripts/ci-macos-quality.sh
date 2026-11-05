@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 exec python3 -I - "$@" <<'PY'
 import glob
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -65,10 +66,20 @@ try:
         tooling = Path(tempfile.mkdtemp(prefix='apassy-ci-rust-'))
         env.update(CARGO_HOME=str(tooling / 'cargo'), RUSTUP_HOME=str(tooling / 'rustup'))
         env['PATH'] = str(tooling / 'cargo/bin') + ':' + env['PATH']
-        installer = str(tooling / 'rustup-init.sh')
+        bootstrap = {
+            'arm64': ('aarch64-apple-darwin', '20ef5516c31b1ac2290084199ba77dbbcaa1406c45c1d978ca68558ef5964ef5'),
+            'x86_64': ('x86_64-apple-darwin', '9c331076f62b4d0edeae63d9d1c9442d5fe39b37b05025ec8d41c5ed35486496'),
+        }
+        host, digest = bootstrap[receipt['metadata']['architecture']]
+        receipt['metadata']['rustup-bootstrap'] = {'version': '1.28.2', 'host': host, 'sha256': digest}
+        installer = str(tooling / 'rustup-init')
         run('download-rustup', ['curl', '--proto', '=https', '--tlsv1.2', '--fail', '--location',
-                               '--max-time', '120', 'https://sh.rustup.rs', '-o', installer])
-        run('install-rustup', ['sh', installer, '-y', '--no-modify-path', '--profile', 'minimal', '--default-toolchain', 'none'])
+                               '--max-time', '120', f'https://static.rust-lang.org/rustup/archive/1.28.2/{host}/rustup-init', '-o', installer])
+        if hashlib.sha256(Path(installer).read_bytes()).hexdigest() != digest:
+            raise ValueError('rustup bootstrap checksum mismatch')
+        os.chmod(installer, 0o700)
+        run('install-rustup', [installer, '-y', '--no-modify-path', '--profile', 'minimal', '--default-toolchain', 'none'])
+        run('disable-rustup-self-update', ['rustup', 'set', 'auto-self-update', 'disable'])
         run('install-rust', ['rustup', 'toolchain', 'install', '1.97.0', '--profile', 'minimal', '--component', 'rustfmt', '--component', 'clippy'])
     elif sys.argv[1:]:
         raise ValueError('only --cloud is supported')

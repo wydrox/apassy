@@ -69,6 +69,20 @@ printf 'fixture-tool-version\\n'
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / 'calls').exists())
 
+    def test_cloud_tampered_bootstrap_is_not_executed(self):
+        curl = self.bin / 'curl'
+        curl.write_text('''#!/bin/bash
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -o ]; then printf 'tampered installer' > "$2"; exit 0; fi
+    shift
+done
+exit 1
+''')
+        result, receipt = self.run_helper(arguments=('--cloud',))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('bootstrap checksum mismatch', receipt['error'])
+        self.assertNotIn('install-rustup', [step['name'] for step in receipt['steps']])
+
     def test_matching_source_runs_complete_quality_contract(self):
         result, receipt = self.run_helper()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

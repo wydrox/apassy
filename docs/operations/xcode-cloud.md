@@ -87,11 +87,14 @@ names do no work. There are no iOS hook/project changes. The pre-build script
 requires the primary checkout to be available and fails if it cannot access it.
 
 The helper uses Python supplied by Xcode/macOS and a fresh temporary, user-writable
-`CARGO_HOME`/`RUSTUP_HOME`. It downloads the HTTPS rustup bootstrap into that
-location (120-second download timeout), installs pinned tooling without sudo or
+`CARGO_HOME`/`RUSTUP_HOME`. It downloads the rustup 1.28.2 bootstrap for the measured
+host architecture from the official versioned archive into that location
+(120-second download timeout), verifies its pinned SHA-256 before execution,
+disables rustup self-updates, and installs pinned tooling without sudo or
 modifying shell startup files, and runs quality before Xcode builds the inert
-framework. The rustup bootstrap itself is fetched from the upstream endpoint,
-not digest-pinned; networking/toolchain availability is a measured pilot risk.
+framework. The bootstrap digests were read from the official archive's `.sha256`
+files for `aarch64-apple-darwin` and `x86_64-apple-darwin`. Networking and toolchain
+availability remain measured pilot risks.
 No dependency cache is added. Cold Cloud vs cached GitHub timings must be labeled.
 
 Apple's documented general onboarding requirements include an App Store Connect
@@ -155,3 +158,4 @@ Read for this preparation (2026-11-05):
 - [Apple: Environment variable reference](https://developer.apple.com/documentation/xcode/environment-variable-reference): repository/project paths, workflow name and action values.
 - [Apple: Setting up your project](https://developer.apple.com/documentation/xcode/setting-up-your-project-to-use-xcode-cloud): stable committed project, shared scheme/archive capability, account and signing requirements.
 - [Apple: Configuring your first workflow](https://developer.apple.com/documentation/xcode/configuring-your-first-xcode-cloud-workflow): onboarding, environment/actions, and build reports.
+- [Rust: Manual installation](https://rust-lang.github.io/rustup/installation/other): versioned bootstrap archives and checksum files.
