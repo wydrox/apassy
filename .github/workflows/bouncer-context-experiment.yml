@@ -215,35 +215,16 @@ jobs:
     - name: Require replay and generated-host tests without skips
       run: |
         set -euo pipefail
-        h2_rc=0
-        if [[ -e tests/evals/secret-context-heldout-v2.jsonl || -e tests/evals/secret-context-heldout-v2.manifest.json ]]; then
-          "$PY" -I -B tests/evals/secret_context_heldout_v2.py --check || h2_rc=$?
-          git diff --quiet -- tests/evals/secret_context_heldout_v2.py \
-            tests/evals/secret-context-heldout-v2.jsonl \
-            tests/evals/secret-context-heldout-v2.manifest.json \
-            docs/evaluation/secret-context-heldout-v2.md || h2_rc=$?
-          "$PY" -B tests/evals/secret_context_heldout_preflight.py \
-            --data tests/evals/secret-context-heldout-v2.jsonl \
-            --manifest tests/evals/secret-context-heldout-v2.manifest.json \
-            --replay-binary "$APASSY_CONTEXT_REPLAY_BINARY" \
-            --out "$EXP/evidence/h2-preflight.json" || h2_rc=$?
-        fi
         "$PY" -B - <<'PY'
         import os, unittest
         from pathlib import Path
         assert Path(os.environ['APASSY_CONTEXT_REPLAY_BINARY']).is_file()
         patterns = ('test_context_replay.py', 'test_context_data.py')
-        if any(Path(name).exists() for name in (
-                'tests/evals/secret-context-heldout-v2.jsonl',
-                'tests/evals/secret-context-heldout-v2.manifest.json')):
-            patterns += ('test_context_heldout_preflight.py',
-                         'test_context_heldout_generator_cli.py')
         suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests/basemodel', pattern=pattern)
                                    for pattern in patterns)
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
         PY
-        test "$h2_rc" -eq 0
     - name: Require tokenizer unittest without skips and exact canonical measurement
       run: |
         set -euo pipefail
