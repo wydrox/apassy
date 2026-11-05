@@ -119,56 +119,30 @@ jobs:
           cache-bin: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
-      - name: Fetch Cargo dependencies
-        run: cargo fetch --locked
+      - name: Run shared macOS Rust and Swift quality checks
+        env:
+          APASSY_CI_EXPECTED_SHA: ${{ github.sha }}
+          APASSY_CI_RECEIPT: ${{ runner.temp }}/macos-quality.json
+        run: bash scripts/ci-macos-quality.sh
 
-      - name: Check the browser extension version
-        run: |
-          app_version="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
-          extension_version="$(plutil -extract version raw -o - extension/manifest.json)"
-          if [ "$app_version" != "$extension_version" ]; then
-            echo "::error::The browser extension version must match Cargo.toml."
-            exit 1
-          fi
-
+  portable:
+    needs: reuse-pr
+    if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Install Rust format tooling
+        run: rustup toolchain install 1.97.0 --profile minimal --component rustfmt
       - name: Check Rust format
-        run: cargo fmt --all -- --check
-
-      - name: Typecheck the native session and Keychain helper
-        run: xcrun --sdk macosx swiftc -typecheck -swift-version 5 -warnings-as-errors native/ApassyHelper/*.swift
-
-      - name: Run Clippy
-        run: cargo clippy --offline --locked --all-features --all-targets -- -D warnings
-
-      # The demo app builds without the vault feature. The steps above build only
-      # with all features, so they do not see vault code that is not gated.
-      - name: Check the demo build without the vault
-        run: cargo check --offline --locked --features desktop --bin apassy
-
-      # The app binary (crates/apassy-app) is outside the default members: it joins the
-      # core with the relay crate for the Mac's own node (ADR 0037).
-      - name: Run Clippy on the app crate
-        run: cargo clippy --offline --locked -p apassy-app --all-targets -- -D warnings
-
-      - name: Check vault API compile failures
-        run: cargo test --offline --locked --features vault --doc
-
-      # The Apple Watch slices of the vault core (ADR 0039 section 4) build without the
-      # default `openssl` feature: SQLCipher uses CommonCrypto there and nowhere else.
-      - name: Check the Apple Watch vault core
-        run: |
-          rustup target add --toolchain 1.97.0 aarch64-apple-watchos aarch64-apple-watchos-sim
-          cargo check --offline --locked -p apassy-core --no-default-features --target aarch64-apple-watchos-sim
-
-      # The vault core of the iPhone app (ios/ApassyCore) has no macOS code, so the
-      # linux job lints it and the relay job tests it. The iPhone slices need Xcode
-      # (ios/README.md).
-
+        run: cargo +1.97.0 fmt --all -- --check
       - name: Run P0 Node model tests
         run: node --test design/walkthrough/model.test.mjs
-
-      - name: Run Python fixture boundary tests
-        run: python3 tests/isolation/test_fixture_boundary.py
 
       - name: Install Python 3.12
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -188,6 +162,18 @@ jobs:
           "$RUNNER_TEMP/brain-venv/bin/python" -I -B -m unittest discover -s tests/basemodel -p 'test_*.py'
           # The K1 bench script (implementation plan 0035, E2) without a server or torch.
           "$RUNNER_TEMP/brain-venv/bin/python" -I -B tools/basemodel/bench.py --dry-run
+
+      - name: Check the browser extension version
+        run: |
+          python3 -I - <<'PYTHON'
+          import json, tomllib
+          with open('Cargo.toml', 'rb') as source:
+              app_version = tomllib.load(source)['package']['version']
+          with open('extension/manifest.json', encoding='utf-8') as source:
+              extension_version = json.load(source)['version']
+          if app_version != extension_version:
+              raise SystemExit('The browser extension version must match Cargo.toml.')
+          PYTHON
 
       - name: Check coordinated release versions
         run: |
@@ -261,7 +247,7 @@ jobs:
   # use the apassy library with the `vault` feature only, so one build serves both.
   # Two jobs build the same targets and each runs one slice of the tests; the first
   # also runs the doc tests and the end-to-end script. Both use one cache key.
-  # The linux job runs their Clippy, the macOS job checks the format (`cargo fmt --all`).
+  # The linux job runs their Clippy, the portable job checks the format (`cargo fmt --all`).
   relay:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
