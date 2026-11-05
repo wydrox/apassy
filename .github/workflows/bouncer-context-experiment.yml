@@ -149,6 +149,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         persist-credentials: false
+        fetch-depth: 0
     - name: Install Python 3.12
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
       with:
@@ -224,6 +225,43 @@ jobs:
                                    for pattern in patterns)
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
+        # Synthetic source tests only; never load the retired H2 integration class.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'heldout_source_tests', 'tests/basemodel/test_context_heldout_preflight.py')
+        source_tests = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(source_tests)
+        suite = unittest.TestSuite(
+            unittest.defaultTestLoader.loadTestsFromTestCase(value)
+            for name, value in vars(source_tests).items()
+            if isinstance(value, type) and issubclass(value, unittest.TestCase)
+            and value is not unittest.TestCase and name != 'HostedH2IntegrationTests')
+        suite.addTests(unittest.defaultTestLoader.discover(
+            'tests/basemodel', pattern='test_context_heldout_route.py'))
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
+        # H3 is conditional preparation, never a new workflow mode or quality PASS.
+        import shutil, subprocess, sys
+        h3 = Path('tests/evals/secret-context-heldout-v3')
+        if (h3 / 'raw.jsonl').is_file() and not (h3 / 'TERMINAL.json').exists():
+            command = [sys.executable, '-B', str(h3 / 'route.py'),
+                       '--raw', str(h3 / 'raw.jsonl'),
+                       '--raw-manifest', str(h3 / 'raw.manifest.json'),
+                       '--replay-binary', os.environ['APASSY_CONTEXT_REPLAY_BINARY']]
+            if (h3 / 'routed.jsonl').exists():
+                command.append('--check')
+            try:
+                # Router applies unchanged preflight to routed rows only after
+                # successful conversion and the additional reachable floors.
+                subprocess.run(command, check=True)
+            finally:
+                upload = Path(os.environ['RUNNER_TEMP'], 'bouncer-context/h3-routed')
+                upload.mkdir(parents=True, exist_ok=True)
+                for name in ('routed.jsonl', 'routed.manifest.json', 'route-report.json'):
+                    if (h3 / name).is_file():
+                        shutil.copyfile(h3 / name, upload / name)
+        elif (h3 / 'TERMINAL.json').exists():
+            print('H3 terminal: preparation skipped; no H3 PASS claimed.')
         PY
     - name: Require tokenizer unittest without skips and exact canonical measurement
       run: |
@@ -460,6 +498,7 @@ jobs:
         compression-level: 0
         path: |
           ${{ runner.temp }}/bouncer-context/evidence/*.json
+          ${{ runner.temp }}/bouncer-context/h3-routed/*
           ${{ runner.temp }}/bouncer-context/evidence/training-time.txt
           ${{ runner.temp }}/bouncer-context/evidence/training-exit.txt
           ${{ runner.temp }}/bouncer-context/probe/training-report.json

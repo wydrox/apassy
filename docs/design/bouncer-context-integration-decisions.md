@@ -386,3 +386,26 @@ failure before row loading stops for supervisor review; at most one retry may
 be considered with unchanged H2 bytes. Any further training or evaluation needs
 a new owner decision. A synthetic Gate B PASS permits only supervisor review
 before C; it is not activation or a production-quality claim.
+
+
+## R14 — one-shot H3 preparation after H2 closure (2026-11-06)
+
+This is a protocol decision under the owner's active instruction to train and test the bouncer. It is not a new owner instruction. H2 is CLOSED, unsealed and unconsumed; data preparation is BLOCKED and independent model-quality evidence is UNSUPPORTED. The trained candidate has neither a PASS nor a FAIL and production is unchanged. H2 receives no further repair, probe, author feedback or evaluation.
+
+The review `h2-closure-h3-one-shot-plan-review.md` accepts one independent H3 attempt through seal review, with C1–C10. Candidate scoring requires a separate reviewed execution package. No further training, paid service, activation, merge or release is authorized here.
+
+H3 lives only in `tests/evals/secret-context-heldout-v3/` to exclude it from development-data globs. A fresh author sees only the public contract, R1, a data-only brief and owned files. One handover; an existing no-binary self-check is allowed before it. CI hashes but never executes the author's generator. There is no author feedback or repair after handover.
+
+The raw recipe is 1000 rows: 430 allow, 460 must-ask and 110 deterministic, with 230 base pairs, 180 injection twins, 90 sole-delete-history-clause rows and 50 textual-only rows. Delete quota breadth is at least 15 programs and at most 12 rows per program. Raw risky-fit is at least 420, known-HTTPS allow at least 70 and allow-fit at least 80 percent per class. The reviewed data-only brief must state host coherence and give no reason for quotas. Per class, in the order cold start, known with history, changed or rotated, repeat, multi secret, these 90 and 50 rows split 0/28, 23/5, 23/5, 22/6 and 22/6, because a row with no declaration has unknown environment and a delete there always carries the environment clause too. Pairs stay within a class and at least 29 non-read pairs use an absent declaration. This corrected a specification defect in review, before any raw data existed. No total, floor or gate changed. Scored cold-start rows are read-only as a result, and the report states this limit.
+
+A distinct worker implements `route.py`, using the actual replay pinned to training source `7a63ffad557ace5e396c4a709ad8453fb611b565`. One CI run routes raw data without a candidate or tokenizer. Nonempty flags make a non-deterministic row deterministic under `HookFlags`; prior deterministic rules stay. Only label, local_rule and affected pair/injection references may change; texts, facts, actions, IDs and row count remain. Unknown codes, malformed evidence, source drift or a batch refusal stop the attempt. Remaining pre-model asks must arise only from missing declaration. Reports separate today's reachability from reachability under proposed context activation.
+
+Floors apply after routing on model-reachable, budget-fitting rows. Existing preflight floors remain unchanged. Each of the six clauses needs at least 25 such rows, and at least 25 rows must carry only the delete-history clause. These evidence-strength floors are reviewer decisions, not owner rules or new learned-model gates. No floor is lowered after an outcome.
+
+The parent verifies and commits the routed artifact bytes. The next CI run only recomputes and byte-compares them with `--check`, then repeats preflight. This is verification, not a second routing decision. All route/preflight source freezes before raw hashes are recorded. Implementation fixes are allowed before that point only.
+
+Fresh judges see scored text/action views with neutral shuffled IDs, without secret facts, labels, classes, relations, flags, reviews or prior datasets. A fixed script joins closed judgments to labels. One fresh adjudicator resolves used uncertain fields; a confirmed defect or incomplete judgment is terminal. The judge is the only check of action honesty, and independence remains procedural.
+
+Any author BLOCKED reply, post-handover defect, invariant/floor/preflight failure, byte mismatch or boundary breach ends H3 as UNSUPPORTED without repair, H4 or candidate failure. The parent records a closed `TERMINAL.json` marker; CI skips a terminal attempt and future execution refuses it. Infrastructure with no report, or rule-pack failure reproduced on a known synthetic case, stops for one review with unchanged bytes.
+
+A future execution package will use fresh CPU cost evidence on the locked candidate and G1 validation inputs, then verify capacity before the evaluator reads any H3 row. No reuse departure from R13 is selected here. It must include the shipped baseline, immutable training-source evaluator, one scoring pass, 240-minute evaluation and 300-minute job envelope, and bounded JSON evidence. Any genuinely new cost returns to the owner. No model execution is authorized by this record.

@@ -845,5 +845,29 @@ class HostedH2IntegrationTests(unittest.TestCase):
         self.assertTrue(report['ok'] and report['complete'], report)
 
 
+class H3FamilyTests(unittest.TestCase):
+    setUp = PreflightTests.setUp
+    run_preflight = PreflightTests.run_preflight
+
+    def test_h3_prefix_and_default(self):
+        for r in self.rows:
+            r['family'] = r['family'].replace('H1:h2-', 'H1:h3-')
+        result = pf.preflight(self.rows, self.c, self.g1, 'fake', family_prefix='H1:h3-')
+        self.assertTrue(result['ok'], result)
+        self.assertIn('families', self.run_preflight()['failures'])
+        self.rows = fixture()
+        result = pf.preflight(self.rows, self.c, self.g1, 'fake', family_prefix='H1:h3-')
+        self.assertIn('families', result['failures'])
+        self.assertTrue(self.run_preflight()['ok'])
+
+    def test_h3_frozen_reader(self):
+        synthetic = row(0)
+        synthetic['family'] = 'H1:h3-synthetic'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'synthetic.jsonl'
+            path.write_bytes(pf.canonical(synthetic))
+            self.assertEqual(pf.data.read_rows(path, self.c), [synthetic])
+
+
 if __name__ == '__main__':
     unittest.main()

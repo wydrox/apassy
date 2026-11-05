@@ -225,7 +225,7 @@ def _relations(rows, report):
     return pairs, injected
 
 
-def _preflight(rows, c, g1_rows, replay_binary, report):
+def _preflight(rows, c, g1_rows, replay_binary, report, family_prefix='H1:h2-'):
     if not _sources_pinned():
         _fail(report, 'source_pin')
         return
@@ -247,7 +247,7 @@ def _preflight(rows, c, g1_rows, replay_binary, report):
         _fail(report, 'schema', malformed)
         return
     report['counts'].update(_counts(rows))
-    wrong = [r for r in rows if not r['family'].startswith('H1:h2-')]
+    wrong = [r for r in rows if not r['family'].startswith(family_prefix)]
     if wrong:
         _fail(report, 'families', wrong)
     fits, coverage = [], Counter()
@@ -395,11 +395,11 @@ def _preflight(rows, c, g1_rows, replay_binary, report):
     report['complete'] = not report['failures']
 
 
-def preflight(rows, c, g1_rows, replay_binary=None):
+def preflight(rows, c, g1_rows, replay_binary=None, family_prefix='H1:h2-'):
     """Bounded report. Exceptions never disclose row text or exception messages."""
     report = _report()
     try:
-        _preflight(rows, c, g1_rows, replay_binary, report)
+        _preflight(rows, c, g1_rows, replay_binary, report, family_prefix)
     except Exception:
         _fail(report, 'preflight_error')
     return report
@@ -428,6 +428,7 @@ def main(argv=None):
     for option in ('data', 'manifest', 'out'):
         parser.add_argument('--' + option, required=True)
     parser.add_argument('--replay-binary')
+    parser.add_argument('--family-prefix', choices=('H1:h2-', 'H1:h3-'), default='H1:h2-')
     args = parser.parse_args(argv)
     report = _report()
     try:
@@ -451,7 +452,7 @@ def main(argv=None):
                 _fail(report, 'manifest')
             if report['ok']:
                 g1 = {s: data.generate(7, n, s) for s, n in [('train', 400), ('val', 100)]}
-                report = preflight(rows, c, g1, args.replay_binary)
+                report = preflight(rows, c, g1, args.replay_binary, args.family_prefix)
     except Exception:
         _fail(report, 'cli_input')
     try:
