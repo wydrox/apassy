@@ -508,6 +508,325 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(before, (base / 'bad.json').read_bytes())
 
 
+class FailedAllowAnalysisTests(unittest.TestCase):
+    # Reuse only synthetic setup and the public API wrapper, without inheriting tests.
+    setUp = PreflightTests.setUp
+    run_preflight = PreflightTests.run_preflight
+
+    def diagnostic_run(self, entries, **extra):
+        def replay_with_flags(views, binary):
+            result = fake_replay(views, binary)
+            for index, diagnostic in entries.items():
+                result['diagnostics'][index] = diagnostic
+            result.update(extra)
+            return result
+        with patch.object(pf.replay, 'baseline_lower_bound', side_effect=replay_with_flags) as call:
+            report = self.run_preflight()
+        self.assertEqual(call.call_count, 1)
+        return report
+
+    def summary(self, report):
+        self.assertEqual(set(report['diagnostics']), {'failed_allow_analysis'})
+        return report['diagnostics']['failed_allow_analysis']
+
+    def conserved(self, summary):
+        self.assertEqual(summary['failed_allow_rows'], summary['diagnosed_rows']
+                         + summary['unknown_or_malformed_rows'])
+        self.assertEqual(sum(e['rows'] for e in summary['flag_sets'])
+                         + summary['truncated_rows'], summary['diagnosed_rows'])
+        self.assertEqual(sum(summary['actions'].values()), summary['diagnosed_rows'])
+        for entry in summary['flag_sets']:
+            self.assertEqual(sum(entry['actions'].values()), entry['rows'])
+
+    def closed(self, summary):
+        self.assertEqual(set(summary), {
+            'complete', 'truncated', 'raw_replay_flags', 'model_scoring',
+            'failed_allow_rows', 'diagnosed_rows', 'unknown_or_malformed_rows',
+            'truncated_rows', 'flag_sets', 'actions',
+            'db_only_all_secrets_hosts_known_rows'})
+        actions = {'read', 'change', 'deploy', 'delete'}
+        self.assertEqual(set(summary['actions']), actions)
+        self.assertLessEqual(len(summary['flag_sets']), 32)
+        for entry in summary['flag_sets']:
+            self.assertEqual(set(entry), {'flags', 'rows', 'actions',
+                                         'unknown_env_rows', 'injection_twin_rows'})
+            self.assertEqual(set(entry['actions']), actions)
+            self.assertEqual(entry['flags'], sorted(set(entry['flags'])))
+        def walk(value):
+            if type(value) is dict:
+                for item in value.values():
+                    walk(item)
+            elif type(value) is list:
+                for item in value:
+                    walk(item)
+            elif type(value) is str:
+                self.assertIn(value, pf.FLAG_VOCABULARY | {'NOT_RUN'})
+            else:
+                self.assertIn(type(value), (int, bool))
+                if type(value) is int:
+                    self.assertGreaterEqual(value, 0)
+                    self.assertLessEqual(value, 1000)
+        walk(summary)
+        self.assertTrue(summary['raw_replay_flags'])
+        self.assertEqual(summary['model_scoring'], 'NOT_RUN')
+        self.conserved(summary)
+
+    def test_diagnostic_exact_aggregate(self):
+        # Set the cross-tab facts explicitly, independent of class ordering.
+        for index in (0, 790):
+            for item in self.rows[index]['secrets']:
+                item['env'] = 'unknown'
+        for index in (1, 2):
+            for item in self.rows[index]['secrets']:
+                item.update(env='development', hosts='known')
+        self.rows[1]['action'] = 'change'
+        self.rows[2]['action'] = 'deploy'
+        self.rows[790]['action'] = 'delete'
+        report = self.diagnostic_run({
+            0: {'flags': ['data_loss']}, 790: {'flags': ['data_loss']},
+            1: {'flags': ['db_host_from_command']},
+            2: {'flags': ['db_host_from_command']}})
+        summary = self.summary(report)
+        self.assertEqual(summary, dict(
+            complete=True, truncated=False, raw_replay_flags=True, model_scoring='NOT_RUN',
+            failed_allow_rows=4, diagnosed_rows=4, unknown_or_malformed_rows=0,
+            truncated_rows=0, actions=dict(read=1, change=1, deploy=1, delete=1),
+            db_only_all_secrets_hosts_known_rows=2,
+            flag_sets=[dict(flags=['data_loss'], rows=2,
+                            actions=dict(read=1, change=0, deploy=0, delete=1),
+                            unknown_env_rows=2, injection_twin_rows=1),
+                       dict(flags=['db_host_from_command'], rows=2,
+                            actions=dict(read=0, change=1, deploy=1, delete=0),
+                            unknown_env_rows=0, injection_twin_rows=0)]))
+        self.closed(summary)
+
+    def test_diagnostic_normalization_and_immutability(self):
+        for item in self.rows[0]['secrets']:
+            item['env'] = 'unknown'
+        for item in self.rows[1]['secrets']:
+            item['env'] = 'development'
+        entries = {0: {'flags': ['data_loss', 'foreign_host', 'data_loss']},
+                   1: {'flags': ['foreign_host', 'data_loss']}}
+        before, rows_before = copy.deepcopy(entries), copy.deepcopy(self.rows)
+        report = self.diagnostic_run(entries)
+        self.assertEqual(entries, before)
+        self.assertEqual(self.rows, rows_before)
+        self.assertEqual(report['failures']['allow_analysis_flags'], ['h2:0', 'h2:1'])
+        self.assertEqual(self.summary(report)['flag_sets'], [dict(
+            flags=['data_loss', 'foreign_host'], rows=2,
+            actions=dict(read=2, change=0, deploy=0, delete=0),
+            unknown_env_rows=1, injection_twin_rows=0)])
+
+    def test_diagnostic_closed_failure(self):
+        class HostileString(str):
+            def __hash__(self):
+                raise AssertionError('hash must not execute')
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError('iteration must not execute')
+        values = [['PRIVATE_FLAG_CANARY'], ['data_loss', 'PRIVATE_FLAG_CANARY'],
+                  None, 'PRIVATE_FLAG_CANARY', [17], [HostileString('data_loss')],
+                  HostileList(['data_loss']), [[]], [{}]]
+        report = self.diagnostic_run({i: {'flags': value} for i, value in enumerate(values)})
+        summary = self.summary(report)
+        self.assertFalse(summary['complete'])
+        self.assertEqual(summary['failed_allow_rows'], len(values))
+        self.assertEqual(summary['unknown_or_malformed_rows'], len(values))
+        self.assertEqual(summary['diagnosed_rows'], 0)
+        self.assertEqual(report['failures']['allow_analysis_flags'], ['h2:0', 'h2:1'])
+        self.assertEqual(report['failures']['analysis_flags_unavailable'],
+                         [f'h2:{i}' for i in range(2, len(values))])
+        self.assertNotIn('PRIVATE_FLAG_CANARY', json.dumps(report))
+        self.closed(summary)
+
+    def test_diagnostic_truncation_stable_top_n(self):
+        import itertools
+        vocabulary = sorted(pf.FLAG_VOCABULARY)
+        groups = [[v] for v in vocabulary]
+        groups += [list(v) for v in itertools.islice(itertools.combinations(vocabulary, 2), 22)]
+        entries, expected = {}, []
+        index = 0
+        for i, flags in enumerate(groups):
+            n = 2 if i % 3 == 0 else 1
+            expected.append((n, flags))
+            for _ in range(n):
+                entries[index] = {'flags': flags}
+                index += 1
+        first = self.summary(self.diagnostic_run(entries))
+        expected.sort(key=lambda item: (-item[0], item[1]))
+        self.assertEqual([(e['rows'], e['flags']) for e in first['flag_sets']], expected[:32])
+        self.assertTrue(first['truncated'])
+        self.assertFalse(first['complete'])
+        self.closed(first)
+        paired = [(r, entries.get(i, {'flags': []})) for i, r in enumerate(self.rows)]
+        # A fixed permutation changes first-seen order and retains all relationships.
+        paired = paired[1::2] + paired[::2]
+        self.rows = [r for r, _ in paired]
+        second = self.summary(self.diagnostic_run({i: d for i, (_, d) in enumerate(paired)}))
+        self.assertEqual(first, second)
+
+    def test_diagnostic_full_vocabulary_size_bound(self):
+        import itertools
+        vocabulary = sorted(pf.FLAG_VOCABULARY)
+        self.assertEqual(len(vocabulary), 18)
+        groups = [list(v) for n in (18, 17, 16)
+                  for v in itertools.combinations(vocabulary, n)][:32]
+        allows = [i for i, r in enumerate(self.rows) if r['label'] == 'allow_ok']
+        summary = self.summary(self.diagnostic_run({i: {'flags': groups[j % 32]}
+                                                    for j, i in enumerate(allows)}))
+        self.assertEqual(len(summary['flag_sets']), 32)
+        self.assertEqual({f for e in summary['flag_sets'] for f in e['flags']},
+                         set(vocabulary))
+        self.assertLessEqual(len(json.dumps(summary, separators=(',', ':')).encode()), 16384)
+        # Bound serialized width even with every counter using its maximum digits.
+        # This conservative shape need not describe a simultaneously possible batch.
+        def maximum_width(value):
+            if type(value) is int:
+                return 1000
+            if type(value) is dict:
+                return {key: maximum_width(item) for key, item in value.items()}
+            if type(value) is list:
+                return [maximum_width(item) for item in value]
+            return value
+        self.assertLessEqual(len(json.dumps(maximum_width(summary),
+                                            separators=(',', ':')).encode()), 16384)
+        self.closed(summary)
+
+    def test_diagnostic_beyond_id_cap(self):
+        report = self.diagnostic_run({i: {'flags': ['data_loss']} for i in range(60)})
+        self.assertEqual(len(report['failures']['allow_analysis_flags']), 50)
+        summary = self.summary(report)
+        self.assertEqual(summary['failed_allow_rows'], 60)
+        self.assertEqual(summary['diagnosed_rows'], 60)
+        self.closed(summary)
+
+    def test_diagnostic_green_paths(self):
+        for entries, extra in [({}, {}), ({}, {'pre_ask': [True] * len(self.rows)}),
+                                ({340: {'flags': ['data_loss']},
+                                  680: {'flags': ['foreign_host']}}, {})]:
+            with self.subTest(entries=entries, extra=bool(extra)):
+                report = self.diagnostic_run(entries, **extra)
+                self.assertTrue(report['ok'], report)
+                self.assertNotIn('diagnostics', report)
+                for forbidden in ('gate_b', 'feasibility_quality', 'scores', 'auroc',
+                                  'ask_rate', 'outcome', 'shared_program_subcommands',
+                                  'data_loss', 'foreign_host'):
+                    self.assertNotIn(forbidden, json.dumps(report))
+        self.assertNotIn('diagnostics', self.run_preflight(None))
+
+    def test_diagnostic_db_gate_and_data_loss_preserved(self):
+        self.rows[2]['secrets'][0]['hosts'] = 'unknown'
+        report = self.diagnostic_run({0: {'flags': ['db_host_from_command']},
+                                     1: {'flags': ['db_host_from_command', 'data_loss']},
+                                     2: {'flags': ['db_host_from_command']}})
+        self.assertFalse(report['ok'])
+        self.assertEqual(report['failures']['allow_analysis_flags'], ['h2:0', 'h2:1', 'h2:2'])
+        summary = self.summary(report)
+        self.assertEqual(summary['db_only_all_secrets_hosts_known_rows'], 1)
+        self.assertIn(['data_loss', 'db_host_from_command'],
+                      [e['flags'] for e in summary['flag_sets']])
+        self.closed(summary)
+
+    def test_diagnostic_batch_failure_fixed_incomplete(self):
+        fixed = dict(complete=False, truncated=False, raw_replay_flags=True,
+                     model_scoring='NOT_RUN', failed_allow_rows=0, diagnosed_rows=0,
+                     unknown_or_malformed_rows=0, truncated_rows=0, flag_sets=[],
+                     actions=dict(read=0, change=0, deploy=0, delete=0),
+                     db_only_all_secrets_hosts_known_rows=0)
+        for mode in ('raise', 'length', 'record'):
+            calls = []
+            def broken(views, binary):
+                calls.append(len(views))
+                if mode == 'raise':
+                    raise ValueError('PRIVATE_BATCH_CANARY')
+                if len(views) == 1:
+                    return {'diagnostics': [{'flags': ['data_loss']}]}
+                result = fake_replay(views, binary)
+                if mode == 'length':
+                    result['diagnostics'].pop()
+                else:
+                    result['diagnostics'][0] = None
+                return result
+            with self.subTest(mode=mode), patch.object(
+                    pf.replay, 'baseline_lower_bound', side_effect=broken), patch.object(
+                        pf, 'monotonic', return_value=0):
+                report = self.run_preflight()
+            self.assertEqual(self.summary(report), fixed)
+            self.assertIn('compiled_replay', report['failures'])
+            self.assertEqual(report['failures']['compiled_replay'],
+                             [r['id'] for r in self.rows[:50]] if mode == 'raise' else ['_dataset'])
+            self.assertEqual(len(calls), 51 if mode == 'raise' else 1 + len(self.rows))
+            self.assertNotIn('PRIVATE_BATCH_CANARY', json.dumps(report))
+        success = self.diagnostic_run({0: {'flags': ['data_loss']}})
+        self.assertNotIn('compiled_replay', success['failures'])
+
+    def test_diagnostic_aggregator_exception_isolation(self):
+        for entries in ({}, {0: {'flags': ['data_loss']}}):
+            baseline = self.diagnostic_run(entries)
+            with patch.object(pf, '_failed_allow_analysis', side_effect=RuntimeError('PRIVATE_ERROR_CANARY')):
+                report = self.diagnostic_run(entries)
+            for key in ('ok', 'complete', 'counts', 'failures', 'not_run'):
+                self.assertEqual(report[key], baseline[key])
+            self.assertNotIn('compiled_replay', report['failures'])
+            self.assertNotIn('preflight_error', report['failures'])
+            self.assertNotIn('PRIVATE_ERROR_CANARY', json.dumps(report))
+            summary = self.summary(report)
+            self.assertFalse(summary['complete'])
+            self.assertEqual(summary['failed_allow_rows'], 0)
+            self.assertEqual(summary['flag_sets'], [])
+            self.closed(summary)
+
+    def test_diagnostic_cli_serialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            dataset, manifest, generator = base / 'rows.jsonl', base / 'manifest.json', base / 'generator.py'
+            generator.write_text('# synthetic source, never executed\n')
+            dataset.write_bytes(b''.join(pf.canonical(r) for r in self.rows))
+            manifest.write_text(json.dumps(dict(
+                sha256=pf.sha256(dataset), generator=generator.name,
+                generator_sha256=pf.sha256(generator), rubric='secret-context-rubric-v1',
+                counts=pf._counts(self.rows))))
+            def flagged(views, binary):
+                result = fake_replay(views, binary)
+                result['diagnostics'][0]['flags'] = ['data_loss']
+                return result
+            for binary in (True, False):
+                out = base / ('binary.json' if binary else 'no-binary.json')
+                args = ['--data', str(dataset), '--manifest', str(manifest), '--out', str(out)]
+                if binary:
+                    args += ['--replay-binary', 'fake']
+                with patch.object(pf.data, 'generate', side_effect=lambda seed, n, split: self.g1[split]), \
+                        patch.object(pf.replay, 'baseline_lower_bound', side_effect=flagged) as call, \
+                        contextlib.redirect_stdout(io.StringIO()) as captured:
+                    rc = pf.main(args)
+                report = json.loads(out.read_text())
+                self.assertEqual(rc, 1)
+                self.assertEqual(json.loads(captured.getvalue()), report)
+                self.assertEqual(call.call_count, int(binary))
+                if binary:
+                    self.assertEqual(self.summary(report)['failed_allow_rows'], 1)
+                    self.closed(self.summary(report))
+                else:
+                    self.assertNotIn('diagnostics', report)
+
+    def test_diagnostic_recursive_closed_shape_and_privacy(self):
+        self.rows[0]['request'].update(user_request='PRIVATE_REQUEST_CANARY',
+                                       purpose='PRIVATE_PURPOSE_CANARY')
+        self.rows[0]['request']['command'] += ' PRIVATE_COMMAND_CANARY'
+        report = self.diagnostic_run({0: dict(
+            flags=['data_loss'], reason='PRIVATE_REASON_CANARY', note='PRIVATE_NOTE_CANARY',
+            systemone_body='PRIVATE_BODY_CANARY', actual_host_count='PRIVATE_COUNT_CANARY')})
+        summary = self.summary(report)
+        self.closed(summary)
+        self.assertEqual(summary['failed_allow_rows'], 1)
+        for canary in ('PRIVATE_REQUEST_CANARY', 'PRIVATE_PURPOSE_CANARY', 'PRIVATE_COMMAND_CANARY',
+                       'PRIVATE_REASON_CANARY', 'PRIVATE_NOTE_CANARY', 'PRIVATE_BODY_CANARY',
+                       'PRIVATE_COUNT_CANARY'):
+            self.assertNotIn(canary, json.dumps(report))
+        for forbidden in ('scores', 'auroc', 'ask_rate', 'feasibility_quality'):
+            self.assertNotIn(forbidden, json.dumps(report))
+
+
 class HostedH2IntegrationTests(unittest.TestCase):
     def test_real_h2_preflight(self):
         if os.environ.get('CI', '').lower() not in ('1', 'true'):
