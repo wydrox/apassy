@@ -91,9 +91,8 @@ concurrency:
 jobs:
   context-experiment:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.context_experiment == 'probe' || inputs.context_experiment == 'full' || inputs.context_experiment == 'cost-only' || inputs.context_experiment == 'cuda-preflight' || inputs.context_experiment == 'external-evaluate') }}
-    # Allow only the callee's manual draft-download jobs to request push access.
     permissions:
-      contents: write
+      contents: read
     uses: ./.github/workflows/bouncer-context-experiment.yml
     with:
       mode: ${{ inputs.context_experiment }}
@@ -109,6 +108,7 @@ jobs:
       freeze_sha256: ${{ inputs.freeze_sha256 }}
       shipped_baseline: ${{ inputs.shipped_baseline }}
     secrets:
+      APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
       APASSY_CONTEXT_SHIPPED_HEADS_URL: ${{ secrets.APASSY_CONTEXT_SHIPPED_HEADS_URL }}
 
   reuse-pr:

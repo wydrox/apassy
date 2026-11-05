@@ -34,7 +34,7 @@ registered, unchanged `ci.yml` bridge:
 gh workflow run ci.yml --ref feat/bouncer-secret-context -f context_experiment=full
 ```
 
-No manual dispatch has occurred. Do not push between green CI and this dispatch.
+Consult the status ledger for actual manual dispatch history. Do not push between green CI and this dispatch.
 Do not dispatch while an earlier run on the same ref remains active. Identify the
 new run and verify its head SHA is X. The bridge also runs the existing full CI
 suite, including macOS jobs, with no secrets or publication.
@@ -57,8 +57,8 @@ All three jobs use the existing `ubuntu-24.04` runner type, Python 3.12 and only
 `contents: read`. Checkout disables persisted credentials. Checkout, setup-python
 and upload-artifact action SHAs match `ci.yml`; the download-artifact SHA is the
 existing v8.0.2 pin in `bouncer-image.yml` (there is no download pin in `ci.yml`).
-No repository secret, R2 read, owner data, endpoint, paid service or publication is
-introduced. Dependency installation and the Rust build occur only in CI.
+Probe/train/evaluate introduce no repository secret, R2 read, owner data,
+endpoint, paid service or publication. Dependency installation and the Rust build occur only in CI.
 
 Each fresh job creates a private venv, public-model HF cache and package caches
 under `$RUNNER_TEMP/bouncer-context` (`EXP`). It unsets the known HF/Laya owner
@@ -254,22 +254,29 @@ checkpoint/freeze), and `groups` (400..800). Seed is fixed at 7. The final sourc
 revision must include this workflow; the original task HEAD is not a dispatch target.
 
 The owner must explicitly approve any later local upload to a **draft** GitHub
-release. This implementation only reads. Before model training, one separately
-approved transport preflight must establish that the workflow's `GITHUB_TOKEN`
-can see the draft release and download its asset. The first Contents-read attempt
-was refused before model execution; its HTTP status was not recorded. GitHub
-limits [draft visibility](https://docs.github.com/en/rest/releases/releases#list-releases)
-to users with push access. The manual `cost-only` and `external-evaluate` jobs
-therefore request **Contents write**, with a matching maximum grant on their
-reusable-workflow caller. Both workflow defaults and all other called jobs retain
-Contents read. The existing manual event/mode guards remain in place, and the
-downloader still issues GET requests only. The token is scoped to its job and
-passed only to its download step; there is no persistent PAT or publication step.
-This correction requires a successful transport preflight before training;
-inaccessible metadata still fails closed. GitHub documents
-[release metadata](https://docs.github.com/en/rest/releases/releases#get-a-release)
-and [asset download](https://docs.github.com/en/rest/releases/assets#get-a-release-asset)
-with Contents read; download may return 200 or 302.
+release. This implementation only reads. All workflow and job Contents grants,
+including the reusable-workflow caller, remain read-only. GitHub credentials are
+not passed to the checkpoint downloader. Instead, immediately before an approved
+run, the owner authenticates locally, verifies the draft release and uploaded
+asset metadata, obtains its temporary read-only CDN URL, and stores an attestation
+in the optional Actions secret `APASSY_CONTEXT_INPUT`. That secret is explicitly
+mapped by `ci.yml` and exposed only in the cost or external download step. Its
+metadata is trusted because the owner controls the secret; CI does not independently
+re-query draft metadata. There is no PAT, write-token job or model artifact handoff.
+
+The secret is a JSON string no larger than 32 KiB with exactly eleven unique keys:
+`schema`, `source_sha`, `repository`, `release_id`, `asset_id`, `draft`, `state`,
+`size`, `sha256`, `url` and `expires_at`. The schema is `apassy-context-input-v1`,
+repository is `wydrox/apassy`, draft is exactly `true`, and state is `uploaded`.
+Positive integer release/asset IDs must match the numeric asset input; source and
+SHA-256 must match the external pins. Size is an integer from 1 byte through
+256 MiB. Expiry is an integer epoch strictly in the future and at most one hour
+from download validation. Boolean values do not substitute for integer fields.
+Every field and the URL are validated before any network request or file creation.
+Missing, expired, malformed or mismatched attestations fail closed. Prepare a fresh
+attestation close to execution; a delayed run may need a new approved preflight.
+The repository is public, so model weights must never be put in Actions artifacts.
+They remain in the private draft; the URL grants temporary read access to one object.
 
 For that preflight, use `context_experiment=cost-only` with `transport_only=true`
 in `ci.yml`. Dispatch through this bridge while the experiment workflow is absent
@@ -283,15 +290,18 @@ download, limited to five minutes within a ten-minute job. It ends by uploading
 only `transport-receipt.json`, before dependency installation, base download, G1
 generation or benchmark. `val_sha256` and `groups` are unused in that path. The
 default `transport_only=false` retains the full cost measurement. A small synthetic
-asset is already in an owner-approved private draft. Transport under the scoped
-write grant remains unmeasured until its new preflight succeeds. Failed HTTP
+asset is already in an owner-approved private draft. Earlier token-based transport
+evidence does not validate this read-only URL path; its exact-source preflight is
+**NOT_RUN** until the status ledger records a successful new run. External mode
+with `transport_only=true` is refused in its input check before the secret-bearing
+download step. Failed HTTP
 responses emit only a closed phase and sanitized status code alongside the generic
 error; response bodies, URLs and credentials are never logged.
 
-The helper verifies draft status, release/asset membership, uploaded state and a
-positive size no larger than 256 MiB. It streams into a new file with exact size
-and external SHA-256 checks, removing partial files on failure. Only API requests
-to `api.github.com` receive the token. Redirects use fresh unauthenticated requests
+The helper verifies the attested draft status, release/asset membership, uploaded
+state, source, size, digest and expiry. It streams into a new file with exact size
+and external SHA-256 checks, removing partial files on failure. Initial and
+redirected CDN GETs carry no Authorization header. Redirects use fresh unauthenticated requests
 to exact HTTPS hosts `release-assets.githubusercontent.com`,
 `objects.githubusercontent.com`, or `github-releases.githubusercontent.com`;
 other hosts, userinfo, non-HTTPS, nonstandard ports and loops are refused. Errors
@@ -306,8 +316,10 @@ private shipped heads are needed. Stock baseline heads provide cost shape only.
 The full cost job is bounded at 120 minutes and the benchmark at 110 minutes. Only completed
 `cost-full.json` and a compact identity/device/budget receipt are upload-allowlisted;
 checkpoint, G1, base/cache and token are excluded. Failures mean **cost unmeasured**.
-Success is **cost evidence only**, never quality PASS or B PASS. Actual download,
-training, models, hosted benchmark and artifact upload are **NOT_RUN** here.
+Success is **cost evidence only**, never quality PASS or B PASS. Runtime of the
+new read-only URL path remains **NOT_RUN** by this source preparation. The status
+ledger is authoritative for actual source/run results; transport-only receipts
+do not establish training, model execution, hosted benchmark or quality success.
 
 ## Existing trainer on Modal (runtime NOT_RUN)
 
@@ -325,7 +337,8 @@ dependencies on hosted Ubuntu, checks exact package versions and CPU-only tensor
 execution, and records source and disk evidence. It executes no model. The
 existing `cost-only` with `transport_only=true` separately checks access to a
 small owner-approved draft asset before training. Both dispatches also start
-ordinary CI. Neither preflight has been run for this package.
+ordinary CI. Consult the status ledger for exact source/run evidence; the new
+read-only URL transport needs its own successful preflight before training.
 
 After source review, green CI and owner approval, the launch entrypoint is
 `context_modal_existing.py launch` with `--source-sha`, a unique `--run-id`,
@@ -364,6 +377,7 @@ quality. Set `shipped_baseline=true` only with an approved
 `APASSY_CONTEXT_SHIPPED_HEADS_URL`; this HTTPS URL is confined to that job and the
 download must match the shipped SHA before H1. It is never sent to Modal. Without
 a conclusive baseline or cost, gate B remains UNSUPPORTED even if quality passes.
-Only compact evidence JSON is published by the evaluator. Training, paid calls,
-draft transport, private baseline access, hosted evaluation and release remain
-**NOT_RUN** by this source preparation.
+Only compact evidence JSON is published by the evaluator. This source preparation
+does not establish training, paid calls, private baseline access, hosted evaluation
+or release. The status ledger is authoritative for actual runs; the new read-only
+URL transport remains **NOT_RUN** until verified on its exact source SHA.

@@ -60,26 +60,17 @@ class DraftPermissions(unittest.TestCase):
         cls.ci = (WORKFLOWS / 'ci.yml').read_text()
         cls.experiment = (WORKFLOWS / 'bouncer-context-experiment.yml').read_text()
 
-    def test_read_defaults_and_only_required_job_write_overrides(self):
-        for source, expected in ((self.ci, {'context-experiment'}),
-                                 (self.experiment, set(DOWNLOADS))):
-            with self.subTest(expected=expected):
-                self.assertNotRegex(source, re.compile(r'^\s*permissions:[^\S\n]+\S', re.M))
-                self.assertEqual(permissions(source, 0), {'contents': 'read'})
-                job_blocks = jobs(source)
-                writers = set()
-                for name, job in job_blocks.items():
-                    grant = permissions(job, 4)
-                    if name in expected:
-                        self.assertEqual(grant, {'contents': 'write'})
-                        writers.add(name)
-                    elif grant is not None:
+    def test_workflow_caller_and_all_jobs_have_only_read_permissions(self):
+        for source in (self.ci, self.experiment):
+            self.assertNotRegex(source, re.compile(r'^\s*permissions:[^\S\n]+\S', re.M))
+            self.assertEqual(permissions(source, 0), {'contents': 'read'})
+            self.assertNotRegex(source, re.compile(r'^\s+[a-z-]+: write\s*$', re.M))
+            for name, job in jobs(source).items():
+                grant = permissions(job, 4)
+                with self.subTest(job=name):
+                    if grant is not None:
                         self.assertEqual(grant.get('contents', 'none'), 'read')
                         self.assertNotIn('write', grant.values())
-                self.assertEqual(writers, expected)
-                # Also reject write grants outside the recognized job blocks.
-                self.assertEqual(len(re.findall(r'^\s+[a-z-]+: write\s*$', source, re.M)),
-                                 len(expected))
 
     def test_actual_guards_allow_only_manual_event_and_matching_modes(self):
         caller = jobs(self.ci)['context-experiment']
@@ -97,43 +88,48 @@ class DraftPermissions(unittest.TestCase):
                         self.assertEqual(guard(callees[name], event, mode),
                                          event == 'workflow_dispatch' and mode == name)
 
-    def test_ephemeral_token_stays_in_each_download_step_only(self):
-        self.assertEqual(self.experiment.count('${{ github.token }}'), len(DOWNLOADS))
+    def test_input_secret_stays_in_each_manual_download_step_only(self):
+        self.assertNotRegex(self.experiment, r'GH_TOKEN|github\.token|GITHUB_TOKEN')
+        self.assertEqual(self.experiment.count('${{ secrets.APASSY_CONTEXT_INPUT }}'), 2)
         for name, download in DOWNLOADS.items():
             job = jobs(self.experiment)[name]
             steps = re.split(r'^    - ', section(job, 'steps', 4), flags=re.M)
-            credential_steps = [step for step in steps if '${{ github.token }}' in step]
+            input_steps = [step for step in steps if '${{ secrets.APASSY_CONTEXT_INPUT }}' in step]
             with self.subTest(job=name):
-                self.assertEqual(len(credential_steps), 1)
-                step = credential_steps[0]
+                self.assertEqual(len(input_steps), 1)
+                step = input_steps[0]
                 self.assertEqual(step.splitlines()[0], f'name: {download}')
-                self.assertIn('      env:\n        GH_TOKEN: ${{ github.token }}\n', step)
-                self.assertEqual(job.count('GH_TOKEN:'), 1)
-                self.assertNotRegex(job, r'GITHUB_TOKEN|secrets\.GITHUB_TOKEN')
-                self.assertEqual(set(re.findall(r'secrets\.([A-Za-z0-9_]+)', job)),
-                                 {'APASSY_CONTEXT_SHIPPED_HEADS_URL'}
-                                 if name == 'external-evaluate' else set())
+                self.assertIn('        APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}\n', step)
+                expected = {'APASSY_CONTEXT_INPUT'}
+                if name == 'external-evaluate':
+                    expected.add('APASSY_CONTEXT_SHIPPED_HEADS_URL')
+                self.assertEqual(set(re.findall(r'secrets\.([A-Za-z0-9_]+)', job)), expected)
                 self.assertNotRegex(step, r'(?:GITHUB_ENV|GITHUB_OUTPUT|::add-mask::)')
+                self.assertNotRegex(step, r'context_cost_asset import download|\bdownload\(')
                 for other in steps:
                     if other != step:
-                        self.assertNotRegex(other, r'GH_TOKEN|github\.token|secrets\.GITHUB_TOKEN')
+                        self.assertNotIn('APASSY_CONTEXT_INPUT', other)
                 checkouts = [s for s in steps if s.startswith('uses: actions/checkout@')]
                 self.assertEqual(len(checkouts), 1)
                 self.assertIn('      with:\n        persist-credentials: false\n', checkouts[0])
                 self.assertNotIn('persist-credentials: true', job)
+        self.assertNotIn('draft-download', jobs(self.experiment))
+        self.assertNotIn('bouncer-context-draft-input-', self.experiment)
 
     def test_reusable_caller_keeps_explicit_secret_allowlist(self):
         caller = jobs(self.ci)['context-experiment']
         self.assertIn('    uses: ./.github/workflows/bouncer-context-experiment.yml\n', caller)
         self.assertNotRegex(caller, r'github\.token|GH_TOKEN|GITHUB_TOKEN')
         self.assertEqual(section(caller, 'secrets', 4).strip(),
-                         'APASSY_CONTEXT_SHIPPED_HEADS_URL: '
+                         'APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}\n'
+                         '      APASSY_CONTEXT_SHIPPED_HEADS_URL: '
                          '${{ secrets.APASSY_CONTEXT_SHIPPED_HEADS_URL }}')
         for source in (self.ci, self.experiment):
             self.assertNotRegex(source, r'secrets:\s*inherit')
         declared = section(section(self.experiment, 'workflow_call', 2), 'secrets', 4)
         self.assertEqual(declared.strip(),
-                         'APASSY_CONTEXT_SHIPPED_HEADS_URL:\n        required: false')
+                         'APASSY_CONTEXT_INPUT:\n        required: false\n'
+                         '      APASSY_CONTEXT_SHIPPED_HEADS_URL:\n        required: false')
 
 
 if __name__ == '__main__':

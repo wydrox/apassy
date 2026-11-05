@@ -1,6 +1,6 @@
 """Cost-only workflow and transport contracts; synthetic bytes, no network/models."""
 import ast
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
@@ -11,7 +11,10 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
+from types import SimpleNamespace
 import unittest
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +23,15 @@ import context_cost_asset as C
 
 BODY = b'fake checkpoint only'
 SHA = hashlib.sha256(BODY).hexdigest()
+NOW = 1700000000
+
+
+def input_manifest(now=NOW):
+    return dict(schema='apassy-context-input-v1', source_sha='a' * 40,
+                repository='wydrox/apassy', release_id=12, asset_id=34, draft=True,
+                state='uploaded', size=len(BODY), sha256=SHA,
+                url='https://objects.githubusercontent.com/input?sig=CANARY_URL',
+                expires_at=now + 300)
 
 
 class Response(io.BytesIO):
@@ -32,7 +44,8 @@ class Response(io.BytesIO):
 class CostAsset(unittest.TestCase):
     def env(self):
         return dict(SOURCE_SHA='a' * 40, GITHUB_SHA='a' * 40, CHECKPOINT_ASSET='12/34',
-                    CHECKPOINT_SHA256=SHA, VAL_SHA256='b' * 64, COST_GROUPS='400')
+                    CHECKPOINT_SHA256=SHA, VAL_SHA256='b' * 64, COST_GROUPS='400',
+                    APASSY_CONTEXT_INPUT=json.dumps(input_manifest()))
 
     def metadata(self):
         return dict(id=12, draft=True, assets=[dict(id=34, state='uploaded', size=len(BODY))])
@@ -147,26 +160,28 @@ class CostAsset(unittest.TestCase):
     def test_cli_errors_are_generic(self):
         stderr = io.StringIO()
         with patch.dict(os.environ, self.env()), patch.object(C.subprocess, 'check_output', return_value='a'*40), \
-             patch.object(C, 'download', side_effect=RuntimeError('FAKE_TOKEN https://private/?secret=raw')), \
+             patch.object(C, 'download_input', side_effect=RuntimeError('FAKE_TOKEN https://private/?secret=raw')), \
              patch.dict(os.environ, EXP='/unused', GH_TOKEN='FAKE_TOKEN'), redirect_stderr(stderr):
             self.assertEqual(C.main(), 1)
         self.assertEqual(stderr.getvalue(), 'cost unmeasured: checkpoint input or transport refused\n')
 
     def cli_with_responses(self, responses):
         stderr = io.StringIO()
+        stdout = io.StringIO()
         requests = []
-        download = C.download
+        download = C.download_input
         def fake(request):
             requests.append(request)
             return responses.pop(0)
-        def transport(asset, sha, destination, token):
-            return download(asset, sha, destination, token, fake)
+        def transport(asset, sha, destination, manifest, source_sha):
+            return download(asset, sha, destination, manifest, source_sha, fake, now=NOW)
         with tempfile.TemporaryDirectory() as tmp:
             env = dict(self.env(), EXP=tmp, GH_TOKEN='CANARY_TOKEN')
             with patch.dict(os.environ, env), \
                  patch.object(C.subprocess, 'check_output', return_value='a'*40), \
-                 patch.object(C, 'download', side_effect=transport), redirect_stderr(stderr):
+                 patch.object(C, 'download_input', side_effect=transport), redirect_stderr(stderr), redirect_stdout(stdout):
                 result = C.main()
+            self.assertEqual(stdout.getvalue(), '')
             destination = Path(tmp) / 'context.safetensors'
             body = destination.read_bytes() if destination.exists() else None
         return result, stderr.getvalue(), requests, body
@@ -184,39 +199,211 @@ class CostAsset(unittest.TestCase):
             self.assertNotIn(canary, stderr)
 
     def test_cli_http_refusals_identify_only_phase_and_status(self):
-        metadata = json.dumps(self.metadata()).encode()
         private = b'CANARY_BODY https://private.test/CANARY_URL?token=CANARY_TOKEN'
         for status in (401, 403, 404):
-            with self.subTest(status=status, phase='release_metadata'):
-                self.assert_http_diagnostic([Response(private, status)], 'release_metadata', status)
-            with self.subTest(status=status, phase='asset'):
-                self.assert_http_diagnostic([Response(metadata), Response(private, status)], 'asset', status)
-            with self.subTest(status=status, phase='cdn'):
-                self.assert_http_diagnostic([Response(metadata), Response(status=302, headers={
+            with self.subTest(status=status, route='direct'):
+                self.assert_http_diagnostic([Response(private, status)], 'asset', status)
+            with self.subTest(status=status, route='redirect'):
+                self.assert_http_diagnostic([Response(status=302, headers={
                     'Location': 'https://objects.githubusercontent.com/CANARY_URL?token=CANARY_TOKEN'}),
                     Response(private, status)], 'asset', status)
+
+    def test_cli_real_urllib_http_error_exposes_only_phase_and_status(self):
+        for status in (401, 404):
+            error = HTTPError('https://private.test/CANARY_URL?token=CANARY_TOKEN', status,
+                              'CANARY_BODY CANARY_TOKEN', {'X-Private': 'CANARY_TOKEN'},
+                              io.BytesIO(b'CANARY_BODY'))
+            stderr = io.StringIO()
+            stdout = io.StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                 patch.dict(os.environ, dict(self.env(), EXP=tmp, GH_TOKEN='CANARY_TOKEN',
+                     APASSY_CONTEXT_INPUT=json.dumps(input_manifest(int(time.time())))), clear=True), \
+                 patch.object(C.subprocess, 'check_output', return_value='a' * 40), \
+                 patch.object(C, 'build_opener') as opener, redirect_stderr(stderr), redirect_stdout(stdout):
+                opener.return_value.open.side_effect = error
+                self.assertEqual(C.main(), 1)
+                self.assertEqual(list(Path(tmp).iterdir()), [])
+            self.assertEqual(stdout.getvalue(), '')
+            self.assertEqual(stderr.getvalue().splitlines(), [
+                'cost unmeasured: checkpoint input or transport refused',
+                json.dumps(dict(phase='asset', status=status))])
+            for canary in ('CANARY_TOKEN', 'CANARY_URL', 'CANARY_BODY'):
+                self.assertNotIn(canary, stderr.getvalue())
 
     def test_cli_malformed_http_status_is_closed_unknown(self):
         for status in (None, True, 200.0, -1, 600, 'CANARY_TOKEN CANARY_URL CANARY_BODY',
                        {'CANARY_TOKEN': 'CANARY_URL CANARY_BODY'}):
-            for phase in ('release_metadata', 'asset'):
-                with self.subTest(status=status, phase=phase):
-                    responses = [Response(b'CANARY_BODY', status)]
-                    if phase == 'asset':
-                        responses.insert(0, Response(json.dumps(self.metadata()).encode()))
-                    self.assert_http_diagnostic(responses, phase, 'unknown')
+            with self.subTest(status=status):
+                self.assert_http_diagnostic([Response(b'CANARY_BODY', status)], 'asset', 'unknown')
 
-    def test_cli_success_preserves_bytes_and_redirect_authorization(self):
+    def test_cli_success_preserves_bytes_and_never_sends_ambient_token(self):
         result, stderr, requests, body = self.cli_with_responses([
-            Response(json.dumps(self.metadata()).encode()), Response(status=302, headers={
-                'Location': 'https://objects.githubusercontent.com/checkpoint?sig=CANARY_URL'}),
-            Response(BODY)])
-        self.assertEqual(result, 0)
-        self.assertEqual(stderr, '')
-        self.assertEqual(body, BODY)
-        self.assertTrue(all(request.get_header('Authorization') == 'Bearer CANARY_TOKEN'
-                            for request in requests[:2]))
-        self.assertIsNone(requests[2].get_header('Authorization'))
+            Response(status=302, headers={
+                'Location': 'https://objects.githubusercontent.com/checkpoint?sig=CANARY_URL'}), Response(BODY)])
+        self.assertEqual((result, stderr, body), (0, '', BODY))
+        self.assertTrue(requests)
+        for request in requests:
+            self.assertIsNone(request.get_header('Authorization'))
+            self.assertFalse(request.full_url.startswith(C.API))
+
+    def test_main_destination_names_are_closed_and_inputs_checked_before_fetch(self):
+        download_input = C.download_input
+        for name in ('context.safetensors', 'bundle.tar'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                def download(asset, sha, destination, manifest, source_sha):
+                    self.assertEqual(Path(destination), Path(tmp) / name)
+                    return download_input(asset, sha, destination, manifest, source_sha,
+                                          lambda request: Response(BODY), now=NOW)
+                with patch.dict(os.environ, dict(self.env(), EXP=tmp, DESTINATION_NAME=name), clear=True), \
+                     patch.object(C.subprocess, 'check_output', return_value='a' * 40), \
+                     patch.object(C, 'download_input', side_effect=download) as fetch:
+                    self.assertEqual(C.main(), 0)
+                    fetch.assert_called_once()
+                self.assertEqual((Path(tmp) / name).read_bytes(), BODY)
+        for key, value in (('DESTINATION_NAME', '../outside'), ('DESTINATION_NAME', '/tmp/arbitrary'),
+                           ('DESTINATION_NAME', 'nested/bundle.tar'), ('DESTINATION_NAME', 'bundle.tar\n'),
+                           ('SOURCE_SHA', 'c' * 40)):
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as tmp:
+                stderr = io.StringIO()
+                env = dict(self.env(), EXP=tmp, GH_TOKEN='CANARY_TOKEN', **{key: value})
+                with patch.dict(os.environ, env, clear=True), \
+                     patch.object(C.subprocess, 'check_output', return_value='a' * 40), \
+                     patch.object(C, 'download_input') as fetch, redirect_stderr(stderr):
+                    self.assertEqual(C.main(), 1)
+                    fetch.assert_not_called()
+                self.assertEqual(list(Path(tmp).iterdir()), [])
+                self.assertEqual(stderr.getvalue(), 'cost unmeasured: checkpoint input or transport refused\n')
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(os.environ, dict(self.env(), EXP=tmp, APASSY_CONTEXT_INPUT='', GH_TOKEN='CANARY_TOKEN'), clear=True), \
+             patch.object(C.subprocess, 'check_output', return_value='a' * 40), \
+             patch.object(C, 'build_opener') as opener, redirect_stderr(io.StringIO()):
+            self.assertEqual(C.main(), 1)
+            opener.assert_not_called()
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+        env = self.env()
+        del env['APASSY_CONTEXT_INPUT']
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, dict(env, EXP=tmp), clear=True), \
+             patch.object(C.subprocess, 'check_output', return_value='a' * 40), \
+             patch.object(C, 'download_input') as fetch, redirect_stderr(io.StringIO()):
+            self.assertEqual(C.main(), 1)
+            fetch.assert_not_called()
+
+
+class InputURL(unittest.TestCase):
+    def download(self, manifest=None, responses=None, **kwargs):
+        manifest = input_manifest() if manifest is None else manifest
+        raw = json.dumps(manifest) if isinstance(manifest, dict) else manifest
+        replies = [Response(BODY)] if responses is None else responses
+        requests = []
+        def fake(request):
+            requests.append(request)
+            return replies.pop(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / 'context.safetensors'
+            try:
+                result = C.download_input(kwargs.get('asset', '12/34'), kwargs.get('sha', SHA),
+                    destination, raw, kwargs.get('source', 'a' * 40), fake, now=kwargs.get('now', NOW))
+                self.assertEqual(destination.read_bytes(), BODY)
+                return result, requests
+            except Exception:
+                self.assertFalse(destination.exists())
+                raise
+
+    def refuse_before_io(self, manifest, **kwargs):
+        raw = json.dumps(manifest) if isinstance(manifest, dict) else manifest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(C.Refused):
+                C.download_input(kwargs.get('asset', '12/34'), kwargs.get('sha', SHA), root / 'payload',
+                    raw, kwargs.get('source', 'a' * 40), lambda request: self.fail('network before validation'),
+                    now=kwargs.get('now', NOW))
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_success_uses_only_unauthenticated_cdn_gets(self):
+        result, requests = self.download(responses=[Response(status=302, headers={
+            'Location': 'https://release-assets.githubusercontent.com/next?sig=CANARY_URL'}), Response(BODY)])
+        self.assertEqual(result, dict(sha256=SHA, size=len(BODY)))
+        self.assertEqual(len(requests), 2)
+        for request in requests:
+            self.assertEqual(request.get_method(), 'GET')
+            self.assertIsNone(request.get_header('Authorization'))
+            self.assertIn(request.host, C.CDN_HOSTS)
+            self.assertFalse(request.full_url.startswith(C.API))
+
+    def test_all_attestation_fields_are_closed_before_io(self):
+        changes = [('schema', 'v2'), ('source_sha', 'c' * 40), ('repository', 'attacker/apassy'),
+                   ('release_id', 13), ('release_id', True), ('release_id', 12.0), ('release_id', 0),
+                   ('asset_id', 35), ('asset_id', True), ('asset_id', '34'), ('draft', False),
+                   ('draft', 1), ('state', 'new'), ('size', 0), ('size', True),
+                   ('size', float(len(BODY))), ('size', C.MAX_SIZE + 1), ('sha256', '0' * 64),
+                   ('expires_at', True), ('expires_at', float(NOW + 300)), ('expires_at', str(NOW + 300)),
+                   ('extra', 'CANARY_BODY')]
+        for key, value in changes:
+            with self.subTest(key=key, value=value):
+                self.refuse_before_io(dict(input_manifest(), **{key: value}))
+        self.refuse_before_io(dict(input_manifest(), release_id=True), asset='1/34')
+        self.refuse_before_io(dict(input_manifest(), asset_id=True), asset='12/1')
+        self.refuse_before_io(dict(input_manifest(), expires_at=True), now=0)
+        for key in input_manifest():
+            manifest = input_manifest(); del manifest[key]
+            with self.subTest(missing=key):
+                self.refuse_before_io(manifest)
+        for raw in ('{', '[]', 'null', '', b'not-a-string', None):
+            with self.subTest(raw=raw):
+                self.refuse_before_io(raw)
+        raw = json.dumps(input_manifest())
+        self.refuse_before_io(raw[:-1] + ', "draft": true}')
+        self.refuse_before_io(raw + ' ' * (32769 - len(raw.encode())))
+
+    def test_external_pins_asset_ids_and_expiry_boundaries(self):
+        for key, values in (('source', ('A' * 40, 'a' * 39, 'a' * 40 + '\n')),
+                            ('sha', ('A' * 64, 'f' * 63, SHA + '\n')),
+                            ('asset', ('0/34', '12/0', '01/34', '12/34?token=CANARY', '12/34\n'))):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    self.refuse_before_io(input_manifest(), **{key: value})
+        for clock in (True, float('nan'), float('inf'), 'CANARY_BODY'):
+            with self.subTest(clock=clock):
+                self.refuse_before_io(input_manifest(), now=clock)
+        for expiry in (NOW - 1, NOW, NOW + 3601):
+            with self.subTest(expiry=expiry):
+                self.refuse_before_io(dict(input_manifest(), expires_at=expiry))
+        for expiry in (NOW + 1, NOW + 3600):
+            with self.subTest(expiry=expiry):
+                self.download(dict(input_manifest(), expires_at=expiry))
+        raw = json.dumps(input_manifest())
+        self.download(raw + ' ' * (32768 - len(raw.encode())))
+
+    def test_unsafe_urls_are_rejected_before_io(self):
+        for url in ('http://objects.githubusercontent.com/a', 'https://api.github.com/a',
+                    'https://evil.test/a', 'https://objects.githubusercontent.com.evil/a',
+                    'https://user:pass@objects.githubusercontent.com/a',
+                    'https://objects.githubusercontent.com:444/a', '/relative',
+                    'https://objects.githubusercontent.com/a#fragment',
+                    'https://objects.githubusercontent.com/é', 'https://objects.githubusercontent.com/\na',
+                    'https://objects.githubusercontent.com\\evil/a'):
+            with self.subTest(url=url):
+                self.refuse_before_io(dict(input_manifest(), url=url))
+
+    def test_redirect_size_digest_and_partial_cleanup(self):
+        for body in (BODY[:-1], BODY + b'extra', b'X' * len(BODY)):
+            with self.subTest(body=body), self.assertRaises(C.Refused):
+                self.download(responses=[Response(body)])
+        url = 'https://objects.githubusercontent.com/loop'
+        for responses in ([Response(status=302, headers={'Location': 'https://evil.test/a'})],
+                          [Response(status=302, headers={})],
+                          [Response(status=302, headers={'Location': url}) for _ in range(2)],
+                          [Response(status=302, headers={'Location': f'https://objects.githubusercontent.com/{n}'})
+                           for n in range(4)]):
+            with self.subTest(redirects=len(responses)), self.assertRaises(C.Refused):
+                self.download(responses=responses)
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / 'context.safetensors'
+            destination.write_bytes(b'preserve')
+            with self.assertRaises(FileExistsError):
+                C.download_input('12/34', SHA, destination, json.dumps(input_manifest()), 'a' * 40,
+                                 lambda request: Response(BODY), now=NOW)
+            self.assertEqual(destination.read_bytes(), b'preserve')
 
 
 class Workflow(unittest.TestCase):
@@ -224,6 +411,7 @@ class Workflow(unittest.TestCase):
         self.source = (ROOT / '.github/workflows/bouncer-context-experiment.yml').read_text()
         self.cost = re.split(r'\n  [a-zA-Z0-9_-]+:\n',
                              self.source.split('\n  cost-only:\n', 1)[1], maxsplit=1)[0]
+        self.external = self.source.split('\n  external-evaluate:\n', 1)[1]
         self.ci = (ROOT / '.github/workflows/ci.yml').read_text()
 
     def test_manual_guard_permissions_bridge_and_allowlist(self):
@@ -246,7 +434,8 @@ class Workflow(unittest.TestCase):
         self.assertNotIn('context_train', self.cost)
         self.assertNotIn('context_eval', self.cost)
         self.assertNotIn('tests/evals', self.cost)
-        self.assertEqual(self.cost.count('GH_TOKEN:'), 1)
+        self.assertNotIn('GH_TOKEN:', self.cost)
+        self.assertIn('APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}', self.cost)
         upload = self.cost.split('        path: |\n')[1].split('    - name:')[0]
         self.assertEqual([x.strip() for x in upload.splitlines() if x.strip()], [
             '${{ runner.temp }}/bouncer-context/evidence/cost-full.json',
@@ -274,15 +463,50 @@ class Workflow(unittest.TestCase):
         self.assertIn("models='NOT_RUN'", by_name['Record verified transport only'])
 
     def test_embedded_shell_and_python_syntax_and_no_input_interpolation(self):
-        blocks = re.findall(r'      run: \|\n((?:        .*\n|\n)+)', self.cost)
+        blocks = re.findall(r'      run: \|\n((?:        .*\n|\n)+)', self.cost + self.external)
         self.assertGreater(len(blocks), 7)
         for block in blocks:
             shell = textwrap.dedent(block)
             self.assertNotIn('${{', shell)
             result = subprocess.run(['bash', '-n'], input=shell, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for code in re.findall(r"<<'PY'\n(.*?)\nPY", shell, re.S):
-                ast.parse(code)
+            for delimiter in ('PY', 'PYCODE'):
+                for code in re.findall(r"<<'" + delimiter + r"'\n(.*?)\n" + delimiter, shell, re.S):
+                    ast.parse(code)
+
+    def test_external_precheck_rejects_transport_before_secret_download(self):
+        check = self.external.split('    - name: Require exact source and external inputs before setup\n', 1)[1]
+        check = check.split('    - name:', 1)[0]
+        self.assertLess(self.external.index(check), self.external.index('APASSY_CONTEXT_INPUT:'))
+        self.assertNotIn('APASSY_CONTEXT_INPUT', check)
+        code = textwrap.dedent(check.split("<<'PYCODE'\n", 1)[1].split('\n        PYCODE', 1)[0])
+        def reached(*args):
+            raise RuntimeError('external input guard reached')
+        fake = SimpleNamespace(check_inputs=reached, run_root=lambda value: self.fail('unexpected root'))
+        for transport in ('true', 'yes', '', None, 'false'):
+            env = {} if transport is None else dict(REQUESTED_TRANSPORT_ONLY=transport)
+            with self.subTest(transport=transport), patch.dict(os.environ, env, clear=True), \
+                 patch.dict(sys.modules, context_external_bundle=fake), \
+                 patch.object(C.subprocess, 'check_output', return_value='a' * 40) as head:
+                if transport == 'false':
+                    with self.assertRaisesRegex(RuntimeError, 'external input guard reached'):
+                        exec(code, {})
+                    head.assert_called_once()
+                else:
+                    with self.assertRaises(C.Refused):
+                        exec(code, {})
+                    head.assert_not_called()
+        step = self.external.split('    - name: Download and restore pinned external bundle\n', 1)[1]
+        step = step.split('    - name:', 1)[0]
+        for mapping in ('CHECKPOINT_ASSET: ${{ inputs.bundle_asset }}',
+                        'CHECKPOINT_SHA256: ${{ inputs.bundle_sha256 }}',
+                        "TRANSPORT_ONLY: 'true'", 'DESTINATION_NAME: bundle.tar'):
+            self.assertIn(mapping, step)
+        self.assertLess(step.index('tools/basemodel/context_cost_asset.py'), step.index('restore('))
+        upload = self.external.split('    - name: Retain bounded evidence only\n', 1)[1]
+        self.assertIn('path: ${{ runner.temp }}/bouncer-context/evidence/*.json', upload)
+        self.assertNotIn('bundle.tar', upload)
+        self.assertLess(self.cost.index('torch.set_num_threads(4)'), self.cost.index('assert torch.get_num_threads() == 4'))
 
     def test_regenerated_validation_check_with_fake_data(self):
         code = self.cost.split("root = Path(os.environ['EXP']) / 'synthetic'\n")[1].split('\n        PY')[0]

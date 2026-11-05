@@ -115,6 +115,8 @@ name: Bouncer context supervised experiment (probe is not gate B)
         default: false
         required: false
     secrets:
+      APASSY_CONTEXT_INPUT:
+        required: false
       APASSY_CONTEXT_SHIPPED_HEADS_URL:
         required: false
 permissions:
@@ -1156,9 +1158,8 @@ jobs:
 
   cost-only:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'cost-only' }}
-    # GitHub requires push access to see drafts; the download helper uses GET only.
     permissions:
-      contents: write
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.transport_only && 10 || 120 }}
     defaults:
@@ -1222,7 +1223,7 @@ jobs:
     - name: Read draft-release checkpoint (transport preflight required)
       timeout-minutes: 5
       env:
-        GH_TOKEN: ${{ github.token }}
+        APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
       run: |
         set -euo pipefail
         "$PY" -B tools/basemodel/context_cost_asset.py
@@ -1263,6 +1264,7 @@ jobs:
         import torch
         assert torch.__version__.split('+')[0] == '2.14.0'
         assert torch.version.cuda is None, 'CPU-only torch required'
+        torch.set_num_threads(4)
         assert torch.get_num_threads() == 4, 'four CPU threads required'
         PY
     - name: Fetch and verify the pinned public base, then go offline
@@ -1454,9 +1456,8 @@ jobs:
 
   external-evaluate:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'external-evaluate' }}
-    # GitHub requires push access to see drafts; the download helper uses GET only.
     permissions:
-      contents: write
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     defaults:
@@ -1480,6 +1481,7 @@ jobs:
       BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
       FREEZE_SHA256: ${{ inputs.freeze_sha256 }}
       SHIPPED_BASELINE: ${{ inputs.shipped_baseline }}
+      REQUESTED_TRANSPORT_ONLY: ${{ inputs.transport_only }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -1490,7 +1492,9 @@ jobs:
         python3 -B - <<'PYCODE'
         import os, subprocess, sys
         sys.path.insert(0, 'tools/basemodel')
+        from context_cost_asset import require
         from context_external_bundle import check_inputs, run_root
+        require(os.environ.get('REQUESTED_TRANSPORT_ONLY') == 'false')
         check_inputs(os.environ, subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
         with open(os.environ['GITHUB_ENV'], 'a') as f:
             f.write('CONTEXT_ROOT=' + str(run_root(os.environ['RUN_ID'])) + '\n')
@@ -1522,18 +1526,21 @@ jobs:
         python -m venv "$EXP/venv"
     - name: Download and restore pinned external bundle
       env:
-        GH_TOKEN: ${{ github.token }}
+        APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
+        CHECKPOINT_ASSET: ${{ inputs.bundle_asset }}
+        CHECKPOINT_SHA256: ${{ inputs.bundle_sha256 }}
+        TRANSPORT_ONLY: 'true'
+        DESTINATION_NAME: bundle.tar
       run: |
         set -euo pipefail
+        "$PY" -B tools/basemodel/context_cost_asset.py
         "$PY" -B - <<'PYCODE'
         import json, os, sys
         from pathlib import Path
         sys.path.insert(0, 'tools/basemodel')
-        from context_cost_asset import download
         from context_external_bundle import restore
         e = os.environ
         bundle = Path(e['EXP']) / 'bundle.tar'
-        download(e['BUNDLE_ASSET'], e['BUNDLE_SHA256'], bundle, e['GH_TOKEN'])
         receipt = restore(bundle, e['BUNDLE_SHA256'], e['FREEZE_SHA256'], e['RUN_ID'])
         (Path(e['EXP']) / 'receipt.json').write_text(json.dumps(receipt))
         bundle.unlink()
