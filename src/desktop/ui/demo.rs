@@ -1825,7 +1825,7 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
             words: "Through the Apassy relay".to_owned(),
             relay: true,
         }),
-        free_end: Some("0.5.19".to_owned()),
+        free_end: Some("0.5.20".to_owned()),
     });
     DevicesView {
         node,

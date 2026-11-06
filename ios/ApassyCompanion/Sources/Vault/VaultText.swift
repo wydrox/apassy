@@ -131,7 +131,7 @@ enum VaultText {
 enum FreeRelayNotice {
     /// The release that ends the free paths. The same as `FREE_RELAY_PATHS_END_VERSION` in
     /// `src/relay/membership.rs`; a Rust test reads this line.
-    static let endVersion = "0.5.19"
+    static let endVersion = "0.5.20"
     /// The hosted relay, `DEFAULT_RELAY_URL` of the core.
     static let hostedHost = "apassy-relay.wyderka.cc"
 

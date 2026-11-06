@@ -1,7 +1,7 @@
 {
   "name": "apassy",
   "description": "Use the API keys in your Apassy vault from a cloud agent without giving it the keys. The agent asks for a run, you allow it on your Mac or iPhone, and your Mac swaps placeholders for the real values.",
-  "version": "0.5.18",
+  "version": "0.5.19",
   "author": {
     "name": "Rafal Wyderka"
   },
