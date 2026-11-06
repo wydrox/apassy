@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer } from "./pages.mjs";
 import { goto, warmUpHelium } from "./helium.mjs";
+import { grantWithStoppedHost } from "./fixture-barrier.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const EXTENSION_DIR = path.resolve(HERE, "../../extension");
@@ -167,14 +168,9 @@ class Harness {
     await page.bringToFront();
     const tab = (await this.targets("tab")).find((t) => t.url === url);
     if (!tab) throw new Error(`no tab target for ${url}`);
-    const scenario = this.scenario();
-    this.setScenario({ notRunning: true });
-    this.clearRequests();
-    await this.browserSession.send("Extensions.triggerAction", { id: EXTENSION_ID, targetId: tab.targetId });
-    for (let i = 0; i < 250 && this.requests("status").length === 0; i += 1) await sleep(20);
-    await this.closeRealPopup();
-    this.setScenario(scenario);
-    this.clearRequests();
+    await grantWithStoppedHost(this, () => this.browserSession.send("Extensions.triggerAction", {
+      id: EXTENSION_ID, targetId: tab.targetId,
+    }));
     return page;
   }
 

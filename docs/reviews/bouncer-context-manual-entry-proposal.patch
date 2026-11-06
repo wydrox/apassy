@@ -1,0 +1,20 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,0 +11,10 @@
++    inputs:
++      context_experiment:
++        description: Optional supervised bouncer experiment
++        type: choice
++        options:
++          - off
++          - probe
++          - full
++        default: off
++        required: true
+@@ -31,0 +42,6 @@
++  context-experiment:
++    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.context_experiment == 'probe' || inputs.context_experiment == 'full') }}
++    uses: ./.github/workflows/bouncer-context-experiment.yml
++    with:
++      mode: ${{ inputs.context_experiment }}
++

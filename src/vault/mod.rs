@@ -24,6 +24,7 @@ mod candidate;
 mod cloud;
 mod companion;
 mod connect;
+mod decision_evidence;
 mod dedup;
 pub mod detect;
 pub mod exceptions;
@@ -109,6 +110,9 @@ pub use cloud::{
 pub use companion::{
     AddDeviceError, CompanionCertificate, CompanionDevice, CompanionDeviceKeys, CompanionSetting,
     DEFAULT_COMPANION_PORT, MAX_COMPANION_DEVICES, MIN_COMPANION_PORT,
+};
+pub use decision_evidence::{
+    EVIDENCE_WINDOW_SECS, EventAge, EvidenceQuery, ItemDecisionEvidence, UseCount,
 };
 pub use dedup::{
     DuplicateGroup, DuplicateMember, MERGED_INTO_DETAIL, MERGED_PREFIX, MergeOutcome, MergeRefusal,

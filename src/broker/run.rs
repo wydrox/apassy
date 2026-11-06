@@ -542,7 +542,7 @@ impl<F: FnMut() -> Result<(), String>> Readiness<F> {
 }
 
 /// True when `host` is `known` or matches a known `*.domain`.
-fn host_matches(host: &str, known: &str) -> bool {
+pub(super) fn host_matches(host: &str, known: &str) -> bool {
     host == known
         || known
             .strip_prefix("*.")

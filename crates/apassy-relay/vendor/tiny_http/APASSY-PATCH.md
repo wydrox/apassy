@@ -13,7 +13,26 @@ Changes relative to that base (plus rustfmt):
 - `connection.rs`, `util/refined_tcp_stream.rs`, new `deadline.rs`: absolute read
   budgets, idle read/write limits, single transport-expiry reaper.
 - `lib.rs`: opt-in `Server::http_with_deadlines`; legacy constructors used by test
-  mocks preserve their previous behavior.
+  mocks remain deadline-free.
+- `lib.rs`: retain and join the accept thread on `Server` drop, including its
+  error/unwind exits, so its listener is released before drop returns. Nonblocking
+  accept parks on a 10 ms idle polling interval, adding admission latency; shutdown
+  unparks it without a connect-to-self wakeup. Each idle listener wakes about
+  100 times per second (about 300 for the three embedded Mac listeners).
+  This covers wildcard IP and
+  missing/unnamed Unix socket addresses. Accepted streams use blocking I/O;
+  client workers and the deadline reaper are not joined. Deadline-free servers
+  preserve responses already handed to `recv()`; the guarded server's reaper
+  still closes tracked connections during shutdown, as before.
+  Reentrant drop on the accept thread is rejected
+  rather than self-joined. TLS remains disabled/unsupported in this copy; restoring
+  it would require moving or bounding the accept-thread handshake before relying
+  on this shutdown guarantee. Existing relay regression:
+  `tests/tailnet_scope.rs::the_tailnet_listener_stops_with_the_node`. The vendored
+  `tests/shutdown.rs` separately checks TCP listener closure, a response after
+  deadline-free server drop, and drop completion after a Unix socket path is
+  unlinked. The Unix case checks that joining cannot hang, not listener release.
+  CI runs these tests with nextest in relay slice 1; runtime validation is required.
 - `request.rs`: `abort_input` / `abort` shut down the actual socket; guarded responses
   declare `Connection: close`. `response.rs` permits that header value.
 - `util/equal_reader.rs`: bounded destructor buffer. `util/mod.rs` and the dummy

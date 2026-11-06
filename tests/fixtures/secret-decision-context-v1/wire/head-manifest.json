@@ -1,0 +1,23 @@
+{
+  "base": {
+    "package": "laya[serve]==0.3.20",
+    "repo": "convaiinnovations/laya",
+    "revision": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+    "weights_file": "model.safetensors",
+    "weights_sha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c"
+  },
+  "checkpoint": {
+    "file": "synthetic-context-heads.safetensors",
+    "format": "safetensors, float32 head tensors: head., type_emb., scorer.",
+    "sha256": "a1b2c3d400000000000000000000000000000000000000000000000000000000",
+    "size_bytes": 1
+  },
+  "context_contract_sha256": "01a9340c6404684050788e233690a53f81fa5a48b0aae000a4a06239206ea51d",
+  "name": "apassy-context-v1",
+  "question": "owner_accepts_use",
+  "schema": 1,
+  "serve": {
+    "zero_shot_questions": []
+  },
+  "tokenizer_sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30"
+}

@@ -1,0 +1,15 @@
+{
+  "base_revision": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+  "context_contract_sha256": "01a9340c6404684050788e233690a53f81fa5a48b0aae000a4a06239206ea51d",
+  "golden_fixtures": 21,
+  "kind": "full_laya_tokenizer_only",
+  "measurement": {
+    "fuzz_cases": 10000,
+    "header_tokens": 43,
+    "proposed_contract_sha256": "01a9340c6404684050788e233690a53f81fa5a48b0aae000a4a06239206ea51d",
+    "tokenizer_sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30"
+  },
+  "model_quality": "NOT_MEASURED",
+  "model_weights_loaded": false,
+  "status": "PASS"
+}

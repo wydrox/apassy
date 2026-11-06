@@ -8,6 +8,67 @@ name: CI
 # runs the full suite; only that run can be reused on main.
 on:
   workflow_dispatch:
+    inputs:
+      context_experiment:
+        description: Optional supervised bouncer experiment
+        type: choice
+        options:
+          - off
+          - probe
+          - full
+          - cost-only
+          - cuda-preflight
+          - external-evaluate
+          - development-diagnostic
+        default: off
+        required: true
+      source_sha:
+        description: Exact lowercase source commit SHA (cost-only)
+        type: string
+        required: false
+      checkpoint_asset:
+        description: Draft release ID/asset ID in wydrox/apassy (cost-only)
+        type: string
+        required: false
+      checkpoint_sha256:
+        description: External checkpoint SHA-256 (cost-only)
+        type: string
+        required: false
+      transport_only:
+        description: Check draft asset transport only; no models or benchmark (cost-only)
+        type: boolean
+        default: false
+        required: false
+      val_sha256:
+        description: External Mac freeze validation SHA-256 (cost-only)
+        type: string
+        required: false
+      groups:
+        description: G1 groups 400..800; seed fixed at 7 (cost-only)
+        type: string
+        required: false
+        default: '400'
+      run_id:
+        description: Attested external run ID
+        type: string
+        required: false
+      bundle_asset:
+        description: Draft release ID/asset ID for external bundle
+        type: string
+        required: false
+      bundle_sha256:
+        description: External bundle SHA-256
+        type: string
+        required: false
+      freeze_sha256:
+        description: External freeze SHA-256
+        type: string
+        required: false
+      shipped_baseline:
+        description: Require optional pinned shipped baseline evidence
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main]
     paths-ignore:
@@ -29,6 +90,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  context-experiment:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.context_experiment == 'probe' || inputs.context_experiment == 'full' || inputs.context_experiment == 'cost-only' || inputs.context_experiment == 'cuda-preflight' || inputs.context_experiment == 'external-evaluate' || inputs.context_experiment == 'development-diagnostic') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bouncer-context-experiment.yml
+    with:
+      mode: ${{ inputs.context_experiment }}
+      source_sha: ${{ inputs.source_sha }}
+      checkpoint_asset: ${{ inputs.checkpoint_asset }}
+      checkpoint_sha256: ${{ inputs.checkpoint_sha256 }}
+      transport_only: ${{ inputs.transport_only }}
+      val_sha256: ${{ inputs.val_sha256 }}
+      groups: ${{ inputs.groups }}
+      run_id: ${{ inputs.run_id }}
+      bundle_asset: ${{ inputs.bundle_asset }}
+      bundle_sha256: ${{ inputs.bundle_sha256 }}
+      freeze_sha256: ${{ inputs.freeze_sha256 }}
+      shipped_baseline: ${{ inputs.shipped_baseline }}
+    secrets:
+      APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
+      APASSY_CONTEXT_SHIPPED_HEADS_URL: ${{ secrets.APASSY_CONTEXT_SHIPPED_HEADS_URL }}
+
   reuse-pr:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -36,7 +119,7 @@ jobs:
       contents: read
       actions: read
     outputs:
-      reuse: ${{ steps.select.outputs.reuse }}
+      reuse: ${{ (inputs.context_experiment == 'development-diagnostic' || inputs.context_experiment == 'cuda-preflight') && 'true' || steps.select.outputs.reuse }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -64,7 +147,7 @@ jobs:
   extension:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
-    runs-on: macos-15
+    runs-on: ${{ vars.APASSY_MACOS_INTEL_FALLBACK == 'true' && 'macos-15-intel' || 'macos-15' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,7 +183,7 @@ jobs:
   macos:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
-    runs-on: macos-15
+    runs-on: ${{ vars.APASSY_MACOS_INTEL_FALLBACK == 'true' && 'macos-15-intel' || 'macos-15' }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -297,6 +380,9 @@ jobs:
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy-relay -p apassy-core
           --partition "slice:$SLICE/2"
+      - name: Verify vendored HTTP listener shutdown
+        if: matrix.slice == 1
+        run: cargo nextest run --profile ci --offline --locked -p tiny_http --test shutdown
       # nextest does not run doc tests.
       - name: Run the relay and iPhone vault core doc tests
         if: matrix.slice == 1
@@ -576,7 +662,7 @@ jobs:
     # No signing credentials enter this job. Its artifact is eligible for Release
     # only after all CI jobs pass for a push to main in this repository, so a pull
     # request does not build it; the macos job compiles the same features.
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && inputs.context_experiment != 'development-diagnostic' && inputs.context_experiment != 'cuda-preflight'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

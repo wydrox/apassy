@@ -405,14 +405,14 @@ pub(super) fn draw(
         }
         return action;
     }
-    for (title, rows) in &view.groups {
+    for (group_index, (title, rows)) in view.groups.iter().enumerate() {
         // A day whose rows are all of a silent Mac is dimmed with them.
         let dim_day = rows.iter().all(|event| dimmed(data, event, now));
         kit::dimmed(ui, dim_day, |ui| {
             kit::group_heading(ui, title, None, "");
         });
         kit::table_group(ui, |ui| {
-            if title == "Today" {
+            if group_index == 0 {
                 kit::table_header(ui, columns, &titles(view.several));
             }
             for (index, event) in rows.iter().enumerate() {
@@ -426,7 +426,7 @@ pub(super) fn draw(
                                 ui,
                                 columns,
                                 &cells,
-                                index == 0 && title != "Today",
+                                index == 0 && group_index != 0,
                                 state.selected() == Some(key),
                             )
                         })

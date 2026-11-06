@@ -1,0 +1,67 @@
+--- a/.github/workflows/bouncer-context-experiment.yml
++++ b/.github/workflows/bouncer-context-experiment.yml
+@@ -47,6 +47,7 @@
+   cancel-in-progress: true
+ jobs:
+   probe:
++    name: ${{ github.event_name == 'workflow_dispatch' && 'probe' || 'preflight' }}
+     runs-on: ubuntu-24.04
+     timeout-minutes: 40
+     defaults:
+@@ -166,12 +167,18 @@
+                       budget_matches=True)
+         evidence.write_text(json.dumps(report, sort_keys=True) + '\n')
+         PY
++    - name: Record preflight-only boundary
++      if: ${{ github.event_name != 'workflow_dispatch' }}
++      run: |
++        echo 'Preflight passed: compiled replay, G1 host extraction and tokenizer. No runtime calibration, training or eligibility result.' >> "$GITHUB_STEP_SUMMARY"
+     - name: Generate only G1 synthetic train and validation
++      if: ${{ github.event_name == 'workflow_dispatch' }}
+       run: |
+         set -euo pipefail
+         "$PY" -B tools/basemodel/context_data.py --out "$EXP/synthetic" --groups 40 --seed 7
+         cp "$EXP/synthetic/data-manifest.json" "$EXP/evidence/data-manifest.json"
+     - name: Bounded training-only probe and verified exit 3
++      if: ${{ github.event_name == 'workflow_dispatch' }}
+       timeout-minutes: 23
+       run: |
+         set -euo pipefail
+@@ -188,6 +195,7 @@
+         echo "$rc" > "$EXP/evidence/training-exit.txt"
+         test "$rc" -eq 3
+     - name: Verify completion, exact paths, config, source, packages and hashes
++      if: ${{ github.event_name == 'workflow_dispatch' }}
+       id: verify
+       env:
+         VERIFY_MODE: probe
+@@ -321,6 +329,7 @@
+             f.write(f'{mode} external freeze SHA-256: `{sha}`. Training completed; gate B unmeasured.\n')
+         PY
+     - name: Measure fresh CPU arms on G1 val (no quality verdict)
++      if: ${{ github.event_name == 'workflow_dispatch' }}
+       timeout-minutes: 40
+       run: |
+         set -euo pipefail
+@@ -344,7 +353,9 @@
+         (root / 'evidence/probe-costs.json').write_text(json.dumps({
+             'elapsed_seconds': time.time() - int(start.read_text()) if start.exists() else None,
+             'directory_bytes': sizes, 'cpu_threads': 2, 'job_timeout_minutes': 40,
+-            'gate_B': 'UNSUPPORTED', 'scope': 'synthetic_training_probe_only',
++            'gate_B': 'UNSUPPORTED',
++            'scope': ('synthetic_training_probe_only' if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
++                      else 'synthetic_preflight_only'),
+             'head_sha': os.environ['SOURCE_HEAD_SHA'],
+             'tested_sha': os.environ['GITHUB_SHA']}, sort_keys=True) + '\n')
+         PY
+@@ -370,8 +381,9 @@
+     outputs:
+       freeze_sha256: ${{ steps.verify.outputs.freeze_sha256 }}
+       probe_report_sha256: ${{ steps.verify.outputs.probe_report_sha256 }}
++      groups: ${{ steps.verify.outputs.groups }}
+   train:
+-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'full' }}
++    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'full' && needs.probe.outputs.groups != '' }}
+     needs: probe
+     runs-on: ubuntu-24.04
+     timeout-minutes: 300

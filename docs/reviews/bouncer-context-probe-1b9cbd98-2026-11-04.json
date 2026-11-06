@@ -1,0 +1,38 @@
+{
+  "run_url": "https://github.com/wydrox/apassy/actions/runs/41852508456",
+  "job_url": "https://github.com/wydrox/apassy/actions/runs/41852508456/job/126652259018",
+  "artifact_id": 13336243297,
+  "head_sha": "1b9cbd9886a710ce4ba10f17229fb317c62fb460",
+  "checkout_sha": "63acf1caac900b3dcdaea25ce3b13d7a4d9e05c5",
+  "training_report": {
+    "mode": "probe",
+    "outcome": "UNSUPPORTED",
+    "reason": "cached timing wall limit"
+  },
+  "resources": {
+    "cpu_threads": 2,
+    "directory_bytes": {
+      "cache": 0,
+      "hf": 2535058088,
+      "pip-cache": 258864128,
+      "probe": 77,
+      "synthetic": 530993,
+      "venv": 1128691272
+    },
+    "elapsed_seconds": 397.9952416419983,
+    "gate_B": "UNSUPPORTED",
+    "head_sha": "1b9cbd9886a710ce4ba10f17229fb317c62fb460",
+    "job_timeout_minutes": 40,
+    "scope": "synthetic_training_probe_only",
+    "tested_sha": "63acf1caac900b3dcdaea25ce3b13d7a4d9e05c5"
+  },
+  "compiled_replay_and_generated_hosts": "PASS_without_skips",
+  "full_tokenizer": "PASS_without_skips",
+  "training_process_wall_seconds": 195.72,
+  "training_process_peak_rss_kib": 9471780,
+  "full_training": "NOT_RUN",
+  "cost_benchmark": "NOT_RUN",
+  "heldout": "NOT_RUN",
+  "feasibility_quality": "UNSUPPORTED",
+  "gate_b": "UNSUPPORTED"
+}

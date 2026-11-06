@@ -1,0 +1,1960 @@
+name: Bouncer context supervised experiment (probe is not gate B)
+'on':
+  pull_request:
+    types:
+    - opened
+    - synchronize
+    - reopened
+    paths:
+    - .github/workflows/bouncer-context-experiment.yml
+    - tools/basemodel/context_*.py
+    - tools/basemodel/contracts/secret-decision-context-v1.json
+    - tools/basemodel/requirements.txt
+    - tools/basemodel/common.py
+    - tools/basemodel/fetch_weights.py
+    - tools/basemodel/manifest.json
+    - tools/basemodel/train.py
+    - tests/basemodel/test_context*.py
+    - tests/fixtures/secret-decision-context-v1/**
+    - docs/design/bouncer-context-*.md
+    - docs/reviews/bouncer-context-*.md
+    - docs/reviews/bouncer-context-token-budget-*.json
+    - docs/evaluation/bouncer-context-ci-probe.md
+    - examples/context_route_replay.rs
+    - Cargo.toml
+    - Cargo.lock
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Bounded probe or supervised full pipeline
+        type: choice
+        options:
+        - probe
+        - full
+        - cost-only
+        default: probe
+        required: true
+      source_sha:
+        description: Exact lowercase source commit SHA (cost-only)
+        type: string
+        required: false
+      checkpoint_asset:
+        description: Draft release ID/asset ID in wydrox/apassy (cost-only)
+        type: string
+        required: false
+      checkpoint_sha256:
+        description: External checkpoint SHA-256 (cost-only)
+        type: string
+        required: false
+      transport_only:
+        description: Check draft asset transport only; no models or benchmark (cost-only)
+        type: boolean
+        default: false
+        required: false
+      val_sha256:
+        description: External Mac freeze validation SHA-256 (cost-only)
+        type: string
+        required: false
+      groups:
+        description: G1 groups 400..800; seed fixed at 7 (cost-only)
+        type: string
+        required: false
+        default: '400'
+  workflow_call:
+    inputs:
+      mode:
+        description: Full requires original workflow_dispatch event
+        type: string
+        default: probe
+        required: false
+      source_sha:
+        description: Exact lowercase source commit SHA (cost-only)
+        type: string
+        required: false
+      checkpoint_asset:
+        description: Draft release ID/asset ID in wydrox/apassy (cost-only)
+        type: string
+        required: false
+      checkpoint_sha256:
+        description: External checkpoint SHA-256 (cost-only)
+        type: string
+        required: false
+      transport_only:
+        description: Check draft asset transport only; no models or benchmark (cost-only)
+        type: boolean
+        default: false
+        required: false
+      val_sha256:
+        description: External Mac freeze validation SHA-256 (cost-only)
+        type: string
+        required: false
+      groups:
+        description: G1 groups 400..800; seed fixed at 7 (cost-only)
+        type: string
+        required: false
+        default: '400'
+      run_id:
+        description: Attested external run ID
+        type: string
+        required: false
+      bundle_asset:
+        description: Draft release ID/asset ID for external bundle
+        type: string
+        required: false
+      bundle_sha256:
+        description: External bundle SHA-256
+        type: string
+        required: false
+      freeze_sha256:
+        description: External freeze SHA-256
+        type: string
+        required: false
+      shipped_baseline:
+        description: Require optional pinned shipped baseline evidence
+        type: boolean
+        default: false
+        required: false
+    secrets:
+      APASSY_CONTEXT_INPUT:
+        required: false
+      APASSY_CONTEXT_SHIPPED_HEADS_URL:
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: bouncer-context-probe-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  probe:
+    if: ${{ inputs.mode != 'cost-only' && inputs.mode != 'cuda-preflight' && inputs.mode != 'external-evaluate' && inputs.mode != 'development-diagnostic' && !inputs.transport_only }}
+    name: ${{ github.event_name == 'workflow_dispatch' && 'probe' || 'preflight' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      OPENBLAS_NUM_THREADS: '2'
+      NUMEXPR_NUM_THREADS: '2'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Install existing dependencies with CPU torch first
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+        "$PY" -m pip install -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PY'
+        import torch
+        assert torch.__version__.split('+')[0] == '2.14.0'
+        assert torch.version.cuda is None, 'CPU-only torch required'
+        assert torch.get_num_threads() == 2, 'two CPU threads required'
+        PY
+    - name: Fetch and verify the pinned public base, then go offline
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/fetch_weights.py
+        "$PY" -B - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import common
+        manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        assert common.BASE_REPO == manifest['repo']
+        assert common.BASE_REVISION == manifest['revision']
+        base = Path(common.base_dir()).resolve()
+        assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+            f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+        Path(os.environ['EXP'], 'evidence/base-identity.json').write_text(json.dumps({
+            'base_dir': str(base), 'manifest_base': manifest}, sort_keys=True) + '\n')
+        PY
+    - name: Build actual Rust baseline replay (CI only)
+      run: |
+        set -euo pipefail
+        rustup toolchain install 1.97.0 --profile minimal
+        cargo +1.97.0 build --locked --features vault --example context_route_replay --target-dir "$RUNNER_TEMP/context-route-target"
+        echo "APASSY_CONTEXT_REPLAY_BINARY=$RUNNER_TEMP/context-route-target/debug/examples/context_route_replay" >> "$GITHUB_ENV"
+    - name: Require replay and generated-host tests without skips
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import os, unittest
+        from pathlib import Path
+        assert Path(os.environ['APASSY_CONTEXT_REPLAY_BINARY']).is_file()
+        patterns = ('test_context_replay.py', 'test_context_data.py')
+        suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests/basemodel', pattern=pattern)
+                                   for pattern in patterns)
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
+        # Synthetic source tests only; never load the retired H2 integration class.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'heldout_source_tests', 'tests/basemodel/test_context_heldout_preflight.py')
+        source_tests = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(source_tests)
+        suite = unittest.TestSuite(
+            unittest.defaultTestLoader.loadTestsFromTestCase(value)
+            for name, value in vars(source_tests).items()
+            if isinstance(value, type) and issubclass(value, unittest.TestCase)
+            and value is not unittest.TestCase and name != 'HostedH2IntegrationTests')
+        suite.addTests(unittest.defaultTestLoader.discover(
+            'tests/basemodel', pattern='test_context_heldout_route.py'))
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
+        # H3 is conditional preparation, never a new workflow mode or quality PASS.
+        import shutil, subprocess, sys
+        h3 = Path('tests/evals/secret-context-heldout-v3')
+        if (h3 / 'raw.jsonl').is_file() and not (h3 / 'TERMINAL.json').exists():
+            command = [sys.executable, '-B', str(h3 / 'route.py'),
+                       '--raw', str(h3 / 'raw.jsonl'),
+                       '--raw-manifest', str(h3 / 'raw.manifest.json'),
+                       '--replay-binary', os.environ['APASSY_CONTEXT_REPLAY_BINARY']]
+            if (h3 / 'routed.jsonl').exists():
+                command.append('--check')
+            try:
+                # Router applies unchanged preflight to routed rows only after
+                # successful conversion and the additional reachable floors.
+                subprocess.run(command, check=True)
+            finally:
+                upload = Path(os.environ['RUNNER_TEMP'], 'bouncer-context/h3-routed')
+                upload.mkdir(parents=True, exist_ok=True)
+                for name in ('routed.jsonl', 'routed.manifest.json', 'route-report.json'):
+                    if (h3 / name).is_file():
+                        shutil.copyfile(h3 / name, upload / name)
+        elif (h3 / 'TERMINAL.json').exists():
+            print('H3 terminal: preparation skipped; no H3 PASS claimed.')
+        PY
+    - name: Require tokenizer unittest without skips and exact canonical measurement
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import json, os, sys, unittest
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import context_v1 as C
+        suite = unittest.defaultTestLoader.discover('tests/basemodel', pattern='test_context_tokens.py')
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        evidence = Path(os.environ['EXP'], 'evidence/token-report.json')
+        report = {'tests_run': result.testsRun, 'skipped': len(result.skipped),
+                  'successful': result.wasSuccessful(), 'gate_B': 'UNSUPPORTED'}
+        evidence.write_text(json.dumps(report, sort_keys=True) + '\n')
+        if not result.wasSuccessful() or result.skipped or result.testsRun < 1:
+            raise SystemExit('Tokenizer unittest must run successfully without skips')
+        c = C.load_contract()
+        proposed, measurement = C.measure(os.environ['APASSY_CONTEXT_TOKENIZER_BASE'], c, fuzz=10000)
+        assert proposed['budget'] == c['budget'], 'canonical budget differs'
+        report.update(measurement=measurement, canonical_contract_sha256=C.contract_hash(c),
+                      budget_matches=True)
+        evidence.write_text(json.dumps(report, sort_keys=True) + '\n')
+        PY
+    - name: Record preflight-only boundary
+      if: ${{ github.event_name != 'workflow_dispatch' }}
+      run: |
+        echo 'Preflight passed: compiled replay, G1 host extraction and tokenizer. No runtime calibration, training or eligibility result.' >> "$GITHUB_STEP_SUMMARY"
+    - name: Generate only G1 synthetic train and validation
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/context_data.py --out "$EXP/synthetic" --groups 40 --seed 7
+        cp "$EXP/synthetic/data-manifest.json" "$EXP/evidence/data-manifest.json"
+    - name: Bounded training-only probe and verified exit 3
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      timeout-minutes: 23
+      run: |
+        set -euo pipefail
+        set +e
+        /usr/bin/time -v -o "$EXP/evidence/training-time.txt" \
+          timeout --signal=TERM --kill-after=30s 1250s \
+          "$PY" -B tools/basemodel/context_train.py \
+          --data "$EXP/synthetic" --out "$EXP/probe" \
+          --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" \
+          --mode probe --limit 64 --epochs 1 --max-steps 4 --batch 1 \
+          --threads 2 --seconds-per-head 600 --seed 7
+        rc=$?
+        set -e
+        echo "$rc" > "$EXP/evidence/training-exit.txt"
+        test "$rc" -eq 3
+    - name: Verify completion, exact paths, config, source, packages and hashes
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      id: verify
+      env:
+        VERIFY_MODE: probe
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import hashlib, json, math, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import context_train as T
+        import context_v1 as C
+        root = Path(os.environ['EXP'])
+        mode = os.environ['VERIFY_MODE']
+        out = root / ('probe' if mode == 'probe' else 'full')
+        def digest(path):
+            with path.open('rb') as f:
+                return hashlib.file_digest(f, 'sha256').hexdigest()
+        report = json.loads((out / 'training-report.json').read_text())
+        assert report.get('training_completed') is True
+        if 'EXPECTED_PROBE_REPORT_SHA' in os.environ:
+            assert digest(out / 'training-report.json') == os.environ['EXPECTED_PROBE_REPORT_SHA']
+        assert report['mode'] == mode and report['outcome'] == 'UNSUPPORTED'
+        assert report['reason'] == 'training_only_no_heldout_opened'
+        freeze_path = out / 'freeze.json'
+        sha = digest(freeze_path)
+        assert sha == report['freeze_sha256']
+        expected_sha = os.environ.get('EXPECTED_FREEZE_SHA', '')
+        if 'EXPECTED_FREEZE_SHA' in os.environ:
+            assert len(expected_sha) == 64 and sha == expected_sha
+        freeze = json.loads(freeze_path.read_text())
+        c = C.load_contract()
+        assert freeze['mode'] == mode
+        assert freeze['source_commit'] == T.source_commit()
+        assert freeze['source_hashes'] == T.source_identity()
+        assert freeze['package_versions'] == T.package_versions()
+        assert freeze['context_contract_sha256'] == C.contract_hash(c)
+        assert freeze['tokenizer_sha256'] == c['tokenizer']['sha256']
+        assert freeze['base'] == json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        expected = {'train': root / 'synthetic/train.jsonl', 'val': root / 'synthetic/val.jsonl',
+                    'context': out / 'context.safetensors', 'control': out / 'control.safetensors',
+                    'data_manifest': root / 'synthetic/data-manifest.json'}
+        for name, path in expected.items():
+            assert Path(freeze[name]['path']) == path
+            assert path.is_file() and path.stat().st_size > 0
+            assert digest(path) == freeze[name]['sha256'], name
+        cfg = freeze['config']
+        config = dict(mode=mode, seed=7, lr=.0003, wd=.01, warmup=100)
+        config.update(dict(limit=64, epochs=1, max_steps=4, batch=1, threads=2, seconds_per_head=600)
+                      if mode == 'probe' else dict(limit=0, epochs=4, max_steps=0, batch=32, threads=4, seconds_per_head=5400))
+        for key, value in config.items():
+            assert cfg[key] == value, key
+        dm = json.loads(expected['data_manifest'].read_text())
+        assert dm['seed'] == 7
+        for name in ('train', 'val'):
+            assert dm['files'][name + '.jsonl']['sha256'] == freeze[name]['sha256']
+        if mode == 'probe':
+            assert dm['groups'] == 40
+            assert report['projection_groups'] == 800 and report['projection_epochs'] == 4 and report['projection_heads'] == 2
+            projection = report['projected_full_seconds']
+            assert type(projection) in (int, float) and math.isfinite(projection) and projection > 0
+            components = report['projection_components']
+            assert set(components) == {'encoder_cache_seconds', 'training_cache_io_seconds', 'inference_seconds'}
+            assert all(type(x) in (int, float) and math.isfinite(x) and x > 0 for x in components.values())
+            assert math.isclose(sum(components.values()), projection, rel_tol=1e-9)
+            for batch, samples in [('1', 32), ('8', 4)]:
+                timing = report['encoder_timings'][batch]
+                assert timing['samples'] == samples
+                assert all(math.isfinite(timing[k]) and timing[k] > 0 for k in ('p50_seconds', 'p95_seconds'))
+            timings = report['encoder_timings']
+            write = timings['cache_write']
+            assert write['samples'] == 4 and write['unit'] == 'seconds_per_row'
+            assert write['provenance'] == 'fp16_feature_cache_serialization_disk_write'
+            cached = timings['cached_head']
+            assert cached['method'] == 'batch8x4_max_batch32_spot_v1'
+            assert cached['projection_batch_size'] == 32 and 'batch_size' not in cached
+            assert cached['sequence_length'] == 512
+            assert cached['unit'] == 'seconds_per_batch' and cached['warmups'] == 2
+            assert cached['encoder_in_measured_step'] is False and cached['threads'] == 2
+            assert cached['provenance'] == 'frozen_fp16_disk_cache_fp32_head_logits_adamw'
+            assert cached['includes'] == 'cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax'
+            assert type(cached['seconds']) is float and math.isfinite(cached['seconds']) and 0 < cached['seconds'] <= 120
+            for name, batch in [('training', 8), ('validation', 8), ('scoring', 1)]:
+                record = cached[name]
+                assert record['samples'] == 3 and record['batch_size'] == batch
+                assert all(type(record[k]) is float and math.isfinite(record[k]) and record[k] > 0
+                           for k in ('p50_seconds', 'p95_seconds'))
+                assert record['p95_seconds'] >= record['p50_seconds']
+            score = cached['scoring']
+            assert type(score['p95_seconds_per_row']) is float and math.isfinite(score['p95_seconds_per_row'])
+            assert math.isclose(score['p95_seconds_per_row'], score['p95_seconds'], rel_tol=1e-12)
+            scaled = cached['scaled_batch8_to32']
+            steps = cached['projection_step_seconds']
+            assert scaled['factor'] == 4 and steps['source'] == 'max(scaled_batch8_to32, spot32)'
+            for name in ('training', 'validation'):
+                spot = cached['spot32'][name]
+                assert spot['batch_size'] == 32 and spot['samples'] == 1 and spot['warmups'] == 0
+                assert 'p50_seconds' not in spot and 'p95_seconds' not in spot
+                single = spot['single_sample_seconds']
+                assert type(single) is float and math.isfinite(single) and single > 0
+                derived = 4 * cached[name]['p95_seconds']
+                assert type(scaled[name]) is float and math.isfinite(scaled[name]) and scaled[name] > 0
+                assert math.isclose(scaled[name], derived, rel_tol=1e-12)
+                assert single <= 1.3 * derived
+                assert type(steps[name]) is float and math.isfinite(steps[name]) and steps[name] > 0
+                assert math.isclose(steps[name], max(derived, single), rel_tol=1e-12)
+            counts = report['projection_counts']
+            assert counts['candidate_groups_min'] == 400 and counts['candidate_groups_max'] == 800
+            assert counts['provenance'] == 'G1_exact_serialized_context_control_union_prefixes_400_to_800'
+            recomputed = T.project_workload(timings, counts)
+            assert math.isclose(recomputed['projected_full_seconds'], projection, rel_tol=1e-12)
+            assert recomputed['projection_components'] == components
+            groups = next((g for g in range(800, 399, -1)
+                           if projection * g / 800 * 1.3 <= .6 * 300 * 60
+                           and (components['encoder_cache_seconds'] + components['training_cache_io_seconds'] / 2)
+                           * g / 800 * 1.3 <= 5400), None)
+            budget = {'outcome': 'ELIGIBLE' if groups else 'UNSUPPORTED', 'reason': None if groups else 'budget',
+                      'groups': groups, 'projection_groups': 800, 'projected_full_seconds': projection,
+                      'probe_freeze_sha256': sha, 'probe_report_sha256': digest(out / 'training-report.json'),
+                      'source_commit': freeze['source_commit'], 'source_hashes': freeze['source_hashes'],
+                      'package_versions': freeze['package_versions']}
+            (root / 'evidence/budget.json').write_text(json.dumps(budget, allow_nan=False) + '\n')
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                f.write(f"groups={groups or ''}\n")
+        else:
+            assert cfg['probe_report'] == str(root / 'evidence/verified-probe-report.json')
+            T.verify_freeze(freeze_path, c, sha)
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f'freeze_sha256={sha}\n')
+            f.write(f"probe_report_sha256={digest(out / 'training-report.json')}\n")
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+            f.write(f'{mode} external freeze SHA-256: `{sha}`. Training completed; gate B unmeasured.\n')
+        PY
+    - name: Record probe eligibility (not gate B)
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      env:
+        GROUPS_SELECTED: ${{ steps.verify.outputs.groups }}
+      run: |
+        if [[ -n "$GROUPS_SELECTED" ]]; then
+          echo "Probe ELIGIBLE by budget: groups=$GROUPS_SELECTED. Train still requires the cost bench to pass. Gate B unmeasured."
+        else
+          echo 'Probe UNSUPPORTED(budget): train and evaluate skipped. B UNSUPPORTED; path ends, no retry.'
+        fi >> "$GITHUB_STEP_SUMMARY"
+    - name: Measure fresh CPU arms on G1 val (no quality verdict)
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      timeout-minutes: 40
+      run: |
+        set -euo pipefail
+        CONTEXT_SHA=$("$PY" -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["context"]["sha256"])' "$EXP/probe/freeze.json")
+        "$PY" -B tools/basemodel/context_replay.py  \
+          --val "$EXP/synthetic/val.jsonl" --base "$APASSY_CONTEXT_TOKENIZER_BASE"  \
+          --context-heads "$EXP/probe/context.safetensors" --expect-context-sha256 "$CONTEXT_SHA"  \
+          --mode probe --threads 2 --out "$EXP/evidence/cost-probe.json"
+    - name: Record bounded resource evidence even after failure
+      if: always()
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/bouncer-context/evidence"
+        python -B - <<'PY'
+        import json, os, time
+        from pathlib import Path
+        root = Path(os.environ['RUNNER_TEMP']) / 'bouncer-context'
+        start = root / 'evidence/start-epoch.txt'
+        sizes = {name: sum(p.stat().st_size for p in (root / name).rglob('*') if p.is_file())
+                 for name in ('probe', 'synthetic', 'hf', 'venv', 'cache', 'pip-cache')}
+        (root / 'evidence/probe-costs.json').write_text(json.dumps({
+            'elapsed_seconds': time.time() - int(start.read_text()) if start.exists() else None,
+            'directory_bytes': sizes, 'cpu_threads': 2, 'job_timeout_minutes': 40,
+            'gate_B': 'UNSUPPORTED',
+            'scope': ('synthetic_training_probe_only' if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+                      else 'synthetic_preflight_only'),
+            'head_sha': os.environ['SOURCE_HEAD_SHA'],
+            'tested_sha': os.environ['GITHUB_SHA']}, sort_keys=True) + '\n')
+        PY
+    - name: Retain bounded evidence only
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-probe-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        compression-level: 0
+        path: |
+          ${{ runner.temp }}/bouncer-context/evidence/*.json
+          ${{ runner.temp }}/bouncer-context/h3-routed/*
+          ${{ runner.temp }}/bouncer-context/evidence/training-time.txt
+          ${{ runner.temp }}/bouncer-context/evidence/training-exit.txt
+          ${{ runner.temp }}/bouncer-context/probe/training-report.json
+          ${{ runner.temp }}/bouncer-context/probe/freeze.json
+          ${{ runner.temp }}/bouncer-context/probe/context.safetensors
+          ${{ runner.temp }}/bouncer-context/probe/control.safetensors
+          ${{ runner.temp }}/bouncer-context/synthetic/data-manifest.json
+          ${{ runner.temp }}/bouncer-context/synthetic/train.jsonl
+          ${{ runner.temp }}/bouncer-context/synthetic/val.jsonl
+    outputs:
+      freeze_sha256: ${{ steps.verify.outputs.freeze_sha256 }}
+      probe_report_sha256: ${{ steps.verify.outputs.probe_report_sha256 }}
+      groups: ${{ steps.verify.outputs.groups }}
+  train:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'full' && needs.probe.outputs.groups != '' }}
+    needs: probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    outputs:
+      freeze_sha256: ${{ steps.verify.outputs.freeze_sha256 }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Remove only held-out inputs in disposable training checkout before Python
+      run: |
+        set -euo pipefail
+        rm -- tests/evals/secret-context-heldout-v1.jsonl tests/evals/secret-context-heldout-v1.manifest.json tests/evals/secret_context_heldout_v1.py
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Install existing dependencies with CPU torch first
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+        "$PY" -m pip install -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PY'
+        import torch
+        assert torch.__version__.split('+')[0] == '2.14.0'
+        assert torch.version.cuda is None, 'CPU-only torch required'
+        assert torch.get_num_threads() == 4, 'four CPU threads required'
+        PY
+    - name: Fetch and verify the pinned public base, then go offline
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/fetch_weights.py
+        "$PY" -B - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import common
+        manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        assert common.BASE_REPO == manifest['repo']
+        assert common.BASE_REVISION == manifest['revision']
+        base = Path(common.base_dir()).resolve()
+        assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+            f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+        Path(os.environ['EXP'], 'evidence/base-identity.json').write_text(json.dumps({
+            'base_dir': str(base), 'manifest_base': manifest}, sort_keys=True) + '\n')
+        PY
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: bouncer-context-probe-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/bouncer-context
+    - name: Verify completion, exact paths, config, source, packages and hashes
+      id: budget
+      env:
+        VERIFY_MODE: probe
+        EXPECTED_FREEZE_SHA: ${{ needs.probe.outputs.freeze_sha256 }}
+        EXPECTED_PROBE_REPORT_SHA: ${{ needs.probe.outputs.probe_report_sha256 }}
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import hashlib, json, math, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import context_train as T
+        import context_v1 as C
+        root = Path(os.environ['EXP'])
+        mode = os.environ['VERIFY_MODE']
+        out = root / ('probe' if mode == 'probe' else 'full')
+        def digest(path):
+            with path.open('rb') as f:
+                return hashlib.file_digest(f, 'sha256').hexdigest()
+        report = json.loads((out / 'training-report.json').read_text())
+        assert report.get('training_completed') is True
+        if 'EXPECTED_PROBE_REPORT_SHA' in os.environ:
+            assert digest(out / 'training-report.json') == os.environ['EXPECTED_PROBE_REPORT_SHA']
+        assert report['mode'] == mode and report['outcome'] == 'UNSUPPORTED'
+        assert report['reason'] == 'training_only_no_heldout_opened'
+        freeze_path = out / 'freeze.json'
+        sha = digest(freeze_path)
+        assert sha == report['freeze_sha256']
+        expected_sha = os.environ.get('EXPECTED_FREEZE_SHA', '')
+        if 'EXPECTED_FREEZE_SHA' in os.environ:
+            assert len(expected_sha) == 64 and sha == expected_sha
+        freeze = json.loads(freeze_path.read_text())
+        c = C.load_contract()
+        assert freeze['mode'] == mode
+        assert freeze['source_commit'] == T.source_commit()
+        assert freeze['source_hashes'] == T.source_identity()
+        assert freeze['package_versions'] == T.package_versions()
+        assert freeze['context_contract_sha256'] == C.contract_hash(c)
+        assert freeze['tokenizer_sha256'] == c['tokenizer']['sha256']
+        assert freeze['base'] == json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        expected = {'train': root / 'synthetic/train.jsonl', 'val': root / 'synthetic/val.jsonl',
+                    'context': out / 'context.safetensors', 'control': out / 'control.safetensors',
+                    'data_manifest': root / 'synthetic/data-manifest.json'}
+        for name, path in expected.items():
+            assert Path(freeze[name]['path']) == path
+            assert path.is_file() and path.stat().st_size > 0
+            assert digest(path) == freeze[name]['sha256'], name
+        cfg = freeze['config']
+        config = dict(mode=mode, seed=7, lr=.0003, wd=.01, warmup=100)
+        config.update(dict(limit=64, epochs=1, max_steps=4, batch=1, threads=2, seconds_per_head=600)
+                      if mode == 'probe' else dict(limit=0, epochs=4, max_steps=0, batch=32, threads=4, seconds_per_head=5400))
+        for key, value in config.items():
+            assert cfg[key] == value, key
+        dm = json.loads(expected['data_manifest'].read_text())
+        assert dm['seed'] == 7
+        for name in ('train', 'val'):
+            assert dm['files'][name + '.jsonl']['sha256'] == freeze[name]['sha256']
+        if mode == 'probe':
+            assert dm['groups'] == 40
+            assert report['projection_groups'] == 800 and report['projection_epochs'] == 4 and report['projection_heads'] == 2
+            projection = report['projected_full_seconds']
+            assert type(projection) in (int, float) and math.isfinite(projection) and projection > 0
+            components = report['projection_components']
+            assert set(components) == {'encoder_cache_seconds', 'training_cache_io_seconds', 'inference_seconds'}
+            assert all(type(x) in (int, float) and math.isfinite(x) and x > 0 for x in components.values())
+            assert math.isclose(sum(components.values()), projection, rel_tol=1e-9)
+            for batch, samples in [('1', 32), ('8', 4)]:
+                timing = report['encoder_timings'][batch]
+                assert timing['samples'] == samples
+                assert all(math.isfinite(timing[k]) and timing[k] > 0 for k in ('p50_seconds', 'p95_seconds'))
+            timings = report['encoder_timings']
+            write = timings['cache_write']
+            assert write['samples'] == 4 and write['unit'] == 'seconds_per_row'
+            assert write['provenance'] == 'fp16_feature_cache_serialization_disk_write'
+            cached = timings['cached_head']
+            assert cached['method'] == 'batch8x4_max_batch32_spot_v1'
+            assert cached['projection_batch_size'] == 32 and 'batch_size' not in cached
+            assert cached['sequence_length'] == 512
+            assert cached['unit'] == 'seconds_per_batch' and cached['warmups'] == 2
+            assert cached['encoder_in_measured_step'] is False and cached['threads'] == 2
+            assert cached['provenance'] == 'frozen_fp16_disk_cache_fp32_head_logits_adamw'
+            assert cached['includes'] == 'cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax'
+            assert type(cached['seconds']) is float and math.isfinite(cached['seconds']) and 0 < cached['seconds'] <= 120
+            for name, batch in [('training', 8), ('validation', 8), ('scoring', 1)]:
+                record = cached[name]
+                assert record['samples'] == 3 and record['batch_size'] == batch
+                assert all(type(record[k]) is float and math.isfinite(record[k]) and record[k] > 0
+                           for k in ('p50_seconds', 'p95_seconds'))
+                assert record['p95_seconds'] >= record['p50_seconds']
+            score = cached['scoring']
+            assert type(score['p95_seconds_per_row']) is float and math.isfinite(score['p95_seconds_per_row'])
+            assert math.isclose(score['p95_seconds_per_row'], score['p95_seconds'], rel_tol=1e-12)
+            scaled = cached['scaled_batch8_to32']
+            steps = cached['projection_step_seconds']
+            assert scaled['factor'] == 4 and steps['source'] == 'max(scaled_batch8_to32, spot32)'
+            for name in ('training', 'validation'):
+                spot = cached['spot32'][name]
+                assert spot['batch_size'] == 32 and spot['samples'] == 1 and spot['warmups'] == 0
+                assert 'p50_seconds' not in spot and 'p95_seconds' not in spot
+                single = spot['single_sample_seconds']
+                assert type(single) is float and math.isfinite(single) and single > 0
+                derived = 4 * cached[name]['p95_seconds']
+                assert type(scaled[name]) is float and math.isfinite(scaled[name]) and scaled[name] > 0
+                assert math.isclose(scaled[name], derived, rel_tol=1e-12)
+                assert single <= 1.3 * derived
+                assert type(steps[name]) is float and math.isfinite(steps[name]) and steps[name] > 0
+                assert math.isclose(steps[name], max(derived, single), rel_tol=1e-12)
+            counts = report['projection_counts']
+            assert counts['candidate_groups_min'] == 400 and counts['candidate_groups_max'] == 800
+            assert counts['provenance'] == 'G1_exact_serialized_context_control_union_prefixes_400_to_800'
+            recomputed = T.project_workload(timings, counts)
+            assert math.isclose(recomputed['projected_full_seconds'], projection, rel_tol=1e-12)
+            assert recomputed['projection_components'] == components
+            groups = next((g for g in range(800, 399, -1)
+                           if projection * g / 800 * 1.3 <= .6 * 300 * 60
+                           and (components['encoder_cache_seconds'] + components['training_cache_io_seconds'] / 2)
+                           * g / 800 * 1.3 <= 5400), None)
+            budget = {'outcome': 'ELIGIBLE' if groups else 'UNSUPPORTED', 'reason': None if groups else 'budget',
+                      'groups': groups, 'projection_groups': 800, 'projected_full_seconds': projection,
+                      'probe_freeze_sha256': sha, 'probe_report_sha256': digest(out / 'training-report.json'),
+                      'source_commit': freeze['source_commit'], 'source_hashes': freeze['source_hashes'],
+                      'package_versions': freeze['package_versions']}
+            (root / 'evidence/budget.json').write_text(json.dumps(budget, allow_nan=False) + '\n')
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                f.write(f"groups={groups or ''}\n")
+        else:
+            assert cfg['probe_report'] == str(root / 'evidence/verified-probe-report.json')
+            T.verify_freeze(freeze_path, c, sha)
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f'freeze_sha256={sha}\n')
+            f.write(f"probe_report_sha256={digest(out / 'training-report.json')}\n")
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+            f.write(f'{mode} external freeze SHA-256: `{sha}`. Training completed; gate B unmeasured.\n')
+        PY
+    - name: Generate selected full G1 data and train reviewed configuration
+      env:
+        GROUPS_SELECTED: ${{ steps.budget.outputs.groups }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$GROUPS_SELECTED" ]]; then
+          echo 'UNSUPPORTED(budget): no group count in 400..800 fits; held-out evaluation blocked.' >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+        cp "$EXP/probe/training-report.json" "$EXP/evidence/verified-probe-report.json"
+        rm -- "$EXP/synthetic/train.jsonl" "$EXP/synthetic/val.jsonl" "$EXP/synthetic/data-manifest.json"
+        "$PY" -B tools/basemodel/context_data.py --out "$EXP/synthetic" --groups "$GROUPS_SELECTED" --seed 7
+        set +e
+        /usr/bin/time -v -o "$EXP/evidence/training-time.txt" \
+          timeout --signal=TERM --kill-after=30s 17000s \
+          "$PY" -B tools/basemodel/context_train.py \
+          --data "$EXP/synthetic" --out "$EXP/full" --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" \
+          --mode full --limit 0 --epochs 4 --max-steps 0 --batch 32 --threads 4 \
+          --lr .0003 --wd .01 --warmup 100 --seconds-per-head 5400 --seed 7 \
+          --probe-report "$EXP/evidence/verified-probe-report.json"
+        rc=$?
+        set -e
+        echo "$rc" > "$EXP/evidence/training-exit.txt"
+        test "$rc" -eq 3
+    - name: Verify completion, exact paths, config, source, packages and hashes
+      id: verify
+      env:
+        VERIFY_MODE: full
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import hashlib, json, math, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import context_train as T
+        import context_v1 as C
+        root = Path(os.environ['EXP'])
+        mode = os.environ['VERIFY_MODE']
+        out = root / ('probe' if mode == 'probe' else 'full')
+        def digest(path):
+            with path.open('rb') as f:
+                return hashlib.file_digest(f, 'sha256').hexdigest()
+        report = json.loads((out / 'training-report.json').read_text())
+        assert report.get('training_completed') is True
+        if 'EXPECTED_PROBE_REPORT_SHA' in os.environ:
+            assert digest(out / 'training-report.json') == os.environ['EXPECTED_PROBE_REPORT_SHA']
+        assert report['mode'] == mode and report['outcome'] == 'UNSUPPORTED'
+        assert report['reason'] == 'training_only_no_heldout_opened'
+        freeze_path = out / 'freeze.json'
+        sha = digest(freeze_path)
+        assert sha == report['freeze_sha256']
+        expected_sha = os.environ.get('EXPECTED_FREEZE_SHA', '')
+        if 'EXPECTED_FREEZE_SHA' in os.environ:
+            assert len(expected_sha) == 64 and sha == expected_sha
+        freeze = json.loads(freeze_path.read_text())
+        c = C.load_contract()
+        assert freeze['mode'] == mode
+        assert freeze['source_commit'] == T.source_commit()
+        assert freeze['source_hashes'] == T.source_identity()
+        assert freeze['package_versions'] == T.package_versions()
+        assert freeze['context_contract_sha256'] == C.contract_hash(c)
+        assert freeze['tokenizer_sha256'] == c['tokenizer']['sha256']
+        assert freeze['base'] == json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        expected = {'train': root / 'synthetic/train.jsonl', 'val': root / 'synthetic/val.jsonl',
+                    'context': out / 'context.safetensors', 'control': out / 'control.safetensors',
+                    'data_manifest': root / 'synthetic/data-manifest.json'}
+        for name, path in expected.items():
+            assert Path(freeze[name]['path']) == path
+            assert path.is_file() and path.stat().st_size > 0
+            assert digest(path) == freeze[name]['sha256'], name
+        cfg = freeze['config']
+        config = dict(mode=mode, seed=7, lr=.0003, wd=.01, warmup=100)
+        config.update(dict(limit=64, epochs=1, max_steps=4, batch=1, threads=2, seconds_per_head=600)
+                      if mode == 'probe' else dict(limit=0, epochs=4, max_steps=0, batch=32, threads=4, seconds_per_head=5400))
+        for key, value in config.items():
+            assert cfg[key] == value, key
+        dm = json.loads(expected['data_manifest'].read_text())
+        assert dm['seed'] == 7
+        for name in ('train', 'val'):
+            assert dm['files'][name + '.jsonl']['sha256'] == freeze[name]['sha256']
+        if mode == 'probe':
+            assert dm['groups'] == 40
+            assert report['projection_groups'] == 800 and report['projection_epochs'] == 4 and report['projection_heads'] == 2
+            projection = report['projected_full_seconds']
+            assert type(projection) in (int, float) and math.isfinite(projection) and projection > 0
+            components = report['projection_components']
+            assert set(components) == {'encoder_cache_seconds', 'training_cache_io_seconds', 'inference_seconds'}
+            assert all(type(x) in (int, float) and math.isfinite(x) and x > 0 for x in components.values())
+            assert math.isclose(sum(components.values()), projection, rel_tol=1e-9)
+            for batch, samples in [('1', 32), ('8', 4)]:
+                timing = report['encoder_timings'][batch]
+                assert timing['samples'] == samples
+                assert all(math.isfinite(timing[k]) and timing[k] > 0 for k in ('p50_seconds', 'p95_seconds'))
+            timings = report['encoder_timings']
+            write = timings['cache_write']
+            assert write['samples'] == 4 and write['unit'] == 'seconds_per_row'
+            assert write['provenance'] == 'fp16_feature_cache_serialization_disk_write'
+            cached = timings['cached_head']
+            assert cached['method'] == 'batch8x4_max_batch32_spot_v1'
+            assert cached['projection_batch_size'] == 32 and 'batch_size' not in cached
+            assert cached['sequence_length'] == 512
+            assert cached['unit'] == 'seconds_per_batch' and cached['warmups'] == 2
+            assert cached['encoder_in_measured_step'] is False and cached['threads'] == 2
+            assert cached['provenance'] == 'frozen_fp16_disk_cache_fp32_head_logits_adamw'
+            assert cached['includes'] == 'cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax'
+            assert type(cached['seconds']) is float and math.isfinite(cached['seconds']) and 0 < cached['seconds'] <= 120
+            for name, batch in [('training', 8), ('validation', 8), ('scoring', 1)]:
+                record = cached[name]
+                assert record['samples'] == 3 and record['batch_size'] == batch
+                assert all(type(record[k]) is float and math.isfinite(record[k]) and record[k] > 0
+                           for k in ('p50_seconds', 'p95_seconds'))
+                assert record['p95_seconds'] >= record['p50_seconds']
+            score = cached['scoring']
+            assert type(score['p95_seconds_per_row']) is float and math.isfinite(score['p95_seconds_per_row'])
+            assert math.isclose(score['p95_seconds_per_row'], score['p95_seconds'], rel_tol=1e-12)
+            scaled = cached['scaled_batch8_to32']
+            steps = cached['projection_step_seconds']
+            assert scaled['factor'] == 4 and steps['source'] == 'max(scaled_batch8_to32, spot32)'
+            for name in ('training', 'validation'):
+                spot = cached['spot32'][name]
+                assert spot['batch_size'] == 32 and spot['samples'] == 1 and spot['warmups'] == 0
+                assert 'p50_seconds' not in spot and 'p95_seconds' not in spot
+                single = spot['single_sample_seconds']
+                assert type(single) is float and math.isfinite(single) and single > 0
+                derived = 4 * cached[name]['p95_seconds']
+                assert type(scaled[name]) is float and math.isfinite(scaled[name]) and scaled[name] > 0
+                assert math.isclose(scaled[name], derived, rel_tol=1e-12)
+                assert single <= 1.3 * derived
+                assert type(steps[name]) is float and math.isfinite(steps[name]) and steps[name] > 0
+                assert math.isclose(steps[name], max(derived, single), rel_tol=1e-12)
+            counts = report['projection_counts']
+            assert counts['candidate_groups_min'] == 400 and counts['candidate_groups_max'] == 800
+            assert counts['provenance'] == 'G1_exact_serialized_context_control_union_prefixes_400_to_800'
+            recomputed = T.project_workload(timings, counts)
+            assert math.isclose(recomputed['projected_full_seconds'], projection, rel_tol=1e-12)
+            assert recomputed['projection_components'] == components
+            groups = next((g for g in range(800, 399, -1)
+                           if projection * g / 800 * 1.3 <= .6 * 300 * 60
+                           and (components['encoder_cache_seconds'] + components['training_cache_io_seconds'] / 2)
+                           * g / 800 * 1.3 <= 5400), None)
+            budget = {'outcome': 'ELIGIBLE' if groups else 'UNSUPPORTED', 'reason': None if groups else 'budget',
+                      'groups': groups, 'projection_groups': 800, 'projected_full_seconds': projection,
+                      'probe_freeze_sha256': sha, 'probe_report_sha256': digest(out / 'training-report.json'),
+                      'source_commit': freeze['source_commit'], 'source_hashes': freeze['source_hashes'],
+                      'package_versions': freeze['package_versions']}
+            (root / 'evidence/budget.json').write_text(json.dumps(budget, allow_nan=False) + '\n')
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                f.write(f"groups={groups or ''}\n")
+        else:
+            assert cfg['probe_report'] == str(root / 'evidence/verified-probe-report.json')
+            T.verify_freeze(freeze_path, c, sha)
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f'freeze_sha256={sha}\n')
+            f.write(f"probe_report_sha256={digest(out / 'training-report.json')}\n")
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+            f.write(f'{mode} external freeze SHA-256: `{sha}`. Training completed; gate B unmeasured.\n')
+        PY
+    - name: Retain bounded evidence only
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-full-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        compression-level: 0
+        path: |
+          ${{ runner.temp }}/bouncer-context/evidence/*.json
+          ${{ runner.temp }}/bouncer-context/evidence/training-time.txt
+          ${{ runner.temp }}/bouncer-context/evidence/training-exit.txt
+          ${{ runner.temp }}/bouncer-context/full/training-report.json
+          ${{ runner.temp }}/bouncer-context/full/freeze.json
+          ${{ runner.temp }}/bouncer-context/full/context.safetensors
+          ${{ runner.temp }}/bouncer-context/full/control.safetensors
+          ${{ runner.temp }}/bouncer-context/synthetic/data-manifest.json
+          ${{ runner.temp }}/bouncer-context/synthetic/train.jsonl
+          ${{ runner.temp }}/bouncer-context/synthetic/val.jsonl
+  evaluate:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'full' }}
+    needs: train
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Install existing dependencies with CPU torch first
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+        "$PY" -m pip install -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PY'
+        import torch
+        assert torch.__version__.split('+')[0] == '2.14.0'
+        assert torch.version.cuda is None, 'CPU-only torch required'
+        assert torch.get_num_threads() == 4, 'four CPU threads required'
+        PY
+    - name: Fetch and verify the pinned public base, then go offline
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/fetch_weights.py
+        "$PY" -B - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import common
+        manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        assert common.BASE_REPO == manifest['repo']
+        assert common.BASE_REVISION == manifest['revision']
+        base = Path(common.base_dir()).resolve()
+        assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+            f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+        Path(os.environ['EXP'], 'evidence/base-identity.json').write_text(json.dumps({
+            'base_dir': str(base), 'manifest_base': manifest}, sort_keys=True) + '\n')
+        PY
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: bouncer-context-full-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/bouncer-context
+    - name: Verify completion, exact paths, config, source, packages and hashes
+      id: verify
+      env:
+        VERIFY_MODE: full
+        EXPECTED_FREEZE_SHA: ${{ needs.train.outputs.freeze_sha256 }}
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import hashlib, json, math, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import context_train as T
+        import context_v1 as C
+        root = Path(os.environ['EXP'])
+        mode = os.environ['VERIFY_MODE']
+        out = root / ('probe' if mode == 'probe' else 'full')
+        def digest(path):
+            with path.open('rb') as f:
+                return hashlib.file_digest(f, 'sha256').hexdigest()
+        report = json.loads((out / 'training-report.json').read_text())
+        assert report.get('training_completed') is True
+        if 'EXPECTED_PROBE_REPORT_SHA' in os.environ:
+            assert digest(out / 'training-report.json') == os.environ['EXPECTED_PROBE_REPORT_SHA']
+        assert report['mode'] == mode and report['outcome'] == 'UNSUPPORTED'
+        assert report['reason'] == 'training_only_no_heldout_opened'
+        freeze_path = out / 'freeze.json'
+        sha = digest(freeze_path)
+        assert sha == report['freeze_sha256']
+        expected_sha = os.environ.get('EXPECTED_FREEZE_SHA', '')
+        if 'EXPECTED_FREEZE_SHA' in os.environ:
+            assert len(expected_sha) == 64 and sha == expected_sha
+        freeze = json.loads(freeze_path.read_text())
+        c = C.load_contract()
+        assert freeze['mode'] == mode
+        assert freeze['source_commit'] == T.source_commit()
+        assert freeze['source_hashes'] == T.source_identity()
+        assert freeze['package_versions'] == T.package_versions()
+        assert freeze['context_contract_sha256'] == C.contract_hash(c)
+        assert freeze['tokenizer_sha256'] == c['tokenizer']['sha256']
+        assert freeze['base'] == json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        expected = {'train': root / 'synthetic/train.jsonl', 'val': root / 'synthetic/val.jsonl',
+                    'context': out / 'context.safetensors', 'control': out / 'control.safetensors',
+                    'data_manifest': root / 'synthetic/data-manifest.json'}
+        for name, path in expected.items():
+            assert Path(freeze[name]['path']) == path
+            assert path.is_file() and path.stat().st_size > 0
+            assert digest(path) == freeze[name]['sha256'], name
+        cfg = freeze['config']
+        config = dict(mode=mode, seed=7, lr=.0003, wd=.01, warmup=100)
+        config.update(dict(limit=64, epochs=1, max_steps=4, batch=1, threads=2, seconds_per_head=600)
+                      if mode == 'probe' else dict(limit=0, epochs=4, max_steps=0, batch=32, threads=4, seconds_per_head=5400))
+        for key, value in config.items():
+            assert cfg[key] == value, key
+        dm = json.loads(expected['data_manifest'].read_text())
+        assert dm['seed'] == 7
+        for name in ('train', 'val'):
+            assert dm['files'][name + '.jsonl']['sha256'] == freeze[name]['sha256']
+        if mode == 'probe':
+            assert dm['groups'] == 40
+            assert report['projection_groups'] == 800 and report['projection_epochs'] == 4 and report['projection_heads'] == 2
+            projection = report['projected_full_seconds']
+            assert type(projection) in (int, float) and math.isfinite(projection) and projection > 0
+            components = report['projection_components']
+            assert set(components) == {'encoder_cache_seconds', 'training_cache_io_seconds', 'inference_seconds'}
+            assert all(type(x) in (int, float) and math.isfinite(x) and x > 0 for x in components.values())
+            assert math.isclose(sum(components.values()), projection, rel_tol=1e-9)
+            for batch, samples in [('1', 32), ('8', 4)]:
+                timing = report['encoder_timings'][batch]
+                assert timing['samples'] == samples
+                assert all(math.isfinite(timing[k]) and timing[k] > 0 for k in ('p50_seconds', 'p95_seconds'))
+            timings = report['encoder_timings']
+            write = timings['cache_write']
+            assert write['samples'] == 4 and write['unit'] == 'seconds_per_row'
+            assert write['provenance'] == 'fp16_feature_cache_serialization_disk_write'
+            cached = timings['cached_head']
+            assert cached['method'] == 'batch8x4_max_batch32_spot_v1'
+            assert cached['projection_batch_size'] == 32 and 'batch_size' not in cached
+            assert cached['sequence_length'] == 512
+            assert cached['unit'] == 'seconds_per_batch' and cached['warmups'] == 2
+            assert cached['encoder_in_measured_step'] is False and cached['threads'] == 2
+            assert cached['provenance'] == 'frozen_fp16_disk_cache_fp32_head_logits_adamw'
+            assert cached['includes'] == 'cache_lookup_collate_forward_loss_backward_clip_optimizer; validation=loss; scoring=softmax'
+            assert type(cached['seconds']) is float and math.isfinite(cached['seconds']) and 0 < cached['seconds'] <= 120
+            for name, batch in [('training', 8), ('validation', 8), ('scoring', 1)]:
+                record = cached[name]
+                assert record['samples'] == 3 and record['batch_size'] == batch
+                assert all(type(record[k]) is float and math.isfinite(record[k]) and record[k] > 0
+                           for k in ('p50_seconds', 'p95_seconds'))
+                assert record['p95_seconds'] >= record['p50_seconds']
+            score = cached['scoring']
+            assert type(score['p95_seconds_per_row']) is float and math.isfinite(score['p95_seconds_per_row'])
+            assert math.isclose(score['p95_seconds_per_row'], score['p95_seconds'], rel_tol=1e-12)
+            scaled = cached['scaled_batch8_to32']
+            steps = cached['projection_step_seconds']
+            assert scaled['factor'] == 4 and steps['source'] == 'max(scaled_batch8_to32, spot32)'
+            for name in ('training', 'validation'):
+                spot = cached['spot32'][name]
+                assert spot['batch_size'] == 32 and spot['samples'] == 1 and spot['warmups'] == 0
+                assert 'p50_seconds' not in spot and 'p95_seconds' not in spot
+                single = spot['single_sample_seconds']
+                assert type(single) is float and math.isfinite(single) and single > 0
+                derived = 4 * cached[name]['p95_seconds']
+                assert type(scaled[name]) is float and math.isfinite(scaled[name]) and scaled[name] > 0
+                assert math.isclose(scaled[name], derived, rel_tol=1e-12)
+                assert single <= 1.3 * derived
+                assert type(steps[name]) is float and math.isfinite(steps[name]) and steps[name] > 0
+                assert math.isclose(steps[name], max(derived, single), rel_tol=1e-12)
+            counts = report['projection_counts']
+            assert counts['candidate_groups_min'] == 400 and counts['candidate_groups_max'] == 800
+            assert counts['provenance'] == 'G1_exact_serialized_context_control_union_prefixes_400_to_800'
+            recomputed = T.project_workload(timings, counts)
+            assert math.isclose(recomputed['projected_full_seconds'], projection, rel_tol=1e-12)
+            assert recomputed['projection_components'] == components
+            groups = next((g for g in range(800, 399, -1)
+                           if projection * g / 800 * 1.3 <= .6 * 300 * 60
+                           and (components['encoder_cache_seconds'] + components['training_cache_io_seconds'] / 2)
+                           * g / 800 * 1.3 <= 5400), None)
+            budget = {'outcome': 'ELIGIBLE' if groups else 'UNSUPPORTED', 'reason': None if groups else 'budget',
+                      'groups': groups, 'projection_groups': 800, 'projected_full_seconds': projection,
+                      'probe_freeze_sha256': sha, 'probe_report_sha256': digest(out / 'training-report.json'),
+                      'source_commit': freeze['source_commit'], 'source_hashes': freeze['source_hashes'],
+                      'package_versions': freeze['package_versions']}
+            (root / 'evidence/budget.json').write_text(json.dumps(budget, allow_nan=False) + '\n')
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                f.write(f"groups={groups or ''}\n")
+        else:
+            assert cfg['probe_report'] == str(root / 'evidence/verified-probe-report.json')
+            T.verify_freeze(freeze_path, c, sha)
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f'freeze_sha256={sha}\n')
+            f.write(f"probe_report_sha256={digest(out / 'training-report.json')}\n")
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+            f.write(f'{mode} external freeze SHA-256: `{sha}`. Training completed; gate B unmeasured.\n')
+        PY
+    - name: Build actual Rust baseline replay (CI only)
+      run: |
+        set -euo pipefail
+        rustup toolchain install 1.97.0 --profile minimal
+        cargo +1.97.0 build --locked --features vault --example context_route_replay --target-dir "$RUNNER_TEMP/context-route-target"
+        echo "APASSY_CONTEXT_REPLAY_BINARY=$RUNNER_TEMP/context-route-target/debug/examples/context_route_replay" >> "$GITHUB_ENV"
+    - name: Require replay and generated-host tests without skips
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import os, unittest
+        from pathlib import Path
+        assert Path(os.environ['APASSY_CONTEXT_REPLAY_BINARY']).is_file()
+        suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests/basemodel', pattern=pattern)
+                                   for pattern in ('test_context_replay.py', 'test_context_data.py'))
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
+        PY
+    - name: Measure fresh CPU arms on G1 val (no quality verdict)
+      timeout-minutes: 110
+      run: |
+        set -euo pipefail
+        CONTEXT_SHA=$("$PY" -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["context"]["sha256"])' "$EXP/full/freeze.json")
+        "$PY" -B tools/basemodel/context_replay.py  \
+          --val "$EXP/synthetic/val.jsonl" --base "$APASSY_CONTEXT_TOKENIZER_BASE"  \
+          --context-heads "$EXP/full/context.safetensors" --expect-context-sha256 "$CONTEXT_SHA"  \
+          --mode full --threads 4 --out "$EXP/evidence/cost-full.json"
+      continue-on-error: true
+    - name: Evaluate held-out only after external freeze verification
+      env:
+        FREEZE_SHA: ${{ needs.train.outputs.freeze_sha256 }}
+      run: |
+        set -euo pipefail
+        set +e
+        "$PY" -B tools/basemodel/context_eval.py --freeze "$EXP/full/freeze.json" \
+          --expect-freeze-sha256 "$FREEZE_SHA" --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" \
+          --baseline-binary "$APASSY_CONTEXT_REPLAY_BINARY" --cost-json "$EXP/evidence/cost-full.json" \
+          --heldout tests/evals/secret-context-heldout-v1.jsonl \
+          --heldout-manifest tests/evals/secret-context-heldout-v1.manifest.json \
+          --out "$EXP/evidence/evaluation.json"
+        rc=$?
+        set -e
+        "$PY" -B - <<'PY'
+        import json, os
+        from pathlib import Path
+        r = json.loads((Path(os.environ['EXP']) / 'evidence/evaluation.json').read_text())
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+            f.write('Feasibility quality only: ' + str(r['feasibility_quality']) + '\n\n')
+            f.write('Gate B: ' + str(r['gate_b']) + '\n\n')
+            f.write('Missing gates / evidence errors: ' + json.dumps({'missing': r.get('missing'), 'errors': r.get('evidence_errors')}) + '\n')
+            f.write('Quality PASS alone never unlocks C/D/E. New supervisor review required.\n')
+        PY
+        exit "$rc"
+    - name: Retain bounded evidence only
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-evaluation-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        compression-level: 0
+        path: ${{ runner.temp }}/bouncer-context/evidence/*.json
+
+  cost-only:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'cost-only' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.transport_only && 10 || 120 }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      CHECKPOINT_ASSET: ${{ inputs.checkpoint_asset }}
+      CHECKPOINT_SHA256: ${{ inputs.checkpoint_sha256 }}
+      VAL_SHA256: ${{ inputs.val_sha256 }}
+      COST_GROUPS: ${{ inputs.groups }}
+      TRANSPORT_ONLY: ${{ inputs.transport_only }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Require exact source and cost inputs before setup
+      run: |
+        set -euo pipefail
+        python3 -B - <<'PY'
+        import os, subprocess, sys
+        sys.path.insert(0, 'tools/basemodel')
+        from context_cost_asset import inputs
+        inputs(os.environ, subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+        PY
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Read draft-release checkpoint (transport preflight required)
+      timeout-minutes: 5
+      env:
+        APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/context_cost_asset.py
+    - name: Record verified transport only
+      if: inputs.transport_only
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import hashlib, json, os
+        from pathlib import Path
+        root = Path(os.environ['EXP'])
+        checkpoint = root / 'context.safetensors'
+        with checkpoint.open('rb') as f:
+            sha = hashlib.file_digest(f, 'sha256').hexdigest()
+        assert sha == os.environ['CHECKPOINT_SHA256']
+        receipt = dict(source_sha=os.environ['SOURCE_SHA'], checkpoint_sha256=sha,
+                       checkpoint_size=checkpoint.stat().st_size,
+                       evidence='transport_only', job_budget_minutes=10,
+                       download_budget_minutes=5, models='NOT_RUN', gate_b='UNMEASURED')
+        (root / 'evidence/transport-receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+        PY
+    - name: Upload transport receipt only
+      if: inputs.transport_only
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-transport-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: error
+        path: ${{ runner.temp }}/bouncer-context/evidence/transport-receipt.json
+    - name: Install existing dependencies with CPU torch first
+      if: ${{ !inputs.transport_only }}
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+        "$PY" -m pip install -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PY'
+        import torch
+        assert torch.__version__.split('+')[0] == '2.14.0'
+        assert torch.version.cuda is None, 'CPU-only torch required'
+        torch.set_num_threads(4)
+        assert torch.get_num_threads() == 4, 'four CPU threads required'
+        PY
+    - name: Fetch and verify the pinned public base, then go offline
+      if: ${{ !inputs.transport_only }}
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/fetch_weights.py
+        "$PY" -B - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import common
+        manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        assert common.BASE_REPO == manifest['repo']
+        assert common.BASE_REVISION == manifest['revision']
+        base = Path(common.base_dir()).resolve()
+        assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+            f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+        Path(os.environ['EXP'], 'evidence/base-identity.json').write_text(json.dumps({
+            'base_dir': str(base), 'manifest_base': manifest}, sort_keys=True) + '\n')
+        PY
+    - name: Recreate G1 and verify external validation hash and manifest
+      if: ${{ !inputs.transport_only }}
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/context_data.py --out "$EXP/synthetic" --groups "$COST_GROUPS" --seed 7
+        "$PY" -B - <<'PY'
+        import hashlib, json, os
+        from pathlib import Path
+        root = Path(os.environ['EXP']) / 'synthetic'
+        dm = json.loads((root / 'data-manifest.json').read_text())
+        assert dm['groups'] == int(os.environ['COST_GROUPS']) and dm['seed'] == 7
+        assert dm['rubric'] == 'v1-R1-text-catalog'
+        for name in ('train.jsonl', 'val.jsonl'):
+            with (root / name).open('rb') as f:
+                sha = hashlib.file_digest(f, 'sha256').hexdigest()
+            assert dm['files'][name]['sha256'] == sha
+            if name == 'val.jsonl':
+                assert sha == os.environ['VAL_SHA256'], 'cost unmeasured: G1 validation mismatch'
+        PY
+    - name: Measure fresh CPU arms on regenerated G1 (cost evidence only)
+      if: ${{ !inputs.transport_only }}
+      timeout-minutes: 110
+      run: |
+        set -euo pipefail
+        timeout --signal=TERM --kill-after=30s 6570s \
+          "$PY" -B tools/basemodel/context_replay.py \
+          --val "$EXP/synthetic/val.jsonl" --base "$APASSY_CONTEXT_TOKENIZER_BASE" \
+          --context-heads "$EXP/context.safetensors" --expect-context-sha256 "$CHECKPOINT_SHA256" \
+          --mode full --threads 4 --out "$EXP/evidence/cost-full.json"
+    - name: Write compact cost receipt
+      if: ${{ !inputs.transport_only }}
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import hashlib, json, os
+        from pathlib import Path
+        root = Path(os.environ['EXP'])
+        checkpoint = root / 'context.safetensors'
+        with checkpoint.open('rb') as f:
+            sha = hashlib.file_digest(f, 'sha256').hexdigest()
+        assert sha == os.environ['CHECKPOINT_SHA256']
+        json.loads((root / 'evidence/cost-full.json').read_text())
+        receipt = dict(source_sha=os.environ['SOURCE_SHA'], checkpoint_sha256=sha,
+                       checkpoint_size=checkpoint.stat().st_size, val_sha256=os.environ['VAL_SHA256'],
+                       groups=int(os.environ['COST_GROUPS']), seed=7, device='cpu', threads=4,
+                       runner='ubuntu-24.04', job_budget_minutes=120, bench_budget_minutes=110,
+                       evidence='cost_only', gate_b='UNMEASURED')
+        (root / 'evidence/cost-receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+        PY
+    - name: Upload only completed cost evidence and compact receipt
+      if: ${{ !inputs.transport_only }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-cost-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: error
+        path: |
+          ${{ runner.temp }}/bouncer-context/evidence/cost-full.json
+          ${{ runner.temp }}/bouncer-context/evidence/cost-receipt.json
+    - name: Record cost-only boundary
+      if: always()
+      env:
+        COST_STATUS: ${{ job.status }}
+      run: |
+        if [[ "$TRANSPORT_ONLY" == true && "$COST_STATUS" == success ]]; then
+          echo 'Transport verified only; no model or benchmark ran. Quality and Gate B unmeasured.' >> "$GITHUB_STEP_SUMMARY"
+        elif [[ "$COST_STATUS" == success ]]; then
+          echo 'Cost evidence only; quality and Gate B unmeasured. No B PASS.' >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo 'Cost unmeasured: cost-only job did not complete. No B PASS.' >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+  cuda-preflight:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'cuda-preflight' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Install pinned CUDA distribution on CPU
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --no-cache-dir -r tools/basemodel/requirements-cu130.txt -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PYCODE'
+        import json, sys, torch
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import PACKAGE_VERSIONS
+        from context_train import package_versions
+        default_threads = torch.get_num_threads()
+        torch.set_num_threads(4)
+        versions = package_versions()
+        cuda_available = torch.cuda.is_available()
+        observed_threads = torch.get_num_threads()
+        tensor_sum = (torch.ones(4, 4) @ torch.ones(4, 4)).sum().item()
+        print(json.dumps(dict(versions=versions, cuda_available=cuda_available, default_threads=default_threads,
+                              observed_threads=observed_threads, tensor_sum=tensor_sum), sort_keys=True))
+        assert versions == PACKAGE_VERSIONS
+        assert torch.cuda.is_available() is False
+        assert torch.get_num_threads() == 4
+        assert tensor_sum == 64
+        print('CPU runtime preflight PASS')
+        PYCODE
+    - name: Validate batch-tail objective on CPU only
+      env:
+        PYTHONHASHSEED: '7'
+      run: |
+        set -euo pipefail
+        "$PY" -B tests/basemodel/cpu_preflight_batch_tail.py \
+          --evidence "$EXP/evidence/objective-cpu-preflight.json"
+    - name: Record CPU runtime and disk evidence
+      run: |
+        "$PY" -B - <<'PYCODE'
+        import json, os, subprocess
+        from pathlib import Path
+        from importlib.metadata import distributions
+        root = Path(os.environ['EXP'])
+        evidence = dict(source_sha=os.environ['SOURCE_HEAD_SHA'],
+                        df_bytes=subprocess.check_output(['df', '-B1'], text=True),
+                        venv_bytes=int(subprocess.check_output(['du', '-sb', str(root / 'venv')], text=True).split()[0]),
+                        distributions={d.metadata['Name']: d.version for d in distributions()},
+                        tensor_sum=64, device='cpu', model='NOT_RUN')
+        (root / 'evidence/cuda-preflight.json').write_text(json.dumps(evidence, sort_keys=True) + '\n')
+        PYCODE
+    - name: Upload runtime evidence only
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-cuda-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: error
+        path: ${{ runner.temp }}/bouncer-context/evidence/*.json
+
+  external-evaluate:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'external-evaluate' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      RUN_ID: ${{ inputs.run_id }}
+      BUNDLE_ASSET: ${{ inputs.bundle_asset }}
+      BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+      FREEZE_SHA256: ${{ inputs.freeze_sha256 }}
+      SHIPPED_BASELINE: ${{ inputs.shipped_baseline }}
+      REQUESTED_TRANSPORT_ONLY: ${{ inputs.transport_only }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Require exact source and external inputs before setup
+      run: |
+        set -euo pipefail
+        python3 -B - <<'PYCODE'
+        import os, subprocess, sys
+        sys.path.insert(0, 'tools/basemodel')
+        from context_cost_asset import require
+        from context_external_bundle import check_inputs, run_root
+        require(os.environ.get('REQUESTED_TRANSPORT_ONLY') == 'false')
+        check_inputs(os.environ, subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write('CONTEXT_ROOT=' + str(run_root(os.environ['RUN_ID'])) + '\n')
+        PYCODE
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Download and restore pinned external bundle
+      timeout-minutes: 10
+      env:
+        APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
+        CHECKPOINT_ASSET: ${{ inputs.bundle_asset }}
+        CHECKPOINT_SHA256: ${{ inputs.bundle_sha256 }}
+        TRANSPORT_ONLY: 'true'
+        DESTINATION_NAME: bundle.tar
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/context_cost_asset.py
+        "$PY" -B - <<'PYCODE'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import restore
+        e = os.environ
+        bundle = Path(e['EXP']) / 'bundle.tar'
+        receipt = restore(bundle, e['BUNDLE_SHA256'], e['FREEZE_SHA256'], e['RUN_ID'])
+        (Path(e['EXP']) / 'receipt.json').write_text(json.dumps(receipt))
+        bundle.unlink()
+        PYCODE
+    - name: Fetch explicitly requested shipped evidence and verify before held-out IO
+      if: ${{ inputs.shipped_baseline }}
+      env:
+        SHIPPED_URL: ${{ secrets.APASSY_CONTEXT_SHIPPED_HEADS_URL }}
+      run: |
+        set -euo pipefail
+        test -n "$SHIPPED_URL"
+        # Fetch short-lived URLs before package installation and Rust compilation.
+        # This copies and hashes bytes only; model loading keeps its later gates.
+        "$PY" -B - <<'PYCODE'
+        import hashlib, os, subprocess, sys
+        from pathlib import Path
+        from urllib.parse import urlsplit
+        sys.path.insert(0, 'tools/basemodel')
+        from context_replay import SHIPPED_SHA
+        url = os.environ['SHIPPED_URL']
+        p = urlsplit(url)
+        if (p.scheme != 'https' or not p.hostname or p.username or p.password or
+                any(ord(c) <= 32 or ord(c) >= 127 for c in url) or any(c in url for c in '\"\\')):
+            raise SystemExit('shipped URL refused')
+        destination = Path(os.environ['EXP']) / 'shipped.safetensors'
+        result = subprocess.run(['curl', '--config', '-', '--proto', '=https', '--proto-redir', '=https',
+                                 '--fail', '--silent', '--max-time', '300', '--connect-timeout', '30',
+                                 '--max-filesize', '268435456', '--output', str(destination)],
+                                input='url = "' + url + '"\n', text=True, capture_output=True, timeout=330)
+        if result.returncode or not destination.is_file() or destination.stat().st_size > 268435456:
+            raise SystemExit('shipped download refused')
+        with destination.open('rb') as f:
+            if hashlib.file_digest(f, 'sha256').hexdigest() != SHIPPED_SHA:
+                raise SystemExit('shipped SHA mismatch')
+        PYCODE
+    - name: Install pinned CUDA distribution on CPU
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --no-cache-dir -r tools/basemodel/requirements-cu130.txt -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PYCODE'
+        import json, sys, torch
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import PACKAGE_VERSIONS
+        from context_train import package_versions
+        default_threads = torch.get_num_threads()
+        torch.set_num_threads(4)
+        versions = package_versions()
+        cuda_available = torch.cuda.is_available()
+        observed_threads = torch.get_num_threads()
+        tensor_sum = (torch.ones(4, 4) @ torch.ones(4, 4)).sum().item()
+        print(json.dumps(dict(versions=versions, cuda_available=cuda_available, default_threads=default_threads,
+                              observed_threads=observed_threads, tensor_sum=tensor_sum), sort_keys=True))
+        assert versions == PACKAGE_VERSIONS
+        assert torch.cuda.is_available() is False
+        assert torch.get_num_threads() == 4
+        assert tensor_sum == 64
+        print('CPU runtime preflight PASS')
+        PYCODE
+    - name: Verify receipt git versions paths and G1 before base or held-out IO
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PYCODE'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import verify_restored
+        e = os.environ
+        receipt = json.loads((Path(e['EXP']) / 'receipt.json').read_text())
+        verify_restored(Path(e['CONTEXT_ROOT']), receipt, e['RUN_ID'], e['SOURCE_SHA'], e['FREEZE_SHA256'], Path.cwd())
+        (Path(e['EXP']) / 'evidence/external-receipt.json').write_text(json.dumps(receipt, sort_keys=True))
+        PYCODE
+    - name: Build actual Rust baseline replay (CI only)
+      run: |
+        set -euo pipefail
+        test ! -e "$RUNNER_TEMP/context-external-route-target"
+        rustup toolchain install 1.97.0 --profile minimal
+        cargo +1.97.0 build --locked --features vault --example context_route_replay --target-dir "$RUNNER_TEMP/context-external-route-target"
+        mkdir -p "$EXP/bin"
+        cp "$RUNNER_TEMP/context-external-route-target/debug/examples/context_route_replay" "$EXP/bin/context_route_replay"
+        rm -rf -- "$RUNNER_TEMP/context-external-route-target"
+        echo "APASSY_CONTEXT_REPLAY_BINARY=$EXP/bin/context_route_replay" >> "$GITHUB_ENV"
+    - name: Fetch and verify the pinned public base, then go offline
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/fetch_weights.py
+        "$PY" -B - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import common
+        manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        assert common.BASE_REPO == manifest['repo']
+        assert common.BASE_REVISION == manifest['revision']
+        base = Path(common.base_dir()).resolve()
+        assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+            f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+        Path(os.environ['EXP'], 'evidence/base-identity.json').write_text(json.dumps({
+            'base_dir': str(base), 'manifest_base': manifest}, sort_keys=True) + '\n')
+        PY
+    - name: Require replay and generated-host tests without skips
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PY'
+        import os, unittest
+        from pathlib import Path
+        assert Path(os.environ['APASSY_CONTEXT_REPLAY_BINARY']).is_file()
+        suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests/basemodel', pattern=pattern)
+                                   for pattern in ('test_context_replay.py', 'test_context_data.py'))
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        assert result.wasSuccessful() and not result.skipped and result.testsRun > 0
+        PY
+    - name: Measure fresh CPU arms on G1 val (no quality verdict)
+      timeout-minutes: 110
+      run: |
+        set -euo pipefail
+        shipped=()
+        if [[ "$SHIPPED_BASELINE" == true ]]; then shipped=(--shipped-heads "$EXP/shipped.safetensors"); fi
+        CONTEXT_SHA=$("$PY" -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["context"]["sha256"])' "$CONTEXT_ROOT/full/freeze.json")
+        "$PY" -B tools/basemodel/context_replay.py  \
+          --val "$CONTEXT_ROOT/g1/val.jsonl" --base "$APASSY_CONTEXT_TOKENIZER_BASE"  \
+          --context-heads "$CONTEXT_ROOT/full/context.safetensors" --expect-context-sha256 "$CONTEXT_SHA"  \
+          "${shipped[@]}" --mode full --threads 4 --out "$EXP/evidence/cost-full.json"
+      continue-on-error: true
+    - name: Evaluate held-out only after external freeze verification
+      timeout-minutes: 120
+      env:
+        FREEZE_SHA: ${{ inputs.freeze_sha256 }}
+      run: |
+        set -euo pipefail
+        shipped=()
+        if [[ "$SHIPPED_BASELINE" == true ]]; then shipped=(--shipped-heads "$EXP/shipped.safetensors"); fi
+        set +e
+        "$PY" -B tools/basemodel/context_eval.py --freeze "$CONTEXT_ROOT/full/freeze.json" \
+          --expect-freeze-sha256 "$FREEZE_SHA" --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" \
+          "${shipped[@]}" --baseline-binary "$APASSY_CONTEXT_REPLAY_BINARY" --cost-json "$EXP/evidence/cost-full.json" \
+          --heldout tests/evals/secret-context-heldout-v1.jsonl \
+          --heldout-manifest tests/evals/secret-context-heldout-v1.manifest.json \
+          --out "$EXP/evidence/evaluation.json"
+        rc=$?
+        set -e
+        "$PY" -B - <<'PY'
+        import json, os
+        from pathlib import Path
+        r = json.loads((Path(os.environ['EXP']) / 'evidence/evaluation.json').read_text())
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+            f.write('Feasibility quality only: ' + str(r['feasibility_quality']) + '\n\n')
+            f.write('Gate B: ' + str(r['gate_b']) + '\n\n')
+            f.write('Missing gates / evidence errors: ' + json.dumps({'missing': r.get('missing'), 'errors': r.get('evidence_errors')}) + '\n')
+            f.write('Quality PASS alone never unlocks C/D/E. New supervisor review required.\n')
+        PY
+        exit "$rc"
+    - name: Retain bounded evidence only
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-external-evaluation-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        compression-level: 0
+        path: ${{ runner.temp }}/bouncer-context/evidence/*.json
+
+  development-diagnostic:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'development-diagnostic' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      RUN_ID: ${{ inputs.run_id }}
+      BUNDLE_ASSET: ${{ inputs.bundle_asset }}
+      BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+      FREEZE_SHA256: ${{ inputs.freeze_sha256 }}
+      SHIPPED_BASELINE: 'false'
+      REQUESTED_TRANSPORT_ONLY: ${{ inputs.transport_only }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Require exact source and external inputs before setup
+      run: |
+        set -euo pipefail
+        python3 -B - <<'PYCODE'
+        import os, subprocess, sys
+        sys.path.insert(0, 'tools/basemodel')
+        from context_cost_asset import require
+        from context_external_bundle import check_inputs, run_root
+        require(os.environ.get('REQUESTED_TRANSPORT_ONLY') == 'false')
+        check_inputs(os.environ, subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write('CONTEXT_ROOT=' + str(run_root(os.environ['RUN_ID'])) + '\n')
+        PYCODE
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Download and restore pinned external bundle
+      timeout-minutes: 10
+      env:
+        APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
+        CHECKPOINT_ASSET: ${{ inputs.bundle_asset }}
+        CHECKPOINT_SHA256: ${{ inputs.bundle_sha256 }}
+        TRANSPORT_ONLY: 'true'
+        DESTINATION_NAME: bundle.tar
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/context_cost_asset.py
+        "$PY" -B - <<'PYCODE'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import restore
+        e = os.environ
+        bundle = Path(e['EXP']) / 'bundle.tar'
+        receipt = restore(bundle, e['BUNDLE_SHA256'], e['FREEZE_SHA256'], e['RUN_ID'])
+        (Path(e['EXP']) / 'receipt.json').write_text(json.dumps(receipt))
+        assert bundle.stat().st_size == 215070720
+        bundle.unlink()
+        PYCODE
+    - name: Bind E entry and immutable S source
+      run: |
+        set -euo pipefail
+        S=7a63ffad557ace5e396c4a709ad8453fb611b565
+        test "$RUN_ID" = bouncer-bbee8f21-20261105t124513z
+        test "$BUNDLE_ASSET" = 435195444/714447674
+        test "$BUNDLE_SHA256" = 6de84990fb29a99c8e23eb51b67066d6344c644fbf5e634ea4f23425a85fb974
+        test "$FREEZE_SHA256" = 7e8391a63aaba4afb84300788474be8e3ffdfb46b4aa3206801c0dbba550368c
+        test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+        test -z "$(git status --porcelain --untracked-files=no)"
+        mkdir "$EXP/entry"
+        git show "$GITHUB_SHA:tools/basemodel/context_dev_diagnostic.py" > "$EXP/entry/context_dev_diagnostic.py"
+        git merge-base --is-ancestor "$S" "$GITHUB_SHA"
+        git checkout --quiet --detach "$S"
+        test "$(git rev-parse HEAD)" = "$S"
+        test -z "$(git status --porcelain --untracked-files=no)"
+        "$PY" -I -B - <<'PYCODE'
+        import hashlib, json, os, subprocess
+        from pathlib import Path
+        e = os.environ
+        entry = Path(e['EXP']) / 'entry/context_dev_diagnostic.py'
+        original = subprocess.check_output(['git', 'show', e['GITHUB_SHA'] + ':tools/basemodel/context_dev_diagnostic.py'])
+        assert entry.read_bytes() == original
+        binding = dict(report_kind='development_diagnostic',
+                       training_source_sha='7a63ffad557ace5e396c4a709ad8453fb611b565',
+                       evaluation_source_sha=e['GITHUB_SHA'],
+                       entry_sha256=hashlib.sha256(original).hexdigest(),
+                       bundle_sha256=e['BUNDLE_SHA256'], freeze_sha256=e['FREEZE_SHA256'],
+                       run_id=e['RUN_ID'])
+        with (Path(e['EXP']) / 'evidence/diagnostic-binding.json').open('x') as f:
+            f.write(json.dumps(binding, sort_keys=True, separators=(',', ':')) + '\n')
+        PYCODE
+    - name: Install pinned CUDA distribution on CPU
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --no-cache-dir -r tools/basemodel/requirements-cu130.txt -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PYCODE'
+        import json, sys, torch
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import PACKAGE_VERSIONS
+        from context_train import package_versions
+        default_threads = torch.get_num_threads()
+        torch.set_num_threads(4)
+        versions = package_versions()
+        cuda_available = torch.cuda.is_available()
+        observed_threads = torch.get_num_threads()
+        tensor_sum = (torch.ones(4, 4) @ torch.ones(4, 4)).sum().item()
+        print(json.dumps(dict(versions=versions, cuda_available=cuda_available, default_threads=default_threads,
+                              observed_threads=observed_threads, tensor_sum=tensor_sum), sort_keys=True))
+        assert versions == PACKAGE_VERSIONS
+        assert torch.cuda.is_available() is False
+        assert torch.get_num_threads() == 4
+        assert tensor_sum == 64
+        print('CPU runtime preflight PASS')
+        PYCODE
+    - name: Verify original restored bundle at S
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PYCODE'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import verify_restored
+        e = os.environ
+        receipt = json.loads((Path(e['EXP']) / 'receipt.json').read_text())
+        verify_restored(Path(e['CONTEXT_ROOT']), receipt, e['RUN_ID'], '7a63ffad557ace5e396c4a709ad8453fb611b565', e['FREEZE_SHA256'], Path.cwd())
+        PYCODE
+    - name: Select aggregate sample before base weights
+      run: |
+        set -euo pipefail
+        "$PY" -I -B "$EXP/entry/context_dev_diagnostic.py" select \
+          --repo-root "$GITHUB_WORKSPACE" --freeze "$CONTEXT_ROOT/full/freeze.json" \
+          --expect-freeze-sha256 "$FREEZE_SHA256" --binding "$EXP/evidence/diagnostic-binding.json" \
+          --out "$EXP/evidence/selection.json"
+    - name: Fetch and verify the pinned public base, then go offline
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/fetch_weights.py
+        "$PY" -B - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import common
+        manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        assert common.BASE_REPO == manifest['repo']
+        assert common.BASE_REVISION == manifest['revision']
+        base = Path(common.base_dir()).resolve()
+        assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+            f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+        PY
+    - name: Score development diagnostic offline
+      timeout-minutes: 30
+      run: |
+        set -euo pipefail
+        test "$HF_HUB_OFFLINE" = 1
+        test "$TRANSFORMERS_OFFLINE" = 1
+        "$PY" -I -B "$EXP/entry/context_dev_diagnostic.py" score \
+          --repo-root "$GITHUB_WORKSPACE" --freeze "$CONTEXT_ROOT/full/freeze.json" \
+          --expect-freeze-sha256 "$FREEZE_SHA256" --binding "$EXP/evidence/diagnostic-binding.json" \
+          --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" --selection "$EXP/evidence/selection.json" \
+          --out "$EXP/evidence/development-diagnostic.json"
+    - name: Retain aggregate diagnostic evidence only
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-development-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        path: ${{ runner.temp }}/bouncer-context/evidence/*.json

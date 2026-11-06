@@ -24,9 +24,12 @@ Run inside the Laya virtual environment (see docs/operations/base-model.md):
 """
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import math
 import os
+import platform
 import random
 import subprocess
 import sys
@@ -41,7 +44,160 @@ sys.path.insert(0, HERE)
 
 import common  # noqa: E402
 
-QUESTIONS = ["task_match", "writes", "remote", "leak", "destroy", "rule_break"]
+QUESTIONS = ["task_match", "writes", "remote", "leak", "destroy", "rule_break", "owner_accepts_use"]
+
+
+# Every key authored by the trainer is reserved, including the base pin.
+RESERVED_METADATA = frozenset(('name', 'base_repo', 'base_revision', 'trained',
+                               'noul_temperature', 'epoch', 'runtime_profile', 'training_objective'))
+
+
+def extra_metadata(raw):
+    """Parse caller fields before any training; trainer-owned fields cannot collide."""
+    if raw is None:
+        return {}
+    if os.path.isfile(raw):
+        with open(raw, encoding="utf-8") as source:
+            fields = json.load(source)
+    else:
+        fields = json.loads(raw)
+    if not isinstance(fields, dict):
+        raise ValueError('metadata must be a JSON object')
+    if RESERVED_METADATA.intersection(fields):
+        raise ValueError('metadata collides with reserved trainer keys')
+    return fields
+
+
+def runtime_settings(seed):
+    """Read effective controls; missing APIs and ineffective setters fail closed."""
+    try:
+        b = torch.backends
+        precision = [b, b.cuda.matmul, b.cudnn, b.cudnn.conv, b.cudnn.rnn]
+        flags = dict(deterministic=torch.are_deterministic_algorithms_enabled(),
+                     warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
+                     cudnn_benchmark=b.cudnn.benchmark, cudnn_deterministic=b.cudnn.deterministic,
+                     fill_uninitialized_memory=torch.utils.deterministic.fill_uninitialized_memory,
+                     fp32_precision=[p.fp32_precision for p in precision], threads=torch.get_num_threads())
+        expected = dict(deterministic=True, warn_only=False, cudnn_benchmark=False,
+                        cudnn_deterministic=True, fill_uninitialized_memory=True,
+                        fp32_precision=['ieee'] * 5, threads=4)
+        env = {k: os.environ.get(k) for k in
+               ('PYTHONHASHSEED', 'CUBLAS_WORKSPACE_CONFIG', 'NVIDIA_TF32_OVERRIDE')}
+        if flags != expected or env != dict(PYTHONHASHSEED=str(seed),
+                                            CUBLAS_WORKSPACE_CONFIG=':4096:8', NVIDIA_TF32_OVERRIDE='0'):
+            raise RuntimeError('deterministic runtime controls ineffective or changed')
+        if torch.__version__ != '2.14.0+cu130' or torch.version.cuda != '13.0':
+            raise RuntimeError('deterministic profile requires torch 2.14.0+cu130 / CUDA 13.0')
+        return dict(flags=flags, environment=env)
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError('deterministic runtime readback unavailable') from exc
+
+
+def configure_runtime(args):
+    """Opt-in only, before manual_seed, Agent import, or any CUDA initialization.
+
+    PYTHONHASHSEED must be supplied at process startup; assigning it here cannot
+    establish Python hash determinism. No cross-hardware equality is promised.
+    """
+    if args.runtime_profile != 'cuda-deterministic-v1':
+        raise ValueError('unsupported runtime profile')
+    if (args.device != 'cuda' and not (args.device.startswith('cuda:')
+            and args.device[5:].isascii() and args.device[5:].isdigit())) or not args.no_amp:
+        raise ValueError('deterministic profile requires CUDA and --no-amp')
+    if type(args.seed) is not int or not 0 <= args.seed < 2 ** 32:
+        raise ValueError('deterministic profile seed must be an unsigned 32-bit integer')
+    if torch.__version__ != '2.14.0+cu130' or torch.version.cuda != '13.0':
+        raise ValueError('deterministic profile requires torch 2.14.0+cu130 / CUDA 13.0')
+    if torch.cuda.is_initialized():
+        raise RuntimeError('CUDA already initialized before runtime configuration')
+    required = dict(PYTHONHASHSEED=str(args.seed), CUBLAS_WORKSPACE_CONFIG=':4096:8',
+                    NVIDIA_TF32_OVERRIDE='0')
+    for key, value in required.items():
+        actual = os.environ.get(key)
+        if actual != value and (actual is not None or key == 'PYTHONHASHSEED'):
+            raise ValueError('conflicting or missing startup environment: ' + key)
+    for key, value in required.items():
+        if key != 'PYTHONHASHSEED':
+            os.environ.setdefault(key, value)
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=False)
+        b = torch.backends
+        b.cudnn.benchmark = False
+        b.cudnn.deterministic = True
+        torch.utils.deterministic.fill_uninitialized_memory = True
+        for target in (b, b.cuda.matmul, b.cudnn, b.cudnn.conv, b.cudnn.rnn):
+            getattr(target, 'fp32_precision')
+            target.fp32_precision = 'ieee'
+        if torch.get_num_threads() != 4:
+            torch.set_num_threads(4)
+        settings = runtime_settings(args.seed)
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError('deterministic runtime API unavailable') from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA unavailable for deterministic profile')
+    if ':' in args.device and int(args.device[5:]) >= torch.cuda.device_count():
+        raise ValueError('requested CUDA device unavailable')
+    np.random.seed(args.seed)
+    return settings
+
+
+def initial_head_sha256(model):
+    """Length-frame sorted head descriptors and CPU array bytes, never log values."""
+    state = common.head_state(model)
+    if not isinstance(state, dict) or not state or any(type(k) is not str or not k for k in state):
+        raise ValueError('invalid or empty trained-head state')
+    digest = hashlib.sha256()
+    for name in sorted(state):
+        tensor = state[name]
+        shape = list(tensor.shape)
+        dtype = str(tensor.dtype)
+        itemsize = tensor.element_size()
+        if (not name.startswith(common.TRAINED_PREFIXES) or not dtype.startswith('torch.')
+                or type(itemsize) is not int or itemsize <= 0
+                or any(type(n) is not int or n <= 0 for n in shape)):
+            raise ValueError('invalid trained-head tensor')
+        raw = tensor.numpy().tobytes(order='C')
+        if not isinstance(raw, bytes) or len(raw) != math.prod(shape) * itemsize:
+            raise ValueError('invalid trained-head bytes')
+        descriptor = json.dumps([name, shape, str(tensor.dtype)], ensure_ascii=True,
+                                separators=(',', ':')).encode('ascii')
+        for part in (descriptor, raw):
+            digest.update(len(part).to_bytes(8, 'big'))
+            digest.update(part)
+    return digest.hexdigest()
+
+
+def runtime_identity(device):
+    index = torch.cuda.current_device() if device.index is None else device.index
+    # Resolve exactly the model's selected device, without serial/host identifiers.
+    if torch.cuda.current_device() != index:
+        raise RuntimeError('profile requires the selected CUDA device to be current')
+    name = torch.cuda.get_device_name(index)
+    capability = list(torch.cuda.get_device_capability(index))
+    if (type(index) is not int or index < 0 or type(name) is not str or not name
+            or len(capability) != 2 or any(type(n) is not int or n < 0 for n in capability)):
+        raise RuntimeError('CUDA device identity unavailable')
+    cudnn = torch.backends.cudnn.version()
+    if type(cudnn) is not int or cudnn <= 0:
+        raise RuntimeError('cuDNN identity unavailable')
+    return dict(torch=str(torch.__version__), cuda=torch.version.cuda, cudnn=cudnn,
+                python=platform.python_version(), numpy=np.__version__,
+                packages={p: importlib.metadata.version(p) for p in ('laya', 'transformers', 'tokenizers')},
+                device=dict(index=index, name=name, compute_capability=capability))
+
+
+def attest_runtime(args, device, model, startup):
+    effective = runtime_settings(args.seed)
+    if effective != startup:
+        raise RuntimeError('runtime changed during model initialization')
+    return dict(schema=1, profile=args.runtime_profile, seed=args.seed, effective=effective,
+                software=runtime_identity(device), initial_head_sha256=initial_head_sha256(model))
+
+
+def validate_runtime(seal, device):
+    if (runtime_settings(seal['seed']) != seal['effective']
+            or runtime_identity(device) != seal['software']):
+        raise RuntimeError('deterministic runtime attestation drift')
 
 
 def on_ac_power():
@@ -100,6 +256,60 @@ def collate(items, pad):
         "y": torch.tensor([it["y"] for it in items], dtype=torch.float32),
         "q": torch.tensor([it["q"] for it in items]),
     }
+
+
+def batch_tail_term(logits, y, temperature):
+    """Opt-in hard-label batch tail; amax shares gradients across maximum ties."""
+    import numbers
+    if not isinstance(temperature, numbers.Real) or isinstance(temperature, bool):
+        raise ValueError('invalid batch-tail temperature')
+    try:
+        temperature = float(temperature)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError('invalid batch-tail temperature') from exc
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError('invalid batch-tail temperature')
+    if (not isinstance(logits, torch.Tensor) or not logits.is_floating_point()
+            or logits.layout != torch.strided
+            or logits.ndim != 2 or logits.shape[0] == 0 or logits.shape[1] != 2
+            or not bool(torch.isfinite(logits).all())):
+        raise ValueError('invalid batch-tail logits')
+    if (not isinstance(y, torch.Tensor) or y.layout != torch.strided or y.is_complex() or y.requires_grad
+            or y.ndim != 1 or y.shape[0] != logits.shape[0] or y.device != logits.device
+            or not bool(torch.isfinite(y).all()) or not bool(((y == 0) | (y == 1)).all())):
+        raise ValueError('invalid batch-tail labels')
+    if not bool(torch.isfinite(logits / temperature).all()):
+        raise ValueError('nonfinite batch-tail normalized logits')
+    z = (logits[:, 1] - logits[:, 0]) / temperature
+    if not bool(torch.isfinite(z).all()):
+        raise ValueError('nonfinite batch-tail scores')
+    positive, negative = y == 1, y == 0
+    if not bool(positive.any()) or not bool(negative.any()):
+        return logits.new_zeros(()), 'positive_only' if bool(positive.any()) else 'negative_only'
+    top = torch.amax(z.masked_fill(positive, -math.inf))
+    delta = top - z
+    if not bool(torch.isfinite(delta).all()):
+        raise ValueError('nonfinite batch-tail differences')
+    terms = F.softplus(delta) * positive
+    tail = terms.sum() / positive.sum()
+    if not bool(torch.isfinite(terms).all()) or not bool(torch.isfinite(tail)):
+        raise ValueError('nonfinite batch-tail term')
+    return tail, 'mixed'
+
+
+def objective_items_ok(items):
+    """Validate encoded splits without changing labels or teacher targets."""
+    if not isinstance(items, (list, tuple)):
+        raise ValueError('objective requires encoded items')
+    classes = set()
+    for item in items:
+        if (not isinstance(item, dict) or type(item.get('y')) not in (int, float)
+                or item['y'] not in (0, 1) or item.get('teacher') is not False
+                or type(item.get('q')) is not int or item['q'] != QUESTIONS.index('owner_accepts_use')):
+            raise ValueError('objective requires hard owner_accepts_use non-teacher items')
+        classes.add(item['y'])
+    if classes != {0, 1}:
+        raise ValueError('objective requires both classes in each split')
 
 
 def targets(y):
@@ -164,6 +374,7 @@ class FeatureCache:
         return meta.get("fingerprint") == fingerprint
 
     def build(self, model, items, pad, device, amp, batch_size, fingerprint, hidden):
+        model.eval()
         total = sum(len(it["ids"]) for it in items)
         data = np.lib.format.open_memmap(self.path + ".tmp", mode="w+", dtype=np.float16, shape=(total, hidden))
         offsets, pos = [], 0
@@ -244,6 +455,73 @@ def ece(p, y, bins=10):
     return float(total)
 
 
+def validation_operating_point(probabilities, hard_targets):
+    """Aggregate development recall above every negative; never filter invalid pairs.
+
+    Inputs are plain lists of probabilities and binary targets. Soft targets remain
+    valid for the generic trainer, but cannot support this empirical interpretation.
+    No individual score or fitted threshold is returned.
+    """
+    coverage = dict(probabilities=0, targets=0, aligned=False, valid_pairs=0,
+                    invalid_probabilities=0, nonfinite_probabilities=0,
+                    invalid_targets=0, nonfinite_targets=0, soft_targets=0)
+    result = dict(status="incomplete", coverage=coverage, positive_count=0,
+                  negative_count=0, safe_positive_count=None, safe_positive_recall=None,
+                  negative_boundary_ties=None, histograms=None)
+    if not isinstance(probabilities, (list, tuple)) or not isinstance(hard_targets, (list, tuple)):
+        return result
+    coverage.update(probabilities=len(probabilities), targets=len(hard_targets),
+                    aligned=len(probabilities) == len(hard_targets))
+
+    def classify(value):
+        if type(value) not in (int, float):
+            return "invalid"
+        if type(value) is float and not math.isfinite(value):
+            return "nonfinite"
+        return "valid" if 0 <= value <= 1 else "invalid"
+
+    for p in probabilities:
+        kind = classify(p)
+        if kind != "valid":
+            coverage[kind + "_probabilities"] += 1
+    for y in hard_targets:
+        kind = classify(y)
+        if kind != "valid":
+            coverage[kind + "_targets"] += 1
+        elif y not in (0, 1):
+            coverage["soft_targets"] += 1
+        elif y == 1:
+            result["positive_count"] += 1
+        else:
+            result["negative_count"] += 1
+    coverage["valid_pairs"] = sum(classify(p) == "valid" and classify(y) == "valid" and y in (0, 1)
+                                  for p, y in zip(probabilities, hard_targets))
+    if (not coverage["aligned"] or coverage["invalid_probabilities"]
+            or coverage["nonfinite_probabilities"] or coverage["invalid_targets"]
+            or coverage["nonfinite_targets"]):
+        return result
+    if coverage["soft_targets"]:
+        result["status"] = "unsupported_soft_targets"
+        return result
+
+    counts = {"positive": [0] * 10, "negative": [0] * 10}
+    for p, y in zip(probabilities, hard_targets):
+        counts["positive" if y == 1 else "negative"][min(9, int(p * 10))] += 1
+    result["histograms"] = dict(bins=10, range=[0, 1],
+                                convention="left_closed_right_open_last_includes_one", counts=counts)
+    if not result["positive_count"] or not result["negative_count"]:
+        result["status"] = "unavailable_class"
+        return result
+    boundary = max(p for p, y in zip(probabilities, hard_targets) if y == 0)
+    allowed = sum(p > boundary for p, y in zip(probabilities, hard_targets) if y == 1)
+    result.update(status="complete", safe_positive_count=allowed,
+                  safe_positive_recall=allowed / result["positive_count"],
+                  negative_boundary_ties=dict(
+                      positive=sum(p == boundary for p, y in zip(probabilities, hard_targets) if y == 1),
+                      negative=sum(p == boundary for p, y in zip(probabilities, hard_targets) if y == 0)))
+    return result
+
+
 def evaluate(model, items, pad, device, amp, temperature, batch_size, cache=None):
     model.eval()
     probs, ys, qs = [], [], []
@@ -275,6 +553,10 @@ def evaluate(model, items, pad, device, amp, temperature, batch_size, cache=None
             "mean_p_yes": float(p[yes].mean()) if yes.any() else None,
             "mean_p_no": float(p[~yes].mean()) if (~yes).any() else None,
         }
+        if name == "owner_accepts_use":
+            operating_point = validation_operating_point(p.tolist(), y.tolist())
+            operating_point.update(evidence="trainer_validation_cache", interpretation="development_only")
+            report[name]["operating_point"] = operating_point
     report["all_nll"] = float(np.mean([v["nll"] for k, v in report.items() if isinstance(v, dict)]))
     return report
 
@@ -321,6 +603,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="folder with train.jsonl and val.jsonl")
     ap.add_argument("--out", required=True, help="checkpoint path (.safetensors)")
+    ap.add_argument("--base-dir", default="", help="existing local base directory; caller verifies weight pins")
+    ap.add_argument("--metadata", default=None, help="extra checkpoint fields: JSON object or local JSON file")
     ap.add_argument("--init", default="", help="start from the heads of this checkpoint (goal B9)")
     ap.add_argument("--name", default=common.MODEL_NAME, help="model name in the version <name>+<hash8>")
     ap.add_argument("--report", default="", help="JSON report path (default: <out>.report.json)")
@@ -331,9 +615,12 @@ def main(argv=None):
     ap.add_argument("--warmup", type=int, default=100)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--device", default="mps")
+    ap.add_argument("--require-device", action="store_true", help="refuse device fallback")
     ap.add_argument("--limit", type=int, default=0, help="use only the first N training rows (a probe)")
     ap.add_argument("--max-steps", type=int, default=0)
     ap.add_argument("--no-amp", action="store_true")
+    ap.add_argument("--runtime-profile", choices=('cuda-deterministic-v1',), default=None)
+    ap.add_argument("--objective", choices=('bce-plus-batch-tail-v1',), default=None)
     ap.add_argument("--skip-baseline", action="store_true")
     ap.add_argument("--lora-layers", type=int, default=0,
                     help="also train LoRA adapters in the last N encoder layers (measurement only, no checkpoint)")
@@ -343,10 +630,26 @@ def main(argv=None):
     ap.add_argument("--keep-cache", action="store_true", help="keep the encoder cache after training")
     args = ap.parse_args(argv)
 
+    if args.metadata is not None:
+        from context_train import install_training_audit
+        install_training_audit()
+    metadata = extra_metadata(args.metadata)
+    if args.base_dir and not os.path.isdir(args.base_dir):
+        raise ValueError('base-dir must be an existing local directory')
+
+    if args.objective is not None:
+        if args.init or args.lora_layers:
+            raise ValueError('objective does not support --init or --lora-layers')
+
+    if args.runtime_profile is not None:
+        runtime_startup = configure_runtime(args)
+
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
     device = torch.device(args.device if (args.device != "mps" or torch.backends.mps.is_available()) else "cpu")
+    if args.require_device and str(device) != args.device:
+        raise ValueError('requested device unavailable; fallback refused')
     amp = device.type in ("mps", "cuda") and not args.no_amp
     ac = on_ac_power()
     print("AC power: %s" % ac, flush=True)
@@ -354,7 +657,7 @@ def main(argv=None):
     from laya.agent import Agent
 
     t0 = time.time()
-    base = common.base_dir()
+    base = args.base_dir or common.base_dir()
     agent = Agent(base, device=str(device))
     model = agent.model
     pad = agent.tok.pad_token_id
@@ -368,11 +671,17 @@ def main(argv=None):
         init_sha = common.sha256_file(args.init)
         print("heads from %s (sha256 %s)" % (args.init, init_sha[:8]), flush=True)
 
+    if args.runtime_profile is not None:
+        runtime_seal = attest_runtime(args, device, model, runtime_startup)
+
     train_rows = load_rows(os.path.join(args.data, "train.jsonl"), args.limit)
     val_rows = load_rows(os.path.join(args.data, "val.jsonl"))
     t_enc = time.time()
     train_items = encode(agent, train_rows)
     val_items = encode(agent, val_rows)
+    if args.objective is not None:
+        objective_items_ok(train_items)
+        objective_items_ok(val_items)
     print("encoded %d train and %d val examples in %.1fs" % (len(train_items), len(val_items), time.time() - t_enc), flush=True)
 
     for p in model.parameters():
@@ -449,6 +758,9 @@ def main(argv=None):
         model.head.train()
         running, count = 0.0, 0
         window, window_n = 0.0, 0
+        if args.objective is not None:
+            train_ce = train_tail = 0.0
+            objective_batches = dict(mixed=0, positive_only=0, negative_only=0)
         for idx in batches(train_items, args.batch, rng, True):
             b = collate([train_items[i] for i in idx], pad)
             if train_cache:
@@ -457,6 +769,12 @@ def main(argv=None):
                 h = encoder_states(model, b, device, amp, grad=bool(args.lora_layers))
             logits = head_logits(model, h, b, device)
             loss = F.cross_entropy(logits / temperature, targets(b["y"]).to(device))
+            if args.objective is not None:
+                tail, kind = batch_tail_term(logits, b["y"].to(device), temperature)
+                train_ce += float(loss.detach()) * len(idx)
+                train_tail += float(tail.detach()) * len(idx)
+                objective_batches[kind] += 1
+                loss = loss + tail
             for g in opt.param_groups:
                 g["lr"] = lr_at(step)
             opt.zero_grad(set_to_none=True)
@@ -492,6 +810,12 @@ def main(argv=None):
         release_cache()
         history.append({"epoch": epoch + 1, "train_loss": running / max(1, count), "val": val,
                         "seconds": time.time() - t_train})
+        if args.objective is not None:
+            history[-1]['objective'] = dict(
+                train_ce=train_ce / max(1, count), train_tail=train_tail / max(1, count),
+                mixed_batches=objective_batches['mixed'],
+                positive_only_batches=objective_batches['positive_only'],
+                negative_only_batches=objective_batches['negative_only'])
         print("epoch %d val nll %.4f: %s" % (epoch + 1, val["all_nll"], json.dumps(
             {k: [round(v["accuracy"], 3), round(v["ece"], 3)] for k, v in val.items() if isinstance(v, dict)})), flush=True)
         if best is None or val["all_nll"] < best["all_nll"]:
@@ -505,6 +829,12 @@ def main(argv=None):
                 "noul_temperature": temperature,
                 "epoch": epoch + 1,
             }
+            meta.update(metadata)
+            if args.objective is not None:
+                meta['training_objective'] = args.objective
+            if args.runtime_profile is not None:
+                validate_runtime(runtime_seal, device)
+                meta["runtime_profile"] = runtime_seal
             common.save_checkpoint(model, args.out, meta)
         if args.max_steps and step >= args.max_steps:
             break
@@ -547,7 +877,16 @@ def main(argv=None):
         report["versions"].update({"laya": laya.__version__, "transformers": transformers.__version__})
     except Exception:
         pass
+    if args.metadata is not None:
+        # Read installed distribution versions, never caller assertions.
+        from context_train import package_versions
+        report["versions"] = package_versions()
+    if args.objective is not None:
+        report['training_objective'] = dict(id=args.objective, train_loss='ce_plus_tail')
     path = args.report or args.out + ".report.json"
+    if args.runtime_profile is not None:
+        validate_runtime(runtime_seal, device)
+        report["runtime_profile"] = runtime_seal
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print("CHECKPOINT %s sha256 %s size %.1f MB version %s" % (

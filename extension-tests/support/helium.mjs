@@ -1,14 +1,57 @@
 import { setTimeout as delay } from "node:timers/promises";
 
+function failureType(error, url) {
+  try {
+    if (error.name === "TimeoutError") return "timeout";
+    if (error.name === "TargetClosedError" || /Target closed|Target page, context or browser has been closed/.test(error.message)) return "target_closed";
+    if (String(error.message).includes("net::ERR_ABORTED")) return "aborted";
+    // Match Playwright's first line only; its optional call log is not a signal.
+    const blank = /^page\.goto: Navigation to "([^"\r\n]+)" is interrupted by another navigation to "about:blank"$/.exec(String(error.message).split(/\r?\n/, 1)[0]);
+    if (blank && blank[1] === url) return "startup_blank";
+  } catch {}
+  return "other";
+}
+
 // Fresh Helium profiles can interrupt navigation with an initial about:blank.
 // Retry only this transport error, never an assertion or an extension action.
 export async function goto(page, url) {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await page.goto(url);
-    } catch (error) {
-      if (attempt >= 3 || !String(error.message).includes("net::ERR_ABORTED")) throw error;
-      await delay(250);
+  const started = performance.now();
+  const events = {};
+  const listeners = [];
+  // Fixed-size aggregates across all attempts; no event payloads are retained.
+  try {
+    for (const name of ["framenavigated", "domcontentloaded", "load", "close", "crash"]) {
+      const key = name === "framenavigated" ? "mainFrameNavigation" : name;
+      events[key] = { count: 0, lastMs: null };
+      const listener = (frame) => {
+        try {
+          if (name === "framenavigated" && frame !== page.mainFrame()) return;
+          events[key].count++;
+          events[key].lastMs = Math.round(performance.now() - started);
+        } catch {} // Observation must not affect navigation.
+      };
+      page.on(name, listener);
+      listeners.push([name, listener]);
+    }
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await page.goto(url);
+      } catch (error) {
+        const errorType = failureType(error, url);
+        if (attempt >= 3 || (errorType !== "aborted" && errorType !== "startup_blank")) {
+          try {
+            console.error("[fixture-goto] " + JSON.stringify({
+              elapsedMs: Math.round(performance.now() - started), attempt, errorType, events,
+            }));
+          } catch {}
+          throw error;
+        }
+        await delay(250);
+      }
+    }
+  } finally {
+    for (const [name, listener] of listeners) {
+      try { page.off(name, listener); } catch {}
     }
   }
 }

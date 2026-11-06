@@ -1,0 +1,36 @@
+{
+  "request": {
+    "user_request": "Check status",
+    "command": "tool status",
+    "purpose": "",
+    "relative_dir": ".",
+    "env_names": [],
+    "instruction": "NEVER_SEND_OWNER_RULE",
+    "task_provenance": ""
+  },
+  "action": "read",
+  "secrets": [
+    {
+      "kind": "api_key",
+      "provider": "none",
+      "env": "unknown",
+      "env_from": "none",
+      "scope": "unknown",
+      "scope_from": "none",
+      "sensitive": "unknown",
+      "project": "undeclared",
+      "hosts": "none",
+      "made_by_agent": "not_recorded",
+      "agent_used": "not_recorded",
+      "secret_changed": "unknown",
+      "access_changed": "unknown",
+      "owner_allowed": "0",
+      "owner_denied": "0",
+      "owner_denied_other": "0",
+      "conflict": "no"
+    }
+  ],
+  "model_text": "User request: \"Check status\". Shell command: `tool status`. Context: action=read secrets=1 history=local_device window=30d. secret_1: kind=api_key provider=none env=unknown env_from=none scope=unknown scope_from=none sensitive=unknown project=undeclared hosts=none made_by_agent=not_recorded agent_used=not_recorded secret_changed=unknown access_changed=unknown owner_allowed=0 owner_denied=0 owner_denied_other=0 conflict=no.",
+  "token_bound": 165,
+  "refusal": null
+}

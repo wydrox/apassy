@@ -42,8 +42,11 @@ mod companion_activity;
 mod companion_owner;
 mod companion_store;
 mod connect_account;
+mod context_adapter;
 mod contracts;
 mod corrections;
+#[cfg(feature = "vault")]
+mod decision_evidence;
 mod declaration_suggestions;
 mod dedup;
 mod desktop_model;
@@ -87,6 +90,8 @@ mod relay_questions;
 mod relay_sync;
 mod rule_packs;
 mod run_proxy;
+#[cfg(feature = "vault")]
+mod secret_context_contract;
 mod shadow_mode;
 #[cfg(feature = "storage-probe")]
 mod sqlcipher_probe;

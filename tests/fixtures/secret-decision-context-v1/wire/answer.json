@@ -1,0 +1,10 @@
+{
+  "answers": {
+    "owner_accepts_use": {
+      "noul": 0.91
+    }
+  },
+  "contract_sha256": "01a9340c6404684050788e233690a53f81fa5a48b0aae000a4a06239206ea51d",
+  "heads": "a1b2c3d400000000000000000000000000000000000000000000000000000000",
+  "model": "apassy-context-v1+a1b2c3d4"
+}

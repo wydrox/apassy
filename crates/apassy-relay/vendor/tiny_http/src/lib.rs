@@ -98,7 +98,7 @@ use std::error::Error;
 use std::io::Error as IoError;
 use std::io::ErrorKind as IoErrorKind;
 use std::io::Result as IoResult;
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
@@ -141,6 +141,9 @@ pub struct Server {
 
     // result of TcpListener::local_addr()
     listening_addr: ListenAddr,
+
+    // Own only the accept thread, not client workers or the deadline reaper.
+    accept_thread: Option<thread::JoinHandle<()>>,
 }
 
 enum Message {
@@ -304,6 +307,15 @@ impl Server {
             }
         };
 
+        // A connect-to-self wakeup can fail (in particular for an unlinked or
+        // unnamed Unix socket). Keep accept nonblocking so shutdown never relies
+        // on the listening address being reachable.
+        match &server {
+            Listener::Tcp(listener) => listener.set_nonblocking(true)?,
+            #[cfg(unix)]
+            Listener::Unix(listener) => listener.set_nonblocking(true)?,
+        }
+
         // creating a task where server.accept() is continuously called
         // and ClientConnection objects are pushed in the messages queue
         let messages = MessagesQueue::with_capacity(8);
@@ -311,7 +323,7 @@ impl Server {
         let inside_close_trigger = close_trigger.clone();
         let inside_messages = messages.clone();
         let reaper = deadlines.map(|_| deadline::reaper(close_trigger.clone()));
-        thread::spawn(move || {
+        let accept_thread = thread::spawn(move || {
             // a tasks pool is used to dispatch the connections into threads
             let tasks_pool = util::TaskPool::new();
 
@@ -319,6 +331,19 @@ impl Server {
             while !inside_close_trigger.load(Relaxed) {
                 let new_client = match server.accept() {
                     Ok((sock, _)) => {
+                        if inside_close_trigger.load(Relaxed) {
+                            break;
+                        }
+                        // Some platforms inherit the listener's nonblocking
+                        // mode. Client parsing must retain blocking I/O.
+                        let blocking = match &sock {
+                            Connection::Tcp(stream) => stream.set_nonblocking(false),
+                            #[cfg(unix)]
+                            Connection::Unix(stream) => stream.set_nonblocking(false),
+                        };
+                        if blocking.is_err() {
+                            continue;
+                        }
                         let guard = if let Some((header, body, handle)) = deadlines {
                             let mut tracked = reaper.as_ref().unwrap().lock().unwrap();
                             tracked.retain(|(weak, _)| weak.strong_count() > 0);
@@ -363,6 +388,12 @@ impl Server {
                         write_closable.deadline = guard;
                         Ok(ClientConnection::new(write_closable, read_closable))
                     }
+                    Err(e) if e.kind() == IoErrorKind::WouldBlock => {
+                        // Poll only while idle; unpark wakes shutdown promptly
+                        // even if it races with entering park_timeout.
+                        thread::park_timeout(Duration::from_millis(10));
+                        continue;
+                    }
                     Err(e) => Err(e),
                 };
 
@@ -403,6 +434,7 @@ impl Server {
             messages,
             close: close_trigger,
             listening_addr: local_addr,
+            accept_thread: Some(accept_thread),
         })
     }
 
@@ -471,18 +503,15 @@ impl Iterator for IncomingRequests<'_> {
 impl Drop for Server {
     fn drop(&mut self) {
         self.close.store(true, Relaxed);
-        // Connect briefly to ourselves to unblock the accept thread
-        let maybe_stream = match &self.listening_addr {
-            ListenAddr::IP(addr) => TcpStream::connect(addr).map(Connection::from),
-            #[cfg(unix)]
-            ListenAddr::Unix(addr) => {
-                // TODO: use connect_addr when its stabilized.
-                let path = addr.as_pathname().unwrap();
-                std::os::unix::net::UnixStream::connect(path).map(Connection::from)
-            }
-        };
-        if let Ok(stream) = maybe_stream {
-            let _ = stream.shutdown(Shutdown::Both);
+        if let Some(accept_thread) = self.accept_thread.take() {
+            // The accept closure owns the Listener and never owns this Server.
+            // Reject reentrant destruction (e.g. from a custom logger) rather
+            // than attempting to join the current thread.
+            assert_ne!(accept_thread.thread().id(), thread::current().id());
+            accept_thread.thread().unpark();
+            // Joining also waits for Listener destruction on error or unwind.
+            // Do not propagate an accept panic from this destructor.
+            let _ = accept_thread.join();
         }
 
         #[cfg(unix)]
