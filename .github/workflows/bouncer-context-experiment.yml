@@ -1776,8 +1776,8 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        fetch-depth: 0
         persist-credentials: false
+        fetch-depth: 0
     - name: Require exact source and external inputs before setup
       run: |
         set -euo pipefail

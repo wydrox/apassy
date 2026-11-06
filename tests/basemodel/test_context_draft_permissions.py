@@ -10,6 +10,7 @@ WORKFLOWS = ROOT / '.github/workflows'
 DOWNLOADS = {
     'cost-only': 'Read draft-release checkpoint (transport preflight required)',
     'external-evaluate': 'Download and restore pinned external bundle',
+    'development-diagnostic': 'Download and restore pinned external bundle',
 }
 
 
@@ -76,8 +77,9 @@ class DraftPermissions(unittest.TestCase):
         caller = jobs(self.ci)['context-experiment']
         callees = jobs(self.experiment)
         modes = ('off', 'probe', 'full', 'cost-only', 'cuda-preflight',
-                 'external-evaluate', '', 'unexpected')
-        caller_modes = {'probe', 'full', 'cost-only', 'cuda-preflight', 'external-evaluate'}
+                 'external-evaluate', 'development-diagnostic', '', 'unexpected')
+        caller_modes = {'probe', 'full', 'cost-only', 'cuda-preflight',
+                        'external-evaluate', 'development-diagnostic'}
         for event in ('workflow_dispatch', 'pull_request', 'pull_request_target',
                       'push', 'workflow_call', 'schedule'):
             for mode in modes:
@@ -90,7 +92,7 @@ class DraftPermissions(unittest.TestCase):
 
     def test_input_secret_stays_in_each_manual_download_step_only(self):
         self.assertNotRegex(self.experiment, r'GH_TOKEN|github\.token|GITHUB_TOKEN')
-        self.assertEqual(self.experiment.count('${{ secrets.APASSY_CONTEXT_INPUT }}'), 2)
+        self.assertEqual(self.experiment.count('${{ secrets.APASSY_CONTEXT_INPUT }}'), 3)
         for name, download in DOWNLOADS.items():
             job = jobs(self.experiment)[name]
             steps = re.split(r'^    - ', section(job, 'steps', 4), flags=re.M)
