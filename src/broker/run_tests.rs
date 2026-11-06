@@ -692,6 +692,95 @@ fn a_classification_labels_only_the_first_unconfirmed_item() {
     assert_eq!(first_unconfirmed(&checked), None);
 }
 
+/// The production rule asks at each write, so the card offers no allowance that it would
+/// ignore. Declared read-only scope with a local brain is where an allowance still counts.
+#[test]
+fn only_a_production_allowance_that_can_count_is_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-allowance").unwrap();
+    vault.unlock("synthetic-allowance").unwrap();
+    let item = vault
+        .add(ItemDraft {
+            title: "Synthetic production key".into(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: vec![],
+            fields: vec![Field {
+                name: "token".into(),
+                value: SecretValue::new("FAKE-allowance-token".to_owned()),
+                secret: true,
+            }],
+        })
+        .unwrap();
+    vault
+        .set_env_binding(item.id, "SYNTH_PRODUCTION_KEY", "token")
+        .unwrap();
+    let declare = |vault: &mut Vault, scope: Scope| {
+        vault
+            .save_declaration(
+                item.id,
+                &Declaration {
+                    project: "project".to_owned(),
+                    environment: Environment::Production,
+                    risk: RiskLevel::Low,
+                    scope,
+                    reversibility: Reversibility::Reversible,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        vault
+            .set_declaration_sources(
+                item.id,
+                &DeclarationSources {
+                    environment: DeclarationSource::Owner,
+                    risk: DeclarationSource::Owner,
+                    scope: DeclarationSource::Owner,
+                    reversibility: DeclarationSource::Owner,
+                },
+            )
+            .unwrap();
+    };
+    let (agent, _) = vault.register_agent("Synthetic allowance").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    let items = [item.id];
+    let command = vec!["true".to_owned()];
+    let request = RunRequest {
+        access_request_id: None,
+        codes: Default::default(),
+        items: &items,
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Change the record.",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Change the record."),
+        host_session: None,
+    };
+    let analysis = Analysis::default();
+    let offers = |checked: &Checked, remote_brain: bool| {
+        let facts = RunFacts {
+            analysis: &analysis,
+            has_user_request: true,
+            pattern: false,
+            action: ActionKind::Change,
+            hosts: &[],
+            remote_brain,
+        };
+        let mut ready = Readiness::new(|| Ok(()));
+        valid_answers(checked, &facts, Some(ActionKind::Change), true, &mut ready)
+            .contains(&AnswerKind::Production(ActionKind::Change))
+    };
+    declare(&mut vault, Scope::ReadWrite);
+    assert!(!offers(&check(&vault, &agent, &request).unwrap(), false));
+    declare(&mut vault, Scope::ReadOnly);
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(offers(&checked, false));
+    assert!(!offers(&checked, true));
+}
+
 /// An item without a declaration counts as unconfirmed, so the first answer writes its
 /// declaration, and the second item of the run is next. No item stays undeclared.
 #[test]

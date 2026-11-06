@@ -169,10 +169,11 @@ Such a run now also offers Allow as dev and Allow as prod. The answer labels the
 first unknown item of the run, and only that item; both devices say which one, and
 the owner check names it. The other unknown items ask at a later run, so the
 questions end after one answer per item. The run still offers Allow once, which
-labels nothing, so an iPhone from before 0.5.19 can answer it. The card offers no
-remembering when the production rule asks in any case: the answer was saved and
-then ignored, so the owner ticked Remember and got the same question. An allowance
-still counts for production with declared read-only scope and a local brain. The host
+labels nothing, so an iPhone from before 0.5.19 can answer it. The card offers no new
+production allowance when the production rule asks in any case: the answer was saved
+and then ignored, so the owner ticked Remember and got the same question. An
+allowance still counts for production with declared read-only scope and a local
+brain. The host
 field of a credential now also counts as its host in the command analysis, so an
 auth header to that host gets no `secret_output`. A flag cannot be remembered, so
 this question came back at each run. The route still checks each destination host

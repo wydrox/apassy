@@ -833,14 +833,7 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
             .all(|facts| !facts.production && !facts.unconfirmed);
     // "Always ask me" of an item asks every agent, so nothing can be remembered for it.
     // "Always ask for this agent" asks this agent only: an answer covers the others.
-    // The production rule asks whatever the owner answered before, so "Remember" would
-    // change nothing: the same question would come back.
-    let production_asks = (0..checked.facts.len()).any(|index| {
-        let (production, read_only) = production_and_read_only(checked, index);
-        production && (!read_only || run.remote_brain)
-    });
-    let can_remember = !production_asks
-        && checked.project.is_some()
+    let can_remember = checked.project.is_some()
         && run.has_user_request
         && checked.declarations.iter().all(Option::is_some)
         && run.analysis.flags.is_empty()
@@ -848,12 +841,16 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
         && checked.facts.iter().all(|facts| !facts.always_ask)
         && sure
         && ready.get().is_ok();
-    if can_remember {
-        valid.push(if production_waiting {
-            AnswerKind::Production(run.action)
-        } else {
-            AnswerKind::InProject(run.action)
-        });
+    // The production rule asks whatever the owner answered before, so a new allowance
+    // would change nothing: the owner ticks "Remember" and the same question comes back.
+    let production_asks = (0..checked.facts.len()).any(|index| {
+        let (production, read_only) = production_and_read_only(checked, index);
+        production && (!read_only || run.remote_brain)
+    });
+    if can_remember && !production_waiting {
+        valid.push(AnswerKind::InProject(run.action));
+    } else if can_remember && !production_asks {
+        valid.push(AnswerKind::Production(run.action));
     }
     // "Development" or "Production" labels one item, the first unconfirmed item of the
     // run ([`QuestionInfo::classifiable_item`]). Each other one asks at a later run.
