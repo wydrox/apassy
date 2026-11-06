@@ -24,9 +24,12 @@ Run inside the Laya virtual environment (see docs/operations/base-model.md):
 """
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import math
 import os
+import platform
 import random
 import subprocess
 import sys
@@ -46,7 +49,7 @@ QUESTIONS = ["task_match", "writes", "remote", "leak", "destroy", "rule_break", 
 
 # Every key authored by the trainer is reserved, including the base pin.
 RESERVED_METADATA = frozenset(('name', 'base_repo', 'base_revision', 'trained',
-                               'noul_temperature', 'epoch'))
+                               'noul_temperature', 'epoch', 'runtime_profile'))
 
 
 def extra_metadata(raw):
@@ -63,6 +66,138 @@ def extra_metadata(raw):
     if RESERVED_METADATA.intersection(fields):
         raise ValueError('metadata collides with reserved trainer keys')
     return fields
+
+
+def runtime_settings(seed):
+    """Read effective controls; missing APIs and ineffective setters fail closed."""
+    try:
+        b = torch.backends
+        precision = [b, b.cuda.matmul, b.cudnn, b.cudnn.conv, b.cudnn.rnn]
+        flags = dict(deterministic=torch.are_deterministic_algorithms_enabled(),
+                     warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
+                     cudnn_benchmark=b.cudnn.benchmark, cudnn_deterministic=b.cudnn.deterministic,
+                     fill_uninitialized_memory=torch.utils.deterministic.fill_uninitialized_memory,
+                     fp32_precision=[p.fp32_precision for p in precision], threads=torch.get_num_threads())
+        expected = dict(deterministic=True, warn_only=False, cudnn_benchmark=False,
+                        cudnn_deterministic=True, fill_uninitialized_memory=True,
+                        fp32_precision=['ieee'] * 5, threads=4)
+        env = {k: os.environ.get(k) for k in
+               ('PYTHONHASHSEED', 'CUBLAS_WORKSPACE_CONFIG', 'NVIDIA_TF32_OVERRIDE')}
+        if flags != expected or env != dict(PYTHONHASHSEED=str(seed),
+                                            CUBLAS_WORKSPACE_CONFIG=':4096:8', NVIDIA_TF32_OVERRIDE='0'):
+            raise RuntimeError('deterministic runtime controls ineffective or changed')
+        if torch.__version__ != '2.14.0+cu130' or torch.version.cuda != '13.0':
+            raise RuntimeError('deterministic profile requires torch 2.14.0+cu130 / CUDA 13.0')
+        return dict(flags=flags, environment=env)
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError('deterministic runtime readback unavailable') from exc
+
+
+def configure_runtime(args):
+    """Opt-in only, before manual_seed, Agent import, or any CUDA initialization.
+
+    PYTHONHASHSEED must be supplied at process startup; assigning it here cannot
+    establish Python hash determinism. No cross-hardware equality is promised.
+    """
+    if args.runtime_profile != 'cuda-deterministic-v1':
+        raise ValueError('unsupported runtime profile')
+    if (args.device != 'cuda' and not (args.device.startswith('cuda:')
+            and args.device[5:].isascii() and args.device[5:].isdigit())) or not args.no_amp:
+        raise ValueError('deterministic profile requires CUDA and --no-amp')
+    if type(args.seed) is not int or not 0 <= args.seed < 2 ** 32:
+        raise ValueError('deterministic profile seed must be an unsigned 32-bit integer')
+    if torch.__version__ != '2.14.0+cu130' or torch.version.cuda != '13.0':
+        raise ValueError('deterministic profile requires torch 2.14.0+cu130 / CUDA 13.0')
+    if torch.cuda.is_initialized():
+        raise RuntimeError('CUDA already initialized before runtime configuration')
+    required = dict(PYTHONHASHSEED=str(args.seed), CUBLAS_WORKSPACE_CONFIG=':4096:8',
+                    NVIDIA_TF32_OVERRIDE='0')
+    for key, value in required.items():
+        actual = os.environ.get(key)
+        if actual != value and (actual is not None or key == 'PYTHONHASHSEED'):
+            raise ValueError('conflicting or missing startup environment: ' + key)
+    for key, value in required.items():
+        if key != 'PYTHONHASHSEED':
+            os.environ.setdefault(key, value)
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=False)
+        b = torch.backends
+        b.cudnn.benchmark = False
+        b.cudnn.deterministic = True
+        torch.utils.deterministic.fill_uninitialized_memory = True
+        for target in (b, b.cuda.matmul, b.cudnn, b.cudnn.conv, b.cudnn.rnn):
+            getattr(target, 'fp32_precision')
+            target.fp32_precision = 'ieee'
+        if torch.get_num_threads() != 4:
+            torch.set_num_threads(4)
+        settings = runtime_settings(args.seed)
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError('deterministic runtime API unavailable') from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA unavailable for deterministic profile')
+    if ':' in args.device and int(args.device[5:]) >= torch.cuda.device_count():
+        raise ValueError('requested CUDA device unavailable')
+    np.random.seed(args.seed)
+    return settings
+
+
+def initial_head_sha256(model):
+    """Length-frame sorted head descriptors and CPU array bytes, never log values."""
+    state = common.head_state(model)
+    if not isinstance(state, dict) or not state or any(type(k) is not str or not k for k in state):
+        raise ValueError('invalid or empty trained-head state')
+    digest = hashlib.sha256()
+    for name in sorted(state):
+        tensor = state[name]
+        shape = list(tensor.shape)
+        dtype = str(tensor.dtype)
+        itemsize = tensor.element_size()
+        if (not name.startswith(common.TRAINED_PREFIXES) or not dtype.startswith('torch.')
+                or type(itemsize) is not int or itemsize <= 0
+                or any(type(n) is not int or n <= 0 for n in shape)):
+            raise ValueError('invalid trained-head tensor')
+        raw = tensor.numpy().tobytes(order='C')
+        if not isinstance(raw, bytes) or len(raw) != math.prod(shape) * itemsize:
+            raise ValueError('invalid trained-head bytes')
+        descriptor = json.dumps([name, shape, str(tensor.dtype)], ensure_ascii=True,
+                                separators=(',', ':')).encode('ascii')
+        for part in (descriptor, raw):
+            digest.update(len(part).to_bytes(8, 'big'))
+            digest.update(part)
+    return digest.hexdigest()
+
+
+def runtime_identity(device):
+    index = torch.cuda.current_device() if device.index is None else device.index
+    # Resolve exactly the model's selected device, without serial/host identifiers.
+    if torch.cuda.current_device() != index:
+        raise RuntimeError('profile requires the selected CUDA device to be current')
+    name = torch.cuda.get_device_name(index)
+    capability = list(torch.cuda.get_device_capability(index))
+    if (type(index) is not int or index < 0 or type(name) is not str or not name
+            or len(capability) != 2 or any(type(n) is not int or n < 0 for n in capability)):
+        raise RuntimeError('CUDA device identity unavailable')
+    cudnn = torch.backends.cudnn.version()
+    if type(cudnn) is not int or cudnn <= 0:
+        raise RuntimeError('cuDNN identity unavailable')
+    return dict(torch=str(torch.__version__), cuda=torch.version.cuda, cudnn=cudnn,
+                python=platform.python_version(), numpy=np.__version__,
+                packages={p: importlib.metadata.version(p) for p in ('laya', 'transformers', 'tokenizers')},
+                device=dict(index=index, name=name, compute_capability=capability))
+
+
+def attest_runtime(args, device, model, startup):
+    effective = runtime_settings(args.seed)
+    if effective != startup:
+        raise RuntimeError('runtime changed during model initialization')
+    return dict(schema=1, profile=args.runtime_profile, seed=args.seed, effective=effective,
+                software=runtime_identity(device), initial_head_sha256=initial_head_sha256(model))
+
+
+def validate_runtime(seal, device):
+    if (runtime_settings(seal['seed']) != seal['effective']
+            or runtime_identity(device) != seal['software']):
+        raise RuntimeError('deterministic runtime attestation drift')
 
 
 def on_ac_power():
@@ -430,6 +565,7 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=0, help="use only the first N training rows (a probe)")
     ap.add_argument("--max-steps", type=int, default=0)
     ap.add_argument("--no-amp", action="store_true")
+    ap.add_argument("--runtime-profile", choices=('cuda-deterministic-v1',), default=None)
     ap.add_argument("--skip-baseline", action="store_true")
     ap.add_argument("--lora-layers", type=int, default=0,
                     help="also train LoRA adapters in the last N encoder layers (measurement only, no checkpoint)")
@@ -445,6 +581,9 @@ def main(argv=None):
     metadata = extra_metadata(args.metadata)
     if args.base_dir and not os.path.isdir(args.base_dir):
         raise ValueError('base-dir must be an existing local directory')
+
+    if args.runtime_profile is not None:
+        runtime_startup = configure_runtime(args)
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -472,6 +611,9 @@ def main(argv=None):
         common.apply_heads(model, tensors)
         init_sha = common.sha256_file(args.init)
         print("heads from %s (sha256 %s)" % (args.init, init_sha[:8]), flush=True)
+
+    if args.runtime_profile is not None:
+        runtime_seal = attest_runtime(args, device, model, runtime_startup)
 
     train_rows = load_rows(os.path.join(args.data, "train.jsonl"), args.limit)
     val_rows = load_rows(os.path.join(args.data, "val.jsonl"))
@@ -611,6 +753,9 @@ def main(argv=None):
                 "epoch": epoch + 1,
             }
             meta.update(metadata)
+            if args.runtime_profile is not None:
+                validate_runtime(runtime_seal, device)
+                meta["runtime_profile"] = runtime_seal
             common.save_checkpoint(model, args.out, meta)
         if args.max_steps and step >= args.max_steps:
             break
@@ -658,6 +803,9 @@ def main(argv=None):
         from context_train import package_versions
         report["versions"] = package_versions()
     path = args.report or args.out + ".report.json"
+    if args.runtime_profile is not None:
+        validate_runtime(runtime_seal, device)
+        report["runtime_profile"] = runtime_seal
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print("CHECKPOINT %s sha256 %s size %.1f MB version %s" % (

@@ -59,7 +59,7 @@ class ExistingCoreTests(unittest.TestCase):
 
     def test_reserved_collisions_refused_before_training(self):
         ns = trainer_functions()
-        keys = {'name', 'base_repo', 'base_revision', 'trained', 'noul_temperature', 'epoch'}
+        keys = {'name', 'base_repo', 'base_revision', 'trained', 'noul_temperature', 'epoch', 'runtime_profile'}
         self.assertEqual(ns['RESERVED_METADATA'], keys)
         for key in keys:
             with self.assertRaisesRegex(ValueError, 'reserved'):

@@ -527,3 +527,46 @@ views remains unmeasured. Limits stay one A10/L4, 4 CPU/32 GiB, 120 minutes remo
 135 minutes caller, 38 upload paths, 9 plain-USTAR members and 256 MiB output. A new
 owner resource decision follows source review and green exact-source CI. No
 model run, held-out effort, activation, merge or release is approved here.
+
+## R17 — explicit deterministic runtime preparation (2026-11-06)
+
+R16's one approved trial ended `DEV_50_MISS`: 0/85 unpaired, 0/91 paired,
+and 7/377 original normal validation rows. The model and artifact checks passed.
+Independent quality and safety remain UNKNOWN; B remains UNSUPPORTED and
+production is unchanged. Its resource approval and launcher exception are
+consumed. No fourth training or new held-out attempt is authorized.
+
+The unchanged control's recorded trajectory also differed between trials.
+Source inspection found no demonstrated training/scoring bug and no explicit
+fail-closed deterministic startup profile. This is a reproducibility prerequisite
+gap, not a proven explanation of the quality result or a causal policy effect.
+
+Prepare only an opt-in `--runtime-profile cuda-deterministic-v1` in the existing
+generic trainer. No current context recipe or workflow passes that option. With
+the option absent, retain the existing training, data, loss, schedule, checkpoint
+selection, threshold and report behavior. Reserve the trainer-owned metadata key
+`runtime_profile` against caller assertions.
+
+The explicit profile must refuse an unknown profile, unsupported device/runtime,
+AMP, an already initialized CUDA context, or conflicting startup environment.
+Require a process-start `PYTHONHASHSEED` matching the seed. Establish the cuBLAS
+workspace and IEEE FP32 settings before CUDA initialization; enable deterministic
+algorithms with errors rather than warnings, disable cuDNN benchmarking, and seed
+the relevant RNGs before Agent construction. Use the pinned PyTorch 2.14 APIs
+without mixing old and new precision controls.
+
+Read back the effective settings after model initialization and before saving
+checkpoints or the final report. Refuse drift. Bind the profile, seed, software
+and device identity, effective settings and the initial trained-head tensor hash
+in the checkpoint metadata and report. Emit no tensor values or row data.
+
+Synthetic tests must cover startup ordering, unsupported/conflicting settings,
+ineffective setters, drift, metadata collisions, stable initial-head hashing,
+and unchanged default behavior. Hosted source CI is required; fake tests do not
+prove CUDA execution or repeated-run equality. This profile does not promise
+bitwise equality across hardware or software versions, or any quality gain.
+
+References: [PyTorch 2.14 reproducibility](https://docs.pytorch.org/docs/2.14/notes/randomness.html)
+and [CUDA precision controls](https://docs.pytorch.org/docs/2.14/notes/cuda.html).
+This record permits unpaid source preparation only. A future training candidate
+still needs its own recipe, reading rule, runtime validation and resource decision.
