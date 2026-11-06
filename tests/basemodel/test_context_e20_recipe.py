@@ -95,6 +95,8 @@ class E20Tests(unittest.TestCase):
                     self.ns['frozen_config'](dict(config=dict(config, **{key: value})))
         with self.assertRaises(Unsupported):
             self.ns['frozen_config'](dict(config=dict(expected, device='cpu')), RECIPE)
+        with self.assertRaises(Unsupported):
+            self.ns['frozen_config'](dict(config=expected))
 
     def test_trainer_command_epochs_and_name_are_explicit(self):
         for recipe, epochs, name in ((None, '4', 'apassy-context-v1'),
@@ -287,15 +289,20 @@ class E20Tests(unittest.TestCase):
     def test_full_validation_denominators_and_no_hidden_selected_filter(self):
         selected, rows, snapshots = self.snapshots()
         validation = rows + [dict(id='synthetic-local', label='allow_ok', local_rule='read'),
-                             dict(id='synthetic-unavailable', label='allow_ok', local_rule=None)]
+                             dict(id='synthetic-unavailable', label='allow_ok', local_rule=None),
+                             dict(id='synthetic-deterministic', label='deterministic_ask', local_rule=None)]
         for arm in snapshots:
-            snapshots[arm]['by_id'].update({'synthetic-local': (None, 'LocalRule'), 'synthetic-unavailable': (None, None)})
+            snapshots[arm]['by_id'].update({'synthetic-local': (None, 'LocalRule'),
+                'synthetic-unavailable': (None, None), 'synthetic-deterministic': (.1, None)})
         result = self.ns['development_reading'](selected, validation, snapshots, ['identical'] * 91, RECIPE)
         label = result['full_validation']['context']['labels']['allow_ok']
         self.assertEqual((label['original_rows'], label['eligible_scorer_rows'], label['refused']['LocalRule'],
                           label['unavailable']), (178, 176, 1, 1))
         self.assertEqual(result['full_validation']['context']['labels']['must_ask']['interpretation'],
                          'calibration_safety_tautology')
+        deterministic = result['full_validation']['context']['labels']['deterministic_ask']
+        self.assertEqual((deterministic['original_rows'], deterministic['eligible_scorer_rows'],
+                          deterministic['interpretation']), (1, 1, 'not_in_threshold_fit'))
         rid = rows[-1]['id']
         snapshots['context']['by_id'][rid] = (None, 'ExactOverflow')
         result = self.ns['development_reading'](selected, validation, snapshots, ['identical'] * 91, RECIPE)
@@ -337,6 +344,36 @@ class E20Tests(unittest.TestCase):
         assignments = [n for n in scores.body if isinstance(n, ast.Assign)]
         self.assertTrue(any(isinstance(t, ast.Attribute) and t.attr == 'last_scores'
                             for node in assignments for t in node.targets))
+
+
+class RealRecipePins(unittest.TestCase):
+    def test_model_free_generation_and_sample_pins_across_hash_seeds(self):
+        self.assertEqual((sys.implementation.name, sys.version_info[:2]), ('cpython', (3, 12)))
+        with patch.object(sys, 'path', [str(SOURCE), *sys.path]):
+            import context_existing_freeze as integration
+            import context_v1 as contract
+            c = contract.load_contract()
+            with tempfile.TemporaryDirectory() as temporary:
+                for seed in ('1', '8675309'):
+                    output = Path(temporary) / seed
+                    generated = subprocess.run([sys.executable, '-B', str(SOURCE / 'context_data.py'),
+                        '--out', str(output), '--groups', '400', '--seed', '7'],
+                        env={**os.environ, 'PYTHONHASHSEED': seed},
+                        capture_output=True, timeout=60)
+                    self.assertEqual(generated.returncode, 0, 'model-free G1 generation failed')
+                    frozen = {key: integration.record(output / name) for key, name in
+                        (('train', 'train.jsonl'), ('val', 'val.jsonl'), ('data_manifest', 'data-manifest.json'))}
+                    self.assertTrue({key: rec['sha256'] for key, rec in frozen.items()} == integration.G1_SHA256,
+                                    'model-free G1 hash pins differ')
+                    sets = integration.originals(frozen, c)
+                    selection = integration.development_selection(sets, frozen, c, RECIPE)[0]
+                    self.assertTrue(selection['sample_sha256'] == integration.D0_SAMPLE_SHA256,
+                                    'model-free D0 sample pin differs')
+                    self.assertEqual((selection['rows'], selection['pairs'], selection['unpaired_allows']), (267, 91, 85))
+                    print(json.dumps(dict(e20_model_free_pins=True, hash_seed=int(seed),
+                        train_rows=len(sets['train']), validation_rows=len(sets['val']),
+                        sample_rows=selection['rows'], pairs=selection['pairs'],
+                        unpaired_allows=selection['unpaired_allows']), sort_keys=True))
 
 
 if __name__ == '__main__':

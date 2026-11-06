@@ -456,3 +456,24 @@ This record grants no new spending: a concrete new USD 8 owner decision follows
 source review and green exact-source CI. It is an authorization envelope, not a
 provider-enforced spend cap or a billing measurement. Legacy launcher limits
 remain unchanged. Existing app/volume cleanup and persistent run markers apply.
+
+Read the D1 outcome in this order. These branch cutoffs are reviewer choices,
+fixed before scoring; they are not quality gates or a diagnosis proven by D0.
+
+| Result | Reading | Next step (each paid step is a new owner question) |
+| --- | --- | --- |
+| Both pass points met | `DEV_50_NOT_RULED_OUT` | Owner decision on an independent-evidence mandate |
+| Miss; best epoch ≥16 and final train loss >0.42 | Still limited by optimization or representation | Source review of schedule and representation; no automatic retry |
+| Miss; best epoch <16 and best val NLL exceeds final train loss by ≥0.10 | Longer training falsified; failure to generalize | Features or data for unseen families, not more epochs |
+| Miss; train and val NLL both ≤0.42 | Ranking tail | Audit the top must-ask population by class, in aggregate; τ stays unchanged |
+| Anything else | Unclassified | Report as is; no narrative fit |
+
+Zero-shot NLL should reproduce context 1.1431 and control 1.1348 within 0.001
+(a reviewer tolerance). A miss means the run is not a pure training-length trial:
+explicit encoder eval mode may differ from the historical constructor state.
+Full validation should show context `allow_ok` with 377 original rows, 372 eligible
+scorer rows and 5 `OverBudget` refusals; control should have 377 original and 377
+eligible. These are pre-registered sanity checks, not new safety evidence.
+After this recipe's one completed sample reading, another candidate needs a new
+recipe identity and updated sample-read accounting. The run marker enforces
+uniqueness per run ID; the operator ledger enforces this recipe's single attempt.

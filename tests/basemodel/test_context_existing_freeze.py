@@ -279,6 +279,73 @@ assert not any(m in sys.modules for m in ('torch', 'numpy', 'laya'))
         G.verify_conversion(f, self.c)
         self.assertFalse(any('heldout' in k for k in f))
 
+    def test_fake_e20_run_wires_metadata_calibration_reading_and_freeze(self):
+        import context_dev_diagnostic as d0
+        from context_eval import CLASSES
+        recipe = 'context-v1-e20'
+        core, common, caches, remember, legacy_train = self.fake_runtime()
+        core.Scorer.temperature = 1.
+        original_item = core.Scorer.item
+        def item(scorer, row, facts_blind=False):
+            value = original_item(scorer, row, facts_blind)
+            value['cache_key'] = tuple(value['ids'])
+            return value
+        core.Scorer.item = item
+        common.load_checkpoint.return_value[1].update(recipe=recipe, noul_temperature=1.)
+        def fit(scorer, rows, which):
+            scorer.last_scores, scorer.last_refusals = [], []
+            for row in rows:
+                converted, counts = R.convert_rows([row], self.c, facts_blind=which == 'control')
+                refusal = 'LocalRule' if counts['local_rule'] else 'OverBudget' if counts['OverBudget'] else None
+                scorer.last_refusals.append(refusal)
+                scorer.last_scores.append(None if refusal else
+                    .8 if which == 'context' and converted[0]['answer'] == 1 else .2)
+            return .5, len(rows)
+        core.fit_threshold = Mock(side_effect=fit)
+        def train(*args, recipe=None):
+            self.assertEqual(recipe, 'context-v1-e20')
+            self.assertEqual(json.loads(args[3].read_bytes())['recipe'], recipe)
+            command = G.trainer_command(*args, recipe=recipe)
+            self.assertEqual(command[command.index('--name') + 1], 'apassy-context-v1-e20')
+            self.assertEqual(command[command.index('--epochs') + 1], '20')
+            legacy_train(*args)
+            report = json.loads(args[4].read_bytes())
+            report['config']['epochs'] = 20
+            report['version'] = 'apassy-context-v1-e20+' + report['sha256'][:8]
+            report['noul_temperature'] = 1.
+            args[4].write_bytes(C.canonical(report))
+        selection = d0.select_rows(self.sets['val'], tuple(CLASSES), C.serialize, C.Refusal, self.c, {})
+        with patch.dict(sys.modules, {'context_train': core, 'torch': NS(), 'common': common}), \
+             patch.object(G, 'originals', side_effect=remember), \
+             patch.object(G, 'development_selection', return_value=selection), \
+             patch.object(G, 'train_arm', side_effect=train) as training:
+            frozen = G.run(self.data, self.out, self.base, 'cpu', recipe=recipe)
+        saved = json.loads((self.out / 'freeze.json').read_bytes())
+        self.assertEqual(saved, frozen)
+        self.assertEqual(saved['development_reading']['recipe'], recipe)
+        self.assertEqual(saved['development_reading']['thresholds'], dict(context=.5, control=.5))
+        self.assertEqual(core.fit_threshold.call_count, 2)
+        self.assertEqual(training.call_count, 2)
+        self.assertEqual(common.apply_heads.call_count, 2)
+        for cache in caches:
+            cache.close.assert_called_once()
+
+    def test_development_reading_presence_recipe_and_threshold_binding(self):
+        frozen = copy.deepcopy(self.frozen)
+        frozen['development_reading'] = {}
+        with self.assertRaisesRegex(C.Unsupported, 'development reading'):
+            G.verify_conversion(frozen, self.c)
+        frozen.update(config=dict(G.config_for('context-v1-e20'), device='cpu'),
+                      threshold=.5, control_threshold=.6)
+        for reading in (None, {}, dict(recipe='wrong'),
+                        dict(recipe='context-v1-e20', thresholds=dict(context=.5, control=.5))):
+            if reading is None:
+                frozen.pop('development_reading', None)
+            else:
+                frozen['development_reading'] = reading
+            with self.assertRaisesRegex(C.Unsupported, 'development reading'):
+                G.verify_conversion(frozen, self.c)
+
     def test_metadata_and_threshold_failures_never_freeze(self):
         for bad_meta in (True, False):
             core, common, caches, remember, train = self.fake_runtime(bad_meta=bad_meta, fail_threshold=not bad_meta)

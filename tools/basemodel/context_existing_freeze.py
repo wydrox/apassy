@@ -44,7 +44,7 @@ def frozen_config(frozen, recipe=None):
     selected = config.get('recipe')
     if recipe is not None and recipe != selected:
         raise Unsupported('existing trainer recipe mismatch')
-    expected = dict(config_for(selected), device=config['device'])
+    expected = dict(config_for(selected), device=config.get('device'))
     if config != expected or expected['device'] not in ('cpu', 'mps', 'cuda'):
         raise Unsupported('existing trainer configuration/device mismatch')
     return expected
@@ -125,7 +125,7 @@ def development_reading(selection, validation, snapshots, keys, recipe):
         refusals[arm] = [snapshot['by_id'][r['id']][1] for r in rows]
         thresholds[arm] = snapshot['threshold']
         labels = {}
-        for label in ('allow_ok', 'must_ask'):
+        for label in ('allow_ok', 'must_ask', 'deterministic_ask'):
             population = [snapshot['by_id'][r['id']] for r in validation if r['label'] == label]
             eligible = [p for p, refusal in population if refusal is None and d0.probability(p)]
             allowed = sum(p >= snapshot['threshold'] for p in eligible)
@@ -134,7 +134,8 @@ def development_reading(selection, validation, snapshots, keys, recipe):
                 eligible_auto_allow_rate=allowed / len(eligible) if eligible else None,
                 refused={code: sum(refusal == code for _, refusal in population) for code in d0.REFUSALS},
                 unavailable=sum(refusal is None and not d0.probability(p) for p, refusal in population),
-                interpretation='calibration_safety_tautology' if label == 'must_ask' else 'reused_calibration_population')
+                interpretation={'must_ask': 'calibration_safety_tautology',
+                                'deterministic_ask': 'not_in_threshold_fit'}.get(label, 'reused_calibration_population'))
         full[arm] = dict(rows=len(validation), labels=labels)
     metrics = d0.aggregate(rows, pairs, unpaired, scores, refusals, keys, thresholds, tuple(CLASSES), auroc)
     complete = all(d0.probability(p) and refusal is None for arm in ARMS
@@ -256,6 +257,12 @@ def verify_conversion(frozen, c, recipe=None):
             safe_path(frozen[name]['path'])
         expected = frozen_config(frozen, recipe)
         recipe = expected.get('recipe')
+        reading = frozen.get('development_reading')
+        if (('development_reading' in frozen) != (recipe is not None)
+                or (recipe is not None and (not isinstance(reading, dict)
+                    or reading.get('recipe') != recipe
+                    or reading.get('thresholds') != dict(context=frozen['threshold'], control=frozen['control_threshold'])))):
+            raise Unsupported('development reading recipe/threshold mismatch')
         if (frozen['context_contract_sha256'] != contract_hash(c)
                 or frozen['tokenizer_sha256'] != c['tokenizer']['sha256']
                 or frozen['base']['revision'] != REVISION):

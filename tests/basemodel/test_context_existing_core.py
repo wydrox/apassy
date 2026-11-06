@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools/basemodel'))
 import context_train as T
 import context_v1 as C
+import context_existing_freeze as G
 
 
 def trainer_functions():
@@ -174,6 +175,7 @@ class ExistingCoreTests(unittest.TestCase):
         # A fake helper tests only core dispatch; real helper integration is separate.
         helper = types.ModuleType('context_existing_freeze')
         helper.verify_conversion = Mock()
+        helper.frozen_config = G.frozen_config
         with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {'context_existing_freeze': helper}):
             directory = Path(tmp)
             frozen = self.freeze(directory)
