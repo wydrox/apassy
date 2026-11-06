@@ -166,19 +166,16 @@ comment, with remembering only as a secondary checkbox, off by default.
 Amended 2026-11-06 (owner: fix the repeated questions): "A run with two or more
 unknown items offers Allow and labels nothing" asked again at each run, for ever.
 Such a run now also offers Allow as dev and Allow as prod. The answer labels the
-first unknown item of the run, and only that item; both devices say which one, and
-the owner check names it. The other unknown items ask at a later run, so the
-questions end after one answer per item. The run still offers Allow once, which
-labels nothing, so an iPhone from before 0.5.19 can answer it. The card offers no new
-production allowance when the production rule asks in any case: the answer was saved
-and then ignored, so the owner ticked Remember and got the same question. An
-allowance still counts for production with declared read-only scope and a local
-brain. The host
-field of a credential now also counts as its host in the command analysis, so an
-auth header to that host gets no `secret_output`. A flag cannot be remembered, so
-this question came back at each run. The route still checks each destination host
-against every item of the run. Production with write or admin scope still asks at
-each run.
+first unknown item of the run, and only that item, and the card names it on both
+devices. The other unknown items ask at a later run, so the questions end after one
+answer per item. The run still offers Allow once, which labels nothing, so an iPhone
+from before 0.5.19 can answer it. The agent chooses the order of the items, so the
+card must name the item. The card offers no new production allowance when the
+production rule asks in any case, and no project answer when every item of the run is
+such a production item: the answer was ignored or not saved, so the owner ticked
+Remember and got the same question. An allowance still counts for production with
+declared read-only scope and a local brain. Production with write or admin scope still
+asks at each run.
 Classification is carried by the exact guarded owner answer; the broker saves
 it after its unchanged-authorization check and before execution. This prevents
 an unrelated mutation from being accepted as part of the classification.

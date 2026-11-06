@@ -847,9 +847,12 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
         let (production, read_only) = production_and_read_only(checked, index);
         production && (!read_only || run.remote_brain)
     });
-    if can_remember && !production_waiting {
+    // A project answer saves nothing for a production item, so with only those it is the
+    // same empty promise.
+    let saves_nothing = production_asks && checked.facts.iter().all(|facts| facts.production);
+    if can_remember && !production_waiting && !saves_nothing {
         valid.push(AnswerKind::InProject(run.action));
-    } else if can_remember && !production_asks {
+    } else if can_remember && production_waiting && !production_asks {
         valid.push(AnswerKind::Production(run.action));
     }
     // "Development" or "Production" labels one item, the first unconfirmed item of the
@@ -2531,15 +2534,6 @@ fn push_item(
         .as_deref()
         .map(|provider| providers::known_hosts(provider).to_vec())
         .unwrap_or_default();
-    // The host field is a host of the item for the route already; the command analysis
-    // reads it too. Otherwise an auth header to that host gets `secret_output`, and no
-    // answer can remember a run with a flag. Another host still gets its flags, and the
-    // route checks each destination against every item of the run.
-    if let Some(host) = &authorization.host_field
-        && !hosts.iter().any(|known| known == host)
-    {
-        hosts.push(host.clone());
-    }
     // A placeholder can go only to the hosts of the variable, so they are its
     // known hosts too.
     if let EnvDelivery::Placeholder(rules) = &binding.delivery {

@@ -774,7 +774,28 @@ fn only_a_production_allowance_that_can_count_is_offered() {
             .contains(&AnswerKind::Production(ActionKind::Change))
     };
     declare(&mut vault, Scope::ReadWrite);
-    assert!(!offers(&check(&vault, &agent, &request).unwrap(), false));
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(!offers(&checked, false));
+    // With an older allowance a project answer would save nothing for this item.
+    let facts = RunFacts {
+        analysis: &analysis,
+        has_user_request: true,
+        pattern: false,
+        action: ActionKind::Change,
+        hosts: &[],
+        remote_brain: false,
+    };
+    let mut ready = Readiness::new(|| Ok(()));
+    assert!(
+        !valid_answers(
+            &checked,
+            &facts,
+            Some(ActionKind::Change),
+            false,
+            &mut ready
+        )
+        .contains(&AnswerKind::InProject(ActionKind::Change))
+    );
     declare(&mut vault, Scope::ReadOnly);
     let checked = check(&vault, &agent, &request).unwrap();
     assert!(offers(&checked, false));
@@ -845,67 +866,4 @@ fn answers_describe_undeclared_items_one_by_one() {
     let checked = check(&vault, &agent, &request).unwrap();
     assert!(checked.declarations.iter().all(Option::is_some));
     assert_eq!(first_unconfirmed(&checked), None);
-}
-
-/// The host field of a credential joins its known hosts, so an auth header to that host
-/// is normal use. Without this the run gets `secret_output`, which no answer can remember.
-#[test]
-fn the_host_field_of_a_credential_is_a_host_for_the_command_analysis() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().join("project");
-    std::fs::create_dir_all(cwd.join(".git")).unwrap();
-    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-host-field").unwrap();
-    vault.unlock("synthetic-host-field").unwrap();
-    let item = vault
-        .add(ItemDraft {
-            title: "Synthetic custom API".into(),
-            kind: CredentialKind::ApiKey,
-            notes: String::new(),
-            tags: vec![],
-            fields: vec![
-                Field {
-                    name: "token".into(),
-                    value: SecretValue::new("FAKE-host-field-token".to_owned()),
-                    secret: true,
-                },
-                Field {
-                    name: "host".into(),
-                    value: SecretValue::new("api.custom.example".to_owned()),
-                    secret: false,
-                },
-            ],
-        })
-        .unwrap();
-    vault
-        .set_env_binding(item.id, "SYNTH_CUSTOM_TOKEN", "token")
-        .unwrap();
-    let (agent, _) = vault.register_agent("Synthetic host field").unwrap();
-    vault.set_agent_sees_all(agent.id, true).unwrap();
-    let items = [item.id];
-    let command = vec!["true".to_owned()];
-    let request = RunRequest {
-        access_request_id: None,
-        codes: Default::default(),
-        items: &items,
-        command: &command,
-        cwd: cwd.to_str().unwrap(),
-        purpose: "Read the account.",
-        path: Some("/usr/bin:/bin"),
-        user_request: Some("Read the account."),
-        host_session: None,
-    };
-    let checked = check(&vault, &agent, &request).unwrap();
-    assert_eq!(
-        checked.provider_hosts,
-        vec![ProviderHosts {
-            env_name: "SYNTH_CUSTOM_TOKEN".to_owned(),
-            hosts: vec!["api.custom.example".to_owned()],
-        }]
-    );
-    assert!(
-        checked.facts[0]
-            .known_hosts
-            .iter()
-            .any(|host| host == "api.custom.example")
-    );
 }
