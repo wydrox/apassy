@@ -919,15 +919,15 @@ impl Choice {
     ) -> Result<Self, &'static str> {
         let question = &card.question;
         let offered = |text: &str| question.valid_answers.iter().any(|answer| answer == text);
-        // "Allow as dev" and "Allow as prod" name no item: the Mac labels the one
-        // unconfirmed item of the run. With two or more the card asks as any other
-        // (the Mac's `allowed_answer_kinds`).
-        let classifiable = question
+        // "Allow as dev" and "Allow as prod" name no item: the Mac labels the first
+        // unconfirmed item of the run, and each other one asks at a later run. A run
+        // with two or more also keeps "approve" (the Mac's `allowed_answer_kinds`).
+        let unconfirmed = question
             .items
             .iter()
             .filter(|item| item.unconfirmed)
-            .count()
-            == 1;
+            .count();
+        let classifiable = unconfirmed >= 1;
         let project = |offer: &str| -> Result<(String, String), &'static str> {
             let project = question
                 .project
@@ -951,7 +951,7 @@ impl Choice {
             }
         };
         let choice = match kind {
-            "approve" if !classifiable => Self::Approve,
+            "approve" if unconfirmed != 1 => Self::Approve,
             "approve_as_development" if classifiable => Self::ApproveAsDevelopment,
             "approve_as_production" if classifiable => Self::ApproveAsProduction,
             "approve_once" => plain("once", Self::ApproveOnce)?,
@@ -1275,15 +1275,15 @@ pub(crate) mod tests {
         for kind in ["approve_as_development", "approve_as_production"] {
             assert!(Choice::for_card(kind, None, None, None, None, &card).is_ok());
         }
-        // Finding 1 of the 0.5.16 review: with two unconfirmed items the answer could
-        // not name the item that it labels, so the card offers "approve" only.
+        // ADR 0031, amended 2026-11-06: with two unconfirmed items the answer labels the
+        // first one, and "approve" labels nothing.
         for item in &mut card.question.items {
             item.unconfirmed = true;
         }
         assert!(card.question.items.len() >= 2);
         assert!(Choice::for_card("approve", None, None, None, None, &card).is_ok());
         for kind in ["approve_as_development", "approve_as_production"] {
-            assert!(Choice::for_card(kind, None, None, None, None, &card).is_err());
+            assert!(Choice::for_card(kind, None, None, None, None, &card).is_ok());
         }
         for item in &mut card.question.items {
             item.unconfirmed = false;

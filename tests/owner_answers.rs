@@ -271,6 +271,25 @@ fn production(run: PendingRun) -> OwnerAction {
     }
 }
 
+/// A production allowance of a write scope credential, as an older version saved it. The
+/// card no longer offers one, because the production rule ignores it.
+fn stored_production(fx: &Fixture, item: u64) {
+    let project = apassy::broker::project::project_of(&fx.project, None).unwrap();
+    with_vault(fx, |v| {
+        v.allow_production(
+            item,
+            &apassy::vault::answers::ProjectRef {
+                key: project.key,
+                label: project.label,
+            },
+            ActionKind::Change,
+            "synthetic test",
+            &[],
+        )
+    })
+    .unwrap();
+}
+
 /// Deny the next question and check that it waited.
 fn asks(fx: &Fixture, cwd: &Path, script: &str) -> PendingRun {
     let handle = run_later(fx, cwd, script);
@@ -359,8 +378,7 @@ fn production_write_keeps_asking_with_a_stored_project_and_action_allowance() {
         "the model is never asked for production"
     );
 
-    let allowed = answer_argv(&fx, &[item], COMMIT, production);
-    assert!(allowed.ok, "{allowed:?}");
+    stored_production(&fx, item);
     let answers = with_vault(&fx, |v| v.answers_for_item(fx.item_id)).expect("answers");
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0].scope, AnswerScope::Production);
@@ -447,10 +465,17 @@ fn no_path_except_allow_production_writes_a_production_answer() {
     assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
     assert!(no_production(&fx));
     assert_eq!(model_calls(&fx), 0);
-    // Only "Allow production" makes one.
-    let allowed = answer_argv(&fx, &[fx.item_id], COMMIT, production);
-    assert!(allowed.ok, "{allowed:?}");
-    assert!(!no_production(&fx));
+    // The card does not offer one for a write scope credential, and a forged answer is
+    // refused: the production rule would ignore it.
+    let handle = argv_later(&fx, &[fx.item_id], COMMIT);
+    let run = waiting(&fx);
+    assert_eq!(
+        owner(&fx, production(run.clone())),
+        Err(ApprovalRefusal::NoProject)
+    );
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+    assert!(no_production(&fx));
 }
 
 /// A remembered answer must name the project and the kind of action of the question.
@@ -506,7 +531,7 @@ fn an_answer_for_another_project_or_action_is_refused() {
 #[test]
 fn a_restore_clears_answers_and_old_history_does_not_count() {
     let fx = fixture(Some(declaration(Environment::Production, RiskLevel::Low)));
-    assert!(answer_argv(&fx, &[fx.item_id], COMMIT, production).ok);
+    stored_production(&fx, fx.item_id);
     let key = project_key(&fx.project);
     with_vault(&fx, |v| {
         v.record_item_use(&NewItemUse {
@@ -672,16 +697,20 @@ fn a_production_allowance_needs_a_certain_kind_of_action() {
     assert_eq!(run.question.action, ActionKind::Change);
     assert!(run.question.production);
     assert!(run.question.items[0].production);
+    // Owner decision (b): the production rule asks at each write, so the card offers no
+    // remembered answer that would change nothing.
     assert!(
-        run.question
+        !run.question
             .valid_answers
-            .contains(&AnswerKind::Production(ActionKind::Change)),
+            .iter()
+            .any(|answer| matches!(answer, AnswerKind::Production(_) | AnswerKind::InProject(_))),
         "{:?}",
         run.question.valid_answers
     );
-    owner(&fx, production(run)).expect("allowed");
-    assert!(handle.join().expect("thread").ok);
-    // Owner decision (b): a stored production allowance cannot auto-allow writes.
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+    // A stored production allowance, from before this rule, cannot auto-allow writes.
+    stored_production(&fx, item);
     assert!(
         asks_argv(&fx, &[item], COMMIT)
             .question
@@ -877,7 +906,7 @@ fn without_a_bouncer_nothing_remembered_runs() {
 fn a_mixed_run_saves_the_project_answer() {
     let fx = fixture(Some(declaration(Environment::Production, RiskLevel::Low)));
     let prod = fx.item_id;
-    assert!(answer_argv(&fx, &[prod], COMMIT, production).ok);
+    stored_production(&fx, prod);
     let staging = with_vault(&fx, |v| {
         let item = v
             .add(ItemDraft {

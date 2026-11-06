@@ -98,6 +98,9 @@ struct RequestsWaitingRow: View {
                     }
                 }
                 .buttonStyle(.bordered)
+                if let card = question.card, let note = AnswerBar.make(for: card).labelNote {
+                    Text(note).font(.footnote).foregroundStyle(.secondary)
+                }
                 Button("Dismiss with comment", role: .destructive) {
                     guard tapGuard.accepts(now: .now), actions.canDeny else { return }
                     commentQuestion = question

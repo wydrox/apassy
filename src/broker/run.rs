@@ -611,17 +611,7 @@ fn hard_rules(
         {
             why.push((format!("\"{}\" includes a one-time code: only an explicit owner project answer covering codes can skip this question.", facts.name), ReasonKind::OneTimeCode));
         }
-        let production = facts.production
-            || checked
-                .declarations
-                .get(index)
-                .and_then(Option::as_ref)
-                .is_some_and(Declaration::is_production);
-        let read_only = checked
-            .declarations
-            .get(index)
-            .and_then(Option::as_ref)
-            .is_some_and(|d| d.scope == crate::vault::Scope::ReadOnly);
+        let (production, read_only) = production_and_read_only(checked, index);
         if production && read_only && run.remote_brain {
             why.push((format!(
                 "\"{}\" is a production credential and the bouncer brain runs on another host: you approve each run in {place}: {}.",
@@ -808,6 +798,19 @@ fn cloud_route(checked: &Checked, run: &RunFacts<'_>, known: &Known) -> Route {
     Route::Ask(text, ReasonKind::CloudAgent)
 }
 
+/// Whether an item of the run is production (from any source), and whether its declared
+/// scope is read-only: the facts of the production rule (ADR 0031, 2026-11-02).
+fn production_and_read_only(checked: &Checked, index: usize) -> (bool, bool) {
+    let declaration = checked.declarations.get(index).and_then(Option::as_ref);
+    let production = checked
+        .facts
+        .get(index)
+        .is_some_and(|facts| facts.production)
+        || declaration.is_some_and(Declaration::is_production);
+    let read_only = declaration.is_some_and(|d| d.scope == crate::vault::Scope::ReadOnly);
+    (production, read_only)
+}
+
 /// The answers that a question can take now (ADR 0025 §3): a remembered answer only
 /// when it can take effect for a later run of the same kind.
 fn valid_answers<F: FnMut() -> Result<(), String>>(
@@ -838,17 +841,23 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
         && checked.facts.iter().all(|facts| !facts.always_ask)
         && sure
         && ready.get().is_ok();
-    if can_remember {
-        valid.push(if production_waiting {
-            AnswerKind::Production(run.action)
-        } else {
-            AnswerKind::InProject(run.action)
-        });
+    // The production rule asks whatever the owner answered before, so a new allowance
+    // would change nothing: the owner ticks "Remember" and the same question comes back.
+    let production_asks = (0..checked.facts.len()).any(|index| {
+        let (production, read_only) = production_and_read_only(checked, index);
+        production && (!read_only || run.remote_brain)
+    });
+    // A project answer saves nothing for a production item, so with only those it is the
+    // same empty promise.
+    let saves_nothing = production_asks && checked.facts.iter().all(|facts| facts.production);
+    if can_remember && !production_waiting && !saves_nothing {
+        valid.push(AnswerKind::InProject(run.action));
+    } else if can_remember && production_waiting && !production_asks {
+        valid.push(AnswerKind::Production(run.action));
     }
-    // "Development" or "Production" labels one item. With two or more unconfirmed
-    // items the answer cannot name the item for every device, so the run asks as any
-    // other ([`QuestionInfo::classifiable_item`]).
-    if unconfirmed_count(checked) == 1 {
+    // "Development" or "Production" labels one item, the first unconfirmed item of the
+    // run ([`QuestionInfo::classifiable_item`]). Each other one asks at a later run.
+    if first_unconfirmed(checked).is_some() {
         valid.push(AnswerKind::CorrectEnvironment);
     }
     valid
@@ -860,25 +869,22 @@ fn item_unconfirmed(checked: &Checked, index: usize) -> bool {
     checked.facts[index].unconfirmed || checked.declarations[index].is_none()
 }
 
-fn unconfirmed_count(checked: &Checked) -> usize {
-    (0..checked.facts.len())
-        .filter(|index| item_unconfirmed(checked, *index))
-        .count()
+fn first_unconfirmed(checked: &Checked) -> Option<usize> {
+    (0..checked.facts.len()).find(|index| item_unconfirmed(checked, *index))
 }
 
-/// The index of `item_id` in the run when it is the only unconfirmed item, the item that
-/// a classification labels. `None` for any other item, and with two or more unconfirmed
-/// items.
+/// The index of `item_id` in the run when it is the first unconfirmed item, the item
+/// that a classification labels. `None` for any other item.
 fn classified_index(checked: &Checked, items: &[u64], item_id: u64) -> Option<usize> {
     let index = items.iter().position(|item| *item == item_id)?;
-    (item_unconfirmed(checked, index) && unconfirmed_count(checked) == 1).then_some(index)
+    (first_unconfirmed(checked) == Some(index)).then_some(index)
 }
 
 /// Save "Allow as dev" or "Allow as prod" ([`Settled::classification`]): label the one
 /// item that the owner check named, never the other items of the run. A development
 /// label lowers the default risk and reversibility of the item, so a bundled production
 /// credential without a signal must keep its careful defaults. False when nothing was
-/// saved: the item is not the only unconfirmed item, or the vault failed.
+/// saved: the item is not the first unconfirmed item, or the vault failed.
 fn save_classification(
     vault: &mut Vault,
     checked: &Checked,

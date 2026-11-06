@@ -252,9 +252,10 @@ pub struct OwnerPrompt {
     pub allowed_answer_kinds: Vec<String>,
 }
 
-/// The answers of the card. "Allow as dev" and "Allow as prod" name no item, so they are
-/// offered only for a run with exactly one unconfirmed item
-/// ([`QuestionInfo::classifiable_item`]); any other run offers "approve".
+/// The answers of the card. "Allow as dev" and "Allow as prod" name no item: they label
+/// the first unconfirmed item ([`QuestionInfo::classifiable_item`]). A run without one
+/// offers "approve". A run with two or more also keeps "approve", which labels nothing:
+/// an iPhone from before 0.5.19 answers such a run only with it.
 pub fn allowed_answer_kinds(question: &QuestionInfo) -> Vec<String> {
     let mut kinds = vec!["deny".to_owned(), "deny_with_comment".to_owned()];
     if question.classifiable_item().is_some() {
@@ -262,7 +263,8 @@ pub fn allowed_answer_kinds(question: &QuestionInfo) -> Vec<String> {
             "approve_as_development".into(),
             "approve_as_production".into(),
         ]);
-    } else {
+    }
+    if question.classifiable_item().is_none() || question.unconfirmed_after_classification() > 0 {
         kinds.push("approve".into());
     }
     kinds
@@ -1834,11 +1836,10 @@ mod tests {
         );
     }
 
-    /// Finding 1 of the 0.5.16 review: the iPhone answer names no item, so a run with a
-    /// labeled dev key and an unlabeled password, plus a second unlabeled item, offers
-    /// no "Allow as dev" or "Allow as prod" and asks as any other run.
+    /// ADR 0031, amended 2026-11-06: a run with two unlabeled items offers "Allow as dev"
+    /// and "Allow as prod" for the first one, and keeps "approve" for an older iPhone.
     #[test]
-    fn classify_answers_need_exactly_one_unconfirmed_item() {
+    fn classify_answers_label_the_first_unconfirmed_item() {
         let item = |item_id, production, unconfirmed| QuestionItem {
             item_id,
             name: format!("item {item_id}"),
@@ -1862,10 +1863,17 @@ mod tests {
         question.items.push(item(3, false, true));
         assert_eq!(
             allowed_answer_kinds(&question),
-            ["deny", "deny_with_comment", "approve"]
+            [
+                "deny",
+                "deny_with_comment",
+                "approve_as_development",
+                "approve_as_production",
+                "approve"
+            ]
         );
-        assert!(!Choice::ApproveAsDevelopment.valid_for(&question));
-        assert!(!Choice::ApproveAsProduction.valid_for(&question));
+        assert_eq!(question.classifiable_item().map(|i| i.item_id), Some(2));
+        assert!(Choice::ApproveAsDevelopment.valid_for(&question));
+        assert!(Choice::ApproveAsProduction.valid_for(&question));
         assert!(Choice::Approve.valid_for(&question));
     }
 }

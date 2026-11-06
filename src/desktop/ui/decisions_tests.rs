@@ -2863,3 +2863,37 @@ fn a_past_decision_opens_its_why_while_a_question_waits() {
         waiter.join().expect("waiter").expect("an answer");
     }
 }
+
+/// ADR 0031, amended 2026-11-06: two credentials without a label. The bar labels the
+/// first one and says so, and "Allow once" labels nothing.
+#[test]
+fn two_unknown_credentials_label_the_first_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    let mut first = item(item_id, "Guarded key");
+    first.unconfirmed = true;
+    let mut second = item(item_id + 1, "Second key");
+    second.unconfirmed = true;
+    let (waiter, pending) = ask(
+        &app,
+        &queue,
+        1,
+        run(
+            "Codex",
+            question(vec![first, second], &[AnswerKind::CorrectEnvironment]),
+        ),
+    );
+    app.place = Place::Decisions;
+    let (text, _) = frames(&mut app, DEFAULT, 3);
+    for expected in [
+        "Allow as dev",
+        "Allow as prod",
+        "Allow once",
+        "label \"Guarded key\"",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(queue.deny(pending.id));
+    waiter.join().unwrap().unwrap();
+}

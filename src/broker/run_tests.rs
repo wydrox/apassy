@@ -531,10 +531,10 @@ fn a_development_label_is_judged_with_the_development_defaults() {
 
 /// Finding 1 of the 0.5.16 review: "Allow as dev" named one item, but the broker labeled
 /// every unconfirmed item of the run, and a development label lowers the default risk
-/// and reversibility. A dev key with an unlabeled password offers no classification;
-/// with one unconfirmed item, only that item is labeled.
+/// and reversibility. An answer labels only the first unconfirmed item, the one that
+/// the devices name (ADR 0031, amended 2026-11-06), and the next run asks about the next.
 #[test]
-fn a_classification_labels_only_the_one_unconfirmed_item() {
+fn a_classification_labels_only_the_first_unconfirmed_item() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(cwd.join(".git")).unwrap();
@@ -636,21 +636,20 @@ fn a_classification_labels_only_the_one_unconfirmed_item() {
             .contains(&AnswerKind::CorrectEnvironment)
     };
 
-    // Two unconfirmed items: no device offers "Allow as dev", and nothing is labeled.
+    // Two unconfirmed items: the first is the one that an answer labels, never the other.
     let checked = check(&vault, &agent, &request).unwrap();
     assert!(checked.facts.iter().all(|facts| facts.unconfirmed));
-    assert!(!offers(&checked));
-    for item in items {
-        assert_eq!(classified_index(&checked, &items, item), None);
-        assert!(!save_classification(
-            &mut vault,
-            &checked,
-            &items,
-            (Environment::Development, item)
-        ));
-    }
+    assert!(offers(&checked));
+    assert_eq!(classified_index(&checked, &items, dev_key), Some(0));
+    assert_eq!(classified_index(&checked, &items, password), None);
+    assert!(!save_classification(
+        &mut vault,
+        &checked,
+        &items,
+        (Environment::Development, password)
+    ));
     assert_eq!(
-        vault.declaration(dev_key).unwrap().unwrap().environment,
+        vault.declaration(password).unwrap().unwrap().environment,
         providers::DEFAULT_ENVIRONMENT
     );
 
@@ -686,4 +685,185 @@ fn a_classification_labels_only_the_one_unconfirmed_item() {
     assert_eq!(password_now.environment, Environment::Production);
     assert_eq!(password_now.risk, providers::DEFAULT_RISK);
     assert_eq!(password_now.reversibility, providers::DEFAULT_REVERSIBILITY);
+
+    // With both labeled, nothing is left to classify: the questions about them end.
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(!offers(&checked));
+    assert_eq!(first_unconfirmed(&checked), None);
+}
+
+/// The production rule asks at each write, so the card offers no allowance that it would
+/// ignore. Declared read-only scope with a local brain is where an allowance still counts.
+#[test]
+fn only_a_production_allowance_that_can_count_is_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-allowance").unwrap();
+    vault.unlock("synthetic-allowance").unwrap();
+    let item = vault
+        .add(ItemDraft {
+            title: "Synthetic production key".into(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: vec![],
+            fields: vec![Field {
+                name: "token".into(),
+                value: SecretValue::new("FAKE-allowance-token".to_owned()),
+                secret: true,
+            }],
+        })
+        .unwrap();
+    vault
+        .set_env_binding(item.id, "SYNTH_PRODUCTION_KEY", "token")
+        .unwrap();
+    let declare = |vault: &mut Vault, scope: Scope| {
+        vault
+            .save_declaration(
+                item.id,
+                &Declaration {
+                    project: "project".to_owned(),
+                    environment: Environment::Production,
+                    risk: RiskLevel::Low,
+                    scope,
+                    reversibility: Reversibility::Reversible,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        vault
+            .set_declaration_sources(
+                item.id,
+                &DeclarationSources {
+                    environment: DeclarationSource::Owner,
+                    risk: DeclarationSource::Owner,
+                    scope: DeclarationSource::Owner,
+                    reversibility: DeclarationSource::Owner,
+                },
+            )
+            .unwrap();
+    };
+    let (agent, _) = vault.register_agent("Synthetic allowance").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    let items = [item.id];
+    let command = vec!["true".to_owned()];
+    let request = RunRequest {
+        access_request_id: None,
+        codes: Default::default(),
+        items: &items,
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Change the record.",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Change the record."),
+        host_session: None,
+    };
+    let analysis = Analysis::default();
+    let offers = |checked: &Checked, remote_brain: bool| {
+        let facts = RunFacts {
+            analysis: &analysis,
+            has_user_request: true,
+            pattern: false,
+            action: ActionKind::Change,
+            hosts: &[],
+            remote_brain,
+        };
+        let mut ready = Readiness::new(|| Ok(()));
+        valid_answers(checked, &facts, Some(ActionKind::Change), true, &mut ready)
+            .contains(&AnswerKind::Production(ActionKind::Change))
+    };
+    declare(&mut vault, Scope::ReadWrite);
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(!offers(&checked, false));
+    // With an older allowance a project answer would save nothing for this item.
+    let facts = RunFacts {
+        analysis: &analysis,
+        has_user_request: true,
+        pattern: false,
+        action: ActionKind::Change,
+        hosts: &[],
+        remote_brain: false,
+    };
+    let mut ready = Readiness::new(|| Ok(()));
+    assert!(
+        !valid_answers(
+            &checked,
+            &facts,
+            Some(ActionKind::Change),
+            false,
+            &mut ready
+        )
+        .contains(&AnswerKind::InProject(ActionKind::Change))
+    );
+    declare(&mut vault, Scope::ReadOnly);
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(offers(&checked, false));
+    assert!(!offers(&checked, true));
+}
+
+/// An item without a declaration counts as unconfirmed, so the first answer writes its
+/// declaration, and the second item of the run is next. No item stays undeclared.
+#[test]
+fn answers_describe_undeclared_items_one_by_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-undeclared").unwrap();
+    vault.unlock("synthetic-undeclared").unwrap();
+    let mut add = |title: &str, env_name: &str| {
+        let item = vault
+            .add(ItemDraft {
+                title: title.into(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new(format!("FAKE-{env_name}-only")),
+                    secret: true,
+                }],
+            })
+            .unwrap();
+        vault.set_env_binding(item.id, env_name, "token").unwrap();
+        item.id
+    };
+    let first = add("Synthetic first", "SYNTH_FIRST");
+    let second = add("Synthetic second", "SYNTH_SECOND");
+    let (agent, _) = vault.register_agent("Synthetic undeclared").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    let items = [first, second];
+    let command = vec!["node".to_owned(), "script.js".into()];
+    let request = RunRequest {
+        access_request_id: None,
+        codes: Default::default(),
+        items: &items,
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Seed the development database.",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Seed the development database."),
+        host_session: None,
+    };
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.declarations.iter().all(Option::is_none));
+    assert_eq!(first_unconfirmed(&checked), Some(0));
+    assert!(save_classification(
+        &mut vault,
+        &checked,
+        &items,
+        (Environment::Development, first)
+    ));
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.declarations[0].is_some());
+    assert_eq!(first_unconfirmed(&checked), Some(1));
+    assert!(save_classification(
+        &mut vault,
+        &checked,
+        &items,
+        (Environment::Development, second)
+    ));
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.declarations.iter().all(Option::is_some));
+    assert_eq!(first_unconfirmed(&checked), None);
 }

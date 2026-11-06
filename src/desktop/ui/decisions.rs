@@ -1970,11 +1970,24 @@ fn prepare_evaluation(app: &mut DesktopApp, run_id: u64) {
     }
 }
 
+/// Which credential "Allow as dev" and "Allow as prod" label when a run has several
+/// without a label. The same text as `AnswerBar.make` of the iPhone app.
+fn classification_note(name: &str, others: usize) -> String {
+    let rest = if others == 1 {
+        "The other credential asks"
+    } else {
+        "The other credentials ask"
+    };
+    format!("\"Allow as dev\" and \"Allow as prod\" label \"{name}\". {rest} next time.")
+}
+
 /// The bar at the bottom: Deny on the left; a caption; Allow Once; the main answer.
 fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) {
-    // Only a run with exactly one unconfirmed item offers "Allow as dev/prod" (review
-    // of 0.5.16, finding 1): the label names that one item.
+    // "Allow as dev/prod" label one item, the first unconfirmed item of the run (review
+    // of 0.5.16, finding 1). With more of them the bar also has "Allow once", which
+    // labels nothing, and it says which item the label goes to.
     let unknown = run.question.classifiable_item();
+    let others = run.question.unconfirmed_after_classification();
     ui.horizontal_wrapped(|ui| {
         if let Some(item) = unknown {
             if bar_button(ui, "Allow as dev", Bar::Main).clicked() {
@@ -1988,6 +2001,9 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
                     item_id: item.item_id,
                     name: item.name.clone(),
                 });
+            }
+            if others > 0 && bar_button(ui, "Allow once", Bar::Plain).clicked() {
+                *answer = Some(Answer::Once);
             }
         } else {
             let key = egui::Id::new(("remember-project", run.id));
@@ -2024,6 +2040,15 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
         }
         ui.ctx().data_mut(|d| d.insert_temp(key, comment));
     });
+    if let Some(item) = unknown.filter(|_| others > 0) {
+        ui.add(
+            Label::new(
+                kit::text(classification_note(&item.name, others), Font::Footnote)
+                    .color(kit::palette().secondary),
+            )
+            .wrap(),
+        );
+    }
     if unknown.is_none()
         && matches!(
             primary(&run.question),

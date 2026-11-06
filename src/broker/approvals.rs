@@ -132,14 +132,21 @@ pub struct QuestionInfo {
 }
 
 impl QuestionInfo {
-    /// The one item that "Allow as dev" or "Allow as prod" labels: the only unconfirmed
-    /// item of the run. `None` with no unconfirmed item, and with two or more: the
-    /// owner check and the iPhone answer name a single item (the iPhone answer names
-    /// none), so neither device offers the answer and the run asks as any other.
+    /// The one item that "Allow as dev" or "Allow as prod" labels: the first unconfirmed
+    /// item of the run, which both devices name. `None` with no unconfirmed item. An
+    /// answer labels one item, so each other unconfirmed item asks at a later run, and
+    /// the questions about unknown items end (ADR 0031, amended 2026-11-06).
     pub fn classifiable_item(&self) -> Option<&QuestionItem> {
-        let mut unconfirmed = self.items.iter().filter(|item| item.unconfirmed);
-        let item = unconfirmed.next()?;
-        unconfirmed.next().is_none().then_some(item)
+        self.items.iter().find(|item| item.unconfirmed)
+    }
+
+    /// The unconfirmed items that a classification of this run leaves unlabeled.
+    pub fn unconfirmed_after_classification(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.unconfirmed)
+            .count()
+            .saturating_sub(1)
     }
 }
 
@@ -1629,9 +1636,10 @@ mod tests {
     }
 
     /// Finding 1 of the 0.5.16 review: "Allow as dev" named one item but labeled every
-    /// unconfirmed item of the run. With two unconfirmed items no device may classify.
+    /// unconfirmed item. An answer labels only the first one, which the devices name (ADR
+    /// 0031, amended 2026-11-06), and no answer can label the second one of the same run.
     #[test]
-    fn classification_needs_exactly_one_unconfirmed_item() {
+    fn classification_labels_only_the_first_unconfirmed_item() {
         let item = |item_id, unconfirmed| QuestionItem {
             item_id,
             unconfirmed,
@@ -1643,8 +1651,10 @@ mod tests {
             ..QuestionInfo::default()
         };
         assert_eq!(question.classifiable_item().map(|i| i.item_id), Some(8));
+        assert_eq!(question.unconfirmed_after_classification(), 0);
         question.items = vec![item(7, true), item(8, true)];
-        assert!(question.classifiable_item().is_none());
+        assert_eq!(question.classifiable_item().map(|i| i.item_id), Some(7));
+        assert_eq!(question.unconfirmed_after_classification(), 1);
 
         for (case, environment) in [
             ("local", crate::vault::Environment::Development),
@@ -1667,27 +1677,33 @@ mod tests {
             });
             let id = wait_until_pending(&queue);
             let pending = queue.pending()[0].clone();
-            let action = if case == "local" {
-                OwnerAction::QuestionDevelopment {
-                    run_id: id,
-                    item_id: 7,
-                }
-            } else {
-                OwnerAction::ClassifyRemoteRun {
-                    run: pending.clone(),
-                    environment,
-                }
+            let proof = |item_id| {
+                let action = if case == "local" {
+                    OwnerAction::QuestionDevelopment {
+                        run_id: id,
+                        item_id,
+                    }
+                } else {
+                    OwnerAction::ClassifyRemoteRun {
+                        run: pending.clone(),
+                        environment,
+                    }
+                };
+                OwnerProof::issue_for_test(action, [1; 32], Instant::now())
             };
-            let proof = OwnerProof::issue_for_test(action, [1; 32], Instant::now());
+            // The second unconfirmed item is not the one that the devices name.
             assert!(
-                !queue.classify_and_approve(&pending, environment, 7, proof),
+                !queue.classify_and_approve(&pending, environment, 8, proof(8)),
                 "{case}"
             );
-            assert!(queue.deny(id));
+            assert!(
+                queue.classify_and_approve(&pending, environment, 7, proof(7)),
+                "{case}"
+            );
             let settled = waiter.join().unwrap().unwrap();
-            assert_eq!(settled.outcome, ApprovalOutcome::Denied);
-            assert!(settled.classification.is_none());
-            assert!(settled.classified_item.is_none());
+            assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+            assert_eq!(settled.classification, Some(environment));
+            assert_eq!(settled.classified_item, Some(7));
         }
     }
 

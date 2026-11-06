@@ -46,17 +46,26 @@ struct AnswerBar: Equatable {
     /// First approval; the second approval is present for unknown environments.
     var primary: Choice?
     var menu: [Choice]
+    /// Which credential the two answers label, on a card with several without a label.
+    var labelNote: String?
 
     /// Unknown item facts take precedence over confirmed production items. "Allow as dev"
-    /// and "Allow as prod" name no item: the Mac labels the one unconfirmed item, so a card
-    /// with two or more unconfirmed items offers "Allow", as the Mac does.
+    /// and "Allow as prod" name no item: the Mac labels the first unconfirmed item, and the
+    /// others ask at a later run, as on the Mac. "Allow once" labels nothing.
     static func make(for card: QuestionCard) -> AnswerBar {
-        let unknown = card.question.items.filter(\.unconfirmed).count == 1
+        let items = card.question.items.filter(\.unconfirmed)
+        let unknown = !items.isEmpty
+        let others = items.count - 1
         return AnswerBar(
             deny: Choice(answer: RemoteAnswer(kind: .deny), label: "Dismiss", destructive: true),
             secondaryApproval: unknown ? Choice(answer: RemoteAnswer(kind: .approveAsProduction), label: "Allow as prod") : nil,
             primary: Choice(answer: RemoteAnswer(kind: unknown ? .approveAsDevelopment : .approve), label: unknown ? "Allow as dev" : "Allow"),
-            menu: [Choice(answer: RemoteAnswer(kind: .denyWithComment), label: "Dismiss with comment", destructive: true)])
+            menu: (others > 0 ? [Choice(answer: RemoteAnswer(kind: .approve), label: "Allow once")] : [])
+                + [Choice(answer: RemoteAnswer(kind: .denyWithComment), label: "Dismiss with comment", destructive: true)],
+            labelNote: others > 0
+                ? "\"Allow as dev\" and \"Allow as prod\" label \"\(items[0].name)\". "
+                    + (others == 1 ? "The other credential asks" : "The other credentials ask") + " next time."
+                : nil)
     }
 
 }
