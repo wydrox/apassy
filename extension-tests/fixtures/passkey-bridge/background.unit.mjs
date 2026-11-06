@@ -500,7 +500,7 @@ for (const [name, change] of Object.entries(BAD_CREATED)) {
       created.authenticator_data = b64(auth);
     }
     bg.natives[0].port.postMessage(ok(change(wire, created)));
-    await flush();
+    await waitFor(() => port.received.length > 0);
     assert.deepEqual(port.received, [{ kind: "error", name: "NotAllowedError" }]);
   });
 }

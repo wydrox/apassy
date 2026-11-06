@@ -893,7 +893,7 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
             questions,
             feed_shown: true,
             other_macs,
-            free_end: free.then(|| "0.5.19".to_owned()),
+            free_end: free.then(|| "0.5.20".to_owned()),
         }),
         ..frame_one()
     };
@@ -965,7 +965,7 @@ fn devices_relay_group_restores_the_relay_and_the_other_macs() {
         "Through the Apassy relay",
         OTHER_MACS_DEVICES,
         ADD_MAC,
-        devices::free_end_line("0.5.19").as_str(),
+        devices::free_end_line("0.5.20").as_str(),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }

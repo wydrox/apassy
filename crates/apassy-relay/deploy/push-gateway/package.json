@@ -1,6 +1,6 @@
 {
   "name": "apassy-push-gateway",
-  "version": "0.5.18",
+  "version": "0.5.19",
   "private": true,
   "type": "module",
   "description": "The push gateway of Apassy: holds the APNs key, turns sealed handles into notifications, and stores nothing.",

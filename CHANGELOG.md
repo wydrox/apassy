@@ -4,12 +4,23 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.19] - 2026-11-07
+
 ### Fixed
 
 - **The same question came back after you answered it:** a run with two or more credentials without a label offered only **Allow**, which saves nothing, so it asked at each run. It now also offers **Allow as dev** and **Allow as prod**, on the Mac and on the iPhone. They label the first of those credentials, the card says which, and the others ask next time. **Allow once** stays and labels nothing.
 - **Remember for this project on a production write:** the card offered it, Apassy saved it, and the next run asked anyway. Production with write or admin scope asks at each run, so the card no longer offers it.
 - **A host that the shell builds:** `https://$P.api.github.com` looked like a known host because its text ends like one, although the request can go to another server. A command like this that sends a secret now asks you.
 - **The bouncer decision log was empty:** the Mac app did not write `~/Library/Logs/Apassy/bouncer-decisions.log`, so `apassy decisions log` had nothing to show. It writes it now.
+- **Apple Watch: "Couldn't reach the relay":** Connect on the watch failed at once on Wi-Fi and on cellular, and no request reached the relay. The watch switched off the system network settings for its connections, so it probably had no way out through the iPhone. It now keeps them and waits for a network path up to the time limit. A connection to your Mac still accepts only that Mac's certificate. If it still fails, the watch shows error codes under the message. This fix is not yet checked on a real watch.
+
+### Changed
+
+- **The free hosted relay paths end with 0.5.20:** the notices on the Mac and the iPhone said 0.5.19. Apassy Connect has no sign-in in the app yet, so approvals and relay sync on apassy-relay.wyderka.cc stay as they are in this release.
+
+### Upgrade notes
+
+- Coordinated release: macOS, iOS (TestFlight, with the watch app), browser extension, relay, Linux CLI and website move to 0.5.19 together. The extension, the relay and the Linux node have no functional change.
 
 ## [0.5.18] - 2026-11-04
 
