@@ -411,7 +411,8 @@ class Workflow(unittest.TestCase):
         self.source = (ROOT / '.github/workflows/bouncer-context-experiment.yml').read_text()
         self.cost = re.split(r'\n  [a-zA-Z0-9_-]+:\n',
                              self.source.split('\n  cost-only:\n', 1)[1], maxsplit=1)[0]
-        self.external = self.source.split('\n  external-evaluate:\n', 1)[1]
+        self.external = re.split(r'\n  [a-zA-Z0-9_-]+:\n',
+                                 self.source.split('\n  external-evaluate:\n', 1)[1], maxsplit=1)[0]
         self.ci = (ROOT / '.github/workflows/ci.yml').read_text()
 
     def test_manual_guard_permissions_bridge_and_allowlist(self):

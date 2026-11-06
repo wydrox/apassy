@@ -126,7 +126,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   probe:
-    if: ${{ inputs.mode != 'cost-only' && inputs.mode != 'cuda-preflight' && inputs.mode != 'external-evaluate' && !inputs.transport_only }}
+    if: ${{ inputs.mode != 'cost-only' && inputs.mode != 'cuda-preflight' && inputs.mode != 'external-evaluate' && inputs.mode != 'development-diagnostic' && !inputs.transport_only }}
     name: ${{ github.event_name == 'workflow_dispatch' && 'probe' || 'preflight' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -1744,4 +1744,210 @@ jobs:
         retention-days: 7
         if-no-files-found: warn
         compression-level: 0
+        path: ${{ runner.temp }}/bouncer-context/evidence/*.json
+
+  development-diagnostic:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'development-diagnostic' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      NUMEXPR_NUM_THREADS: '4'
+      TOKENIZERS_PARALLELISM: 'false'
+      CUDA_VISIBLE_DEVICES: ''
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      RUN_ID: ${{ inputs.run_id }}
+      BUNDLE_ASSET: ${{ inputs.bundle_asset }}
+      BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+      FREEZE_SHA256: ${{ inputs.freeze_sha256 }}
+      SHIPPED_BASELINE: 'false'
+      REQUESTED_TRANSPORT_ONLY: ${{ inputs.transport_only }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Require exact source and external inputs before setup
+      run: |
+        set -euo pipefail
+        python3 -B - <<'PYCODE'
+        import os, subprocess, sys
+        sys.path.insert(0, 'tools/basemodel')
+        from context_cost_asset import require
+        from context_external_bundle import check_inputs, run_root
+        require(os.environ.get('REQUESTED_TRANSPORT_ONLY') == 'false')
+        check_inputs(os.environ, subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write('CONTEXT_ROOT=' + str(run_root(os.environ['RUN_ID'])) + '\n')
+        PYCODE
+    - name: Install Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Isolate experiment paths and credentials
+      run: |
+        set -euo pipefail
+        EXP="$RUNNER_TEMP/bouncer-context"
+        mkdir -p "$EXP/evidence"
+        cat > "$EXP/sanitize.sh" <<'SH'
+        unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HUGGINGFACE_HUB_TOKEN HF_TOKEN_PATH
+        unset APASSY_BASE_MODEL LAYA_API_KEY
+        SH
+        source "$EXP/sanitize.sh"
+        {
+          echo "EXP=$EXP"
+          echo "PY=$EXP/venv/bin/python"
+          echo "HF_HOME=$EXP/hf"
+          echo "HF_HUB_CACHE=$EXP/hf/hub"
+          echo "XDG_CACHE_HOME=$EXP/cache"
+          echo "PIP_CACHE_DIR=$EXP/pip-cache"
+          echo "BASH_ENV=$EXP/sanitize.sh"
+        } >> "$GITHUB_ENV"
+        date +%s > "$EXP/evidence/start-epoch.txt"
+        python -m venv "$EXP/venv"
+    - name: Download and restore pinned external bundle
+      timeout-minutes: 10
+      env:
+        APASSY_CONTEXT_INPUT: ${{ secrets.APASSY_CONTEXT_INPUT }}
+        CHECKPOINT_ASSET: ${{ inputs.bundle_asset }}
+        CHECKPOINT_SHA256: ${{ inputs.bundle_sha256 }}
+        TRANSPORT_ONLY: 'true'
+        DESTINATION_NAME: bundle.tar
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/context_cost_asset.py
+        "$PY" -B - <<'PYCODE'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import restore
+        e = os.environ
+        bundle = Path(e['EXP']) / 'bundle.tar'
+        receipt = restore(bundle, e['BUNDLE_SHA256'], e['FREEZE_SHA256'], e['RUN_ID'])
+        (Path(e['EXP']) / 'receipt.json').write_text(json.dumps(receipt))
+        assert bundle.stat().st_size == 215070720
+        bundle.unlink()
+        PYCODE
+    - name: Bind E entry and immutable S source
+      run: |
+        set -euo pipefail
+        S=7a63ffad557ace5e396c4a709ad8453fb611b565
+        test "$RUN_ID" = bouncer-bbee8f21-20261105t124513z
+        test "$BUNDLE_ASSET" = 435195444/714447674
+        test "$BUNDLE_SHA256" = 6de84990fb29a99c8e23eb51b67066d6344c644fbf5e634ea4f23425a85fb974
+        test "$FREEZE_SHA256" = 7e8391a63aaba4afb84300788474be8e3ffdfb46b4aa3206801c0dbba550368c
+        test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+        test -z "$(git status --porcelain --untracked-files=no)"
+        mkdir "$EXP/entry"
+        git show "$GITHUB_SHA:tools/basemodel/context_dev_diagnostic.py" > "$EXP/entry/context_dev_diagnostic.py"
+        git merge-base --is-ancestor "$S" "$GITHUB_SHA"
+        git checkout --quiet --detach "$S"
+        test "$(git rev-parse HEAD)" = "$S"
+        test -z "$(git status --porcelain --untracked-files=no)"
+        "$PY" -I -B - <<'PYCODE'
+        import hashlib, json, os, subprocess
+        from pathlib import Path
+        e = os.environ
+        entry = Path(e['EXP']) / 'entry/context_dev_diagnostic.py'
+        original = subprocess.check_output(['git', 'show', e['GITHUB_SHA'] + ':tools/basemodel/context_dev_diagnostic.py'])
+        assert entry.read_bytes() == original
+        binding = dict(report_kind='development_diagnostic',
+                       training_source_sha='7a63ffad557ace5e396c4a709ad8453fb611b565',
+                       evaluation_source_sha=e['GITHUB_SHA'],
+                       entry_sha256=hashlib.sha256(original).hexdigest(),
+                       bundle_sha256=e['BUNDLE_SHA256'], freeze_sha256=e['FREEZE_SHA256'],
+                       run_id=e['RUN_ID'])
+        with (Path(e['EXP']) / 'evidence/diagnostic-binding.json').open('x') as f:
+            f.write(json.dumps(binding, sort_keys=True, separators=(',', ':')) + '\n')
+        PYCODE
+    - name: Install pinned CUDA distribution on CPU
+      run: |
+        set -euo pipefail
+        "$PY" -m pip install --no-cache-dir -r tools/basemodel/requirements-cu130.txt -r tools/basemodel/requirements.txt
+        "$PY" -m pip check
+        "$PY" -B - <<'PYCODE'
+        import json, sys, torch
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import PACKAGE_VERSIONS
+        from context_train import package_versions
+        default_threads = torch.get_num_threads()
+        torch.set_num_threads(4)
+        versions = package_versions()
+        cuda_available = torch.cuda.is_available()
+        observed_threads = torch.get_num_threads()
+        tensor_sum = (torch.ones(4, 4) @ torch.ones(4, 4)).sum().item()
+        print(json.dumps(dict(versions=versions, cuda_available=cuda_available, default_threads=default_threads,
+                              observed_threads=observed_threads, tensor_sum=tensor_sum), sort_keys=True))
+        assert versions == PACKAGE_VERSIONS
+        assert torch.cuda.is_available() is False
+        assert torch.get_num_threads() == 4
+        assert tensor_sum == 64
+        print('CPU runtime preflight PASS')
+        PYCODE
+    - name: Verify original restored bundle at S
+      run: |
+        set -euo pipefail
+        "$PY" -B - <<'PYCODE'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        from context_external_bundle import verify_restored
+        e = os.environ
+        receipt = json.loads((Path(e['EXP']) / 'receipt.json').read_text())
+        verify_restored(Path(e['CONTEXT_ROOT']), receipt, e['RUN_ID'], '7a63ffad557ace5e396c4a709ad8453fb611b565', e['FREEZE_SHA256'], Path.cwd())
+        PYCODE
+    - name: Select aggregate sample before base weights
+      run: |
+        set -euo pipefail
+        "$PY" -I -B "$EXP/entry/context_dev_diagnostic.py" select \
+          --repo-root "$GITHUB_WORKSPACE" --freeze "$CONTEXT_ROOT/full/freeze.json" \
+          --expect-freeze-sha256 "$FREEZE_SHA256" --binding "$EXP/evidence/diagnostic-binding.json" \
+          --out "$EXP/evidence/selection.json"
+    - name: Fetch and verify the pinned public base, then go offline
+      run: |
+        set -euo pipefail
+        "$PY" -B tools/basemodel/fetch_weights.py
+        "$PY" -B - <<'PY'
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools/basemodel')
+        import common
+        manifest = json.loads(Path('tools/basemodel/manifest.json').read_text())['base']
+        assert common.BASE_REPO == manifest['repo']
+        assert common.BASE_REVISION == manifest['revision']
+        base = Path(common.base_dir()).resolve()
+        assert common.sha256_file(base / manifest['weights_file']) == manifest['weights_sha256']
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'APASSY_CONTEXT_TOKENIZER_BASE={base}\n')
+            f.write('HF_HUB_OFFLINE=1\nTRANSFORMERS_OFFLINE=1\n')
+        PY
+    - name: Score development diagnostic offline
+      timeout-minutes: 30
+      run: |
+        set -euo pipefail
+        test "$HF_HUB_OFFLINE" = 1
+        test "$TRANSFORMERS_OFFLINE" = 1
+        "$PY" -I -B "$EXP/entry/context_dev_diagnostic.py" score \
+          --repo-root "$GITHUB_WORKSPACE" --freeze "$CONTEXT_ROOT/full/freeze.json" \
+          --expect-freeze-sha256 "$FREEZE_SHA256" --binding "$EXP/evidence/diagnostic-binding.json" \
+          --base-dir "$APASSY_CONTEXT_TOKENIZER_BASE" --selection "$EXP/evidence/selection.json" \
+          --out "$EXP/evidence/development-diagnostic.json"
+    - name: Retain aggregate diagnostic evidence only
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: bouncer-context-development-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
         path: ${{ runner.temp }}/bouncer-context/evidence/*.json
