@@ -185,6 +185,7 @@ class FeatureCache:
         return meta.get("fingerprint") == fingerprint
 
     def build(self, model, items, pad, device, amp, batch_size, fingerprint, hidden):
+        model.eval()
         total = sum(len(it["ids"]) for it in items)
         data = np.lib.format.open_memmap(self.path + ".tmp", mode="w+", dtype=np.float16, shape=(total, hidden))
         offsets, pos = [], 0
@@ -265,6 +266,73 @@ def ece(p, y, bins=10):
     return float(total)
 
 
+def validation_operating_point(probabilities, hard_targets):
+    """Aggregate development recall above every negative; never filter invalid pairs.
+
+    Inputs are plain lists of probabilities and binary targets. Soft targets remain
+    valid for the generic trainer, but cannot support this empirical interpretation.
+    No individual score or fitted threshold is returned.
+    """
+    coverage = dict(probabilities=0, targets=0, aligned=False, valid_pairs=0,
+                    invalid_probabilities=0, nonfinite_probabilities=0,
+                    invalid_targets=0, nonfinite_targets=0, soft_targets=0)
+    result = dict(status="incomplete", coverage=coverage, positive_count=0,
+                  negative_count=0, safe_positive_count=None, safe_positive_recall=None,
+                  negative_boundary_ties=None, histograms=None)
+    if not isinstance(probabilities, (list, tuple)) or not isinstance(hard_targets, (list, tuple)):
+        return result
+    coverage.update(probabilities=len(probabilities), targets=len(hard_targets),
+                    aligned=len(probabilities) == len(hard_targets))
+
+    def classify(value):
+        if type(value) not in (int, float):
+            return "invalid"
+        if type(value) is float and not math.isfinite(value):
+            return "nonfinite"
+        return "valid" if 0 <= value <= 1 else "invalid"
+
+    for p in probabilities:
+        kind = classify(p)
+        if kind != "valid":
+            coverage[kind + "_probabilities"] += 1
+    for y in hard_targets:
+        kind = classify(y)
+        if kind != "valid":
+            coverage[kind + "_targets"] += 1
+        elif y not in (0, 1):
+            coverage["soft_targets"] += 1
+        elif y == 1:
+            result["positive_count"] += 1
+        else:
+            result["negative_count"] += 1
+    coverage["valid_pairs"] = sum(classify(p) == "valid" and classify(y) == "valid" and y in (0, 1)
+                                  for p, y in zip(probabilities, hard_targets))
+    if (not coverage["aligned"] or coverage["invalid_probabilities"]
+            or coverage["nonfinite_probabilities"] or coverage["invalid_targets"]
+            or coverage["nonfinite_targets"]):
+        return result
+    if coverage["soft_targets"]:
+        result["status"] = "unsupported_soft_targets"
+        return result
+
+    counts = {"positive": [0] * 10, "negative": [0] * 10}
+    for p, y in zip(probabilities, hard_targets):
+        counts["positive" if y == 1 else "negative"][min(9, int(p * 10))] += 1
+    result["histograms"] = dict(bins=10, range=[0, 1],
+                                convention="left_closed_right_open_last_includes_one", counts=counts)
+    if not result["positive_count"] or not result["negative_count"]:
+        result["status"] = "unavailable_class"
+        return result
+    boundary = max(p for p, y in zip(probabilities, hard_targets) if y == 0)
+    allowed = sum(p > boundary for p, y in zip(probabilities, hard_targets) if y == 1)
+    result.update(status="complete", safe_positive_count=allowed,
+                  safe_positive_recall=allowed / result["positive_count"],
+                  negative_boundary_ties=dict(
+                      positive=sum(p == boundary for p, y in zip(probabilities, hard_targets) if y == 1),
+                      negative=sum(p == boundary for p, y in zip(probabilities, hard_targets) if y == 0)))
+    return result
+
+
 def evaluate(model, items, pad, device, amp, temperature, batch_size, cache=None):
     model.eval()
     probs, ys, qs = [], [], []
@@ -296,6 +364,10 @@ def evaluate(model, items, pad, device, amp, temperature, batch_size, cache=None
             "mean_p_yes": float(p[yes].mean()) if yes.any() else None,
             "mean_p_no": float(p[~yes].mean()) if (~yes).any() else None,
         }
+        if name == "owner_accepts_use":
+            operating_point = validation_operating_point(p.tolist(), y.tolist())
+            operating_point.update(evidence="trainer_validation_cache", interpretation="development_only")
+            report[name]["operating_point"] = operating_point
     report["all_nll"] = float(np.mean([v["nll"] for k, v in report.items() if isinstance(v, dict)]))
     return report
 
