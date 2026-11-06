@@ -1,6 +1,7 @@
 import ApassyCoreFFI
 import ApassyVaultKit
 import Foundation
+import Synchronization
 
 /// `WatchService` over the Rust core with the role `watch` (ADR 0039, contract ios-core-v1
 /// section 5.13). Every call name and parameter of the watch is in this file.
@@ -33,6 +34,9 @@ public final class WatchCoreService: WatchService, @unchecked Sendable {
     private struct Waited: Decodable, Sendable { var changed: Bool }
 
     private let core: CorePointer
+    /// `networkProblem`: the line of the transport after the last `connectStart` that could not
+    /// reach the relay.
+    private let lastProblem = Mutex<String?>(nil)
     private let queue = DispatchQueue(label: "com.wydrox.apassy.watch-core", qos: .userInitiated, attributes: .concurrent)
 
     /// - Parameters:
@@ -79,10 +83,19 @@ public final class WatchCoreService: WatchService, @unchecked Sendable {
     public func connectStart(link: String, name: String, answerKey: Data, passphrase: String) async throws
         -> WatchConnectInfo
     {
-        try await call(
-            Op.connectStart,
-            ["link": link, "name": name, "answer_key": Base64URL.encode(answerKey), "passphrase": passphrase])
+        let mark = URLSessionCoreTransport.shared.sendCount()
+        do {
+            return try await call(
+                Op.connectStart,
+                ["link": link, "name": name, "answer_key": Base64URL.encode(answerKey), "passphrase": passphrase])
+        } catch let error as VaultError where [.relayUnreachable, .rateLimited, .busy].contains(error.code) {
+            let line = URLSessionCoreTransport.shared.problem(since: mark)
+            lastProblem.withLock { $0 = [error.code.rawValue, line].compactMap(\.self).joined(separator: ": ") }
+            throw error
+        }
     }
+
+    public func networkProblem() async -> String? { lastProblem.withLock { $0 } }
 
     public func connectPoll() async throws -> WatchConnectInfo { try await call(Op.connectPoll) }
 

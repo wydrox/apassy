@@ -17,6 +17,11 @@ import Synchronization
 /// only the leaf certificate with that pin, never the system trust store. Another certificate
 /// answers `pin_mismatch` before any request byte. Only the watch installs the transport; the
 /// type builds everywhere so that the macOS tests reach it.
+///
+/// Both sessions keep the network settings of the system, proxies included: with the iPhone near,
+/// the watch reaches the internet through it. A request waits for a network path up to its
+/// deadline instead of failing at once. Each failure is kept as a line of codes for the screen
+/// (`problem(since:)`).
 final class URLSessionCoreTransport: Sendable {
     static let shared = URLSessionCoreTransport()
     private static let installed = Mutex(false)
@@ -28,6 +33,8 @@ final class URLSessionCoreTransport: Sendable {
     /// The session of the pinned requests: TLS 1.3 at least, as the core's own pinned client.
     private let pinnedSession: URLSession
     private let state = Mutex(State())
+    /// The requests so far, and the line of the last one, nil after a JSON answer.
+    private let record = Mutex<(sends: UInt64, problem: String?)>((0, nil))
 
     private struct Running {
         let task: URLSessionTask
@@ -53,9 +60,13 @@ final class URLSessionCoreTransport: Sendable {
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
         configuration.urlCredentialStorage = nil
-        configuration.waitsForConnectivity = false
+        // Wait for a path instead of failing at once: `perform` ends the wait at the deadline of
+        // the request, and the bytes sent decide `connect` or `broken`.
+        configuration.waitsForConnectivity = true
         configuration.allowsCellularAccess = true
-        configuration.connectionProxyDictionary = [:]
+        // No `connectionProxyDictionary`: an empty one turns off the proxies of the system, and with
+        // them the path of the watch through the paired iPhone. A pinned request needs no such
+        // guard: it accepts only the pinned leaf.
         configuration.tlsMinimumSupportedProtocolVersion = minimumTLS
         // Each request has its own deadline (`timeout_ms`); this only bounds a stuck one.
         configuration.timeoutIntervalForResource = 120
@@ -103,25 +114,26 @@ final class URLSessionCoreTransport: Sendable {
 
     /// One request of the core: its JSON in, the answer JSON out (contract ios-core-v1 section 2.1).
     func perform(_ json: String) -> String {
+        record.withLock { $0.sends += 1 }
         // A request that cannot be read was not sent: nothing reached the relay.
         guard let request = try? JSONDecoder().decode(Request.self, from: Data(json.utf8)),
             let url = URL(string: request.url), url.scheme == "https" || url.scheme == "http"
-        else { return Answer.failure("connect") }
+        else { return unsent("the request of the core is not valid") }
         // A pinned request is https with a pin of the contract's form, or it is not sent.
         if let pin = request.pin, url.scheme != "https" || !CorePin.isValid(pin) {
-            return Answer.failure("connect")
+            return unsent("the pin of the request is not valid")
         }
         let seconds = Double(min(max(request.timeout_ms, 1), 600_000)) / 1000
         var urlRequest = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: seconds)
         urlRequest.httpMethod = request.method
         urlRequest.httpShouldHandleCookies = false
         for pair in request.headers {
-            guard pair.count == 2 else { return Answer.failure("connect") }
+            guard pair.count == 2 else { return unsent("a header of the request is not valid") }
             guard !Self.reserved.contains(pair[0].lowercased()) else { continue }
             urlRequest.addValue(pair[1], forHTTPHeaderField: pair[0])
         }
         if let body = request.body_b64u {
-            guard let data = Base64URL.decode(body) else { return Answer.failure("connect") }
+            guard let data = Base64URL.decode(body) else { return unsent("the body of the request is not valid") }
             urlRequest.httpBody = data
         }
         let exchange = Exchange(limit: Self.maxBody, pin: request.pin)
@@ -134,14 +146,36 @@ final class URLSessionCoreTransport: Sendable {
         }
         guard started else { return Answer.failure("broken") }
         defer { state.withLock { (state: inout State) in state.running[request.id] = nil } }
+        let began = ContinuousClock.now
         task.resume()
         if exchange.done.wait(timeout: .now() + .milliseconds(Int(seconds * 1000) + 1000)) == .timedOut {
-            // Past the deadline of the request: it may have reached the relay.
-            exchange.end()
+            // Past the deadline of the request. The metrics decide: `connect` when no byte left this
+            // watch (it waited for a path), else `broken`, as it may have reached the relay.
+            exchange.passDeadline()
             task.cancel()
             exchange.done.wait()
         }
+        note(exchange.problem(after: began.duration(to: .now)))
         return exchange.answer()
+    }
+
+    /// A request that is not sent: `connect`, with its line.
+    private func unsent(_ problem: String) -> String {
+        note("connect, \(problem)")
+        return Answer.failure("connect")
+    }
+
+    /// The number of requests so far: the mark of the start of a call of the core.
+    func sendCount() -> UInt64 { record.withLock { $0.sends } }
+
+    /// The line of the last request when one was made since `mark`; else a line that says none
+    /// was (the core failed before the network).
+    func problem(since mark: UInt64) -> String? {
+        record.withLock { record in record.sends == mark ? "no request was made" : record.problem }
+    }
+
+    private func note(_ problem: String?) {
+        record.withLock { $0.problem = problem }
     }
 
     private func cancel(_ id: UInt64) {
@@ -213,6 +247,9 @@ private final class Exchange: NSObject, URLSessionDataDelegate, @unchecked Senda
     private var body = Data()
     private var failure: String?
     private var sentBytes: Int64?
+    private var error: NSError?
+    private var waited = false
+    private var deadlinePassed = false
 
     init(limit: Int, pin: String?) {
         self.limit = limit
@@ -242,11 +279,57 @@ private final class Exchange: NSObject, URLSessionDataDelegate, @unchecked Senda
         completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
-    /// The request was cancelled or passed its deadline: it answers `broken`.
+    /// The request was cancelled: it answers `broken`.
     func end() {
         lock.withLock {
             if failure == nil { failure = "broken" }
         }
+    }
+
+    /// The request passed its deadline: its completion is `connect` only when no byte was sent.
+    func passDeadline() {
+        lock.withLock { deadlinePassed = true }
+    }
+
+    /// One line for the screen when the request failed or the answer is not JSON, else nil. Codes
+    /// and counts only: no header, body, or URL.
+    func problem(after elapsed: Duration) -> String? {
+        lock.withLock {
+            var parts: [String] = []
+            if let failure {
+                parts.append(failure)
+                if let error {
+                    parts.append("\(error.domain == NSURLErrorDomain ? "URLError" : error.domain) \(error.code)")
+                    if let domain = error.userInfo["_kCFStreamErrorDomainKey"],
+                        let code = error.userInfo["_kCFStreamErrorCodeKey"]
+                    {
+                        parts.append("stream \(domain)/\(code)")
+                    }
+                    if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+                        parts.append("under \(underlying.domain) \(underlying.code)")
+                    }
+                    if let reason = error.userInfo[NSURLErrorNetworkUnavailableReasonKey] as? Int {
+                        parts.append("unavailable \(reason)")
+                    }
+                }
+                if deadlinePassed { parts.append("deadline") }
+            } else if let response {
+                let type = response.value(forHTTPHeaderField: "Content-Type") ?? "no type"
+                guard !type.contains("json") else { return nil }
+                parts.append("HTTP \(response.statusCode) \(type)")
+            } else {
+                return nil
+            }
+            if waited { parts.append("waited for a network") }
+            if let sentBytes { parts.append("\(sentBytes) B sent") }
+            let (seconds, attoseconds) = elapsed.components
+            parts.append("\(seconds * 1000 + attoseconds / 1_000_000_000_000_000) ms")
+            return parts.joined(separator: ", ")
+        }
+    }
+
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        lock.withLock { waited = true }
     }
 
     func answer() -> String {
@@ -304,7 +387,14 @@ private final class Exchange: NSObject, URLSessionDataDelegate, @unchecked Senda
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         lock.withLock {
-            if let error, failure == nil { failure = Self.classify(error, sentBytes: sentBytes) }
+            if let error {
+                self.error = error as NSError
+                if failure == nil {
+                    failure =
+                        deadlinePassed
+                        ? (sentBytes == 0 ? "connect" : "broken") : Self.classify(error, sentBytes: sentBytes)
+                }
+            }
             if error == nil, response == nil, failure == nil { failure = "protocol" }
         }
         done.signal()

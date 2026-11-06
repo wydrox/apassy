@@ -153,6 +153,7 @@ struct CoreTransportPinTests {
         let answer = try Self.answer(text)
         #expect(answer["status"] as? Int == 200, "\(text)")
         #expect(server.requests.joined().hasPrefix("GET /v1/questions HTTP/1.1\r\n"))
+        #expect(transport.problem(since: 0) == nil, "a JSON answer leaves no problem")
     }
 
     @Test("another pin is a pin mismatch before any request byte, each time")
@@ -174,11 +175,15 @@ struct CoreTransportPinTests {
     func systemTrustRefusesTheNode() async throws {
         let server = try await CoreTLSServer.start()
         defer { server.stop() }
-        let text = URLSessionCoreTransport().perform(
+        let transport = URLSessionCoreTransport()
+        let text = transport.perform(
             Self.request(id: 4, url: "https://127.0.0.1:\(server.port)/v1/questions", pin: nil))
         let error = try Self.answer(text)["error"] as? String
         #expect(error == "connect", "\(text)")
         #expect(server.requests.isEmpty)
+        let line = try #require(transport.problem(since: 0))
+        #expect(line.hasPrefix("connect, URLError -12"), "\(line)")
+        #expect(!line.contains("127.0.0.1") && !line.contains("Bearer"), "codes only: \(line)")
     }
 
     @Test("a pin with http, or a pin of another form, is never sent")
@@ -191,6 +196,34 @@ struct CoreTransportPinTests {
         ] {
             let text = transport.perform(Self.request(id: id, url: url, pin: pin))
             #expect(try Self.answer(text)["error"] as? String == "connect", "\(url) \(pin)")
+            #expect(transport.problem(since: 0) == "connect, the pin of the request is not valid")
         }
+    }
+
+    @Test("a call of the core that made no request says so")
+    func noRequest() {
+        let transport = URLSessionCoreTransport()
+        let mark = transport.sendCount()
+        #expect(transport.problem(since: mark) == "no request was made")
+        _ = transport.perform("not json")
+        #expect(transport.problem(since: mark) == "connect, the request of the core is not valid")
+        #expect(transport.problem(since: transport.sendCount()) == "no request was made")
+    }
+
+    @Test("a refused connection is connect with its error code, and no system proxy is turned off")
+    func refusedConnection() throws {
+        let configuration = URLSessionCoreTransport.configuration(minimumTLS: .TLSv12)
+        #expect(configuration.connectionProxyDictionary == nil, "nil keeps the proxies of the system")
+        #expect(configuration.waitsForConnectivity)
+        let transport = URLSessionCoreTransport()
+        let object: [String: Any] = [
+            "id": 8, "method": "GET", "url": "http://127.0.0.1:9/v1/questions", "headers": [[String]](),
+            "timeout_ms": 2_000,
+        ]
+        let text = transport.perform(String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self))
+        #expect(try Self.answer(text)["error"] as? String == "connect", "\(text)")
+        let line = try #require(transport.problem(since: 0))
+        #expect(line.hasPrefix("connect, "), "\(line)")
+        #expect(line.hasSuffix(" ms"), "\(line)")
     }
 }

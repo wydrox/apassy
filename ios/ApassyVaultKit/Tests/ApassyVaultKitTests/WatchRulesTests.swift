@@ -87,7 +87,14 @@ import Testing
     @Test func theConnectProblemsUseTheWordsOfTheSpec() {
         #expect(WatchConnectProblem.of(VaultError(.joinRefused, "x")) == .wordsDiffer)
         #expect(WatchConnectProblem.of(VaultError(.linkInvalid, "x")) == .codeExpired)
-        #expect(WatchConnectProblem.of(VaultError(.relayUnreachable, "x")) == .relayUnreachable)
+        #expect(WatchConnectProblem.of(VaultError(.relayUnreachable, "x")) == .relayUnreachable(detail: nil))
+        #expect(WatchConnectProblem.of(VaultError(.rateLimited, "x")) == .relayUnreachable(detail: nil))
+        #expect(
+            WatchConnectProblem.relayUnreachable(detail: nil).text
+                == "Couldn't reach the relay. Check that this watch is online, then start again on your iPhone.")
+        #expect(
+            WatchConnectProblem.relayUnreachable(detail: "connect: URLError -1009").text
+                == "Couldn't reach the relay. Check that this watch is online, then start again on your iPhone.\n\nDetails: connect: URLError -1009")
         #expect(
             WatchConnectProblem.of(VaultError(.macUpdateNeeded, "Update Apassy on your Mac to connect this watch."))
                 == .other("Update Apassy on your Mac to connect this watch."))
