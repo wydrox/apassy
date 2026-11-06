@@ -27,7 +27,12 @@ CONFIG = dict(mode='full', trainer='train.py', amp=False, epochs=4, batch=32,
 RECIPES = {'context-v1-e20': dict(CONFIG, epochs=20, recipe='context-v1-e20'),
            'context-v1-e20-denial-invariance-v1': dict(
                CONFIG, epochs=20, recipe='context-v1-e20-denial-invariance-v1',
-               training_views='denial-balanced-v1')}
+               training_views='denial-balanced-v1'),
+           'context-v1-e20-batch-tail-v1': dict(
+               CONFIG, epochs=20, recipe='context-v1-e20-batch-tail-v1',
+               training_objective='bce-plus-batch-tail-v1', runtime_profile='cuda-deterministic-v1')}
+BATCH_TAIL_RUNTIME_ENV = dict(PYTHONHASHSEED='7', CUBLAS_WORKSPACE_CONFIG=':4096:8',
+                              NVIDIA_TF32_OVERRIDE='0')
 G1_SHA256 = dict(train='a78f550019b5cfa9ddf9524476ab1ea940f2bd5c91a102c7433e821bdd6cfc5f',
                  val='a3284ff49471406ddde90668812b6715d2bf9c23a3893fbe0b585719352b3aa6',
                  data_manifest='c2478f94f5bea91f0485a0061037d4a36140502c32dd465eea39dd6571bc0efe')
@@ -114,7 +119,8 @@ def temperature_ok(meta, report, scorer):
 
 def development_reading(selection, validation, snapshots, keys, recipe):
     """Aggregate reused calibration data; no independent quality/safety claim."""
-    CANDIDATE_ATTEMPT = {'context-v1-e20': 2, 'context-v1-e20-denial-invariance-v1': 3}
+    CANDIDATE_ATTEMPT = {'context-v1-e20': 2, 'context-v1-e20-denial-invariance-v1': 3,
+                         'context-v1-e20-batch-tail-v1': 4}
     config_for(recipe)
     if recipe is None:
         raise Unsupported('development reading requires explicit recipe')
@@ -260,10 +266,68 @@ def report_ok(report, frozen, which, recipe=None):
             or type(report['trainable_parameters']) is not int or report['trainable_parameters'] <= 0
             or type(report['best_epoch']) is not int or not 1 <= report['best_epoch'] <= config['epochs']):
         raise Unsupported('trainer report configuration/counts/versions/checkpoint mismatch')
+    if recipe == 'context-v1-e20-batch-tail-v1':
+        batch_tail_report_ok(report, frozen)
+    elif 'training_objective' in report or 'runtime_profile' in report:
+        raise Unsupported('legacy recipe cannot claim objective/runtime profile')
     if recipe is not None:
         temperature = report.get('noul_temperature')
         if type(temperature) not in (float, int) or not math.isfinite(temperature) or temperature <= 0:
             raise Unsupported('trainer temperature invalid')
+
+
+def batch_tail_report_ok(report, frozen):
+    """Validate the opt-in objective and real R17 attestation without tensors."""
+    try:
+        if (report.get('training_objective') != dict(id='bce-plus-batch-tail-v1', train_loss='ce_plus_tail')
+                or report['device'] != 'cuda'):
+            raise Unsupported('batch-tail objective/device mismatch')
+        history = report['history']
+        if not isinstance(history, list) or len(history) != 20:
+            raise Unsupported('batch-tail history length mismatch')
+        for row in history:
+            objective = row['objective']
+            losses = [objective[k] for k in ('train_ce', 'train_tail')]
+            counts = [objective[k] for k in ('mixed_batches', 'positive_only_batches', 'negative_only_batches')]
+            if (set(objective) != {'train_ce', 'train_tail', 'mixed_batches',
+                                  'positive_only_batches', 'negative_only_batches'}
+                    or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in losses)
+                    or any(type(v) is not int or v < 0 for v in counts)
+                    or sum(counts) != (report['train_examples'] + 31) // 32):
+                raise Unsupported('batch-tail objective history accounting mismatch')
+        seal = report['runtime_profile']
+        flags = dict(deterministic=True, warn_only=False, cudnn_benchmark=False,
+                     cudnn_deterministic=True, fill_uninitialized_memory=True,
+                     fp32_precision=['ieee'] * 5, threads=4)
+        if (set(seal) != {'schema', 'profile', 'seed', 'effective', 'software', 'initial_head_sha256'}
+                or type(seal['schema']) is not int or seal['schema'] != 1
+                or seal['profile'] != 'cuda-deterministic-v1'
+                or type(seal['seed']) is not int or seal['seed'] != 7
+                or seal['effective'] != dict(flags=flags, environment=BATCH_TAIL_RUNTIME_ENV)
+                or not isinstance(seal['initial_head_sha256'], str)
+                or re.fullmatch(r'[0-9a-f]{64}', seal['initial_head_sha256']) is None):
+            raise Unsupported('batch-tail runtime profile mismatch')
+        # Equality alone would accept bools as integers in JSON readbacks.
+        actual_flags = seal['effective']['flags']
+        if any(type(actual_flags[k]) is not type(v) for k, v in flags.items()):
+            raise Unsupported('batch-tail runtime flag types mismatch')
+        software = seal['software']
+        device = software['device']
+        if (set(software) != {'torch', 'cuda', 'cudnn', 'python', 'numpy', 'packages', 'device'}
+                or software['torch'] != frozen['package_versions']['torch']
+                or software['torch'] != '2.14.0+cu130' or software['cuda'] != '13.0'
+                or type(software['cudnn']) is not int or software['cudnn'] <= 0
+                or any(type(software[k]) is not str or not software[k] for k in ('python', 'numpy'))
+                or software['packages'] != {k: frozen['package_versions'][k]
+                                            for k in ('laya', 'transformers', 'tokenizers')}
+                or set(device) != {'index', 'name', 'compute_capability'}
+                or type(device['index']) is not int or device['index'] < 0
+                or type(device['name']) is not str or not device['name']
+                or type(device['compute_capability']) is not list or len(device['compute_capability']) != 2
+                or any(type(v) is not int or v < 0 for v in device['compute_capability'])):
+            raise Unsupported('batch-tail runtime software mismatch')
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise Unsupported('invalid batch-tail report') from exc
 
 
 def verify_conversion(frozen, c, recipe=None):
@@ -301,6 +365,10 @@ def verify_conversion(frozen, c, recipe=None):
             report = read_json(checked(frozen['training_reports'][which]))
             report_ok(report, frozen, which)
             reports.append(report)
+        if recipe == 'context-v1-e20-batch-tail-v1':
+            for key in ('effective', 'software', 'initial_head_sha256'):
+                if reports[0]['runtime_profile'][key] != reports[1]['runtime_profile'][key]:
+                    raise Unsupported('batch-tail cross-arm runtime identity mismatch')
         if reports[0]['trainable_parameters'] != reports[1]['trainable_parameters']:
             raise Unsupported('trainer head parameter mismatch')
     except Unsupported:
@@ -351,22 +419,27 @@ def require_device(device, torch):
 
 def trainer_command(base, data, out, meta, report, cache, device, recipe=None):
     config = config_for(recipe)
-    return [sys.executable, str(Path(__file__).with_name('train.py')), '--base-dir', str(base),
+    command = [sys.executable, str(Path(__file__).with_name('train.py')), '--base-dir', str(base),
             '--metadata', str(meta), '--data', str(data), '--out', str(out), '--report', str(report),
             '--cache-dir', str(cache), '--no-amp', '--device', device, '--require-device',
             '--name', model_name(recipe),
             '--epochs', str(config['epochs']), '--batch', '32', '--lr', '0.0003', '--weight-decay', '0.01',
             '--warmup', '100', '--seed', '7']
+    if recipe == 'context-v1-e20-batch-tail-v1':
+        command += ['--objective', config['training_objective'], '--runtime-profile', config['runtime_profile']]
+    return command
 
 
 def train_arm(base, data, checkpoint, metadata, report, cache, device, recipe=None):
     config_for(recipe)
     if cache.exists():
         raise Unsupported('trainer cache must be fresh')
+    env = {**os.environ, 'HF_HUB_OFFLINE': '1', 'OMP_NUM_THREADS': '4', 'MKL_NUM_THREADS': '4'}
+    if recipe == 'context-v1-e20-batch-tail-v1':
+        env.update(BATCH_TAIL_RUNTIME_ENV)
     try:
         subprocess.run(trainer_command(base, data, checkpoint, metadata, report, cache, device, recipe),
-                       env={**os.environ, 'HF_HUB_OFFLINE': '1', 'OMP_NUM_THREADS': '4',
-                            'MKL_NUM_THREADS': '4'}, timeout=5400, check=True)
+                       env=env, timeout=5400, check=True)
     finally:
         if cache.exists():
             shutil.rmtree(cache)
@@ -375,6 +448,8 @@ def train_arm(base, data, checkpoint, metadata, report, cache, device, recipe=No
 def run(data, out, base, device, contract=CONTRACT, source_sha=None, recipe=None):
     """Explicit future run only; caller must obtain resource/owner approval first."""
     config = config_for(recipe)
+    if recipe == 'context-v1-e20-batch-tail-v1' and device != 'cuda':
+        raise Unsupported('batch-tail recipe requires CUDA')
     # Path checks and exclusive output precede any model imports.
     if source_sha is not None and (not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', source_sha)):
         raise Unsupported('invalid source SHA')
@@ -461,6 +536,13 @@ def run(data, out, base, device, contract=CONTRACT, source_sha=None, recipe=None
                     or meta.get('epoch') != trainer_report['best_epoch']
                     or meta.get('base_repo') != manifest['base']['repo']):
                 raise Unsupported('checkpoint trainer metadata mismatch')
+            if recipe == 'context-v1-e20-batch-tail-v1':
+                if (meta.get('training_objective') != config['training_objective']
+                        or 'training_objective' not in meta
+                        or meta.get('runtime_profile') != trainer_report['runtime_profile']):
+                    raise Unsupported('checkpoint objective/runtime metadata mismatch')
+            elif 'training_objective' in meta or 'runtime_profile' in meta:
+                raise Unsupported('legacy checkpoint cannot claim objective/runtime profile')
             cache = core.FeatureCache(limit=CACHE_BYTES)
             scorer = None
             try:

@@ -1472,6 +1472,13 @@ jobs:
         assert tensor_sum == 64
         print('CPU runtime preflight PASS')
         PYCODE
+    - name: Validate batch-tail objective on CPU only
+      env:
+        PYTHONHASHSEED: '7'
+      run: |
+        set -euo pipefail
+        "$PY" -B tests/basemodel/cpu_preflight_batch_tail.py \
+          --evidence "$EXP/evidence/objective-cpu-preflight.json"
     - name: Record CPU runtime and disk evidence
       run: |
         "$PY" -B - <<'PYCODE'

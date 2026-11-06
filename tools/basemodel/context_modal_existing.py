@@ -38,7 +38,7 @@ RUNTIME_ENV = dict(NVIDIA_TF32_OVERRIDE='0', HF_HUB_OFFLINE='1',
 
 def deadline_limits(recipe=None):
     if recipe is not None and (not isinstance(recipe, str) or recipe not in (
-            'context-v1-e20', 'context-v1-e20-denial-invariance-v1')):
+            'context-v1-e20', 'context-v1-e20-denial-invariance-v1', 'context-v1-e20-batch-tail-v1')):
         raise ValueError('unknown training recipe')
     return dict(function_timeout=FUNCTION_TIMEOUT if recipe is None else 7200,
                 remote=REMOTE_LIMIT_S if recipe is None else 7200,
@@ -165,7 +165,7 @@ def _serialized_entry(volume):
     # only after independently hashing every staged regular file (including itself).
     def entry(run_id, source_sha, deadline_epoch, inventory_sha256, recipe=None):
         if recipe is not None and (not isinstance(recipe, str) or recipe not in (
-                'context-v1-e20', 'context-v1-e20-denial-invariance-v1')):
+                'context-v1-e20', 'context-v1-e20-denial-invariance-v1', 'context-v1-e20-batch-tail-v1')):
             raise ValueError('unknown training recipe')
         import time
         if time.time() >= deadline_epoch:
@@ -401,7 +401,7 @@ def main(argv=None):
     launch_parser.add_argument('--approved-budget-usd', required=True, type=float)
     launch_parser.add_argument('--evidence-dir', required=True)
     launch_parser.add_argument('--recipe', choices=(
-        'context-v1-e20', 'context-v1-e20-denial-invariance-v1'))
+        'context-v1-e20', 'context-v1-e20-denial-invariance-v1', 'context-v1-e20-batch-tail-v1'))
     args = parser.parse_args(argv)
     options = {} if args.recipe is None else dict(recipe=args.recipe)
     launch(args.source_sha, args.run_id, args.approved_budget_usd, args.evidence_dir,

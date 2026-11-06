@@ -119,7 +119,7 @@ jobs:
       contents: read
       actions: read
     outputs:
-      reuse: ${{ inputs.context_experiment == 'development-diagnostic' && 'true' || steps.select.outputs.reuse }}
+      reuse: ${{ (inputs.context_experiment == 'development-diagnostic' || inputs.context_experiment == 'cuda-preflight') && 'true' || steps.select.outputs.reuse }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -662,7 +662,7 @@ jobs:
     # No signing credentials enter this job. Its artifact is eligible for Release
     # only after all CI jobs pass for a push to main in this repository, so a pull
     # request does not build it; the macos job compiles the same features.
-    if: github.event_name != 'pull_request' && inputs.context_experiment != 'development-diagnostic'
+    if: github.event_name != 'pull_request' && inputs.context_experiment != 'development-diagnostic' && inputs.context_experiment != 'cuda-preflight'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

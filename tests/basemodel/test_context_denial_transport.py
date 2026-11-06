@@ -286,7 +286,7 @@ class DenialTransportTests(unittest.TestCase):
         self.assertIsInstance(entry.body[0], ast.If)
         choices = [n.comparators[0] for n in ast.walk(entry.body[0].test)
                    if isinstance(n, ast.Compare) and isinstance(n.ops[0], ast.NotIn)]
-        self.assertEqual([ast.literal_eval(n) for n in choices], [(E20, RECIPE)])
+        self.assertEqual([ast.literal_eval(n) for n in choices], [(E20, RECIPE, 'context-v1-e20-batch-tail-v1')])
         bundle = ast.parse((REPO / 'tools/basemodel/context_external_bundle.py').read_text())
         pack = next(n for n in bundle.body if isinstance(n, ast.FunctionDef) and n.name == 'pack')
         formats = [k.value for n in ast.walk(pack) if isinstance(n, ast.Call)

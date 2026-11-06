@@ -81,7 +81,7 @@ class DevelopmentWorkflow(unittest.TestCase):
                     with self.subTest(event=event, mode=mode, reuse=prior_reuse):
                         v = self.values(event, mode, prior_reuse)
                         reuse = evaluate(field(self.ci['reuse-pr'], 'reuse', 6), v)
-                        self.assertEqual(reuse, 'true' if mode == 'development-diagnostic' else prior_reuse)
+                        self.assertEqual(reuse, 'true' if mode in ('development-diagnostic', 'cuda-preflight') else prior_reuse)
                         v['needs.reuse-pr.outputs.reuse'] = reuse
                         active = {name for name, body in self.ci.items()
                                   if name == 'reuse-pr' or evaluate(field(body, 'if'), v)}
@@ -89,7 +89,7 @@ class DevelopmentWorkflow(unittest.TestCase):
                         self.assertEqual('context-experiment' in active, bridge)
                         self.assertEqual(active & ordinary, ordinary if reuse != 'true' else set())
                         self.assertEqual('release-binaries' in active,
-                                         event != 'pull_request' and mode != 'development-diagnostic')
+                                         event != 'pull_request' and mode not in ('development-diagnostic', 'cuda-preflight'))
                         called = {name for name, body in self.called.items()
                                   if evaluate(field(body, 'if'), v)}
                         if mode == 'development-diagnostic':

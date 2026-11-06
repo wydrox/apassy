@@ -49,7 +49,7 @@ QUESTIONS = ["task_match", "writes", "remote", "leak", "destroy", "rule_break", 
 
 # Every key authored by the trainer is reserved, including the base pin.
 RESERVED_METADATA = frozenset(('name', 'base_repo', 'base_revision', 'trained',
-                               'noul_temperature', 'epoch', 'runtime_profile'))
+                               'noul_temperature', 'epoch', 'runtime_profile', 'training_objective'))
 
 
 def extra_metadata(raw):
@@ -256,6 +256,60 @@ def collate(items, pad):
         "y": torch.tensor([it["y"] for it in items], dtype=torch.float32),
         "q": torch.tensor([it["q"] for it in items]),
     }
+
+
+def batch_tail_term(logits, y, temperature):
+    """Opt-in hard-label batch tail; amax shares gradients across maximum ties."""
+    import numbers
+    if not isinstance(temperature, numbers.Real) or isinstance(temperature, bool):
+        raise ValueError('invalid batch-tail temperature')
+    try:
+        temperature = float(temperature)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError('invalid batch-tail temperature') from exc
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError('invalid batch-tail temperature')
+    if (not isinstance(logits, torch.Tensor) or not logits.is_floating_point()
+            or logits.layout != torch.strided
+            or logits.ndim != 2 or logits.shape[0] == 0 or logits.shape[1] != 2
+            or not bool(torch.isfinite(logits).all())):
+        raise ValueError('invalid batch-tail logits')
+    if (not isinstance(y, torch.Tensor) or y.layout != torch.strided or y.is_complex() or y.requires_grad
+            or y.ndim != 1 or y.shape[0] != logits.shape[0] or y.device != logits.device
+            or not bool(torch.isfinite(y).all()) or not bool(((y == 0) | (y == 1)).all())):
+        raise ValueError('invalid batch-tail labels')
+    if not bool(torch.isfinite(logits / temperature).all()):
+        raise ValueError('nonfinite batch-tail normalized logits')
+    z = (logits[:, 1] - logits[:, 0]) / temperature
+    if not bool(torch.isfinite(z).all()):
+        raise ValueError('nonfinite batch-tail scores')
+    positive, negative = y == 1, y == 0
+    if not bool(positive.any()) or not bool(negative.any()):
+        return logits.new_zeros(()), 'positive_only' if bool(positive.any()) else 'negative_only'
+    top = torch.amax(z.masked_fill(positive, -math.inf))
+    delta = top - z
+    if not bool(torch.isfinite(delta).all()):
+        raise ValueError('nonfinite batch-tail differences')
+    terms = F.softplus(delta) * positive
+    tail = terms.sum() / positive.sum()
+    if not bool(torch.isfinite(terms).all()) or not bool(torch.isfinite(tail)):
+        raise ValueError('nonfinite batch-tail term')
+    return tail, 'mixed'
+
+
+def objective_items_ok(items):
+    """Validate encoded splits without changing labels or teacher targets."""
+    if not isinstance(items, (list, tuple)):
+        raise ValueError('objective requires encoded items')
+    classes = set()
+    for item in items:
+        if (not isinstance(item, dict) or type(item.get('y')) not in (int, float)
+                or item['y'] not in (0, 1) or item.get('teacher') is not False
+                or type(item.get('q')) is not int or item['q'] != QUESTIONS.index('owner_accepts_use')):
+            raise ValueError('objective requires hard owner_accepts_use non-teacher items')
+        classes.add(item['y'])
+    if classes != {0, 1}:
+        raise ValueError('objective requires both classes in each split')
 
 
 def targets(y):
@@ -566,6 +620,7 @@ def main(argv=None):
     ap.add_argument("--max-steps", type=int, default=0)
     ap.add_argument("--no-amp", action="store_true")
     ap.add_argument("--runtime-profile", choices=('cuda-deterministic-v1',), default=None)
+    ap.add_argument("--objective", choices=('bce-plus-batch-tail-v1',), default=None)
     ap.add_argument("--skip-baseline", action="store_true")
     ap.add_argument("--lora-layers", type=int, default=0,
                     help="also train LoRA adapters in the last N encoder layers (measurement only, no checkpoint)")
@@ -581,6 +636,10 @@ def main(argv=None):
     metadata = extra_metadata(args.metadata)
     if args.base_dir and not os.path.isdir(args.base_dir):
         raise ValueError('base-dir must be an existing local directory')
+
+    if args.objective is not None:
+        if args.init or args.lora_layers:
+            raise ValueError('objective does not support --init or --lora-layers')
 
     if args.runtime_profile is not None:
         runtime_startup = configure_runtime(args)
@@ -620,6 +679,9 @@ def main(argv=None):
     t_enc = time.time()
     train_items = encode(agent, train_rows)
     val_items = encode(agent, val_rows)
+    if args.objective is not None:
+        objective_items_ok(train_items)
+        objective_items_ok(val_items)
     print("encoded %d train and %d val examples in %.1fs" % (len(train_items), len(val_items), time.time() - t_enc), flush=True)
 
     for p in model.parameters():
@@ -696,6 +758,9 @@ def main(argv=None):
         model.head.train()
         running, count = 0.0, 0
         window, window_n = 0.0, 0
+        if args.objective is not None:
+            train_ce = train_tail = 0.0
+            objective_batches = dict(mixed=0, positive_only=0, negative_only=0)
         for idx in batches(train_items, args.batch, rng, True):
             b = collate([train_items[i] for i in idx], pad)
             if train_cache:
@@ -704,6 +769,12 @@ def main(argv=None):
                 h = encoder_states(model, b, device, amp, grad=bool(args.lora_layers))
             logits = head_logits(model, h, b, device)
             loss = F.cross_entropy(logits / temperature, targets(b["y"]).to(device))
+            if args.objective is not None:
+                tail, kind = batch_tail_term(logits, b["y"].to(device), temperature)
+                train_ce += float(loss.detach()) * len(idx)
+                train_tail += float(tail.detach()) * len(idx)
+                objective_batches[kind] += 1
+                loss = loss + tail
             for g in opt.param_groups:
                 g["lr"] = lr_at(step)
             opt.zero_grad(set_to_none=True)
@@ -739,6 +810,12 @@ def main(argv=None):
         release_cache()
         history.append({"epoch": epoch + 1, "train_loss": running / max(1, count), "val": val,
                         "seconds": time.time() - t_train})
+        if args.objective is not None:
+            history[-1]['objective'] = dict(
+                train_ce=train_ce / max(1, count), train_tail=train_tail / max(1, count),
+                mixed_batches=objective_batches['mixed'],
+                positive_only_batches=objective_batches['positive_only'],
+                negative_only_batches=objective_batches['negative_only'])
         print("epoch %d val nll %.4f: %s" % (epoch + 1, val["all_nll"], json.dumps(
             {k: [round(v["accuracy"], 3), round(v["ece"], 3)] for k, v in val.items() if isinstance(v, dict)})), flush=True)
         if best is None or val["all_nll"] < best["all_nll"]:
@@ -753,6 +830,8 @@ def main(argv=None):
                 "epoch": epoch + 1,
             }
             meta.update(metadata)
+            if args.objective is not None:
+                meta['training_objective'] = args.objective
             if args.runtime_profile is not None:
                 validate_runtime(runtime_seal, device)
                 meta["runtime_profile"] = runtime_seal
@@ -802,6 +881,8 @@ def main(argv=None):
         # Read installed distribution versions, never caller assertions.
         from context_train import package_versions
         report["versions"] = package_versions()
+    if args.objective is not None:
+        report['training_objective'] = dict(id=args.objective, train_loss='ce_plus_tail')
     path = args.report or args.out + ".report.json"
     if args.runtime_profile is not None:
         validate_runtime(runtime_seal, device)

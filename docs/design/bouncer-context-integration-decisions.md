@@ -570,3 +570,64 @@ References: [PyTorch 2.14 reproducibility](https://docs.pytorch.org/docs/2.14/no
 and [CUDA precision controls](https://docs.pytorch.org/docs/2.14/notes/cuda.html).
 This record permits unpaid source preparation only. A future training candidate
 still needs its own recipe, reading rule, runtime validation and resource decision.
+
+## R18 — batch-tail objective preparation (2026-11-06)
+
+R17 has a source ACCEPT and green draft CI on `66082fa1`; its real CUDA behavior
+and repeatability are still NOT_RUN. All three paid trials are consumed. The
+owner goal remains unmet, independent quality/safety UNKNOWN, B UNSUPPORTED and
+production unchanged. This record authorizes unpaid source preparation and
+CPU-only validation, not a fourth training or a new held-out effort.
+
+The next fixed hypothesis is `bce-plus-batch-tail-v1`. For the existing two logits
+and positive temperature T, let z=(logit_yes-logit_no)/T. On a mixed hard-label
+batch add mean_positive softplus(max_negative(z)-z_positive) to the unchanged
+mean cross-entropy. The coefficient is exactly 1, with no margin or search.
+Use `amax`, `masked_fill` and mask multiplication, not boolean indexing. A
+single-class batch has zero tail term; each whole split must contain both
+classes. Refuse malformed/nonfinite inputs, soft/teacher labels, other questions,
+initial checkpoints and LoRA for the new objective.
+
+The term targets the most confident negative within its own batch. It is not a
+global-maximum guarantee, and length bucketing limits the comparisons. Its
+shift invariance applies to the tail term only. Gradient clipping, AdamW and
+generalization remain limitations. The conceptual reference is
+[Top Rank Optimization in Linear Time](https://proceedings.neurips.cc/paper_files/paper/2014/file/1f1f37ef046902cfd7abecc00f2fc9af-Paper.pdf);
+the paper's linear algorithm and guarantees are not claimed for this variant.
+
+Prepare opt-in recipe `context-v1-e20-batch-tail-v1` on original E20 rows, without
+the denial-balanced view. Both arms use the same objective and explicit R17
+runtime profile. Keep 20 epochs, original batch/schedule/steps and optimizer,
+minimum-validation-NLL selection, CPU threshold fit and original validation.
+Only this recipe's trainer subprocess gets startup PYTHONHASHSEED=7,
+CUBLAS_WORKSPACE_CONFIG=:4096:8 and NVIDIA_TF32_OVERRIDE=0. Refuse non-CUDA for
+this recipe before output creation. Existing recipes keep their own paths.
+
+Bind the objective and runtime in config, checkpoint metadata and top-level
+report fields. Keep `report.config` and `context_meta_ok` unchanged. Record
+row-weighted CE and tail components and mixed/positive-only/negative-only batch
+counts for each epoch. Reports must validate those counts and runtime identity.
+Before emitting a complete freeze, require matching initial trained-head hashes,
+effective settings and software/device identity across arms; calibration may
+remain sequential. No existing recipe may claim these new report fields.
+
+The proposed candidate reading is attempt 4 only for this new recipe. Preserve
+sample SHA-256 `864ea9c6f39c3c2cc910aa5fa1af2bc0e0f3ce78279b2fc4d8f5c74f8cc8dce4`.
+Both 43/85 unpaired and 46/91 paired normal permissions are required for
+`DEV_50_NOT_RULED_OUT`. Report the full original 377-normal denominator. A miss
+or incomplete result ends this fixed variant without threshold, checkpoint or
+population rescue and without automatic retry. Production normal 60 percent and
+all safety gates stay unchanged; no result here establishes independent quality.
+
+Validate source wiring with stdlib/fake tests. Then, after exact-head PR CI and
+source review, run one isolated `cuda-preflight` on hosted Linux with the exact
+pinned CUDA distribution and CUDA hidden. Test tiny CPU tensors, loss/gradient
+oracles, ties, invalid inputs, R17 control readbacks and real head hashing. Load
+no model or dataset. Keep this script outside ordinary `test_*.py` discovery.
+Its evidence must say GPU and model NOT_RUN. The existing CI bridge must skip
+ordinary/release jobs for this mode, leaving only the CPU job and reuse helper.
+
+No runner, permission, secret, upload path, receipt key or resource-limit increase
+is included. A future spending decision comes only after these checks pass. It
+must state that real CUDA determinism is unverified and a runtime refusal would
+consume that future attempt as incomplete. No spending decision is granted here.

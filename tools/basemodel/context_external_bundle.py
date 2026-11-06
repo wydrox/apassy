@@ -119,7 +119,8 @@ def _receipt(r):
     legacy = {'groups': 400, 'seed': 7, 'device': 'cuda'}
     require(isinstance(config, dict) and
             (config == legacy or config == dict(legacy, recipe='context-v1-e20') or
-             config == dict(legacy, recipe='context-v1-e20-denial-invariance-v1')) and
+             config == dict(legacy, recipe='context-v1-e20-denial-invariance-v1') or
+             config == dict(legacy, recipe='context-v1-e20-batch-tail-v1')) and
             all(type(config[k]) is int for k in ('groups', 'seed')), 'receipt config')
     require(r['schema'] == 'apassy-context-modal-receipt-v1')
     run_root(r['run_id'])
