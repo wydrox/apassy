@@ -430,6 +430,7 @@ class BatchTailSourceContracts(unittest.TestCase):
                                      'context_train_rows', 'context_existing_freeze',
                                      'common', 'requests', 'huggingface_hub', 'boto3'})
         calls = {ast.unparse(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+        self.assertIn('print', calls)
         self.assertFalse(any('from_pretrained' in call or call.endswith('.cuda')
                              or 'load_model' in call or 'load_dataset' in call
                              or 'secret' in call.lower() for call in calls))

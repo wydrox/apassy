@@ -248,12 +248,10 @@ def main(argv=None):
     evidence['count'] = len(evidence['cases'])
     if success:
         evidence.update(status='PASS', failure=None)
-    else:
-        evidence['cases'] = []
-        evidence['count'] = 0
     evidence.setdefault('runtime_settings', None)
     encoded = json.dumps(evidence, sort_keys=True, allow_nan=False) + '\n'
     require(len(encoded) < 16384)
+    print(encoded, end='', flush=True)
     path = Path(args.evidence)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(encoded)
