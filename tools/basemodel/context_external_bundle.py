@@ -18,7 +18,7 @@ TORCH_SHA256 = '9c5693d3ca91743202034094ad3b3df20b5eb1373d5e0bc8a5d976be12c35302
 PACKAGE_VERSIONS = {'laya': '0.3.20', 'torch': '2.14.0+cu130', 'transformers': '5.17.0', 'tokenizers': '0.23.2'}
 UPLOAD_PATHS = tuple(sorted(
     ['tools/basemodel/' + p for p in (
-        'common.py', 'context_data.py', 'context_eval.py', 'context_existing_freeze.py',
+        'common.py', 'context_data.py', 'context_dev_diagnostic.py', 'context_eval.py', 'context_existing_freeze.py',
         'context_external_bundle.py', 'context_modal_existing.py', 'context_replay.py',
         'context_train.py', 'context_train_rows.py', 'context_v1.py', 'fetch_weights.py',
         'manifest.json', 'requirements.txt', 'requirements-cu130.txt', 'train.py',
@@ -115,6 +115,11 @@ def _json(raw):
 
 def _receipt(r):
     require(isinstance(r, dict) and set(r) == RECEIPT_KEYS, 'receipt keys')
+    config = r['config']
+    legacy = {'groups': 400, 'seed': 7, 'device': 'cuda'}
+    require(isinstance(config, dict) and
+            (config == legacy or config == dict(legacy, recipe='context-v1-e20')) and
+            all(type(config[k]) is int for k in ('groups', 'seed')), 'receipt config')
     require(r['schema'] == 'apassy-context-modal-receipt-v1')
     run_root(r['run_id'])
     require(_hex(r['source_sha'], 40) and _hex(r['freeze_sha256']))
@@ -123,8 +128,6 @@ def _receipt(r):
     require(r['inventory_sha256'] == inventory_sha256(r['inventory']))
     require(r['package_versions'] == PACKAGE_VERSIONS and r['torch_wheel_sha256'] == TORCH_SHA256)
     require(isinstance(r['gpu_name'], str) and r['gpu_name'] in SUPPORTED_GPU_NAMES)
-    require(r['config'] == {'groups': 400, 'seed': 7, 'device': 'cuda'}
-            and all(type(r['config'][k]) is int for k in ('groups', 'seed')))
     require(r['env'] == {'NVIDIA_TF32_OVERRIDE': '0'})
     require(all(type(r[k]) in (int, float) and math.isfinite(r[k]) and r[k] >= 0
                 for k in ('started_epoch', 'finished_epoch')))
@@ -247,6 +250,8 @@ def verify_restored(root, receipt, run_id, source_sha, expected_freeze_sha, repo
     import context_train as T
     require(T.package_versions() == PACKAGE_VERSIONS, 'package versions differ')
     frozen = _json((root / 'full/freeze.json').read_bytes())
+    require(frozen.get('config', {}).get('recipe') == receipt['config'].get('recipe'),
+            'receipt/freeze recipe differs')
     expected = {'train': root / 'g1/train.jsonl', 'val': root / 'g1/val.jsonl',
                 'data_manifest': root / 'g1/data-manifest.json',
                 'context': root / 'full/context.safetensors', 'control': root / 'full/control.safetensors'}

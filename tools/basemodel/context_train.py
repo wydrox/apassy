@@ -40,7 +40,7 @@ def environment(base, c):
 
 
 SOURCE_FILES = ('context_v1.py', 'context_data.py', 'context_train.py', 'context_eval.py', 'train.py', 'common.py',
-                'context_train_rows.py', 'context_existing_freeze.py')
+                'context_train_rows.py', 'context_existing_freeze.py', 'context_dev_diagnostic.py')
 CACHE_BYTES = 6 * 1024**3
 
 
@@ -309,6 +309,7 @@ class Scorer:
     def scores(self, rows, facts_blind=False, reinforced=False):
         import train
         out, self.last_overflow, self.last_refusals = [], [], []
+        self.last_scores = out
         self.model.eval()
         with self.torch.no_grad():
             for row in rows:
@@ -614,11 +615,12 @@ class Scorer:
             raise
 
 
-def context_meta_ok(meta, which, c, weights_sha):
+def context_meta_ok(meta, which, c, weights_sha, recipe=None):
     """Shared checkpoint pin predicate for existing training and evaluation."""
     if which not in ('context', 'control'):
         raise Unsupported('unknown context arm')
-    return (meta.get('context_contract_sha256') == contract_hash(c)
+    return (meta.get('recipe') == recipe
+            and meta.get('context_contract_sha256') == contract_hash(c)
             and meta.get('question') == 'owner_accepts_use'
             and meta.get('facts_blind') == (which == 'control')
             and meta.get('tokenizer_sha256') == c['tokenizer']['sha256']
@@ -663,13 +665,16 @@ def verify_freeze(freeze_path, c, expect_freeze_sha256):
     cfg = frozen['config']
     if 'trainer' in cfg and cfg['trainer'] != 'train.py':
         raise Unsupported('unknown frozen trainer')
+    epochs = 4
     if cfg.get('trainer') == 'train.py':
+        from context_existing_freeze import frozen_config
+        epochs = frozen_config(frozen)['epochs']
         if (cfg.get('amp') is not False or cfg.get('batch') != 32
                 or cfg.get('limit') != 0 or cfg.get('max_steps') != 0
                 or any(cfg.get(k) for k in ('init', 'lora', 'lora_layers', 'lora_rank',
                                             'lora_alpha', 'teacher_rows'))):
             raise Unsupported('existing trainer configuration differs')
-    expected = dict(epochs=4, lr=.0003, wd=.01, warmup=100, threads=4, seed=7, max_steps=0, seconds_per_head=5400)
+    expected = dict(epochs=epochs, lr=.0003, wd=.01, warmup=100, threads=4, seed=7, max_steps=0, seconds_per_head=5400)
     if any(cfg.get(k) != v for k, v in expected.items()) or not 1 <= cfg['batch'] <= 64:
         raise Unsupported('full configuration differs')
     # Validate the entire path set before hashing even the first artifact.
@@ -732,7 +737,7 @@ def evaluate_frozen(freeze_path, heldout_path, heldout_manifest, base, c,
     checkpoints = {}
     for which in ('context', 'control'):
         tensors, meta = common.load_checkpoint(frozen[which]['path'])
-        if not context_meta_ok(meta, which, c, frozen['base']['weights_sha256']):
+        if not context_meta_ok(meta, which, c, frozen['base']['weights_sha256'], frozen['config'].get('recipe')):
             raise Unsupported('not matching context heads')
         checkpoints[which] = tensors
     # First held-out IO; external freeze identity and all code/pins were checked above.

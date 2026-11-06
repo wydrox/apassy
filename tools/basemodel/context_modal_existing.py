@@ -1,6 +1,6 @@
 """Owner-invoked, single-attempt existing CUDA trainer. Importing performs no RPC.
 
-The USD 8 envelope is an approval threshold, not a provider-enforced spend cap.
+The USD 8 envelope is a threshold, not owner approval or a provider-enforced spend cap.
 No release upload or evaluation is performed here.
 """
 import argparse
@@ -34,6 +34,15 @@ RUNTIME_ENV = dict(NVIDIA_TF32_OVERRIDE='0', HF_HUB_OFFLINE='1',
                    TRANSFORMERS_OFFLINE='1', OMP_NUM_THREADS='4', MKL_NUM_THREADS='4',
                    TOKENIZERS_PARALLELISM='false', HF_HOME='/opt/hf',
                    HF_HUB_DISABLE_IMPLICIT_TOKEN='1', PYTHONDONTWRITEBYTECODE='1')
+
+
+def deadline_limits(recipe=None):
+    if recipe is not None and (not isinstance(recipe, str) or recipe != 'context-v1-e20'):
+        raise ValueError('unknown training recipe')
+    return dict(function_timeout=FUNCTION_TIMEOUT if recipe is None else 7200,
+                remote=REMOTE_LIMIT_S if recipe is None else 7200,
+                caller=CALLER_CUTOFF_S if recipe is None else 8100,
+                build=IMAGE_BUILD_LIMIT_S, export_reserve=EXPORT_RESERVE_S)
 
 
 def _sha(value):
@@ -86,10 +95,13 @@ def _child(command, deadline, env):
         raise subprocess.CalledProcessError(code, command)
 
 
-def worker(run_id, source_sha, deadline_epoch, inventory_sha256):
+def worker(run_id, source_sha, deadline_epoch, inventory_sha256, recipe=None):
+    limits = deadline_limits(recipe)
     started = time.time()
     if not math.isfinite(deadline_epoch) or started >= deadline_epoch - EXPORT_RESERVE_S:
         raise TimeoutError('remote deadline')
+    if recipe is not None and deadline_epoch > started + limits['remote']:
+        raise TimeoutError('recipe deadline exceeds whole-attempt limit')
     _sha(source_sha)
     inv = _attest_tree(REMOTE_SRC, inventory_sha256)
     sys.path.insert(0, str(Path(REMOTE_SRC) / 'tools/basemodel'))
@@ -107,7 +119,10 @@ def worker(run_id, source_sha, deadline_epoch, inventory_sha256):
     root = bundle.run_root(run_id)
     import modal
     marker = modal.Dict.from_name(MARKER_DICT, create_if_missing=True, environment_name='main')
-    if marker.put(run_id, dict(source_sha=source_sha, started_epoch=started), skip_if_exists=True) is not True:
+    marker_value = dict(source_sha=source_sha, started_epoch=started)
+    if recipe is not None:
+        marker_value['recipe'] = recipe
+    if marker.put(run_id, marker_value, skip_if_exists=True) is not True:
         raise ValueError('run marker already consumed; no retry')
     root.parent.mkdir(parents=True, exist_ok=True)
     root.mkdir(mode=0o700)  # Never clean up a root we did not create.
@@ -119,16 +134,21 @@ def worker(run_id, source_sha, deadline_epoch, inventory_sha256):
         scripts = Path(REMOTE_SRC) / 'tools/basemodel'
         _child([sys.executable, str(scripts / 'context_data.py'), '--out', str(root / 'g1'),
                 '--groups', '400', '--seed', '7'], deadline_epoch, env)
-        _child([sys.executable, str(scripts / 'context_existing_freeze.py'),
-                '--data', str(root / 'g1'), '--out', str(root / 'full'), '--base-dir', str(base),
-                '--device', 'cuda', '--source-sha', source_sha], deadline_epoch, env)
+        command = [sys.executable, str(scripts / 'context_existing_freeze.py'),
+                   '--data', str(root / 'g1'), '--out', str(root / 'full'), '--base-dir', str(base),
+                   '--device', 'cuda', '--source-sha', source_sha]
+        config = dict(groups=400, seed=7, device='cuda')
+        if recipe is not None:
+            command += ['--recipe', recipe]
+            config['recipe'] = recipe
+        _child(command, deadline_epoch, env)
         if time.time() >= deadline_epoch:
             raise TimeoutError('remote export deadline')
         freeze_sha = hashlib.sha256((root / 'full/freeze.json').read_bytes()).hexdigest()
         receipt = dict(schema='apassy-context-modal-receipt-v1', run_id=run_id, source_sha=source_sha,
                        inventory=inv, inventory_sha256=inventory_sha256, package_versions=versions,
                        torch_wheel_sha256=bundle.TORCH_SHA256, gpu_name=gpu_name, freeze_sha256=freeze_sha,
-                       config=dict(groups=400, seed=7, device='cuda'), env=dict(NVIDIA_TF32_OVERRIDE='0'),
+                       config=config, env=dict(NVIDIA_TF32_OVERRIDE='0'),
                        started_epoch=started, finished_epoch=time.time())
         result = bundle.pack(root, receipt, Path('/export/bundle.tar'))
         # Mounted Volume handle supplied by the serialized entrypoint, never RPC bytes.
@@ -142,7 +162,9 @@ def worker(run_id, source_sha, deadline_epoch, inventory_sha256):
 def _serialized_entry(volume):
     # A local closure forces cloudpickle-by-value. It imports the attested entrypoint
     # only after independently hashing every staged regular file (including itself).
-    def entry(run_id, source_sha, deadline_epoch, inventory_sha256):
+    def entry(run_id, source_sha, deadline_epoch, inventory_sha256, recipe=None):
+        if recipe is not None and (not isinstance(recipe, str) or recipe != 'context-v1-e20'):
+            raise ValueError('unknown training recipe')
         import time
         if time.time() >= deadline_epoch:
             raise TimeoutError('remote deadline')
@@ -166,7 +188,9 @@ def _serialized_entry(volume):
         sys.path.insert(0, str(root / 'tools/basemodel'))
         import context_modal_existing as implementation
         implementation._export_volume = volume
-        return implementation.worker(run_id, source_sha, deadline_epoch, inventory_sha256)
+        if recipe is None:
+            return implementation.worker(run_id, source_sha, deadline_epoch, inventory_sha256)
+        return implementation.worker(run_id, source_sha, deadline_epoch, inventory_sha256, recipe=recipe)
     return entry
 
 
@@ -210,7 +234,8 @@ def _image(modal, staging):
             .env(RUNTIME_ENV))
 
 
-async def _execute(staging, evidence, source_sha, run_id, inv_sha, start):
+async def _execute(staging, evidence, source_sha, run_id, inv_sha, start, recipe=None):
+    limits = deadline_limits(recipe)
     import modal  # Only guarded execution imports the SDK.
     if getattr(modal, '__version__', None) != '1.5.4':
         raise ValueError('Modal 1.5.4 launcher required')
@@ -225,7 +250,7 @@ async def _execute(staging, evidence, source_sha, run_id, inv_sha, start):
                 _save(evidence, 'volume.json', dict(volume_id=volume.object_id))
                 image = _image(modal, staging)
                 function = app.function(image=image, serialized=True, include_source=False,
-                                        gpu=GPU_PREFERENCES, cpu=CPU, memory=MEMORY_MIB, timeout=FUNCTION_TIMEOUT,
+                                        gpu=GPU_PREFERENCES, cpu=CPU, memory=MEMORY_MIB, timeout=limits['function_timeout'],
                                         retries=0, max_containers=1, volumes={'/export': volume},
                                         secrets=[])(_serialized_entry(volume))
                 # App entry eagerly resolves the image. Bound entry AND explicit build,
@@ -256,10 +281,14 @@ async def _execute(staging, evidence, source_sha, run_id, inv_sha, start):
                             remember_app()
                             watcher.cancel()
                             await asyncio.gather(watcher, return_exceptions=True)
-                    await asyncio.wait_for(build(), min(IMAGE_BUILD_LIMIT_S,
-                                                        start + REMOTE_LIMIT_S - time.time()))
+                    await asyncio.wait_for(build(), min(limits['build'],
+                                                        start + limits['remote'] - time.time()))
                     _save(evidence, 'spawn-intent.json', dict(run_id=run_id, epoch=time.time()))
-                    call = await function.spawn.aio(run_id, source_sha, start + REMOTE_LIMIT_S, inv_sha)
+                    if recipe is None:
+                        call = await function.spawn.aio(run_id, source_sha, start + limits['remote'], inv_sha)
+                    else:
+                        call = await function.spawn.aio(run_id, source_sha, start + limits['remote'], inv_sha,
+                                                        recipe=recipe)
                     _save(evidence, 'call.json', dict(call_id=call.object_id))
                     result = await call.get.aio()
                     if result.get('status') != 'ok':
@@ -300,13 +329,14 @@ async def _execute(staging, evidence, source_sha, run_id, inv_sha, start):
                                 await asyncio.wait_for(context.__aexit__(None, None, None), 60)
         async def bounded_attempt():
             # The attempt budget includes build and export, even if either stalls.
-            return await asyncio.wait_for(session(), max(0, start + REMOTE_LIMIT_S - time.time()))
-        return await asyncio.wait_for(bounded_attempt(), max(0, start + CALLER_CUTOFF_S - time.time()))
+            return await asyncio.wait_for(session(), max(0, start + limits['remote'] - time.time()))
+        return await asyncio.wait_for(bounded_attempt(), max(0, start + limits['caller'] - time.time()))
     finally:
         _save(evidence, 'after.json', await _snapshot())
 
 
-def launch(source_sha, run_id, approved_budget_usd, evidence_dir, repo_root):
+def launch(source_sha, run_id, approved_budget_usd, evidence_dir, repo_root, recipe=None):
+    limits = deadline_limits(recipe)
     start = time.time()
     if sys.implementation.name != 'cpython' or sys.version_info[:2] != (3, 12):
         raise ValueError('CPython 3.12 launcher required')
@@ -331,8 +361,10 @@ def launch(source_sha, run_id, approved_budget_usd, evidence_dir, repo_root):
     inv_sha = bundle.inventory_sha256(inv)
     receipt = dict(run_id=run_id, source_sha=source_sha, inventory_sha256=inv_sha,
                    approved_budget_usd=approved_budget_usd, envelope_usd=ENVELOPE_USD,
-                   started_epoch=start, deadline_epoch=start + REMOTE_LIMIT_S,
-                   caller_cutoff_epoch=start + CALLER_CUTOFF_S, environment='main')
+                   started_epoch=start, deadline_epoch=start + limits['remote'],
+                   caller_cutoff_epoch=start + limits['caller'], environment='main')
+    if recipe is not None:
+        receipt['recipe'] = recipe
     _save(evidence, 'attempt.json', receipt)
     try:
         with tempfile.TemporaryDirectory(prefix='apassy-modal-stage-') as temporary:
@@ -345,7 +377,11 @@ def launch(source_sha, run_id, approved_budget_usd, evidence_dir, repo_root):
                     stream.write(raw)
             if bundle.inventory(staging) != inv:
                 raise ValueError('staging differs from git inventory')
-            receipt.update(asyncio.run(_execute(staging, evidence, source_sha, run_id, inv_sha, start)))
+            if recipe is None:
+                result = _execute(staging, evidence, source_sha, run_id, inv_sha, start)
+            else:
+                result = _execute(staging, evidence, source_sha, run_id, inv_sha, start, recipe=recipe)
+            receipt.update(asyncio.run(result))
         receipt['finished_epoch'] = time.time()
         _save(evidence, 'success.json', receipt)
         return receipt
@@ -362,9 +398,11 @@ def main(argv=None):
     launch_parser.add_argument('--run-id', required=True)
     launch_parser.add_argument('--approved-budget-usd', required=True, type=float)
     launch_parser.add_argument('--evidence-dir', required=True)
+    launch_parser.add_argument('--recipe', choices=('context-v1-e20',))
     args = parser.parse_args(argv)
+    options = {} if args.recipe is None else dict(recipe=args.recipe)
     launch(args.source_sha, args.run_id, args.approved_budget_usd, args.evidence_dir,
-           Path(__file__).resolve().parents[2])
+           Path(__file__).resolve().parents[2], **options)
     return 0
 
 

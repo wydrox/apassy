@@ -409,3 +409,50 @@ Fresh judges see scored text/action views with neutral shuffled IDs, without sec
 Any author BLOCKED reply, post-handover defect, invariant/floor/preflight failure, byte mismatch or boundary breach ends H3 as UNSUPPORTED without repair, H4 or candidate failure. The parent records a closed `TERMINAL.json` marker; CI skips a terminal attempt and future execution refuses it. Infrastructure with no report, or rule-pack failure reproduced on a known synthetic case, stops for one review with unchanged bytes.
 
 A future execution package will use fresh CPU cost evidence on the locked candidate and G1 validation inputs, then verify capacity before the evaluator reads any H3 row. No reuse departure from R13 is selected here. It must include the shipped baseline, immutable training-source evaluator, one scoring pass, 240-minute evaluation and 300-minute job envelope, and bounded JSON evidence. Any genuinely new cost returns to the owner. No model execution is authorized by this record.
+## R15 — goal50 development recipe (2026-11-06)
+
+The owner requested continued work until at least 50 percent of correct uses are
+automatically allowed. D0's measured 3/85 unpaired and 0/91 paired correct uses
+remain negative development evidence. They do not establish independent quality.
+The existing production normal gate of 60 percent and all safety gates remain
+unchanged. Activation, merge and release are separate owner decisions.
+
+The next prepared recipe is explicitly `context-v1-e20`: the existing `train.py`
+and frozen encoder, 20 epochs, both context and blind arms, batch 32, FP32/noAMP,
+lr 3e-4, wd 0.01, warmup 100, seed 7, 4 threads, no init/LoRA/teacher/limit/max-steps,
+and 5400 seconds per head. More epochs also changes the cosine schedule. This is
+a training-length/schedule hypothesis, not an established cause or fix. Legacy
+`CONFIG`, default four-epoch behavior and historical source-bound freezes retain
+their own identities. Checkpoint choice remains minimum validation NLL.
+
+The new recipe binds the same G1 groups 400/seed 7 source hashes and the original
+D0 sample SHA-256 `864ea9c6f39c3c2cc910aa5fa1af2bc0e0f3ce78279b2fc4d8f5c74f8cc8dce4`
+before training. No data, label, feature, loss or threshold policy is changed.
+After loading the chosen checkpoint, the existing full-validation CPU scoring
+pass fits the threshold. The same aligned probabilities supply aggregate-only
+development evidence; no extra encoder/scoring pass is added. Every original
+normal row is accounted for, and contractual exclusions and unavailable scores
+remain explicit. The saved reading contains no row IDs, text or individual scores.
+
+Development progress requires both at least 43 of 85 unpaired and 46 of 91 paired
+correct uses on that pinned sample, with complete coverage. Its only positive
+reading is `DEV_50_NOT_RULED_OUT`, alongside the unchanged D0 references of 60 percent
+normal permission and 90 percent pair ordering. The sample has already been read
+once for D0; this candidate is read attempt 2, including the historical miss.
+Calibration zeros are not independent safety evidence. Independent confirmation
+and all existing safety gates are still required before claiming goal completion;
+no new held-out corpus or independent execution is authorized by this record.
+
+The U1 source-only input check found that selected context labels use only the
+visible request/action/facts; non-null local rules are excluded before conversion.
+It establishes no neural learnability or label correctness. Per-epoch empirical
+operating-point diagnostics are observational and do not choose the checkpoint.
+
+The prepared resource envelope is one opt-in A10/L4 attempt in workspace
+`rodzina260622`, environment `main`, 4 CPU cores/32 GiB, no retry, global remote limit
+120 minutes including image build <= 30 minutes and 15 minutes export reserve, and an
+independent 135-minute caller cutoff. The previous one-USD8 training is consumed.
+This record grants no new spending: a concrete new USD 8 owner decision follows
+source review and green exact-source CI. It is an authorization envelope, not a
+provider-enforced spend cap or a billing measurement. Legacy launcher limits
+remain unchanged. Existing app/volume cleanup and persistent run markers apply.
