@@ -223,8 +223,12 @@ fn logs_filter_the_rows_and_open_a_cloud_run() {
     let cloud = data.events[1].key();
     let mut app = app_with(&dir, Place::Logs, ActivityScope::default(), data);
     let text = frames(&mut app, 4);
+    // Recent fixture rows can be yesterday's when this runs just after local midnight.
+    assert!(
+        text.lines().any(|line| matches!(line, "Today" | "Yesterday")),
+        "the recent fixture has a relative day heading: {text}"
+    );
     for expected in [
-        "Today",
         "Time",
         "Environment",
         "Event",
@@ -287,6 +291,69 @@ fn logs_filter_the_rows_and_open_a_cloud_run() {
     assert!(!text.contains("SECRET-PATH"), "{text}");
     // The chevrons of the rows are drawn: SF Pro has no "⌄", which showed as a box.
     assert!(!text.contains('⌄') && !text.contains('›'), "{text}");
+}
+
+/// Headers belong to the first displayed group even when every row is older than today.
+#[test]
+fn older_logs_show_column_headers_once_above_the_first_day() {
+    let mut data = fixture(0);
+    // Keep a second day visible so repeating the headers for every group also fails.
+    data.events.last_mut().expect("fixture event").at -= 86_400;
+    let scope = ActivityScope::default();
+    let filter = LogFilter::default();
+    let state = logs::State::default();
+    let offset = 0;
+    for (now, first_day) in [(NOW + 86_400, "Yesterday"), (NOW + 2 * 86_400, "3 Nov")] {
+        let view = logs::LogsView::of(&data, &scope, &filter, now, offset);
+        assert_eq!(view.groups.len(), 2);
+        assert_eq!(view.groups[0].0, first_day);
+        assert_eq!(view.groups[1].0, "2 Nov");
+        assert_eq!(
+            view.groups.iter().map(|(_, rows)| rows.len()).sum::<usize>(),
+            data.events.len()
+        );
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for frame in 0..3 {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+                time: Some(0.1 + frame as f64 * 0.1),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = logs::draw(ui, &view, &state, &data, now, offset);
+            });
+            text.clear();
+            for clipped in &output.shapes {
+                super::owner_tests::collect(&clipped.shape, &mut text);
+            }
+            output.drop_without_applying_deltas();
+        }
+        for title in [
+            first_day,
+            "2 Nov",
+            "Time",
+            "Environment",
+            "Agent",
+            "Event",
+            "Credential",
+            "Outcome",
+        ] {
+            assert_eq!(
+                text.lines().filter(|line| *line == title).count(),
+                1,
+                "{title}: {text}"
+            );
+        }
+        assert!(!text.lines().any(|line| line == "Today"), "{text}");
+        assert!(text.find(first_day) < text.find("Time"), "{text}");
+        assert!(
+            text.find("Time").expect("header")
+                < text.find("Allowed by bouncer").expect("first day's row"),
+            "{text}"
+        );
+        assert!(text.contains("Connect"), "the second day's row stays: {text}");
+    }
 }
 
 /// Frame 14: filters that match nothing; Clear Filters is the way back.
