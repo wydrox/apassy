@@ -336,22 +336,106 @@ import context_modal_existing, context_external_bundle
         self.assertTrue((self.evidence/'after.json').is_file())
 
     def test_caller_cutoff_cancels_and_build_cutoff_no_spawn(self):
+        original_wait_for = asyncio.wait_for
         for build in (False, True):
             modal, app, call, image = self.fake_sdk(stalled=not build, build_stalled=build)
             evidence = self.root / str(build)
             evidence.mkdir()
+            start = 1000.
+
+            async def run_case():
+                phase_entered = asyncio.Event()
+                phase_cancelled = asyncio.Event()
+                context = app.run.return_value
+
+                class GatedContext:
+                    async def __aenter__(self):
+                        if build:
+                            phase_entered.set()
+                        try:
+                            return await context.__aenter__()
+                        except asyncio.CancelledError:
+                            phase_cancelled.set()
+                            raise
+
+                    async def __aexit__(self, *args):
+                        return await context.__aexit__(*args)
+
+                app.run.return_value = GatedContext()
+
+                async def get():
+                    phase_entered.set()
+                    try:
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        phase_cancelled.set()
+                        raise
+
+                if not build:
+                    call.get.aio.side_effect = get
+
+                budgets = dict(bounded_attempt=M.CALLER_CUTOFF_S,
+                               session=M.REMOTE_LIMIT_S,
+                               build=min(M.IMAGE_BUILD_LIMIT_S, M.REMOTE_LIMIT_S))
+                waits = []
+                target = 'build' if build else 'bounded_attempt'
+
+                async def wait_for(awaitable, timeout):
+                    phase = awaitable.cr_code.co_name
+                    if phase not in budgets:
+                        # Use real wait_for for cancel and context-exit cleanup.
+                        self.assertEqual(timeout, 60)
+                        return await original_wait_for(awaitable, timeout)
+                    self.assertEqual(timeout, budgets[phase])
+                    waits.append(phase)
+                    if phase != target:
+                        return await awaitable
+                    task = asyncio.create_task(awaitable)
+                    try:
+                        await phase_entered.wait()
+                        if build:
+                            call.spawn.aio.assert_not_awaited()
+                            call.get.aio.assert_not_awaited()
+                        else:
+                            call.spawn.aio.assert_awaited_once()
+                            call.get.aio.assert_awaited_once()
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                        self.assertTrue(phase_cancelled.is_set())
+                        raise TimeoutError('synthetic ' + target + ' cutoff')
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+
+                # Patch the module reference, not global asyncio/time. The real
+                # production budgets are checked without racing disk/fsync work.
+                with patch.object(M, 'asyncio', NS(wait_for=wait_for,
+                        create_task=asyncio.create_task, sleep=asyncio.sleep,
+                        gather=asyncio.gather)), patch.object(M, 'time', NS(time=lambda: start)):
+                    with self.assertRaisesRegex(TimeoutError, 'synthetic ' + target + ' cutoff'):
+                        await M._execute(self.repo, evidence, SHA, 'run', 'c'*64, start)
+                self.assertEqual(waits, ['bounded_attempt', 'session', 'build'])
+                self.assertTrue(phase_entered.is_set())
+
             with self.subTest(build=build), patch.dict(sys.modules, {'modal': modal}), \
-                 patch.object(M, '_snapshot', AsyncMock(return_value={})), patch.object(M, '_cli', AsyncMock(return_value='')) as cli, \
-                 patch.object(M, 'CALLER_CUTOFF_S', .05), patch.object(M, 'IMAGE_BUILD_LIMIT_S', .01):
-                with self.assertRaises(TimeoutError):
-                    asyncio.run(M._execute(self.repo, evidence, SHA, 'run', 'c'*64, M.time.time()))
+                 patch.object(M, '_snapshot', AsyncMock(return_value={})), patch.object(M, '_cli', AsyncMock(return_value='')) as cli:
+                async def watchdog():
+                    # Fixture hang detection only; never the production cutoff.
+                    await original_wait_for(run_case(), 10)
+                asyncio.run(watchdog())
             if not build:
                 call.cancel.aio.assert_awaited_once_with(terminate_containers=True)
             else:
                 call.get.aio.assert_not_awaited()
                 call.spawn.aio.assert_not_awaited()
+                call.cancel.aio.assert_not_awaited()
+            cli.assert_awaited_once_with('app', 'stop', 'ap-own', '--env', 'main', '--yes')
             self.assertTrue(all(c.args[0:3] == ('app','stop','ap-own') for c in cli.call_args_list))
             self.assertFalse((evidence/'bundle.tar').exists())
+            self.assertFalse((evidence/'freeze_sha256').exists())
+            self.assertTrue((evidence/'after.json').is_file())
 
 
 if __name__ == '__main__':
