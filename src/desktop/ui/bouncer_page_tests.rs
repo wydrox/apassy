@@ -225,7 +225,8 @@ fn logs_filter_the_rows_and_open_a_cloud_run() {
     let text = frames(&mut app, 4);
     // Recent fixture rows can be yesterday's when this runs just after local midnight.
     assert!(
-        text.lines().any(|line| matches!(line, "Today" | "Yesterday")),
+        text.lines()
+            .any(|line| matches!(line, "Today" | "Yesterday")),
         "the recent fixture has a relative day heading: {text}"
     );
     for expected in [
@@ -309,7 +310,10 @@ fn older_logs_show_column_headers_once_above_the_first_day() {
         assert_eq!(view.groups[0].0, first_day);
         assert_eq!(view.groups[1].0, "2 Nov");
         assert_eq!(
-            view.groups.iter().map(|(_, rows)| rows.len()).sum::<usize>(),
+            view.groups
+                .iter()
+                .map(|(_, rows)| rows.len())
+                .sum::<usize>(),
             data.events.len()
         );
         let ctx = egui::Context::default();
@@ -352,7 +356,10 @@ fn older_logs_show_column_headers_once_above_the_first_day() {
                 < text.find("Allowed by bouncer").expect("first day's row"),
             "{text}"
         );
-        assert!(text.contains("Connect"), "the second day's row stays: {text}");
+        assert!(
+            text.contains("Connect"),
+            "the second day's row stays: {text}"
+        );
     }
 }
 
