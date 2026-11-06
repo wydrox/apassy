@@ -641,6 +641,9 @@ pub fn run() -> eframe::Result {
 
 /// Open the native desktop window with the options of the app binary.
 pub fn run_with(options: RunOptions) -> eframe::Result {
+    // Here and not in a `main`: the app bundle runs `crates/apassy-app`, and each window
+    // process must write the decision log, whichever binary opened it.
+    crate::decision_log::enable(crate::decision_log::default_path());
     eframe::run_native(
         "apassy",
         native_options(),

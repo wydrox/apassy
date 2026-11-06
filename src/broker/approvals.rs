@@ -132,14 +132,21 @@ pub struct QuestionInfo {
 }
 
 impl QuestionInfo {
-    /// The one item that "Allow as dev" or "Allow as prod" labels: the only unconfirmed
-    /// item of the run. `None` with no unconfirmed item, and with two or more: the
-    /// owner check and the iPhone answer name a single item (the iPhone answer names
-    /// none), so neither device offers the answer and the run asks as any other.
+    /// The one item that "Allow as dev" or "Allow as prod" labels: the first unconfirmed
+    /// item of the run, which both devices name. `None` with no unconfirmed item. An
+    /// answer labels one item, so each other unconfirmed item asks at a later run, and
+    /// the questions about unknown items end (ADR 0031, amended 2026-11-06).
     pub fn classifiable_item(&self) -> Option<&QuestionItem> {
-        let mut unconfirmed = self.items.iter().filter(|item| item.unconfirmed);
-        let item = unconfirmed.next()?;
-        unconfirmed.next().is_none().then_some(item)
+        self.items.iter().find(|item| item.unconfirmed)
+    }
+
+    /// The unconfirmed items that a classification of this run leaves unlabeled.
+    pub fn unconfirmed_after_classification(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.unconfirmed)
+            .count()
+            .saturating_sub(1)
     }
 }
 
@@ -1643,8 +1650,10 @@ mod tests {
             ..QuestionInfo::default()
         };
         assert_eq!(question.classifiable_item().map(|i| i.item_id), Some(8));
+        assert_eq!(question.unconfirmed_after_classification(), 0);
         question.items = vec![item(7, true), item(8, true)];
-        assert!(question.classifiable_item().is_none());
+        assert_eq!(question.classifiable_item().map(|i| i.item_id), Some(7));
+        assert_eq!(question.unconfirmed_after_classification(), 1);
 
         for (case, environment) in [
             ("local", crate::vault::Environment::Development),

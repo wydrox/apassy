@@ -4,6 +4,13 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Fixed
+
+- **The same question came back after you answered it:** a run with two or more credentials without a label offered only **Allow**, which saves nothing, so it asked at each run. It now also offers **Allow as dev** and **Allow as prod**, on the Mac and on the iPhone. They label the first of those credentials, the card says which, and the others ask next time. **Allow once** stays and labels nothing.
+- **Remember for this project on a production write:** the card offered it, Apassy saved it, and the next run asked anyway. Production with write or admin scope asks at each run, so the card no longer offers it.
+- **A credential with a host field:** a command that sent its auth header to that host was flagged `secret_output`, and a flagged run cannot be remembered, so it asked at each run. The host field now counts as a host of the credential. A command to any other host still asks.
+- **The bouncer decision log was empty:** the Mac app did not write `~/Library/Logs/Apassy/bouncer-decisions.log`, so `apassy decisions log` had nothing to show. It writes it now.
+
 ## [0.5.18] - 2026-11-04
 
 ### Fixed

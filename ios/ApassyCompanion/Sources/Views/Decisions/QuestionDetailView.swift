@@ -143,6 +143,12 @@ struct QuestionDetailView: View {
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let note = bar.labelNote {
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if let primary = bar.primary {
                 Button { answer(primary, question) } label: {
                     Text(primary.label).lineLimit(1).frame(maxWidth: .infinity)
@@ -162,8 +168,8 @@ struct QuestionDetailView: View {
                 }
             }
             ForEach(bar.menu) { choice in
-                Button(choice.label, role: .destructive) { answer(choice, question) }
-                    .decisionButton(.deny)
+                Button(choice.label, role: choice.destructive ? .destructive : nil) { answer(choice, question) }
+                    .decisionButton(choice.destructive ? .deny : .primary)
             }
             if busy {
                 Text("Sending…").font(.caption).foregroundStyle(.secondary)

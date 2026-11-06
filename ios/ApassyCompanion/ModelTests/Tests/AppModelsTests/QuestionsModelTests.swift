@@ -282,15 +282,19 @@ struct QuestionsModelTests {
         #expect(mixed.secondaryApproval?.label == "Allow as prod")
     }
 
-    @Test("two unconfirmed items offer Allow, not Allow as dev: the answer names no item")
-    func twoUnknownItemsAskAsAnyOther() {
+    @Test("two unconfirmed items label the first one, and Allow once labels nothing")
+    func twoUnknownItemsLabelTheFirst() {
         var card = Self.card(validAnswers: [])
         card.question.items = card.question.items.map { var item = $0; item.unconfirmed = true; return item }
         #expect(card.question.items.count >= 2)
         let bar = AnswerBar.make(for: card)
-        #expect(bar.primary?.answer.kind == .approve)
-        #expect(bar.primary?.label == "Allow")
-        #expect(bar.secondaryApproval == nil)
+        #expect(bar.primary?.answer.kind == .approveAsDevelopment)
+        #expect(bar.primary?.label == "Allow as dev")
+        #expect(bar.secondaryApproval?.answer.kind == .approveAsProduction)
+        #expect(bar.menu.map(\.answer.kind) == [.approve, .denyWithComment])
+        #expect(bar.menu.first?.label == "Allow once")
+        #expect(bar.menu.first?.destructive == false)
+        #expect(bar.labelNote?.contains(card.question.items[0].name) == true)
     }
 
     @Test("the Face ID reason names the agent without control characters or quotes, and the answer")

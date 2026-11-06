@@ -261,16 +261,6 @@ fn in_project(run: PendingRun) -> OwnerAction {
     }
 }
 
-fn production(run: PendingRun) -> OwnerAction {
-    let project = run.question.project.clone().expect("project");
-    let action = run.question.action;
-    OwnerAction::AllowProduction {
-        run,
-        project,
-        action,
-    }
-}
-
 /// Deny the next question and check that it waited.
 fn asks(fx: &Fixture, cwd: &Path, script: &str) -> PendingRun {
     let handle = run_later(fx, cwd, script);
@@ -672,16 +662,33 @@ fn a_production_allowance_needs_a_certain_kind_of_action() {
     assert_eq!(run.question.action, ActionKind::Change);
     assert!(run.question.production);
     assert!(run.question.items[0].production);
+    // Owner decision (b): the production rule asks at each write, so the card offers no
+    // remembered answer that would change nothing.
     assert!(
-        run.question
+        !run.question
             .valid_answers
-            .contains(&AnswerKind::Production(ActionKind::Change)),
+            .iter()
+            .any(|answer| matches!(answer, AnswerKind::Production(_) | AnswerKind::InProject(_))),
         "{:?}",
         run.question.valid_answers
     );
-    owner(&fx, production(run)).expect("allowed");
-    assert!(handle.join().expect("thread").ok);
-    // Owner decision (b): a stored production allowance cannot auto-allow writes.
+    let project = run.question.project.clone().expect("project");
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+    // A stored production allowance, from before this rule, cannot auto-allow writes.
+    with_vault(&fx, |v| {
+        v.allow_production(
+            item,
+            &apassy::vault::answers::ProjectRef {
+                key: project.key,
+                label: project.label,
+            },
+            ActionKind::Change,
+            "synthetic test",
+            &[],
+        )
+    })
+    .unwrap();
     assert!(
         asks_argv(&fx, &[item], COMMIT)
             .question

@@ -10,7 +10,8 @@
 //! the secret values of the items masked), and the outcome. The decision log in the
 //! vault keeps the full entry.
 //!
-//! Only the Apassy window writes it ([`enable`]). Tests and other hosts write nothing.
+//! Only the Apassy window writes it (`desktop::run_with` calls [`enable`]). Tests and
+//! other hosts write nothing.
 //! The file moves to `bouncer-decisions.log.1` at [`MAX_BYTES`].
 
 use serde::{Deserialize, Serialize};
@@ -297,7 +298,7 @@ pub fn advice(reason: &str) -> &'static str {
             "The credential is set to Always ask. Change it in the credential, Agent Access."
         }
         "Production" => {
-            "A production credential with write or admin scope. Allow production for the project and the action, or declare it read-only if it is."
+            "A production credential with write or admin scope: you approve each run, and a remembered answer does not change that. Declare it read-only if it is, or answer \"Allow as dev\" if it is not production."
         }
         "ForeignHost" => {
             "The command goes to a host that the credential does not know. Add the host to the credential (Agent Access > Hosts and risk), or remember your answer for the project."
@@ -306,7 +307,7 @@ pub fn advice(reason: &str) -> &'static str {
             "The credential is declared for another project. Change its project in Agent Access, or remember your answer for this project."
         }
         "MissingDeclaration" => {
-            "The credential has no declaration. Open it, Agent Access, and save its environment and risk."
+            "The credential has no declaration. Answer \"Allow as dev\" or \"Allow as prod\": Apassy saves the label, and this question does not come back for it. You can also open it, Agent Access, and save its environment and risk."
         }
         "UnfitAnswer" => "Your earlier answer is for another action or host.",
         "OneTimeCode" => "A one-time code always asks, unless a project answer includes codes.",

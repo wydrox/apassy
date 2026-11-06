@@ -531,10 +531,10 @@ fn a_development_label_is_judged_with_the_development_defaults() {
 
 /// Finding 1 of the 0.5.16 review: "Allow as dev" named one item, but the broker labeled
 /// every unconfirmed item of the run, and a development label lowers the default risk
-/// and reversibility. A dev key with an unlabeled password offers no classification;
-/// with one unconfirmed item, only that item is labeled.
+/// and reversibility. An answer labels only the first unconfirmed item, the one that
+/// the devices name (ADR 0031, amended 2026-11-06), and the next run asks about the next.
 #[test]
-fn a_classification_labels_only_the_one_unconfirmed_item() {
+fn a_classification_labels_only_the_first_unconfirmed_item() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(cwd.join(".git")).unwrap();
@@ -636,21 +636,20 @@ fn a_classification_labels_only_the_one_unconfirmed_item() {
             .contains(&AnswerKind::CorrectEnvironment)
     };
 
-    // Two unconfirmed items: no device offers "Allow as dev", and nothing is labeled.
+    // Two unconfirmed items: the first is the one that an answer labels, never the other.
     let checked = check(&vault, &agent, &request).unwrap();
     assert!(checked.facts.iter().all(|facts| facts.unconfirmed));
-    assert!(!offers(&checked));
-    for item in items {
-        assert_eq!(classified_index(&checked, &items, item), None);
-        assert!(!save_classification(
-            &mut vault,
-            &checked,
-            &items,
-            (Environment::Development, item)
-        ));
-    }
+    assert!(offers(&checked));
+    assert_eq!(classified_index(&checked, &items, dev_key), Some(0));
+    assert_eq!(classified_index(&checked, &items, password), None);
+    assert!(!save_classification(
+        &mut vault,
+        &checked,
+        &items,
+        (Environment::Development, password)
+    ));
     assert_eq!(
-        vault.declaration(dev_key).unwrap().unwrap().environment,
+        vault.declaration(password).unwrap().unwrap().environment,
         providers::DEFAULT_ENVIRONMENT
     );
 
@@ -686,4 +685,138 @@ fn a_classification_labels_only_the_one_unconfirmed_item() {
     assert_eq!(password_now.environment, Environment::Production);
     assert_eq!(password_now.risk, providers::DEFAULT_RISK);
     assert_eq!(password_now.reversibility, providers::DEFAULT_REVERSIBILITY);
+
+    // With both labeled, nothing is left to classify: the questions about them end.
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(!offers(&checked));
+    assert_eq!(first_unconfirmed(&checked), None);
+}
+
+/// An item without a declaration counts as unconfirmed, so the first answer writes its
+/// declaration, and the second item of the run is next. No item stays undeclared.
+#[test]
+fn answers_describe_undeclared_items_one_by_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-undeclared").unwrap();
+    vault.unlock("synthetic-undeclared").unwrap();
+    let mut add = |title: &str, env_name: &str| {
+        let item = vault
+            .add(ItemDraft {
+                title: title.into(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new(format!("FAKE-{env_name}-only")),
+                    secret: true,
+                }],
+            })
+            .unwrap();
+        vault.set_env_binding(item.id, env_name, "token").unwrap();
+        item.id
+    };
+    let first = add("Synthetic first", "SYNTH_FIRST");
+    let second = add("Synthetic second", "SYNTH_SECOND");
+    let (agent, _) = vault.register_agent("Synthetic undeclared").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    let items = [first, second];
+    let command = vec!["node".to_owned(), "script.js".into()];
+    let request = RunRequest {
+        access_request_id: None,
+        codes: Default::default(),
+        items: &items,
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Seed the development database.",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Seed the development database."),
+        host_session: None,
+    };
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.declarations.iter().all(Option::is_none));
+    assert_eq!(first_unconfirmed(&checked), Some(0));
+    assert!(save_classification(
+        &mut vault,
+        &checked,
+        &items,
+        (Environment::Development, first)
+    ));
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.declarations[0].is_some());
+    assert_eq!(first_unconfirmed(&checked), Some(1));
+    assert!(save_classification(
+        &mut vault,
+        &checked,
+        &items,
+        (Environment::Development, second)
+    ));
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.declarations.iter().all(Option::is_some));
+    assert_eq!(first_unconfirmed(&checked), None);
+}
+
+/// The host field of a credential joins its known hosts, so an auth header to that host
+/// is normal use. Without this the run gets `secret_output`, which no answer can remember.
+#[test]
+fn the_host_field_of_a_credential_is_a_host_for_the_command_analysis() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-host-field").unwrap();
+    vault.unlock("synthetic-host-field").unwrap();
+    let item = vault
+        .add(ItemDraft {
+            title: "Synthetic custom API".into(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: vec![],
+            fields: vec![
+                Field {
+                    name: "token".into(),
+                    value: SecretValue::new("FAKE-host-field-token".to_owned()),
+                    secret: true,
+                },
+                Field {
+                    name: "host".into(),
+                    value: SecretValue::new("api.custom.example".to_owned()),
+                    secret: false,
+                },
+            ],
+        })
+        .unwrap();
+    vault
+        .set_env_binding(item.id, "SYNTH_CUSTOM_TOKEN", "token")
+        .unwrap();
+    let (agent, _) = vault.register_agent("Synthetic host field").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    let items = [item.id];
+    let command = vec!["true".to_owned()];
+    let request = RunRequest {
+        access_request_id: None,
+        codes: Default::default(),
+        items: &items,
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Read the account.",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Read the account."),
+        host_session: None,
+    };
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert_eq!(
+        checked.provider_hosts,
+        vec![ProviderHosts {
+            env_name: "SYNTH_CUSTOM_TOKEN".to_owned(),
+            hosts: vec!["api.custom.example".to_owned()],
+        }]
+    );
+    assert!(
+        checked.facts[0]
+            .known_hosts
+            .iter()
+            .any(|host| host == "api.custom.example")
+    );
 }
