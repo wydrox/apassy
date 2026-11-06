@@ -203,7 +203,7 @@ class CliTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.directory = Path(tmp.name)
+        self.directory = Path(tmp.name).resolve()
         self.enter = contextlib.ExitStack()
         self.addCleanup(self.enter.close)
         self.enter.enter_context(patch.object(route, 'HERE', self.directory))
