@@ -5,18 +5,70 @@ Context checkpoint metadata/freeze compatibility needs separate acceptance befor
 any model execution. No secrets, tensor libraries, or network access are needed.
 """
 import argparse
+import copy
 import hashlib
 import json
 from pathlib import Path
 import re
 import shutil
 
-from context_data import CLASSES, overlap, _json_object, _invalid_constant
+from context_data import CLASSES, overlap, rubric, _json_object, _invalid_constant
 from context_v1 import (CONTRACT, Unsupported, Refusal, blind, canonical,
                         contract_hash, load_contract, serialize, validate_secret)
 
 LABELS = {'allow_ok': 1.0, 'must_ask': 0.0, 'deterministic_ask': 0.0}
 FIELDS = set('id family class request action secrets local_rule pair_of injection_of rationale label'.split())
+TRAINING_VIEW_POLICIES = ('denial-balanced-v1',)
+
+
+def training_view_rows(rows, policy):
+    """Fixed train-only replacement; retain order and deep-copy every row.
+
+    Balance each original-value stratum independently. Original canonical bytes
+    break digest ties, without depending on input order or Python's hash seed.
+    """
+    if policy not in TRAINING_VIEW_POLICIES:
+        raise Unsupported('unknown training view policy')
+    rows = list(rows)
+    views = copy.deepcopy(rows)
+    strata = {}
+    for index, row in enumerate(rows):
+        denied = row['secrets'][-1]['owner_denied']
+        if row['local_rule'] is None and denied in ('0', 'unknown'):
+            key = (row['label'], row['action'], row['class'], denied)
+            raw = canonical(row)
+            strata.setdefault(key, []).append((hashlib.sha256(raw).digest(), raw, index))
+    for members in strata.values():
+        for rank, (_, _, index) in enumerate(sorted(members)):
+            view = views[index]
+            view['secrets'][-1]['owner_denied'] = ('0', 'unknown')[rank % 2]
+            if rubric(view) != view['label']:
+                raise Unsupported('training view rubric mismatch')
+    return views
+
+
+def training_view_summary(rows, selected, policy):
+    """Aggregate provenance from original raw rows and converted TRAIN rows.
+
+    Counts cover raw rows, including rows later refused by the budget. No row
+    identifiers, text, per-stratum keys or model labels are exposed.
+    """
+    if policy not in TRAINING_VIEW_POLICIES:
+        raise Unsupported('unknown training view policy')
+    rows = list(rows)
+    views = training_view_rows(rows, policy)
+    counts = dict(eligible=0, changed=0, untouched=0, **{'0': 0, 'unknown': 0})
+    for original, view in zip(rows, views):
+        if (original['local_rule'] is None
+                and original['secrets'][-1]['owner_denied'] in ('0', 'unknown')):
+            counts['eligible'] += 1
+            value = view['secrets'][-1]['owner_denied']
+            counts[value] += 1
+            counts['changed'] += value != original['secrets'][-1]['owner_denied']
+        else:
+            counts['untouched'] += 1
+    return dict(policy=policy, view_counts=counts,
+                distinct_train_states=len({row['state'] for row in selected}))
 
 
 def safe_path(path):
@@ -86,8 +138,10 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def export_rows(data, out, *, facts_blind=False, contract_path=CONTRACT):
+def export_rows(data, out, *, facts_blind=False, contract_path=CONTRACT, training_views=None):
     """Validate both source splits before creating a new output directory."""
+    if training_views is not None and training_views not in TRAINING_VIEW_POLICIES:
+        raise Unsupported('unknown training view policy')
     data, out, contract_path = [safe_path(p) for p in (data, out, contract_path)]
     paths = [safe_path(data / name) for name in ('data-manifest.json', 'train.jsonl', 'val.jsonl')]
     if out.exists() or out.is_symlink():
@@ -131,6 +185,12 @@ def export_rows(data, out, *, facts_blind=False, contract_path=CONTRACT):
     payloads, counts = {}, {}
     for name, rows in zip(('train.jsonl', 'val.jsonl'), sets):
         converted, counts[name] = convert_rows(rows, contract, facts_blind=facts_blind)
+        if name == 'train.jsonl' and training_views is not None:
+            converted, view_counts = convert_rows(training_view_rows(rows, training_views), contract,
+                                                  facts_blind=facts_blind)
+            if view_counts != counts[name]:
+                raise Unsupported('training view conversion counts changed')
+            view_summary = training_view_summary(rows, converted, training_views)
         if not converted:
             raise Unsupported('no trainable rows in split')
         payloads[name] = b''.join(canonical(row) for row in converted)
@@ -138,6 +198,8 @@ def export_rows(data, out, *, facts_blind=False, contract_path=CONTRACT):
                       arm='control' if facts_blind else 'context', source_sha256=sources,
                       output_sha256={k: digest(v) for k, v in payloads.items()}, counts=counts,
                       evidence='input data only; not a model freeze')
+    if training_views is not None:
+        provenance['training_views'] = view_summary
     payloads['provenance.json'] = canonical(provenance)
     out.mkdir()  # Exclusive creation; never overwrite even an empty existing directory.
     try:

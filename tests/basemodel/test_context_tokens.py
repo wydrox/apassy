@@ -75,6 +75,47 @@ class ExactInputSafety(unittest.TestCase):
 
 
 class TokenizerParity(unittest.TestCase):
+    def test_denial_training_views_exact_token_lengths_seed7_400(self):
+        base = os.environ.get('APASSY_CONTEXT_TOKENIZER_BASE')
+        if not base:
+            self.skipTest('APASSY_CONTEXT_TOKENIZER_BASE not explicitly provided')
+        if not all(importlib.util.find_spec(m) for m in ('laya', 'transformers')):
+            self.skipTest('optional Laya/transformers dependencies unavailable')
+        import json
+        import context_data as D
+        import context_train_rows as A
+        c = C.load_contract()
+        tok, header, identity = C.tokenizer_tools(base, c)
+        rows = D.generate(7, 400, split='train')
+        original, original_counts = A.convert_rows(rows, c)
+        viewed, viewed_counts = A.convert_rows(
+            A.training_view_rows(rows, 'denial-balanced-v1'), c)
+        self.assertTrue(original_counts == viewed_counts)
+        self.assertEqual(len(original), 4427)
+        self.assertEqual(len(viewed), len(original))
+        self.assertEqual(original_counts['OverBudget'], 38)
+        self.assertEqual(header, c['budget']['header_tokens'])
+        parity = identity_ok = fits = True
+        maximum = checked = 0
+        for old, new in zip(original, viewed):
+            lengths = []
+            for row in (old, new):
+                text = row['state']
+                identity_ok &= identity(text) == text
+                ids = tok(text.replace(tok.mask_token, ' '),
+                          add_special_tokens=False)['input_ids']
+                lengths.append(len(ids) + header)
+            parity &= lengths[0] == lengths[1]
+            fits &= max(lengths) <= 512
+            maximum = max(maximum, *lengths)
+            checked += 1
+        # Closed evidence only: no requests, states, identifiers or token IDs.
+        print(json.dumps(dict(checked=checked, parity=parity, identity=identity_ok,
+                              fits=fits, maximum_tokens=maximum), sort_keys=True))
+        self.assertTrue(identity_ok)
+        self.assertTrue(parity)
+        self.assertTrue(fits)
+
     def test_pinned_tokenizer_additivity_and_full_bound_10000(self):
         base = os.environ.get('APASSY_CONTEXT_TOKENIZER_BASE')
         if not base:

@@ -16,14 +16,18 @@ import subprocess
 import sys
 
 from context_data import _json_object, _invalid_constant, overlap, rubric
-from context_train_rows import convert_rows, digest, export_rows, safe_path, validate_rows
+from context_train_rows import (convert_rows, digest, export_rows, safe_path, validate_rows,
+                                training_view_rows, training_view_summary)
 from context_v1 import CONTRACT, REVISION, Unsupported, Refusal, canonical, contract_hash, load_contract
 
 ARMS = ('context', 'control')
 CONFIG = dict(mode='full', trainer='train.py', amp=False, epochs=4, batch=32,
               lr=.0003, wd=.01, warmup=100, seed=7, threads=4, limit=0,
               max_steps=0, seconds_per_head=5400)
-RECIPES = {'context-v1-e20': dict(CONFIG, epochs=20, recipe='context-v1-e20')}
+RECIPES = {'context-v1-e20': dict(CONFIG, epochs=20, recipe='context-v1-e20'),
+           'context-v1-e20-denial-invariance-v1': dict(
+               CONFIG, epochs=20, recipe='context-v1-e20-denial-invariance-v1',
+               training_views='denial-balanced-v1')}
 G1_SHA256 = dict(train='a78f550019b5cfa9ddf9524476ab1ea940f2bd5c91a102c7433e821bdd6cfc5f',
                  val='a3284ff49471406ddde90668812b6715d2bf9c23a3893fbe0b585719352b3aa6',
                  data_manifest='c2478f94f5bea91f0485a0061037d4a36140502c32dd465eea39dd6571bc0efe')
@@ -110,6 +114,7 @@ def temperature_ok(meta, report, scorer):
 
 def development_reading(selection, validation, snapshots, keys, recipe):
     """Aggregate reused calibration data; no independent quality/safety claim."""
+    CANDIDATE_ATTEMPT = {'context-v1-e20': 2, 'context-v1-e20-denial-invariance-v1': 3}
     config_for(recipe)
     if recipe is None:
         raise Unsupported('development reading requires explicit recipe')
@@ -150,7 +155,7 @@ def development_reading(selection, validation, snapshots, keys, recipe):
     passed = all(p['auto_allow'] >= p['minimum_auto_allow'] for p in populations.values())
     reading = ('DEV_50_INCOMPLETE' if not complete else
                'DEV_50_NOT_RULED_OUT' if passed else 'DEV_50_MISS')
-    return dict(schema='context-development-reading-v1', recipe=recipe, candidate_attempt=2,
+    return dict(schema='context-development-reading-v1', recipe=recipe, candidate_attempt=CANDIDATE_ATTEMPT[recipe],
         sample_sha256=selected['sample_sha256'], selection_counts=dict(rows=selected['rows'],
             pairs=selected['pairs'], unpaired_allows=selected['unpaired_allows']),
         thresholds=thresholds, data_reused_for_calibration=True, independent_quality='UNKNOWN',
@@ -203,10 +208,18 @@ def originals(frozen, c):
     return sets
 
 
-def conversion(sets, frozen, c, which):
+def conversion(sets, frozen, c, which, training_views=None):
     counts, hashes = {}, {}
-    for split, rows in sets.items():
+    view_summary = None
+    for split, original_rows in sets.items():
+        rows = (training_view_rows(original_rows, training_views)
+                if split == 'train' and training_views is not None else original_rows)
         selected, counts[split + '.jsonl'] = convert_rows(rows, c, facts_blind=which == 'control')
+        if split == 'train' and training_views is not None:
+            _, legacy_counts = convert_rows(original_rows, c, facts_blind=which == 'control')
+            if counts['train.jsonl'] != legacy_counts:
+                raise Unsupported('training view conversion counts differ')
+            view_summary = training_view_summary(original_rows, selected, training_views)
         answers = {r['answer'] for r in selected}
         if answers != {0., 1.}:
             raise Unsupported('selected split requires both classes')
@@ -217,10 +230,13 @@ def conversion(sets, frozen, c, which):
             if not {'allow_ok', 'must_ask'} <= labels:
                 raise Unsupported('validation requires allow_ok and must_ask')
         hashes[split + '.jsonl'] = digest(b''.join(canonical(r) for r in selected))
-    return dict(contract_sha256=contract_hash(c), question=c['question'], arm=which,
+    provenance = dict(contract_sha256=contract_hash(c), question=c['question'], arm=which,
                 source_sha256={name: frozen[key]['sha256'] for name, key in
                                (('data-manifest.json', 'data_manifest'), ('train.jsonl', 'train'), ('val.jsonl', 'val'))},
                 output_sha256=hashes, counts=counts, evidence='input data only; not a model freeze')
+    if training_views is not None:
+        provenance['training_views'] = view_summary
+    return provenance
 
 
 def report_ok(report, frozen, which, recipe=None):
@@ -279,7 +295,7 @@ def verify_conversion(frozen, c, recipe=None):
             raise Unsupported('conversion arms mismatch')
         reports = []
         for which in ARMS:
-            if frozen['converted'][which] != conversion(sets, frozen, c, which):
+            if frozen['converted'][which] != conversion(sets, frozen, c, which, expected.get('training_views')):
                 raise Unsupported('conversion provenance mismatch')
             checked(frozen[which])
             report = read_json(checked(frozen['training_reports'][which]))
@@ -385,9 +401,12 @@ def run(data, out, base, device, contract=CONTRACT, source_sha=None, recipe=None
     frozen = {key: record(data / name) for key, name in
               (('train', 'train.jsonl'), ('val', 'val.jsonl'), ('data_manifest', 'data-manifest.json'))}
     sets = originals(frozen, c)
+    policy = config.get('training_views')
+    training_sets = (dict(sets, train=training_view_rows(sets['train'], policy))
+                     if policy is not None else sets)
     selection = development_selection(sets, frozen, c, recipe)
     snapshots, pair_keys = {}, None
-    provenance = {which: conversion(sets, frozen, c, which) for which in ARMS}
+    provenance = {which: conversion(sets, frozen, c, which, policy) for which in ARMS}
     # The whole run is offline, including environment and CPU tokenizer loading.
     previous = os.environ.get('HF_HUB_OFFLINE')
     os.environ['HF_HUB_OFFLINE'] = '1'
@@ -405,19 +424,22 @@ def run(data, out, base, device, contract=CONTRACT, source_sha=None, recipe=None
         try:
             n_train = sum(t.numel() for t in common.head_state(scorer.model).values())
             for which in ARMS:
-                exact_preflight(scorer, sets, c, which)
+                exact_preflight(scorer, training_sets, c, which)
         finally:
             del scorer
             gc.collect()  # Release CPU encoder before either training subprocess.
         for which in ARMS:
             arm_data = out / (which + '-data')
-            if export_rows(data, arm_data, facts_blind=which == 'control', contract_path=contract) != provenance[which]:
+            if export_rows(data, arm_data, facts_blind=which == 'control', contract_path=contract,
+                           **({'training_views': policy} if policy is not None else {})) != provenance[which]:
                 raise Unsupported('source changed during export')
             metadata = dict(context_contract_sha256=contract_hash(c), question=c['question']['id'],
                             facts_blind=which == 'control', tokenizer_sha256=c['tokenizer']['sha256'],
                             base_weights_sha256=manifest['base']['weights_sha256'])
             if recipe is not None:
                 metadata['recipe'] = recipe
+            if policy is not None:
+                metadata['training_views'] = policy
             meta_path = out / (which + '-metadata.json')
             meta_path.write_bytes(canonical(metadata))
             checkpoint, report = out / (which + '.safetensors'), out / (which + '-report.json')
@@ -433,6 +455,8 @@ def run(data, out, base, device, contract=CONTRACT, source_sha=None, recipe=None
             if not core.context_meta_ok(meta, which, c, manifest['base']['weights_sha256'],
                                         **({'recipe': recipe} if recipe is not None else {})):
                 raise Unsupported('checkpoint context metadata mismatch')
+            if meta.get('training_views') != policy or ('training_views' in meta) != (policy is not None):
+                raise Unsupported('checkpoint training views metadata mismatch')
             if (meta.get('trained') != list(common.TRAINED_PREFIXES)
                     or meta.get('epoch') != trainer_report['best_epoch']
                     or meta.get('base_repo') != manifest['base']['repo']):

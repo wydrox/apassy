@@ -477,3 +477,53 @@ eligible. These are pre-registered sanity checks, not new safety evidence.
 After this recipe's one completed sample reading, another candidate needs a new
 recipe identity and updated sample-read accounting. The run marker enforces
 uniqueness per run ID; the operator ledger enforces this recipe's single attempt.
+
+## R16 — fixed denial-balanced training view (2026-11-06)
+
+E20 ended `DEV_50_MISS`: 62/85 unpaired and 7/91 paired normal uses, 151/377
+original normal validation rows. This is development evidence; independent
+quality is UNKNOWN. A training-only count found last-secret `owner_denied=unknown`
+in 343 positives and no negatives. This is a shortcut opportunity, not proof that
+the head uses it. Both paid attempts and their one-launcher disk exceptions are
+consumed; this record authorizes unpaid source preparation only.
+
+The next opt-in recipe is `context-v1-e20-denial-invariance-v1`, policy
+`denial-balanced-v1`. It uses a fixed replacement before conversion, not dynamic
+views. Deep-copy original training rows; among rows with no local rule and final
+`owner_denied` in `('0','unknown')`, group by label, action, class and original
+denial value, sort by SHA-256 of canonical original rows, and assign alternating
+`0`/`unknown` by rank. Preserve row order, every other field, input objects and
+labels. Refuse any changed rubric result. Denial 1/2-4/5+ and earlier secrets stay.
+
+Only the training export and its provenance change. Validation, calibration,
+the D0 sample and all original G1 bytes/hashes remain unchanged. The converter
+refuses any difference in selected, local-rule or OverBudget counts. Control
+training text and both validation exports remain byte-identical. Record the
+view policy/counts and distinct training-state count in conversion provenance;
+no IDs, labels or view fields are added to model text or emitted legacy rows.
+
+The existing trainer and scoring code stay unchanged: 20 epochs, original slot
+and optimizer-step counts, BCE, E20 schedule, seed 7, batch 32, frozen encoder and
+minimum-validation-NLL checkpoint. The exact preflight sees the training view;
+all scoring and threshold paths see original validation rows. A tokenizer-only
+hosted check must confirm equal original/view token counts and the 512-token
+limit for every selected view. The 6 GiB feature-cache cap and cleanup stay.
+
+Bind the new recipe and policy in the exact config, conversion hashes and
+checkpoint identity. Legacy and E20 behavior keep their own identities. The
+next completed D0 sample reading is candidate attempt 3, with the same sample
+SHA-256 `864ea9c6f39c3c2cc910aa5fa1af2bc0e0f3ce78279b2fc4d8f5c74f8cc8dce4`.
+Use the best-NLL checkpoint and unchanged full-validation threshold fit. Both
+43/85 unpaired and 46/91 paired normal permissions are required for
+`DEV_50_NOT_RULED_OUT`; otherwise report `DEV_50_MISS` or incomplete coverage.
+Report the full original-normal denominator, without a pooled/per-class rescue.
+A miss rejects this fixed intervention as sufficient, not all coverage ideas.
+No automatic retry or threshold adjustment follows. Production normal 60 percent
+and all safety gates remain unchanged; independent confirmation is still needed.
+
+Report zero-shot NLL 1.1431 and control threshold 0.55096 as sanity comparisons,
+never gates or independent evidence. Runtime reachability of the synthetic
+views remains unmeasured. Limits stay one A10/L4, 4 CPU/32 GiB, 120 minutes remote,
+135 minutes caller, 38 upload paths, 9 plain-USTAR members and 256 MiB output. A new
+owner resource decision follows source review and green exact-source CI. No
+model run, held-out effort, activation, merge or release is approved here.

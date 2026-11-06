@@ -260,6 +260,8 @@ assert not any(m in sys.modules for m in ('torch', 'numpy', 'laya'))
         def train(base, data, checkpoint, metadata, report, cache, device):
             m = json.loads(metadata.read_bytes())
             self.assertNotIn('base_revision', m)
+            if m.get('recipe') in (None, 'context-v1-e20'):
+                self.assertNotIn('training_views', m)
             checkpoint.write_bytes(b'fake checkpoint, never load')
             f = dict(self.frozen, **{checkpoint.stem: G.record(checkpoint)})
             report.write_bytes(C.canonical(self.report(f, checkpoint.stem)))
