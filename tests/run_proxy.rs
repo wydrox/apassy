@@ -1730,9 +1730,15 @@ fn websocket_to_another_host_is_a_tunnel() {
 
     // A run that reaches only the hosts of its secrets refuses it.
     let refuse = start_proxy(&service, OtherHosts::Refuse);
-    let (_, answer) = connect_through(&refuse, &format!("127.0.0.1:{port}"));
+    let (mut refused_connection, answer) = connect_through(&refuse, &format!("127.0.0.1:{port}"));
     assert!(answer.starts_with("HTTP/1.1 403 "), "{answer}");
+    // The proxy records the refusal after sending its response. Wait for that
+    // connection to finish before taking the event snapshot.
+    refused_connection
+        .read_to_end(&mut Vec::new())
+        .expect("refused connection closes");
     let log = events(refuse);
+    assert_eq!(log.len(), 1, "{log:?}");
     assert_eq!(log[0].outcome, ProxyOutcome::Refused, "{log:?}");
     assert_eq!(service.seen.lock().expect("seen").len(), seen.len());
 }
