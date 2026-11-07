@@ -57,6 +57,15 @@ struct QuestionDetailView: View {
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
             facts(question, card)
+            // What the request is for comes before the command (owner, 2026-11-07: a raw
+            // command alone does not say whether to allow it).
+            if !card.run.purpose.isEmpty || !card.run.userRequest.isEmpty || showsAgentRequest(card) {
+                Section("Requests") {
+                    if !card.run.purpose.isEmpty { labeled("Purpose", card.run.purpose) }
+                    if !card.run.userRequest.isEmpty { labeled("You asked", card.run.userRequest) }
+                    if showsAgentRequest(card) { labeled("The agent says", card.run.agentRequest) }
+                }
+            }
             Section("Command") {
                 DecisionCommand(line: CommandDisplay.line(card.run.command))
                 LabeledContent("Folder") {
@@ -67,12 +76,6 @@ struct QuestionDetailView: View {
                 Text(card.question.why)
                 if !card.run.risk.isEmpty {
                     Text(card.run.risk).font(.footnote).foregroundStyle(.secondary)
-                }
-            }
-            if !card.run.userRequest.isEmpty || !card.run.agentRequest.isEmpty {
-                Section("Requests") {
-                    if !card.run.userRequest.isEmpty { labeled("You asked", card.run.userRequest) }
-                    if !card.run.agentRequest.isEmpty { labeled("The agent says", card.run.agentRequest) }
                 }
             }
         }
@@ -123,6 +126,11 @@ struct QuestionDetailView: View {
                 LabeledContent("Vault", value: vault)
             }
         }
+    }
+
+    /// Some Macs copy the purpose into the agent request; the same text is shown once.
+    private func showsAgentRequest(_ card: QuestionCard) -> Bool {
+        !card.run.agentRequest.isEmpty && card.run.agentRequest != card.run.purpose
     }
 
     private func labeled(_ label: String, _ value: String) -> some View {

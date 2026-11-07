@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Fixed
+
+- **iPhone: a request showed only the command:** a waiting request on the Requests tab showed the raw shell command, so you could not tell what it was for. It now shows the purpose that the agent gave and the words you asked it with, above the command. The request details show them first too. The full command stays on the card.
+
 ## [0.5.19] - 2026-11-07
 
 ### Fixed
