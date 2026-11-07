@@ -45,9 +45,21 @@ struct RequestsWaitingRow: View {
                             Text(card.question.items.map(\.name).joined(separator: ", "))
                                 .font(.subheadline).foregroundStyle(.secondary)
                         }
+                        // The agent's reason and the owner's own words come before the command, so
+                        // the owner can tell what the request is for without reading shell code.
+                        // The full command stays on the row: the reason is the agent's claim, the
+                        // command is what runs.
+                        if !card.run.purpose.isEmpty {
+                            Text(verbatim: "Purpose: \(card.run.purpose)")
+                                .font(.body).lineLimit(4)
+                        }
+                        if !card.run.userRequest.isEmpty {
+                            Text(verbatim: "You asked: \(card.run.userRequest)")
+                                .font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
+                        }
                         if actions.canAllowOnce { Text("Access: This request only").font(.subheadline) }
                         Text(CommandDisplay.line(card.run.command))
-                            .font(.callout.monospaced()).fixedSize(horizontal: false, vertical: true)
+                            .font(.footnote.monospaced()).fixedSize(horizontal: false, vertical: true)
                     } else {
                         Label("This question could not be read", systemImage: "lock.trianglebadge.exclamationmark")
                             .font(.subheadline).foregroundStyle(.secondary)
