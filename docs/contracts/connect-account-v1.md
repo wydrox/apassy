@@ -71,7 +71,7 @@ The relay-sync-v1 codes keep their meaning: `invalid_request` 400, `unauthentica
 | 429 | `tunnel_limit` | Open streams, dials a minute, or the monthly byte budget of the account | tunnel |
 | 404 | `node_unknown` | A dial or a grant names a node that does not exist | tunnel |
 | 503 | `tunnel_offline` | The node exists and has no open tunnel | tunnel |
-| 410 | `free_connect_ended` | `POST /v1/connect` (the free questions-only Connect of ADR 0032) while `APASSY_RELAY_FREE_CONNECT=0` | this |
+| 410 | `free_connect_ended` | `POST /v1/connect` (the free questions-only Connect of ADR 0032), its challenge, and the questions, feed, and push routes of a free Connect team, while `APASSY_RELAY_FREE_CONNECT=0` | this |
 | 410 | `hosted_retired` | In `APASSY_RELAY_MODE=connect`: a retired route of section 14 | this |
 
 A `403 plan_required` and a `403 account_required` never carry a price, a link, or a purchase hint: the iPhone shows them as "Not on Connect" ([connect-billing-v1](connect-billing-v1.md) section 10).
@@ -232,8 +232,8 @@ Chosen defaults; the owner can change each without code.
 
 ## 14. Modes and retired routes
 
-- **Transition** (`APASSY_RELAY_CONNECT_ACCOUNTS=1`): the routes of the three Connect contracts are added to a running relay. With `APASSY_RELAY_FREE_CONNECT=0`, `POST /v1/connect` answers `410 free_connect_ended`.
-- **Connect only** (`APASSY_RELAY_MODE=connect`): no master key (`APASSY_RELAY_KEY` is refused at start), no proxy. These routes answer `410 hosted_retired` before any body is read: `POST /v1/connect`, `POST /v1/teams`, `POST /v1/join`, `/v1/questions` and below, `/v1/feed` and below, `/v1/push/token`, `/mcp`, `/p/` and below. Relay-sync-v1 works only for vault stores.
+- **Transition** (`APASSY_RELAY_CONNECT_ACCOUNTS=1`): the routes of the three Connect contracts are added to a running relay. With `APASSY_RELAY_FREE_CONNECT=0`, `POST /v1/connect` and `POST /v1/connect/challenge` answer `410 free_connect_ended` before their body is read, and so do the questions, feed, and push routes of a free Connect team (after its token, before its body); its sign-in, devices, leaving, and relay sync stay. With `APASSY_RELAY_CONNECT_SYNC_BYTES=0` as well, a push or a receipt of a free Connect team is `403 plan_required` whatever its own `sync_bytes`, and its pulls work. Teams made with a team code and vault stores are not affected.
+- **Connect only** (`APASSY_RELAY_MODE=connect`): no master key (`APASSY_RELAY_KEY` and its file form are refused at start), no push settings, no proxy. These routes answer `410 hosted_retired` before any token or body is read: `POST /v1/connect` and its challenge, `POST /v1/teams`, `POST /v1/join`, `/v1/questions` and below, `/v1/feed` and below, `/v1/push/token`, `/v1/push/handle`, `/mcp`, `/p/` and below, and every other relay route that is not relay-sync-v1 of a vault store (its sign-in, `GET /v1/me`, `GET /v1/devices`, and the sync routes). Relay-sync-v1 works only for vault stores. `/healthz` names the mode (`x-apassy-relay-mode`). The relay's SPEC section 37 lists every route.
 
 ## 15. Test vectors
 
