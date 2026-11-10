@@ -93,7 +93,7 @@ wait_for "Repeat new passphrase:"; line "$new_pass"
 wait_for "Vault locked."
 check change-passphrase "Passphrase changed."
 # One passphrase prompt (R6 of the first run), and no "Vault passphrase:" before it.
-if [ "$(section | grep -c "passphrase:")" = 3 ] && ! section | grep -q "Vault passphrase:"; then
+if [ "$(section | grep -c "^Current passphrase:")" = 1 ] && ! section | grep -q "Vault passphrase:"; then
     result PASS change-passphrase-asks-once
 else
     result FAIL change-passphrase-asks-once

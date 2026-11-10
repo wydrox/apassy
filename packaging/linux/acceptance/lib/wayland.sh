@@ -20,8 +20,10 @@ l4_wl() {
 
 l4_wayland_up() {
     l4_as rm -f /tmp/l4/sway.env
+    # The owner cannot read the kit in another home: give it its own copy.
+    sudo install -o "$L4_USER" -m 0644 "$L4_KIT/lib/sway.conf" "/home/$L4_USER/.l4-sway.conf"
     l4_spawn sway env -u DISPLAY WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
-        WLR_RENDERER=pixman sway -c "$L4_KIT/lib/sway.conf"
+        WLR_RENDERER=pixman sway -c "/home/$L4_USER/.l4-sway.conf"
     local i
     for i in $(seq 1 50); do l4_as test -s /tmp/l4/sway.env && break; sleep 0.2; done
     l4_as test -s /tmp/l4/sway.env || l4_die 'sway did not start'
