@@ -37,6 +37,10 @@ mod columns;
 mod companion;
 #[cfg(all(test, feature = "vault"))]
 mod companion_tests;
+/// Settings > Connect: the Apassy Connect account, plans, devices, and groups (plan s7 M2).
+mod connect;
+#[cfg(all(test, feature = "vault"))]
+mod connect_tests;
 /// Decisions: the questions that wait for the owner (ADR 0026 §2).
 #[cfg(feature = "vault")]
 mod decisions;
@@ -327,6 +331,8 @@ pub(crate) struct UiState {
     pub(crate) wifi_notice_seen: bool,
     /// Settings > Devices: its sheets, the node cache, and the demo frame.
     pub(crate) devices: devices::State,
+    /// Settings > Connect: its sheet, the account and its worker, and the demo frame.
+    pub(crate) connect: connect::State,
     /// The shared vaults in the sidebar (ADR 0026 §6). Nothing fills it until the vault
     /// keeps shared vaults; the tests draw synthetic ones.
     pub(crate) shared_vaults: Vec<sidebar::SharedVaultRow>,

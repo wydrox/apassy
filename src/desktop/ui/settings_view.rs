@@ -25,6 +25,10 @@ pub(crate) enum SettingsSection {
     /// This Mac with its node on the tailnet, every device, and Wi-Fi Pairing. The
     /// demo build shows the frames of the Devices mockup.
     Devices,
+    /// The Apassy Connect account of this Mac: its plan, the checkout and the portal,
+    /// its devices, and its family or team (plan s7 unit M2). The demo build shows the
+    /// frames of the Connect mockup.
+    Connect,
     /// The model of the bouncer, and calibration and learning.
     #[cfg(feature = "vault")]
     Bouncer,
@@ -43,16 +47,17 @@ pub(crate) enum SettingsSection {
 impl SettingsSection {
     /// The sections in the order of the list.
     #[cfg(feature = "vault")]
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Vault,
         Self::Security,
         Self::Devices,
+        Self::Connect,
         Self::Bouncer,
         Self::Tools,
         Self::Updates,
     ];
     #[cfg(not(feature = "vault"))]
-    pub(crate) const ALL: [Self; 2] = [Self::Devices, Self::Rules];
+    pub(crate) const ALL: [Self; 3] = [Self::Devices, Self::Connect, Self::Rules];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -61,6 +66,7 @@ impl SettingsSection {
             #[cfg(feature = "vault")]
             Self::Security => "Security",
             Self::Devices => "Devices",
+            Self::Connect => "Connect",
             #[cfg(feature = "vault")]
             Self::Bouncer => "Bouncer",
             #[cfg(feature = "vault")]
@@ -80,6 +86,7 @@ impl SettingsSection {
             #[cfg(feature = "vault")]
             Self::Security => (kit::fixed::SETTINGS_SECURITY, Icon::Lock),
             Self::Devices => (kit::fixed::SETTINGS_DEVICES, Icon::Laptop),
+            Self::Connect => (kit::fixed::SETTINGS_CONNECT, Icon::Cloud),
             #[cfg(feature = "vault")]
             Self::Bouncer => (kit::fixed::SETTINGS_BOUNCER, Icon::Shield),
             #[cfg(feature = "vault")]
@@ -113,6 +120,7 @@ fn status(app: &DesktopApp, section: SettingsSection) -> String {
     #[cfg(not(feature = "vault"))]
     match section {
         SettingsSection::Devices => super::demo::devices_status(app),
+        SettingsSection::Connect => super::connect::status_line(app),
         SettingsSection::Rules => "Fixture rule interpreter".to_owned(),
     }
 }
@@ -127,6 +135,9 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .unwrap_or_default();
     #[cfg(not(feature = "vault"))]
     let subtitle = "Demo".to_owned();
+    // The demo build: `APASSY_DEMO_CONNECT` opens a frame of the Connect mockup.
+    #[cfg(not(feature = "vault"))]
+    super::connect::demo_from_env(app);
     columns::list_toolbar(ui, "Settings", &subtitle, |_| {});
     let rows: Vec<(SettingsSection, String)> = SettingsSection::ALL
         .into_iter()
@@ -194,6 +205,10 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 SettingsSection::Devices => {
                     header(app, ui, section);
                     super::demo::devices_section(app, ui);
+                }
+                SettingsSection::Connect => {
+                    header(app, ui, section);
+                    super::connect::section(app, ui);
                 }
                 SettingsSection::Rules => super::demo::draw_rules(app, ui),
             }

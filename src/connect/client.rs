@@ -53,6 +53,7 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             (403, "forbidden") => ConnectError::Forbidden,
             (404 | 405, _) => ConnectError::NotFound,
             (409, "conflict") => ConnectError::Conflict,
+            (409, "seat_limit") => ConnectError::SeatLimit,
             (429, _) => ConnectError::RateLimited(retry_after.unwrap_or(60).max(1)),
             _ => ConnectError::Refused { status, code },
         },
@@ -60,6 +61,27 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
 }
 
 // ---- Bodies of the requests (section 6 to 10). ----
+
+/// The body of `POST /v1/tunnel/nodes` (connect-tunnel-v1 section 3.1).
+#[derive(Serialize)]
+struct RegisterNode<'a> {
+    name: &'a str,
+    pin: &'a str,
+}
+
+/// A node as Connect answers it (`NodeView`, connect-tunnel-v1 section 3.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelNodeView {
+    pub node_id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub name: String,
+    pub pin: String,
+    pub public_name: String,
+    pub online: bool,
+    pub created_at: u64,
+}
 
 #[derive(Serialize)]
 pub(super) struct CreateAccount<'a> {
@@ -132,6 +154,48 @@ pub(super) struct RecoverBody<'a> {
     pub public_key: &'a str,
     pub recovery_hash: &'a str,
     pub signature: &'a str,
+}
+
+/// `POST /v1/account/checkout` (connect-billing-v1 section 4): `people` only for Family,
+/// `seats` only for Team; the other is left out of the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CheckoutRequest {
+    /// `personal`, `family`, or `team`.
+    pub plan: String,
+    /// `month` or `year`.
+    pub interval: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub people: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seats: Option<u64>,
+}
+
+impl CheckoutRequest {
+    /// The body for `count` units of `plan`: people for Family, seats for Team, nothing
+    /// for Personal.
+    pub fn new(plan: &str, interval: &str, count: u64) -> Self {
+        Self {
+            plan: plan.to_owned(),
+            interval: interval.to_owned(),
+            people: (plan == "family").then_some(count),
+            seats: (plan == "team").then_some(count),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct InviteRequest<'a> {
+    role: &'a str,
+}
+
+#[derive(Serialize)]
+struct GroupJoinRequest<'a> {
+    code: &'a str,
+}
+
+#[derive(Serialize)]
+struct SeatsRequest {
+    quantity: u64,
 }
 
 /// The empty JSON object of `DELETE /v1/account` and the refusal of a join.
@@ -389,6 +453,108 @@ pub struct PlansView {
     /// `inclusive`.
     pub tax: String,
     pub plans: Vec<PlanOffer>,
+}
+
+impl PlanOffer {
+    /// The price of `interval`, if Connect has one.
+    pub fn price(&self, interval: &str) -> Option<&PlanPrice> {
+        self.prices.iter().find(|price| price.interval == interval)
+    }
+
+    /// The total in cents for `count` units (people or seats; Personal 1) of `interval`
+    /// (connect-billing-v1 section 2): `amount + max(0, count − included) × extra`, for
+    /// `1 ≤ count ≤ max`. `None` outside that range, or without that price.
+    pub fn total(&self, interval: &str, count: u64) -> Option<u64> {
+        if count == 0 || count > self.max {
+            return None;
+        }
+        let price = self.price(interval)?;
+        let further = count.saturating_sub(self.included);
+        if further == 0 {
+            return Some(price.amount);
+        }
+        price
+            .extra?
+            .checked_mul(further)
+            .and_then(|extra| extra.checked_add(price.amount))
+    }
+}
+
+/// `POST /v1/account/checkout`: the Stripe Checkout page that the Mac opens in the
+/// default browser.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CheckoutAnswer {
+    pub url: String,
+    pub session_id: String,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/account/portal`: the Stripe Customer Portal page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PortalAnswer {
+    pub url: String,
+}
+
+/// A member of a family or team (connect-billing-v1 section 6).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupMember {
+    pub account_id: String,
+    pub name: String,
+    /// `owner`, `admin`, or `member`.
+    pub role: String,
+    /// `pending` or `active`.
+    pub state: String,
+    #[serde(default)]
+    pub joined_at: Option<u64>,
+}
+
+/// `GET /v1/account/group`: the `GroupView` of connect-billing-v1 section 6, with the
+/// members. (The short group of `GET /v1/account` is [`GroupView`].)
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupDetail {
+    pub group_id: String,
+    /// `family` or `team`.
+    pub kind: String,
+    /// The role of this account: `owner`, `admin`, or `member`.
+    pub role: String,
+    pub owner_account: String,
+    pub included: u64,
+    /// The subscription quantity: people or seats.
+    pub quantity: u64,
+    pub members: Vec<GroupMember>,
+}
+
+/// `POST /v1/account/group/invites`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct InviteAnswer {
+    pub invite_id: u64,
+    /// `https://<site>/connect/join#apassy_gin_<group id>_<64 hex>`.
+    pub url: String,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/account/group/join`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupJoined {
+    pub group_id: String,
+    pub kind: String,
+    /// `pending` until the owner or an admin confirms.
+    pub state: String,
+    pub owner_name: String,
+}
+
+/// `DELETE /v1/account/group/members/{account_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct MemberRemoved {
+    pub account_id: String,
+    pub removed_from_stores: u64,
+}
+
+/// `POST /v1/account/group/seats`: the new quantity applies when Stripe confirms it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SeatsAnswer {
+    pub quantity: u64,
+    pub pending: bool,
 }
 
 /// The `result` of an envelope that [`ConnectClient::get_document`] read, or its error.
@@ -651,5 +817,97 @@ impl ConnectClient {
 
     pub(super) fn entitlement(&self, token: &str) -> Result<EntitlementAnswer, ConnectError> {
         self.get("/v1/account/entitlement", Some(token))
+    }
+
+    /// `POST /v1/tunnel/nodes` (connect-tunnel-v1 section 3.1): register the node of the
+    /// calling device with its display name and the pin of its node certificate, or
+    /// update both. The node's tunnel (`crate::node::tunnel`, plan s7 unit M4) calls it
+    /// before it opens its WebSocket.
+    pub fn register_node(
+        &self,
+        token: &str,
+        name: &str,
+        pin: &str,
+    ) -> Result<TunnelNodeView, ConnectError> {
+        self.post("/v1/tunnel/nodes", Some(token), &RegisterNode { name, pin })
+    }
+    // ---- Billing and groups (connect-billing-v1 sections 4 to 6, 8). ----
+
+    pub(super) fn checkout(
+        &self,
+        token: &str,
+        body: &CheckoutRequest,
+    ) -> Result<CheckoutAnswer, ConnectError> {
+        self.post("/v1/account/checkout", Some(token), body)
+    }
+
+    pub(super) fn portal(&self, token: &str) -> Result<PortalAnswer, ConnectError> {
+        self.post("/v1/account/portal", Some(token), &Empty {})
+    }
+
+    pub(super) fn plan(&self, token: &str) -> Result<PlanView, ConnectError> {
+        self.get("/v1/account/plan", Some(token))
+    }
+
+    pub(super) fn group(&self, token: &str) -> Result<GroupDetail, ConnectError> {
+        self.get("/v1/account/group", Some(token))
+    }
+
+    pub(super) fn invite(&self, token: &str, role: &str) -> Result<InviteAnswer, ConnectError> {
+        self.post(
+            "/v1/account/group/invites",
+            Some(token),
+            &InviteRequest { role },
+        )
+    }
+
+    pub(super) fn join_group(&self, token: &str, code: &str) -> Result<GroupJoined, ConnectError> {
+        self.post(
+            "/v1/account/group/join",
+            Some(token),
+            &GroupJoinRequest { code },
+        )
+    }
+
+    pub(super) fn confirm_member(
+        &self,
+        token: &str,
+        account_id: &str,
+    ) -> Result<GroupMember, ConnectError> {
+        if !super::words::valid_account_id(account_id) {
+            return Err(ConnectError::Invalid);
+        }
+        self.post(
+            &format!("/v1/account/group/members/{account_id}/confirm"),
+            Some(token),
+            &Empty {},
+        )
+    }
+
+    pub(super) fn remove_member(
+        &self,
+        token: &str,
+        account_id: &str,
+    ) -> Result<MemberRemoved, ConnectError> {
+        if !super::words::valid_account_id(account_id) {
+            return Err(ConnectError::Invalid);
+        }
+        self.send(Request::new(
+            "DELETE",
+            format!("/v1/account/group/members/{account_id}"),
+            Some(token),
+        ))
+    }
+
+    pub(super) fn set_seats(
+        &self,
+        token: &str,
+        quantity: u64,
+    ) -> Result<SeatsAnswer, ConnectError> {
+        self.post(
+            "/v1/account/group/seats",
+            Some(token),
+            &SeatsRequest { quantity },
+        )
     }
 }

@@ -33,11 +33,13 @@ use std::fmt;
 pub use account::{
     AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest, PendingJoin,
     RevokeOutcome, account_file, drop_account_rows, drop_stale_account_rows, forget_this_device,
+    group_invite_code,
 };
 pub use client::{
-    AccountCreated, AccountDeleted, AccountView, ConnectClient, DeviceView, GroupView, PlanView,
-    PlansView, RecoverAnswer, RevokeAnswer, StoreDevice, VaultStoreView, WellKnown,
-    configured_origin,
+    AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
+    DeviceView, GroupDetail, GroupJoined, GroupMember, GroupView, InviteAnswer, MemberRemoved,
+    PlanOffer, PlanPrice, PlanView, PlansView, PortalAnswer, RecoverAnswer, RevokeAnswer,
+    SeatsAnswer, StoreDevice, VaultStoreView, WellKnown, configured_origin,
 };
 pub use device_key::{
     AccountSigner, DeviceKeyError, DeviceKeyStore, KeychainDeviceKeyStore, MemoryKeyStore,
@@ -96,6 +98,9 @@ pub enum ConnectError {
     NotFound,
     /// `409 conflict`.
     Conflict,
+    /// `409 seat_limit`: people or seats below the confirmed members, or above the
+    /// maximum of the plan (connect-billing-v1 section 6).
+    SeatLimit,
     /// `429`: wait this many seconds.
     RateLimited(u64),
     /// Another refusal of Connect, with its status and code.
@@ -158,6 +163,9 @@ impl fmt::Display for ConnectError {
             }
             Self::Conflict => {
                 "Apassy Connect has a different state for this. Reload and try again."
+            }
+            Self::SeatLimit => {
+                "That number is below the members of your family or team, or above the most the plan allows. Remove members first, or choose another number."
             }
             Self::RateLimited(seconds) => {
                 return write!(f, "Apassy Connect asks to wait {seconds} seconds.");

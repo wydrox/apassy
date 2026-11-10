@@ -379,7 +379,8 @@ struct Shared {
     /// The slots and the rate of the tailnet peers that Serve names (ServeTcp only).
     forwarded: Arc<Connections>,
     forwarded_rate: RateLimiter<IpAddr>,
-    stop: AtomicBool,
+    /// Shared with the pumps of this front's connections.
+    stop: Arc<AtomicBool>,
     loopback_is_tailnet: bool,
     allow_loopback_bind: bool,
     route: FrontRoute,
@@ -438,7 +439,7 @@ impl Front {
             rate: RateLimiter::new(limits.new_per_peer_per_minute),
             forwarded: Connections::new(limits.max_connections, limits.max_per_forwarded_peer),
             forwarded_rate: RateLimiter::new(limits.new_per_forwarded_peer_per_minute),
-            stop: AtomicBool::new(false),
+            stop: Arc::new(AtomicBool::new(false)),
             loopback_is_tailnet: options.allow_test_peers || options.route == FrontRoute::ServeTcp,
             allow_loopback_bind: options.allow_loopback_bind
                 || options.route == FrontRoute::ServeTcp,
@@ -702,14 +703,82 @@ impl Activity {
     }
 }
 
-/// The TLS state and the write half to the peer, under one lock: the records of both
-/// directions reach the peer in the order that rustls made them.
-struct PeerSide {
-    tls: TlsSide,
-    socket: TcpStream,
+/// The peer side of a connection that the front serves: a TCP socket of a listener, or a
+/// stream of the Connect tunnel (`crate::node::tunnel`), which arrives as an accepted
+/// connection. The pump needs a second handle for the other direction, a shutdown, and
+/// timeouts, with the meaning they have on a [`TcpStream`]: a read that times out fails
+/// with `WouldBlock` or `TimedOut` and the connection stays usable.
+pub trait Conn: Read + Write + Send + Sized + 'static {
+    /// A second handle to the same connection.
+    fn try_clone(&self) -> io::Result<Self>;
+    /// `Write`: no more bytes go to the peer. `Both`: the connection ends.
+    fn shutdown(&self, how: Shutdown) -> io::Result<()>;
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
 }
 
-impl PeerSide {
+impl Conn for TcpStream {
+    fn try_clone(&self) -> io::Result<Self> {
+        TcpStream::try_clone(self)
+    }
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        TcpStream::shutdown(self, how)
+    }
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_write_timeout(self, timeout)
+    }
+}
+
+/// Serve one connection that no listener of a front accepted: a stream of the Connect
+/// tunnel, handed over with the TLS configuration of its kind (`crate::node::public_cert`).
+/// The same handshake deadline, connection to the loopback `target`, pump, and idle limit
+/// as a tailnet connection. There is no peer check and no per-peer slot: Connect tells
+/// the node nothing about the caller, who authenticates inside TLS as on the tailnet, and
+/// the tunnel has its own stream limits. `stop` ends the pump (the tunnel stops). It
+/// returns when the connection ended.
+pub fn serve_connection<C: Conn>(
+    mut conn: C,
+    config: Arc<ServerConfig>,
+    target: SocketAddr,
+    limits: FrontLimits,
+    stop: &Arc<AtomicBool>,
+) {
+    if !target.ip().to_canonical().is_loopback() {
+        let _ = conn.shutdown(Shutdown::Both);
+        return;
+    }
+    let Ok(mut tls) = TlsSide::new(config) else {
+        let _ = conn.shutdown(Shutdown::Both);
+        return;
+    };
+    let deadline = Instant::now() + limits.handshake;
+    let Some(early) = handshake(&mut tls, &mut conn, deadline) else {
+        let _ = conn.shutdown(Shutdown::Both);
+        return;
+    };
+    let Ok(target) = TcpStream::connect_timeout(&target, limits.connect_target) else {
+        tls.close();
+        let mut out = Vec::new();
+        tls.outgoing(&mut out);
+        let _ = conn.write_all(&out);
+        let _ = conn.shutdown(Shutdown::Both);
+        return;
+    };
+    let _ = target.set_nodelay(true);
+    pump(limits, stop, conn, target, tls, early);
+}
+
+/// The TLS state and the write half to the peer, under one lock: the records of both
+/// directions reach the peer in the order that rustls made them.
+struct PeerSide<C> {
+    tls: TlsSide,
+    socket: C,
+}
+
+impl<C: Conn> PeerSide<C> {
     fn flush(&mut self) -> io::Result<()> {
         let mut out = Vec::new();
         self.tls.outgoing(&mut out);
@@ -732,7 +801,7 @@ fn is_timeout(error: &io::Error) -> bool {
 /// plaintext that came in the same read as the client's Finished (a client may send its
 /// first request right behind it), for the pump. Early data is off, so no plaintext
 /// comes before the handshake ends.
-fn handshake(tls: &mut TlsSide, socket: &mut TcpStream, deadline: Instant) -> Option<Vec<u8>> {
+fn handshake<C: Conn>(tls: &mut TlsSide, socket: &mut C, deadline: Instant) -> Option<Vec<u8>> {
     let mut buffer = vec![0u8; CHUNK];
     let mut plain = Vec::new();
     while tls.is_handshaking() {
@@ -826,7 +895,7 @@ fn serve(shared: &Arc<Shared>, mut client: TcpStream, config: Arc<ServerConfig>,
         (Ok(source), Ok(listener)) => Some(front_peers::register(source, listener, peer)),
         _ => None,
     };
-    pump(shared, client, target, tls, early);
+    pump(shared.limits, &shared.stop, client, target, tls, early);
 }
 
 /// The longest PROXY protocol v1 line, `\r\n` included.
@@ -910,13 +979,19 @@ fn tick(idle: Duration) -> Duration {
         .max(Duration::from_millis(5))
 }
 
-fn end_both(client: &TcpStream, target: &TcpStream) {
+fn end_both<C: Conn>(client: &C, target: &TcpStream) {
     let _ = client.shutdown(Shutdown::Both);
     let _ = target.shutdown(Shutdown::Both);
 }
 
-fn pump(shared: &Arc<Shared>, client: TcpStream, target: TcpStream, tls: TlsSide, early: Vec<u8>) {
-    let limits = shared.limits;
+fn pump<C: Conn>(
+    limits: FrontLimits,
+    stop: &Arc<AtomicBool>,
+    client: C,
+    target: TcpStream,
+    tls: TlsSide,
+    early: Vec<u8>,
+) {
     let (Ok(client_write), Ok(target_read)) = (client.try_clone(), target.try_clone()) else {
         end_both(&client, &target);
         return;
@@ -935,30 +1010,31 @@ fn pump(shared: &Arc<Shared>, client: TcpStream, target: TcpStream, tls: TlsSide
     let down = {
         let peer = Arc::clone(&peer);
         let activity = Arc::clone(&activity);
-        let shared = Arc::clone(shared);
+        let stop = Arc::clone(stop);
         thread::Builder::new()
             .name("apassy-front-down".to_owned())
-            .spawn(move || down_pump(&shared, target_read, &peer, &activity, tick))
+            .spawn(move || down_pump(limits, &stop, target_read, &peer, &activity, tick))
     };
     let Ok(down) = down else {
         end_both(&client, &target);
         return;
     };
-    up_pump(shared, client, target, &peer, &activity, tick, early);
+    up_pump(limits, stop, client, target, &peer, &activity, tick, early);
     let _ = down.join();
 }
 
 /// Peer to target. It runs on the connection's thread.
-fn up_pump(
-    shared: &Shared,
-    mut client: TcpStream,
+#[allow(clippy::too_many_arguments)] // The pump's whole state; a struct would only rename it.
+fn up_pump<C: Conn>(
+    limits: FrontLimits,
+    stop: &AtomicBool,
+    mut client: C,
     mut target: TcpStream,
-    peer: &Mutex<PeerSide>,
+    peer: &Mutex<PeerSide<C>>,
     activity: &Activity,
     tick: Duration,
     early: Vec<u8>,
 ) {
-    let limits = shared.limits;
     let mut buffer = vec![0u8; CHUNK];
     let mut total: u64 = 0;
     // Plaintext that came with the client's Finished.
@@ -987,7 +1063,7 @@ fn up_pump(
             let _ = target.shutdown(Shutdown::Write);
             return;
         }
-        if shared.stop.load(Ordering::SeqCst) || activity.idle_for() >= limits.idle {
+        if stop.load(Ordering::SeqCst) || activity.idle_for() >= limits.idle {
             end_both(&client, &target);
             return;
         }
@@ -1023,14 +1099,14 @@ fn up_pump(
 }
 
 /// Target to peer.
-fn down_pump(
-    shared: &Shared,
+fn down_pump<C: Conn>(
+    limits: FrontLimits,
+    stop: &AtomicBool,
     mut target: TcpStream,
-    peer: &Mutex<PeerSide>,
+    peer: &Mutex<PeerSide<C>>,
     activity: &Activity,
     tick: Duration,
 ) {
-    let limits = shared.limits;
     let mut buffer = vec![0u8; CHUNK];
     let mut total: u64 = 0;
     if target.set_read_timeout(Some(tick)).is_err() {
@@ -1039,7 +1115,7 @@ fn down_pump(
         return;
     }
     loop {
-        if shared.stop.load(Ordering::SeqCst) || activity.idle_for() >= limits.idle {
+        if stop.load(Ordering::SeqCst) || activity.idle_for() >= limits.idle {
             let side = locked(peer);
             end_both(&side.socket, &target);
             return;

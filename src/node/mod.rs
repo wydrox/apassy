@@ -56,13 +56,16 @@
 //! Lock order: the node (read or write), then the catalog state, then the vault. No code
 //! holds the vault while it waits for the node.
 
+pub mod acme;
 pub mod backend;
 pub mod catalog;
 pub mod funnel;
 mod host;
 pub mod master_key;
+pub mod public_cert;
 pub mod questions_team;
 pub mod tailnet;
+pub mod tunnel;
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -79,6 +82,7 @@ use self::backend::{
 use self::funnel::{Funnel, FunnelError, SystemTailscale, Tailscale, TailscaleCli};
 use self::master_key::{KeySource, KeyStore, KeychainStore, NoKeychain};
 use self::tailnet::{TailnetHere, TailnetRoute};
+use self::tunnel::{ConnectSetup, Targets, Tunnel, TunnelHandle, TunnelOptions, TunnelStatus};
 use crate::broker::SharedVault;
 use crate::broker::decide::BrokerContext;
 use crate::net::tls_front::FrontRoute;
@@ -103,6 +107,9 @@ const SERVE_TCP_PORT_FILE: &str = "serve-tcp-port";
 /// The file in the node directory with the Funnel port that the owner chose ("Use Port
 /// 10000"). Without it the route uses 8443.
 const FUNNEL_PORT_FILE: &str = "funnel-port";
+/// The file in the node directory that says the "Apassy Connect" route is on (plan s7
+/// unit M4). The route is of this Mac (its Connect account), not of a vault.
+const CONNECT_ROUTE_FILE: &str = "connect-route";
 /// The audit rows of one run that Logs reads at most.
 const RUN_AUDIT_ROWS: u32 = 500;
 /// Rows of "Recent cloud activity".
@@ -372,6 +379,8 @@ pub struct NodeStatus {
     pub funnel_port: u16,
     /// The tailnet route (plan unit N4).
     pub tailnet: TailnetStatus,
+    /// The "Apassy Connect" route (plan s7 unit M4).
+    pub connect: ConnectRouteStatus,
 }
 
 /// Why remote access does not work, for the remote access block (plan F6).
@@ -484,6 +493,25 @@ struct Running {
     funnel_on: bool,
     /// The tailnet route, when it is on.
     tailnet: Option<TailnetRoute>,
+    /// The tunnel to Apassy Connect, when its route is on (plan s7 unit M4).
+    tunnel: Option<TunnelHandle>,
+    /// `https://<public name>` that this start used, when it knew it.
+    connect_origin: Option<String>,
+}
+
+/// The "Apassy Connect" route of this Mac, for Bouncer > Agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectRouteStatus {
+    /// This Mac has a Connect account (the route can be turned on).
+    pub available: bool,
+    /// The owner's switch.
+    pub on: bool,
+    /// The node runs.
+    pub running: bool,
+    /// The public name, from the tunnel or the kept registration.
+    pub public_name: Option<String>,
+    /// The tunnel, while the node runs with the route on.
+    pub tunnel: Option<TunnelStatus>,
 }
 
 #[derive(Default)]
@@ -510,12 +538,13 @@ struct Move {
 
 /// The failure codes after which the desktop tries a start again by itself
 /// ([`Node::retry_soon`]): Tailscale was not there yet, or a port was taken.
-const RETRY_CODES: [&str; 5] = [
+const RETRY_CODES: [&str; 6] = [
     "no_tailscale",
     "tailscale_not_connected",
     "tailscale_no_address",
     "tailnet_port_taken",
     "tailnet_serve_failed",
+    "connect_unavailable",
 ];
 
 /// The node service. Every method can be called from any thread.
@@ -545,6 +574,8 @@ pub struct Node {
     /// Called on the host thread when the connect requests change; every node of this
     /// service gets it.
     on_connects: Arc<Mutex<Option<host::ConnectsHook>>>,
+    /// The Connect account of this build ([`Node::set_connect`]); `None`: no Connect route.
+    connect: Mutex<Option<ConnectSetup>>,
 }
 
 /// The state of the open vault that a start needs.
@@ -588,6 +619,7 @@ impl Node {
             notes: Mutex::new(Notes::default()),
             connect_ends: Mutex::new(std::collections::VecDeque::new()),
             on_connects: Arc::new(Mutex::new(None)),
+            connect: Mutex::new(None),
         }
     }
 
@@ -663,6 +695,19 @@ impl Node {
             .then(|| vault.epoch())
     }
 
+    /// [`Node::wanted`] with the "Apassy Connect" route of this Mac: an unlocked vault
+    /// also wants the node while that route is on.
+    pub fn wanted_here(&self, vault: &Vault) -> Option<[u8; 32]> {
+        self.may_run_here(vault)
+    }
+
+    /// [`Node::may_run`] with the "Apassy Connect" route of this Mac.
+    pub fn may_run_here(&self, vault: &Vault) -> Option<[u8; 32]> {
+        Self::may_run(vault).or_else(|| {
+            (!vault.is_locked() && self.connect_wanted().is_some()).then(|| vault.epoch())
+        })
+    }
+
     /// Serve the new session of the same vault file (a passphrase change or a backup
     /// ends the session without a lock), so its sessions and the route stay. Returns
     /// false when no node runs, or it serves another file: then stop it.
@@ -685,7 +730,7 @@ impl Node {
         Ok((loaded.secret, loaded.source, loaded.retired.is_some()))
     }
 
-    fn vault_state(vault: &SharedVault) -> Result<VaultState, NodeError> {
+    fn vault_state(vault: &SharedVault, connect_on: bool) -> Result<VaultState, NodeError> {
         let mut guard = lock(vault);
         let vault = guard
             .as_mut()
@@ -693,7 +738,7 @@ impl Node {
             .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
         let storage = |_| error("vault_error", "The vault cannot be read for the node.");
         let setting = vault.cloud_node_setting().map_err(storage)?;
-        if !setting.route_on && !setting.tailnet_on {
+        if !setting.route_on && !setting.tailnet_on && !connect_on {
             return Err(error(
                 "route_off",
                 "Remote access is off (Bouncer > Agents).",
@@ -807,7 +852,8 @@ impl Node {
             return Ok(());
         }
         self.check_not_stopping()?;
-        let state = Self::vault_state(vault)?;
+        let connect = self.connect_wanted();
+        let state = Self::vault_state(vault, connect.is_some())?;
         lock(&self.notes).tailnet_notes.clear();
         // The Funnel route needs the MagicDNS name; the tailnet route its address.
         let dns_name = if state.route_on {
@@ -824,8 +870,8 @@ impl Node {
         };
         let dns_name = match dns_name {
             Ok(name) => name,
-            // With the tailnet route on, the node starts without Funnel.
-            Err(failure) if state.tailnet_on => {
+            // With the tailnet route or the Connect route on, the node starts without Funnel.
+            Err(failure) if state.tailnet_on || connect.is_some() => {
                 lock(&self.notes).tailnet_notes.push(format!(
                     "The public route for cloud agents is off: {}",
                     failure.message
@@ -853,12 +899,48 @@ impl Node {
             team_id = None;
         }
         self.check_not_stopping()?;
+        // The certificate key is sealed under the node key, which moves into the config.
+        let certificate_key = Zeroizing::new(key.expose().as_bytes().to_vec());
+        // The Connect route: the node certificate (its pin) and the public name.
+        let (connect_certificate, connect_origin) = match &connect {
+            Some(setup) => {
+                let (certificate, name) = self.connect_name(setup, &certificate_key)?;
+                (
+                    Some(certificate),
+                    name.map(|name| format!("https://{name}")),
+                )
+            }
+            None => (None, None),
+        };
+        self.check_not_stopping()?;
         let origin = here.as_ref().map(|here| here.origin(state.tailnet_port));
-        let public_url = match (&dns_name, &origin) {
-            (Some(name), _) => self.funnel.origin(name),
+        // The devices sign in with the node origin. With the tailnet route: the tailnet
+        // origin. With only the Connect route: the origin that the devices paired with
+        // (kept in the vault), so a paired device keeps its identity and dials the node
+        // through Connect instead of the tailnet; before any pairing, the public name with
+        // the node port (a pinned origin names a port; Connect is the transport).
+        let device_origin = origin
+            .clone()
+            .or_else(|| connect.as_ref().and(state.last_origin.clone()))
+            .or_else(|| {
+                connect_origin
+                    .as_ref()
+                    .map(|connect_origin| format!("{connect_origin}:{}", state.tailnet_port))
+            });
+        // Agents get one public origin (OAuth names it): Funnel's when Funnel is up, else
+        // the public name at Connect while remote access is on.
+        let public_url = match (&dns_name, &connect_origin, &device_origin) {
+            (Some(name), _, _) => self.funnel.origin(name),
+            (None, Some(connect_origin), _) if state.route_on => connect_origin.clone(),
             // No public route: the node origin is the only origin.
-            (None, Some(origin)) => origin.clone(),
-            (None, None) => {
+            (None, _, Some(device_origin)) => device_origin.clone(),
+            (None, _, None) if connect.is_some() => {
+                return Err(error(
+                    "connect_unavailable",
+                    "Apassy Connect did not register this Mac yet. Apassy tries again.",
+                ));
+            }
+            (None, _, None) => {
                 return Err(error(
                     "route_off",
                     "Remote access is off (Bouncer > Agents).",
@@ -866,20 +948,21 @@ impl Node {
             }
         };
         let funnel_wanted = dns_name.is_some();
-        let tailnet_config = origin.as_ref().map(|origin| NodeTailnet {
+        // The public listener serves Funnel, and the public streams of Connect while
+        // remote access is on.
+        let public_wanted = funnel_wanted || (state.route_on && connect_origin.is_some());
+        let tailnet_config = device_origin.as_ref().map(|origin| NodeTailnet {
             node_origin: origin.clone(),
             tailnet_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             tailnet_agents: false,
             push_gateway: Some(state.push_gateway.clone()),
         });
-        // The certificate key is sealed under the node key, which moves into the config.
-        let certificate_key = Zeroizing::new(key.expose().as_bytes().to_vec());
         let node = match self.backend.start_on_tailnet(
             NodeConfig {
                 data_dir: self.data_dir.clone(),
                 master_key: key,
                 public_url: public_url.clone(),
-                public_listen: funnel_wanted
+                public_listen: public_wanted
                     .then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, state.port))),
             },
             tailnet_config,
@@ -895,6 +978,10 @@ impl Node {
             }
         };
         let tailnet_target = node.tailnet_addr().zip(node.local_route_addr());
+        let connect_targets = Targets {
+            device: node.tailnet_addr(),
+            public: public_wanted.then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, state.port))),
+        };
         let team = match team_id.map(NodeTeamId) {
             Some(team) if node.has_team(&team) => team,
             stored => {
@@ -1015,6 +1102,13 @@ impl Node {
             }
             return Err(failure);
         }
+        // The tunnel last: it connects by itself, and a stop closes it first.
+        let tunnel = match (connect, connect_certificate) {
+            (Some(setup), Some(certificate)) => {
+                self.start_tunnel(setup, certificate, connect_targets)
+            }
+            _ => None,
+        };
         *lock(&self.running) = Some(Running {
             serial: self.serial.fetch_add(1, Ordering::SeqCst) + 1,
             shared,
@@ -1022,8 +1116,138 @@ impl Node {
             port: state.port,
             funnel_on,
             tailnet: route,
+            tunnel,
+            connect_origin,
         });
         Ok(())
+    }
+
+    /// The Connect account of this build, when the owner turned its route on.
+    fn connect_wanted(&self) -> Option<ConnectSetup> {
+        if !self.connect_route_on() {
+            return None;
+        }
+        lock(&self.connect)
+            .clone()
+            .filter(|setup| setup.auth.has_account())
+    }
+
+    /// The node certificate and the public name of the Connect route: the kept
+    /// registration when it has this pin, else a registration now. A Connect that cannot
+    /// be reached gives no name (the tunnel registers later, and [`Node::maintain`]
+    /// starts the node again with it).
+    fn connect_name(
+        &self,
+        setup: &ConnectSetup,
+        certificate_key: &[u8],
+    ) -> Result<(crate::net::NodeCertificate, Option<String>), NodeError> {
+        let name = crate::sync::device_name();
+        let (certificate, _) = tailnet::certificate(&self.data_dir, certificate_key, &name)?;
+        let pin = certificate.pin.text();
+        let origin = setup.auth.origin();
+        if let Some(file) =
+            tunnel::load_node_file(&self.data_dir, &origin).filter(|file| file.pin == pin)
+        {
+            return Ok((certificate, Some(file.public_name)));
+        }
+        match tunnel::register_now(setup.auth.as_ref(), &self.data_dir, &name, &pin) {
+            Ok(view) => Ok((certificate, Some(view.public_name))),
+            Err(failure) => {
+                lock(&self.notes)
+                    .tailnet_notes
+                    .push(format!("Apassy Connect: {failure}."));
+                Ok((certificate, None))
+            }
+        }
+    }
+
+    fn start_tunnel(
+        &self,
+        setup: ConnectSetup,
+        certificate: crate::net::NodeCertificate,
+        targets: Targets,
+    ) -> Option<TunnelHandle> {
+        match Tunnel::start(TunnelOptions {
+            setup,
+            node_dir: self.data_dir.clone(),
+            name: crate::sync::device_name(),
+            certificate,
+            targets,
+        }) {
+            Ok(tunnel) => Some(tunnel),
+            Err(failure) => {
+                lock(&self.notes).tailnet_notes.push(format!(
+                    "The tunnel to Apassy Connect did not start: {failure}."
+                ));
+                None
+            }
+        }
+    }
+
+    /// Give the node the Connect account of this build (the app: [`ConnectSetup::platform`]
+    /// when this Mac has an account). `None` turns the Connect route off for this
+    /// process. It takes effect at the next start.
+    pub fn set_connect(&self, setup: Option<ConnectSetup>) {
+        *lock(&self.connect) = setup;
+    }
+
+    /// This build has a Connect account for the route.
+    pub fn has_connect(&self) -> bool {
+        lock(&self.connect).is_some()
+    }
+
+    /// The owner's "Apassy Connect" switch of this Mac.
+    pub fn connect_route_on(&self) -> bool {
+        std::fs::read_to_string(self.data_dir.join(CONNECT_ROUTE_FILE))
+            .is_ok_and(|text| text.trim() == "on")
+    }
+
+    /// Turn the "Apassy Connect" route on or off. A running node stops, so the desktop
+    /// starts it again with the new routes (off: the tunnel closes and no stream
+    /// survives). Devices still authenticate inside the pinned TLS, and cloud agents
+    /// reach the public listener only while remote access is on, where every connect
+    /// asks the owner: the switch itself grants nothing.
+    pub fn set_connect_route(&self, on: bool) -> Result<(), NodeError> {
+        let path = self.data_dir.join(CONNECT_ROUTE_FILE);
+        let saved = if on {
+            std::fs::create_dir_all(&self.data_dir).and_then(|()| std::fs::write(&path, "on\n"))
+        } else {
+            match std::fs::remove_file(&path) {
+                Err(failure) if failure.kind() != std::io::ErrorKind::NotFound => Err(failure),
+                _ => Ok(()),
+            }
+        };
+        saved.map_err(|_| error("node_failed", "The Apassy Connect route cannot be saved."))?;
+        lock(&self.notes).failure = None;
+        if self.is_running() {
+            self.stop();
+        }
+        Ok(())
+    }
+
+    /// The "Apassy Connect" route as Bouncer > Agents shows it.
+    pub fn connect_status(&self) -> ConnectRouteStatus {
+        let tunnel = lock(&self.running)
+            .as_ref()
+            .and_then(|running| running.tunnel.as_ref())
+            .map(TunnelHandle::status);
+        let setup = lock(&self.connect)
+            .clone()
+            .filter(|setup| setup.auth.has_account());
+        let kept = setup.as_ref().and_then(|setup| {
+            tunnel::load_node_file(&self.data_dir, &setup.auth.origin())
+                .map(|file| file.public_name)
+        });
+        ConnectRouteStatus {
+            available: setup.is_some(),
+            on: self.connect_route_on(),
+            running: self.is_running(),
+            public_name: tunnel
+                .as_ref()
+                .and_then(|status| status.public_name.clone())
+                .or(kept),
+            tunnel,
+        }
     }
 
     /// The tailnet route of a start: the certificate, then the front on the relay's
@@ -1145,6 +1369,10 @@ impl Node {
         };
         // A move waits for a device of the node team: its key goes with the node.
         lock(&self.moving).take();
+        // The tunnel first: its WebSocket closes and every stream through it ends.
+        if let Some(mut tunnel) = running.tunnel.take() {
+            tunnel.stop();
+        }
         // The summary rows, while the vault is still open (at a quit; a lock wrote its
         // own rows already).
         host::end_all_sessions(&running.shared, "the node stopped");
@@ -1163,8 +1391,18 @@ impl Node {
     /// down keeps the node: the front follows the addresses. Only the node that it checked
     /// is stopped. Returns true when it stopped the node.
     pub fn maintain(&self) -> bool {
-        let Some((serial, port, public_url, funnel_on, on_tailnet)) =
+        let Some((serial, port, public_url, funnel_on, on_tailnet, connect_late)) =
             lock(&self.running).as_ref().map(|running| {
+                // The tunnel registered after a start without the public name: start
+                // again with it.
+                let connect_late = running.tunnel.as_ref().is_some_and(|tunnel| {
+                    tunnel
+                        .status()
+                        .public_name
+                        .map(|name| format!("https://{name}"))
+                        != running.connect_origin
+                        && tunnel.status().public_name.is_some()
+                });
                 (
                     running.serial,
                     running.port,
@@ -1174,12 +1412,13 @@ impl Node {
                         .tailnet
                         .as_ref()
                         .map(|route| (route.origin.clone(), route.port)),
+                    connect_late,
                 )
             })
         else {
             return false;
         };
-        let mut stop = false;
+        let mut stop = connect_late;
         if funnel_on {
             let name_changed = match self.funnel.status() {
                 Tailscale::Connected { dns_name } => self.funnel.origin(&dns_name) != public_url,
@@ -1297,6 +1536,7 @@ impl Node {
             problem,
             funnel_port: self.funnel.port(),
             tailnet,
+            connect: self.connect_status(),
         }
     }
 

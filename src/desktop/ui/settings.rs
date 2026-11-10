@@ -54,6 +54,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, section: SettingsSec
         }
         SettingsSection::Security => security_section(app, ui),
         SettingsSection::Devices => devices_section(app, ui),
+        SettingsSection::Connect => super::connect::section(app, ui),
         SettingsSection::Bouncer => broker_section(app, ui),
         SettingsSection::Tools => {
             command_line_section(app, ui);
@@ -94,6 +95,7 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
             }
         }
         SettingsSection::Devices => super::devices::status_line(app),
+        SettingsSection::Connect => super::connect::status_line(app),
         SettingsSection::Bouncer => app.model_server.as_ref().map_or_else(
             || "Every run waits for you".to_owned(),
             |server| {

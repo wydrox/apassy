@@ -12,6 +12,14 @@
 //! Hooks act as a broken or hostile Connect: report another origin in the challenge,
 //! shorten the token lifetime, lose the next answers after doing the step, entitle an
 //! account, revoke a device behind the app's back, and read what the app sent.
+//!
+//! Billing and groups (contract connect-billing-v1, plan s7 unit M2): `GET /v1/plans`
+//! answers `tests/fixtures/connect-billing-v1/plans.json`; the checkout, the portal, the
+//! plan, and the group routes check the strict bodies and the roles of sections 4 to 6
+//! and answer synthetic Stripe URLs. No Stripe is called: [`FakeConnect::complete_checkout`]
+//! does what the webhook would (binds the customer, sets the plan, makes the group), and
+//! [`FakeConnect::set_plan`] sets any `PlanView` of section 8. A seats change applies at
+//! once here (Connect waits for `customer.subscription.updated`).
 
 #![allow(dead_code)]
 
@@ -62,6 +70,42 @@ struct Account {
     created_at: u64,
     recovery_hash: String,
     entitled: bool,
+    /// A `PlanView` set by [`FakeConnect::set_plan`] or a completed checkout.
+    plan: Option<Value>,
+    /// A Stripe customer is bound (a checkout completed): the portal works.
+    customer: bool,
+}
+
+/// A checkout session that the app asked for.
+struct Checkout {
+    session_id: String,
+    account: String,
+    body: Value,
+    completed: bool,
+}
+
+struct Member {
+    account: String,
+    role: String,
+    state: String,
+    joined_at: u64,
+}
+
+struct Group {
+    id: String,
+    kind: String,
+    owner: String,
+    included: u64,
+    max: u64,
+    quantity: u64,
+    members: Vec<Member>,
+}
+
+struct Invite {
+    code: String,
+    group: String,
+    role: String,
+    used: bool,
 }
 
 struct Link {
@@ -116,6 +160,9 @@ struct State {
     /// Each request line with its `Authorization` header.
     authorizations: Vec<(String, Option<String>)>,
     recover_tries: u64,
+    checkouts: Vec<Checkout>,
+    groups: Vec<Group>,
+    invites: Vec<Invite>,
 }
 
 /// A running fake Connect.
@@ -301,6 +348,104 @@ impl FakeConnect {
             .collect()
     }
 
+    /// The `PlanView` that `GET /v1/account` and `GET /v1/account/plan` answer for
+    /// `account`; `entitled` follows its `entitled` field.
+    pub fn set_plan(&self, account: &str, plan: Value) {
+        if let Some(entry) = lock(&self.shared).accounts.get_mut(account) {
+            entry.entitled = plan["entitled"].as_bool().unwrap_or(false);
+            entry.plan = Some(plan);
+        }
+    }
+
+    /// What the webhook does after `checkout.session.completed` and
+    /// `customer.subscription.created` for the checkout `session_id`: the customer is
+    /// bound, the plan is active, and a Family or Team checkout makes the group with the
+    /// buyer as its owner. False for an unknown or completed session.
+    pub fn complete_checkout(&self, session_id: &str) -> bool {
+        let mut state = lock(&self.shared);
+        let Some(index) = state
+            .checkouts
+            .iter()
+            .position(|checkout| checkout.session_id == session_id && !checkout.completed)
+        else {
+            return false;
+        };
+        state.checkouts[index].completed = true;
+        let account = state.checkouts[index].account.clone();
+        let body = state.checkouts[index].body.clone();
+        let plan = text(&body, "plan").to_owned();
+        let quantity = body["people"]
+            .as_u64()
+            .or_else(|| body["seats"].as_u64())
+            .unwrap_or(1);
+        state.next += 1;
+        let group_id = (plan != "personal").then(|| id("grp_", state.next));
+        let renews = now() + 2_592_000;
+        let view = json!({"plan": plan, "status": "active", "entitled": true,
+                          "interval": text(&body, "interval"), "quantity": quantity,
+                          "renews_at": renews, "ends_at": null, "grace_until": null,
+                          "read_only_until": null, "delete_at": null, "group_id": group_id});
+        if let Some(entry) = state.accounts.get_mut(&account) {
+            entry.entitled = true;
+            entry.customer = true;
+            entry.plan = Some(view);
+        }
+        if let Some(group_id) = group_id {
+            let offer = plan_offer(&plan);
+            state.groups.push(Group {
+                id: group_id,
+                kind: plan.clone(),
+                owner: account.clone(),
+                included: offer["included"].as_u64().unwrap_or(1),
+                max: offer["max"].as_u64().unwrap_or(1),
+                quantity,
+                members: vec![Member {
+                    account,
+                    role: "owner".to_owned(),
+                    state: "active".to_owned(),
+                    joined_at: now(),
+                }],
+            });
+        }
+        true
+    }
+
+    /// The bodies of the checkouts that the app asked for, in order, with their session
+    /// ids.
+    pub fn checkouts(&self) -> Vec<(String, Value)> {
+        lock(&self.shared)
+            .checkouts
+            .iter()
+            .map(|checkout| (checkout.session_id.clone(), checkout.body.clone()))
+            .collect()
+    }
+
+    /// The members of the group of `account`: (account, role, state).
+    pub fn members(&self, account: &str) -> Vec<(String, String, String)> {
+        let state = lock(&self.shared);
+        group_of(&state, account)
+            .map(|index| {
+                state.groups[index]
+                    .members
+                    .iter()
+                    .map(|member| {
+                        (
+                            member.account.clone(),
+                            member.role.clone(),
+                            member.state.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The subscription quantity of the group of `account`.
+    pub fn quantity(&self, account: &str) -> Option<u64> {
+        let state = lock(&self.shared);
+        group_of(&state, account).map(|index| state.groups[index].quantity)
+    }
+
     /// The public key of the entitlement key, b64u.
     pub fn entitlement_public_key() -> String {
         let pair = Ed25519KeyPair::from_seed_unchecked(&entitlement_seed()).expect("seed");
@@ -437,7 +582,94 @@ fn device_view(device: &Device) -> Value {
            "last_seen_at": null})
 }
 
+/// The plans of the default configuration (connect-billing-v1 section 2).
+fn plans() -> Value {
+    serde_json::from_str(include_str!("../fixtures/connect-billing-v1/plans.json"))
+        .expect("plans.json")
+}
+
+/// One plan of [`plans`].
+fn plan_offer(plan: &str) -> Value {
+    plans()["plans"]
+        .as_array()
+        .and_then(|offers| offers.iter().find(|offer| offer["plan"] == plan).cloned())
+        .unwrap_or(Value::Null)
+}
+
+/// The index of the group in which `account` is a member (pending or active).
+fn group_of(state: &State, account: &str) -> Option<usize> {
+    state
+        .groups
+        .iter()
+        .position(|group| group.members.iter().any(|member| member.account == account))
+}
+
+/// The member entry of `account` in its group.
+fn membership<'a>(state: &'a State, account: &str) -> Option<(&'a Group, &'a Member)> {
+    let group = &state.groups[group_of(state, account)?];
+    let member = group
+        .members
+        .iter()
+        .find(|member| member.account == account)?;
+    Some((group, member))
+}
+
+fn no_plan() -> Value {
+    json!({"plan": null, "status": "none", "entitled": false, "interval": null,
+           "quantity": null, "renews_at": null, "ends_at": null, "grace_until": null,
+           "read_only_until": null, "delete_at": null, "group_id": null})
+}
+
+/// The `PlanView` of `account`: its own plan, or for an active member the plan of the
+/// group's owner, and none for a pending member (section 8).
+fn account_plan(state: &State, account: &str) -> Value {
+    if let Some((group, member)) = membership(state, account)
+        && group.owner != account
+    {
+        if member.state != "active" {
+            return no_plan();
+        }
+        let mut view = state
+            .accounts
+            .get(&group.owner)
+            .map_or_else(no_plan, plan_view);
+        view["quantity"] = json!(group.quantity);
+        view["group_id"] = json!(group.id);
+        return view;
+    }
+    let Some(entry) = state.accounts.get(account) else {
+        return no_plan();
+    };
+    let mut view = plan_view(entry);
+    if let Some(index) = group_of(state, account) {
+        view["quantity"] = json!(state.groups[index].quantity);
+    }
+    view
+}
+
+/// The short group of `GET /v1/account`.
+fn account_group(state: &State, account: &str) -> Value {
+    match membership(state, account) {
+        Some((group, member)) => json!({"group_id": group.id, "kind": group.kind,
+                                        "role": member.role, "state": member.state}),
+        None => Value::Null,
+    }
+}
+
+fn member_view(state: &State, member: &Member) -> Value {
+    let name = state
+        .accounts
+        .get(&member.account)
+        .map(|entry| entry.name.clone())
+        .unwrap_or_default();
+    json!({"account_id": member.account, "name": name, "role": member.role,
+           "state": member.state, "joined_at": member.joined_at})
+}
+
 fn plan_view(account: &Account) -> Value {
+    if let Some(plan) = &account.plan {
+        return plan.clone();
+    }
     if account.entitled {
         json!({"plan": "personal", "status": "active", "entitled": true, "interval": "month",
                "quantity": 1, "renews_at": now() + 2_592_000, "ends_at": null,
@@ -553,6 +785,8 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                     created_at: now(),
                     recovery_hash: text(&body, "recovery_hash").to_owned(),
                     entitled: false,
+                    plan: None,
+                    customer: false,
                 },
             );
             let device = new_device(
@@ -814,6 +1048,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             ok(json!({"account_id": account, "device_id": device.id,
                       "deleted_stores": deleted}))
         }
+        ("GET", ["v1", "plans"]) => ok(plans()),
         ("GET", [".well-known", "apassy-connect.json"]) => ok(json!({
             "v": 1,
             "origin": origin,
@@ -850,13 +1085,29 @@ fn authenticated(
                 .collect();
             ok(
                 json!({"account_id": account, "name": entry.name, "email": null,
-                      "created_at": entry.created_at, "plan": plan_view(&entry),
-                      "devices": devices, "group": null}),
+                      "created_at": entry.created_at,
+                      "plan": account_plan(state, account),
+                      "devices": devices, "group": account_group(state, account)}),
             )
         }
         ("DELETE", []) => {
             if body.as_object().is_none_or(|map| !map.is_empty()) {
                 return fail(400, "invalid_request");
+            }
+            if let Some((group, _)) = membership(state, account)
+                && group.owner == account
+                && group.members.len() > 1
+            {
+                return fail(409, "conflict");
+            }
+            if let Some(index) = group_of(state, account) {
+                if state.groups[index].owner == account {
+                    state.groups.remove(index);
+                } else {
+                    state.groups[index]
+                        .members
+                        .retain(|member| member.account != account);
+                }
             }
             let deleted = state
                 .stores
@@ -1085,6 +1336,268 @@ fn authenticated(
             let signature = encode_b64u(pair.sign(&message).as_ref());
             let _ = origin;
             ok(json!({"token": format!("{payload}.{signature}"), "expires_at": iat + 86_400}))
+        }
+        _ => billing(state, method, rest, body, account),
+    }
+}
+
+/// A count field of a checkout body: a JSON number.
+fn count(body: &Value, key: &str) -> Option<u64> {
+    body.get(key).and_then(Value::as_u64)
+}
+
+/// The routes of connect-billing-v1 sections 4 to 6 and 8.
+fn billing(
+    state: &mut State,
+    method: &str,
+    rest: &[&str],
+    body: &Value,
+    account: &str,
+) -> Outgoing {
+    match (method, rest) {
+        ("GET", ["plan"]) => ok(account_plan(state, account)),
+        ("POST", ["checkout"]) => {
+            let Some(map) = body.as_object() else {
+                return fail(400, "invalid_request");
+            };
+            let plan = text(body, "plan");
+            let field = match plan {
+                "personal" => None,
+                "family" => Some("people"),
+                "team" => Some("seats"),
+                _ => return fail(400, "invalid_request"),
+            };
+            let expected = 2 + usize::from(field.is_some());
+            if map.len() != expected
+                || !matches!(text(body, "interval"), "month" | "year")
+                || field.is_some_and(|field| count(body, field).is_none())
+            {
+                return fail(400, "invalid_request");
+            }
+            if account_plan(state, account)["entitled"] == true
+                || membership(state, account).is_some()
+            {
+                return fail(409, "conflict");
+            }
+            let offer = plan_offer(plan);
+            let n = field.and_then(|field| count(body, field)).unwrap_or(1);
+            if n == 0 || n > offer["max"].as_u64().unwrap_or(1) {
+                return fail(409, "seat_limit");
+            }
+            state.next += 1;
+            let session_id = format!("cs_test_Fake{:04}", state.next);
+            state.checkouts.push(Checkout {
+                session_id: session_id.clone(),
+                account: account.to_owned(),
+                body: body.clone(),
+                completed: false,
+            });
+            ok(
+                json!({"url": format!("https://checkout.stripe.com/c/pay/{session_id}"),
+                      "session_id": session_id, "expires_at": now() + 86_400}),
+            )
+        }
+        ("POST", ["portal"]) => {
+            if !strict(body, &[]) {
+                return fail(400, "invalid_request");
+            }
+            if let Some((group, _)) = membership(state, account)
+                && group.owner != account
+            {
+                return fail(403, "forbidden");
+            }
+            if !state
+                .accounts
+                .get(account)
+                .is_some_and(|entry| entry.customer)
+            {
+                return fail(404, "not_found");
+            }
+            state.next += 1;
+            ok(
+                json!({"url": format!("https://billing.stripe.com/p/session/test_Fake{:04}", state.next)}),
+            )
+        }
+        ("GET", ["group"]) => {
+            let Some((group, member)) = membership(state, account) else {
+                return fail(404, "not_found");
+            };
+            let members: Vec<Value> = group
+                .members
+                .iter()
+                .map(|entry| member_view(state, entry))
+                .collect();
+            ok(
+                json!({"group_id": group.id, "kind": group.kind, "role": member.role,
+                      "owner_account": group.owner, "included": group.included,
+                      "quantity": group.quantity, "members": members}),
+            )
+        }
+        ("POST", ["group", "invites"]) => {
+            if !strict(body, &["role"]) || !matches!(text(body, "role"), "member" | "admin") {
+                return fail(400, "invalid_request");
+            }
+            let Some((group, member)) = membership(state, account) else {
+                return fail(403, "not_in_group");
+            };
+            let role = text(body, "role");
+            let allowed = match member.role.as_str() {
+                "owner" => group.kind == "team" || role == "member",
+                "admin" => role == "member",
+                _ => false,
+            };
+            if member.state != "active" || !allowed {
+                return fail(403, "forbidden");
+            }
+            let group_id = group.id.clone();
+            state.next += 1;
+            let code = format!("apassy_gin_{group_id}_{}", secret_hex(state.next));
+            state.invites.push(Invite {
+                code: code.clone(),
+                group: group_id,
+                role: role.to_owned(),
+                used: false,
+            });
+            ok(json!({"invite_id": state.next,
+                      "url": format!("https://apassy.wyderka.cc/connect/join#{code}"),
+                      "expires_at": now() + 604_800}))
+        }
+        ("POST", ["group", "join"]) => {
+            if !strict(body, &["code"]) {
+                return fail(400, "invalid_request");
+            }
+            let Some(invite) = state
+                .invites
+                .iter()
+                .position(|invite| invite.code == text(body, "code") && !invite.used)
+            else {
+                return fail(403, "forbidden");
+            };
+            if membership(state, account).is_some()
+                || account_plan(state, account)["entitled"] == true
+            {
+                return fail(409, "conflict");
+            }
+            state.invites[invite].used = true;
+            let (group_id, role) = (
+                state.invites[invite].group.clone(),
+                state.invites[invite].role.clone(),
+            );
+            let Some(index) = state.groups.iter().position(|group| group.id == group_id) else {
+                return fail(403, "forbidden");
+            };
+            state.groups[index].members.push(Member {
+                account: account.to_owned(),
+                role,
+                state: "pending".to_owned(),
+                joined_at: now(),
+            });
+            let group = &state.groups[index];
+            let owner_name = state
+                .accounts
+                .get(&group.owner)
+                .map(|entry| entry.name.clone())
+                .unwrap_or_default();
+            ok(
+                json!({"group_id": group.id, "kind": group.kind, "state": "pending",
+                      "owner_name": owner_name}),
+            )
+        }
+        ("POST", ["group", "members", target, "confirm"]) => {
+            if !strict(body, &[]) {
+                return fail(400, "invalid_request");
+            }
+            let Some(index) = group_of(state, account) else {
+                return fail(403, "not_in_group");
+            };
+            let group = &state.groups[index];
+            let caller = group
+                .members
+                .iter()
+                .find(|member| member.account == account);
+            if !caller.is_some_and(|member| matches!(member.role.as_str(), "owner" | "admin")) {
+                return fail(403, "forbidden");
+            }
+            let Some(position) = group
+                .members
+                .iter()
+                .position(|member| member.account == *target)
+            else {
+                return fail(403, "not_in_group");
+            };
+            let active = group
+                .members
+                .iter()
+                .filter(|member| member.state == "active")
+                .count() as u64;
+            let wanted = active + u64::from(group.members[position].state != "active");
+            if wanted > group.max {
+                return fail(409, "seat_limit");
+            }
+            let group = &mut state.groups[index];
+            group.members[position].state = "active".to_owned();
+            if group.kind == "team" && wanted > group.quantity {
+                group.quantity = wanted;
+            }
+            if group.kind == "family" && wanted > group.quantity.max(group.included) {
+                group.quantity = wanted;
+            }
+            let group = &state.groups[index];
+            ok(member_view(state, &group.members[position]))
+        }
+        ("DELETE", ["group", "members", target]) => {
+            let Some(index) = group_of(state, account) else {
+                return fail(403, "not_in_group");
+            };
+            let group = &state.groups[index];
+            let Some(position) = group
+                .members
+                .iter()
+                .position(|member| member.account == *target)
+            else {
+                return fail(403, "not_in_group");
+            };
+            let caller = group
+                .members
+                .iter()
+                .find(|member| member.account == account)
+                .map(|member| member.role.clone())
+                .unwrap_or_default();
+            let target_role = group.members[position].role.clone();
+            let allowed = *target != group.owner
+                && (*target == account
+                    || caller == "owner"
+                    || (caller == "admin" && target_role == "member"));
+            if !allowed {
+                return fail(403, "forbidden");
+            }
+            state.groups[index].members.remove(position);
+            ok(json!({"account_id": target, "removed_from_stores": 0}))
+        }
+        ("POST", ["group", "seats"]) => {
+            let Some(quantity) = (body.as_object().is_some_and(|map| map.len() == 1))
+                .then(|| count(body, "quantity"))
+                .flatten()
+            else {
+                return fail(400, "invalid_request");
+            };
+            let Some(index) = group_of(state, account) else {
+                return fail(403, "not_in_group");
+            };
+            let group = &mut state.groups[index];
+            if group.owner != account {
+                return fail(403, "forbidden");
+            }
+            let active = group
+                .members
+                .iter()
+                .filter(|member| member.state == "active")
+                .count() as u64;
+            if quantity == 0 || quantity < active || quantity > group.max {
+                return fail(409, "seat_limit");
+            }
+            group.quantity = quantity;
+            ok(json!({"quantity": quantity, "pending": true}))
         }
         _ => fail(404, "not_found"),
     }
