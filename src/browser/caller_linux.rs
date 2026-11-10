@@ -155,11 +155,17 @@ fn image(pid: u32, expected: &[&str]) -> io::Result<PathBuf> {
 
 /// Match conservatively, including switches after `--`, single dashes and unusual
 /// case. Values are never logged, returned, or used as identity.
+///
+/// Chrome and Chromium rewrite their process title on Linux: `/proc/PID/cmdline`
+/// then holds one NUL-terminated string, the arguments joined with spaces. So every
+/// whitespace-separated word of every string is checked, `argv[0]` too. A value that
+/// contains a space and a switch-like word is refused: this refuses more than the
+/// browser reads, never less.
 fn safe_arguments(bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes.last() != Some(&0) {
         return false;
     }
-    !bytes.split(|b| *b == 0).skip(1).any(|arg| {
+    !bytes.split(|b| *b == 0 || b.is_ascii_whitespace()).any(|arg| {
         let Some(first) = arg.first() else {
             return false;
         };
@@ -344,6 +350,25 @@ mod tests {
         }
         assert!(!safe_arguments(b""));
         assert!(!safe_arguments(b"chrome\0--remote-debugging-port=0"));
+    }
+
+    /// Chrome 157 on Ubuntu 24.04, started with `--remote-debugging-port=9333`, showed
+    /// this exact `/proc/PID/cmdline`: one string after its process-title rewrite.
+    #[test]
+    fn rewritten_browser_titles_are_checked_word_by_word() {
+        assert!(safe_arguments(b"/opt/google/chrome/chrome\0"));
+        assert!(safe_arguments(
+            b"/opt/google/chrome/chrome --profile-directory=Default http://localhost:4174/\0"
+        ));
+        for title in [
+            &b"/opt/google/chrome/chrome --remote-debugging-port=9333 http://localhost:4174/passkey.html\0"[..],
+            b"/usr/lib/chromium/chromium --show-component-extension-options --load-extension=/tmp/x\0",
+            b"/opt/google/chrome/chrome\t--disable-extensions-except=/tmp/x\0",
+            b"/opt/google/chrome/chrome --type=utility --utility-sub-type=x\0",
+            b"--remote-debugging-pipe\0",
+        ] {
+            assert!(!safe_arguments(title), "{}", String::from_utf8_lossy(title));
+        }
     }
 
     /// Set by [`hidden_exe_of_a_non_dumpable_peer_is_recognized`] for its child.
