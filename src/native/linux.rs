@@ -10,6 +10,10 @@ use zeroize::Zeroizing;
 
 use super::AuthCancel;
 
+/// Screen lock, sleep and session observation over D-Bus (systemd-logind, screen saver).
+#[cfg(feature = "session-bus")]
+pub mod session_bus;
+
 pub const KEYRING_WARNING: &str = "Store this vault passphrase in Secret Service? Other programs running as your user can retrieve it while the keyring is unlocked. This does not provide biometric protection.";
 const MAX_SECRET: usize = 4096;
 

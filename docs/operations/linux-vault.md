@@ -112,6 +112,44 @@ passkey flow. These checks are defense in depth; root and a compromised process
 of the same user remain outside the software vault's protection. Linux does not
 provide the macOS code-signing, Secure Enclave or Touch ID boundary.
 
+## Screen lock, sleep and inactivity
+
+The desktop observes the session over D-Bus (zbus, the client that the desktop
+already links) and applies the macOS rules: "Lock after inactivity" locks the
+vault, and the "How often to ask" window ends, at screen lock, sleep, user switch
+and session end. Sources:
+
+- systemd-logind on the system bus. The session is found by `XDG_SESSION_ID`,
+  else logind's `auto` session, and must belong to this user. Its `Lock` and
+  `Unlock` signals and `LockedHint`, `Active` and `State` changes; the manager's
+  `PrepareForSleep` and `SessionRemoved`. A `delay` sleep inhibitor gives Apassy
+  up to 2 seconds to lock before the system sleeps.
+- `org.freedesktop.ScreenSaver` or `org.gnome.ScreenSaver` on the session bus:
+  `ActiveChanged` and `GetActive`.
+- The clocks: a suspend gap (`CLOCK_BOOTTIME` ran, `CLOCK_MONOTONIC` did not)
+  counts as a sleep, also with no bus. Without the inhibitor the vault locks at
+  the wake, before any other work.
+
+Inactivity always counts input in the Apassy window; agent requests never reset
+it. When the desktop maintains logind's idle hint (`IdleSinceHint` was set; GNOME
+and KDE do), the vault also stays open while the hint says the session is active,
+so work in other apps keeps it open. Without that hint, only input in Apassy counts.
+
+Settings > Security names the missing sources. Full: a logind session, logind sleep
+signals and a screen saver service. Partial (for example a minimal window manager
+without a screen saver service): reuse works and ends at each lock and sleep that
+Apassy sees; a locker that reports to neither source is not seen. None (no session
+bus and no logind session: a container, SSH, a bare X server): approval reuse is
+off, every sensitive action needs a fresh check, and you lock manually; the
+inactivity time and the clock's sleep detection still apply. Each reuse also reads
+the lock state again; any error, timeout or lost stream ends the window and keeps
+reuse off until Apassy restarts. "How often to ask" and "Lock after inactivity" are
+stored per device in `device-policy.json` in the data directory (mode 0600, this
+user, no symlink); a damaged or too open file means "Every time" and "Never".
+Headless owner commands can use the same rule without the desktop
+(`apassy::native::session_lock::SessionLock`, and with the `session-bus` feature
+`apassy::native::linux::session_bus::SessionObserver`).
+
 ## Verification evidence
 
 The Linux vault CI matrix builds x86_64 and aarch64 app/host binaries, exercises

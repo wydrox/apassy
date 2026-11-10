@@ -35,6 +35,9 @@ impl LockPolicy {
             Self::FifteenMinutes => "15 minutes",
             Self::OneHour => "1 hour",
             Self::FourHours => "4 hours",
+            Self::Session if cfg!(target_os = "linux") => {
+                "When the screen locks or the computer sleeps"
+            }
             Self::Session => "When the Mac locks or sleeps",
         }
     }
@@ -232,16 +235,39 @@ impl DesktopApp {
             helper.auto_lock_read().map_err(|e| e.to_string())
         }));
     }
+    /// Read or write the setting on a worker thread (Linux: the device settings file).
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "macOS reads and writes through the helper")
+    )]
+    pub(crate) fn start_auto_lock_task(
+        &mut self,
+        ctx: &egui::Context,
+        work: impl FnOnce() -> Result<LockPolicy, String> + Send + 'static,
+    ) {
+        self.auto_lock.task = Some(Task::spawn(Some(ctx.clone()), work));
+    }
+    /// Whether this build can keep the setting (the macOS helper, or Linux's file).
+    pub(crate) fn auto_lock_storable(&self) -> bool {
+        self.owner.helper.is_some() || cfg!(target_os = "linux")
+    }
     pub(crate) fn save_auto_lock(&mut self, policy: LockPolicy, ctx: &egui::Context) {
-        let Some(helper) = self.owner.helper.clone() else {
-            return;
-        };
-        self.auto_lock.task = Some(Task::spawn(Some(ctx.clone()), move || {
-            helper
-                .auto_lock_write(policy)
-                .map(|()| policy)
-                .map_err(|e| e.to_string())
-        }));
+        #[cfg(target_os = "linux")]
+        self.start_auto_lock_task(ctx, move || {
+            crate::desktop::session_watch::store::write_auto_lock(policy)
+        });
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Some(helper) = self.owner.helper.clone() else {
+                return;
+            };
+            self.auto_lock.task = Some(Task::spawn(Some(ctx.clone()), move || {
+                helper
+                    .auto_lock_write(policy)
+                    .map(|()| policy)
+                    .map_err(|e| e.to_string())
+            }));
+        }
     }
     pub(crate) fn poll_auto_lock(&mut self, ctx: &egui::Context) {
         if let Some(task) = &self.auto_lock.task {
@@ -266,6 +292,8 @@ impl DesktopApp {
             .with_vault(|v| v.access_expired())
             .unwrap_or(false);
         let (idle, session, generation) = self.auto_lock.source.take();
+        // A sleep held by the Linux delay inhibitor may go once this pass decided.
+        let sleep_held = session;
         let unlocked = fenced || !self.owner_ui.session.is_locked();
         if fenced
             || self.auto_lock.timer.due(
@@ -279,6 +307,9 @@ impl DesktopApp {
         {
             self.lock_vault(Some(ctx));
             self.auto_lock.timer.unlocked = false;
+        }
+        if sleep_held {
+            self.owner.session.ack_sleep();
         }
         if unlocked && !self.owner_ui.session.is_locked() {
             let policy = self.auto_lock.policy;

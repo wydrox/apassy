@@ -42,6 +42,14 @@ uses `pkcheck` and the packaged `com.wydrox.apassy.owner-presence` policy with
 `auth_self`, without cached authorization. Missing, refused or cancelled
 presence must not count as approval; passphrase confirmation stays available.
 
+The desktop locks the vault and ends the "How often to ask" window at screen lock,
+sleep, user switch and session end, from systemd-logind and screen saver D-Bus
+signals, and after the inactivity time (input in Apassy; the desktop's idle hint
+when it keeps one). Settings > Security lists the signals that this session lacks.
+Without a logind session and without a screen saver service, approval reuse stays
+off and you lock the vault manually. Both settings are stored per device in
+`~/.local/share/apassy/device-policy.json`.
+
 The vault is a software vault. Root and compromised processes of the same user
 are outside its protection. Linux kernel peer credentials and verified process
 ancestry improve browser authentication, but do not provide macOS code signing,

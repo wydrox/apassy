@@ -29,6 +29,7 @@ impl OwnerFrequency {
             Self::FiveMinutes => "5 minutes",
             Self::FifteenMinutes => "15 minutes",
             Self::OneHour => "1 hour",
+            Self::UntilLock if cfg!(target_os = "linux") => "Until the screen locks",
             Self::UntilLock => "Until the Mac locks",
         }
     }
@@ -246,7 +247,10 @@ impl OwnerWindow {
             "observer_unhealthy"
         } else if !matches!(
             method,
-            super::CheckMethod::TouchId | super::CheckMethod::Passphrase
+            // Polkit auth_self is Linux's local owner check (never cached by polkit).
+            super::CheckMethod::TouchId
+                | super::CheckMethod::Passphrase
+                | super::CheckMethod::Polkit
         ) {
             "nonlocal_check"
         } else {
@@ -390,6 +394,7 @@ mod tests {
         for method in [
             super::super::CheckMethod::TouchId,
             super::super::CheckMethod::Passphrase,
+            super::super::CheckMethod::Polkit,
         ] {
             let (w, c) = fixture();
             w.configure(OwnerFrequency::OneMinute);

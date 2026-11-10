@@ -33,9 +33,13 @@
 
 pub(crate) mod base64;
 pub mod check;
+/// The Linux device settings file (owner-check frequency and auto-lock).
+pub mod device_policy;
 /// Optional Linux system authentication and explicitly enabled keyring storage.
 #[cfg(target_os = "linux")]
 pub mod linux;
+/// Session lock, sleep and inactivity events and the lock rule, without a UI.
+pub mod session_lock;
 
 #[cfg(all(feature = "vault", feature = "desktop"))]
 pub(crate) mod owner_lifecycle;

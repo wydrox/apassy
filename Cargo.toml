@@ -20,7 +20,10 @@ default-members = ["."]
 # Apple Watch core (ADR 0039 section 4), because openssl-src cannot configure OpenSSL for watchOS.
 default = ["openssl"]
 openssl = ["rusqlite?/bundled-sqlcipher-vendored-openssl"]
-desktop = ["dep:eframe", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "time?/local-offset"]
+desktop = ["dep:eframe", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "dep:x11rb", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "time?/local-offset", "session-bus"]
+# Linux: screen lock, sleep and session observation over D-Bus (src/native/linux/session_bus.rs).
+# The desktop turns it on; a headless owner service may name it. No effect on macOS.
+session-bus = ["dep:zbus"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
 vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium"]
 # Tests only (docs/operations/checks.md, "Test vault KDF"): in a debug build, a vault
@@ -86,6 +89,9 @@ x11rb = { version = "=0.13.2", optional = true, default-features = false }
 wayland-client = { version = "=0.31.15", optional = true, default-features = false }
 wayland-protocols = { version = "=0.32.13", optional = true, default-features = false, features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "=0.3.12", optional = true, default-features = false, features = ["client"] }
+# systemd-logind and screen saver signals. The D-Bus client that the Linux desktop already
+# builds (AccessKit's AT-SPI bridge: zbus 5.19 with async-io); `blocking-api` adds no crate.
+zbus = { version = "=5.19.0", optional = true, default-features = false, features = ["async-io", "blocking-api"] }
 
 # The owner command line and the window without the Mac's own node. The app bundle
 # ships `apassy-app` (crates/apassy-app) under this name; this target stays for the

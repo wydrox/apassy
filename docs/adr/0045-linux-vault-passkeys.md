@@ -35,6 +35,8 @@ item. Never silently store a passphrase, log it, or pass it on a command line.
 Optional polkit auth_self presence may use system PAM/fprintd; unavailable or
 cancelled authentication must not count as success. Passphrase confirmation is
 always available. Presence approval remains bound to the pending operation.
+Auto-lock and the end of the owner-check window follow systemd-logind lock, sleep and
+session signals and screen saver `ActiveChanged`; with no lock source, reuse stays off.
 
 ## Delivery and verification
 
