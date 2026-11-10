@@ -1,6 +1,7 @@
 //! The C interface (contract section 2). The only `unsafe` code of the crate: it reads
 //! the C strings of the caller, hands out the core as an opaque pointer, frees the
-//! answers, and calls the external HTTP transport of the host (section 2.1).
+//! answers, and calls the external HTTP transport of the host (section 2.1) and the
+//! Keychain store of the Connect account key (section 5.14).
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -9,6 +10,8 @@ use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 use apassy::sync::{ExternalAnswer, ExternalRequest, HttpError, HttpTransport};
+
+use apassy::connect::{DeviceKeyError, DeviceKeyStore};
 
 use crate::core::{Core, HistoryKeyError, HistoryKeyProvider, error_answer};
 
@@ -165,6 +168,101 @@ pub unsafe extern "C" fn apassy_core_new_with_history_key_provider(
 /// # Safety
 ///
 /// `config` is a valid NUL-terminated string.
+type AccountKeyRead = unsafe extern "C" fn(*mut c_void, *mut u8, usize, *mut usize) -> i32;
+type AccountKeyWrite = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> i32;
+type AccountKeyDelete = unsafe extern "C" fn(*mut c_void) -> i32;
+
+/// The largest account key document that the core reads: a PKCS#8 P-256 key of `ring` is
+/// 138 bytes.
+const ACCOUNT_KEY_CAPACITY: usize = 1024;
+
+/// The Keychain item of the Connect account device key (section 5.14), in the app.
+struct NativeAccountKeyStore {
+    read: AccountKeyRead,
+    write: AccountKeyWrite,
+    delete: AccountKeyDelete,
+    context: *mut c_void,
+}
+
+// SAFETY: the contract of `apassy_core_set_account_key_store` requires thread-safe
+// callbacks and a context that outlive the core.
+unsafe impl Send for NativeAccountKeyStore {}
+unsafe impl Sync for NativeAccountKeyStore {}
+
+impl DeviceKeyStore for NativeAccountKeyStore {
+    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>, DeviceKeyError> {
+        let mut key = Zeroizing::new(vec![0u8; ACCOUNT_KEY_CAPACITY]);
+        let mut length = 0usize;
+        // SAFETY: the buffer has `ACCOUNT_KEY_CAPACITY` bytes; the callback writes at
+        // most that many and the length.
+        let code =
+            unsafe { (self.read)(self.context, key.as_mut_ptr(), key.len(), &raw mut length) };
+        match code {
+            0 if (1..=ACCOUNT_KEY_CAPACITY).contains(&length) => {
+                key.truncate(length);
+                Ok(Some(key))
+            }
+            1 => Ok(None),
+            _ => Err(DeviceKeyError::Unavailable),
+        }
+    }
+
+    fn store(&self, pkcs8: &[u8]) -> Result<(), DeviceKeyError> {
+        // SAFETY: the pointer and the length describe `pkcs8`; the callback copies it.
+        match unsafe { (self.write)(self.context, pkcs8.as_ptr(), pkcs8.len()) } {
+            0 => Ok(()),
+            _ => Err(DeviceKeyError::Unavailable),
+        }
+    }
+
+    fn delete(&self) -> Result<bool, DeviceKeyError> {
+        // SAFETY: the callback takes only the context.
+        match unsafe { (self.delete)(self.context) } {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(DeviceKeyError::Unavailable),
+        }
+    }
+}
+
+/// Give the core the Keychain store of the Apassy Connect account device key (contract
+/// section 5.14). Once per core; false for a second call, a NULL pointer, or a NULL
+/// callback. Without it, the Connect calls answer `not_allowed`.
+///
+/// # Safety
+///
+/// `core` comes from [`apassy_core_new`] and is not freed. The callbacks are
+/// thread-safe and stay valid, with `context`, until [`apassy_core_free`] returns. `read`
+/// writes at most `capacity` bytes and their count, and answers 0 (copied), 1 (no key),
+/// or another value (unavailable). `write` copies the bytes into the Keychain and answers
+/// 0, else unavailable. `delete` answers 0 (deleted), 1 (no key), or unavailable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn apassy_core_set_account_key_store(
+    core: *const Core,
+    read: Option<AccountKeyRead>,
+    write: Option<AccountKeyWrite>,
+    delete: Option<AccountKeyDelete>,
+    context: *mut c_void,
+) -> bool {
+    let (Some(read), Some(write), Some(delete)) = (read, write, delete) else {
+        return false;
+    };
+    if core.is_null() {
+        return false;
+    }
+    // SAFETY: the caller keeps `core` alive and not freed.
+    let core = unsafe { &*core };
+    catch_unwind(AssertUnwindSafe(|| {
+        core.set_account_key_store(Arc::new(NativeAccountKeyStore {
+            read,
+            write,
+            delete,
+            context,
+        }))
+    }))
+    .unwrap_or(false)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn apassy_core_new(config: *const c_char) -> *mut Core {
     if config.is_null() {
@@ -402,5 +500,130 @@ mod tests {
             native(&failing).send(&request(None)).err(),
             Some(HttpError::Connect)
         );
+    }
+
+    /// A Keychain of the host in memory: the key, and a switch that makes it unavailable.
+    struct Keychain {
+        key: std::sync::Mutex<Option<Vec<u8>>>,
+        unavailable: std::sync::atomic::AtomicBool,
+    }
+
+    unsafe extern "C" fn key_read(
+        context: *mut c_void,
+        out: *mut u8,
+        capacity: usize,
+        length: *mut usize,
+    ) -> i32 {
+        let keychain = unsafe { &*context.cast::<Keychain>() };
+        if keychain
+            .unavailable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return 2;
+        }
+        match keychain.key.lock().unwrap().as_ref() {
+            Some(key) if key.len() <= capacity => {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(key.as_ptr(), out, key.len());
+                    *length = key.len();
+                }
+                0
+            }
+            Some(_) => 2,
+            None => 1,
+        }
+    }
+
+    unsafe extern "C" fn key_write(context: *mut c_void, key: *const u8, length: usize) -> i32 {
+        let keychain = unsafe { &*context.cast::<Keychain>() };
+        let bytes = unsafe { std::slice::from_raw_parts(key, length) }.to_vec();
+        *keychain.key.lock().unwrap() = Some(bytes);
+        0
+    }
+
+    unsafe extern "C" fn key_delete(context: *mut c_void) -> i32 {
+        let keychain = unsafe { &*context.cast::<Keychain>() };
+        if keychain.key.lock().unwrap().take().is_some() {
+            0
+        } else {
+            1
+        }
+    }
+
+    #[test]
+    fn the_account_key_goes_through_the_host_keychain() {
+        let keychain = Keychain {
+            key: std::sync::Mutex::new(None),
+            unavailable: std::sync::atomic::AtomicBool::new(false),
+        };
+        let store = NativeAccountKeyStore {
+            read: key_read,
+            write: key_write,
+            delete: key_delete,
+            context: std::ptr::from_ref(&keychain).cast_mut().cast(),
+        };
+        assert_eq!(store.read(), Ok(None));
+        let signer = apassy::connect::AccountSigner::open_or_create(&store).unwrap();
+        let stored = keychain.key.lock().unwrap().clone().unwrap();
+        assert_eq!(store.read().unwrap().unwrap().as_slice(), stored.as_slice());
+        let again = apassy::connect::AccountSigner::open(&store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.public_key(), signer.public_key());
+        keychain
+            .unavailable
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(store.read(), Err(DeviceKeyError::Unavailable));
+        keychain
+            .unavailable
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(store.delete(), Ok(true));
+        assert_eq!(store.delete(), Ok(false));
+        assert_eq!(store.read(), Ok(None));
+    }
+
+    #[test]
+    fn the_key_store_is_set_once_and_never_with_null() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config =
+            CString::new(serde_json::json!({ "data_dir": dir.path() }).to_string()).unwrap();
+        let core = unsafe { apassy_core_new(config.as_ptr()) };
+        assert!(!core.is_null());
+        let keychain = Keychain {
+            key: std::sync::Mutex::new(None),
+            unavailable: std::sync::atomic::AtomicBool::new(false),
+        };
+        let context: *mut c_void = std::ptr::from_ref(&keychain).cast_mut().cast();
+        unsafe {
+            assert!(!apassy_core_set_account_key_store(
+                core,
+                None,
+                Some(key_write),
+                Some(key_delete),
+                context
+            ));
+            assert!(!apassy_core_set_account_key_store(
+                std::ptr::null(),
+                Some(key_read),
+                Some(key_write),
+                Some(key_delete),
+                context
+            ));
+            assert!(apassy_core_set_account_key_store(
+                core,
+                Some(key_read),
+                Some(key_write),
+                Some(key_delete),
+                context
+            ));
+            assert!(!apassy_core_set_account_key_store(
+                core,
+                Some(key_read),
+                Some(key_write),
+                Some(key_delete),
+                context
+            ));
+            apassy_core_free(core);
+        }
     }
 }

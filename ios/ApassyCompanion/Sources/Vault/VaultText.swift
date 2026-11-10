@@ -242,3 +242,146 @@ enum DeviceRoute: Equatable {
         return "Turn on Tailscale on this iPhone to reach \(list)."
     }
 }
+
+/// The row "Apassy Connect" of Settings > General (plan s7 unit I1, section 6): the plan of the
+/// account of this iPhone, as text. App Store Review Guideline 3.1 allows the iPhone to show the
+/// plan of the account it belongs to and where it is managed; it never shows a price, a currency,
+/// a comparison, a trial, or a button or link that leads to a purchase. So this type has text only:
+/// no action, no URL.
+enum ConnectPlanRow: Equatable {
+    /// The status is not known yet.
+    case checking
+    /// The core gave no status (no network and no earlier answer, or the Keychain is locked).
+    case unavailable
+    case notOnConnect
+    /// "Connect Personal · renews 3 Dec 2026" (or Team).
+    case active(plan: String?, renews: Date?)
+    /// "Connect Family · 3 of 4 people".
+    case family(active: Int, of: Int)
+    case pastDue
+    /// "Ends 12 Jan 2027".
+    case ending(Date)
+
+    static let title = "Apassy Connect"
+    /// The only line about where the plan is managed: text, no link.
+    static let managedLine = "Managed in Apassy on your Mac"
+    /// Once, after the core found that this iPhone is no device of its account any more: a Mac
+    /// removed it, the account was deleted, or the Keychain lost the key.
+    static let removedLine = "This iPhone is no longer a device of its Apassy Connect account."
+
+    /// What the row shows: its value and the lines under it, all of them text.
+    struct Content: Equatable {
+        var title: String
+        var value: String
+        var lines: [String]
+    }
+
+    /// The row of `status`. `failed`: the last `connect_status` failed.
+    static func of(_ status: ConnectStatus?, failed: Bool = false) -> ConnectPlanRow {
+        guard let status else { return failed ? .unavailable : .checking }
+        guard status.state == .account else { return .notOnConnect }
+        guard let plan = status.plan else { return .unavailable }
+        switch plan.status {
+        case .active, .trialing:
+            if let ends = VaultText.date(plan.endsAt) { return .ending(ends) }
+            if plan.plan == "family", let people = plan.people { return .family(active: people.active, of: people.of) }
+            return .active(plan: plan.plan, renews: VaultText.date(plan.renewsAt))
+        case .pastDue:
+            return .pastDue
+        case .readOnly:
+            return VaultText.date(plan.readOnlyUntil).map(ConnectPlanRow.ending) ?? .notOnConnect
+        case .none, .pending, .suspended, .unknown:
+            return .notOnConnect
+        }
+    }
+
+    /// The name of a plan: "Connect Personal", "Connect Family", "Connect Team".
+    static func planName(_ plan: String?) -> String {
+        switch plan {
+        case "personal": "Connect Personal"
+        case "family": "Connect Family"
+        case "team": "Connect Team"
+        default: title
+        }
+    }
+
+    /// A day as the row shows it: "3 Dec 2026". English, as every text of the app.
+    static func day(_ date: Date, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "d MMM yyyy"
+        return formatter.string(from: date)
+    }
+
+    func value(timeZone: TimeZone = .current) -> String {
+        switch self {
+        case .checking: "Checking"
+        case .unavailable: "Not available"
+        case .notOnConnect: "Not on Connect"
+        case .active(let plan, let renews):
+            renews.map { "\(Self.planName(plan)) · renews \(Self.day($0, timeZone: timeZone))" } ?? Self.planName(plan)
+        case .family(let active, let of): "Connect Family · \(active) of \(of) people"
+        case .pastDue: "Past due"
+        case .ending(let date): "Ends \(Self.day(date, timeZone: timeZone))"
+        }
+    }
+
+    /// Whether this iPhone is on an account in this state: only then does the row say where the
+    /// plan is managed. Without an account the iPhone says nothing more (no call to action).
+    var isOnAccount: Bool {
+        switch self {
+        case .active, .family, .pastDue, .ending: true
+        case .checking, .unavailable, .notOnConnect: false
+        }
+    }
+
+    /// The whole row for `status`.
+    static func content(_ status: ConnectStatus?, failed: Bool = false, timeZone: TimeZone = .current) -> Content {
+        let row = of(status, failed: failed)
+        var lines: [String] = []
+        if row.isOnAccount { lines.append(managedLine) }
+        if status?.removed == true { lines.append(removedLine) }
+        return Content(title: title, value: row.value(timeZone: timeZone), lines: lines)
+    }
+}
+
+/// The line "Reaches your Mac through: …" of Settings > Devices (plan s7 unit I1): how this
+/// iPhone reaches its Mac now. Apassy Connect shows only when the core reports its dial (unit I2).
+enum MacReach: Equatable, CaseIterable {
+    case tailscale
+    case connect
+    case wifi
+
+    var word: String {
+        switch self {
+        case .tailscale: "Tailscale"
+        case .connect: "Apassy Connect"
+        case .wifi: "Wi-Fi"
+        }
+    }
+
+    /// "Reaches your Mac through: Tailscale", or nil when no route reaches a Mac.
+    static func line(_ routes: [MacReach]) -> String? {
+        let ordered = allCases.filter(routes.contains)
+        guard !ordered.isEmpty else { return nil }
+        return "Reaches your Mac through: " + ordered.map(\.word).joined(separator: ", ")
+    }
+
+    /// The routes: Tailscale for a vault or a questions team on a node (the relay inside the Mac
+    /// app, over the tailnet), Apassy Connect when the core dials through it, Wi-Fi for a paired
+    /// companion.
+    static func routes(
+        vaults: [VaultEntry], questionRoutes: [DeviceRoute], wifiPaired: Bool, connect: ConnectStatus?
+    ) -> [MacReach] {
+        var routes: [MacReach] = []
+        let onNode =
+            vaults.contains(where: \.isNode)
+            || questionRoutes.contains { if case .viaYourMac = $0 { true } else { false } }
+        if onNode { routes.append(.tailscale) }
+        if connect?.state == .account, connect?.dialRoute == true { routes.append(.connect) }
+        if wifiPaired { routes.append(.wifi) }
+        return routes
+    }
+}

@@ -7,6 +7,7 @@
 #define APASSY_CORE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -26,6 +27,23 @@ typedef int32_t (*apassy_history_key_provider)(void *_Nullable context,
 ApassyCore *_Nullable apassy_core_new_with_history_key_provider(
     const char *_Nonnull config, apassy_history_key_provider _Nonnull provider,
     void *_Nullable context);
+
+/// The Keychain store of the Apassy Connect account device key (contract section 5.14):
+/// one P-256 key of this iPhone, outside every vault, this device only, not synchronizable.
+/// `read` copies the stored PKCS#8 document into `out` (at most `capacity` bytes), sets
+/// `out_length`, and answers 0; 1: no key; any other value: unavailable. `write` stores a
+/// new document (replacing an earlier one) and answers 0, else unavailable. `delete`
+/// answers 0 (deleted), 1 (no key), or unavailable. Set it once per core, after
+/// apassy_core_new; false for a second call. The callbacks and the context stay valid
+/// until apassy_core_free returns and are thread-safe. Keep no copy of the bytes.
+typedef int32_t (*apassy_account_key_read)(void *_Nullable context, uint8_t *_Nonnull out,
+    size_t capacity, size_t *_Nonnull out_length);
+typedef int32_t (*apassy_account_key_write)(void *_Nullable context,
+    const uint8_t *_Nonnull key, size_t length);
+typedef int32_t (*apassy_account_key_delete)(void *_Nullable context);
+bool apassy_core_set_account_key_store(ApassyCore *_Nonnull core,
+    apassy_account_key_read _Nonnull read, apassy_account_key_write _Nonnull write,
+    apassy_account_key_delete _Nonnull delete_key, void *_Nullable context);
 
 /// One call (contract section 4). Safe from several threads at once.
 char *_Nonnull apassy_core_call(ApassyCore *_Nonnull core, const char *_Nonnull request);

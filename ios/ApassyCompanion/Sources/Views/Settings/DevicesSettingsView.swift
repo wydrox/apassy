@@ -13,6 +13,7 @@ struct DevicesSettingsView: View {
     let close: DismissAction
     @Environment(RootModel.self) private var root
     @Environment(VaultUI.self) private var ui: VaultUI?
+    @State private var connect: ConnectStatus?
 
     var body: some View {
         Form {
@@ -20,6 +21,7 @@ struct DevicesSettingsView: View {
                 SyncSettingsSections(vault: vault)
             }
             Section {
+                MacReachRow(connect: connect)
                 QuestionsStateRow()
                 MacPairingRow()
                 if root.isDemo {
@@ -48,6 +50,32 @@ struct DevicesSettingsView: View {
         .navigationTitle("Devices")
         .navigationBarTitleDisplayMode(.inline)
         .task { if !root.isDemo { AppleWatchLink.shared.activate() } }
+        .task {
+            // The Connect route shows only when the core reports its dial (plan s7 unit I2).
+            guard !root.isDemo else { return }
+            connect = try? await root.vault?.service.connectStatus()
+        }
+    }
+}
+
+/// "Reaches your Mac through: Tailscale, Apassy Connect, Wi-Fi" (plan s7 unit I1): the routes that
+/// reach a Mac now. Apassy Connect shows only when the core reports that it dials through it.
+struct MacReachRow: View {
+    /// The Connect status of this iPhone (`connect_status`), nil until it is known.
+    let connect: ConnectStatus?
+    @Environment(RootModel.self) private var root
+
+    var body: some View {
+        let questionRoutes = root.questions?.phase == .ready ? (root.questions?.questionRoutes ?? []) : []
+        let routes = MacReach.routes(
+            vaults: root.vault?.vaults ?? [], questionRoutes: questionRoutes.map(\.route),
+            wifiPaired: root.companionIsPaired, connect: connect)
+        if let line = MacReach.line(routes) {
+            Text(verbatim: line)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("devices.macReach")
+        }
     }
 }
 

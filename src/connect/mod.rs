@@ -54,12 +54,19 @@ use crate::broker::approvals::ProofRefusal;
 /// another Connect, for example the sandbox relay ([`configured_origin`]).
 pub const DEFAULT_CONNECT_URL: &str = crate::sync::DEFAULT_RELAY_URL;
 
-/// The platform of this build on the wire (`mac`, `iphone`, or `linux`).
-pub const PLATFORM: &str = if cfg!(target_os = "macos") {
+/// The platform of this build on the wire (`mac`, `iphone`, or `linux`). The iPhone core
+/// (`ios/ApassyCore`) also names it itself ([`JoinRequest::start_on`]), because its tests
+/// run on a Mac or Linux.
+pub const PLATFORM: &str = if cfg!(target_os = "ios") {
+    "iphone"
+} else if cfg!(target_os = "macos") {
     "mac"
 } else {
     "linux"
 };
+
+/// The platforms of section 2.
+pub const PLATFORMS: [&str; 3] = ["mac", "iphone", "linux"];
 
 /// Sign `message` with the account device key, only when it begins with one of the
 /// seven tags of section 5 (plan 0035 I-1: the allow-list contains

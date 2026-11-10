@@ -23,6 +23,7 @@
 
 mod autofill;
 mod config;
+mod connect;
 mod credential_export;
 mod dedup;
 mod errors;
@@ -43,7 +44,7 @@ mod wire;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -112,6 +113,10 @@ struct ConfigWire {
     device_name: Option<String>,
     #[serde(default)]
     role: Option<Role>,
+    /// The Apassy Connect origin (section 5.14): the hosted Connect when absent. Tests and
+    /// a sandbox build name another one.
+    #[serde(default)]
+    connect_url: Option<String>,
 }
 
 /// The vault core of one process.
@@ -153,6 +158,13 @@ pub struct Core {
     /// The pause of the feed reads after a `403 feed_rate`: a minute
     /// ([`Core::with_feed_rate_pause`] shortens it for tests).
     feed_rate_pause: Duration,
+    /// The Apassy Connect account of this iPhone (section 5.14, `connect.rs`).
+    connect: Mutex<connect::State>,
+    /// The Keychain store of the account device key, from the app
+    /// (`apassy_core_set_account_key_store`).
+    connect_keys: OnceLock<Arc<dyn apassy::connect::DeviceKeyStore>>,
+    /// The Connect origin, without a trailing slash.
+    connect_origin: String,
 }
 
 /// What a close of the vault ends.
@@ -301,6 +313,12 @@ impl Core {
         let device_name = truncate(&device_name, 64);
         // The name of this iPhone in the sync record and in a conflict copy.
         apassy::sync::set_device_name(&device_name);
+        let connect_origin = match config.connect_url.as_deref() {
+            None => apassy::connect::DEFAULT_CONNECT_URL.to_owned(),
+            Some(url) => apassy::connect::ConnectClient::new(url)
+                .map(|client| client.origin().to_owned())
+                .map_err(|_| CoreError::invalid("The Apassy Connect address is not valid."))?,
+        };
         let list = PhoneList::load(&paths.data_dir)?;
         let questions = questions::State::load(&paths.data_dir);
         let core = Self {
@@ -326,6 +344,9 @@ impl Core {
             questions: Mutex::new(questions),
             opening: Mutex::new(()),
             feed_rate_pause: feed::FEED_RATE_PAUSE,
+            connect: Mutex::new(connect::State::default()),
+            connect_keys: OnceLock::new(),
+            connect_origin,
         };
         if core.role != Role::Autofill {
             core.clear_unfinished_joins();
@@ -357,6 +378,7 @@ impl Core {
     /// Lock, end the relay calls, and cancel a join: the process ends.
     pub fn shutdown(&self) {
         self.close(Closing::Lock);
+        self.connect_join_cancel();
         let joining = guard(&self.join).take();
         if let Some(joining) = joining {
             joining.abandon();
@@ -706,6 +728,16 @@ impl Core {
                 self.require_app_or_watch()?;
                 self.questions_call(&op, request)
             }
+            // 5.14 Apassy Connect: this iPhone joins an account and shows its plan. The
+            // app only.
+            "connect_join"
+            | "connect_join_poll"
+            | "connect_join_cancel"
+            | "connect_status"
+            | "connect_forget" => {
+                self.require_app()?;
+                self.connect_call(&op, request)
+            }
             // 5.12 The agent feeds of the Macs: the app only.
             "feed_list" | "feed_wait" | "feed_action_string" | "feed_action"
             | "feed_action_wait" | "feed_action_status" => {
@@ -867,6 +899,10 @@ impl Core {
             Closing::Lock | Closing::Suspend => self.questions_drop_all(),
         };
         *guard(&self.icloud_pending) = None;
+        if closing != Closing::Switch {
+            // The account token and key of Apassy Connect leave memory too.
+            self.connect_sign_out();
+        }
         if let Some(mut vault) = slot.take() {
             let _ = vault.lock();
         }

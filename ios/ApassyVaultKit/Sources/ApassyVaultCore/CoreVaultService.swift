@@ -18,6 +18,8 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
     private let core: CorePointer
     // Owns the callback's unretained context until core_free has returned.
     private let historyKeyStore: KeychainHistoryKeyStore?
+    // The Connect account key (section 5.14); the same lifetime rule.
+    private let accountKeyStore: KeychainAccountKeyStore?
     private let queue = DispatchQueue(label: "com.wydrox.apassy.core", qos: .userInitiated, attributes: .concurrent)
 
     private static let historyKeyProvider: apassy_history_key_provider = { context, vaultID, mayCreate, output in
@@ -47,14 +49,51 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         }
     }
 
+    private static let accountKeyRead: apassy_account_key_read = { context, output, capacity, length in
+        guard let context else { return 2 }
+        let store = Unmanaged<KeychainAccountKeyStore>.fromOpaque(context).takeUnretainedValue()
+        switch store.read() {
+        case .value(let key):
+            guard key.count <= capacity else { return 2 }
+            key.copyBytes(to: output, count: key.count)
+            length.pointee = key.count
+            return 0
+        case .missing:
+            return 1
+        case .unavailable:
+            return 2
+        }
+    }
+
+    private static let accountKeyWrite: apassy_account_key_write = { context, key, length in
+        guard let context else { return 2 }
+        let store = Unmanaged<KeychainAccountKeyStore>.fromOpaque(context).takeUnretainedValue()
+        return store.write(Data(bytes: key, count: length)) ? 0 : 2
+    }
+
+    private static let accountKeyDelete: apassy_account_key_delete = { context in
+        guard let context else { return 2 }
+        let store = Unmanaged<KeychainAccountKeyStore>.fromOpaque(context).takeUnretainedValue()
+        switch store.delete() {
+        case true?: return 0
+        case false?: return 1
+        case nil: return 2
+        }
+    }
+
     /// - Parameters:
     ///   - dataDirectory: the App Group data folder (`SharedContainer.dataDirectory()`).
     ///   - deviceName: the name that the relay and the Macs show for this iPhone.
     ///   - historyKeyStore: an optional fake-backed store for synthetic tests.
+    ///   - accountKeyStore: the Connect account key; a fake-backed store for synthetic tests. The
+    ///     app only: AutoFill holds no account.
     public init(dataDirectory: URL, deviceName: String, role: Role,
                 iCloudFiles: any ICloudFileAccess = CoordinatedICloudFileAccess(),
-                historyKeyStore: KeychainHistoryKeyStore? = nil) throws {
+                historyKeyStore: KeychainHistoryKeyStore? = nil,
+                accountKeyStore: KeychainAccountKeyStore? = nil) throws {
         self.role = role
+        let accountKeys = role == .app ? (accountKeyStore ?? KeychainAccountKeyStore()) : nil
+        self.accountKeyStore = accountKeys
         self.cloud = ICloudVaultTransfer(directory: dataDirectory, files: iCloudFiles, session: cloudSession)
         let keyStore = role == .app ? (historyKeyStore ?? KeychainHistoryKeyStore()) : nil
         self.historyKeyStore = keyStore
@@ -78,6 +117,16 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
                 historyEnabled = false
             }
         }
+        if role == .app {
+            // The Connect account file (section 5.14) stays on this device, as its key does: a
+            // backup restored on another iPhone must not bring an account without its key.
+            var directory = dataDirectory.appending(path: "connect", directoryHint: .isDirectory)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                     attributes: [.posixPermissions: 0o700])
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? directory.setResourceValues(values)
+        }
         let config: [String: Any] = [
             "request_history_enabled": historyEnabled,
             "request_guard_storage_ready": historyEnabled,
@@ -98,11 +147,16 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         guard let core = pointer else {
             throw VaultError(.internal, "The vault core did not start.")
         }
+        if let accountKeys {
+            _ = apassy_core_set_account_key_store(
+                core, Self.accountKeyRead, Self.accountKeyWrite, Self.accountKeyDelete,
+                Unmanaged.passUnretained(accountKeys).toOpaque())
+        }
         self.core = CorePointer(raw: core)
     }
 
     deinit {
-        withExtendedLifetime(historyKeyStore) {
+        withExtendedLifetime((historyKeyStore, accountKeyStore)) {
             apassy_core_free(core.raw)
         }
     }
