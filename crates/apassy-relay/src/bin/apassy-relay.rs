@@ -33,7 +33,7 @@ const USAGE: &str = "Usage:
   apassy-relay downgrade-directory-1005
   apassy-relay snapshot-check
   apassy-relay backup
-  apassy-relay connect-cutover [--dry-run | --confirm-delete-teams] [--backup <folder>]
+  apassy-relay connect-cutover [--dry-run | --confirm-delete-teams <plan>] [--backup <folder>]
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin node-code [--minutes <n>]
   apassy-relay admin teams
@@ -88,8 +88,9 @@ hosted relay (docs/operations/connect.md): it checks the newest stopped backup (
 --backup <folder>), keeps relay.db and the vault stores of the accounts as plain files,
 and deletes every other team with its files and keys; then the relay starts with
 APASSY_RELAY_MODE=connect and no master key. --dry-run (the default) changes nothing and
-prints the plan; --confirm-delete-teams does it and writes cutover.json. A run that
-stopped is finished by the next one. It exits 1 when a check fails.";
+prints the plan with its plan_sha256; --confirm-delete-teams <plan_sha256> does it, only if
+the plan is still the one of the dry run, and writes cutover.json. A run that stopped is
+finished by the next one. It exits 1 when a check fails.";
 
 /// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
 /// before a deletion.
@@ -112,7 +113,7 @@ enum Command {
     SnapshotCheck,
     Backup,
     ConnectCutover {
-        confirm: bool,
+        confirm: Option<String>,
         backup: Option<PathBuf>,
     },
     Admin(Operator),
@@ -329,16 +330,24 @@ fn parse(args: &[String]) -> Result<Command, String> {
     }
 }
 
-/// `connect-cutover [--dry-run | --confirm-delete-teams] [--backup <folder>]`: a dry run
-/// unless `--confirm-delete-teams` is given.
+/// `connect-cutover [--dry-run | --confirm-delete-teams <plan>] [--backup <folder>]`: a dry
+/// run unless `--confirm-delete-teams` is given with the `plan_sha256` of the dry run.
 fn parse_cutover(args: &[String]) -> Result<Command, String> {
-    let mut confirm = false;
+    let mut confirm = None;
     let mut dry_run = false;
     let mut backup = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
-            "--confirm-delete-teams" if !confirm => confirm = true,
+            "--confirm-delete-teams" if confirm.is_none() => {
+                let plan = rest
+                    .next()
+                    .filter(|plan| !plan.starts_with("--"))
+                    .ok_or_else(|| {
+                        "--confirm-delete-teams needs the plan_sha256 of the dry run.".to_string()
+                    })?;
+                confirm = Some(plan.clone());
+            }
             "--dry-run" if !dry_run => dry_run = true,
             "--backup" if backup.is_none() => {
                 let folder = rest
@@ -352,7 +361,7 @@ fn parse_cutover(args: &[String]) -> Result<Command, String> {
             other => return Err(format!("Unknown option: {other}")),
         }
     }
-    if confirm && dry_run {
+    if confirm.is_some() && dry_run {
         return Err("Give --dry-run or --confirm-delete-teams, not both.".to_string());
     }
     Ok(Command::ConnectCutover { confirm, backup })
@@ -594,7 +603,7 @@ fn main() -> ExitCode {
             let options = apassy_relay::server::cutover::Options {
                 confirm,
                 backup,
-                interrupt: None,
+                ..Default::default()
             };
             match apassy_relay::server::cutover::run(&config, &options, apassy_relay::now_unix()) {
                 Ok(report) => {
@@ -602,23 +611,10 @@ fn main() -> ExitCode {
                         "{}",
                         serde_json::to_string_pretty(&report).unwrap_or_default()
                     );
-                    match report.state.as_str() {
-                        "done" if confirm => eprintln!(
-                            "apassy-relay: the cutover is done: {} vault stores kept as plain files, {} teams deleted. Start the relay with APASSY_RELAY_MODE=connect and without APASSY_RELAY_KEY_FILE.",
-                            report.kept.len(),
-                            report.deleted.len()
-                        ),
-                        "done" => eprintln!(
-                            "apassy-relay: the cutover was done at {}; nothing changed.",
-                            report.finished_at.unwrap_or_default()
-                        ),
-                        _ => eprintln!(
-                            "apassy-relay: a dry run, nothing changed: {} vault stores would stay, {} teams would be deleted. The backup check passed ({}).",
-                            report.kept.len(),
-                            report.deleted.len(),
-                            report.backup.dir
-                        ),
-                    }
+                    eprintln!(
+                        "apassy-relay: {}",
+                        apassy_relay::server::cutover::summary(&report)
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(error) => fail(&error.message),
@@ -873,12 +869,14 @@ mod tests {
 
     #[test]
     fn cutover_and_backup_commands() {
+        let plan = "ab".repeat(32);
+        let given = |value: &str| Some(value.to_string());
         for (words, confirm, backup) in [
-            (vec!["connect-cutover"], false, None),
-            (vec!["connect-cutover", "--dry-run"], false, None),
+            (vec!["connect-cutover"], None, None),
+            (vec!["connect-cutover", "--dry-run"], None, None),
             (
-                vec!["connect-cutover", "--confirm-delete-teams"],
-                true,
+                vec!["connect-cutover", "--confirm-delete-teams", plan.as_str()],
+                given(&plan),
                 None,
             ),
             (
@@ -887,8 +885,9 @@ mod tests {
                     "--backup",
                     "/backups/x",
                     "--confirm-delete-teams",
+                    plan.as_str(),
                 ],
-                true,
+                given(&plan),
                 Some(PathBuf::from("/backups/x")),
             ),
         ] {
@@ -901,11 +900,21 @@ mod tests {
             }
         }
         for words in [
-            vec!["connect-cutover", "--dry-run", "--confirm-delete-teams"],
+            vec![
+                "connect-cutover",
+                "--dry-run",
+                "--confirm-delete-teams",
+                plan.as_str(),
+            ],
+            // The plan of the dry run is required.
+            vec!["connect-cutover", "--confirm-delete-teams"],
+            vec!["connect-cutover", "--confirm-delete-teams", "--dry-run"],
             vec![
                 "connect-cutover",
                 "--confirm-delete-teams",
+                plan.as_str(),
                 "--confirm-delete-teams",
+                plan.as_str(),
             ],
             vec!["connect-cutover", "--backup"],
             vec!["connect-cutover", "--force"],

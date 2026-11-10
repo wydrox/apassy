@@ -412,6 +412,9 @@ impl Hub {
                 "There is no relay in the data directory. Run `apassy-relay init` first.",
             ));
         }
+        // A cutover to Apassy Connect that is not finished: no start, before any file is
+        // opened, migrated, or swept (docs/SPEC.md section 37.3).
+        crate::server::cutover::check_start(&config)?;
         let directory = Directory::open(&config)?;
         let rules = RuleSet::builtin().map_err(|_| {
             RelayError::internal("The built-in rule packs of the core cannot be loaded.")
@@ -477,16 +480,17 @@ impl Hub {
         }
         // Each open derives the key of its file (PBKDF2, 256 000 rounds, about 0.1 s of
         // one core): with many Connect teams, open them on several threads.
-        // `connect` mode serves vault stores only (docs/SPEC.md section 37): a team of
-        // another kind in a plain `relay.db` is a cutover that did not finish, and stays out
-        // of service until `apassy-relay connect-cutover` ends it.
+        // `connect` mode serves vault stores only (docs/SPEC.md section 37). A cutover that
+        // is not finished never gets here (`cutover::check_start`), and a finished one and
+        // `init` leave only vault stores: a team of another kind is a `relay.db` changed by
+        // hand, and is logged and not served.
         let plain = hub.config.connect.plain_files();
         for row in rows
             .iter()
             .filter(|row| plain && row.kind != TeamKind::Account)
         {
             eprintln!(
-                "apassy-relay: team {} is not a vault store and is not served in connect mode: run `apassy-relay connect-cutover`",
+                "apassy-relay: team {} is not a vault store and is not served in connect mode",
                 row.id
             );
         }
@@ -507,8 +511,12 @@ impl Hub {
                         // One team that cannot be opened does not stop the others. It
                         // stays out of service until the operator suspends or deletes it.
                         if let Err(error) = hub.open_team(row) {
+                            let advice = crate::server::cutover::open_failure_advice(
+                                plain,
+                                plain && !crate::server::cutover::plain_header(&hub.config.team_path(&row.id)),
+                            );
                             eprintln!(
-                                "apassy-relay: team {} cannot be opened and is out of service: {} Suspend or delete it with `apassy-relay admin`.",
+                                "apassy-relay: team {} cannot be opened and is out of service: {} {advice}",
                                 row.id, error.message
                             );
                         }
