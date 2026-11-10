@@ -165,25 +165,27 @@ fn safe_arguments(bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes.last() != Some(&0) {
         return false;
     }
-    !bytes.split(|b| *b == 0 || b.is_ascii_whitespace()).any(|arg| {
-        let Some(first) = arg.first() else {
-            return false;
-        };
-        if *first != b'-' {
-            return false;
-        }
-        let switch = arg
-            .iter()
-            .copied()
-            .skip_while(|b| *b == b'-')
-            .take_while(|b| *b != b'=')
-            .map(|b| b.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-        switch.starts_with(b"remote-debugging")
-            || switch == b"load-extension"
-            || switch == b"disable-extensions-except"
-            || switch == b"type"
-    })
+    !bytes
+        .split(|b| *b == 0 || b.is_ascii_whitespace())
+        .any(|arg| {
+            let Some(first) = arg.first() else {
+                return false;
+            };
+            if *first != b'-' {
+                return false;
+            }
+            let switch = arg
+                .iter()
+                .copied()
+                .skip_while(|b| *b == b'-')
+                .take_while(|b| *b != b'=')
+                .map(|b| b.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            switch.starts_with(b"remote-debugging")
+                || switch == b"load-extension"
+                || switch == b"disable-extensions-except"
+                || switch == b"type"
+        })
 }
 
 #[cfg(target_os = "linux")]
@@ -412,7 +414,10 @@ mod tests {
         let pid = child.id();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !exe_hidden_by_kernel(pid).unwrap() {
-            assert!(std::time::Instant::now() < deadline, "the child stayed dumpable");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child stayed dumpable"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let error = fs::read_link(format!("/proc/{pid}/exe")).unwrap_err();
