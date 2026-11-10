@@ -16,7 +16,8 @@
 //!
 //! Authorisation goes through [`TunnelDirectory`]: which account a bearer token is,
 //! which node a device has, whether an account is entitled, and the `tunnel_grant`s.
-//! The account store of unit C1 implements it; [`MemoryDirectory`] is the test one.
+//! `super::tunnel_routes::AccountDirectory` implements it on the account store;
+//! [`MemoryDirectory`] is the test one.
 //!
 //! Every queue has a cap. A node's outgoing queue holds at most
 //! [`Limits::node_queue`] bytes; a client that sends faster waits (backpressure to its
@@ -87,12 +88,12 @@ impl TunnelError {
     pub const NOT_IN_GROUP: Self = Self::new(
         403,
         codes::NOT_IN_GROUP,
-        "This account may not dial that node.",
+        "That node belongs to an account that gave yours no access.",
     );
     pub const PLAN_REQUIRED: Self = Self::new(
         403,
         codes::PLAN_REQUIRED,
-        "The node's account has no plan with the tunnel.",
+        "The node's account is not on Apassy Connect.",
     );
     pub const ACCOUNT_LIMIT: Self = Self::new(
         403,
@@ -104,8 +105,11 @@ impl TunnelError {
         codes::TUNNEL_LIMIT,
         "A tunnel limit of the account is reached.",
     );
-    pub const TUNNEL_OFFLINE: Self =
-        Self::new(503, codes::TUNNEL_OFFLINE, "The node is not connected.");
+    pub const TUNNEL_OFFLINE: Self = Self::new(
+        503,
+        codes::TUNNEL_OFFLINE,
+        "The node is not connected to Apassy Connect.",
+    );
 
     /// The JSON error envelope (`{"ok":false,"error":{...}}`).
     pub fn body(&self) -> Vec<u8> {
@@ -1024,6 +1028,14 @@ impl Broker {
             },
             close::REVOKED,
         )
+    }
+
+    /// The plan of an account ended: the open streams of its nodes end (4003 to their
+    /// clients, a `reset` to the node). Its node WebSockets stay; new dials and ingress
+    /// streams are refused by [`TunnelDirectory::entitled`]. Returns how many streams.
+    pub fn end_plan(&self, account_id: &str) -> usize {
+        self.inner
+            .reset_where(|conn, _| conn.account == account_id, close::REVOKED)
     }
 
     /// The plan of an account ended: its nodes close (4003), and its devices' dials to

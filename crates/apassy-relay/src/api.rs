@@ -1606,6 +1606,59 @@ pub struct WellKnown {
     pub keys: Vec<WellKnownKey>,
 }
 
+// ---- The Connect tunnel (docs/contracts/connect-tunnel-v1.md sections 3 and 6). ----
+
+/// `POST /v1/tunnel/nodes`: the node of the calling device, its name and its pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelNodeRegister {
+    pub name: String,
+    pub pin: String,
+}
+
+/// The `NodeView`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelNodeView {
+    pub node_id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub name: String,
+    pub pin: String,
+    pub public_name: String,
+    pub online: bool,
+    pub created_at: u64,
+}
+
+/// `DELETE /v1/tunnel/nodes/{node_id}` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelNodeDeleted {
+    pub node_id: String,
+}
+
+/// `POST /v1/tunnel/grants`: the node of the caller's account and the grantee account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelGrantRequest {
+    pub node_id: String,
+    pub account_id: String,
+}
+
+/// The `GrantView`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelGrantView {
+    pub grant_id: String,
+    pub node_id: String,
+    pub account_id: String,
+    pub created_at: u64,
+}
+
+/// `DELETE /v1/tunnel/grants/{grant_id}` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelGrantDeleted {
+    pub grant_id: String,
+    pub closed_streams: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
