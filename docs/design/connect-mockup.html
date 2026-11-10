@@ -499,7 +499,7 @@ svg{display:block}
 <!-- ============================================================ 3 -->
 <section class="frame" id="f3">
   <div class="flabel"><b><span class="fnum">3</span>Account, no plan</b>
-    <span>The account exists; no plan yet. Devices, joining a family or team, deletion.</span></div>
+    <span>The account exists; no plan yet. Devices, joining a family or team, deletion. Then the account after a start or a lock.</span></div>
   <div class="win" style="min-height:820px">
     <aside class="side">
       <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
@@ -538,8 +538,22 @@ svg{display:block}
         <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Delete Account…</div><div class="v"></div></div></div>
       </div></div>
     </section>
+  </div><div class="pgrid" style="margin-top:22px">
+    <div class="pcard"><div class="plabel">3b · Signed out<small>Status line: Signed out</small></div>
+      <div class="gl">Apassy Connect</div>
+      <div class="grp">
+        <div class="fr"><div class="k">Name</div><div class="v">Rafal</div></div>
+        <div class="fr"><div class="k">This Mac</div><div class="v">Mac mini (office)</div></div>
+        <div class="fr"><div class="kn"><div>Signed out</div><div class="nt">Touch ID reads the Connect key of this Mac.</div></div><span class="pb pri">Sign In…</span></div>
+      </div></div>
+    <div class="pcard"><div class="plabel">3c · Asking Connect<small>After Sign In…, until GET /v1/account answers</small></div>
+      <div class="gl">Apassy Connect</div>
+      <div class="grp">
+        <div class="fr"><div class="k">Name</div><div class="v">Rafal</div></div>
+        <div class="fr"><div class="v" style="text-align:left;display:flex;gap:7px;align-items:center"><span class="spin"></span>Asking Apassy Connect…</div></div>
+      </div></div>
   </div>
-  <ul class="fnotes"><li><b>Email</b> shows only when Connect has one (copied from Stripe after a checkout); it is never written to disk.</li><li><b>Choose a Plan…</b> opens frame 4. It is the one primary button of the view.</li><li><b>Forget…</b> on this Mac revokes this Mac itself (frame 7d). <b>Revoke…</b> on another device: frame 7c.</li><li><b>Join…</b>: frame 10. <b>Delete Account…</b>: frame 11.</li></ul>
+  <ul class="fnotes"><li><b>Email</b> shows only when Connect has one (copied from Stripe after a checkout); it is never written to disk.</li><li><b>Choose a Plan…</b> opens frame 4. It is the one primary button of the view.</li><li><b>Forget…</b> on this Mac revokes this Mac itself (frame 7d). <b>Revoke…</b> on another device: frame 7c.</li><li><b>Join…</b>: frame 10. <b>Delete Account…</b>: frame 11.</li><li><b>3b</b>: after the app starts, a lock, or a new unlock, the account key is not in memory. The section shows the account file (no secret) and <b>Sign In…</b>, which reads the key from the Keychain (Touch ID) and asks Connect (3c). The app never asks Touch ID by itself when the section opens.</li></ul>
 </section>
 <!-- ============================================================ 4 -->
 <section class="frame" id="f4">

@@ -1956,13 +1956,6 @@ pub struct OwnerFlows {
 impl OwnerFlows {
     /// Take the proof of the last Connect account check, once: the slot is empty after
     /// it, also when the account call then fails (B-L1).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the Connect view of plan s7 unit M2 takes the proof"
-        )
-    )]
     pub(crate) fn take_connect_proof(&mut self) -> Option<OwnerProof> {
         self.connect_proof.take()
     }
