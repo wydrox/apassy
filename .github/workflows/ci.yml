@@ -388,9 +388,9 @@ jobs:
           rm target/node-dist/apassy
           packaging/linux/verify.sh --dist target/node-dist --arch x86_64
 
-  # ADR 0045: real Linux builds/packages on both native architectures. These
-  # artifacts are not published downloads; synthetic crypto/identity tests are
-  # separate from actual desktop and Chrome/Chromium runtime acceptance.
+  # ADR 0045: the Linux vault tests on both native architectures; the packages are
+  # built by linux-vault-package below. Synthetic crypto/identity tests are separate
+  # from actual desktop and Chrome/Chromium runtime acceptance.
   linux-vault:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
@@ -407,7 +407,6 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
-      APASSY_RELEASE_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -455,15 +454,94 @@ jobs:
       - name: Verify real vault create/get and persistence with the synthetic RP
         working-directory: extension-tests
         run: node fixtures/passkey-rp/core-checks.mjs
-      - name: Build the Linux desktop, owner commands and browser host
-        run: >-
-          cargo build --offline --locked -p apassy-app -p apassy
-          --features apassy-app/window,apassy-app/node,apassy-app/owner
-          --bin apassy-app --bin apassy-browser-host
       - name: Check vault packaging scripts
         run: >-
-          shellcheck packaging/linux/build-vault.sh packaging/linux/install-vault.sh
-          packaging/linux/verify-vault.sh crates/apassy-relay/deploy/worker/public/install.sh
+          shellcheck packaging/linux/build-vault.sh packaging/linux/build-vault-release.sh
+          packaging/linux/install-vault.sh packaging/linux/verify-vault.sh
+          crates/apassy-relay/deploy/worker/public/install.sh
+
+  # ADR 0045, unit L6: the Linux vault packages exactly as a release builds them
+  # (relay-image.yml, linux-vault): release mode, in Debian 11 (glibc 2.31) so that they
+  # run on Debian 12 and 13 and Ubuntu 22.04 and 24.04, by build-vault-release.sh. The
+  # checkout is the pull request's head commit, not its merge commit, so that the
+  # package records the commit it was built from. These artifacts are not downloads.
+  linux-vault-package:
+    needs: reuse-pr
+    if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    name: linux-vault-package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    container:
+      image: rust:1.97.0-bullseye@sha256:7373627c1378e62a7e4963df5b6ceb90422c5b87afd59e17943029d19ea31e9a
+    env:
+      CARGO_INCREMENTAL: "0"
+      ARCH: ${{ matrix.arch }}
+      APASSY_RELEASE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install artifact inspection tools
+        run: |
+          test "$(uname -m)" = "$ARCH"
+          apt-get update
+          apt-get install -y --no-install-recommends binutils file python3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-linux-vault-bullseye
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Build and package the release build
+        run: |
+          # The container runs as root on a checkout of the runner's user.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/linux/build-vault-release.sh --arch "$ARCH" --out target/vault-dist
+          cat "target/vault-dist/SHA256SUMS-vault-$ARCH" "target/vault-dist/release-vault-linux-$ARCH.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-vault-linux-${{ matrix.arch }}
+          path: target/vault-dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The packages of linux-vault-package on the runner (Ubuntu 24.04: install, owner
+  # refusal, removal, install.sh from a file:// directory) and in minimal Debian 12, 13
+  # and Ubuntu 22.04, 24.04 containers (dependencies, loading, the window under Xvfb).
+  linux-vault-verify:
+    needs: linux-vault-package
+    name: linux-vault-verify (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apassy-vault-linux-${{ matrix.arch }}
+          path: target/vault-dist
+      - name: Install Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils
       - name: Prepare protected package parents on disposable CI runner
         # Hosted images make shared directories writable for tool provisioning.
         # Normalize only the installer's shared parents, never recursively. The
@@ -479,19 +557,8 @@ jobs:
               test -z "$(find "$path" -maxdepth 0 -perm /022 -print)"
             fi
           done
-      - name: Package and verify the Linux vault build
-        run: |
-          mkdir -p target/vault-dist
-          strip target/debug/apassy-app target/debug/apassy-browser-host
-          packaging/linux/build-vault.sh --binary target/debug/apassy-app \
-            --host target/debug/apassy-browser-host --arch "${{ matrix.arch }}" --out target/vault-dist
-          packaging/linux/verify-vault.sh --dist target/vault-dist --arch "${{ matrix.arch }}"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: apassy-vault-linux-${{ matrix.arch }}
-          path: target/vault-dist/
-          if-no-files-found: error
-          retention-days: 7
+      - name: Verify the packages
+        run: packaging/linux/verify-vault.sh --dist target/vault-dist --arch "${{ matrix.arch }}" --containers
 
   audit:
     needs: reuse-pr
@@ -623,7 +690,7 @@ jobs:
             file="/proc/sys/$(echo "$knob" | tr . /)"
             if [ -e "$file" ]; then echo "$knob=$(cat "$file")"; else echo "$knob: not present"; fi
           done
-          ls /etc/apparmor.d | grep -i -e bwrap -e userns || echo "no AppArmor profile named bwrap or userns"
+          find /etc/apparmor.d -maxdepth 1 \( -iname '*bwrap*' -o -iname '*userns*' \) -printf '%f\n' | grep . || echo "no AppArmor profile named bwrap or userns"
           if bwrap --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \
                --unshare-net --disable-userns --die-with-parent --new-session --as-pid-1 \
                --ro-bind / / --dev /dev --proc /proc true; then

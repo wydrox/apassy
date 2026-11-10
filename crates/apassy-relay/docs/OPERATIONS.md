@@ -943,9 +943,9 @@ The Worker serves three things itself, without the relay and without the edge se
 
 | Path | What |
 | --- | --- |
-| `/install.sh` | after a SHA-256 check: on Linux (x86_64, aarch64) the node `apassy` and the `apassy-team` shim from the node tarball, on macOS `apassy-team`, into `~/.local/bin` (`deploy/worker/public/install.sh`) |
+| `/install.sh` | after a SHA-256 check: on Linux (x86_64, aarch64) the node `apassy` and the `apassy-team` shim from the node tarball, on macOS `apassy-team`, into `~/.local/bin`; with `APASSY_COMPONENT=vault` as root, the Linux vault package (`.deb` with apt, or the tarball), on Debian 12+ and Ubuntu 22.04+ only (`deploy/worker/public/install.sh`) |
 | `/guide` | the guide for owners and members of a relay that they run (`deploy/worker/public/guide.html`; source `docs/ONBOARDING.md`) |
-| `/dl/*` | the CLI binaries, the Linux node packages (`.tar.gz` and `.deb` for x86_64 and aarch64), and `SHA256SUMS` |
+| `/dl/*` | the CLI binaries, the Linux node packages and the Linux vault packages (`.tar.gz` and `.deb` for x86_64 and aarch64 each), and `SHA256SUMS` (ten lines). Workers static assets serve at most 25 MiB per file; the build refuses a larger package |
 
 Users install with:
 

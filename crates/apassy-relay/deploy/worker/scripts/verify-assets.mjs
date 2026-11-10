@@ -4,6 +4,9 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/** Workers static assets serve files up to 25 MiB. */
+export const MAX_ASSET_BYTES = 25 * 1024 * 1024;
+
 export function verifyAssets(directory, version, commit) {
   if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error('Expected a full source commit.');
   if (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink()) throw new Error('Invalid download directory.');
@@ -43,7 +46,25 @@ export function verifyAssets(directory, version, commit) {
     if (bytes.subarray(0, magic.length / 2).toString('hex') !== magic) throw new Error(`Wrong package format: ${name}`);
     expected.push(`${hash}  ${name}`);
   }
-  if (JSON.stringify(sums) !== JSON.stringify(expected.sort())) throw new Error('SHA256SUMS must verify exactly the six downloads.');
+  // The Linux vault packages (ADR 0045, unit L6): both tarballs and both .debs, each at
+  // most 25 MiB, the largest file that Workers static assets serve.
+  const vault = metadata.vault;
+  const vaultNames = [`apassy-vault-${version}-linux-x86_64.tar.gz`, `apassy-vault-${version}-linux-aarch64.tar.gz`,
+    `apassy-vault_${version}_amd64.deb`, `apassy-vault_${version}_arm64.deb`];
+  if (!vault || typeof vault !== 'object' || JSON.stringify(Object.keys(vault).sort()) !== JSON.stringify([...vaultNames].sort())) {
+    throw new Error('release.json must list exactly the four Linux vault packages.');
+  }
+  for (const name of vaultNames) {
+    const bytes = read(name);
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    const asset = vault[name];
+    if (asset?.sha256 !== hash || asset.size !== bytes.length || bytes.length === 0) throw new Error(`Unverified download: ${name}`);
+    if (bytes.length > MAX_ASSET_BYTES) throw new Error(`Too large for /dl/ (25 MiB): ${name}`);
+    const magic = name.endsWith('.deb') ? '213c617263683e0a' : '1f8b';
+    if (bytes.subarray(0, magic.length / 2).toString('hex') !== magic) throw new Error(`Wrong package format: ${name}`);
+    expected.push(`${hash}  ${name}`);
+  }
+  if (JSON.stringify(sums) !== JSON.stringify(expected.sort())) throw new Error('SHA256SUMS must verify exactly the ten downloads.');
   return metadata;
 }
 
@@ -55,7 +76,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const rootVersion = readFileSync(join(worker, '../../Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)?.[1];
     if (rootVersion !== version) throw new Error('Worker and relay release versions differ.');
     verifyAssets(join(worker, 'public/dl'), version, commit);
-    console.log(`Verified both CLI downloads and the four Linux node packages for ${version} at ${commit}.`);
+    console.log(`Verified both CLI downloads, the four Linux node packages and the four Linux vault packages for ${version} at ${commit}.`);
   } catch (error) {
     console.error(`Worker asset preflight failed: ${error.message}`);
     process.exitCode = 1;

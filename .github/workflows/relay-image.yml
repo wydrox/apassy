@@ -1,5 +1,6 @@
-# The relay image, the Linux node packages (plan S2-S3, L3), and both downloadable team
-# CLIs (ADR 0037: the relay is the crate crates/apassy-relay of this workspace). GitHub builds release artifacts; never build on
+# The relay image, the Linux node packages (plan S2-S3, L3), the Linux vault packages
+# (ADR 0045, L6), and both downloadable team CLIs (ADR 0037: the relay is the crate
+# crates/apassy-relay of this workspace). GitHub builds release artifacts; never build on
 # the production VPS or in a local VM. Push image-release-<version> on the tested main
 # commit, or image-test-* for artifacts without a release label or publication.
 # Deployment remains a separate step.
@@ -324,6 +325,148 @@ jobs:
             dist/SHA256SUMS-node
             dist/release-linux-x86_64.json
             dist/release-linux-aarch64.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # The Linux vault packages (ADR 0045, unit L6): the desktop, the owner commands and the
+  # browser host (`apassy-vault`), built by packaging/linux/build-vault-release.sh in the
+  # node's bullseye image (glibc 2.31) for x86_64 and aarch64, as a .tar.gz and a .deb with
+  # SHA256SUMS and attestations. They go to /dl/ next to the node packages
+  # (docs/operations/release.md, "Linux vault packages"). The node jobs above are unchanged.
+  linux-vault:
+    needs: guard
+    name: linux-vault (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    container:
+      image: rust:1.97.0-bullseye@sha256:7373627c1378e62a7e4963df5b6ceb90422c5b87afd59e17943029d19ea31e9a
+    env:
+      CARGO_INCREMENTAL: "0"
+      APASSY_RELEASE_COMMIT: ${{ github.sha }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install artifact inspection tools
+        run: |
+          test "$(uname -m)" = "$ARCH"
+          apt-get update
+          apt-get install -y --no-install-recommends binutils file python3
+      - name: Build and package the vault
+        run: |
+          # The container runs as root on a checkout of the runner's user.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/linux/build-vault-release.sh --arch "$ARCH" --out dist
+          cat "dist/SHA256SUMS-vault-$ARCH" "dist/release-vault-linux-$ARCH.json"
+      # The SBOM scans the stripped executables of the packages and the workspace Cargo.lock.
+      - name: Stage the SBOM input
+        run: |
+          rm -rf "target/sbom-vault-$ARCH"
+          mkdir -p "target/sbom-vault-$ARCH"
+          cp target/release/apassy-app "target/sbom-vault-$ARCH/apassy"
+          cp target/release/apassy-browser-host "target/sbom-vault-$ARCH/"
+          strip "target/sbom-vault-$ARCH/apassy" "target/sbom-vault-$ARCH/apassy-browser-host"
+          cp Cargo.lock "target/sbom-vault-$ARCH/"
+      - name: Attest the vault packages
+        uses: ./.github/actions/attest
+        with:
+          subject-path: |
+            dist/apassy-vault-*-linux-${{ matrix.arch }}.tar.gz
+            dist/apassy-vault_*.deb
+            dist/release-vault-linux-${{ matrix.arch }}.json
+          sbom-subject-path: |
+            dist/apassy-vault-*-linux-${{ matrix.arch }}.tar.gz
+            dist/apassy-vault_*.deb
+          sbom-path: target/sbom-vault-${{ matrix.arch }}
+          sbom-output: dist/apassy-vault-linux-${{ matrix.arch }}.spdx.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-vault-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The vault packages on the runner and in minimal Debian 12, 13 and Ubuntu 22.04, 24.04
+  # containers: install, dependencies, the window under Xvfb (packaging/linux/verify-vault.sh).
+  linux-vault-verify:
+    name: linux-vault-verify (${{ matrix.arch }})
+    needs: linux-vault
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apassy-vault-linux-${{ matrix.arch }}
+          path: dist
+      - name: Install Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils
+      - name: Prepare protected package parents on the disposable runner
+        # Hosted images make shared directories writable for tool provisioning. Only the
+        # installer's shared parents, never recursively; customers' unsafe directories
+        # are still refused.
+        run: |
+          for path in /usr /usr/bin /usr/lib /usr/share /usr/share/applications /usr/share/doc /usr/share/polkit-1 /usr/share/polkit-1/actions; do
+            test ! -L "$path"
+            if [ -e "$path" ]; then
+              test -d "$path"
+              test "$(stat -c %u "$path")" = 0
+              sudo chmod go-w "$path"
+            fi
+          done
+      - name: Verify the packages
+        run: packaging/linux/verify-vault.sh --dist dist --arch "${{ matrix.arch }}" --containers
+
+  # One SHA256SUMS of the four vault packages, for /dl/ next to the node packages.
+  linux-vault-sums:
+    needs: linux-vault
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: apassy-vault-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Combine the checksums
+        run: |
+          cd dist
+          LC_ALL=C sort -k 2 SHA256SUMS-vault-x86_64 SHA256SUMS-vault-aarch64 > SHA256SUMS-vault
+          test "$(wc -l < SHA256SUMS-vault)" -eq 4
+          sha256sum -c SHA256SUMS-vault
+          cat SHA256SUMS-vault
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-vault-sha256sums
+          path: |
+            dist/SHA256SUMS-vault
+            dist/release-vault-linux-x86_64.json
+            dist/release-vault-linux-aarch64.json
           if-no-files-found: error
           retention-days: 7
 
