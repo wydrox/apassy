@@ -154,7 +154,7 @@ enum NodeDone {
     /// The questions team of the vault is on the node.
     Team,
     /// A move started: the node team waits for a device.
-    MoveStarted(MoveStart),
+    MoveStarted(Box<MoveStart>),
     /// The move ended.
     Moved(MoveDone),
 }
@@ -593,7 +593,7 @@ impl DesktopApp {
             let device = device_name();
             let done = if elsewhere {
                 node.move_approvals(&vault, &device)
-                    .map(NodeDone::MoveStarted)
+                    .map(|start| NodeDone::MoveStarted(Box::new(start)))
             } else {
                 node.ensure_questions_team(&vault, &device)
                     .map(|_| NodeDone::Team)
@@ -634,6 +634,7 @@ impl DesktopApp {
                 }
             }
             Some(Ok(NodeDone::MoveStarted(start))) if open => {
+                let start = *start;
                 // The questions still go through the hosted team here.
                 let (questions_only, watches) = self
                     .owner_ui

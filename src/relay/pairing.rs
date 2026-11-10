@@ -1,6 +1,15 @@
 //! A QR capability hands question keys to a confirmed iPhone or Apple Watch (ADR 0039 §6)
 //! over existing opaque question routes. The relay never sees the QR secret. No vault
 //! snapshot or paid sync is involved.
+//!
+//! The code that the Mac shows is a device link of node-pairing-v1, built by
+//! `PairedLink::format` (or `format_with` for a given Connect route) and read by
+//! `PairedLink::parse`, the one builder and the one reader of the Mac and the iPhone
+//! core. Beside the tailnet address it can carry the node's Connect route (section 7a,
+//! plan s7 units I2 and M5): `alt=…,wss://<Connect host>/v1/tunnel/dial/<node id>` and
+//! `node=<node id>`. The fragment never reaches a server; the handoff AAD and the safety
+//! words cover the route exactly as written, so a code with a changed route gives other
+//! words on the two devices.
 use crate::questions::envelope::{Sealed, new_qid, open};
 use crate::questions::{QuestionsClient, QuestionsError};
 use crate::sync::DeviceKey;
@@ -578,6 +587,66 @@ mod tests {
         let hosted_link = channel.link(&hosted);
         let (read, _) = PairingChannel::parse(&hosted_link).unwrap();
         assert_eq!(read, hosted);
+    }
+
+    /// Section 7a and 8: the route and the node of a code of a node on Connect are part
+    /// of "the original full link without handoff", so the words cover them; the relay
+    /// call still sends the code alone.
+    #[test]
+    fn a_handoff_after_a_connect_route_binds_the_route() {
+        let connect = crate::connect::configured_origin();
+        let route = crate::sync::TunnelRoute::new(&connect, "node_k7m2q4x3ca").unwrap();
+        let url = crate::sync::RelayUrl::parse_with_trust(
+            "https://100.64.0.7:8444",
+            crate::sync::TlsTrust::Pinned(crate::sync::parse_pin(PIN).unwrap()),
+        )
+        .unwrap()
+        .alternatives(&["apassy-mini.tail0123.ts.net".to_owned()])
+        .unwrap();
+        let raw = crate::sync::PairedLink::format_with(
+            crate::sync::LinkKind::Device,
+            &url,
+            &link_code(),
+            Some("Studio"),
+            Some(&route),
+        )
+        .unwrap();
+        assert!(raw.contains(&format!(",{}&node=node_k7m2q4x3ca", route.text())));
+        let channel = PairingChannel::generate(&raw).unwrap();
+        let link = channel.link(&raw);
+        let (read, phone_channel) = PairingChannel::parse(&link).unwrap();
+        assert_eq!(read, raw.as_str(), "the route is in the text of the AAD");
+        let (relay_url, code) = crate::sync::PendingJoin::parse_link(&link, "").unwrap();
+        assert_eq!(code.as_str(), link_code());
+        assert_eq!(relay_url.as_str(), "https://100.64.0.7:8444");
+        assert_eq!(relay_url.tunnel(), Some(&route));
+
+        let phone = DeviceKey::generate().unwrap();
+        let name = "Synthetic iPhone";
+        let words = channel.mac_safety(TEAM, phone.public_key(), name).unwrap();
+        assert_eq!(
+            phone_channel.phone_safety(TEAM, &phone, name).unwrap(),
+            words
+        );
+        // Another node in the route and the node: other words.
+        let moved = link.replace("node_k7m2q4x3ca", "node_aaaaaaaaaa");
+        let (_, moved_channel) = PairingChannel::parse(&moved).unwrap();
+        assert_ne!(
+            moved_channel.phone_safety(TEAM, &phone, name).unwrap(),
+            words
+        );
+        // The same code without a route keeps the AAD of a link of today.
+        let plain = crate::sync::PairedLink::format(
+            crate::sync::LinkKind::Device,
+            &url,
+            &link_code(),
+            Some("Studio"),
+        )
+        .unwrap();
+        assert!(!plain.contains("node="));
+        let plain_link = PairingChannel::generate(&plain).unwrap().link(&plain);
+        let (read, _) = PairingChannel::parse(&plain_link).unwrap();
+        assert_eq!(read, plain.as_str());
     }
 
     #[test]

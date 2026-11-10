@@ -1,0 +1,208 @@
+{
+  "contract": "node-pairing-v1",
+  "section": "7a",
+  "note": "Synthetic values. The Connect route of a pinned node: the last alt entry wss://<Connect host>/v1/tunnel/dial/<node id> and node=<node id>. Read with the Connect origin connect_origin.",
+  "connect_origin": "https://apassy-relay.wyderka.cc",
+  "node": "node_k7m2q4x3ca",
+  "route": "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca",
+  "old": [
+    {
+      "name": "link_1",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q"
+    },
+    {
+      "name": "link_2",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q"
+    },
+    {
+      "name": "link_3",
+      "text": "https://100.64.0.7:8444/pair#apassy_tcd_cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444&name=build-box"
+    },
+    {
+      "name": "link_4",
+      "text": "https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q"
+    }
+  ],
+  "accepted": [
+    {
+      "name": "device link with the tailnet, the Connect route, and a handoff",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "kind": "device",
+      "origin": "https://100.64.0.7:8444",
+      "pin": "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE",
+      "alt": [
+        "apassy-mini.tail0123.ts.net:8444",
+        "[fd7a:115c:a1e0::7]:8444"
+      ],
+      "route": "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca",
+      "node": "node_k7m2q4x3ca",
+      "node_name": "Mac mini “Studio”",
+      "handoff": true,
+      "without_handoff": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D",
+      "stored_alt": [
+        "apassy-mini.tail0123.ts.net:8444",
+        "[fd7a:115c:a1e0::7]:8444",
+        "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca"
+      ]
+    },
+    {
+      "name": "device link with the Connect route only",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca",
+      "kind": "device",
+      "origin": "https://100.64.0.7:8444",
+      "pin": "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE",
+      "alt": [],
+      "route": "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca",
+      "node": "node_k7m2q4x3ca",
+      "node_name": null,
+      "handoff": false,
+      "without_handoff": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca",
+      "stored_alt": [
+        "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca"
+      ]
+    },
+    {
+      "name": "node pairing link with the Connect route",
+      "text": "https://100.64.0.7:8444/pair#apassy_tcd_cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=build-box",
+      "kind": "pair",
+      "origin": "https://100.64.0.7:8444",
+      "pin": "u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE",
+      "alt": [],
+      "route": "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca",
+      "node": "node_k7m2q4x3ca",
+      "node_name": "build-box",
+      "handoff": false,
+      "without_handoff": "https://100.64.0.7:8444/pair#apassy_tcd_cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=build-box",
+      "stored_alt": [
+        "wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca"
+      ]
+    }
+  ],
+  "refused": [
+    {
+      "name": "a ws:// route",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,ws://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "an https:// route",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,https://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route through another host",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://connect.example.com/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route through the Connect host on another port",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc:8443/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route with the port 443 written",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc:443/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route with an uppercase host",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://Apassy-Relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route with a user",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://u@apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route with another path",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/node&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route with a trailing slash",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca/&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route with a node id outside a-z2-7",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3c1&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "a route that is not the last entry",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca,apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "two routes",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "an entry of another scheme",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,ftp://apassy-relay.wyderka.cc&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_connect"
+    },
+    {
+      "name": "five entries with the route",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=a.example.com,b.example.com,c.example.com,d.example.com,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_alt"
+    },
+    {
+      "name": "a loopback tailnet entry before the route",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=127.0.0.1,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_alt"
+    },
+    {
+      "name": "a route without node",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_node"
+    },
+    {
+      "name": "node without a route",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_node"
+    },
+    {
+      "name": "node of another node than the route",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_aaaaaaaaaa&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_node"
+    },
+    {
+      "name": "node that is not a node id",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_K7M2Q4X3CA&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "bad_node"
+    },
+    {
+      "name": "node before alt",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&node=node_k7m2q4x3ca&alt=wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca",
+      "reason": "key_order"
+    },
+    {
+      "name": "node after name",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&node=node_k7m2q4x3ca&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "key_order"
+    },
+    {
+      "name": "node repeated",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca&node=node_k7m2q4x3ca&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "repeated_key"
+    },
+    {
+      "name": "an empty node",
+      "text": "https://100.64.0.7:8444/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&pin=u7Ri74l_xMBm74XnZDWpOC6Z4p6n4aUqwWmsV6firLE&alt=apassy-mini.tail0123.ts.net,[fd7a:115c:a1e0::7]:8444,wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=&name=Mac%20mini%20%E2%80%9CStudio%E2%80%9D&handoff=2.oKGio6SlpqeoqaqrrK2urw.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8.BAIX5hfwtkQ5KCePlpmeaaI6TywVK99tbN9m5bgCgtTtGUp968uXcS0t2jyoWqh2Wlb0X8dYWZZS8ol8ZTBuV5Q",
+      "reason": "empty_value"
+    },
+    {
+      "name": "node on a hosted link",
+      "text": "https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&node=node_k7m2q4x3ca",
+      "reason": "needs_pin"
+    },
+    {
+      "name": "a route on a hosted link",
+      "text": "https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_abababababababababababababababababababababababababababababababab&alt=wss://apassy-relay.wyderka.cc/v1/tunnel/dial/node_k7m2q4x3ca&node=node_k7m2q4x3ca",
+      "reason": "needs_pin"
+    }
+  ]
+}

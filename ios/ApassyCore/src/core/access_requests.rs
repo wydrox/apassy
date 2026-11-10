@@ -1,4 +1,5 @@
-//! Typed ADR 0033 calls. This is a child of questions so the carrier stays shared.
+//! Typed ADR 0033 calls. This is a child of questions so the carrier stays shared: the same
+//! members, and so the same transport (`transport.rs`, ios-core-v1 section 5.15).
 use super::*;
 use apassy::questions::access_request as access;
 use apassy::vault::{QuestionKey, TrustedDeviceKind};

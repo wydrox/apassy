@@ -428,3 +428,65 @@ A Linux node ([Linux node](linux-node.md); plan S2–S3 units L1 and L4) serves 
 Every relay sync of such a vault connects only with the stored pin: the worker, "Sync now", the step before a lock, "Add a device…", "Devices…", "Turn off", the join and the adoption of a new Mac, and the iPhone (`VaultEntry { pin, alt }` in `phone.json`). A membership with a pin never connects without it, also when the vault list lost its pin; a vault list whose pin differs from the membership's is refused ("The vault does not match its sync settings."), and a stored pin that is not a pin is refused too. Nothing falls back to system trust. A typed relay address has system trust, so a node origin typed into "New relay copy" is refused ("Relay not reachable"); a node comes only from its pairing link. A new pairing is the only way to replace a pin: a node with a new certificate, or a new tailnet address or port, needs a new link (`apassy pair`) and a new team.
 
 Tests: `your_own_node_takes_a_pairing_link_and_the_iphone_link_names_the_node_and_its_pin` and `a_wrong_pin_refuses_the_node_before_any_request` (`src/desktop/ui/sync_tests.rs`) run the sheet against the in-process fake relay behind the real TLS front of a node on the loopback; `a_team_on_a_pinned_node_is_made_only_through_its_pin` (`src/relay/membership.rs`) checks `create_team_on_relay` with a pinned address; `tests/relay_pinned.rs` checks the engine; `an_iphone_joins_a_pinned_node_and_keeps_the_pin_in_its_entry` (`ios/ApassyCore/tests/pinned_join.rs`) checks the iPhone, also a `phone.json` with another pin. The test on a physical Linux machine is an owner step.
+
+## 18. Sync through Apassy Connect
+
+Apassy Connect (ADR 0037 stage 7; plan s7 unit M3) keeps the encrypted copy of a vault for a Connect account: a **vault store**, one relay-sync-v1 team of kind `account` for each vault ([connect-account-v1](../contracts/connect-account-v1.md) section 8). The relay-sync-v1 wire does not change: the team sign-in, the signed heads, the chain, the receipts, and `DELETE /v1/sync` are those of section 17, at the Connect origin. What differs is the key: a store signs with the **account device key** of this Mac (one Keychain item outside every vault, Touch ID), not with a key in the vault. The vault keeps an account row (`relay_membership.key_source = 'account'`, schema 34) with the public key and no private key. Apassy Connect is the paid part; relay sync and the passphrase-encrypted copy work the same way everywhere ([plans](../product/plans.md) section 5).
+
+### 18.1 Turn it on
+
+1. Settings › Connect: an account on this Mac, signed in ("Sign In…" after each unlock), with a plan that pushes (active, trialing, or past due in its grace).
+2. Settings › Vault › Sync, the vault's row, "Apassy relay": the sheet offers **Apassy Connect** first. Select "Turn on".
+3. Apassy makes the store (`POST /v1/account/vaults`; the same vault again answers the existing store), signs in to it with the account key, and pushes version 1. Then it adds the other live devices of the account to the store (`POST /v1/account/vaults/{team}/devices`). Those devices joined the account with the safety words and Touch ID on a live device; each still needs the vault passphrase.
+
+The account row, the sync state, and the link of the vault list are stored only after the first push worked. "This account is not on Apassy Connect, or its plan is read-only." means no plan that pushes: nothing turned on.
+
+### 18.2 A second Mac of the same account
+
+The second Mac needs no link code. It holds the same vault (the same vault id, for example from a folder sync before), its account is signed in, and the first Mac added it to the store (step 3 of 18.1, or later: Settings › Connect on a Mac in the store adds the account's newer devices). On the second Mac, "Apassy relay" › "Apassy Connect" › "Turn on" takes the existing store, merges the copy, and pushes the merged vault. A Mac that the store does not list yet gets "This Mac is not in the Apassy Connect copy of this vault yet. On a Mac that syncs it through Apassy Connect, open Settings › Connect: that Mac adds this one. Then try again."
+
+### 18.3 A shared Family or Team vault
+
+A member of a Connect Family or Connect Team joins a shared vault only with a link, the safety words, and the passphrase:
+
+1. On the Mac that syncs the vault through Connect: "Add a device…" makes the link of section 17.2 (`<Connect origin>/link#apassy_lnk_…`). Send it to the member.
+2. On the member's Mac (its own account, signed in, an active member of the same group): "Use a vault from another Mac" › "Apassy relay", or "Join from another Mac" for a vault on that Mac. Apassy sends the link with the member's **account key** and shows the two safety words.
+3. On the first Mac: the member's Mac waits with the same words; "Confirm…" runs the owner check. Connect adds only a device of the same account or of an active member of the same group: anyone else is refused (`403 not_in_group`), also with the right link and words.
+4. On the member's Mac: the passphrase of the vault opens the copy. A wrong passphrase makes no vault.
+
+The store is then `shared`; both sides sync as in section 17.
+
+### 18.4 Move the relay copy to Connect
+
+A vault that syncs through the hosted relay (`apassy-relay.wyderka.cc`) with a key of its own shows "Move the Relay Copy to Connect" while this Mac can sync through Connect. The order:
+
+1. Apassy syncs with the hosted relay, so this Mac has the changes of the other Macs.
+2. It pushes the vault to Connect (the store, the sign-in with the account key, version 1). The vault still syncs with the hosted relay.
+3. It deletes the copy on the hosted relay (`DELETE /v1/sync`), then turns the hosted sync off on this Mac.
+4. It turns on the sync through Connect (18.1) and adds the other devices of the account.
+
+Connect gets the copy **first**; the old copy goes **second**. A move record `<data folder>/sync/<list id>.move.json` (mode 0600, no secret: the vault id, the Connect origin and store, the old relay and team, and the step) keeps the step:
+
+| The row says | Both copies | The vault syncs with | What to do |
+| --- | --- | --- | --- |
+| "The copy is on Apassy Connect, and the old copy is still on apassy-relay.wyderka.cc. Both copies are kept, …" | yes | the hosted relay, as before | "Try Again" goes on from step 1 (Connect gets the changes made since), or "Undo the Move…" deletes the Connect copy after an owner check |
+| "The copy is on Apassy Connect, and the old copy is deleted, but the sync with Apassy Connect did not turn on yet. …" | Connect only | nothing yet; the vault is safe on this Mac | "Try Again" runs step 4 |
+
+The other Macs of the old team: their next sync finds the hosted copy gone. Each turns on 18.2 (same account) or joins with a link (18.3).
+
+### 18.5 Plan states
+
+The sync worker shows the plan state of the account on the vault's row (connect-billing-v1 section 8):
+
+| Row | When | What works |
+| --- | --- | --- |
+| "Connect: past due" | `past_due` within its grace | Sync works until `grace_until`; update the payment method in Settings › Connect › Manage Billing… |
+| "Connect: read-only until <date>" | `read_only` (`403 plan_required` on a push) | Pulls and downloads work: the waiter's new versions and every 5 minutes. A change of this Mac stays on this Mac, is not lost, and is not pushed every few seconds; the next sync that pushes takes it up. The sync log does not count it as a stuck sync. |
+| "Connect: suspended" | `suspended` | Pulls are refused too; Connect keeps the copy until `delete_at`. The vault on this Mac is safe. |
+| "Connect: signed out" | The account of this Mac is signed out (after a lock or an unlock) | The sync waits for Settings › Connect › "Sign In…", then syncs at once. |
+
+The account key leaves the memory of the sync with the vault key at a lock.
+
+### 18.6 Tests
+
+`tests/relay_sync.rs`, module `connect_sync`, against the fake Connect with its stores in the fake relay (`FakeConnect::with_relay`; the relay checks every head with `ring`): `enabling_on_connect_pushes_version_one_under_the_account_key`, `a_second_mac_of_the_account_joins_without_a_link_code_and_merges`, `a_family_members_mac_joins_a_shared_vault_only_with_a_link_the_words_and_the_passphrase`, `moving_the_relay_copy_pushes_to_connect_first_and_deletes_the_old_copy_second`, `a_failure_between_the_steps_of_a_move_leaves_both_copies_with_a_clear_state` (also the retry and the undo), and `a_read_only_plan_shows_the_state_and_keeps_pulls`. The words of the states: `the_connect_states_say_what_works_with_their_date` (`src/desktop/ui/sync/relay.rs`); the picker: `the_sync_offers_apassy_connect_only_with_a_plan_that_pushes` (`src/desktop/ui/connect_tests.rs`). The real Connect relay (C1, `crates/apassy-relay`) and a physical second Mac are not covered here.

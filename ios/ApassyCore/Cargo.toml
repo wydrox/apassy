@@ -27,6 +27,9 @@ default = ["openssl"]
 openssl = ["apassy/openssl"]
 
 [dev-dependencies]
+# tests/connect_dial.rs (plan s7 unit I2): the loopback Connect is the relay crate's own
+# server with the account routes and the tunnel. A workspace member, no new crate.
+apassy-relay = { path = "../../crates/apassy-relay" }
 tempfile = "=3.27.0"
 rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 

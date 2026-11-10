@@ -52,6 +52,10 @@ pub use folder::{
     FOLDER_NAME, FolderEntry, PUSH_SUFFIX, SYNC_FILE_EXTENSION, SyncFolder, detect_folders_in,
     file_name_for, list_folder_vaults, start_download,
 };
+pub use relay::connect::{
+    ConnectEnableReport, MoveFailure, MoveRecord, MoveStep, StoreError, StorePlan, is_plan_refusal,
+    waits_for_account,
+};
 pub use relay::{
     DeviceView, JoinedDevice, KeySource, LINK_INVALID_TEXT, LINK_UPDATE_TEXT, LinkCode, LinkKind,
     LinkRefusal, MAX_LINK_BYTES, MAX_NODE_NAME_CHARS, PIN_CHANGED_TEXT, PairedLink, PendingJoin,
@@ -66,8 +70,9 @@ pub use relay_crypto::{
 };
 pub use relay_http::{
     Cancel, DEFAULT_RELAY_URL, ExternalAnswer, ExternalRequest, HttpError, HttpTransport,
-    MAX_ALTERNATIVES, RelayUrl, TlsTrust, clear_local_route, post_json, set_http_transport,
-    set_local_route,
+    MAX_ALTERNATIVES, NodeRoute, RelayUrl, TUNNEL_DIAL_PATH, TlsTrust, TunnelDialer, TunnelPipe,
+    TunnelRoute, clear_local_route, post_json, probe_direct, set_http_transport, set_local_route,
+    valid_node_id,
 };
 pub use state::{SyncState, TransportKind};
 pub use transport::{FolderTransport, Precondition, Remote, RemoteHead, SyncTransport, Transport};

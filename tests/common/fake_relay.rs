@@ -309,7 +309,18 @@ struct Relay {
     feed_not_newer: bool,
     /// The next feed reads (`GET /v1/feed`) get `403 feed_rate` (a scripted answer).
     feed_rate_next: usize,
+    /// The vault stores of Apassy Connect ([`FakeRelay::add_store_team`]): relay-sync-v1
+    /// teams of kind `account` that the fake Connect makes.
+    store_teams: std::collections::BTreeSet<String>,
+    /// Whether a device link of a store may add the key (connect-account-v1 section 8:
+    /// a device of the same account, or of a member of the same group). `false` is
+    /// `403 not_in_group` at the confirmation.
+    store_guard: Option<StoreGuard>,
 }
+
+/// The check of [`FakeRelay::set_store_guard`]: the store, the key of the device that a
+/// link would add, and the device id it would get.
+pub type StoreGuard = Arc<dyn Fn(&str, &[u8], u64) -> bool + Send + Sync>;
 
 /// A running fake relay. It stops when dropped.
 pub struct FakeRelay {
@@ -399,6 +410,112 @@ impl FakeRelay {
             .expect("team")
             .sync_bytes = Some(bytes);
     }
+    /// A vault store of Apassy Connect (plan s7 unit M3): a relay-sync-v1 team named
+    /// `name` with the account key `public_key` as its device 1 of its kind, made by the
+    /// fake Connect on `POST /v1/account/vaults`. Returns the team id and the device id.
+    pub fn add_store_team(
+        &self,
+        name: &str,
+        device_name: &str,
+        public_key: &[u8],
+    ) -> (String, u64) {
+        let mut relay = lock(&self.shared.0);
+        relay.next_team += 1;
+        let team_id: String = format!("t_fake{:06}", relay.next_team)
+            .chars()
+            .map(|ch| match ch.to_digit(10) {
+                Some(digit) => char::from(b'a' + digit as u8),
+                None => ch,
+            })
+            .collect();
+        let device_id = relay.next_device;
+        relay.next_device += 1;
+        relay.teams.insert(
+            team_id.clone(),
+            Team {
+                name: name.to_owned(),
+                devices: vec![Device {
+                    id: device_id,
+                    name: device_name.to_owned(),
+                    public_key: public_key.to_vec(),
+                    live: true,
+                }],
+                ..Team::default()
+            },
+        );
+        relay.store_teams.insert(team_id.clone());
+        (team_id, device_id)
+    }
+
+    /// Add the account key `public_key` to the store `team_id` (`POST
+    /// /v1/account/vaults/{team}/devices` of the fake Connect). Returns its device id.
+    pub fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64 {
+        let mut relay = lock(&self.shared.0);
+        let device_id = relay.next_device;
+        relay.next_device += 1;
+        relay
+            .teams
+            .get_mut(team_id)
+            .expect("store")
+            .devices
+            .push(Device {
+                id: device_id,
+                name: device_name.to_owned(),
+                public_key: public_key.to_vec(),
+                live: true,
+            });
+        device_id
+    }
+
+    /// The device ids and keys of the live devices of `team_id`.
+    pub fn team_devices(&self, team_id: &str) -> Vec<(u64, Vec<u8>)> {
+        lock(&self.shared.0)
+            .teams
+            .get(team_id)
+            .map(|team| {
+                team.devices
+                    .iter()
+                    .filter(|device| device.live)
+                    .map(|device| (device.id, device.public_key.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Delete the store `team_id` with its heads and snapshots.
+    pub fn remove_team(&self, team_id: &str) {
+        let mut relay = lock(&self.shared.0);
+        relay.teams.remove(team_id);
+        relay.store_teams.remove(team_id);
+    }
+
+    /// Whether `team_id` is a team of this relay.
+    pub fn has_team(&self, team_id: &str) -> bool {
+        lock(&self.shared.0).teams.contains_key(team_id)
+    }
+
+    /// The current version of the team `team_id` (0 without a copy or without the team).
+    pub fn version_of(&self, team_id: &str) -> u64 {
+        lock(&self.shared.0)
+            .teams
+            .get(team_id)
+            .map_or(0, Team::version)
+    }
+
+    /// The heads of the team `team_id`, oldest first.
+    pub fn heads_of(&self, team_id: &str) -> Vec<StoredHead> {
+        lock(&self.shared.0)
+            .teams
+            .get(team_id)
+            .map(|team| team.heads.clone())
+            .unwrap_or_default()
+    }
+
+    /// The check of a device link of a store ([`StoreGuard`]).
+    pub fn set_store_guard(&self, guard: StoreGuard) {
+        lock(&self.shared.0).store_guard = Some(guard);
+    }
+
     /// The ids of the Connect teams that the relay made.
     pub fn connect_teams(&self) -> Vec<String> {
         lock(&self.shared.0)
@@ -1471,6 +1588,19 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         .unwrap_or_default()
                         .to_owned();
                     let next = relay.next_device;
+                    // A store adds only a device of the account or of its group.
+                    let refused = relay
+                        .store_guard
+                        .clone()
+                        .filter(|_| relay.store_teams.contains(&team_id))
+                        .zip(
+                            relay.teams[&team_id]
+                                .links
+                                .iter()
+                                .find(|link| link.id == id)
+                                .map(|link| link.public_key.clone()),
+                        )
+                        .is_some_and(|(guard, key)| !guard(&team_id, &key, next));
                     let team = relay.teams.get_mut(&team_id).expect("team");
                     let Some(link) = team
                         .links
@@ -1485,6 +1615,9 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                     }
                     if words != link.safety {
                         return fail(409, "conflict");
+                    }
+                    if refused {
+                        return fail(403, "not_in_group");
                     }
                     link.state = LinkState::Confirmed;
                     let device = Device {

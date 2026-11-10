@@ -220,6 +220,7 @@ name = "apassy-core"
 version = "0.5.19"
 dependencies = [
  "apassy",
+ "apassy-relay",
  "getrandom 0.4.3",
  "ring",
  "rusqlite",
