@@ -9,6 +9,7 @@
 //! The public interface below is fixed by the skeleton: the `apassy-relay`
 //! binary and the tests use `Relay::init` and `Relay::start`.
 
+pub mod account;
 pub mod admin;
 pub mod approvals;
 pub mod audit;
@@ -17,6 +18,7 @@ pub mod connect;
 pub mod decide;
 pub mod devices;
 pub mod directory;
+pub mod entitlement;
 pub mod env;
 pub mod feed;
 pub mod host;
@@ -158,6 +160,16 @@ pub struct Core {
 }
 
 impl Core {
+    /// A team that anyone may make without the operator: a Connect team, or a vault store
+    /// of an account (connect-account-v1). Its outside refusals go to the relay audit, and
+    /// its long polls and requests have the Connect bounds.
+    pub fn hosted(&self) -> bool {
+        matches!(
+            self.kind,
+            crate::api::TeamKind::Connect | crate::api::TeamKind::Account
+        )
+    }
+
     pub fn limits(&self) -> TeamLimits {
         *self
             .team_limits
@@ -240,7 +252,7 @@ impl Core {
         action: &str,
         detail: &serde_json::Value,
     ) {
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             self.audit.refusal(&self.store, now, kind, action, detail);
             return;
         }
@@ -265,7 +277,7 @@ impl Core {
     /// (`limit_error_on`), for a Connect team with that row in the relay audit
     /// (`outside_refusal`). Call it with no lock of the team's store held.
     pub fn outside_limit(&self, now: u64, kind: &'static str) -> RelayError {
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             return self
                 .store
                 .with(|conn| self.limit_error_on(conn, now, kind))
@@ -284,7 +296,7 @@ impl Core {
     /// `Limits::connect_long_polls`, or `None` when they are all held (the poll then
     /// answers at once).
     pub fn poll_seat(&self) -> Option<connect::PollSeat<'_>> {
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             return Some(connect::PollSeat::free());
         }
         connect::PollSeat::take(&self.connect_polls, self.config.limits.connect_long_polls)
@@ -294,7 +306,7 @@ impl Core {
     /// of `Limits::connect_feed_long_polls`, apart from the seats of `poll_seat`, or
     /// `None` when they are all held (the poll then answers at once).
     pub fn feed_poll_seat(&self) -> Option<connect::PollSeat<'_>> {
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             return Some(connect::PollSeat::free());
         }
         connect::PollSeat::take(
@@ -309,7 +321,7 @@ impl Core {
     /// is not counted.
     pub fn take_request(&self, now: u64) -> Result<(), (RelayError, u64)> {
         self.last_request.store(now, Ordering::Relaxed);
-        if self.kind != crate::api::TeamKind::Connect {
+        if !self.hosted() {
             return Ok(());
         }
         let per_minute = connect::REQUESTS_PER_MINUTE.saturating_mul(self.limits().members.max(1));

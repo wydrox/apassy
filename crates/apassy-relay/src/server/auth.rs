@@ -256,6 +256,10 @@ pub enum Need {
     Agent,
     /// A member or an agent token.
     Any,
+    /// The account token of a live Apassy Connect account device (connect-account-v1,
+    /// `server::account::authenticate`). No team principal has it: a team token is 403
+    /// `account_required`.
+    Account,
 }
 
 /// Checks a principal against a need.
@@ -263,6 +267,7 @@ pub fn allow(need: Need, principal: Option<&Principal>) -> RelayResult<()> {
     let wrong_kind = RelayError::unauthenticated;
     match (need, principal) {
         (Need::Edge, _) => Ok(()),
+        (Need::Account, Some(_)) => Err(crate::server::account::account_required()),
         (_, None) => Err(RelayError::unauthenticated()),
         (Need::Any, Some(_)) => Ok(()),
         (Need::Agent, Some(Principal::Agent(_))) => Ok(()),
@@ -381,6 +386,13 @@ mod tests {
             codes::UNAUTHENTICATED
         );
         assert!(allow(Need::Edge, None).is_ok());
+        // A team token never acts for an account.
+        assert_eq!(
+            allow(Need::Account, Some(&member(Role::Owner)))
+                .unwrap_err()
+                .code,
+            codes::ACCOUNT_REQUIRED
+        );
         assert!(allow(Need::Any, Some(&member(Role::Member))).is_ok());
     }
 }

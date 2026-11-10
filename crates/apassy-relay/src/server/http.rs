@@ -49,7 +49,7 @@ use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{
-    Core, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, push, sync,
+    Core, account, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, push, sync,
 };
 use crate::session::SessionSource;
 
@@ -1197,7 +1197,7 @@ pub fn maintain(hub: &Hub, now: u64) {
         let last_pass = core.maintained_at.load(Ordering::Relaxed);
         let idle = core.last_request.load(Ordering::Relaxed) < last_pass
             && now < last_pass.saturating_add(IDLE_MAINTENANCE_SECS);
-        if core.kind == TeamKind::Connect && idle {
+        if core.hosted() && idle {
             continue;
         }
         core.maintained_at.store(now, Ordering::Relaxed);
@@ -1419,6 +1419,12 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         respond_auth_limited(hub, listener, counted, request, now);
         return;
     }
+    // Apassy Connect accounts (connect-account-v1): only with the account routes on, else
+    // the paths fall through to the route table and are 404.
+    if hub.config.connect.accounts && account::is_account_path(&path) {
+        respond_account(hub, listener, counted, request, &method, &path, now);
+        return;
+    }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
         respond_error(request, &team_vaults_retired());
         return;
@@ -1619,6 +1625,16 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             return;
         }
     };
+    // A vault store of an account (connect-account-v1 section 8) serves relay sync only:
+    // its devices come from their account, never from an invite or a device link, and it
+    // has no items, agents, questions, feed, or push. Pushes need an entitled plan of the
+    // account that made it, pulls a plan that still allows them.
+    if core.kind == TeamKind::Account
+        && let Err(error) = vault_store_allows(hub, &core, endpoint, now)
+    {
+        respond_error(request, &error);
+        return;
+    }
     // A Connect team has a request rate (section 26); an operator team has none.
     if let Err((error, wait)) = core.take_request(now) {
         respond_json_with(
@@ -1711,6 +1727,144 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         hold,
         now,
     ) {
+        Ok(result) => respond_ok(request, result),
+        Err(error) => respond_error(request, &error),
+    }
+}
+
+/// What a vault store serves (connect-account-v1 section 8): `GET /v1/me`, the device
+/// list, and relay sync. Every other team route is 403 `forbidden`. A push and a receipt
+/// need an entitled plan of the store's account (403 `plan_required`, the place of the
+/// `sync_bytes` check of relay-sync-v1 section 4); a pull or a download needs a plan that
+/// allows pulls (`PlanView::can_pull`); `DELETE /v1/sync` always works.
+fn vault_store_allows(hub: &Hub, core: &Core, endpoint: Endpoint, now: u64) -> RelayResult<()> {
+    let plan_required = || {
+        RelayError::new(
+            codes::PLAN_REQUIRED,
+            "This account is not on Apassy Connect.",
+        )
+    };
+    let plan = |hub: &Hub| -> RelayResult<api::PlanView> {
+        let account = hub
+            .account_of_team(&core.team)?
+            .ok_or_else(account::account_required)?;
+        hub.accounts
+            .plans()
+            .plan(&hub.directory.store, &account, now)
+    };
+    match endpoint {
+        Endpoint::Me | Endpoint::DeviceList | Endpoint::SyncDelete => Ok(()),
+        Endpoint::SyncPush | Endpoint::SyncReceipt => {
+            if plan(hub)?.entitled {
+                Ok(())
+            } else {
+                Err(plan_required())
+            }
+        }
+        Endpoint::SyncHead | Endpoint::SyncSnapshot => {
+            if plan(hub)?.can_pull() {
+                Ok(())
+            } else {
+                Err(plan_required())
+            }
+        }
+        _ => Err(RelayError::forbidden(
+            "A vault store of Apassy Connect serves relay sync only; its devices come from the account.",
+        )),
+    }
+}
+
+/// One request of an account route (connect-account-v1): the route (404, 405), then for
+/// an edge route no `Authorization` (400) and the body; for the others the account token
+/// (401, or 403 `account_required` for a team token) before the body, and again after it.
+/// A 401 counts in the listener's failed-auth limiter. Bodies are at most 64 KiB.
+#[allow(clippy::too_many_arguments)]
+fn respond_account(
+    hub: &Hub,
+    listener: &Listener,
+    counted: Counted,
+    mut request: Request,
+    method: &str,
+    path: &str,
+    now: u64,
+) {
+    let (need, endpoint) = match account::route(method, path) {
+        Ok(routed) => routed,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    // DELETE /v1/account carries `{}`: read it as a POST body.
+    let body_method = if method == "DELETE" { "POST" } else { method };
+    let authorization = header_value(&request, "Authorization");
+    if need == Need::Edge {
+        if authorization.is_some() {
+            respond_error(
+                request,
+                &RelayError::invalid("An edge route of Apassy Connect takes no Authorization."),
+            );
+            return;
+        }
+        let body = match read_body(&mut request, body_method) {
+            Ok(body) => body,
+            Err(error) => {
+                respond_error(request, &error);
+                return;
+            }
+        };
+        match account::dispatch_edge(hub, &endpoint, &body, now) {
+            Ok(result) => respond_ok(request, result),
+            Err(error) if error.code == codes::RATE_LIMITED => respond_json_with(
+                request,
+                error.status(),
+                &error.to_envelope(),
+                false,
+                Header::from_bytes(&b"Retry-After"[..], b"3600")
+                    .ok()
+                    .into_iter()
+                    .collect(),
+            ),
+            Err(error) => respond_error(request, &error),
+        }
+        return;
+    }
+    let token = auth::bearer(authorization.as_deref());
+    let refused = |error: &RelayError| {
+        if error.code == codes::UNAUTHENTICATED {
+            listener.record_failure(counted, now);
+            hub.refusal(
+                now,
+                "account_token",
+                "auth_failed",
+                &json!({"code": error.code, "path_kind": "account"}),
+            );
+        }
+    };
+    if let Err(error) = account::authenticate(hub, token, now) {
+        refused(&error);
+        respond_error(request, &error);
+        return;
+    }
+    let body = match read_body(&mut request, body_method) {
+        Ok(body) => body,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    // Read the caller again after the body: a device revoked while the body arrived does
+    // not act.
+    let now = now_unix();
+    let caller = match account::authenticate(hub, token, now) {
+        Ok(caller) => caller,
+        Err(error) => {
+            refused(&error);
+            respond_error(request, &error);
+            return;
+        }
+    };
+    match account::dispatch(hub, &caller, &endpoint, &body, now) {
         Ok(result) => respond_ok(request, result),
         Err(error) => respond_error(request, &error),
     }
