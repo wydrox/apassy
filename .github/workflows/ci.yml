@@ -407,7 +407,11 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
-      APASSY_RELEASE_COMMIT: ${{ github.sha }}
+      # A pull request run builds the synthetic merge of the PR head into its base
+      # (github.sha). The package names the PR head, the commit that people check
+      # out and qualify, and records the merge it was built from (build-vault.sh).
+      APASSY_RELEASE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      APASSY_BUILT_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -438,7 +442,7 @@ jobs:
           APASSY_REQUIRE_DBUS: "1"
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy --all-features
-          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/) | test(/^desktop::clipboard::/) | test(/^owner::serve::/) | test(/^owner_serve::/)'
+          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/) | test(/^desktop::clipboard::/) | test(/^owner::serve::/) | test(/^owner_serve::/) | test(/^cli::browser::/) | test(/^desktop::ui::cli_tools::/) | test(/^desktop::ui::browser_settings::/) | test(/^vault::passkey::tests::passkeys_of_a_site/) | test(=vault::tests::a_wrong_passphrase_prints_no_sqlcipher_lines)'
       - name: Test headless owner commands without a desktop
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy-app
