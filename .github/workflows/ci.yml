@@ -457,6 +457,15 @@ jobs:
         run: >-
           shellcheck packaging/linux/build-vault.sh packaging/linux/install-vault.sh
           packaging/linux/verify-vault.sh crates/apassy-relay/deploy/worker/public/install.sh
+      - name: Prepare protected shared-data prefix on disposable CI runner
+        # Hosted images may make /usr/share group-writable for tool provisioning.
+        # The shipped installer must continue to refuse that unsafe configuration.
+        run: |
+          stat -c '%n owner=%u group=%g mode=%a' /usr /usr/share
+          test ! -L /usr/share
+          test "$(stat -c %u /usr/share)" = 0
+          sudo chmod go-w /usr/share
+          test -z "$(find /usr/share -maxdepth 0 -perm /022 -print)"
       - name: Package and verify the Linux vault build
         run: |
           mkdir -p target/vault-dist
