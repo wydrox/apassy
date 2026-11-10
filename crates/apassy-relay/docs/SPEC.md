@@ -135,6 +135,17 @@ From `src/config.rs` (`RelayConfig::from_env`):
 | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once, active or suspended (section 26), 0 to 1000000; `0` turns `POST /v1/connect` off | 100 |
 | `APASSY_RELAY_CONNECT_SYNC_BYTES` | `sync_bytes` of a new Connect team (`RelayConfig::connect_sync_bytes`, section 26.4): 0 (no relay sync, 403 `plan_required`) or 1048576 to 67108864; the hosted relay sets 67108864 until Apassy Connect starts | 0 |
 | `APASSY_RELAY_CONNECT_LONG_POLLS` | long polls of all Connect teams together (`Limits::connect_long_polls`, section 26.4), 0 to 1024; `0`: every Connect poll answers at once | 96 |
+| `APASSY_CONNECT_INGRESS_LISTEN` | with the account routes: the SNI ingress of the tunnel (section 35.7, 35.11; hosted `0.0.0.0:443`) | none: off |
+| `APASSY_CONNECT_ACME_LISTEN` | with the account routes: the ACME HTTP-01 listener of the tunnel (hosted `0.0.0.0:80`) | none: off |
+| `APASSY_CONNECT_NODE_ZONE` | the DNS zone of the nodes' public names | `node.apassy.wyderka.cc` |
+| `APASSY_CONNECT_TUNNEL_STREAMS` | open tunnel streams of one account, 1 to 4096 | 64 |
+| `APASSY_CONNECT_TUNNEL_NODES` | nodes of one account, 1 to 64 | 8 |
+| `APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE` | dials of one account in one minute, 1 to 6000 | 60 |
+| `APASSY_CONNECT_TUNNEL_GIB_PER_MONTH` | tunnel GiB of one account in one UTC month for each person or member, 1 to 10240 | 20 |
+| `APASSY_CONNECT_TUNNEL_PING_SECS` | ping interval of a tunnel WebSocket, 5 to 300 s | 30 |
+| `APASSY_CONNECT_TUNNEL_IDLE_SECS` | a tunnel WebSocket without a message closes, 10 to 3600 s, above the ping | 90 |
+| `APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS` | a stream without a byte is reset, 60 to 86400 s | 900 |
+| `APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB` | KiB buffered toward one client of a stream, 64 to 16384 | 256 |
 
 `UpstreamOptions` (extra roots, fixed addresses) is not read from the environment. Tests set it in code.
 
@@ -2115,3 +2126,326 @@ The way back in place: `apassy-relay downgrade-directory-1004` (`Directory::down
 - A device of a team can make the node call its gateway (one of the node's), once per question, with a handle of its choosing. The gateway allow-list keeps it from making the node call anything else.
 - A node that held a handle can push the fixed notification to that device until the handle expires at the gateway (180 days), also after the device left the team (push-gateway-v1 section 17).
 - The sign-in origin set widens what a signature is good for to the origins of one node; a signature for another node's origin, or the hosted relay's, is refused.
+
+## 33. Connect accounts
+
+Apassy Connect accounts (ADR 0037 stage 7, plan s7 unit C1). The wire is the contract [connect-account-v1](../../../docs/contracts/connect-account-v1.md); this section names how the relay serves it. The code is `server/account.rs` (routes, sign-in, devices, vault stores, recovery), `server/entitlement.rs` (the token), and the directory step of 33.10.
+
+### 33.1 Settings and modes
+
+| Variable | Effect |
+| --- | --- |
+| `APASSY_RELAY_CONNECT_ACCOUNTS` | `1`: the account routes beside every other route (the transition). `0` or unset: every route of the contract is 404 `not_found` (they fall through to the route table). |
+| `APASSY_RELAY_MODE` | `relay` (default) or `connect`. In `connect` mode the master key is refused at start (`APASSY_RELAY_KEY` and `APASSY_RELAY_KEY_FILE` must be unset), `relay.db` and the vault stores are plain SQLite files (33.8), shared team vaults are off, and the account routes are on (`APASSY_RELAY_CONNECT_ACCOUNTS=0` is refused there). The retired routes of contract section 14 are the cutover unit's (C5). |
+| `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 key of the entitlement token, PKCS#8 (DER or PEM). Without it the well-known document lists no key and `GET /v1/account/entitlement` is 503 `busy` for an entitled account. |
+| `APASSY_CONNECT_SITE_URL` | The `https://` site origin for billing and groups (default `https://apassy.wyderka.cc`). |
+
+`RelayConfig.connect` (`ConnectConfig`) holds them; `ConnectConfig::default()` has no accounts. The account routes are served only on the node listener (`Scope::Node`); the public and tailnet listeners answer 404 for them.
+
+### 33.2 Order of a request
+
+After `/healthz` and the edge secret, before the proxy and the route table: an account path (`/v1/account`, below it, and `/.well-known/apassy-connect.json`) goes to `http::respond_account`. The route (404, 405); an **edge route** (`POST /v1/account`, `…/challenge`, `…/token`, `…/devices/join`, `…/devices/join/cancel`, `…/recover`, the well-known document) refuses any `Authorization` header with 400 `invalid_request` and reads its body; **every other route** (`Need::Account`) checks the account token before the body (401, or 403 `account_required` for a team token), reads the body (64 KiB, 413 above), and checks the token again after it. A 401 counts in the listener's failed-auth limiter and writes an `auth_failed` refusal row (`account_token`) to the relay audit, at most one per ten seconds. Request bodies are strict (`deny_unknown_fields`, no missing or duplicate field): 400 `invalid_request`. `DELETE` routes take no body or `{}`.
+
+### 33.3 Accounts, devices, and sign-in
+
+- `POST /v1/account` verifies the ECDSA signature over `account_message(public_url, key)` (`apassy-connect account v1`); another origin, key, or domain is 400. Ids are `acc_` and `dev_` with 10 random characters of `a-z2-7`. The SHA-256 of the parsed body is kept (`account.create_hash`): the same body again within 600 s answers the same result; the same key otherwise is 409 `conflict`.
+- **One key, one account, ever**: `account_key` keeps the SHA-256 of every key that became a device (creation, confirmation, recovery), also after a revoke or a deletion. Such a key cannot make an account, join, or recover (409).
+- `POST /v1/account/challenge`: a live device of the account gets a 32-byte nonce for 60 s, at most 4 open for each key (a fifth drops the oldest), at most 10000 for the relay (503 `busy`). A key with a pending join of the account is 403 `join_pending`; with a refused, cancelled, or expired one 403 `join_refused`; any other 401. The answer names `public_url` as `origin`.
+- `POST /v1/account/token` removes the nonce **before** any check, then checks the account, the key, and the signature over `account_sign_in_message(public_url, account, key, nonce)` (`apassy-connect sign-in v1`), and a live device of that key. One 401 for every cause. The token is `apassy_act_<account id>_<64 hex>` (`secret::new_account_token`), 900 s, kept in memory as its SHA-256 (at most 8 for each device, 100000 for the relay). It is never a team token: `parse_token` refuses it, and `parse_account_token` refuses team tokens.
+- **Domain separation**: the relay verifies an account sign-in only over `apassy-connect sign-in v1`, a team sign-in only over `apassy-relay sign-in v1` (section 23), a Connect team only over `apassy-relay connect v1` (section 26); it never accepts `apassy-bouncer sign-in v1`. Each message binds the origin.
+- `account::authenticate` (used by every `Need::Account` route, also those of billing, groups, and the tunnel) reads the token in memory and then the device in `relay.db` (live, account not deleted), so a revoked device fails at once. It writes `last_seen_at` rounded to the hour, at most once an hour.
+- `GET /v1/account` is the `AccountView`: `plan` from `Plans` (33.6), `group` from `Groups`, the live devices.
+
+### 33.4 Adding and removing devices
+
+- `POST /v1/account/devices/link` stores only the link hash (43 b64u characters), one use, 600 s, at most 3 open for each device. Connect never sees the code, so it cannot compute the six safety words (`device::account_safety_words`, the vectors of the contract): the devices compare them.
+- `POST /v1/account/devices/join` (edge) verifies the signature over `account_join_message` (`apassy-connect join v1`), finds an unused, unexpired link of a live device of the account (else 403 `forbidden`), marks it used, and stores a pending join with the SHA-256 of its body (the same body again answers the same result). Nothing is added until the confirmation.
+- `…/pending` lists the pending joins of links that the calling device made. `…/pending/{join_id}/confirm` and `…/refuse` are for that device only (403 `forbidden` for another device of the account, 404 for another account, 409 when the join is not pending or expired). The confirm adds exactly the key in its body: another key is 409 and adds nothing. At most 10 live devices (403 `account_limit`). `…/join/cancel` (edge) ends a pending join.
+- `DELETE /v1/account/devices/{device_id}` (any live device of the account, also itself): in one transaction of `relay.db` the device is revoked, its pending joins expire, its open links end, its tunnel node and grants go, and an I-4 `revoke` event is queued (`brain_event`); then its tokens and nonces leave memory, and it leaves every vault store (33.5). The last live device can go; the account then needs recovery.
+
+### 33.5 Vault stores
+
+- A vault store is a team of kind `account` (`TeamKind::Account`) with `team.account_id` and `team.vault_id` (unique together), `TeamLimits::account(members)`: 64 MiB snapshots, 120 pushes an hour, no items, no agents, the smallest question and feed budgets, a file cap of 24 MiB plus 1 MiB for each further member. `Hub::create_vault_store` makes its file with the owner member named by the account id and device 1 named by the account device id, with the account device's public key; `account_store_device` maps each account device to its store device. A race for the same vault answers the store that won.
+- `POST /v1/account/vaults` needs `Plans::plan(...).entitled` (403 `plan_required`) and at most `10 × Plans::people` stores (403 `account_limit`); the same vault id answers the existing store. `GET /v1/account/vaults` lists the stores the account made or holds a device in.
+- `POST /v1/account/vaults/{team_id}/devices`: the caller's device must be in the store (403 `forbidden`); the team must be a vault store (404 `not_found` for no team and for a team of another kind: `account_required` is only a team token on an account route); the target is a live device (404) of the caller's account or of an account for which `Groups::share_group` is true (else 403 `not_in_group`); at most 10 devices of one account in a store. `Hub::add_store_device` adds a member for the account (when there is none) and the device without the item keys; a key that is in the store keeps its id.
+- `DELETE /v1/account/vaults/{team_id}` by a device of the account that made it: `Hub::delete_vault_store` takes the store out of service, waits for its requests (at most 10 s, else 409), deletes its row, its device map, and its file with the snapshots.
+- A device leaves a store (`Hub::remove_store_device`) by its row there being revoked, its relay-sync tokens of the store dropped at once, its long polls woken, and its map row deleted. The heads it signed stay verifiable.
+- **What a store serves** (`http::vault_store_allows`, after the token check): `GET /v1/me`, `GET /v1/devices`, `DELETE /v1/sync` always; a push and a receipt with an entitled plan of the store's account (403 `plan_required`, the place of the `sync_bytes` check of section 24); `GET /v1/sync/head` and `…/snapshot` with `PlanView::can_pull` (entitled or `read_only`); every other team route is 403 `forbidden` (invites, joins, device links, members, items, agents, questions, feed, push). The relay-sync sign-in (`/v1/auth/challenge`, `/v1/auth/token`) and the sync routes are those of section 24, unchanged. A store's outside refusals go to the relay audit and its polls and requests have the Connect bounds (`Core::hosted`).
+
+### 33.6 Seams for billing and groups
+
+`account::Plans` (`plan`, `people`, `cancel_for_deletion`) and `account::Groups` (`group_of`, `share_group`, `blocks_deletion`) are installed with `Hub::set_plans` and `Hub::set_groups`. With the account routes on, `Hub::open` installs the groups of section 36 (`group::DirectoryGroups`) and, when Stripe is set up, billing (section 34, `billing_store::BillingPlans`). Without Stripe, `NoPlans` answers `PlanView::none()` for every account (no new store, no push, no pull, no entitlement token: 403 `plan_required`); a test may install its own plans with `Hub::set_plans`. Each call gets the directory store and takes its own lock. The tables of both are in directory 1006 already (33.10). `tunnel_node`, `tunnel_grant`, and `tunnel_usage` are unused by C1, except that a revoke and a deletion delete the rows of their device or account.
+
+### 33.7 Recovery and deletion
+
+- `POST /v1/account/recover` (edge): at most 5 tries for each account an hour (429 `rate_limited`, `Retry-After: 3600`; in memory), then the signature over `account_recover_message` (400), then the code: the hash of `apassy_rec_<32 hex>` (`device::account_recovery_hash`) compared in constant time with the stored hash, and no live device; a wrong code, an unknown account, and a live device are the same 403 `forbidden`. A used key is 409. Every vault store of the account is deleted, the new device is the first device, the hash is replaced, the subscription stays.
+- `DELETE /v1/account`: `Groups::blocks_deletion` (409), `Plans::cancel_for_deletion`, every store of the account deleted, its devices out of other accounts' stores, its tunnel rows and the email copy of `stripe_customer` gone, the account with its devices, links, and joins deleted (`ON DELETE CASCADE`), the keys kept in `account_key`, an I-4 `forget` event queued, and its tokens and nonces dropped.
+
+### 33.8 Plain files
+
+`Store::create_plain`, `Store::open_plain`, `Store::create_team_plain`, and `Store::open_team_plain` open SQLite without a key, with the other checks of a keyed file (build options, defensive mode, secure delete, foreign keys, journal mode DELETE). They run only when `store::plain_allowed` passes: `APASSY_RELAY_MODE=connect`, an empty master key, and neither `APASSY_RELAY_KEY` nor `APASSY_RELAY_KEY_FILE` in the environment. An encrypted file does not open plain. In `connect` mode `Directory::create` and `open`, new team files, and `Hub::open_team` use them; a plain team file must be of the current schema (no migration). The cutover of existing files is C5's.
+
+### 33.9 The entitlement token
+
+`Entitlement::sign(signer, claims)` and `Entitlement::verify(keys, token, now)` (`server/entitlement.rs`) follow contract section 10: the compact JSON of `Claims` in the order `v, kid, acc, plan, group, feats, iat, exp`, Ed25519 over `"apassy-connect entitlement v1" 0x00 <payload b64u>`. The key id is `ek_` and 16 hex characters of the SHA-256 of the public key (`entitlement::key_id`), so a new key has a new id. `GET /v1/account/entitlement` answers a token of 24 h for an entitled plan of `personal`, `family`, or `team` (else 403 `plan_required`), with every feature (`brain`, `sync`, `tunnel`). `entitlement_key` keeps the kid and public key of each signing key (at start) and the time of its last token; the well-known document lists the signing key and every other key that signed a token in the last 24 hours. No route takes the token as a credential.
+
+### 33.10 Directory version 1006
+
+`DIRECTORY_VERSION` is 1006 (`BEFORE_ACCOUNTS_VERSION` 1005; the step is one constant, so it can be renumbered if another plan lands a step first). `MIGRATE_ACCOUNTS`, additive, in the transaction that moves 1001 to 1005 up: the table `team` is rebuilt with the kind `account` and the columns `account_id`, `vault_id` (SQLite cannot widen a CHECK; the rows are copied and `team_legacy` is made again), and the tables `account`, `account_device`, `account_key`, `account_link`, `account_join`, `account_store_device`, `brain_event`, `"group"`, `group_member`, `group_invite`, `stripe_customer`, `stripe_subscription`, `stripe_event`, `tunnel_node`, `tunnel_grant`, `tunnel_usage`, and `entitlement_key` are made. `stripe_subscription` has the columns of billing (34.10), `last_invoice_created` and `stores_deleted_at` included. A new file runs the 1005 schema and then the same step, so a new and a migrated file have the same schema. Nothing in them is secret; tokens, link codes, recovery codes, client addresses, and the signing key are never stored. The images before refuse 1006.
+
+The way back in place: `apassy-relay downgrade-directory-1005` (`Directory::downgrade_to_1005`), with the relay stopped: the vault store rows and their device map go and the version is 1005, in one transaction; then their files are deleted. Every other table and column stays (the 1005 image never reads them; the next open of 1006 keeps them). `downgrade-directory-1004` and `-1003` take a 1006 file down with the same step first. docs/OPERATIONS.md section 26.3.
+
+### 33.11 Tests
+
+`tests/server_account.rs`, on free loopback ports and temporary directories, with a `Plans` of the test: an account only with a valid signature and one key for one account; sign-in refused for another origin, another domain, and a used or dropped nonce; a link of one use and 600 s; a join only with the confirmation of the link's device and the same words on both sides (the vectors, this relay and the app); a revoke that ends the token at once and removes the device from every store; a vault store as a relay-sync team with the account key (push, chain, receipt, plan gates, relay sync only); no store access for another account without a group; recovery only with no live device, deleting the stores, five tries an hour; the entitlement token with the published key (this relay and the app), refused after `exp`, with a changed claim, or another key; `open_plain` and `connect` mode against a master key, and plain files in `connect` mode; directory 1006 to 1005 and back, and the rollback note; 404 without the setting; and the app's `src/connect` client (M1), unchanged, against the relay. Unit tests: the routes and value forms (`account::tests`), the token (`entitlement::tests`), the token forms (`secret::tests`), the need (`auth::tests`), and the directory steps (`directory::tests`).
+
+### 33.12 What this does not protect
+
+- Connect sees the public keys, names, and platforms of the devices, the vault ids, the times of sign-ins (rounded to the hour), and which devices share a store. It never sees a link code, a recovery code, a vault key, or a value.
+- The per-address limits of the edge routes are the Worker's (contract section 3); the relay bounds the nonces, tokens, and recovery tries in memory only, so a restart resets them (and ends every account token).
+- The I-4 events (`brain_event`) are queued, not sent: the delivery to the bouncer brain and its internal routes (contract section 11) are a later unit.
+
+## 34. Billing
+
+ADR 0037 stage 7, D3 (docs/design/implementation-plan-s7-connect.md of the core, unit C2; contract `connect-billing-v1` of the core, which wins over this section where they differ). Connect sells three plans through Stripe Checkout and the Stripe Customer Portal, with no Stripe SDK: `src/server/stripe.rs` is the Stripe client and the webhook check, `src/server/billing.rs` the plans, the plan state, and the handlers. Section 33 (Connect accounts, unit C1) gives the account, the account token, and the directory tables; this section numbers its parts on the assumption that C1 takes 33.
+
+**Wired (unit CW):** with the account routes on (`APASSY_RELAY_CONNECT_ACCOUNTS=1` or `connect` mode) and both Stripe files set, `Hub::open` makes billing on the directory tables (`server/billing_store.rs`, `DirectoryBilling`) and installs it as the `Plans` seam of the accounts (`BillingPlans`): the plan of every account, its people for the store limit, and the cancel of `DELETE /v1/account` come from it. The routes are in 34.11, the maintenance pass in 34.6, the settings in 34.7. Without the Stripe files the billing routes answer 503 `busy` and no account has a plan; without the account routes nothing of this section exists (every path is 404).
+
+### 34.1 Rules
+
+- **Prices are configuration.** No amount is in code. Connect resolves the prices of six lookup keys (`connect_<plan>_<month|year>`) at start with `GET /v1/prices?lookup_keys[]=…&active=true&expand[]=data.tiers` and keeps them for an hour (`PRICE_TTL`); a failed lookup keeps the last prices. A price is used only in the form of the contract: `eur`, `tax_behavior=inclusive`, recurring at the interval of its key; Personal and Team `per_unit`; Family `tiered` and `graduated`, tier 1 `up_to=4` with a flat amount, tier 2 `up_to=inf` with the unit amount of each further person. A price that fails is logged and left out, so its plan or interval is not offered.
+- **State only from verified webhooks.** Checkout, the portal, and a seats change call Stripe and change nothing in the directory. The webhook (34.5) is the only writer of customers, subscriptions, and the groups it makes; the maintenance pass only records that the stores of an ended plan were deleted.
+- **What Stripe gets:** the account id (`client_reference_id`, `metadata[account_id]`, `subscription_data[metadata][account_id]`), price ids, quantities, customer and subscription ids, and the site URLs. Never a device key, a token, a vault id, a device name, or a value.
+- **Every Stripe call** carries `Authorization: Bearer <restricted key>`, `Stripe-Version: 2025-03-31.basil` (the version of the webhook endpoint), and form encoding; every POST an `Idempotency-Key`. A transport failure, 409, 429, or 5xx is tried once more with the same key. A Stripe refusal is `502 upstream_failed`; an outage or 429 is `503 busy`. The client accepts `https://` bases, and `http://` on a loopback address only (the fake server of the tests).
+- **Logs** name event ids and types, Stripe object ids, account ids, HTTP statuses, and Stripe's error type and code. Never an email, a key, a body, or Stripe's error message.
+
+### 34.2 Plans and totals
+
+| Plan | Unit | Included | Max | Stripe quantity |
+| --- | --- | --- | --- | --- |
+| `personal` Connect Personal | account | 1 | 1 | 1 |
+| `family` Connect Family | person | 4 | 10 | people |
+| `team` Connect Team | member | 1 | 250 | seats |
+
+The total for `n` units is `amount + max(0, n − included) × extra` for `1 ≤ n ≤ max` (`billing::total_cents`); a count outside is `409 seat_limit`. A Family of 2 pays the price of 4; a Family of 6 pays 700 a month or 7000 a year in the default configuration. `GET /v1/plans` (public) answers the `PlansView` of the contract from the resolved prices (`Billing::plans`); a plan without a usable price is left out.
+
+### 34.3 Checkout
+
+`Billing::checkout(account, body, now)` takes `{"plan","interval","people"?,"seats"?}` with unknown fields refused: `people` for Family only, `seats` for Team only. Refused: an account that is a pending or active member of a group (not its owner), or one whose plan is entitled (`409 conflict`: the portal changes a plan); a count outside the plan (`409 seat_limit`); a plan without a usable price, or a Family price whose tier 2 differs from `APASSY_CONNECT_FAMILY_EXTRA_CENTS` or `_YEAR_CENTS` (`503 busy`, logged). An owner whose plan lapsed may buy again, and the new subscription keeps the group.
+
+The form is the contract's, in its order (`billing::checkout_form`), plus `tax_id_collection[enabled]=true` for Team and `customer` with `customer_update[address]=auto` for an account that has a Stripe customer. The idempotency key is a hash of the account, the plan, the interval, the count, the customer, and the hour: a repeated click within the hour gets the same session, so one click cannot make two subscriptions. The answer is `{url, session_id, expires_at}`.
+
+### 34.4 The portal, seats, and cancellation
+
+- `Billing::portal(account, body)`: `{}` only. A member that is not the owner: `403 forbidden`; no Stripe customer: `404 not_found`. `POST /v1/billing_portal/sessions` with `customer` and `return_url=<site>/connect/done`.
+- `Billing::change_seats(account, body, now)`: `{"quantity"}` from the active owner of a group (another member: `403 forbidden`; an account outside, or pending: `403 not_in_group`). `Billing::request_group_quantity(group, quantity, now)` is the same without the role check, for C3's confirm of a member (owner or admin, checked by the caller). Refused: an ended group plan (`403 plan_required`); a count outside the plan or below the active members, the owner included (`409 seat_limit`, "The family has 5 people; choose at least 5."). The same quantity answers `pending: false` without a call. Otherwise `POST /v1/subscription_items/{item}` with `quantity` and `proration_behavior=create_prorations`, with a fresh idempotency key for each change, and the answer `{quantity, pending: true}`. The stored quantity changes only when `customer.subscription.updated` arrives.
+- `Billing::cancel_for_account_deletion(account)` (for `DELETE /v1/account`): `DELETE /v1/subscriptions/{id}` for each subscription that has not ended (a 404 counts as ended), then the email copy is deleted. The customer row stays for support; the state changes with the webhook.
+
+### 34.5 The webhook
+
+`Billing::webhook(signature, body, now)` checks, in this order, and every refusal changes nothing:
+
+1. the size: above 256 KiB (`MAX_WEBHOOK_BODY`) is `413 payload_too_large`;
+2. the signature (`stripe::verify_signature`): `Stripe-Signature: t=<seconds>,v1=<hex>[,v1=…]` (at most 4 KiB, 8 `v1`; one `t`; other schemes ignored); HMAC-SHA256 with the endpoint secret over `<t>.<body>`, compared with `ring::hmac::verify`; `|now − t| ≤ 300`. A failure is `400 invalid_request` ("The Stripe signature does not verify."); the log names the reason;
+3. the event JSON (`id` of form `evt_…`, `type`, `created`, `data.object`): `400 invalid_request`;
+4. the event id, stored in `stripe_event` in the same transaction as the effect: a repeat answers `{"received":true,"duplicate":true}` and changes nothing. A failed transaction keeps no id, so Stripe retries.
+
+The effects (fields as the contract's table; every other field ignored):
+
+- `checkout.session.completed`: needs `mode=subscription`, `client_reference_id` equal to `metadata.account_id`, a known account, and `cus_`/`sub_` ids. An account bound to another customer, a customer bound to another account, or a subscription bound elsewhere is ignored. Stores the customer with the email copy and binds the subscription (`incomplete` until its own event).
+- `customer.subscription.created|updated|deleted`: a known subscription must keep its customer and account; a new one needs a known account in `metadata.account_id` and a customer not bound elsewhere. An event older than the last applied subscription event of that subscription is ignored (a `created` with the same `created` time too). An unknown lookup key is ignored. Stores the item, the plan and interval of the lookup key, the quantity, the status (`deleted` is `canceled`), `cancel_at_period_end`, and the period end (of the item, else the top level). The end of an ended status is `ended_at`, else the one stored, else the event time. `active` and `trialing` clear the failure time; `past_due` without one starts the grace at the event time. A Family or Team plan makes its group with the buyer as the active `owner`, unless the buyer is in another group (logged).
+- `invoice.paid` and `invoice.payment_failed`: the subscription of `parent.subscription_details.subscription` (or `subscription`) must be known and have the invoice's customer; an invoice event older than the last applied one is ignored. `paid` clears the first failure; `payment_failed` sets it if none is set.
+- Any other type: stored id, no effect.
+
+An event that does not apply is logged and answered `200` with its id stored, so Stripe does not retry it. The answer is `{"received":true,"duplicate":false}`.
+
+### 34.6 The plan state
+
+`billing::plan_state` is a pure function of the stored subscription and the time (contract section 8; `plan-states.json`). `PlanState::allows` gives the permissions: a new store, a push, a dial, and an entitlement token need `entitled`; a pull and a download also work in `read_only`. `PlanState::require` answers `403 plan_required` ("This account is not on Apassy Connect.").
+
+| Stripe status | Plan status | Times |
+| --- | --- | --- |
+| none | `none` | — |
+| `incomplete`, an unknown status | `pending` | — |
+| `active`, `trialing` | `active`, `trialing` (entitled) | `renews_at` = period end, or `ends_at` with `cancel_at_period_end` |
+| `past_due`, `now <` first failure + grace | `past_due` (entitled) | `grace_until` |
+| `past_due` beyond the grace; `canceled`, `unpaid`, `incomplete_expired`, `paused` | `read_only` while `now < end + read-only days`, then `suspended` until `end + delete days`, then `none` | `read_only_until`, `delete_at`; `grace_until` stays for a past due |
+
+`end` is `grace_until` for a past due beyond its grace, else the stored end, else the period end; a past due without a failure time counts the grace from the period end. The account's `PlanView` comes from its own subscriptions and, for an active member that is not the owner, from the group's subscription when its plan is of the group's kind; an entitled state wins over one that is not, then the newest. A pending member has `none`.
+
+`Billing::maintenance(now)` prunes event ids older than 30 days and lists each ended plan whose `delete_at ≤ now` and whose stores were not deleted (`DueDeletion`). `billing_store::maintain`, part of the relay's maintenance pass at most once an hour, then deletes the vault stores and the tunnel nodes of the buying account and of each active member of its group whose plan is over too (status `none`; a member with a plan of its own keeps its stores), queues I-4 `forget` for each of them (`brain_event`), writes one audit row `plan_stores_deleted` (actor `billing`; the subscription, the account, the group, and the counts of accounts, stores, and nodes), and calls `Billing::mark_stores_deleted`. Read-only and suspended are states that each request reads, not actions of the pass. A renewal before the deletion keeps the stores; `active` again clears the mark. After an applied webhook that leaves an account (or a member of the group it owns) without an entitled plan, its open tunnel streams close (section 35).
+
+### 34.7 Configuration
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `STRIPE_SECRET_KEY_FILE` | A file with the restricted key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox). A live secret key `sk_live_…` is refused. | required for billing |
+| `STRIPE_WEBHOOK_SECRET_FILE` | A file with the endpoint secret (`whsec_…`) | required for billing |
+| `APASSY_CONNECT_SITE_URL` | The https origin of the done, cancel, and join pages, without a path | `https://apassy.wyderka.cc` |
+| `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that checkouts expect | 100, 1000 |
+| `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment (1 to 60) | 14 |
+| `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end (1 to 365) | 30 |
+| `APASSY_CONNECT_DELETE_DAYS` | Days from the end to the deletion of the stores (above the read-only days, at most 730) | 90 |
+
+`config::billing_from` reads them into `ConnectConfig.billing` (`BillingSettings`): both files or neither (one alone stops the start), the five settings checked even without the files, and the site from `APASSY_CONNECT_SITE_URL` as section 33.1 checks it. The Stripe API base is `https://api.stripe.com`; no setting changes it. Only code sets another base (`BillingSettings.stripe_api_base`, the fake Stripe of the tests), and `Hub::open` refuses any base other than Stripe's own or a loopback `http://` address. The debug form of the settings never shows the key or the secret.
+
+### 34.8 The edge Worker
+
+`POST /v1/stripe/webhook` (exactly) has its own cap of 256 KiB (`MAX_STRIPE_WEBHOOK_LENGTH`), needs `Content-Length` (chunked is `400`), and has no per-address limiter: Stripe sends every event from a few shared addresses, and the signature is the relay's check. The Worker forwards the body bytes and `Stripe-Signature` unchanged. `POST /v1/account` has `ACCOUNT_LIMITER` (namespace 1006, 5 a minute), keyed by the IPv4 address or the IPv6 /64.
+
+### 34.9 Tests
+
+`tests/server_billing.rs` runs the handlers against `tests/common/fake_stripe.rs` (an in-process server on a free loopback port that records calls and replays idempotent POSTs) and `MemoryBillingStore`, with the fixtures of `tests/fixtures/connect-billing-v1/` of the core. `tests/server_billing_routes.rs` runs a relay with billing against the fake Stripe over HTTP: the price warm-up and the public plans (equal to `plans.json`), the checkout form, the raw webhook (exact bytes, a changed byte, another secret, 301 s late, no `v1`, 256 KiB + 1, a repeat, an unknown account), every plan state against a real vault store (push, pull, download, new store, entitlement token), the deletion day with its audit row, the account deletion, and the settings. `tests/server_group.rs` (section 36) and `tests/server_connect_e2e.rs` (the app client end to end) use the same helpers (`tests/common/connect.rs`). `tests/connect_billing_sandbox.rs` is the test-clock flow against the Stripe sandbox, ignored unless `STRIPE_SANDBOX_KEY_FILE` is set, run only by `.github/workflows/connect-sandbox.yml` (manual).
+
+### 34.10 Storage
+
+`DirectoryBilling` keeps every billing transaction in one immediate transaction of `relay.db`: an event id and its effect commit together. `stripe_customer` (customer id, account id, the email copy, also copied to `account.email` for `GET /v1/account`), `stripe_subscription` (the `SubscriptionRow`: ids, item, account, group, lookup key, quantity, status, period end, `cancel_at_period_end`, first failure, end, `event_created` of the last applied subscription event, `last_invoice_created` of the last applied invoice event, `stores_deleted_at`), `stripe_event` (id, type, time), `"group"` (with its `subscription_id`), `group_member` (the owner row of a new group). No card, address, or tax id.
+
+### 34.11 Routes
+
+| Route | Where | Notes |
+| --- | --- | --- |
+| `GET /v1/plans` | `http::respond_billing` | public: no `Authorization` (400 with one); 405 for another method; the cached prices (an hour), resolved at start on a thread of its own |
+| `POST /v1/stripe/webhook` | `http::respond_billing` | the edge secret as every route; `Stripe-Signature`; the raw body read up to 256 KiB + 1 byte (413 above, before the signature); then 34.5 |
+| `GET /v1/account/plan` | `account::dispatch` | the `PlanView` of `Plans::plan` (also without Stripe: `none`) |
+| `POST /v1/account/checkout` | `account::dispatch` | `Billing::checkout` (34.3) |
+| `POST /v1/account/portal` | `account::dispatch` | `Billing::portal` (34.4) |
+| `POST /v1/account/group/seats` | `group::dispatch` | `Billing::change_seats` (34.4) |
+| `DELETE /v1/account` | `account::delete_account` | `Plans::cancel_for_deletion` = `Billing::cancel_for_account_deletion` before any row goes: a Stripe failure leaves the account as it was |
+
+The account routes need the account token (section 33.2). Without the Stripe files every route of this table but `GET /v1/account/plan` and `DELETE /v1/account` answers 503 `busy`.
+
+## 35. Tunnel and ingress
+
+ADR 0037 stage 7, unit C4; the wire is docs/contracts/connect-tunnel-v1.md (the contract wins where this section is shorter). Code: `src/server/tunnel.rs` (the broker), `src/server/tunnel/frame.rs` (the frame and the stream rules), `src/server/tunnel/ws.rs` (WebSocket), `src/server/ingress.rs` (ports 443 and 80), and `src/server/tunnel_routes.rs` (unit CW: the broker on the account store, the routes, the start, the usage in `relay.db`, and the hooks of the other units). The tunnel exists only with the account routes (`APASSY_RELAY_CONNECT_ACCOUNTS=1` or `APASSY_RELAY_MODE=connect`, section 33): without them `Relay::start` makes no broker and no ingress, and every `/v1/tunnel/...` path is 404 `not_found` (35.10 to 35.13).
+
+### 35.1 What the broker does
+
+A node keeps one WebSocket (`GET /v1/tunnel/node`, subprotocol `apassy-tunnel-v1`). Each dial of a device (`GET /v1/tunnel/dial/{node_id}`) and each ingress connection is one stream of the frame mux `[stream u32 BE][kind u8][flags u8][len u16 BE][payload]` on it. The broker forwards bytes unchanged, stores none of them, and logs nothing: no content, no token, no client address. For each account and UTC month it counts dials, streams, and bytes (both directions, every stream of the account's nodes): `Broker::usage`, `usage_all`, and `restore_usage` (the store keeps them across a restart).
+
+The broker asks the account store through the trait `TunnelDirectory`: the caller of a bearer token (`Refusal::Unauthenticated` is 401, `Refusal::AccountRequired` 403 `account_required`), the node of the caller's device, a node by id, `has_grant(node_id, grantee_account)`, `entitled(account_id)`, and `budget_units(account_id)` (1, or the people of Family, or the members of Team). A device may dial a node of its own account, or of another account that granted its account (`tunnel::may_dial`). `MemoryDirectory` is the test implementation.
+
+### 35.2 The checks before the `101`
+
+`Broker::serve_node` and `Broker::serve_dial` take a `tiny_http::Request`, answer a refusal with the error envelope, or answer `101 Switching Protocols` with `Sec-WebSocket-Accept` and `Sec-WebSocket-Protocol: apassy-tunnel-v1` through `Request::upgrade_split`, and return at once; two threads carry the WebSocket after that. A dial is checked in the contract's order: 400 `invalid_request` (not an upgrade, another subprotocol, a body), 401 `unauthenticated`, 403 `account_required`, 404 `node_unknown` (also a malformed node id), 403 `not_in_group`, 403 `plan_required`, 429 `tunnel_limit`, 503 `tunnel_offline`. A node WebSocket: 400, 401, 403 `account_required`, 404 `node_unknown` (the device has no registered node), 403 `plan_required`, 403 `account_limit` (8 nodes of the account online), 429 `tunnel_limit` (all node WebSockets of the broker).
+
+A second WebSocket of the same node replaces the first: the old one gets close 4005, and its streams end (their dials get 4001). A node that goes away ends its streams the same way.
+
+### 35.3 Streams
+
+Connect opens every stream, with ids from 1 that only grow on one WebSocket. A dial opens a `device` stream with an empty `open`; each binary message of the dial (1 to 16384 bytes; more is close 1009) becomes one frame. A node's `close` closes the dial with 1000 after the last bytes, and Connect closes the other direction; a node's `reset` closes it with 4004. A dial's WebSocket close sends `close`; if the node does not close its side within `Limits::close_grace` (10 s), Connect resets the stream. `frame::Sequencer` applies the rules of contract section 4 to both directions: a broken rule of a live stream resets that stream (a `reset` to the node, 4004 to the client) and leaves the WebSocket open; a frame for no live stream is dropped, and a `reset` is never answered with a `reset`. A malformed frame closes the node's WebSocket with 1002, a text message with 1003.
+
+The frames of a stream are found by its id in the sequencer of its own WebSocket and go only to that stream's client: no buffer is shared between streams (the property tests interleave streams at random).
+
+### 35.4 Limits and queues
+
+`tunnel::Limits` (defaults; configuration, not wire constants): 64 open streams of an account (all kinds, the ingress included), 8 nodes online, 60 dials a clock minute, 20 GiB a month for each budget unit, pings every 30 s, a WebSocket closed after 90 s without a message (read and write timeouts), a stream reset after 15 minutes without a byte, 256 KiB buffered toward one client, 1 MiB queued toward one node, 4096 node WebSockets and 4096 streams for the whole broker. The month and the minute come from an injectable `Clock`.
+
+Over the byte budget the account's open streams close with 4002 and new dials and ingress streams are refused (429, or a closed connection) until the first day of the next UTC month. A larger budget (more people) counts from the next new stream; a month that tripped stays tripped.
+
+Every queue has a cap. Toward a node: data waits for room (backpressure to the client's TCP window), `open` frames are bounded by the stream count, resets and pongs have a queue of at most 1024 entries (a pong replaces a queued pong; a reset over the cap is dropped, since the node drops late frames anyway). Toward a client: over 256 KiB the stream is reset, so a client that does not read never makes Connect buffer more, and a node's writes never wait for one client. A client writer stuck in a write when its stream is reset has its socket shut down.
+
+### 35.5 WebSocket
+
+`tunnel::ws` is this crate's own RFC 6455 code: `Cargo.lock` had no synchronous WebSocket crate, and the tunnel needs only binary messages, ping, pong, and close, without extensions; SHA-1 for the handshake comes from `ring`, already in the lock. It refuses RSV bits, unknown opcodes, unmasked client frames, masked server frames, non-minimal lengths, a 64-bit length with the top bit set, control frames over 125 bytes or fragmented, a continuation without a message, a new message inside a fragmented one, a message over its cap (checked before any allocation), a one-byte close payload, an invalid close code, and a close reason that is not UTF-8.
+
+### 35.6 The vendored HTTP server
+
+The relay's deadline transport refused every upgrade (`vendor/tiny_http/APASSY-PATCH.md`). It now passes a `GET` upgrade without `Content-Length` or `Transfer-Encoding` to the handler (anything else is still refused, and a connection still serves one request). `Request::upgrade_split` ends the request's header, body, and handle deadlines, sets read and write timeouts of `Limits::idle_timeout`, makes the reaper forget the transport, and returns the read half, the write half, and a shutdown function. The read half is the buffered reader that read the head, so a first WebSocket frame in the same TCP segment as the handshake is kept (`tests/server_tunnel.rs`, `upgrade_keeps_bytes_sent_with_the_head`). Only the two tunnel routes take an upgrade: `http::handle` answers a request with an `Upgrade` header, or a `Connection` header with the token `upgrade`, on any other method and path with 400 `invalid_request` and `Connection: close`, before any other check (also before `/healthz`, the OAuth flow, the edge secret, and the proxy), before a handler sees it, and without reading a body. This holds on every listener (`Scope::Node`, `Scope::Public` with `/mcp` and `/p/`, `Scope::Tailnet` and the local route) and for the tunnel routes too on a relay without the account routes or on a listener other than the node listener. The transport itself still answers an upgrade with a body or of another method than `GET` with the same 400.
+
+### 35.7 The ingress
+
+`ingress::serve_sni` (port 443): reads exactly the first TLS record, at most 16 KiB, within 5 seconds; parses only the ClientHello's `server_name` (one `host_name` entry; every length must add up, no duplicate extension, no bytes after the record, a ClientHello that spans records is refused); and opens a `public` stream with the exact record as the payload of `open`. Bytes the agent sent after the record are forwarded as data. A name of no registered node, an offline node, a node of an account without a plan, a name outside the zone, or a hello without a name gets the alert `15 03 03 00 02 02 70` and a close. A truncated, malformed, or slow hello is closed without an answer. Over the account's stream limit or budget the connection is closed.
+
+`ingress::serve_acme` (port 80): reads a request head of at most 8 KiB within 5 seconds; forwards only `GET /.well-known/acme-challenge/<token>` (`[A-Za-z0-9_-]`, 1 to 128) over HTTP/1.1 with one `Host` (an optional `:80`) that is the public name of an online node, and no body and no bytes after the head, as an `acme` stream whose `open` carries the head and `close`; the node's answer (at most 64 KiB) goes back. Anything else gets `HTTP/1.1 404 Not Found`, `Connection: close`, an empty body.
+
+Both keep each client address only in memory, for 30 new connections a minute per address (IPv6 per /64; a table of at most 65,536 addresses, and when it is full of addresses of this minute, new ones are refused), and at most 256 connections in their first record or head. `IngressHandle::stats` counts accepted, rate-limited, busy, malformed, timed-out, unrecognized, limited, and forwarded connections, with no address and no name.
+
+### 35.8 Tests
+
+`tests/server_tunnel.rs`, on free loopback ports through the relay's own deadline transport: the contract vectors (frames, invalid frames, sequences); the sequencer under random interleaving; 404 for an unknown node, 503 for an offline one, the order of 401, 403 `account_required`, 400, and 403 `plan_required`; another account without a grant (403), with one, and after `revoke_grant` (4003); the eighth-node limit; the first frame in the handshake's segment; a tunnel that outlives the request deadlines; streams of eight concurrent devices with random sizes and a node that echoes in random pieces; slot release on close; the 65th stream (429, and the ingress refused); the dial rate; the byte budget trip and its reset on the first of the month with a fake clock; node replacement (4005 and 4001); node close and reset; a broken stream rule, a malformed frame, text, and an oversized dial message; a client that does not read; a rustls ClientHello forwarded unchanged both ways; unknown, offline, foreign, and not-entitled names; truncated, malformed, slow, and silent hellos; the per-address limit; the ACME path filter; node removal and a plan's end; usage and its restore. Unit tests: `tunnel::frame`, `tunnel::ws`, `tunnel` (months, names), `ingress` (every truncation of a hello, malformed hellos, ACME heads, the address table).
+
+`tests/server_tunnel_routes.rs` runs the wired tunnel on a relay with the account routes, with real account devices on free loopback ports: a node registered and dialed through the routes with an echoing fake node; strict bodies and 401, 403 `account_required`, 404, 405 on the JSON routes; the dial checks in the contract's order (400, 401, 403 `account_required`, 404 `node_unknown`, 403 `not_in_group`, 403 `plan_required`, 429 `tunnel_limit`, 503 `tunnel_offline`); a grant through the routes, its deletion (4003), a grant that holds only while the accounts share a group, `grants_end_between` and `plan_ended` (4003); a revoked node device (node closed 4003, dials 4001, row deleted), a revoked dialer (4003), `DELETE /v1/tunnel/nodes/{id}`, and an account deletion; the ninth node (403 `account_limit`); a byte budget that still holds after a restart on the same data directory; the ingress and the ACME listener started from the configuration; nothing of the tunnel without the account routes; the walk of every route of the relay with an `Upgrade` on every listener (35.6) and the two tunnel routes answering `101`; and every example of `examples.json` with the relay's strict types.
+
+### 35.9 What this does not protect
+
+- Connect sees the sizes and times of the TLS records of every stream, the server names of the ingress, and the client addresses of the ingress (in memory).
+- A node can hold the slots of its own account's streams (up to 64) until the idle reset; it cannot reach another account's streams.
+- The ingress is a raw TCP port on the Connect host: the per-address limit and the pending cap bound the work of one address, not of many.
+
+### 35.10 The routes on the account store
+
+`tunnel_routes::AccountDirectory` is the `TunnelDirectory` of the broker on `relay.db`. It holds the hub weakly (the hub holds the broker) and caches nothing beyond one call:
+
+- `caller`: `account::authenticate`, so each request reads the device in `relay.db` again: a revoked device's token is 401 `unauthenticated` at once, a relay-sync team token is 403 `account_required`.
+- `device_node` and `node`: the rows of `tunnel_node` (`id`, `account_id`, `device_id`, `name`, `pin`, `created_at`).
+- `has_grant`: a row of `tunnel_grant` for the node and the grantee account, and the node's account and the grantee share a group now (`Groups::share_group`). A row of accounts that no longer share a group grants nothing.
+- `entitled`: `Plans::plan(...).entitled` of the account now. `budget_units`: `Plans::people` (at least 1).
+
+The routes (connect-tunnel-v1 sections 3 and 6; the contract wins), each with an account token, strict bodies (`deny_unknown_fields`, 400), and the errors of connect-account-v1 section 4 (`node_unknown` 404, `tunnel_limit` 429, and `tunnel_offline` 503 are codes of `error::codes`):
+
+| Route | Answer |
+| --- | --- |
+| `POST /v1/tunnel/nodes` `{"name","pin"}` | The `NodeView` of the calling device's node: new (id `node_` and 10 of `a-z2-7`), or the same node with the new name and pin. The name is 1 to 64 bytes without a control character, trimmed; the pin is 43 characters of base64url of 32 bytes. A new node over `nodes_per_account` (8) of the account: 403 `account_limit`. |
+| `GET /v1/tunnel/nodes` | The nodes of the account, and those of accounts whose grant to it holds, as `NodeView`s (`online`: the broker has its WebSocket; `public_name`: the label, `.`, and `APASSY_CONNECT_NODE_ZONE`). |
+| `DELETE /v1/tunnel/nodes/{node_id}` | From a device of the node's account (else 404 `node_unknown`): the node and its grants go, its WebSocket closes (4003), its streams end (4001). `{"node_id"}`. |
+| `GET /v1/tunnel/node` | `Broker::serve_node` (35.2). |
+| `GET /v1/tunnel/dial/{node_id}` | `Broker::serve_dial` (35.2), the checks of contract 3.3 in order. |
+| `POST /v1/tunnel/grants` `{"node_id","account_id"}` | From a device of the node's account (another account: 403 `forbidden`; no such node: 404 `node_unknown`; the own account: 400): the grantee must share a group with the account (403 `not_in_group`). The `GrantView` (id `tgr_` and 10 of `a-z2-7`); the same grant again answers the existing one. |
+| `GET /v1/tunnel/grants` | The grants that the account made and those made to it. |
+| `DELETE /v1/tunnel/grants/{grant_id}` | From either account (else 404 `not_found`): the grant goes and the grantee's open streams to the node reset at once (4003). `{"grant_id","closed_streams"}`. |
+
+The JSON routes read the caller, the body, and the caller again (as the account routes); a bad token counts against the listener's failed-auth limit. The audit of the relay gets `tunnel_node_registered`, `tunnel_node_updated`, `tunnel_node_removed`, `tunnel_grant_created`, `tunnel_grant_removed`, and `tunnel_grants_ended`, with ids only.
+
+Hooks: `account::revoke` deletes the device's node row and the node's grants, then `tunnel_routes::device_revoked` (`Broker::revoke_device`: the node closes with 4003, the device's dials end with 4003). `account::delete_account` deletes the account's nodes and the grants both ways, then `tunnel_routes::account_deleted` (`Broker::end_account`). For billing, `tunnel_routes::plan_ended(hub, account)` ends the open streams of the account's nodes with 4003 (`Broker::end_plan`; the node WebSockets stay, new dials and ingress streams are refused by `entitled`). For groups, `tunnel_routes::grants_end_between(hub, account, others, now)` deletes the grants between `account` and each of `others`, both ways, resets the streams they carried at once (4003), and returns how many grants it deleted.
+
+### 35.11 Configuration and start
+
+`ConnectConfig::tunnel` (`config::TunnelSettings`, from `tunnel_from` in `connect_from`; section 6): `APASSY_CONNECT_INGRESS_LISTEN` and `APASSY_CONNECT_ACME_LISTEN` (socket addresses; unset: that listener is off), `APASSY_CONNECT_NODE_ZONE` (a DNS name, default `node.apassy.wyderka.cc`), and the limits of contract section 8: `APASSY_CONNECT_TUNNEL_STREAMS` (64, 1 to 4096), `APASSY_CONNECT_TUNNEL_NODES` (8, 1 to 64), `APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE` (60, 1 to 6000), `APASSY_CONNECT_TUNNEL_GIB_PER_MONTH` (20 for each person or member, 1 to 10240), `APASSY_CONNECT_TUNNEL_PING_SECS` (30, 5 to 300), `APASSY_CONNECT_TUNNEL_IDLE_SECS` (90, 10 to 3600, above the ping), `APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS` (900, 60 to 86400), `APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB` (256, 64 to 16384). None of them set is the contract's default; they change nothing without the account routes.
+
+`Relay::start` calls `tunnel_routes::start` after the hub opens: with the account routes it makes the broker (`Hub::tunnel`), restores this month's usage, binds each ingress listener whose address is set (a bind failure stops the start), and starts the usage writer. `RunningRelay::stop` stops the ingress, closes every tunnel WebSocket (1000; streams 4001), and writes the usage once more before the data directory unlocks. `RunningRelay::tunnel_ingress_addr` and `tunnel_acme_addr` give the bound addresses.
+
+### 35.12 Usage in `relay.db`
+
+`tunnel_usage` (`account_id`, `month` as `yyyymm` UTC text, `dials`, `streams`, `bytes`) keeps the counters of section 35.1. The writer thread writes the counters that changed every `USAGE_FLUSH_SECS` (60 seconds) and once at stop; a write keeps the larger of the stored and the counted value, so it never lowers a count. At start the rows of the current month go back into the broker (`Broker::restore_usage`), so a restart does not reset a budget: an account over its bytes stays at 429 `tunnel_limit` until the first day of the next month. A crash loses at most the last minute of counts. Rows of earlier months stay as the audit's counts for each account and month (contract section 9).
+
+### 35.13 The edge Worker
+
+The Worker forwards a WebSocket upgrade only on `GET /v1/tunnel/*` (raw and parsed path equal), with its headers unchanged and the edge secret set, and returns the relay's `101` response as it is. An upgrade on any other path or method gets 400 `invalid_request` at the edge, and the relay refuses it again (35.6). `GET /v1/tunnel/dial/*` has `TUNNEL_LIMITER` (namespace 1007, 60 a minute for each IPv4 address or IPv6 /64, the key of `ACCOUNT_LIMITER`); over it 429 `rate_limited` with `Retry-After: 60`. Whether the Workers VPC binding carries a WebSocket upgrade is not verified (docs/OPERATIONS.md section 28.1).
+
+## 36. Groups: Family and Team
+
+ADR 0037 stage 7, plan s7 unit C3; the wire is [connect-billing-v1](../../../docs/contracts/connect-billing-v1.md) section 6 (the contract wins where this section is shorter). Code: `src/server/group.rs`, on the directory tables `"group"`, `group_member`, and `group_invite` of directory 1006 (section 33.10). The routes exist only with the account routes on; each needs the account token (section 33.2) and a strict body.
+
+### 36.1 What a group is
+
+The Stripe webhook makes a group when a Family or Team subscription is bound (34.5), with the buying account as its active `owner`. A Family has one organizer (`owner`) and `member`s: no admins, 4 people included, at most 10. A Team has `owner`, `admin`s, and `member`s, one seat each, at most 250. A member keeps its own account, devices, and stores. Only an **active** member gets the group's plan (34.6); a pending member has none.
+
+### 36.2 Routes
+
+| Route | Who | Answer, refusals |
+| --- | --- | --- |
+| `GET /v1/account/group` | any member | the `GroupView` (`group_id`, `kind`, `role`, `owner_account`, `included`, `quantity` of the subscription, `members`); a pending member sees the owner and itself only; no group: 404 `not_found` |
+| `POST /v1/account/group/invites` `{"role"}` | the owner or an active admin | `{invite_id, url, expires_at}`; `url` is `<APASSY_CONNECT_SITE_URL>/connect/join#apassy_gin_<group id>_<64 hex>`. `admin` only in a Team and only by the owner (403 `forbidden`); a role other than `member` or `admin`: 400; the owner's plan not entitled: 403 `plan_required`; 20 open invites: 403 `account_limit` |
+| `POST /v1/account/group/join` `{"code"}` | the invited account | `{group_id, kind, state: "pending", owner_name}`; a malformed code: 400; an unknown, used, or expired code: 403 `forbidden` (one answer); an account in a group, or with an entitled plan of its own: 409 `conflict`; the same code again by the account that used it answers the same |
+| `POST /v1/account/group/members/{account}/confirm` `{}` | the owner or an active admin | the member view, `active`; when the active members would exceed the subscription's quantity, `Billing::request_group_quantity` asks Stripe for the member count first (`create_prorations`; 409 `seat_limit` above the plan's maximum; nothing changes when Stripe refuses); the owner's plan not entitled: 403 `plan_required`; an account not in this group: 404 |
+| `DELETE /v1/account/group/members/{account}` | the owner or an active admin; a member itself | `{account_id, removed_from_stores}`. The owner cannot be removed (403); only the owner removes an admin (403); a member may remove itself (a pending one cancels its join) |
+| `POST /v1/account/group/seats` `{"quantity"}` | the owner | 34.4 |
+
+A caller in no group: 403 `not_in_group` (404 for the view); a role that may not: 403 `forbidden`. The owner's device runs the owner check (`OwnerAction::ChangeConnectGroup`) before a confirm or a removal; Connect does not see it.
+
+### 36.3 Invites
+
+The code is 32 random bytes in hex after the group id. Connect stores only its SHA-256 (`group_invite.code_hash`), the role, the inviting account, the times, and, once used, the account that used it. A code works once, for 7 days (`INVITE_SECS`). The join marks the invite used and adds the member as `pending` in one transaction, so two accounts never use one code.
+
+### 36.4 Removal
+
+A removal, in this order: the devices of the removed account leave the vault stores of the group's other accounts, and their devices leave the removed account's stores (`Hub::remove_store_device`; `removed_from_stores` counts the first kind); the tunnel grants between it and the group end, both ways, and their streams close (section 35); its `group_member` row goes and `account.group_id` is cleared; an audit row `group_member_removed`. The removed account keeps a free account; its next request has no plan (34.6). The quantity at Stripe does not change: the owner lowers it with the seats route.
+
+### 36.5 The seam of the accounts
+
+`group::DirectoryGroups` is the `Groups` seam (33.6): `group_of` (the `group` of `GET /v1/account`: id, kind, role, state), `share_group` (both accounts are **active** members of one group: a device of the other account may join a vault store, and the store becomes `shared`), and `blocks_deletion` (an owner with another active member: `DELETE /v1/account` is 409 `conflict`). An account that is deleted leaves its group in the same transaction (`group::forget_account`): a member's row goes; an owner's group, its pending members, and its invites go.
+
+### 36.6 Tests
+
+`tests/server_group.rs`, one test for each bullet of the plan's C3 acceptance, with subscriptions from signed synthetic webhooks against the fake Stripe: the group made by the webhook; an invite is one use and 7 days, stored as a hash; a pending member has no entitlement until confirmed, and a member does not buy; the Family quantity follows the people (4 included, the fifth raises it with prorations, the change applied only on the webhook, `seat_limit` below the members and above 10) and the Team quantity its members; a removed member keeps a free account, loses the plan within one request, and leaves the shared store; a member's device joins a shared store and a stranger's or a pending member's does not; roles (a Family has no admins, only the owner invites or removes an admin, the owner cannot be removed, a member may leave); an owner with members cannot delete the account, a member can, and then the owner can (the subscription canceled at once).

@@ -62,6 +62,27 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
 
 // ---- Bodies of the requests (section 6 to 10). ----
 
+/// The body of `POST /v1/tunnel/nodes` (connect-tunnel-v1 section 3.1).
+#[derive(Serialize)]
+struct RegisterNode<'a> {
+    name: &'a str,
+    pin: &'a str,
+}
+
+/// A node as Connect answers it (`NodeView`, connect-tunnel-v1 section 3.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelNodeView {
+    pub node_id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub name: String,
+    pub pin: String,
+    pub public_name: String,
+    pub online: bool,
+    pub created_at: u64,
+}
+
 #[derive(Serialize)]
 pub(super) struct CreateAccount<'a> {
     pub name: &'a str,
@@ -796,6 +817,19 @@ impl ConnectClient {
 
     pub(super) fn entitlement(&self, token: &str) -> Result<EntitlementAnswer, ConnectError> {
         self.get("/v1/account/entitlement", Some(token))
+    }
+
+    /// `POST /v1/tunnel/nodes` (connect-tunnel-v1 section 3.1): register the node of the
+    /// calling device with its display name and the pin of its node certificate, or
+    /// update both. The node's tunnel (`crate::node::tunnel`, plan s7 unit M4) calls it
+    /// before it opens its WebSocket.
+    pub fn register_node(
+        &self,
+        token: &str,
+        name: &str,
+        pin: &str,
+    ) -> Result<TunnelNodeView, ConnectError> {
+        self.post("/v1/tunnel/nodes", Some(token), &RegisterNode { name, pin })
     }
     // ---- Billing and groups (connect-billing-v1 sections 4 to 6, 8). ----
 

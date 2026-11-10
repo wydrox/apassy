@@ -46,6 +46,9 @@ serde_json = "=1.0.151"
 tempfile = "=3.27.0"
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 zeroize = "=1.9.0"
+# tests/connect_tunnel.rs: the loopback Connect routes the tunnel paths to the relay's
+# broker on the relay's own HTTP server, as `Relay::start` binds it (the vendored copy).
+tiny_http = { version = "=0.12.0", path = "../apassy-relay/vendor/tiny_http", default-features = false }
 
 # Another name than the root `apassy` target, so the two do not overwrite each other
 # in target/. scripts/build-app.sh copies it into the bundle as Contents/MacOS/apassy;

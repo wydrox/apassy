@@ -20,7 +20,15 @@
     { "name": "CONNECT_LIMITER", "namespace_id": "1004", "simple": { "limit": 1, "period": 60 } },
     // The same route, per IPv6 /48 or IPv4 /24. The relay also counts Connect teams per this
     // prefix in memory (the x-apassy-client-prefix header).
-    { "name": "CONNECT_PREFIX_LIMITER", "namespace_id": "1005", "simple": { "limit": 3, "period": 60 } }
+    { "name": "CONNECT_PREFIX_LIMITER", "namespace_id": "1005", "simple": { "limit": 3, "period": 60 } },
+    // New Connect accounts and recoveries (POST /v1/account, POST /v1/account/recover,
+    // connect-account-v1 section 3), per IPv4 address or IPv6 /64.
+    // The Stripe webhook (POST /v1/stripe/webhook) has no limiter: Stripe sends from its own
+    // addresses, and the relay checks each event's signature.
+    { "name": "ACCOUNT_LIMITER", "namespace_id": "1006", "simple": { "limit": 5, "period": 60 } },
+    // Tunnel dials (GET /v1/tunnel/dial/*, connect-tunnel-v1 section 8), per IPv4 address or
+    // IPv6 /64. The relay also limits the dials of each account (60 a minute).
+    { "name": "TUNNEL_LIMITER", "namespace_id": "1007", "simple": { "limit": 60, "period": 60 } }
   ],
   // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },

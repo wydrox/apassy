@@ -99,8 +99,17 @@ fn make_team_file_with_device(
             .map_err(|_| RelayError::internal("The system has no random source."))?;
     }
     let path = config.team_path(&id);
-    let file_key = new_file_key()?;
-    let store = Store::create_team(&path, &file_key)?;
+    // `connect` mode: a plain file and no file key (ADR 0037 stage 7).
+    let (file_key, store) = if config.connect.plain_files() {
+        (
+            SecretString::new(String::new()),
+            Store::create_team_plain(&path, config)?,
+        )
+    } else {
+        let file_key = new_file_key()?;
+        let store = Store::create_team(&path, &file_key)?;
+        (file_key, store)
+    };
     let owner_token = new_token(TokenKind::Member, &id)?;
     let hash = token_hash(owner_token.expose());
     let audit = Audit::new();
@@ -376,6 +385,17 @@ pub struct Hub {
     /// The bad codes and refresh tokens of each OAuth client of an embedded node, in
     /// memory only (docs/SPEC.md section 31.5).
     pub(crate) oauth_failures: crate::server::oauth::ClientFailures,
+    /// Apassy Connect accounts: the sign-in state in memory, the plan and group seams,
+    /// and the entitlement signer (`server::account`).
+    pub(crate) accounts: crate::server::account::Accounts,
+    /// Connect billing (docs/SPEC.md section 34): with the account routes on and the
+    /// Stripe files set. It is also the `Plans` seam of the accounts.
+    pub(crate) billing: Option<Arc<crate::server::billing_store::ConnectBilling>>,
+    /// The time of the last billing maintenance pass (`billing_store::maintain`).
+    pub(crate) billing_maintained_at: std::sync::atomic::AtomicU64,
+    /// The Connect tunnel broker (`server::tunnel_routes`): set once by `Relay::start`
+    /// when the account routes are on, else never.
+    pub(crate) tunnel: std::sync::OnceLock<crate::server::tunnel::Broker>,
 }
 
 impl Hub {
@@ -397,7 +417,26 @@ impl Hub {
             RelayError::internal("The built-in rule packs of the core cannot be loaded.")
         })?;
         let push = crate::server::push::Push::start(config.push.clone(), stop.clone())?;
+        let signer = config
+            .connect
+            .signing_key
+            .as_ref()
+            .map(crate::server::entitlement::EntitlementSigner::from_key)
+            .transpose()?;
+        let billing = match (&config.connect.billing, config.connect.accounts) {
+            (Some(settings), true) => {
+                settings.check_api_base()?;
+                Some(Arc::new(crate::server::billing_store::build(
+                    settings,
+                    directory.store.clone(),
+                )?))
+            }
+            _ => None,
+        };
         let hub = Arc::new(Self {
+            accounts: crate::server::account::Accounts::new(signer),
+            billing,
+            billing_maintained_at: std::sync::atomic::AtomicU64::new(0),
             public_host: crate::decision::public_host(&config.public_url),
             config: Arc::new(config),
             directory,
@@ -415,7 +454,19 @@ impl Hub {
             connect_polls: Arc::new(AtomicUsize::new(0)),
             connect_feed_polls: Arc::new(AtomicUsize::new(0)),
             oauth_failures: crate::server::oauth::ClientFailures::default(),
+            tunnel: std::sync::OnceLock::new(),
         });
+        if hub.config.connect.accounts {
+            crate::server::account::record_signing_key(&hub, crate::now_unix())?;
+        }
+        if hub.config.connect.accounts {
+            hub.set_groups(Arc::new(crate::server::group::DirectoryGroups));
+        }
+        if let Some(billing) = &hub.billing {
+            hub.set_plans(Arc::new(crate::server::billing_store::BillingPlans(
+                billing.clone(),
+            )));
+        }
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
         sweep_orphans(&hub.config, &rows);
@@ -457,7 +508,12 @@ impl Hub {
     /// Opens the file of a team and adds it to the hub. A restart ends every session:
     /// a run that was `ready` becomes `ended`.
     fn open_team(&self, row: &TeamRow) -> RelayResult<Arc<Core>> {
-        let store = Store::open_team(&self.config.team_path(&row.id), &row.file_key)?;
+        let path = self.config.team_path(&row.id);
+        let store = if self.config.connect.plain_files() {
+            Store::open_team_plain(&path, &self.config)?
+        } else {
+            Store::open_team(&path, &row.file_key)?
+        };
         self.register(row.id.clone(), store, row.limits, row.kind)
     }
 
@@ -579,6 +635,277 @@ impl Hub {
             }
             None => None,
         }
+    }
+
+    /// The Connect tunnel broker, on a started relay with the account routes.
+    pub fn tunnel(&self) -> Option<&crate::server::tunnel::Broker> {
+        self.tunnel.get()
+    }
+
+    /// Installs the plans of billing (C2): until then every account has none.
+    pub fn set_plans(&self, plans: Arc<dyn crate::server::account::Plans>) {
+        self.accounts.set_plans(plans);
+    }
+
+    /// Connect billing, when it is configured (the tests call its maintenance pass and
+    /// read its store through it).
+    pub fn billing(&self) -> Option<&Arc<crate::server::billing_store::ConnectBilling>> {
+        self.billing.as_ref()
+    }
+
+    /// Installs the groups (C3): until then no account is in a group.
+    pub fn set_groups(&self, groups: Arc<dyn crate::server::account::Groups>) {
+        self.accounts.set_groups(groups);
+    }
+
+    /// The account that made a vault store, or `None` for a team of another kind.
+    pub fn account_of_team(&self, team: &TeamId) -> RelayResult<Option<String>> {
+        Ok(self
+            .directory
+            .team(team)?
+            .filter(|row| row.kind == TeamKind::Account)
+            .and_then(|row| row.account_id))
+    }
+
+    /// `POST /v1/account/vaults` (connect-account-v1 section 8): a vault store, a team of
+    /// kind `account` with `TeamLimits::account`, for `vault_id` of `account`. Its owner
+    /// member is named by the account id; its device 1 is the account device `device`
+    /// (named by its id) with the key `public_key`, so the relay-sync sign-in works with
+    /// the account device key. The directory maps the account device to the store device
+    /// (`account_store_device`). A race for the same vault answers the store that won.
+    pub fn create_vault_store(
+        &self,
+        account: &str,
+        device: &str,
+        public_key: &[u8],
+        vault_id: &str,
+        name: &str,
+        now: u64,
+    ) -> RelayResult<TeamId> {
+        let name = checked_team_name(name)?.to_string();
+        let limits = TeamLimits::account(1);
+        limits.validate()?;
+        let new = make_team_file_with_device(
+            &self.config,
+            &name,
+            account,
+            now,
+            Some((device, public_key)),
+        )?;
+        let store_device = new.store.with(|conn| {
+            conn.query_row(
+                "SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL",
+                params![to_i(new.owner_id.0)],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(db)
+        });
+        let added = store_device.and_then(|store_device| {
+            self.directory.store.tx(|tx| {
+                directory::insert_vault_store(
+                    tx, &new.id, &name, &new.file_key, &limits, account, vault_id, now,
+                )?;
+                tx.execute(
+                    "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![new.id.as_str(), device, account, store_device, to_i(now)],
+                )
+                .map_err(db)?;
+                self.directory.audit.write_on(
+                    tx,
+                    now,
+                    &format!("account:{account}"),
+                    "vault_store_created",
+                    None,
+                    &json!({"team_id": new.id, "account_id": account, "device_id": device}),
+                )
+            })
+        });
+        if let Err(error) = added {
+            // The team row did not commit: its file has no key anywhere.
+            let id = new.id.clone();
+            drop(new);
+            let _ = remove_team_file(&self.config, &id);
+            let winner: Option<String> = self.directory.store.with(|conn| {
+                conn.query_row(
+                    "SELECT id FROM team WHERE kind = 'account' AND account_id = ?1 AND vault_id = ?2",
+                    params![account, vault_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db)
+            })?;
+            return winner.as_deref().and_then(TeamId::parse).ok_or(error);
+        }
+        let NewTeam { id, store, .. } = new;
+        self.register(id.clone(), store, limits, TeamKind::Account)?;
+        Ok(id)
+    }
+
+    /// Adds the account device `device` (key `public_key`) of `account` to the vault store
+    /// `team`: a member named by the account id (made when it is not there) and a device
+    /// named by the device id, without the item keys. Returns the store device id. A
+    /// device whose key is in the store already keeps its id.
+    pub fn add_store_device(
+        &self,
+        team: &TeamId,
+        account: &str,
+        device: &str,
+        public_key: &[u8],
+        now: u64,
+    ) -> RelayResult<u64> {
+        let core = self
+            .team(team)
+            .filter(|core| core.kind == TeamKind::Account)
+            .ok_or_else(|| RelayError::internal("The vault store is not open."))?;
+        let store_device = core.store.tx(|tx| {
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM device WHERE public_key = ?1 AND revoked_at IS NULL",
+                    params![public_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db)?;
+            if let Some(id) = existing {
+                return Ok(to_u(id));
+            }
+            let member: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM member WHERE name = ?1 AND revoked_at IS NULL",
+                    params![account],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db)?;
+            let member = match member {
+                Some(member) => member,
+                None => {
+                    tx.execute(
+                        "INSERT INTO member (name, role, created_at) VALUES (?1, 'member', ?2)",
+                        params![account, to_i(now)],
+                    )
+                    .map_err(db)?;
+                    tx.last_insert_rowid()
+                }
+            };
+            tx.execute(
+                "INSERT INTO device (member_id, name, public_key, key_holder, created_at) VALUES (?1, ?2, ?3, 0, ?4)",
+                params![member, device, public_key, to_i(now)],
+            )
+            .map_err(db)?;
+            let id = to_u(tx.last_insert_rowid());
+            core.audit.write_on(
+                tx,
+                now,
+                RELAY_ACTOR,
+                "device_added",
+                None,
+                &json!({"member_id": member, "device_id": id, "name": device}),
+            )?;
+            Ok(id)
+        })?;
+        self.directory.store.with(|conn| {
+            conn.execute(
+                "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(team_id, device_id) DO NOTHING",
+                params![team.as_str(), device, account, to_i(store_device), to_i(now)],
+            )
+            .map_err(db)
+        })?;
+        Ok(store_device)
+    }
+
+    /// Removes the account device `device` (store device `store_device`) from the vault
+    /// store `team` at once: its device row there is revoked, its relay-sync tokens of the
+    /// store end, its long polls wake, and its row of `account_store_device` goes. The
+    /// heads it signed stay verifiable (relay-sync-v1: a removed device keeps its key).
+    pub fn remove_store_device(
+        &self,
+        team: &TeamId,
+        device: &str,
+        store_device: u64,
+        now: u64,
+    ) -> RelayResult<()> {
+        if let Some(core) = self
+            .team(team)
+            .filter(|core| core.kind == TeamKind::Account)
+        {
+            core.store.tx(|tx| {
+                let changed = tx
+                    .execute(
+                        "UPDATE device SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+                        params![to_i(store_device), to_i(now)],
+                    )
+                    .map_err(db)?;
+                if changed > 0 {
+                    core.audit.write_on(
+                        tx,
+                        now,
+                        RELAY_ACTOR,
+                        "device_revoked",
+                        None,
+                        &json!({"device_id": store_device, "name": device}),
+                    )?;
+                }
+                Ok(())
+            })?;
+            crate::server::devices::drop_tokens(&core, &[DeviceId(store_device)]);
+            core.notify.notify();
+        }
+        self.directory.store.with(|conn| {
+            conn.execute(
+                "DELETE FROM account_store_device WHERE team_id = ?1 AND device_id = ?2",
+                params![team.as_str(), device],
+            )
+            .map_err(db)
+            .map(drop)
+        })
+    }
+
+    /// Deletes the vault store `team` (connect-account-v1 sections 6, 8, 9): it leaves
+    /// service at once, its requests drain (at most 10 seconds, else 409 and the store
+    /// stays out of service until a retry or a restart), then its row, its device map, and
+    /// its file with the snapshots go. `actor` names the account in the relay audit.
+    pub fn delete_vault_store(&self, team: &TeamId, actor: &str, now: u64) -> RelayResult<()> {
+        self.directory
+            .team(team)?
+            .filter(|row| row.kind == TeamKind::Account)
+            .ok_or_else(|| RelayError::not_found("vault store"))?;
+        let core = self
+            .teams
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(team);
+        if let Some(core) = core {
+            core.close();
+            self.draining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(team.clone(), Arc::downgrade(&core));
+        }
+        self.wait_for_drained(team)?;
+        self.directory.store.tx(|tx| {
+            tx.execute("DELETE FROM team WHERE id = ?1", params![team.as_str()])
+                .map_err(db)?;
+            tx.execute(
+                "DELETE FROM account_store_device WHERE team_id = ?1",
+                params![team.as_str()],
+            )
+            .map_err(db)?;
+            self.directory.audit.write_on(
+                tx,
+                now,
+                actor,
+                "vault_store_deleted",
+                None,
+                &json!({"team_id": team}),
+            )
+        })?;
+        self.draining
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(team);
+        remove_team_file(&self.config, team)
     }
 
     /// Every active team.

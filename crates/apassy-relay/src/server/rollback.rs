@@ -621,6 +621,8 @@ mod tests {
             limits: crate::server::directory::TeamLimits::default(),
             kind: TeamKind::Operator,
             suspend_reason: None,
+            account_id: None,
+            vault_id: None,
         };
         unread(&row)
     }

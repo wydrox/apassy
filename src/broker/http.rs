@@ -630,6 +630,9 @@ pub enum Body<'a> {
     /// `Content-Type: application/x-www-form-urlencoded`. Build the bytes with
     /// [`form_body`], so a signer (SigV4) can hash the exact bytes that are sent.
     Form(&'a [u8]),
+    /// `Content-Type: application/jose+json`: a flattened JWS of ACME (RFC 8555
+    /// section 6.2), for the node's public certificate (`crate::node::acme`).
+    Jose(&'a [u8]),
 }
 
 impl<'a> Body<'a> {
@@ -637,12 +640,13 @@ impl<'a> Body<'a> {
         match self {
             Self::Json(_) => b"application/json",
             Self::Form(_) => b"application/x-www-form-urlencoded",
+            Self::Jose(_) => b"application/jose+json",
         }
     }
 
     fn bytes(self) -> &'a [u8] {
         match self {
-            Self::Json(bytes) | Self::Form(bytes) => bytes,
+            Self::Json(bytes) | Self::Form(bytes) | Self::Jose(bytes) => bytes,
         }
     }
 }
@@ -697,6 +701,7 @@ impl std::fmt::Debug for HttpRequest<'_> {
         let body = self.body.map(|body| match body {
             Body::Json(bytes) => ("json", bytes.len()),
             Body::Form(bytes) => ("form", bytes.len()),
+            Body::Jose(bytes) => ("jose", bytes.len()),
         });
         f.debug_struct("HttpRequest")
             .field("method", &self.method)

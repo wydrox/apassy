@@ -678,3 +678,116 @@ fn turn_on_remote_access_of_the_overview_asks_the_owner_and_turns_the_route_on()
         .expect("open vault");
     assert!(on, "{}", app.status_text);
 }
+
+/// The "Apassy Connect" row of the remote access block (plan s7 unit M4): one line for
+/// each state, the address only while the route and remote access are on, and the
+/// certificate line.
+#[test]
+fn the_apassy_connect_row_has_a_line_for_each_state() {
+    use super::agents_page::ConnectState;
+    use crate::node::ConnectRouteStatus;
+    use crate::node::tunnel::{CertState, TunnelState, TunnelStatus};
+    const NAME: &str = "k7m2q4x3ca.node.apassy.wyderka.cc";
+    let tunnel = |state: TunnelState, certificate: CertState| TunnelStatus {
+        state,
+        public_name: Some(NAME.to_owned()),
+        url: Some(format!("https://{NAME}/mcp")),
+        certificate,
+        open_streams: 0,
+        attempts: 1,
+        connects: 1,
+        connected_at: None,
+    };
+    let route = |available: bool, on: bool, tunnel: Option<TunnelStatus>| ConnectRouteStatus {
+        available,
+        on,
+        running: tunnel.is_some(),
+        public_name: Some(NAME.to_owned()),
+        tunnel,
+    };
+    let valid = CertState::Valid {
+        not_after: 1_802_044_800,
+    };
+
+    // No account: "not on Connect", and the switch cannot go on.
+    let row = agents::connect_row(&route(false, false, None), true).expect("row");
+    assert_eq!(row.state, ConnectState::NotOnConnect);
+    assert_eq!(
+        row.line(),
+        "Not on Apassy Connect. Choose a plan in Settings > Connect."
+    );
+    assert!(!row.switch_enabled());
+    assert_eq!(row.address, None);
+
+    // Off.
+    let row = agents::connect_row(&route(true, false, None), true).expect("row");
+    assert_eq!(
+        (row.state.clone(), row.line()),
+        (ConnectState::Off, "Off".to_owned())
+    );
+    assert!(row.switch_enabled());
+    assert_eq!(row.address, None);
+
+    // Connecting, then on with the URL and the certificate.
+    let connecting = route(
+        true,
+        true,
+        Some(tunnel(TunnelState::Connecting, valid.clone())),
+    );
+    let row = agents::connect_row(&connecting, true).expect("row");
+    assert_eq!(row.line(), "Connecting…");
+    let on = route(true, true, Some(tunnel(TunnelState::On, valid.clone())));
+    let row = agents::connect_row(&on, true).expect("row");
+    assert_eq!(row.state, ConnectState::On);
+    assert_eq!(
+        row.address.as_deref(),
+        Some("https://k7m2q4x3ca.node.apassy.wyderka.cc/mcp")
+    );
+    assert_eq!(row.certificate_line(), None);
+    // Without remote access, cloud agents have no address (devices still dial).
+    let row = agents::connect_row(&on, false).expect("row");
+    assert_eq!(row.address, None);
+
+    // Reconnecting with the reason.
+    let reconnecting = route(
+        true,
+        true,
+        Some(tunnel(
+            TunnelState::Reconnecting {
+                why: "the connection to Apassy Connect ended".to_owned(),
+            },
+            valid.clone(),
+        )),
+    );
+    let row = agents::connect_row(&reconnecting, true).expect("row");
+    assert_eq!(
+        row.line(),
+        "Reconnecting: the connection to Apassy Connect ended"
+    );
+
+    // No certificate yet: the reason.
+    let missing = route(
+        true,
+        true,
+        Some(tunnel(
+            TunnelState::On,
+            CertState::Missing("the certificate authority could not be reached".to_owned()),
+        )),
+    );
+    let row = agents::connect_row(&missing, true).expect("row");
+    assert_eq!(
+        row.certificate_line().as_deref(),
+        Some("No certificate yet: the certificate authority could not be reached.")
+    );
+
+    // The plan ended while the route is on: "not on Connect", and the switch can go off.
+    let ended = route(true, true, Some(tunnel(TunnelState::NotOnConnect, valid)));
+    let row = agents::connect_row(&ended, true).expect("row");
+    assert_eq!(row.state, ConnectState::NotOnConnect);
+    assert!(row.switch_enabled());
+    assert_eq!(row.address, None);
+    // The texts name Apassy Connect and the plan names only (plans.md section 5).
+    for line in [row.line(), "Off".to_owned()] {
+        assert!(!line.to_ascii_lowercase().contains("free"), "{line}");
+    }
+}

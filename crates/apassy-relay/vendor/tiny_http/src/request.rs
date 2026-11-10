@@ -373,6 +373,60 @@ impl Request {
         }
     }
 
+    /// Apassy (connect-tunnel-v1): the upgrade of the relay's deadline transport.
+    ///
+    /// Like [`Request::upgrade`], but for a server made by `Server::http_with_deadlines`:
+    /// it first ends the request's header, body and handle deadlines (reads and writes
+    /// then fail after `idle` without progress, and the reaper forgets the transport),
+    /// prints `response` with `Connection: upgrade` and `Upgrade: {protocol}`, and returns
+    /// the read and write halves apart, so that two threads can use them, with a function
+    /// that shuts the socket down from any thread (it unblocks a pending read).
+    ///
+    /// The read half is the same buffered reader that read the request head: bytes that
+    /// arrived with the head (a first WebSocket frame in the same TCP segment) are kept.
+    /// On a server without deadlines the shutdown function does nothing and no idle
+    /// limit is set.
+    pub fn upgrade_split<R: Read>(
+        mut self,
+        protocol: &str,
+        response: Response<R>,
+        idle: std::time::Duration,
+    ) -> Result<UpgradedParts, IoError> {
+        if let Some(deadline) = &self.deadline {
+            deadline.release(idle);
+        }
+        let mut writer = self.extract_writer_impl();
+        let printed = response
+            .raw_print(
+                writer.by_ref(),
+                self.http_version.clone(),
+                &self.headers,
+                false,
+                Some(protocol),
+            )
+            .and_then(|()| writer.flush());
+        let reader = self.extract_reader_impl();
+        let deadline = self.deadline.take();
+        if let Some(sender) = self.notify_when_responded.take() {
+            let _ = sender.send(());
+        }
+        if let Err(error) = printed {
+            if let Some(deadline) = &deadline {
+                deadline.close(std::net::Shutdown::Both);
+            }
+            return Err(error);
+        }
+        let shutdown: Box<dyn Fn() + Send + Sync> = match deadline {
+            Some(deadline) => Box::new(move || deadline.close(std::net::Shutdown::Both)),
+            None => Box::new(|| {}),
+        };
+        Ok(UpgradedParts {
+            reader,
+            writer,
+            shutdown,
+        })
+    }
+
     /// Allows to read the body of the request.
     ///
     /// # Example
@@ -537,6 +591,16 @@ impl Drop for Request {
             }
         }
     }
+}
+
+/// Apassy: the halves of an upgraded transport, from [`Request::upgrade_split`].
+pub struct UpgradedParts {
+    /// Bytes from the client, starting right after the request head.
+    pub reader: Box<dyn Read + Send + 'static>,
+    /// Bytes to the client (buffered: flush after each message).
+    pub writer: Box<dyn Write + Send + 'static>,
+    /// Shuts the socket down both ways.
+    pub shutdown: Box<dyn Fn() + Send + Sync + 'static>,
 }
 
 /// Dummy trait that regroups the `Read` and `Write` traits.
