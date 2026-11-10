@@ -1927,6 +1927,9 @@ pub struct OwnerFlows {
     /// `None` in tests and when the app cannot find its own executable.
     pub(crate) helper: Option<NativeHelper>,
     pub(crate) lifecycle: Option<crate::native::owner_lifecycle::OwnerLifecycle>,
+    /// Linux: screen lock, sleep and session observation (D-Bus), the counterpart of
+    /// `lifecycle`. Empty on macOS and in tests.
+    pub(crate) session: crate::desktop::session_watch::SessionWatch,
     pub(crate) frequency_read:
         Option<Task<Result<crate::broker::approvals::OwnerFrequency, String>>>,
     pub(crate) frequency_write:
@@ -2012,6 +2015,20 @@ impl DesktopApp {
             None
         };
         self.owner.helper = helper.clone();
+        // Linux: the D-Bus observer feeds the owner window and auto-lock, and the two
+        // device settings live in a private file (no helper, no keychain).
+        #[cfg(target_os = "linux")]
+        {
+            use crate::desktop::session_watch::{SessionWatch, store};
+            self.owner.session = SessionWatch::start(
+                self.owner_ui.session.owner_window.clone(),
+                self.auto_lock.source.clone(),
+                ctx.clone(),
+            );
+            self.start_auto_lock_task(ctx, store::read_auto_lock);
+            self.owner.frequency_read =
+                Some(Task::spawn(Some(ctx.clone()), store::read_owner_frequency));
+        }
         if let Some(helper) = &helper {
             self.owner.lifecycle = crate::native::owner_lifecycle::OwnerLifecycle::start(
                 helper,

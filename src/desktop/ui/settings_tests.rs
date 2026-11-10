@@ -146,7 +146,7 @@ fn cases() -> [(
                     "Unlock",
                     "Passphrase",
                     "Owner checks",
-                    "Owner confirmation",
+                    "How often to ask",
                     "Lock after inactivity",
                     "Never",
                     "Agents cannot use credentials while the vault is locked.",
@@ -1970,14 +1970,16 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
     for expected in ["Lock after inactivity", "Never", "Every time"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
-    // Linux requires a fresh check for every action; macOS can reuse its owner window.
+    // Linux: with no observer (this test starts none) nothing is observed, so reuse is
+    // off and the texts say why; macOS can reuse its owner window.
     let expected: &[&str] = if cfg!(target_os = "linux") {
         &[
-            "Owner confirmation",
+            "How often to ask",
             "Each sensitive action requires fresh confirmation with the vault passphrase or optional system authentication.",
-            "Linux screen-lock observation and approval reuse are unavailable.",
+            "Approval reuse is off: Apassy cannot observe the screen lock here.",
             "Lock the vault manually when you finish.",
-            "Automatic screen-lock and inactivity detection are unavailable on Linux.",
+            "Screen lock is not observed here",
+            "Inactivity counts only input in the Apassy window",
             "Agents cannot use credentials while the vault is locked.",
         ]
     } else {
@@ -1997,12 +1999,110 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
             "Touch ID",
             "Apassy doesn't ask again for anything until this time is up",
             "Mac locks or sleeps",
+            "unavailable on Linux",
         ] {
             assert!(
                 !text.contains(unavailable),
                 "unexpected {unavailable}: {text}"
             );
         }
+    }
+}
+
+/// The Security texts for full and partial observation (Linux renders them; the text
+/// functions themselves are tested on every platform in `session_watch`).
+#[test]
+fn security_lock_texts_follow_the_observed_sources() {
+    use crate::native::session_lock::Observation;
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let full = Observation {
+        session_bus: true,
+        logind: true,
+        logind_session: true,
+        screen_saver: true,
+        idle_hint: true,
+        sleep_inhibitor: true,
+    };
+    let partial = Observation {
+        screen_saver: false,
+        idle_hint: false,
+        ..full
+    };
+    for (obs, expected, absent) in [
+        (
+            full,
+            &[
+                "Apassy doesn't ask again for anything until this time is up",
+                "The window ends when the screen locks, the computer sleeps, or you switch user.",
+                "observed through systemd-logind and the screen saver service",
+                "while the desktop reports the session idle",
+            ][..],
+            &["Approval reuse is off", "Not observed", "manually"][..],
+        ),
+        (
+            partial,
+            &[
+                "The window ends at every lock and sleep that Apassy observes.",
+                "Not observed: No screen saver service answers on the session bus",
+                "Apassy observes only part of this session.",
+                "Inactivity counts only input in the Apassy window",
+            ][..],
+            &["Approval reuse is off", "manually"][..],
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        app.place = Place::Settings;
+        app.ui.settings_section = SettingsSection::Security;
+        app.owner.session.fixed = Some(obs);
+        let (text, _) = frames(&mut app, TALL);
+        for expected in expected {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        for absent in absent {
+            assert!(!text.contains(absent), "unexpected {absent}: {text}");
+        }
+    }
+}
+
+/// A fake signal source drives the real app: a screen lock ends the owner window and,
+/// under "When the screen locks", locks the vault; a sleep locks it too.
+#[test]
+fn security_observed_lock_and_sleep_lock_the_vault_and_end_reuse() {
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    use crate::desktop::auto_lock::LockPolicy;
+    use crate::desktop::session_watch::Applier;
+    use crate::native::session_lock::{Observation, SessionEvent};
+    let full = Observation {
+        session_bus: true,
+        logind: true,
+        logind_session: true,
+        screen_saver: true,
+        idle_hint: false,
+        sleep_inhibitor: false,
+    };
+    for event in [SessionEvent::ScreenLocked, SessionEvent::Sleep] {
+        let dir = TempDir::new().unwrap();
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        let window = app.owner_ui.session.owner_window.clone();
+        window.configure(OwnerFrequency::UntilLock);
+        let applier = Applier::new(window.clone(), app.auto_lock.source.clone(), full);
+        applier.apply(SessionEvent::ScreenUnlocked);
+        applier.apply(SessionEvent::SessionActive);
+        let epoch = app.owner_ui.session.epoch().unwrap();
+        window.seed(epoch, CheckMethod::Passphrase, window.generation());
+        let (proof, _) = window.ticket(epoch).expect("reuse while observed");
+        app.auto_lock.policy = LockPolicy::Session;
+        let ctx = egui::Context::default();
+        app.poll_auto_lock(&ctx);
+        assert!(!app.owner_ui.session.is_locked());
+        applier.apply(event);
+        assert!(!proof.valid(), "{event:?}");
+        assert!(window.ticket(epoch).is_none(), "{event:?}");
+        app.poll_auto_lock(&ctx);
+        assert!(app.owner_ui.session.is_locked(), "{event:?}");
     }
 }
 

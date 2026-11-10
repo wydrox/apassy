@@ -59,6 +59,9 @@ pub(crate) mod passkey_socket;
 /// The agent feeds of the other Macs of the vault (relay-feed-v1 reader).
 #[cfg(feature = "vault")]
 pub(crate) mod remote_feeds;
+/// Linux screen lock, sleep and inactivity in the owner window and auto-lock.
+#[cfg(feature = "vault")]
+pub(crate) mod session_watch;
 /// The sync log and the notice of a vault that does not sync.
 #[cfg(feature = "vault")]
 pub(crate) mod sync_health;
