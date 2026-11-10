@@ -3,14 +3,16 @@
 // and a coarser /48 or /24 prefix, which also travels to the relay in a header with its
 // HMAC; nothing is stored) and snapshot pushes, bounds the declared length of every body, and
 // forwards relay requests with the required edge secret. `/internal/` routes (the APNs
-// sender, apns.ts) are handled here and never forwarded.
+// sender, apns.ts) are handled here and never forwarded. The Stripe webhook
+// (connect-billing-v1 section 7) has its own 256 KiB cap and no per-address limiter:
+// Stripe sends from its own addresses, and the relay checks the signature.
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
 // Node can run it with type stripping in the tests.
 // workerd accepts only handlers as exports of this main module, so values such as
 // the length limits live in limits.ts. Type exports are fine: they are erased.
 
 import { handleInternal, type PushEnv } from "./apns.ts";
-import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "./limits.ts";
+import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH, MAX_STRIPE_WEBHOOK_LENGTH } from "./limits.ts";
 
 /** A Workers VPC service binding: a tunnel from the relay's host, no public origin. */
 export interface RelayService {
@@ -42,6 +44,8 @@ export interface Env extends PushEnv {
   CONNECT_LIMITER?: CreateLimiter;
   /** The coarser key of `POST /v1/connect`: an IPv6 /48 or an IPv4 /24. */
   CONNECT_PREFIX_LIMITER?: CreateLimiter;
+  /** Connect accounts (`POST /v1/account`, connect-account-v1), per IPv4 address or IPv6 /64. */
+  ACCOUNT_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
 }
@@ -64,6 +68,10 @@ const SNAPSHOT_PATH = "/v1/sync/snapshot";
 const FEED_PATH = "/v1/feed";
 /** The agent proxy prefix (SPEC 12). */
 const PROXY_PREFIX = "/p/";
+/** The Stripe webhook (connect-billing-v1 section 7): signed by Stripe, sent from Stripe's addresses. */
+const STRIPE_WEBHOOK_PATH = "/v1/stripe/webhook";
+/** A new Connect account (connect-account-v1): free, unauthenticated, so limited per client. */
+const ACCOUNT_PATH = "/v1/account";
 
 function text(status: number, body: string): Response {
   return new Response(body, {
@@ -84,20 +92,24 @@ function jsonError(status: number, code: string, message: string, extra: Record<
 // path (an unknown path, a wrong method, a bad token, SPEC 24.10). So the edge bounds
 // the declared `Content-Length` of every request with a body before the relay sees it:
 // the snapshot push up to MAX_SNAPSHOT_LENGTH, the feed put (`PUT /v1/feed` exactly) up
-// to MAX_FEED_LENGTH, the agent proxy up to MAX_PROXY_LENGTH, everything else up to
-// MAX_JSON_LENGTH. A snapshot push and a feed put must declare their length. Elsewhere a
-// request without one has no body or a chunked one, which tiny_http does not drain.
+// to MAX_FEED_LENGTH, the Stripe webhook (`POST /v1/stripe/webhook` exactly) up to
+// MAX_STRIPE_WEBHOOK_LENGTH, the agent proxy up to MAX_PROXY_LENGTH, everything else up
+// to MAX_JSON_LENGTH. A snapshot push, a feed put, and a webhook must declare their length.
+// Elsewhere a request without one has no body or a chunked one, which tiny_http does not drain.
 function lengthError(request: Request, path: string): Response | undefined {
   const snapshot = request.method === "PUT" && path === SNAPSHOT_PATH;
   const feed = request.method === "PUT" && path === FEED_PATH;
-  const push = snapshot || feed;
+  const webhook = request.method === "POST" && path === STRIPE_WEBHOOK_PATH;
+  const push = snapshot || feed || webhook;
   if (push && request.headers.has("transfer-encoding")) {
     return jsonError(
       400,
       "invalid_request",
       snapshot
         ? "Send the snapshot with Content-Length, not Transfer-Encoding."
-        : "Send the feed with Content-Length, not Transfer-Encoding.",
+        : webhook
+          ? "Send the webhook with Content-Length, not Transfer-Encoding."
+          : "Send the feed with Content-Length, not Transfer-Encoding.",
     );
   }
   const declared = request.headers.get("content-length");
@@ -113,6 +125,10 @@ function lengthError(request: Request, path: string): Response | undefined {
   } else if (feed) {
     if (Number(length) > MAX_FEED_LENGTH) {
       return jsonError(413, "payload_too_large", "The feed body is larger than 352 KiB.");
+    }
+  } else if (webhook) {
+    if (Number(length) > MAX_STRIPE_WEBHOOK_LENGTH) {
+      return jsonError(413, "payload_too_large", "The webhook body is larger than 256 KiB.");
     }
   } else if (path.startsWith(PROXY_PREFIX)) {
     if (Number(length) > MAX_PROXY_LENGTH) {
@@ -197,11 +213,15 @@ const CONNECT_PATH = "/v1/connect";
 
 // The per-IP limiter of a route. Creation (a team, a join, a device link) is rare;
 // sign-in is frequent (a waiting CLI asks every 5 s); a snapshot push holds a relay
-// thread for its whole body. A Connect team needs no code at all.
+// thread for its whole body. A Connect team needs no code at all. The Stripe webhook has
+// none on purpose: Stripe sends every event from a few shared addresses, and a limit there
+// would drop paid events; its signature is the relay's check.
 function limiterFor(method: string, path: string, env: Env): CreateLimiter | undefined {
   if (method === "PUT" && path === SNAPSHOT_PATH) return env.SYNC_LIMITER;
   if (method !== "POST") return undefined;
   switch (path) {
+    case STRIPE_WEBHOOK_PATH:
+      return undefined;
     case CONNECT_PATH:
       return env.CONNECT_LIMITER;
     case "/v1/join":
@@ -257,15 +277,19 @@ export default {
     // then its coarser /48 (or /24) prefix, asked only when the first one lets the call pass.
     // Every other route has one guard, keyed by the full address.
     const isConnect = request.method === "POST" && url.pathname === CONNECT_PATH;
+    // A new account is keyed like Connect's first guard: one client usually holds a whole /64.
+    const isAccount = request.method === "POST" && url.pathname === ACCOUNT_PATH;
     const limiter = limiterFor(request.method, url.pathname, env);
-    if (limiter || isConnect) {
+    if (limiter || isConnect || isAccount) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
       // For Connect the relay also caps the teams of a day for everyone.
       const address = request.headers.get("cf-connecting-ip") ?? "unknown";
       const guards: [CreateLimiter | undefined, string][] = isConnect
         ? [[env.CONNECT_LIMITER, connectKey(address)], [env.CONNECT_PREFIX_LIMITER, connectPrefix(address)]]
-        : [[limiter, address]];
+        : isAccount
+          ? [[env.ACCOUNT_LIMITER, connectKey(address)]]
+          : [[limiter, address]];
       for (const [guard, key] of guards) {
         if (!guard) continue;
         try {
