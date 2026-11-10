@@ -8,6 +8,7 @@ The `apassy-vault` package includes the egui desktop, interactive owner commands
 Chrome stable/Chromium native messaging host and extension, plus optional polkit
 policy. It replaces the node-only `apassy` package; node commands stay available.
 Install with `sudo apt install ./apassy-vault_<version>_<amd64|arm64>.deb`.
+These builds need `libc6 (>= 2.39)`: Ubuntu 24.04+ or Debian 13+.
 The package starts no process and does not enable any keyring integration.
 
 The tar archive has a fixed `/usr` tree and an `install-vault.sh` installer.
@@ -35,7 +36,8 @@ for commands and the verification boundary. Optional Secret Service needs
 `secret-tool` (`libsecret-tools`) and explicit opt-in. Other clients running as
 the same user can retrieve an item from an unlocked keyring. Optional presence
 uses `pkcheck` and the packaged `com.wydrox.apassy.owner-presence` policy with
-`auth_self`, without cached authorization. Missing, refused or cancelled
+`auth_self`, without cached authorization. It needs a polkit agent in a local
+seat session; in a text session use `pkttyagent --process "$(pgrep -xo apassy)"`. Missing, refused or cancelled
 presence must not count as approval; passphrase confirmation stays available.
 
 The vault is a software vault. Root and compromised processes of the same user

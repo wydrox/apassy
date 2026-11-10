@@ -5,6 +5,11 @@ ADR [0045](../adr/0045-linux-vault-passkeys.md) extends the existing
 interactive owner commands and browser passkeys. The implementation targets
 x86_64 and aarch64 on Ubuntu and Debian. CI produces architecture-specific
 artifacts; this change does not publish a release or add a public download.
+The CI desktop artifacts depend on `libc6 (>= 2.39)`: Ubuntu 24.04 or later and
+Debian 13 or later. Ubuntu 22.04 and Debian 12 refuse the package. The runtime
+acceptance record is
+[docs/reviews/linux-acceptance-2026-11.md](../reviews/linux-acceptance-2026-11.md); its
+re-runnable kit is `packaging/linux/acceptance/`.
 
 ## Build and install
 
@@ -64,14 +69,20 @@ commands refuse non-interactive input. Keep vault and backup files private.
 
 Secret Service is optional: install `libsecret-tools` and explicitly opt in
 with `apassy owner keyring-enable /path/to/vault.db`. Other same-user clients
-can retrieve an item from an unlocked keyring. Use `keyring-disable` to remove
-that convenience. Do not treat an unlocked keyring as user presence.
+can retrieve an item from an unlocked keyring. Only `apassy owner unlock-keyring
+/path/to/vault.db` reads that item; it opens the same terminal session as
+`apassy owner unlock`. The desktop window does not read it. Use `keyring-disable`
+to remove that convenience. Do not treat an unlocked keyring as user presence.
 
 The optional polkit action `com.wydrox.apassy.owner-presence` requests `auth_self`
 without retained authorization. `pkcheck` needs a session authentication agent;
-its PAM stack may support fprintd. Failure, cancellation or missing support must
-refuse the operation, with passphrase confirmation available. No biometric-only
-path is required to unlock the vault.
+its PAM stack may support fprintd. A desktop's agent serves the whole session. In
+a text session, run `pkttyagent --process "$(pgrep -xo apassy)"` in another
+terminal of the same user: `pkttyagent` without `--process` serves only its own
+parent process. `allow_active` needs a local, active seat session; from an SSH
+session polkit answers "Not authorized" without a prompt. Failure, cancellation
+or missing support must refuse the operation, with passphrase confirmation
+available. No biometric-only path is required to unlock the vault.
 
 ## Desktop and browser
 
@@ -88,6 +99,21 @@ refused. The manifests are per user under these browser directories:
 
 - `~/.config/google-chrome/NativeMessagingHosts/com.wydrox.apassy.json`
 - `~/.config/chromium/NativeMessagingHosts/com.wydrox.apassy.json`
+
+Run `apassy setup browser --browser chrome` (or `chromium`) once: without
+`--browser` it writes nothing for a browser that has not created its profile
+yet. Then, in the browser, turn on Developer mode on `chrome://extensions`, choose
+Load unpacked and select `/usr/share/apassy/browser-extension`; its manifest key
+gives it the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Observed browser limits
+(2026-11-10):
+
+- Ubuntu ships Chromium only as a snap. The snap cannot see
+  `/usr/lib/apassy` or `/usr/share/apassy`, reads its manifests from
+  `~/snap/chromium/common/chromium`, and runs from a `/snap` path that the caller
+  check refuses. Use Google Chrome on Ubuntu.
+- Debian's `chromium` package adds `--load-extension=…` to every start
+  (`/etc/chromium.d/extensions`). Apassy refuses a browser started with that
+  switch, so passkeys, fill and save are refused in Debian's Chromium as packaged.
 
 Browser authentication verifies kernel peer credentials, process ancestry and
 root-owned executable paths. Unknown browser builds, writable executables,
