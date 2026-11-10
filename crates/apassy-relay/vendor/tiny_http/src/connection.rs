@@ -92,6 +92,14 @@ impl Connection {
             Self::Unix(s) => s.set_write_timeout(Some(std::time::Duration::from_secs(5))),
         }
     }
+    /// Apassy: the write limit of an upgraded transport.
+    pub(crate) fn set_write_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => s.set_write_timeout(Some(timeout)),
+            #[cfg(unix)]
+            Self::Unix(s) => s.set_write_timeout(Some(timeout)),
+        }
+    }
     /// Gets the peer's address. Some for TCP, None for Unix sockets.
     pub(crate) fn peer_addr(&mut self) -> std::io::Result<Option<SocketAddr>> {
         match self {

@@ -20,8 +20,10 @@ release. Future upgrades must remove/reapply these changes deliberately.
   reject CR, LF, NUL and other prohibited control bytes;
   field names must be HTTP tokens. Folded headers are rejected; only SP/HTAB count
   as optional whitespace. Lines are limited to 8 KiB, with at most 100 fields and
-  64 KiB of total header lines. Guarded connections reject upgrades, whose upstream
-  reader otherwise ignores CL/TE framing.
+  64 KiB of total header lines. Guarded connections reject upgrades with CL/TE
+  framing or of a method other than `GET`, because the upstream upgrade reader ignores
+  CL/TE. A body-less `GET` upgrade reaches the handler, for the Connect tunnel
+  (`Request::upgrade_split`, `vendor/tiny_http/APASSY-PATCH.md`).
 - Inbound chunk metadata is limited to 8 KiB per line without allocation, uses
   checked hexadecimal arithmetic and strict CRLF, and rejects incomplete chunks.
   Incomplete length-delimited bodies also fail. Trailers remain unsupported, as in

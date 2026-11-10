@@ -2285,3 +2285,59 @@ An event that does not apply is logged and answered `200` with its id stored, so
 ### 34.9 Tests
 
 `tests/server_billing.rs` runs the handlers against `tests/common/fake_stripe.rs` (an in-process server on a free loopback port that records calls and replays idempotent POSTs) and `MemoryBillingStore`, with the fixtures of `tests/fixtures/connect-billing-v1/` of the core. `tests/connect_billing_sandbox.rs` is the test-clock flow against the Stripe sandbox, ignored unless `STRIPE_SANDBOX_KEY_FILE` is set, run only by `.github/workflows/connect-sandbox.yml` (manual).
+
+## 35. Tunnel and ingress
+
+ADR 0037 stage 7, unit C4; the wire is docs/contracts/connect-tunnel-v1.md (the contract wins where this section is shorter). Code: `src/server/tunnel.rs` (the broker), `src/server/tunnel/frame.rs` (the frame and the stream rules), `src/server/tunnel/ws.rs` (WebSocket), `src/server/ingress.rs` (ports 443 and 80). The HTTP routes and the configuration keys join in a later step, after the account store (unit C1); until then nothing in `Relay::start` starts the broker or the ingress.
+
+### 35.1 What the broker does
+
+A node keeps one WebSocket (`GET /v1/tunnel/node`, subprotocol `apassy-tunnel-v1`). Each dial of a device (`GET /v1/tunnel/dial/{node_id}`) and each ingress connection is one stream of the frame mux `[stream u32 BE][kind u8][flags u8][len u16 BE][payload]` on it. The broker forwards bytes unchanged, stores none of them, and logs nothing: no content, no token, no client address. For each account and UTC month it counts dials, streams, and bytes (both directions, every stream of the account's nodes): `Broker::usage`, `usage_all`, and `restore_usage` (the store keeps them across a restart).
+
+The broker asks the account store through the trait `TunnelDirectory`: the caller of a bearer token (`Refusal::Unauthenticated` is 401, `Refusal::AccountRequired` 403 `account_required`), the node of the caller's device, a node by id, `has_grant(node_id, grantee_account)`, `entitled(account_id)`, and `budget_units(account_id)` (1, or the people of Family, or the members of Team). A device may dial a node of its own account, or of another account that granted its account (`tunnel::may_dial`). `MemoryDirectory` is the test implementation.
+
+### 35.2 The checks before the `101`
+
+`Broker::serve_node` and `Broker::serve_dial` take a `tiny_http::Request`, answer a refusal with the error envelope, or answer `101 Switching Protocols` with `Sec-WebSocket-Accept` and `Sec-WebSocket-Protocol: apassy-tunnel-v1` through `Request::upgrade_split`, and return at once; two threads carry the WebSocket after that. A dial is checked in the contract's order: 400 `invalid_request` (not an upgrade, another subprotocol, a body), 401 `unauthenticated`, 403 `account_required`, 404 `node_unknown` (also a malformed node id), 403 `not_in_group`, 403 `plan_required`, 429 `tunnel_limit`, 503 `tunnel_offline`. A node WebSocket: 400, 401, 403 `account_required`, 404 `node_unknown` (the device has no registered node), 403 `plan_required`, 403 `account_limit` (8 nodes of the account online), 429 `tunnel_limit` (all node WebSockets of the broker).
+
+A second WebSocket of the same node replaces the first: the old one gets close 4005, and its streams end (their dials get 4001). A node that goes away ends its streams the same way.
+
+### 35.3 Streams
+
+Connect opens every stream, with ids from 1 that only grow on one WebSocket. A dial opens a `device` stream with an empty `open`; each binary message of the dial (1 to 16384 bytes; more is close 1009) becomes one frame. A node's `close` closes the dial with 1000 after the last bytes, and Connect closes the other direction; a node's `reset` closes it with 4004. A dial's WebSocket close sends `close`; if the node does not close its side within `Limits::close_grace` (10 s), Connect resets the stream. `frame::Sequencer` applies the rules of contract section 4 to both directions: a broken rule of a live stream resets that stream (a `reset` to the node, 4004 to the client) and leaves the WebSocket open; a frame for no live stream is dropped, and a `reset` is never answered with a `reset`. A malformed frame closes the node's WebSocket with 1002, a text message with 1003.
+
+The frames of a stream are found by its id in the sequencer of its own WebSocket and go only to that stream's client: no buffer is shared between streams (the property tests interleave streams at random).
+
+### 35.4 Limits and queues
+
+`tunnel::Limits` (defaults; configuration, not wire constants): 64 open streams of an account (all kinds, the ingress included), 8 nodes online, 60 dials a clock minute, 20 GiB a month for each budget unit, pings every 30 s, a WebSocket closed after 90 s without a message (read and write timeouts), a stream reset after 15 minutes without a byte, 256 KiB buffered toward one client, 1 MiB queued toward one node, 4096 node WebSockets and 4096 streams for the whole broker. The month and the minute come from an injectable `Clock`.
+
+Over the byte budget the account's open streams close with 4002 and new dials and ingress streams are refused (429, or a closed connection) until the first day of the next UTC month. A larger budget (more people) counts from the next new stream; a month that tripped stays tripped.
+
+Every queue has a cap. Toward a node: data waits for room (backpressure to the client's TCP window), `open` frames are bounded by the stream count, resets and pongs have a queue of at most 1024 entries (a pong replaces a queued pong; a reset over the cap is dropped, since the node drops late frames anyway). Toward a client: over 256 KiB the stream is reset, so a client that does not read never makes Connect buffer more, and a node's writes never wait for one client. A client writer stuck in a write when its stream is reset has its socket shut down.
+
+### 35.5 WebSocket
+
+`tunnel::ws` is this crate's own RFC 6455 code: `Cargo.lock` had no synchronous WebSocket crate, and the tunnel needs only binary messages, ping, pong, and close, without extensions; SHA-1 for the handshake comes from `ring`, already in the lock. It refuses RSV bits, unknown opcodes, unmasked client frames, masked server frames, non-minimal lengths, a 64-bit length with the top bit set, control frames over 125 bytes or fragmented, a continuation without a message, a new message inside a fragmented one, a message over its cap (checked before any allocation), a one-byte close payload, an invalid close code, and a close reason that is not UTF-8.
+
+### 35.6 The vendored HTTP server
+
+The relay's deadline transport refused every upgrade (`vendor/tiny_http/APASSY-PATCH.md`). It now passes a `GET` upgrade without `Content-Length` or `Transfer-Encoding` to the handler (anything else is still refused, and a connection still serves one request). `Request::upgrade_split` ends the request's header, body, and handle deadlines, sets read and write timeouts of `Limits::idle_timeout`, makes the reaper forget the transport, and returns the read half, the write half, and a shutdown function. The read half is the buffered reader that read the head, so a first WebSocket frame in the same TCP segment as the handshake is kept (`tests/server_tunnel.rs`, `upgrade_keeps_bytes_sent_with_the_head`). The routing step must answer an `Upgrade` on every other route as before (the proxy already answers 501 `not_supported`).
+
+### 35.7 The ingress
+
+`ingress::serve_sni` (port 443): reads exactly the first TLS record, at most 16 KiB, within 5 seconds; parses only the ClientHello's `server_name` (one `host_name` entry; every length must add up, no duplicate extension, no bytes after the record, a ClientHello that spans records is refused); and opens a `public` stream with the exact record as the payload of `open`. Bytes the agent sent after the record are forwarded as data. A name of no registered node, an offline node, a node of an account without a plan, a name outside the zone, or a hello without a name gets the alert `15 03 03 00 02 02 70` and a close. A truncated, malformed, or slow hello is closed without an answer. Over the account's stream limit or budget the connection is closed.
+
+`ingress::serve_acme` (port 80): reads a request head of at most 8 KiB within 5 seconds; forwards only `GET /.well-known/acme-challenge/<token>` (`[A-Za-z0-9_-]`, 1 to 128) over HTTP/1.1 with one `Host` (an optional `:80`) that is the public name of an online node, and no body and no bytes after the head, as an `acme` stream whose `open` carries the head and `close`; the node's answer (at most 64 KiB) goes back. Anything else gets `HTTP/1.1 404 Not Found`, `Connection: close`, an empty body.
+
+Both keep each client address only in memory, for 30 new connections a minute per address (IPv6 per /64; a table of at most 65,536 addresses, and when it is full of addresses of this minute, new ones are refused), and at most 256 connections in their first record or head. `IngressHandle::stats` counts accepted, rate-limited, busy, malformed, timed-out, unrecognized, limited, and forwarded connections, with no address and no name.
+
+### 35.8 Tests
+
+`tests/server_tunnel.rs`, on free loopback ports through the relay's own deadline transport: the contract vectors (frames, invalid frames, sequences); the sequencer under random interleaving; 404 for an unknown node, 503 for an offline one, the order of 401, 403 `account_required`, 400, and 403 `plan_required`; another account without a grant (403), with one, and after `revoke_grant` (4003); the eighth-node limit; the first frame in the handshake's segment; a tunnel that outlives the request deadlines; streams of eight concurrent devices with random sizes and a node that echoes in random pieces; slot release on close; the 65th stream (429, and the ingress refused); the dial rate; the byte budget trip and its reset on the first of the month with a fake clock; node replacement (4005 and 4001); node close and reset; a broken stream rule, a malformed frame, text, and an oversized dial message; a client that does not read; a rustls ClientHello forwarded unchanged both ways; unknown, offline, foreign, and not-entitled names; truncated, malformed, slow, and silent hellos; the per-address limit; the ACME path filter; node removal and a plan's end; usage and its restore. Unit tests: `tunnel::frame`, `tunnel::ws`, `tunnel` (months, names), `ingress` (every truncation of a hello, malformed hellos, ACME heads, the address table).
+
+### 35.9 What this does not protect
+
+- Connect sees the sizes and times of the TLS records of every stream, the server names of the ingress, and the client addresses of the ingress (in memory).
+- A node can hold the slots of its own account's streams (up to 64) until the idle reset; it cannot reach another account's streams.
+- The ingress is a raw TCP port on the Connect host: the per-address limit and the pending cap bound the work of one address, not of many.

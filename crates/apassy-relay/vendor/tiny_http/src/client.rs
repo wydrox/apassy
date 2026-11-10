@@ -171,7 +171,15 @@ impl ClientConnection {
             (method, path, version, headers)
         };
 
+        // Apassy (connect-tunnel-v1): a GET upgrade without body framing headers is
+        // allowed; its reader is the raw stream and nothing in it is a body. The handler
+        // either answers it (one request per connection) or calls `upgrade_split`.
+        let bodyless_get = method == Method::Get
+            && !headers.iter().any(|h: &crate::Header| {
+                h.field.equiv("Content-Length") || h.field.equiv("Transfer-Encoding")
+            });
         if self.deadline.is_some()
+            && !bodyless_get
             && headers.iter().any(|h: &crate::Header| {
                 h.field.equiv("Upgrade")
                     || (h.field.equiv("Connection")
@@ -181,8 +189,8 @@ impl ClientConnection {
                             .any(|token| token.trim().eq_ignore_ascii_case("upgrade")))
             })
         {
-            // Relay endpoints do not upgrade. Upstream's upgrade reader ignores
-            // Content-Length and Transfer-Encoding, so never select it here.
+            // Relay endpoints upgrade only a body-less GET. Upstream's upgrade reader
+            // ignores Content-Length and Transfer-Encoding, so never select it otherwise.
             return Err(ReadError::WrongHeader(version));
         }
         if let Some(deadline) = &self.deadline {
