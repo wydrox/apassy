@@ -13,6 +13,7 @@ pub mod admin;
 pub mod approvals;
 pub mod audit;
 pub mod auth;
+pub mod billing;
 pub mod connect;
 pub mod decide;
 pub mod devices;
@@ -32,6 +33,7 @@ pub mod rollback;
 pub mod runkeys;
 pub mod sessions;
 pub mod store;
+pub mod stripe;
 pub mod sync;
 
 use std::collections::HashMap;

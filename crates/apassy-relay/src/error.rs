@@ -115,6 +115,12 @@ pub mod codes {
     /// agent on a relay with `APASSY_RELAY_TEAM_VAULTS=0`. 410: the feature is gone here,
     /// and a retry does not help.
     pub const TEAM_VAULTS_RETIRED: &str = "team_vaults_retired";
+    // Connect billing and groups (docs/contracts/connect-billing-v1.md).
+    /// A count of people or seats outside `1 ≤ n ≤ max` of the plan, or below the
+    /// active members of the group.
+    pub const SEAT_LIMIT: &str = "seat_limit";
+    /// A group route or call by an account that is not in the group.
+    pub const NOT_IN_GROUP: &str = "not_in_group";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -152,12 +158,13 @@ pub fn status_of(code: &str) -> u16 {
         | PLAN_REQUIRED
         | FEED_LIMIT
         | FEED_RATE
-        | TOO_MANY_ACTIONS => 403,
+        | TOO_MANY_ACTIONS
+        | NOT_IN_GROUP => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
         | PUSH_GATEWAY_REFUSED | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED
-        | ACTION_EXPIRED => 409,
+        | ACTION_EXPIRED | SEAT_LIMIT => 409,
         TEAM_VAULTS_RETIRED => 410,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
