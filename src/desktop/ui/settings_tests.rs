@@ -216,6 +216,8 @@ fn cases() -> [(
             &[
                 "Command line",
                 "apassy",
+                // The Linux package brings the command: Settings offers no install there.
+                #[cfg(not(target_os = "linux"))]
                 "Install tools…",
                 "Browser extension",
             ],

@@ -268,7 +268,13 @@ fn settings_show_the_groups_of_the_selected_section_only() {
         ),
         (
             SettingsSection::Tools,
-            &["Command line", "Install tools…", "Browser extension"][..],
+            &[
+                "Command line",
+                // The Linux package brings the command: Settings offers no install there.
+                #[cfg(not(target_os = "linux"))]
+                "Install tools…",
+                "Browser extension",
+            ][..],
             &["Back up now…", "Socket", "Sessions"][..],
         ),
         (
