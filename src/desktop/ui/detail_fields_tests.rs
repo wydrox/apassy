@@ -355,6 +355,36 @@ fn username_copy_writes_the_clipboard_without_an_owner_check() {
     assert!(!window.text.contains(PASSWORD));
 }
 
+/// A session that cannot clear its own copy shows the Copy of a secret disabled, and a
+/// click asks for no owner check. The Copy of the username, no secret, still works.
+#[test]
+fn password_copy_is_disabled_when_the_session_cannot_clear_its_copy() {
+    let _session = crate::desktop::clipboard::test_session::unavailable(
+        "Clipboard copy is unavailable: synthetic session reason.",
+    );
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked_app(&dir);
+    let mut window = Window::new();
+    let id = bano_login(&mut app);
+    open(&mut app, &mut window, id);
+    assert!(
+        window.beside("Password", "Copy").is_some(),
+        "{}",
+        window.text
+    );
+    assert!(!window.named("Copy Password"), "{:?}", window.names);
+    window.click_beside(&mut app, "Password", "Copy");
+    assert!(
+        app.owner.check.is_none(),
+        "a disabled Copy asks for nothing"
+    );
+    assert!(window.copied.is_empty(), "{:?}", window.copied);
+    assert!(!window.text.contains(PASSWORD));
+
+    window.click_beside(&mut app, "Username", "Copy");
+    assert_eq!(window.copied, vec![USERNAME.to_owned()]);
+}
+
 /// "Add website…" is on the Website row of a login without a website only: not for a
 /// login with a website or a website detail, another kind, or an archived login.
 #[test]

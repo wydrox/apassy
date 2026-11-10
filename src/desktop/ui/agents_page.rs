@@ -171,7 +171,11 @@ const ACCESS_HELP: [&str; 4] = [
     "Tailscale Funnel opens only the MCP endpoint and the proxy.",
     "Credential values stay on this Mac.",
     "Give a cloud agent the address. It asks to connect; you approve it in Decisions.",
-    "Switching on needs Touch ID. Keep this Mac unlocked and awake.",
+    if cfg!(target_os = "linux") {
+        "Switching on needs the passphrase or system authentication. Keep this computer unlocked and awake."
+    } else {
+        "Switching on needs Touch ID. Keep this Mac unlocked and awake."
+    },
 ];
 
 // ---- The page of all agents. ----
@@ -965,7 +969,9 @@ impl AgentPage {
         }
         if let Some(at) = connected {
             let how = match local {
-                Some(local) if local.remote && local.oauth => " with Touch ID",
+                Some(local) if local.remote && local.oauth => {
+                    concat!(" with ", crate::touch_id!())
+                }
                 _ => "",
             };
             help.push(format!(

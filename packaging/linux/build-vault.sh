@@ -97,7 +97,7 @@ Maintainer: Apassy authors <apassy@wyderka.cc>
 Section: utils
 Priority: optional
 Depends: $depends
-Suggests: libsecret-tools, policykit-1
+Suggests: libsecret-tools, polkitd | policykit-1
 Conflicts: apassy
 Replaces: apassy
 Description: Apassy encrypted vault, desktop and browser passkeys

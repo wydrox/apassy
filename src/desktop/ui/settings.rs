@@ -289,7 +289,7 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     rows::group(ui, Some("Owner checks"), |g| {
         g.field(
             if cfg!(target_os = "linux") {
-                "Owner confirmation"
+                "How often to ask"
             } else {
                 "How often to ask for Touch ID"
             },
@@ -299,7 +299,9 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     .map(|value| (value, value.label().to_owned()))
                     .collect();
                 ui.add_enabled_ui(
-                    app.owner.helper.is_some()
+                    (app.owner.helper.is_some()
+                        || (cfg!(target_os = "linux")
+                            && app.owner.session.observation().lock_observed()))
                         && app.owner.frequency_read.is_none()
                         && app.owner.frequency_write.is_none(),
                     |ui| {
@@ -317,9 +319,9 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             },
         );
         g.note_row(if cfg!(target_os = "linux") {
-            "Each sensitive action requires fresh confirmation with the vault passphrase or optional system authentication. Linux screen-lock observation and approval reuse are unavailable."
+            crate::desktop::session_watch::owner_note(&app.owner.session.observation())
         } else {
-            "After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your Mac locks or sleeps."
+            "After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your Mac locks or sleeps.".to_owned()
         });
     });
     if let Some(note) = &app.owner.frequency_note {
@@ -333,7 +335,7 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 .into_iter()
                 .map(|value| (value, value.label().to_owned()))
                 .collect();
-            ui.add_enabled_ui(app.owner.helper.is_some() && !app.auto_lock.busy(), |ui| {
+            ui.add_enabled_ui(app.auto_lock_storable() && !app.auto_lock.busy(), |ui| {
                 kit::picker(
                     ui,
                     "auto-lock",
@@ -346,8 +348,10 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             .inner
         });
         g.note_row(if cfg!(target_os = "linux") {
-            "Lock the vault manually when you finish. Automatic screen-lock and inactivity detection are unavailable on Linux. Agents cannot use credentials while the vault is locked."
-        } else { "Agents can't use your credentials while the vault is locked." });
+            crate::desktop::session_watch::lock_note(&app.owner.session.observation())
+        } else {
+            "Agents can't use your credentials while the vault is locked.".to_owned()
+        });
     });
     if let Some(note) = &app.auto_lock.note {
         rows::footnote(ui, note);

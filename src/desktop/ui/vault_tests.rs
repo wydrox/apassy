@@ -230,7 +230,7 @@ fn settings_show_the_groups_of_the_selected_section_only() {
                 &[
                     "Passphrase",
                     "Change passphrase…",
-                    "Owner confirmation",
+                    "How often to ask",
                     "Every time",
                 ][..]
             } else {

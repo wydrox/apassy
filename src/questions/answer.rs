@@ -171,7 +171,9 @@ impl AnswerError {
         match self {
             Self::NotOffered => "This question does not offer this answer.".to_owned(),
             Self::Unbuildable => "Apassy cannot send this answer from another device.".to_owned(),
-            Self::NeedsOwnerCheck => "Confirm with Touch ID to send this answer.".to_owned(),
+            Self::NeedsOwnerCheck => {
+                concat!("Confirm with ", crate::touch_id!(), " to send this answer.").to_owned()
+            }
             Self::Sign => "Apassy could not sign the answer.".to_owned(),
             Self::AlreadyAnswered => "Already answered.".to_owned(),
             Self::Expired => "Expired.".to_owned(),

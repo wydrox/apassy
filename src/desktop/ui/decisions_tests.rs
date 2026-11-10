@@ -1479,7 +1479,7 @@ fn suggestions_accept_a_stricter_value_at_once_and_a_looser_one_after_the_check(
         "Ignore",
         "Development",
         "Production",
-        "Development needs Touch ID or the passphrase.",
+        concat!("Development needs ", crate::owner_check!(), "."),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -1676,7 +1676,7 @@ fn ignore_needs_the_check_only_when_it_restores_a_looser_environment() {
         "Is Guarded key a production key?",
         "Before",
         "Ignore makes it development again.",
-        "Development and Ignore need Touch ID or the passphrase.",
+        concat!("Development and Ignore need ", crate::owner_check!(), "."),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }

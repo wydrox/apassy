@@ -7,7 +7,7 @@
 //! a new credential moves no authority (the bouncer decides each use of it).
 
 use super::{OwnerSession, fail, map_err};
-use crate::desktop::model::ModelResult;
+use crate::owner::model::ModelResult;
 use crate::vault::detect::{self, Detected};
 use crate::vault::{Environment, ItemSummary, VaultErrorKind};
 

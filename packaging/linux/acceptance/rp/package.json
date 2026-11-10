@@ -1,0 +1,10 @@
+{
+  "name": "apassy-linux-acceptance-rp",
+  "private": true,
+  "description": "Local synthetic relying party for the Linux vault acceptance kit. Synthetic accounts only.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@simplewebauthn/server": "14.0.3"
+  }
+}
