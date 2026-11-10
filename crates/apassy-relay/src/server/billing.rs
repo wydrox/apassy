@@ -31,8 +31,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{RelayError, RelayResult, codes};
 use crate::secret::SecretString;
 use crate::server::stripe::{
-    self, Form, LogSink, MAX_WEBHOOK_BODY, SignatureError, StripeClient, StripePrice,
-    is_stripe_id,
+    self, Form, LogSink, MAX_WEBHOOK_BODY, SignatureError, StripeClient, StripePrice, is_stripe_id,
 };
 use crate::sync_head::hex;
 
@@ -237,7 +236,9 @@ pub fn resolve_prices(raw: &HashMap<String, StripePrice>, log: &LogSink) -> Reso
     let mut out = BTreeMap::new();
     for key in LOOKUP_KEYS {
         let Some(price) = raw.get(key) else {
-            log(&format!("price {key}: no active price with this lookup key"));
+            log(&format!(
+                "price {key}: no active price with this lookup key"
+            ));
             continue;
         };
         let Some((plan, interval)) = parse_lookup_key(key) else {
@@ -274,7 +275,8 @@ fn check_price(
         return Err("tax_behavior is not inclusive");
     }
     match &price.recurring {
-        Some(recurring) if recurring.interval == interval.as_str() && recurring.interval_count == 1 => {}
+        Some(recurring)
+            if recurring.interval == interval.as_str() && recurring.interval_count == 1 => {}
         _ => return Err("the recurring interval does not match the lookup key"),
     }
     let spec = plan.spec();
@@ -283,7 +285,10 @@ fn check_price(
             if price.billing_scheme.as_deref().unwrap_or("per_unit") != "per_unit" {
                 return Err("the billing scheme is not per_unit");
             }
-            let amount = price.unit_amount.filter(|a| *a > 0).ok_or("no unit amount")?;
+            let amount = price
+                .unit_amount
+                .filter(|a| *a > 0)
+                .ok_or("no unit amount")?;
             let extra = (spec.max > spec.included).then_some(amount);
             Ok((amount, extra))
         }
@@ -303,7 +308,10 @@ fn check_price(
             if first.unit_amount.unwrap_or(0) != 0 || second.flat_amount.unwrap_or(0) != 0 {
                 return Err("tier 1 has a unit amount or tier 2 a flat amount");
             }
-            let amount = first.flat_amount.filter(|a| *a > 0).ok_or("tier 1 has no flat amount")?;
+            let amount = first
+                .flat_amount
+                .filter(|a| *a > 0)
+                .ok_or("tier 1 has no flat amount")?;
             let extra = second.unit_amount.ok_or("tier 2 has no unit amount")?;
             Ok((amount, Some(extra)))
         }
@@ -445,7 +453,9 @@ impl BillingConfig {
                 .parse()
                 .map_err(|_| RelayError::invalid(format!("{name} is not a number.")))?;
             if !(min..=max).contains(&value) {
-                return Err(RelayError::invalid(format!("{name} must be {min} to {max}.")));
+                return Err(RelayError::invalid(format!(
+                    "{name} must be {min} to {max}."
+                )));
             }
             Ok(value)
         };
@@ -585,9 +595,10 @@ impl PlanState {
     /// read-only.
     pub fn allows(&self, capability: Capability) -> bool {
         match capability {
-            Capability::NewStore | Capability::Push | Capability::Dial | Capability::EntitlementToken => {
-                self.entitled
-            }
+            Capability::NewStore
+            | Capability::Push
+            | Capability::Dial
+            | Capability::EntitlementToken => self.entitled,
             Capability::Pull | Capability::Download => {
                 self.entitled || self.status == PlanStatus::ReadOnly
             }
@@ -714,7 +725,11 @@ impl PlanView {
         Self::from_state(&PlanState::NONE, None, None)
     }
 
-    fn from_state(state: &PlanState, row: Option<&SubscriptionRow>, group_id: Option<&str>) -> Self {
+    fn from_state(
+        state: &PlanState,
+        row: Option<&SubscriptionRow>,
+        group_id: Option<&str>,
+    ) -> Self {
         let row = row.filter(|_| state.status != PlanStatus::None);
         Self {
             plan: row.and_then(|row| row.plan),
@@ -955,7 +970,10 @@ impl MemoryBillingStore {
     /// Adds an account to a group (C3 does this through invites and confirmations).
     pub fn add_member(&self, group_id: &str, account: &str, role: GroupRole, state: MemberState) {
         let mut guard = self.lock();
-        let kind = guard.groups.get(group_id).map_or(GroupKind::Family, |g| g.kind);
+        let kind = guard
+            .groups
+            .get(group_id)
+            .map_or(GroupKind::Family, |g| g.kind);
         guard.accounts.insert(account.to_owned());
         guard.members.insert(
             account.to_owned(),
@@ -1021,7 +1039,11 @@ impl BillingTx for MemoryState {
     }
 
     fn customer_of_account(&mut self, account: &str) -> RelayResult<Option<CustomerRow>> {
-        Ok(self.customers.values().find(|c| c.account == account).cloned())
+        Ok(self
+            .customers
+            .values()
+            .find(|c| c.account == account)
+            .cloned())
     }
 
     fn customer(&mut self, customer: &str) -> RelayResult<Option<CustomerRow>> {
@@ -1212,7 +1234,10 @@ pub struct MaintenanceReport {
 /// Parses a strict JSON request body.
 pub fn parse_request<T: for<'de> Deserialize<'de>>(body: &[u8]) -> RelayResult<T> {
     if body.len() > 64 * 1024 {
-        return Err(RelayError::new(codes::PAYLOAD_TOO_LARGE, "The body is larger than 64 KiB."));
+        return Err(RelayError::new(
+            codes::PAYLOAD_TOO_LARGE,
+            "The body is larger than 64 KiB.",
+        ));
     }
     serde_json::from_slice(body).map_err(|_| RelayError::invalid("The request body is not valid."))
 }
@@ -1231,7 +1256,12 @@ pub struct Billing<S: BillingStore> {
 }
 
 impl<S: BillingStore> Billing<S> {
-    pub fn new(store: S, stripe: StripeClient, config: BillingConfig, webhook_secret: SecretString) -> RelayResult<Self> {
+    pub fn new(
+        store: S,
+        stripe: StripeClient,
+        config: BillingConfig,
+        webhook_secret: SecretString,
+    ) -> RelayResult<Self> {
         stripe::check_webhook_secret(&webhook_secret)?;
         Ok(Self {
             store,
@@ -1280,13 +1310,19 @@ impl<S: BillingStore> Billing<S> {
             (Plan::Family, Some(people), None) => people,
             (Plan::Team, None, Some(seats)) => seats,
             (Plan::Family, _, _) => {
-                return Err(RelayError::invalid("A family checkout needs `people` and no `seats`."));
+                return Err(RelayError::invalid(
+                    "A family checkout needs `people` and no `seats`.",
+                ));
             }
             (Plan::Team, _, _) => {
-                return Err(RelayError::invalid("A team checkout needs `seats` and no `people`."));
+                return Err(RelayError::invalid(
+                    "A team checkout needs `seats` and no `people`.",
+                ));
             }
             (Plan::Personal, _, _) => {
-                return Err(RelayError::invalid("Connect Personal takes no `people` or `seats`."));
+                return Err(RelayError::invalid(
+                    "Connect Personal takes no `people` or `seats`.",
+                ));
             }
         };
         check_count(request.plan, count)?;
@@ -1320,14 +1356,22 @@ impl<S: BillingStore> Billing<S> {
                 "checkout refused: no usable price {}",
                 lookup_key(request.plan, request.interval)
             ));
-            return Err(RelayError::new(codes::BUSY, "This plan cannot be bought now."));
+            return Err(RelayError::new(
+                codes::BUSY,
+                "This plan cannot be bought now.",
+            ));
         };
-        if request.plan == Plan::Family && price.extra != Some(self.config.family_extra(request.interval)) {
+        if request.plan == Plan::Family
+            && price.extra != Some(self.config.family_extra(request.interval))
+        {
             self.log(&format!(
                 "checkout refused: tier 2 of {} differs from the configured Family extra",
                 lookup_key(request.plan, request.interval)
             ));
-            return Err(RelayError::new(codes::BUSY, "This plan cannot be bought now."));
+            return Err(RelayError::new(
+                codes::BUSY,
+                "This plan cannot be bought now.",
+            ));
         }
         let form = checkout_form(
             account,
@@ -1351,7 +1395,10 @@ impl<S: BillingStore> Billing<S> {
             ],
         );
         let session = self.stripe.create_checkout_session(&form, &key)?;
-        self.log(&format!("checkout session {} made for {account}", session.id));
+        self.log(&format!(
+            "checkout session {} made for {account}",
+            session.id
+        ));
         Ok(CheckoutAnswer {
             url: session.url,
             session_id: session.id,
@@ -1376,7 +1423,9 @@ impl<S: BillingStore> Billing<S> {
         })?;
         let key = random_idempotency_key("portal")?;
         let return_url = format!("{}/connect/done", self.config.site_url);
-        let session = self.stripe.create_portal_session(&customer, &return_url, &key)?;
+        let session = self
+            .stripe
+            .create_portal_session(&customer, &return_url, &key)?;
         Ok(PortalAnswer { url: session.url })
     }
 
@@ -1401,20 +1450,31 @@ impl<S: BillingStore> Billing<S> {
     /// Asks Stripe for a new quantity of the group's subscription. For C3's confirm of a
     /// member (owner or admin, checked by the caller) and for `change_seats`. Refuses a
     /// count outside `1 ≤ n ≤ max` or below the active members (`409 seat_limit`).
-    pub fn request_group_quantity(&self, group_id: &str, quantity: u32, now: u64) -> RelayResult<SeatsAnswer> {
+    pub fn request_group_quantity(
+        &self,
+        group_id: &str,
+        quantity: u32,
+        now: u64,
+    ) -> RelayResult<SeatsAnswer> {
         let durations = self.config.durations;
         let (row, active) = self.store.transaction(|tx| {
-            let group = tx.group(group_id)?.ok_or_else(|| RelayError::not_found("group"))?;
+            let group = tx
+                .group(group_id)?
+                .ok_or_else(|| RelayError::not_found("group"))?;
             let row = group_subscription(tx, &group)?
                 .ok_or_else(|| RelayError::not_found("subscription of this group"))?;
             Ok((row, tx.active_members(group_id)?))
         })?;
-        let plan = row.plan.ok_or_else(|| RelayError::not_found("plan of this group"))?;
+        let plan = row
+            .plan
+            .ok_or_else(|| RelayError::not_found("plan of this group"))?;
         row.state(now, &durations).require(Capability::Push)?;
         check_count(plan, quantity)?;
         if quantity < active {
             return Err(seat_limit(match plan {
-                Plan::Family => format!("The family has {active} people; choose at least {active}."),
+                Plan::Family => {
+                    format!("The family has {active} people; choose at least {active}.")
+                }
                 _ => format!("The team has {active} members; choose at least {active}."),
             }));
         }
@@ -1509,7 +1569,12 @@ impl<S: BillingStore> Billing<S> {
     /// effect. Every refusal changes nothing. An event that cannot apply (an unknown
     /// account, another customer, an unknown price) is logged, its id is stored, and the
     /// answer is 200, so Stripe does not retry it.
-    pub fn webhook(&self, signature: Option<&str>, body: &[u8], now: u64) -> RelayResult<WebhookOutcome> {
+    pub fn webhook(
+        &self,
+        signature: Option<&str>,
+        body: &[u8],
+        now: u64,
+    ) -> RelayResult<WebhookOutcome> {
         if body.len() > MAX_WEBHOOK_BODY {
             return Err(RelayError::new(
                 codes::PAYLOAD_TOO_LARGE,
@@ -1530,7 +1595,9 @@ impl<S: BillingStore> Billing<S> {
         let event: Event = serde_json::from_slice(body)
             .map_err(|_| RelayError::invalid("The Stripe event is not valid JSON."))?;
         if !is_stripe_id("evt_", &event.id) || event.kind.is_empty() || event.kind.len() > 100 {
-            return Err(RelayError::invalid("The Stripe event has no valid id or type."));
+            return Err(RelayError::invalid(
+                "The Stripe event has no valid id or type.",
+            ));
         }
         let durations = self.config.durations;
         let mut lines = Vec::new();
@@ -1546,7 +1613,10 @@ impl<S: BillingStore> Billing<S> {
         }
         let duplicate = effect == WebhookEffect::Duplicate;
         if duplicate {
-            self.log(&format!("webhook {} ({}) is a repeat", event.id, event.kind));
+            self.log(&format!(
+                "webhook {} ({}) is a repeat",
+                event.id, event.kind
+            ));
         }
         Ok(WebhookOutcome {
             answer: WebhookAnswer {
@@ -1559,7 +1629,10 @@ impl<S: BillingStore> Billing<S> {
 }
 
 fn not_in_group() -> RelayError {
-    RelayError::new(codes::NOT_IN_GROUP, "This account is not in that family or team.")
+    RelayError::new(
+        codes::NOT_IN_GROUP,
+        "This account is not in that family or team.",
+    )
 }
 
 /// The time the stores of an ended plan are deleted, if its end is known.
@@ -1663,7 +1736,10 @@ fn account_plan(
 }
 
 /// The subscription of a group: the owner's subscription bound to it.
-fn group_subscription(tx: &mut dyn BillingTx, group: &GroupRow) -> RelayResult<Option<SubscriptionRow>> {
+fn group_subscription(
+    tx: &mut dyn BillingTx,
+    group: &GroupRow,
+) -> RelayResult<Option<SubscriptionRow>> {
     Ok(tx
         .subscriptions_of_account(&group.owner_account)?
         .into_iter()
@@ -1722,12 +1798,18 @@ fn apply_event(
                 return ignore(lines, &format!("session {session} names no account"));
             };
             if account != meta || !is_account_id(account) || !tx.account_exists(account)? {
-                return ignore(lines, &format!("session {session} names an unknown account"));
+                return ignore(
+                    lines,
+                    &format!("session {session} names an unknown account"),
+                );
             }
             let (Some(customer), Some(subscription)) =
                 (text(object, "/customer"), text(object, "/subscription"))
             else {
-                return ignore(lines, &format!("session {session} has no customer or subscription"));
+                return ignore(
+                    lines,
+                    &format!("session {session} has no customer or subscription"),
+                );
             };
             if !is_stripe_id("cus_", customer) || !is_stripe_id("sub_", subscription) {
                 return ignore(lines, &format!("session {session} has malformed ids"));
@@ -1740,12 +1822,18 @@ fn apply_event(
             if let Some(bound) = tx.customer(customer)?
                 && bound.account != account
             {
-                return ignore(lines, &format!("customer {customer} is bound to another account"));
+                return ignore(
+                    lines,
+                    &format!("customer {customer} is bound to another account"),
+                );
             }
             if let Some(row) = tx.subscription(subscription)?
                 && (row.account != account || row.customer != customer)
             {
-                return ignore(lines, &format!("subscription {subscription} is bound elsewhere"));
+                return ignore(
+                    lines,
+                    &format!("subscription {subscription} is bound elsewhere"),
+                );
             }
             let email = text(object, "/customer_details/email")
                 .filter(|email| email.len() <= 254 && email.contains('@'))
@@ -1766,19 +1854,26 @@ fn apply_event(
                 account: account.to_owned(),
             })
         }
-        "customer.subscription.created" | "customer.subscription.updated" | "customer.subscription.deleted" => {
+        "customer.subscription.created"
+        | "customer.subscription.updated"
+        | "customer.subscription.deleted" => {
             let Some(id) = text(object, "/id").filter(|id| is_stripe_id("sub_", id)) else {
                 return ignore(lines, "no subscription id");
             };
-            let Some(customer) = text(object, "/customer").filter(|c| is_stripe_id("cus_", c)) else {
+            let Some(customer) = text(object, "/customer").filter(|c| is_stripe_id("cus_", c))
+            else {
                 return ignore(lines, &format!("{id} has no customer"));
             };
             let metadata = text(object, "/metadata/account_id");
             let existing = tx.subscription(id)?;
             let account = match &existing {
                 Some(row) => {
-                    if row.customer != customer || metadata.is_some_and(|meta| meta != row.account) {
-                        return ignore(lines, &format!("{id} does not match its stored customer or account"));
+                    if row.customer != customer || metadata.is_some_and(|meta| meta != row.account)
+                    {
+                        return ignore(
+                            lines,
+                            &format!("{id} does not match its stored customer or account"),
+                        );
                     }
                     row.account.clone()
                 }
@@ -1792,7 +1887,10 @@ fn apply_event(
                     if let Some(bound) = tx.customer(customer)?
                         && bound.account != account
                     {
-                        return ignore(lines, &format!("customer {customer} is bound to another account"));
+                        return ignore(
+                            lines,
+                            &format!("customer {customer} is bound to another account"),
+                        );
                     }
                     if let Some(bound) = tx.customer_of_account(account)?
                         && bound.customer != customer
@@ -1802,8 +1900,10 @@ fn apply_event(
                     account.to_owned()
                 }
             };
-            let mut row = existing.unwrap_or_else(|| SubscriptionRow::bound(id, customer, &account));
-            let created_again = event.kind == "customer.subscription.created" && row.last_event_created > 0;
+            let mut row =
+                existing.unwrap_or_else(|| SubscriptionRow::bound(id, customer, &account));
+            let created_again =
+                event.kind == "customer.subscription.created" && row.last_event_created > 0;
             if event.created < row.last_event_created
                 || (event.created == row.last_event_created && created_again)
             {
@@ -1821,7 +1921,10 @@ fn apply_event(
             if let (Some(kind), Some(group)) = (plan.group_kind(), row.group_id.clone())
                 && tx.group(&group)?.is_some_and(|g| g.kind != kind)
             {
-                return ignore(lines, &format!("{id}: the plan does not fit its group {group}"));
+                return ignore(
+                    lines,
+                    &format!("{id}: the plan does not fit its group {group}"),
+                );
             }
             let status = if event.kind == "customer.subscription.deleted" {
                 StripeStatus::Canceled
@@ -1894,7 +1997,10 @@ fn apply_event(
                 return ignore(lines, &format!("{id}: the invoice has another customer"));
             }
             if event.created < row.last_invoice_created {
-                return ignore(lines, &format!("{id}: older than the last applied invoice event"));
+                return ignore(
+                    lines,
+                    &format!("{id}: older than the last applied invoice event"),
+                );
             }
             if event.kind == "invoice.paid" {
                 row.first_failed_at = None;
@@ -1906,9 +2012,12 @@ fn apply_event(
             lines.push(format!(
                 "{tag}: {id} of {}: first failure {}",
                 row.account,
-                row.first_failed_at.map_or("cleared".to_owned(), |t| t.to_string())
+                row.first_failed_at
+                    .map_or("cleared".to_owned(), |t| t.to_string())
             ));
-            Ok(WebhookEffect::Applied { account: row.account })
+            Ok(WebhookEffect::Applied {
+                account: row.account,
+            })
         }
         _ => {
             lines.push(format!("{tag}: stored, no effect"));
@@ -1937,7 +2046,10 @@ fn ensure_group(
         if member.role == GroupRole::Owner && member.kind == kind {
             row.group_id = Some(member.group_id);
         } else {
-            lines.push(format!("{tag}: {} is in another group; no group made", row.account));
+            lines.push(format!(
+                "{tag}: {} is in another group; no group made",
+                row.account
+            ));
         }
         return Ok(());
     }
@@ -1972,10 +2084,16 @@ mod tests {
     #[test]
     fn config_defaults_and_limits() {
         let none = |_: &str| None;
-        assert_eq!(BillingConfig::from_lookup(&none).unwrap(), BillingConfig::default());
-        let bad_delete = |name: &str| (name == "APASSY_CONNECT_DELETE_DAYS").then(|| "30".to_owned());
+        assert_eq!(
+            BillingConfig::from_lookup(&none).unwrap(),
+            BillingConfig::default()
+        );
+        let bad_delete =
+            |name: &str| (name == "APASSY_CONNECT_DELETE_DAYS").then(|| "30".to_owned());
         assert!(BillingConfig::from_lookup(&bad_delete).is_err());
-        let path = |name: &str| (name == "APASSY_CONNECT_SITE_URL").then(|| "https://a.example/x".to_owned());
+        let path = |name: &str| {
+            (name == "APASSY_CONNECT_SITE_URL").then(|| "https://a.example/x".to_owned())
+        };
         assert!(BillingConfig::from_lookup(&path).is_err());
         let custom = |name: &str| match name {
             "APASSY_CONNECT_GRACE_DAYS" => Some("7".to_owned()),
@@ -1994,7 +2112,13 @@ mod tests {
         let key = idempotency_key("checkout", &["acc_k7m2q4x3ca", "personal"]);
         assert!(key.starts_with("apassy-checkout-"));
         assert!(!key.contains("acc_"));
-        assert_eq!(key, idempotency_key("checkout", &["acc_k7m2q4x3ca", "personal"]));
-        assert_ne!(key, idempotency_key("checkout", &["acc_k7m2q4x3ca", "family"]));
+        assert_eq!(
+            key,
+            idempotency_key("checkout", &["acc_k7m2q4x3ca", "personal"])
+        );
+        assert_ne!(
+            key,
+            idempotency_key("checkout", &["acc_k7m2q4x3ca", "family"])
+        );
     }
 }

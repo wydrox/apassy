@@ -323,7 +323,8 @@ impl StripeConfig {
         let loopback = ["http://127.0.0.1:", "http://[::1]:", "http://localhost:"]
             .iter()
             .any(|prefix| base.starts_with(prefix));
-        if !(base.starts_with("https://") || loopback) || base.contains(['?', '#', ' ', '@', '\\']) {
+        if !(base.starts_with("https://") || loopback) || base.contains(['?', '#', ' ', '@', '\\'])
+        {
             return Err(RelayError::invalid(
                 "The Stripe API base must be https://, or http:// on a loopback address.",
             ));
@@ -407,7 +408,11 @@ impl StripeClient {
             if let Some(cache) = &*cache
                 && now.saturating_sub(cache.fetched_at) < PRICE_TTL
                 && now >= cache.fetched_at
-                && cache.keys.iter().map(String::as_str).eq(keys.iter().copied())
+                && cache
+                    .keys
+                    .iter()
+                    .map(String::as_str)
+                    .eq(keys.iter().copied())
             {
                 return Ok(cache.prices.clone());
             }
@@ -424,7 +429,13 @@ impl StripeClient {
             Err(error) => {
                 let cache = self.prices.lock().unwrap_or_else(PoisonError::into_inner);
                 match &*cache {
-                    Some(cache) if cache.keys.iter().map(String::as_str).eq(keys.iter().copied()) => {
+                    Some(cache)
+                        if cache
+                            .keys
+                            .iter()
+                            .map(String::as_str)
+                            .eq(keys.iter().copied()) =>
+                    {
                         Ok(cache.prices.clone())
                     }
                     _ => Err(error),
@@ -450,8 +461,15 @@ impl StripeClient {
         query.push(("active".into(), "true".into()));
         query.push(("expand[]".into(), "data.tiers".into()));
         query.push(("limit".into(), "100".into()));
-        let value = self.call(Method::Get, "/v1/prices", Some(&form_encode(&query)), None, None)?;
-        let list: PriceList = serde_json::from_value(value).map_err(|_| self.bad_answer("/v1/prices"))?;
+        let value = self.call(
+            Method::Get,
+            "/v1/prices",
+            Some(&form_encode(&query)),
+            None,
+            None,
+        )?;
+        let list: PriceList =
+            serde_json::from_value(value).map_err(|_| self.bad_answer("/v1/prices"))?;
         let mut prices = HashMap::new();
         for price in list.data {
             let Some(key) = price.lookup_key.clone() else {
@@ -493,10 +511,13 @@ impl StripeClient {
         idempotency_key: &str,
     ) -> RelayResult<PortalSession> {
         if !is_stripe_id("cus_", customer) {
-            return Err(RelayError::internal("The stored Stripe customer id is not valid."));
+            return Err(RelayError::internal(
+                "The stored Stripe customer id is not valid.",
+            ));
         }
         let mut form = Form::new();
-        form.push("customer", customer).push("return_url", return_url);
+        form.push("customer", customer)
+            .push("return_url", return_url);
         let value = self.call(
             Method::Post,
             "/v1/billing_portal/sessions",
@@ -522,7 +543,9 @@ impl StripeClient {
         idempotency_key: &str,
     ) -> RelayResult<()> {
         if !is_stripe_id("si_", item) {
-            return Err(RelayError::internal("The stored subscription item id is not valid."));
+            return Err(RelayError::internal(
+                "The stored subscription item id is not valid.",
+            ));
         }
         let mut form = Form::new();
         form.push("quantity", quantity.to_string())
@@ -541,7 +564,9 @@ impl StripeClient {
     /// contract section 9). A subscription Stripe no longer knows (404) counts as ended.
     pub fn cancel_subscription(&self, subscription: &str) -> RelayResult<()> {
         if !is_stripe_id("sub_", subscription) {
-            return Err(RelayError::internal("The stored subscription id is not valid."));
+            return Err(RelayError::internal(
+                "The stored subscription id is not valid.",
+            ));
         }
         match self.call(
             Method::Delete,
@@ -557,7 +582,9 @@ impl StripeClient {
     }
 
     fn bad_answer(&self, path: &str) -> RelayError {
-        (self.log)(&format!("stripe: the answer of {path} is not the expected object"));
+        (self.log)(&format!(
+            "stripe: the answer of {path} is not the expected object"
+        ));
         RelayError::new(codes::UPSTREAM_FAILED, "Stripe did not answer as expected.")
     }
 
@@ -572,7 +599,9 @@ impl StripeClient {
         idempotency_key: Option<&str>,
     ) -> RelayResult<Value> {
         if method == Method::Post && idempotency_key.is_none_or(str::is_empty) {
-            return Err(RelayError::internal("A Stripe POST needs an idempotency key."));
+            return Err(RelayError::internal(
+                "A Stripe POST needs an idempotency key.",
+            ));
         }
         let mut last = None;
         for attempt in 0..ATTEMPTS {
@@ -591,8 +620,12 @@ impl StripeClient {
                     ));
                     let retry = status == 409 || status == 429 || status >= 500;
                     last = Some(match status {
-                        404 => RelayError::new(codes::NOT_FOUND, "Stripe does not know that object."),
-                        429 | 500.. => RelayError::new(codes::BUSY, "Stripe is busy. Try again later."),
+                        404 => {
+                            RelayError::new(codes::NOT_FOUND, "Stripe does not know that object.")
+                        }
+                        429 | 500.. => {
+                            RelayError::new(codes::BUSY, "Stripe is busy. Try again later.")
+                        }
                         _ => RelayError::new(
                             codes::UPSTREAM_FAILED,
                             "Stripe did not accept the request.",
@@ -607,7 +640,10 @@ impl StripeClient {
                         "stripe: {} {path} failed: {words}",
                         method.as_str()
                     ));
-                    last = Some(RelayError::new(codes::BUSY, "Stripe cannot be reached. Try again later."));
+                    last = Some(RelayError::new(
+                        codes::BUSY,
+                        "Stripe cannot be reached. Try again later.",
+                    ));
                 }
             }
         }
@@ -630,7 +666,10 @@ impl StripeClient {
         let mut builder = ureq::http::Request::builder()
             .method(method.as_str())
             .uri(url)
-            .header("Authorization", format!("Bearer {}", self.config.key.expose()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.key.expose()),
+            )
             .header("Stripe-Version", self.config.api_version.as_str())
             .header("Accept", "application/json");
         if let Some(key) = idempotency_key {
@@ -800,7 +839,10 @@ mod tests {
     fn form_round_trips_brackets_and_urls() {
         let mut form = Form::new();
         form.push("line_items[0][price]", "price_X")
-            .push("success_url", "https://a.example/done?session_id={CHECKOUT_SESSION_ID}")
+            .push(
+                "success_url",
+                "https://a.example/done?session_id={CHECKOUT_SESSION_ID}",
+            )
             .push("name", "a b&c=d");
         let text = form.encode();
         assert!(!text.contains('[') && !text.contains('{') && !text.contains(' '));
@@ -811,7 +853,10 @@ mod tests {
     fn a_signed_body_verifies_and_a_changed_one_does_not() {
         let body = b"{\"id\":\"evt_1\"}\n";
         let header = signature_header(&secret(), 1000, body);
-        assert_eq!(verify_signature(Some(&header), body, &secret(), 1000), Ok(1000));
+        assert_eq!(
+            verify_signature(Some(&header), body, &secret(), 1000),
+            Ok(1000)
+        );
         assert_eq!(
             verify_signature(Some(&header), b"{\"id\":\"evt_2\"}\n", &secret(), 1000),
             Err(SignatureError::Mismatch)
@@ -820,7 +865,10 @@ mod tests {
             verify_signature(Some(&header), body, &secret(), 1301),
             Err(SignatureError::Timestamp)
         );
-        assert_eq!(verify_signature(Some(&header), body, &secret(), 1300), Ok(1000));
+        assert_eq!(
+            verify_signature(Some(&header), body, &secret(), 1300),
+            Ok(1000)
+        );
         assert_eq!(
             verify_signature(None, body, &secret(), 1000),
             Err(SignatureError::Header)
@@ -835,10 +883,22 @@ mod tests {
     #[test]
     fn only_restricted_or_sandbox_keys_are_taken() {
         for good in ["rk_live_abc123", "rk_test_abc123", "sk_test_abc123"] {
-            assert!(check_secret_key(&SecretString::new(good.into())).is_ok(), "{good}");
+            assert!(
+                check_secret_key(&SecretString::new(good.into())).is_ok(),
+                "{good}"
+            );
         }
-        for bad in ["sk_live_abc123", "pk_test_abc", "", "rk_test_a b", "whsec_x"] {
-            assert!(check_secret_key(&SecretString::new(bad.into())).is_err(), "{bad}");
+        for bad in [
+            "sk_live_abc123",
+            "pk_test_abc",
+            "",
+            "rk_test_a b",
+            "whsec_x",
+        ] {
+            assert!(
+                check_secret_key(&SecretString::new(bad.into())).is_err(),
+                "{bad}"
+            );
         }
     }
 
