@@ -413,7 +413,12 @@ impl FakeRelay {
     /// A vault store of Apassy Connect (plan s7 unit M3): a relay-sync-v1 team named
     /// `name` with the account key `public_key` as its device 1 of its kind, made by the
     /// fake Connect on `POST /v1/account/vaults`. Returns the team id and the device id.
-    pub fn add_store_team(&self, name: &str, device_name: &str, public_key: &[u8]) -> (String, u64) {
+    pub fn add_store_team(
+        &self,
+        name: &str,
+        device_name: &str,
+        public_key: &[u8],
+    ) -> (String, u64) {
         let mut relay = lock(&self.shared.0);
         relay.next_team += 1;
         let team_id: String = format!("t_fake{:06}", relay.next_team)

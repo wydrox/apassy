@@ -2331,9 +2331,16 @@ mod connect_sync {
         assert!(head.text.contains(&vault_id));
         let devices = cloud.relay.team_devices(&team);
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].1, signer.public_key(), "the store device is the account key");
+        assert_eq!(
+            devices[0].1,
+            signer.public_key(),
+            "the store device is the account key"
+        );
         // The vault keeps an account row with no private key.
-        let row = vault.relay_device().expect("row").expect("relay sync is on");
+        let row = vault
+            .relay_device()
+            .expect("row")
+            .expect("relay sync is on");
         assert!(row.uses_account_key());
         assert!(row.key_pkcs8.is_empty());
         assert_eq!(row.team_id, team);
@@ -2348,7 +2355,11 @@ mod connect_sync {
         assert!(a.mac.sync.sync(&mut vault).expect("sync").pushed);
         assert_eq!(cloud.relay.version_of(&team), 2);
         let heads = cloud.relay.heads_of(&team);
-        assert!(verifies(signer.public_key(), &heads[1].text, &heads[1].signature));
+        assert!(verifies(
+            signer.public_key(),
+            &heads[1].text,
+            &heads[1].signature
+        ));
 
         // An account without a plan gets no store, and nothing turns on.
         let c = connect_mac(&cloud, "c");
@@ -2410,7 +2421,8 @@ mod connect_sync {
         assert_eq!(cloud.relay.version_of(&team), 2);
         let log = cloud.connect.log();
         assert!(
-            !log.iter().any(|line| line.starts_with("POST /v1/devices/link")),
+            !log.iter()
+                .any(|line| line.starts_with("POST /v1/devices/link")),
             "no device link: {log:?}"
         );
         assert!(
@@ -2448,8 +2460,7 @@ mod connect_sync {
     }
 
     #[test]
-    fn a_family_members_mac_joins_a_shared_vault_only_with_a_link_the_words_and_the_passphrase()
-    {
+    fn a_family_members_mac_joins_a_shared_vault_only_with_a_link_the_words_and_the_passphrase() {
         let cloud = cloud();
         let a = connect_mac(&cloud, "a");
         let m = connect_mac(&cloud, "m");
@@ -2483,13 +2494,20 @@ mod connect_sync {
             account_s.signer().expect("signer"),
         )
         .expect("request");
-        let links = a.mac.sync.pending_links(&vault_a, Some(&code)).expect("links");
+        let links = a
+            .mac
+            .sync
+            .pending_links(&vault_a, Some(&code))
+            .expect("links");
         assert_eq!(links[0].safety.as_deref(), Some(stranger.safety.as_str()));
         assert!(
             a.mac.sync.confirm_link(&vault_a, &links[0]).is_err(),
             "not_in_group"
         );
-        assert!(stranger.poll().expect("poll").is_none(), "still not a device");
+        assert!(
+            stranger.poll().expect("poll").is_none(),
+            "still not a device"
+        );
         assert_eq!(cloud.relay.team_devices(&team).len(), 1);
 
         // The member with a link: the same words on both Macs, then the confirmation.
@@ -2498,7 +2516,11 @@ mod connect_sync {
         let pending =
             PendingJoin::request_with_account(&code.link, "", "Ola's Mac", Arc::clone(&signer_m))
                 .expect("request");
-        let links = a.mac.sync.pending_links(&vault_a, Some(&code)).expect("links");
+        let links = a
+            .mac
+            .sync
+            .pending_links(&vault_a, Some(&code))
+            .expect("links");
         let link = links
             .iter()
             .find(|link| link.device_name == "Ola's Mac")
@@ -2514,7 +2536,10 @@ mod connect_sync {
         vault_m.unlock(PASS).expect("unlock");
         assert_eq!(titles(&vault_m), vec!["Family"]);
         let row = vault_m.relay_device().expect("row").expect("on");
-        assert!(row.uses_account_key(), "the member signs with its account key");
+        assert!(
+            row.uses_account_key(),
+            "the member signs with its account key"
+        );
         assert_eq!(row.public_key, signer_m.public_key());
         // The store is shared now, and both sides sync.
         let stores = account_m.vault_stores().expect("stores");
@@ -2545,7 +2570,12 @@ mod connect_sync {
         let mut vault = a.create();
         vault.add(item("Alpha", "SYNTH-alpha")).expect("add");
         a.sync
-            .create_team(&mut vault, "Personal", &old.team_code(), "Synthetic MacBook")
+            .create_team(
+                &mut vault,
+                "Personal",
+                &old.team_code(),
+                "Synthetic MacBook",
+            )
             .expect("team");
         assert_eq!(old.version(), 1);
         let keys = MemoryKeyStore::new();
@@ -2613,7 +2643,11 @@ mod connect_sync {
             .connect
             .store_of(&account_id, &vault_id)
             .expect("the store is there before the delete");
-        assert_eq!(cloud.relay.version_of(&team), 1, "Connect has the copy first");
+        assert_eq!(
+            cloud.relay.version_of(&team),
+            1,
+            "Connect has the copy first"
+        );
         assert_eq!(old.version(), 1, "the old copy is still there");
         assert_eq!(
             a.sync.pending_move().map(|record| record.step),
@@ -2625,7 +2659,10 @@ mod connect_sync {
         assert_eq!(report.team_id, team);
         assert_eq!(old.version(), 0, "the old copy is deleted second");
         assert!(a.sync.pending_move().is_none(), "the record goes");
-        assert!(a.sync.state().expect("state").is_none(), "the old sync is off");
+        assert!(
+            a.sync.state().expect("state").is_none(),
+            "the old sync is off"
+        );
         assert!(to_connect.state().expect("state").is_some());
         let guard = shared.lock().unwrap();
         let vault = guard.as_ref().expect("vault");
@@ -2685,7 +2722,10 @@ mod connect_sync {
         assert_eq!(report.team_id, team);
         assert_eq!(old.version(), 0);
         assert!(a.sync.pending_move().is_none());
-        assert!(cloud.relay.version_of(&team) >= 2, "the change went to Connect");
+        assert!(
+            cloud.relay.version_of(&team) >= 2,
+            "the change went to Connect"
+        );
         assert_eq!(titles(&vault), vec!["Alpha", "Beta"]);
 
         // Undo after a failed delete: the Connect copy goes, the relay copy stays.
@@ -2708,10 +2748,11 @@ mod connect_sync {
         let owner = owner();
         let (proof, epoch) =
             owner.proof(ConnectAccount::delete_vault_store_action(&record.team_id));
-        a.sync
-            .undo_move(&mut account, proof, &epoch)
-            .expect("undo");
-        assert!(!cloud.relay.has_team(&record.team_id), "the Connect copy is gone");
+        a.sync.undo_move(&mut account, proof, &epoch).expect("undo");
+        assert!(
+            !cloud.relay.has_team(&record.team_id),
+            "the Connect copy is gone"
+        );
         assert_eq!(old.version(), 1, "the relay copy stays");
         assert!(a.sync.pending_move().is_none());
         assert!(a.sync.sync(&mut vault).is_ok(), "the old sync goes on");

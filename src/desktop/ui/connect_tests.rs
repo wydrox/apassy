@@ -295,6 +295,27 @@ fn the_picker_shows_the_total_of_the_plans() {
     assert!(!text.contains('€'), "no price without the plans: {text}");
 }
 
+/// The relay sheet offers "Apassy Connect" only while this Mac's account is signed in
+/// with a plan that pushes (plan s7 unit M3): not for an account without a plan, then
+/// after the checkout; the account key goes to the sync then.
+#[test]
+fn the_sync_offers_apassy_connect_only_with_a_plan_that_pushes() {
+    let dir = TempDir::new().expect("dir");
+    let connect = FakeConnect::start();
+    let ctx = egui::Context::default();
+    let mut app = connect_app(&dir, &connect);
+    assert!(!app.connect_sync_available(), "no account");
+    create_account(&ctx, &mut app, "Rafal");
+    assert!(!app.connect_sync_available(), "no plan");
+    buy(&ctx, &mut app, &connect, "personal", 1);
+    until(&ctx, &mut app, "the refresh", |app| {
+        app.connect_sync_available()
+    });
+    let account = app.ui.connect.live.sync_account().expect("account");
+    assert!(account.signer.is_some(), "the key goes to the sync");
+    assert_eq!(account.origin, connect.url);
+}
+
 /// No amount is written in the code of the section: every price comes from
 /// `GET /v1/plans`.
 #[test]

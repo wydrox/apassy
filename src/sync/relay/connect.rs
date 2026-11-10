@@ -312,7 +312,8 @@ impl RelaySync {
         })?;
         let (session, store) = self.store_session(account, &local.vault_id, vault_name)?;
         *lock(&self.refused) = None;
-        let enable = self.finish_enable(vault, session, &local.vault_id, store.name.clone(), None)?;
+        let enable =
+            self.finish_enable(vault, session, &local.vault_id, store.name.clone(), None)?;
         let (registered, not_registered) = register_others(account, &store);
         Ok(ConnectEnableReport {
             enable,
@@ -487,7 +488,12 @@ impl RelaySync {
         account: &mut ConnectAccount,
         vault_name: &str,
     ) -> Result<ConnectEnableReport, MoveFailure> {
-        self.move_to_connect_in(connect, &mut SharedSlot { slot, accept }, account, vault_name)
+        self.move_to_connect_in(
+            connect,
+            &mut SharedSlot { slot, accept },
+            account,
+            vault_name,
+        )
     }
 
     fn move_to_connect_in<A: VaultAccess + ?Sized>(
@@ -611,7 +617,10 @@ impl RelaySync {
     }
 
     /// One sync with the old relay, with the run guard held by the caller.
-    fn sync_access<A: VaultAccess + ?Sized>(&self, vault: &mut A) -> Result<SyncOutcome, SyncError> {
+    fn sync_access<A: VaultAccess + ?Sized>(
+        &self,
+        vault: &mut A,
+    ) -> Result<SyncOutcome, SyncError> {
         self.clear_work();
         let mut state = self.require_state()?;
         let session = vault.with(|vault| self.checked_session(vault, &state))?;
@@ -635,8 +644,12 @@ impl RelaySync {
         self.clear_work();
         let (session, store) = self.store_session(account, vault_id, vault_name)?;
         let device_id = session.device_id().ok_or(SyncError::NotEnabled)?;
-        let mut state =
-            state::SyncState::new_relay(session.url.as_str(), &session.team_id, device_id, vault_id);
+        let mut state = state::SyncState::new_relay(
+            session.url.as_str(),
+            &session.team_id,
+            device_id,
+            vault_id,
+        );
         let transport = self.transport(Arc::clone(&session), &state);
         let result = self.rounds(vault, &mut state, &transport, false, None);
         // The session was never the one of this relay sync: it goes with this step.

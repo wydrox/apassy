@@ -654,7 +654,11 @@ fn read_request(stream: &TcpStream) -> Option<Incoming> {
         .unwrap_or(0);
     let path = target.split('?').next().unwrap_or_default().to_owned();
     // A snapshot for the relay of the stores comes whole.
-    let cap = if relay_route(&path) { 128 * 1024 * 1024 } else { 64 * 1024 };
+    let cap = if relay_route(&path) {
+        128 * 1024 * 1024
+    } else {
+        64 * 1024
+    };
     let mut body = vec![0u8; length.min(cap)];
     reader.read_exact(&mut body).ok()?;
     Some(Incoming {
@@ -1505,7 +1509,13 @@ fn authenticated(
                 .devices
                 .iter()
                 .find(|entry| entry.id == device_id && entry.live)
-                .map(|entry| (entry.account.clone(), entry.name.clone(), entry.public_key.clone()))
+                .map(|entry| {
+                    (
+                        entry.account.clone(),
+                        entry.name.clone(),
+                        entry.public_key.clone(),
+                    )
+                })
             else {
                 return fail(404, "not_found");
             };

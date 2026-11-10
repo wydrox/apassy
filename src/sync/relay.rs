@@ -1647,6 +1647,9 @@ impl RelaySync {
             session.close();
         }
         *lock(&self.refused) = None;
+        // The Connect account key leaves memory with the vault key (a lock, a quit); the
+        // window shares it again after the next "Sign In…".
+        *lock(&self.account) = None;
     }
 
     /// Whether the key is in memory, so that [`Self::poll`] can sign in.
