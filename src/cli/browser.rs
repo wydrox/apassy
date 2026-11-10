@@ -11,6 +11,7 @@ use super::args::{Args, usage};
 use super::{Failure, Outcome};
 use crate::browser::install::{self, BROWSERS, Browser, Install, State};
 
+#[cfg(not(target_os = "linux"))]
 pub const HELP: &str = "\
 apassy setup browser [--browser NAME] [--remove]
 
@@ -30,12 +31,24 @@ Each fill asks for Touch ID or the passphrase in Apassy. The extension gets no
 password without it.
 ";
 
+#[cfg(target_os = "linux")]
+pub const HELP: &str = "apassy setup browser [--browser chrome|chromium] [--remove]
+
+Connect Chrome stable or Chromium to the installed Apassy browser host.
+The root-owned host is /usr/lib/apassy/apassy-browser-host; the extension is in
+/usr/share/apassy/browser-extension. --browser selects one browser even before its
+profile exists. Load that extension folder from the browser extensions page.
+Each fill and passkey request requires owner confirmation in the Apassy window.
+The vault passphrase works without a keyring, screen lock or biometric reader.
+--remove deletes native messaging manifests; remove the extension in the browser too.
+";
+
 /// What happened in one browser.
 #[derive(Debug, PartialEq, Eq)]
 enum Change {
     Wrote(std::path::PathBuf),
     Removed(std::path::PathBuf),
-    /// The browser folder is not there, so the browser is not on this Mac.
+    /// The browser folder is not there, so the browser is no browser profile found.
     Missing,
     /// `--remove` found no manifest.
     Absent,
@@ -113,14 +126,16 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
     // The agent profile denies a change in the app bundle, not in a source tree.
     let Some(app) = Install::current() else {
         return Err(Failure::Other(
-            "Use the apassy program inside Apassy.app: /Applications/Apassy.app/Contents/MacOS/apassy setup browser. A source build is not protected from agents: an agent could change target/debug/apassy-browser-host or extension/, and the browser runs them outside the sandbox."
-                .to_owned(),
+            if cfg!(target_os = "linux") {
+                "Install the Linux vault package with its root-owned host at /usr/lib/apassy/apassy-browser-host. Source builds are not accepted browser hosts."
+            } else {
+                "Use the apassy program inside Apassy.app: /Applications/Apassy.app/Contents/MacOS/apassy setup browser. Source builds are not protected browser hosts."
+            }.to_owned(),
         ));
     };
     if !app.host().is_file() {
         return Err(Failure::Other(
-            "apassy-browser-host is not in this Apassy.app. Install the current Apassy.app."
-                .to_owned(),
+            "apassy-browser-host is missing. Reinstall the Apassy package.".to_owned(),
         ));
     }
     let changes = if json {
@@ -165,7 +180,7 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
                 println!("{name}: wrote {}", file.display());
             }
             Change::Removed(file) => println!("{name}: removed {}", file.display()),
-            Change::Missing => println!("{name}: not on this Mac"),
+            Change::Missing => println!("{name}: no browser profile found"),
             Change::Absent => println!("{name}: no manifest"),
         }
     }
@@ -182,11 +197,9 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
     if extension.join("manifest.json").is_file() {
         println!("The extension folder: {}", extension.display());
     } else {
-        println!(
-            "The extension folder is missing in this Apassy.app. Install the current Apassy.app."
-        );
+        println!("The extension folder is missing. Reinstall the Apassy package.");
     }
-    if !app.is_installed_app() {
+    if !cfg!(target_os = "linux") && !app.is_installed_app() {
         println!(
             "This Apassy.app is not /Applications/Apassy.app. The agent profile protects it only when agents start with the apassy-sandbox of this app, or with --app-build."
         );
@@ -196,7 +209,9 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
         install::STORE_URL
     );
     println!("Or load the folder above with Developer mode on the extensions page of the browser.");
-    println!("Each fill asks for Touch ID or the passphrase in Apassy.");
+    println!(
+        "Each fill requires owner confirmation in Apassy. The vault passphrase is always available."
+    );
     Ok(())
 }
 
@@ -207,39 +222,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_writes_only_for_browsers_on_this_mac_and_removes() {
+    fn setup_writes_only_for_existing_profiles_and_removes() {
         let home = tempfile::tempdir().unwrap();
-        let support = home.path().join("Library/Application Support");
-        fs::create_dir_all(support.join("net.imput.helium")).unwrap();
-        fs::create_dir_all(support.join("Arc/User Data")).unwrap();
+        let first = &BROWSERS[0];
+        let second = &BROWSERS[1];
+        let first_file = install::manifest_path(home.path(), first);
+        let second_file = install::manifest_path(home.path(), second);
+        fs::create_dir_all(first_file.parent().unwrap().parent().unwrap()).unwrap();
         let host = Path::new("/x/apassy-browser-host");
-
         let changes = apply(home.path(), host, None, false).unwrap();
-        let helium = support.join("net.imput.helium/NativeMessagingHosts/com.wydrox.apassy.json");
-        let arc = support.join("Arc/User Data/NativeMessagingHosts/com.wydrox.apassy.json");
-        assert!(changes.contains(&("Helium", Change::Wrote(helium.clone()))));
-        assert!(changes.contains(&("Arc", Change::Wrote(arc.clone()))));
-        assert!(changes.contains(&("Google Chrome", Change::Missing)));
-        assert!(
-            !support.join("Google").exists(),
-            "no folder for a missing browser"
-        );
+        assert!(changes.contains(&(first.name, Change::Wrote(first_file.clone()))));
+        assert!(changes.contains(&(second.name, Change::Missing)));
+        assert!(!second_file.exists());
         let value: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&helium).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&first_file).unwrap()).unwrap();
         assert_eq!(value["path"], "/x/apassy-browser-host");
-
-        // A selected browser gets its folder.
-        let changes = apply(home.path(), host, install::find("chrome"), false).unwrap();
+        let changes = apply(home.path(), host, Some(second), false).unwrap();
         assert_eq!(changes.len(), 1);
-        assert!(
-            support
-                .join("Google/Chrome/NativeMessagingHosts/com.wydrox.apassy.json")
-                .is_file()
-        );
-
+        assert!(second_file.is_file());
         let changes = apply(home.path(), host, None, true).unwrap();
-        assert!(changes.contains(&("Helium", Change::Removed(helium.clone()))));
-        assert!(changes.contains(&("Brave", Change::Absent)));
-        assert!(!helium.exists() && !arc.exists());
+        assert!(changes.contains(&(first.name, Change::Removed(first_file.clone()))));
+        assert!(!first_file.exists() && !second_file.exists());
     }
 }

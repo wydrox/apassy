@@ -1969,6 +1969,9 @@ impl OwnerFlows {
 
     /// Text about Touch ID for the owner check. `None` when Touch ID can run.
     pub(crate) fn touch_id_note(&self) -> Option<String> {
+        if cfg!(target_os = "linux") {
+            return Some("Confirm with your vault passphrase. System authentication is optional and requires an installed polkit policy.".to_owned());
+        }
         if self.helper.is_none() {
             return Some(
                 "Touch ID is not available: this build has no Touch ID helper. Touch ID works only in Apassy.app. Type the passphrase to confirm.".to_owned(),
@@ -2002,7 +2005,12 @@ impl DesktopApp {
 
     /// Start the helper probe and the notification center. The window calls this once.
     pub(crate) fn start_native(&mut self, ctx: &egui::Context) {
-        let helper = NativeHelper::locate().ok();
+        // Apple helpers must never become an accidental Linux authentication path.
+        let helper = if cfg!(target_os = "macos") {
+            NativeHelper::locate().ok()
+        } else {
+            None
+        };
         self.owner.helper = helper.clone();
         if let Some(helper) = &helper {
             self.owner.lifecycle = crate::native::owner_lifecycle::OwnerLifecycle::start(

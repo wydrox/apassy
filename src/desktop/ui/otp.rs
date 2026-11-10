@@ -384,6 +384,11 @@ fn hide_button(ui: &mut egui::Ui, label: &str) -> bool {
 }
 
 fn copy_button(ui: &mut egui::Ui, label: &str) -> bool {
+    if !crate::desktop::clipboard::supported() {
+        ui.add_enabled(false, egui::Button::new("Copy"))
+            .on_hover_text(crate::desktop::clipboard::UNSUPPORTED_NOTE);
+        return false;
+    }
     rows::pill_button(ui, "Copy", &format!("Copy the code of {label}"))
         .on_hover_text(copy_hover())
         .clicked()

@@ -11,6 +11,14 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
+/// Linux has no implemented exact-write clipboard ownership adapter yet.
+/// Memory-board tests exercise the contract without claiming a system clipboard.
+pub(crate) const fn supported() -> bool {
+    cfg!(any(target_os = "macos", test))
+}
+pub(crate) const UNSUPPORTED_NOTE: &str =
+    "Secure clipboard copy is unavailable on Linux. Use Show or browser fill instead.";
+
 /// The earliest clear after a copy. A code that changes sooner stays this long, so the
 /// owner has time to paste it.
 pub(crate) const MIN_CLEAR: Duration = Duration::from_secs(10);
@@ -23,7 +31,11 @@ pub(crate) struct PasteboardError;
 
 impl PasteboardError {
     pub(crate) fn message(&self) -> &'static str {
-        "Apassy could not confirm the copy. The clipboard may contain the value; replace its contents if needed."
+        if supported() {
+            "Apassy could not confirm the copy. The clipboard may contain the value; replace its contents if needed."
+        } else {
+            UNSUPPORTED_NOTE
+        }
     }
 }
 
@@ -171,6 +183,9 @@ pub(crate) fn clear_delay(left: u64) -> Duration {
 
 #[cfg(not(test))]
 fn open_board() -> Result<Box<dyn Pasteboard>, PasteboardError> {
+    if !supported() {
+        return Err(PasteboardError);
+    }
     Ok(Box::new(native::SystemPasteboard::open()?))
 }
 

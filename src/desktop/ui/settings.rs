@@ -271,7 +271,11 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .unwrap_or(false);
     let mut action = None;
     rows::group(ui, Some("Unlock"), |g| {
-        action = touch_id_rows(app, g, &mut setup);
+        if cfg!(target_os = "linux") {
+            g.note_row("Use your vault passphrase to unlock. Optional Secret Service storage can be enabled with apassy owner keyring-enable; other programs running as your user can read an unlocked keyring item.");
+        } else {
+            action = touch_id_rows(app, g, &mut setup);
+        }
         g.line("Passphrase", None, |ui| {
             change = kit::small_button(ui, "Change passphrase…", Style::Bordered)
                 .on_hover_text("Old backups still need the old passphrase.")
@@ -281,29 +285,40 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let policy = app.owner_ui.session.owner_window.policy();
     let mut selected = policy;
     rows::group(ui, Some("Owner checks"), |g| {
-        g.field("How often to ask for Touch ID", |ui| {
-            let options: Vec<_> = crate::broker::approvals::OwnerFrequency::ALL
-                .into_iter()
-                .map(|value| (value, value.label().to_owned()))
-                .collect();
-            ui.add_enabled_ui(
-                app.owner.helper.is_some()
-                    && app.owner.frequency_read.is_none()
-                    && app.owner.frequency_write.is_none(),
-                |ui| {
-                    kit::picker(
-                        ui,
-                        "owner-check-frequency",
-                        &mut selected,
-                        &options,
-                        policy.label(),
-                        260.0,
-                    )
-                },
-            )
-            .inner
+        g.field(
+            if cfg!(target_os = "linux") {
+                "Owner confirmation"
+            } else {
+                "How often to ask for Touch ID"
+            },
+            |ui| {
+                let options: Vec<_> = crate::broker::approvals::OwnerFrequency::ALL
+                    .into_iter()
+                    .map(|value| (value, value.label().to_owned()))
+                    .collect();
+                ui.add_enabled_ui(
+                    app.owner.helper.is_some()
+                        && app.owner.frequency_read.is_none()
+                        && app.owner.frequency_write.is_none(),
+                    |ui| {
+                        kit::picker(
+                            ui,
+                            "owner-check-frequency",
+                            &mut selected,
+                            &options,
+                            policy.label(),
+                            260.0,
+                        )
+                    },
+                )
+                .inner
+            },
+        );
+        g.note_row(if cfg!(target_os = "linux") {
+            "Each sensitive action requires fresh confirmation with the vault passphrase or optional system authentication. Linux screen-lock observation and approval reuse are unavailable."
+        } else {
+            "After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your Mac locks or sleeps."
         });
-        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your Mac locks or sleeps.");
     });
     if let Some(note) = &app.owner.frequency_note {
         rows::footnote(ui, note);
@@ -328,7 +343,9 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             })
             .inner
         });
-        g.note_row("Agents can't use your credentials while the vault is locked.");
+        g.note_row(if cfg!(target_os = "linux") {
+            "Lock the vault manually when you finish. Automatic screen-lock and inactivity detection are unavailable on Linux. Agents cannot use credentials while the vault is locked."
+        } else { "Agents can't use your credentials while the vault is locked." });
     });
     if let Some(note) = &app.auto_lock.note {
         rows::footnote(ui, note);

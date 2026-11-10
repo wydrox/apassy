@@ -181,6 +181,11 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
                 "Waiting for Touch ID. Touch the sensor, or cancel the macOS prompt.",
                 Tone::Warning,
             ),
+            Some(CheckMethod::Polkit) => kit::tone_note(
+                ui,
+                "Waiting for system authentication. You can cancel and use the passphrase.",
+                Tone::Warning,
+            ),
             Some(CheckMethod::Passphrase) => {
                 kit::tone_note(ui, "Apassy is checking the passphrase.", Tone::Accent);
             }
@@ -222,6 +227,22 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         kit::sheet_buttons(
             ui,
             |ui| {
+                #[cfg(target_os = "linux")]
+                if ui
+                    .add_enabled_ui(idle, |ui| {
+                        kit::button_with(
+                            ui,
+                            None,
+                            "Use system authentication",
+                            Style::Link,
+                            Size::Regular,
+                        )
+                    })
+                    .inner
+                    .clicked()
+                {
+                    touch_id = true;
+                }
                 if has_helper
                     && ui
                         .add_enabled_ui(idle, |ui| {
@@ -293,6 +314,9 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             );
         }
     } else if touch_id && ready {
+        #[cfg(target_os = "linux")]
+        app.start_owner_check(OwnerCheck::Polkit, Some(ctx.clone()));
+        #[cfg(not(target_os = "linux"))]
         app.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));
     } else if passphrase && ready {
         app.start_passphrase_check(ctx);

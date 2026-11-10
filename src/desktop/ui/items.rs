@@ -1570,7 +1570,7 @@ fn secret_row(
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         let toggle = mask_button(ui, revealed);
-                        if app.owner_ui.session.can_copy_field(id, name, details.revision)
+                        if crate::desktop::clipboard::supported() && app.owner_ui.session.can_copy_field(id, name, details.revision)
                             && rows::pill_button(ui, "Copy", &format!("Copy {label}")).on_hover_text("Confirm with Touch ID or passphrase. Clipboard clears after 30 seconds if unchanged.").clicked() {
                             *copy = Some(name.to_owned());
                         }
@@ -3052,7 +3052,7 @@ fn custom_value_row(
                 |ui| ui.label(kit::text(&detail.label, Font::Callout).color(kit::palette().secondary)),
                 |ui| {
                     toggle = mask_button(ui, revealed);
-                    if app.owner_ui.session.can_copy_field(id, &detail.name, details.revision)
+                    if crate::desktop::clipboard::supported() && app.owner_ui.session.can_copy_field(id, &detail.name, details.revision)
                         && rows::pill_button(ui, "Copy", &format!("Copy {}", detail.label)).on_hover_text("Confirm with Touch ID or passphrase. Clipboard clears after 30 seconds if unchanged.").clicked() {
                         *copy = Some(detail.name.clone());
                     }

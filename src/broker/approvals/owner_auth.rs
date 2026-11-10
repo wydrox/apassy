@@ -1186,6 +1186,8 @@ fn short_device_name(name: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckMethod {
     TouchId,
+    /// Linux polkit auth_self authentication, never reported as biometrics.
+    Polkit,
     Passphrase,
     /// Face ID on a paired iPhone, as a signature of the approval key.
     Companion,
@@ -1208,6 +1210,9 @@ pub enum OwnerCheck {
     },
     /// Touch ID through the native helper.
     TouchId,
+    /// Linux system authentication for this exact pending action.
+    #[cfg(target_os = "linux")]
+    Polkit,
     /// The master passphrase. The buffer is erased on drop.
     Passphrase(Zeroizing<String>),
     /// The approval signature of a paired iPhone (ADR 0020). `time` is the Unix time in
@@ -1252,6 +1257,8 @@ impl OwnerCheck {
     pub fn method(&self) -> CheckMethod {
         match self {
             Self::TouchId => CheckMethod::TouchId,
+            #[cfg(target_os = "linux")]
+            Self::Polkit => CheckMethod::Polkit,
             Self::Passphrase(_) => CheckMethod::Passphrase,
             Self::Companion { .. } => CheckMethod::Companion,
             Self::Remote { .. } | Self::RemoteChoice { .. } | Self::RemoteAction { .. } => {
@@ -1265,6 +1272,8 @@ impl fmt::Debug for OwnerCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TouchId => f.write_str("OwnerCheck::TouchId"),
+            #[cfg(target_os = "linux")]
+            Self::Polkit => f.write_str("OwnerCheck::Polkit"),
             Self::RemoteChoice { .. } => f.write_str("OwnerCheck::RemoteChoice([redacted])"),
             Self::Passphrase(_) => f.write_str("OwnerCheck::Passphrase([redacted])"),
             Self::Companion {
@@ -1630,7 +1639,10 @@ impl OwnerGate {
         cancel: Option<&AuthCancel>,
     ) -> Result<OwnerProof, OwnerAuthError> {
         let generation = self.window.generation();
-        let local = matches!(check, OwnerCheck::TouchId | OwnerCheck::Passphrase(_));
+        let local = matches!(
+            check.method(),
+            CheckMethod::TouchId | CheckMethod::Passphrase | CheckMethod::Polkit
+        );
         let mut result = self.authorize_fresh(action.clone(), check, cancel);
         if local && result.is_ok() {
             if self.window.generation() != generation {
@@ -1702,6 +1714,15 @@ impl OwnerGate {
                     &signature,
                     now,
                 )?;
+            }
+            #[cfg(target_os = "linux")]
+            OwnerCheck::Polkit => {
+                crate::native::linux::authenticate(cancel).map_err(|_| {
+                    OwnerAuthError::Other(
+                        "System authentication did not succeed. Confirm with the passphrase."
+                            .into(),
+                    )
+                })?;
             }
             OwnerCheck::TouchId => {
                 let Some(helper) = &self.touch_id else {
