@@ -20,6 +20,8 @@ struct JoinFlowView: View {
             case .faceID: faceID
             case .done(let vault): done(vault)
             case .failed(let title, let message): failed(title, message)
+            case .connectWaiting(let join): connectWaiting(join)
+            case .connectDone(let confirmer): connectDone(confirmer)
             }
         }
         .animation(.snappy, value: model.step)
@@ -270,6 +272,64 @@ struct JoinFlowView: View {
         .sensoryFeedback(.success, trigger: vault.id)
     }
 
+    // MARK: Apassy Connect (plan s7 unit I1): join the account of the Mac. Nothing here buys,
+    // subscribes, or links to a page: the account and its plan are managed in Apassy on the Mac.
+
+    private func connectWaiting(_ join: ConnectJoin) -> some View {
+        PairingScreen {
+            VStack(spacing: 24) {
+                Text("Check the six words")
+                    .font(.title2.bold())
+                    .multilineTextAlignment(.center)
+                SafetyWords(words: join.words, columns: 2)
+                Text(
+                    "Waiting for \(join.confirmer)… Both devices show the same six words. Confirm “\(model.trimmedDeviceName)” on the Mac only if they match."
+                )
+                .multilineTextAlignment(.center)
+                VStack(spacing: 8) {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Waiting for your Mac")
+                            .foregroundStyle(.secondary)
+                    }
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text("The code works for \(WaitClock.text(model.secondsLeft(join, at: context.date))) more")
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    if let note = model.waitNote {
+                        CalloutView(symbol: "wifi.exclamationmark", text: note)
+                    }
+                }
+                Text("If the words differ, select Cancel here and Refuse on the Mac. Another device may have read the code.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .accessibilityIdentifier("join.connectWaiting")
+        } actions: {
+            cancelButton
+        }
+    }
+
+    private func connectDone(_ confirmer: String) -> some View {
+        PairingScreen {
+            PairingHero(
+                symbol: "checkmark.seal.fill", tint: .green, title: "This iPhone is on Apassy Connect",
+                message:
+                    "\(confirmer) added this iPhone to its Apassy Connect account. Settings > General shows the plan of the account; it is managed in Apassy on your Mac."
+            )
+        } actions: {
+            Button {
+                model.complete()
+            } label: {
+                Text("Continue").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glassProminent)
+        }
+        .sensoryFeedback(.success, trigger: confirmer)
+    }
+
     private func failed(_ title: String, _ message: String) -> some View {
         PairingScreen {
             PairingHero(symbol: "exclamationmark.triangle.fill", tint: .orange, title: title, message: message)
@@ -333,18 +393,20 @@ struct JoinFlowView: View {
     #endif
 }
 
-/// The two safety words, large.
+/// The safety words, large: two of a vault join in one column, six of Apassy Connect in two.
 struct SafetyWords: View {
     let words: [String]
+    var columns = 1
     @ScaledMetric(relativeTo: .largeTitle) private var size: CGFloat = 40
 
     var body: some View {
-        VStack(spacing: 4) {
-            ForEach(Array(words.enumerated()), id: \.offset) { _, word in
-                Text(word)
-                    .font(.system(size: size, weight: .bold, design: .rounded))
-                    .minimumScaleFactor(0.5)
-                    .lineLimit(1)
+        Group {
+            if columns > 1 {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 4) {
+                    wordViews(size: size * 0.7)
+                }
+            } else {
+                VStack(spacing: 4) { wordViews(size: size) }
             }
         }
         .padding(.vertical, 20)
@@ -352,5 +414,14 @@ struct SafetyWords: View {
         .background(.tint.opacity(0.12), in: .rect(cornerRadius: 24, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("The words: \(words.joined(separator: ", "))")
+    }
+
+    private func wordViews(size: CGFloat) -> some View {
+        ForEach(Array(words.enumerated()), id: \.offset) { _, word in
+            Text(word)
+                .font(.system(size: size, weight: .bold, design: .rounded))
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+        }
     }
 }

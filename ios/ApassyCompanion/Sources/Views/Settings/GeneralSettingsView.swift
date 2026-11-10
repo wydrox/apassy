@@ -3,7 +3,7 @@ import AuthenticationServices
 import SwiftUI
 
 /// Settings > General: the vault and the other vaults, removing the vault from this iPhone, import
-/// and export, and AutoFill.
+/// and export, AutoFill, and the plan of Apassy Connect (text only).
 struct GeneralSettingsView: View {
     /// Closes the Settings sheet (`dismiss` here would only go back to the root).
     let close: DismissAction
@@ -27,11 +27,58 @@ struct GeneralSettingsView: View {
                     Text("Vault")
                 }
             }
+            ConnectPlanSection()
         }
         .navigationTitle("General")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
+
+// MARK: Apassy Connect row
+// Plan s7 section 6 (App Store Review Guideline 3.1): this block shows text only. No Button, Link,
+// NavigationLink, menu, gesture, URL, price, or currency; `ConnectPlanRowTests` reads this block of
+// the source and fails on any of them. The texts come from `ConnectPlanRow` (VaultText.swift).
+
+/// The row "Apassy Connect": the plan of the account of this iPhone ("Connect Personal · renews
+/// 3 Dec 2026", "Not on Connect", …) and "Managed in Apassy on your Mac", as text.
+struct ConnectPlanSection: View {
+    @Environment(RootModel.self) private var root
+    @State private var status: ConnectStatus?
+    @State private var failed = false
+
+    var body: some View {
+        let content = ConnectPlanRow.content(status, failed: failed)
+        Section {
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent(content.title, value: content.value)
+                ForEach(content.lines, id: \.self) { line in
+                    Text(verbatim: line)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("general.connect")
+        }
+        .task { await load() }
+    }
+
+    private func load() async {
+        // The demo has no account: the row says so and asks nothing.
+        guard !root.isDemo, let service = root.vault?.service else {
+            status = ConnectStatus(state: .none)
+            return
+        }
+        do {
+            status = try await service.connectStatus()
+            failed = false
+        } catch {
+            failed = true
+        }
+    }
+}
+
+// MARK: End of the Apassy Connect row
 
 /// The sections of General for an unlocked vault.
 private struct GeneralVaultSections: View {

@@ -257,6 +257,29 @@ impl FakeConnect {
         lock(&self.shared).reported_origin = Some(origin.to_owned());
     }
 
+    /// Every link of `account` expires now, and its pending joins with it: a later join
+    /// with such a link is `403 forbidden`, and the challenge of a waiting device is
+    /// `403 join_refused` (section 7).
+    pub fn expire_links(&self, account: &str) {
+        let mut state = lock(&self.shared);
+        let mut expired = Vec::new();
+        for link in state
+            .links
+            .iter_mut()
+            .filter(|link| link.account == account)
+        {
+            link.expires_at = 0;
+            expired.push(link.id);
+        }
+        for join in state.joins.iter_mut().filter(|join| {
+            join.account == account
+                && expired.contains(&join.link_id)
+                && join.state == JoinState::Pending
+        }) {
+            join.state = JoinState::Refused;
+        }
+    }
+
     /// Tokens live `seconds`.
     pub fn set_token_lifetime(&self, seconds: u64) {
         lock(&self.shared).token_seconds = seconds;

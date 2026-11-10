@@ -1281,6 +1281,22 @@ impl JoinRequest {
         code: &str,
         device_name: &str,
     ) -> Result<Self, ConnectError> {
+        Self::start_on(client, store, path, code, device_name, PLATFORM)
+    }
+
+    /// [`Self::start`] for a device of `platform` (one of [`super::PLATFORMS`]): the iPhone
+    /// core joins as `iphone` also in its tests on a Mac or Linux.
+    pub fn start_on(
+        client: ConnectClient,
+        store: &dyn DeviceKeyStore,
+        path: &Path,
+        code: &str,
+        device_name: &str,
+        platform: &'static str,
+    ) -> Result<Self, ConnectError> {
+        if !super::PLATFORMS.contains(&platform) {
+            return Err(ConnectError::Invalid);
+        }
         if AccountState::load(path)?.is_some() {
             return Err(ConnectError::AccountExists);
         }
@@ -1295,7 +1311,7 @@ impl JoinRequest {
             account_id: &account_id,
             link_hash: &link_hash,
             device_name: &device_name,
-            platform: PLATFORM,
+            platform,
             public_key: &public_key,
             signature: &signature,
         };

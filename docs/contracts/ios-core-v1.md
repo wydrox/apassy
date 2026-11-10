@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkey algorithms ES384, EdDSA, and RS256, and the PRF and large blob extensions (sections 5.8, 5.9, 11; vault schema 25) added 2026-11-03. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1). The agents of the Macs (section 5.12, contract relay-feed-v1) added 2026-10-14 (stream FD). The Apple Watch (the external HTTP transport in section 2.1, the role `watch` in section 3, and its calls in section 5.13; [ADR 0039](../adr/0039-apple-watch-access-requests.md)) added 2026-11-03.
+Date: 2026-10-07. Passkey algorithms ES384, EdDSA, and RS256, and the PRF and large blob extensions (sections 5.8, 5.9, 11; vault schema 25) added 2026-11-03. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1). The agents of the Macs (section 5.12, contract relay-feed-v1) added 2026-10-14 (stream FD). The Apple Watch (the external HTTP transport in section 2.1, the role `watch` in section 3, and its calls in section 5.13; [ADR 0039](../adr/0039-apple-watch-access-requests.md)) added 2026-11-03. Apassy Connect (the account key store in section 2.2, `connect_url` in section 3, and the calls of section 5.14; plan s7 unit I1) added 2026-11-10.
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -77,6 +77,23 @@ void apassy_core_set_http_transport(apassy_http_send _Nonnull send, apassy_http_
 - **Cancel.** A lock, a suspend, or the end of a long poll calls `cancel` with the request ID; the `send` of that request then answers `{"error": "broken"}` at once. `cancel` can come from another thread while that `send` runs, and also just before that `send` starts: then that `send` fails at once. `cancel` must not call the core. A request that starts after the close never reaches the host.
 - **Not through the transport.** A snapshot upload or download fails with `protocol`: the watch never syncs.
 
+### 2.2 The Keychain store of the Apassy Connect account key
+
+The iPhone is a device of an Apassy Connect account with one P-256 key of its own, the **account device key** ([connect-account-v1](connect-account-v1.md) section 5): outside every vault, one for the device, this device only, not synchronizable. The app keeps it as a generic password of the data-protection Keychain (`KeychainAccountKeyStore`: service `com.wydrox.apassy.connect-account-key`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, `kSecAttrSynchronizable` false) and gives the core three callbacks:
+
+```c
+typedef int32_t (*apassy_account_key_read)(void *context, uint8_t *out, size_t capacity, size_t *out_length);
+typedef int32_t (*apassy_account_key_write)(void *context, const uint8_t *key, size_t length);
+typedef int32_t (*apassy_account_key_delete)(void *context);
+bool apassy_core_set_account_key_store(ApassyCore *core, apassy_account_key_read read,
+    apassy_account_key_write write, apassy_account_key_delete delete_key, void *context);
+```
+
+- Set it once per core, after `apassy_core_new`, in the `app` role only; a second call, a NULL core, or a NULL callback answers `false`. The callbacks and the context stay valid until `apassy_core_free` returns and are thread-safe. Without a store every call of section 5.14 that needs the key answers `not_allowed`.
+- `read` copies the stored document (the PKCS#8 of `ring`, 138 bytes; at most `capacity`, 1024) and its length and answers 0; 1: no key; any other value: unavailable. `write` stores a new document, replacing an earlier one, and answers 0, else unavailable. `delete` answers 0 (deleted), 1 (no key), or unavailable. The host keeps no copy of the bytes.
+- The core makes the key at the first `connect_join` and reads it into an erasing buffer while it signs (the Mac reads its key after Touch ID the same way). `lock` and `suspend` drop it and the account token from memory. The key signs only the seven messages of connect-account-v1 section 5. It never goes into a vault, a file, a log, an answer, or a request: Connect sees only the public key.
+- Not a key of section 5.2: a vault join keeps its relay key in the vault it joins.
+
 ## 3. Config
 
 ```json
@@ -89,6 +106,8 @@ void apassy_core_set_http_transport(apassy_http_send _Nonnull send, apassy_http_
 - `request_history_required`: defaults to `false` for existing callers. The native app always sets it to `true`, including when storage initialization fails. An unavailable journal then blocks answer preparation/delivery instead of bypassing the durable duplicate-answer guard. AutoFill does not enable or require history.
 - `role`: `app`, `autofill`, or `watch`. The `autofill` role answers only the calls marked **R** in section 5. Every other call gets `not_allowed`. The extension never syncs and never edits an item. It records a reveal, and it can add a passkey with `passkey_register`. It cannot import, remove, or export (section 5.8). The `watch` role is the Apple Watch app (section 5.13): it answers only the calls listed there, and every other call gets `not_allowed` ("Not available on Apple Watch."). Its default `device_name` is "Apple Watch".
 
+- `connect_url`: the Apassy Connect origin of section 5.14 (relay-sync-v1 section 3: `https://`, or `http://` on loopback). Absent: the hosted Connect, `https://apassy-relay.wyderka.cc`. Tests and a sandbox build name another one. A value that is not an origin fails the config.
+
 Files in `data_dir`:
 
 | File | What it is |
@@ -97,6 +116,7 @@ Files in `data_dir`:
 | `vaults/<vault_id>.apassy` | The live vault (SQLCipher), as on the Mac. |
 | `sync/<vault_id>.json` and `sync/.*` | The relay sync state and work files, as on the Mac. |
 | `feed-seq.json` | The highest feed `seq` accepted of each Mac (section 5.12). No secret. |
+| `connect/account.json` | The Apassy Connect account of this iPhone (section 5.14), mode 0600, the account file of the Mac (connect-account-v1): the origin, the account and device ids, the names, the public key, the time. No key, no token, no email, no code, no plan. The app excludes `connect/` from backup: the key is of this device only, so a restored file without it would be useless. |
 | `request-history/<vault_id>.json` | Encrypted, device-local request metadata and durable answer intents; excluded from backup and sync. |
 | `icloud-transfer/<transaction>/…` | Private encrypted input/output snapshots for one coordinated file transaction. |
 | iCloud bookmarks | Private Swift-managed file access records, keyed by vault ID. They contain no passphrase. |
@@ -761,6 +781,46 @@ Added 2026-11-03. The watch answers ADR 0033 access requests with **Allow once**
 **`watch_forget`** leaves the team (best effort, with the relay key of an open replica: unlock first), then deletes the replica file, its list entry, its access guards (`request-history/access-guards-v1-<vault_id>.json`), and its history. Answers `{"state": "unpaired", "vault": null, "macs": [], "own": null}`. The app deletes its history key of that vault and the passphrase from the watch keychain.
 
 New error codes: `already_connected`, `mac_update_needed`. `answer_key_changed` has a watch message.
+
+### 5.14 Apassy Connect: this iPhone as a device of an account (plan s7 unit I1)
+
+Added 2026-11-10. The iPhone **joins** the Apassy Connect account of a Mac and shows the plan of that account. It never creates an account, never starts a checkout or opens the portal, never reads `GET /v1/plans`, and never collects an email: the account and its plan are managed in Apassy on the Mac ([plan s7](../design/implementation-plan-s7-connect.md) section 6, App Store Review Guideline 3.1; [connect-billing-v1](connect-billing-v1.md) section 10). No answer of these calls holds a price, a currency, or a URL. The calls are of the `app` role only; `autofill` and `watch` get `not_allowed`. The flow and its checks are those of the Mac (`apassy::connect`, connect-account-v1 sections 6 and 7): the link code, the link hash, the `apassy-connect join v1` signature with the account key (section 2.2), the six safety words of section 7.3, the challenge with its origin check, and the 15-minute account token in memory. The token never leaves the core; it goes only to the Connect origin of the account (unit I2 dials with it).
+
+**`connect_join`** `{"link": "apassy_alk_<account id>_<64 hex>", "device_name": "Rafał’s iPhone"}`: the code that "Add a device…" shows on the Mac (as text, or the QR code of the same text), trimmed. `device_name` is optional (default: `device_name` of the config). The core makes the account key if it has none, sends `POST /v1/account/devices/join` with `platform: "iphone"`, and answers:
+
+```json
+{"state": "waiting", "account_id": "acc_k7m2q4x3ca", "confirmer": "MacBook Pro", "words": ["blaze", "cable", "flute", "board", "seal", "tiger"], "expires_at": 1790000600}
+```
+
+- The app shows "Waiting for MacBook Pro… Both devices show: blaze cable flute board seal tiger." The Mac shows the same words and confirms with Touch ID.
+- A new start gives up the join that waits. An iPhone that is a device of an account already gets `already_connected`.
+- Errors: `link_invalid` (not a code, or Connect refused it: unknown, used, or expired; nothing is sent for text that is not a code), `already_connected`, `relay_unreachable`, `rate_limited`, `not_allowed` (no key store, or the Keychain is locked).
+
+**`connect_join_poll`** `{}` answers the same object with `"state": "waiting"` until the Mac confirms, then once with `"state": "confirmed"`: the core signed in, wrote `connect/account.json`, and keeps the account. The app asks every 5 s (connect-account-v1 section 7.2).
+
+- Errors: `join_refused` (the Mac refused, or the code expired: the join ends), `invalid_input` (no join waits), `relay_unreachable` and `rate_limited` (the join waits on).
+
+**`connect_join_cancel`** `{}` gives up the join that waits, best effort at Connect (`POST /v1/account/devices/join/cancel`). Answers `{}`.
+
+**`connect_status`** `{}`:
+
+```json
+{"state": "account", "account_id": "acc_k7m2q4x3ca", "device_name": "iPhone", "dial_route": false,
+ "plan": {"plan": "family", "status": "active", "entitled": true, "renews_at": 1796299200, "ends_at": null,
+          "grace_until": null, "read_only_until": null, "delete_at": null,
+          "group": {"kind": "family", "role": "member"}, "people": {"active": 3, "of": 4}}}
+```
+
+- `state`: `none` (no account on this iPhone) or `account`. Without an account: `{"state": "none", "plan": null, "dial_route": false}`, with `"join": {…}` while a join waits.
+- `plan` is the `PlanView` of connect-billing-v1 section 8 without `interval`, `quantity`, and `group_id`, with `group` (the kind and the role of the account's group, from `GET /v1/account`) and `people` (for an active Family: the active members and `max(quantity, included)` of `GET /v1/account/group`, for "Connect Family · 3 of 4 people"; else null).
+- `stale: true` (absent otherwise): Connect did not answer; `plan` is the last answer of this process, or null.
+- `removed: true` (absent otherwise), once: Connect confirmed that this iPhone is no device of the account any more (a Mac revoked it, or the account was deleted), or the Keychain lost the key. The core forgot the account (as `connect_forget`) and answers `state: none`.
+- `dial_route`: true when this iPhone reaches its Mac through the Connect dial (unit I2). Always false in I1.
+- Errors: `not_allowed` (no key store, or the Keychain is locked), `relay_unreachable` only when the account file cannot be read meanwhile, `damaged` (an answer of Connect that the core does not accept).
+
+**The row of the app** (Settings > General, "Apassy Connect", text only): "Not on Connect" (`none`, `pending`, `suspended`, an unknown state, or no account); "Connect Personal · renews 3 Dec 2026" (`active` or `trialing`; Team the same); "Connect Family · 3 of 4 people"; "Past due" (`past_due`); "Ends 12 Jan 2027" (`ends_at` of an `active` plan, or `read_only_until`); and, only on an account, "Managed in Apassy on your Mac" as text. No button, link, price, currency, comparison, or trial, in any state.
+
+**`connect_forget`** `{}` deletes the account key from the Keychain store, `connect/account.json`, and the account and token in memory, and gives up a join that waits. Connect is not asked: the Mac lists this iPhone until a Mac revokes it. Answers `{"forgotten": true}`, or `false` when there was no account and no key.
 
 ## 6. `phone.json`
 

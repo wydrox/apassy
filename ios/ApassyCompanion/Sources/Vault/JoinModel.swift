@@ -11,6 +11,11 @@ import Observation
 /// `&pin=` in its fragment) goes the same way; the core checks the pin. The screens then say "via
 /// your Mac" with the node's name of the link, and a node that does not answer asks for Tailscale
 /// on this iPhone.
+///
+/// The code of "Add a device…" of Apassy Connect on the Mac (`apassy_alk_…`, plan s7 unit I1) goes
+/// the same way: the name of this iPhone, then the six safety words while the Mac confirms, and this
+/// iPhone is a device of the Mac's Connect account. It joins only: it never creates an account,
+/// starts a purchase, or asks for an email.
 @MainActor
 @Observable
 final class JoinModel {
@@ -32,6 +37,10 @@ final class JoinModel {
         case done(VaultEntry)
         /// The join ended: the link did not work, the Mac refused, or the words did not match.
         case failed(title: String, message: String)
+        /// Apassy Connect: the Mac shows the same six words and waits for the owner to confirm.
+        case connectWaiting(ConnectJoin)
+        /// Apassy Connect: the Mac confirmed; this iPhone is a device of its account.
+        case connectDone(confirmer: String)
     }
 
     var step: Step = .instructions
@@ -51,6 +60,8 @@ final class JoinModel {
     @ObservationIgnored private let passphraseStore: any PassphraseStore
     @ObservationIgnored private let settings: VaultSettings
     @ObservationIgnored private let pollInterval: Duration
+    /// The interval of the Apassy Connect join: 5 s, as connect-account-v1 section 7.2 asks.
+    @ObservationIgnored private let connectPollInterval: Duration
     @ObservationIgnored private let now: @MainActor () -> Date
     /// Whether the app is in the background now (`VaultModel.isInBackground`).
     @ObservationIgnored private let isAway: @MainActor () -> Bool
@@ -67,7 +78,8 @@ final class JoinModel {
 
     init(
         service: any VaultService, passphraseStore: any PassphraseStore, settings: VaultSettings, biometry: Biometry,
-        deviceName: String, pollInterval: Duration = .seconds(2), now: @escaping @MainActor () -> Date = { Date() },
+        deviceName: String, pollInterval: Duration = .seconds(2), connectPollInterval: Duration = .seconds(5),
+        now: @escaping @MainActor () -> Date = { Date() },
         isAway: @escaping @MainActor () -> Bool = { false },
         answerKey: (@Sendable (_ team: String?) throws -> Data)? = nil,
         onFinished: @escaping @MainActor (VaultEntry) -> Void, onCancel: @escaping @MainActor () -> Void,
@@ -81,6 +93,7 @@ final class JoinModel {
         self.biometry = biometry
         self.deviceName = deviceName
         self.pollInterval = pollInterval
+        self.connectPollInterval = connectPollInterval
         self.now = now
         self.isAway = isAway
         self.onFinished = onFinished
@@ -119,6 +132,13 @@ final class JoinModel {
         }
         if VaultText.isNodePairingLink(trimmed) {
             scanNote = Self.nodePairingNote
+            return
+        }
+        if let code = connectLinkCode(trimmed) {
+            // Apassy Connect: the same name step, then the words of the account.
+            scanNote = nil
+            node = nil
+            step = .name(link: code)
             return
         }
         guard let link = VaultText.joinLink(from: text) else {
@@ -187,6 +207,7 @@ final class JoinModel {
         guard case .name(let link) = step, deviceNameProblem == nil else { return }
         step = .starting
         waitNote = nil
+        if connectLinkCode(link) != nil { return await startConnect(link) }
         do {
             let join = try await service.joinStart(
                 link: link, deviceName: trimmedDeviceName, answerKey: try? answerKey?(VaultText.linkTeam(link)))
@@ -266,6 +287,60 @@ final class JoinModel {
         max(0, Int(TimeInterval(join.expiresAt) - date.timeIntervalSince1970))
     }
 
+    /// The seconds until the Connect code ends.
+    func secondsLeft(_ join: ConnectJoin, at date: Date) -> Int {
+        max(0, Int(TimeInterval(join.expiresAt) - date.timeIntervalSince1970))
+    }
+
+    // MARK: Apassy Connect
+
+    /// Send the code with the name of this iPhone and its account key, then wait for the Mac.
+    private func startConnect(_ code: String) async {
+        do {
+            let join = try await service.connectJoin(link: code, deviceName: trimmedDeviceName)
+            settings.deviceName = trimmedDeviceName
+            step = .connectWaiting(join)
+            stopPolling()
+            pollTask = Task { [weak self] in await self?.pollConnect() }
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// Ask every 5 s until the Mac confirmed or refused. A network problem is a note until the code
+    /// ends.
+    private func pollConnect() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: connectPollInterval)
+            guard !Task.isCancelled, case .connectWaiting(let current) = step else { return }
+            do {
+                let join = try await service.connectJoinPoll()
+                guard !Task.isCancelled else { return }
+                waitNote = nil
+                if join.state == .confirmed {
+                    pollTask = nil
+                    step = .connectDone(confirmer: join.confirmer)
+                    return
+                }
+                step = .connectWaiting(join)
+            } catch let error as VaultError where error.code == .relayUnreachable || error.code == .rateLimited {
+                waitNote = error.message
+                if now().timeIntervalSince1970 > TimeInterval(current.expiresAt) + 5 {
+                    pollTask = nil
+                    step = .failed(
+                        title: "The code has expired",
+                        message: "Select “Add a device…” in Apassy > Settings > Connect on your Mac again to make a new code.")
+                    return
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                pollTask = nil
+                fail(error)
+                return
+            }
+        }
+    }
+
     // MARK: The passphrase
 
     /// Open the copy. A wrong passphrase keeps the download: the owner tries again.
@@ -321,8 +396,12 @@ final class JoinModel {
 
     /// The owner selects Continue on the last screen.
     func complete() {
-        guard case .done(let vault) = step else { return }
-        onFinished(vault)
+        switch step {
+        case .done(let vault): onFinished(vault)
+        // Apassy Connect adds no vault: the flow closes.
+        case .connectDone: onCancel()
+        default: break
+        }
     }
 
     // MARK: Ending
@@ -334,6 +413,9 @@ final class JoinModel {
         switch step {
         case .waiting, .passphrase, .starting:
             try? await service.joinCancel()
+            try? await service.connectJoinCancel()
+        case .connectWaiting:
+            try? await service.connectJoinCancel()
         default:
             break
         }
@@ -357,6 +439,7 @@ final class JoinModel {
         case .linkInvalid?: title = "This code does not work"
         case .pinMismatch?: title = "The certificate does not match"
         case .joinRefused?: title = "The Mac did not add this iPhone"
+        case .alreadyConnected?: title = "This iPhone is on Apassy Connect already"
         case .safetyMismatch?: title = "The words do not match"
         case .relayUnreachable?: title = "The relay does not answer"
         case .unsupportedSchema?: title = "Update Apassy"
