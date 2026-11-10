@@ -29,7 +29,8 @@ mod companion;
 pub mod inbox;
 #[cfg(feature = "vault")]
 mod learning_ui;
-pub mod model;
+/// Shared with the headless owner service: [`crate::owner::model`].
+pub use crate::owner::model;
 #[cfg(all(feature = "vault", any(target_os = "macos", test)))]
 mod native_menu;
 /// The Mac's own node for cloud agents (ADR 0037, cloud slice).
@@ -46,10 +47,12 @@ pub mod owner_check;
 pub(crate) mod owner_cli;
 #[cfg(feature = "vault")]
 mod owner_frequency;
+/// Shared with the headless owner service: [`crate::owner::owner_store`].
 #[cfg(feature = "vault")]
-pub(crate) mod owner_socket;
+pub use crate::owner::owner_store;
+/// Shared with the headless owner service (`apassy owner serve`): [`crate::owner::socket`].
 #[cfg(feature = "vault")]
-pub mod owner_store;
+pub(crate) use crate::owner::socket as owner_socket;
 /// Tests of the browser passkeys, the browser one-time codes, and the macOS passkey sheet.
 #[cfg(all(test, feature = "vault"))]
 mod passkey_controller_tests;
@@ -644,6 +647,11 @@ pub fn run() -> eframe::Result {
 
 /// Open the native desktop window with the options of the app binary.
 pub fn run_with(options: RunOptions) -> eframe::Result {
+    // Linux: one owner process for the data directory, this window or
+    // `apassy owner serve` (ADR 0045). The lock lives as long as the window.
+    #[cfg(all(target_os = "linux", feature = "vault"))]
+    let _owner = crate::owner::serve::instance::OwnerInstance::acquire(&crate::paths::data_dir())
+        .map_err(|err| eframe::Error::AppCreation(Box::new(err)))?;
     // Here and not in a `main`: the app bundle runs `crates/apassy-app`, and each window
     // process must write the decision log, whichever binary opened it.
     crate::decision_log::enable(crate::decision_log::default_path());

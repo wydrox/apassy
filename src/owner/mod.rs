@@ -19,3 +19,22 @@ pub mod wire;
 /// Interactive terminal prompts shared with headless owner commands.
 #[path = "../cli/terminal.rs"]
 pub mod terminal;
+
+/// The in-memory demo model and the owner errors of the desktop session. The file stays
+/// with the desktop; the headless owner service (`apassy owner serve`) shares it.
+#[cfg(any(feature = "vault", feature = "desktop"))]
+#[path = "../desktop/model.rs"]
+pub mod model;
+/// The owner vault session of the desktop window, without a window: the headless owner
+/// service (`apassy owner serve`) hosts the same session.
+#[cfg(feature = "vault")]
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+#[path = "../desktop/owner_store.rs"]
+pub mod owner_store;
+/// `apassy owner serve`: the owner process without a window (ADR 0045).
+#[cfg(feature = "vault")]
+pub mod serve;
+/// The line sockets of the owner process: `owner.sock` and `browser.sock`.
+#[cfg(feature = "vault")]
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) mod socket;

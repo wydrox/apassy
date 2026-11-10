@@ -73,6 +73,32 @@ its PAM stack may support fprintd. Failure, cancellation or missing support must
 refuse the operation, with passphrase confirmation available. No biometric-only
 path is required to unlock the vault.
 
+### Browser and agents without a desktop: `apassy owner serve`
+
+`apassy owner serve /path/to/vault.db` unlocks the vault in the terminal and then
+serves the browser native host (passkey create and sign-in, fill, save) and agents
+(runs with secrets, access requests, bouncer questions) until `lock` or `quit`, the
+end of the terminal, or 15 idle minutes (`--idle-minutes N`). Each request shows its
+facts in the terminal and needs a typed `approve` and the vault passphrase (or
+`approve polkit`); `deny` refuses. It refuses to start without a terminal on stdin and
+stdout, and while the desktop app or another `owner serve` runs for the same data
+directory. Do not run it from a systemd unit, cron or a pipe. To keep it running over
+SSH, start it in tmux or screen and attach to approve:
+
+```sh
+tmux new -s apassy 'apassy owner serve /path/to/vault.db'   # detach: Ctrl-b d
+tmux attach -t apassy                                        # to approve a request
+screen -S apassy apassy owner serve /path/to/vault.db        # or with screen
+```
+
+While it waits detached, a request times out after 215 s (browser) or 5 minutes
+(agents) unless you attach and answer. SIGTERM or a closed terminal ends it at once
+and leaves the vault locked. Headless, these do not work: agent fills of the browser,
+browser debugging permission, "approve and remember" and project answers, the owner
+command line of `owner.sock` (`apassy items …`), iPhone approvals, sync and the node
+of the desktop. A desktop session lock does not lock the service unless the session
+lock hook is available.
+
 ## Desktop and browser
 
 Run `apassy` as your desktop user. Prefer Wayland: X11 clients can intercept

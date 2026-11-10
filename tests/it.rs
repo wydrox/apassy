@@ -73,6 +73,7 @@ mod onepassword_import;
 mod otp_agent_boundary;
 mod owner_answers;
 mod owner_auth;
+mod owner_serve;
 mod owner_vault;
 mod passkey_conflict_recovery;
 mod passkey_export;

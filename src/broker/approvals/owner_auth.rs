@@ -1566,7 +1566,6 @@ impl OwnerGate {
         }
     }
 
-    #[cfg(feature = "desktop")]
     pub(crate) fn with_window(mut self, window: super::owner_window::OwnerWindow) -> Self {
         self.window = window;
         self

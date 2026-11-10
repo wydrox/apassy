@@ -10,7 +10,7 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const HELP: &str = "Usage: apassy owner <create|unlock|shell|list|add|backup|change-passphrase|keyring-enable|keyring-disable> VAULT [DEST]\nAll operations require an interactive terminal. unlock opens a session until lock, quit or EOF.\nOptional keyring unlock: apassy owner unlock-keyring VAULT. Passphrase is always the default.\nThese commands never write the clipboard: without a desktop session Apassy cannot confirm and clear its own copy.";
+const HELP: &str = "Usage: apassy owner <create|unlock|shell|list|add|backup|change-passphrase|keyring-enable|keyring-disable> VAULT [DEST]\n       apassy owner serve VAULT [--idle-minutes N] [--keyring]\nAll operations require an interactive terminal. unlock opens a session until lock, quit or EOF.\nserve (Linux) unlocks the vault and serves the browser and agents until lock, quit, EOF or N idle minutes (default 15); each request waits for approve and the passphrase in this terminal.\nOptional keyring unlock: apassy owner unlock-keyring VAULT, or serve --keyring. Passphrase is always the default.\nThese commands never write the clipboard: without a desktop session Apassy cannot confirm and clear its own copy.";
 
 pub fn run(args: &[String]) -> i32 {
     if args.is_empty() || args == ["--help"] {
@@ -27,6 +27,9 @@ pub fn run(args: &[String]) -> i32 {
 }
 fn execute(args: &[String]) -> Result<(), String> {
     let command = args.first().map(String::as_str).ok_or(HELP)?;
+    if command == "serve" {
+        return serve(&args[1..]);
+    }
     let expected = if command == "backup" { 3 } else { 2 };
     if args.len() != expected
         || !matches!(
@@ -113,6 +116,66 @@ fn execute(args: &[String]) -> Result<(), String> {
     println!("Vault locked.");
     Ok(())
 }
+/// `apassy owner serve VAULT [--idle-minutes N] [--keyring]` (ADR 0045): the browser
+/// and agent services of the owner without a window. The console refuses a pipe, a
+/// file or `/dev/null` on stdin or stdout before the vault opens.
+fn serve(args: &[String]) -> Result<(), String> {
+    let (vault, idle, keyring) = serve_args(args)?;
+    if !cfg!(target_os = "linux") {
+        return Err(
+            "owner serve is for Linux. On macOS the Apassy app serves the browser and agents."
+                .into(),
+        );
+    }
+    let mut console = apassy::owner::serve::console::TtyConsole::open().map_err(err)?;
+    let unlock = if keyring {
+        keyring_unlock(&vault)?
+    } else {
+        apassy::owner::serve::Unlock::Terminal
+    };
+    let options = apassy::owner::serve::ServeOptions::system(vault, idle, unlock);
+    apassy::owner::serve::serve::<apassy::owner::serve::browser::SystemPeers>(
+        options,
+        &mut console,
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn keyring_unlock(vault: &Path) -> Result<apassy::owner::serve::Unlock, String> {
+    apassy::native::linux::read_passphrase(vault).map(apassy::owner::serve::Unlock::Given)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn keyring_unlock(_vault: &Path) -> Result<apassy::owner::serve::Unlock, String> {
+    Err("The keyring unlock is for Linux.".into())
+}
+
+fn serve_args(args: &[String]) -> Result<(PathBuf, std::time::Duration, bool), String> {
+    let mut vault = None;
+    let mut idle = apassy::owner::serve::DEFAULT_IDLE;
+    let mut keyring = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--keyring" if !keyring => keyring = true,
+            "--idle-minutes" => {
+                let minutes: u64 = rest
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .filter(|n| (1..=24 * 60).contains(n))
+                    .ok_or("--idle-minutes needs a number from 1 to 1440")?;
+                idle = std::time::Duration::from_secs(minutes * 60);
+            }
+            other if vault.is_none() && !other.starts_with('-') => {
+                vault = Some(PathBuf::from(other));
+            }
+            _ => return Err(HELP.into()),
+        }
+    }
+    Ok((vault.ok_or(HELP)?, idle, keyring))
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -271,6 +334,32 @@ mod tests {
         );
         vault.lock().unwrap();
         assert!(proof.check(&action, &vault.epoch()).is_err());
+    }
+    #[test]
+    fn serve_takes_a_vault_an_idle_time_and_the_keyring_opt_in_only() {
+        let words = |text: &str| {
+            text.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let (vault, idle, keyring) = serve_args(&words("/v.db")).unwrap();
+        assert_eq!(vault, PathBuf::from("/v.db"));
+        assert_eq!(idle, apassy::owner::serve::DEFAULT_IDLE);
+        assert!(!keyring);
+        let (_, idle, keyring) = serve_args(&words("/v.db --idle-minutes 5 --keyring")).unwrap();
+        assert_eq!(idle, std::time::Duration::from_secs(300));
+        assert!(keyring);
+        // No passphrase or secret is ever an argument.
+        for bad in [
+            "",
+            "/v.db /w.db",
+            "/v.db --idle-minutes 0",
+            "/v.db --idle-minutes",
+            "/v.db --passphrase x",
+            "/v.db --keyring --keyring",
+        ] {
+            assert!(serve_args(&words(bad)).is_err(), "{bad}");
+        }
     }
     #[test]
     fn terminal_names_strip_control_and_bidi_characters() {

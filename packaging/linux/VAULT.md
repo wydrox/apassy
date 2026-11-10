@@ -50,6 +50,11 @@ Without a logind session and without a screen saver service, approval reuse stay
 off and you lock the vault manually. Both settings are stored per device in
 `~/.local/share/apassy/device-policy.json`.
 
+Without a desktop, `apassy owner serve /path/to/vault.db` hosts the browser and
+agent services after a terminal unlock; every request waits for a typed `approve` and
+the passphrase in that terminal. Run it in tmux or screen, never from a systemd unit:
+it refuses non-interactive input, and the package ships no unit for it.
+
 The vault is a software vault. Root and compromised processes of the same user
 are outside its protection. Linux kernel peer credentials and verified process
 ancestry improve browser authentication, but do not provide macOS code signing,
