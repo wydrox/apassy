@@ -428,10 +428,10 @@ jobs:
         run: cargo fetch --locked
       - name: Install cargo-nextest 0.9.150
         run: bash scripts/ci-install-nextest.sh
-      - name: Test Linux vault, browser identity and synthetic WebAuthn signatures
+      - name: Test Linux vault, browser identity, clipboard ownership and synthetic WebAuthn signatures
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy --all-features
-          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/)'
+          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/) | test(/^desktop::clipboard::/)'
       - name: Test headless owner commands without a desktop
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy-app

@@ -10,7 +10,7 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const HELP: &str = "Usage: apassy owner <create|unlock|shell|list|add|backup|change-passphrase|keyring-enable|keyring-disable> VAULT [DEST]\nAll operations require an interactive terminal. unlock opens a session until lock, quit or EOF.\nOptional keyring unlock: apassy owner unlock-keyring VAULT. Passphrase is always the default.";
+const HELP: &str = "Usage: apassy owner <create|unlock|shell|list|add|backup|change-passphrase|keyring-enable|keyring-disable> VAULT [DEST]\nAll operations require an interactive terminal. unlock opens a session until lock, quit or EOF.\nOptional keyring unlock: apassy owner unlock-keyring VAULT. Passphrase is always the default.\nThese commands never write the clipboard: without a desktop session Apassy cannot confirm and clear its own copy.";
 
 pub fn run(args: &[String]) -> i32 {
     if args.is_empty() || args == ["--help"] {

@@ -187,6 +187,10 @@ dependencies = [
  "time",
  "toml_edit",
  "tracing",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "x11rb",
  "zeroize",
 ]
 

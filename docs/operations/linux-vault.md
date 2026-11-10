@@ -75,9 +75,24 @@ path is required to unlock the vault.
 
 ## Desktop and browser
 
-Run `apassy` as your desktop user. Secret and TOTP clipboard Copy is currently
-unsupported on Linux; Show and browser fill remain available. Prefer Wayland: X11 clients can intercept
-input. The package installs the desktop entry and the browser extension assets.
+Run `apassy` as your desktop user. Prefer Wayland: X11 clients can intercept
+input.
+
+Clipboard Copy of secrets and TOTP codes (src/desktop/clipboard/linux.rs) has the
+macOS guarantees. Apassy owns the clipboard itself and serves the value to each
+paste with `x-kde-passwordManagerHint: secret`, which Klipper, CopyQ and
+wl-clipboard/cliphist honour. When another app copies, Apassy stops serving the
+value and never touches that clipboard again. After the clear time, on lock,
+vault switch and quit, it replaces only its own copy with an empty one: GNOME's
+Mutter keeps and restores the last text clipboard and ignores the hint, so a
+plain release would bring the value back. The session decides the mechanism:
+Wayland uses ext-data-control-v1 or wlr-data-control (wlroots compositors, KWin);
+a compositor without them (GNOME) uses X11 through XWayland; an X11 session uses
+X11. With no display, or Wayland without data-control and without XWayland,
+Copy stays disabled, its hover names the reason, and Show and browser fill
+remain. Every client of the session can read the clipboard while Apassy owns it,
+and a clipboard manager that ignores the hint can keep the value. Values above
+64 KiB are refused. Headless owner commands never write the clipboard. The package installs the desktop entry and the browser extension assets.
 Use Apassy's browser extension installation flow from the desktop account.
 Chrome stable and Chromium native manifests point to the trusted root-owned
 `/usr/lib/apassy/apassy-browser-host`, with extension assets under
