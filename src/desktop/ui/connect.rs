@@ -706,8 +706,12 @@ fn account_section(
             Tone::Neutral => kit::palette().secondary,
             tone => tone.text(),
         };
-        g.line(
+        // The buttons stay on the line of the label, and the status goes under it in
+        // full: "Connect Personal · Renews 10 Dec 2026" never ends in "…" at the width
+        // of Settings (frame 6 of the mockup).
+        g.line_note(
             "Plan",
+            None,
             Some(kit::text(value, Font::Body).color(color)),
             |ui| {
                 if billing && kit::small_button(ui, MANAGE_BILLING, Style::Bordered).clicked() {

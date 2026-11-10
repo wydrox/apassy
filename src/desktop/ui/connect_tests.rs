@@ -787,6 +787,87 @@ fn join_a_group_with_the_pasted_link() {
 
 // ---- The plan row. ----
 
+/// The texts of the galleys of `shape` that egui cut with "…" (`Label::truncate`).
+fn elided(shape: &egui::Shape, out: &mut Vec<String>) {
+    match shape {
+        egui::Shape::Text(text) if text.galley.elided => out.push(text.galley.text().to_owned()),
+        egui::Shape::Vec(nested) => nested.iter().for_each(|inner| elided(inner, out)),
+        _ => {}
+    }
+}
+
+/// At the width of the Settings column, the plan row shows its whole status, also the
+/// longest ones beside two buttons: the status goes under the label and wraps, and no
+/// text of the row is cut with "…" (leftover of unit M2, frame 6 of the mockup).
+#[test]
+fn the_plan_row_shows_its_whole_status_at_the_settings_width() {
+    let ctx = egui::Context::default();
+    let plan = |status: &str, renews: Option<u64>, read_only: Option<u64>| Plan {
+        plan: Some("personal".to_owned()),
+        status: status.to_owned(),
+        entitled: status == "active",
+        interval: Some("month".to_owned()),
+        quantity: Some(1),
+        renews_at: renews,
+        ends_at: None,
+        grace_until: None,
+        read_only_until: read_only,
+        delete_at: read_only.map(|at| at + 5_184_000),
+    };
+    for (plan, expected) in [
+        (
+            plan("active", Some(1_796_860_800), None),
+            "Connect Personal · Renews 10 Dec 2026",
+        ),
+        (
+            plan("read_only", None, Some(1_799_020_800)),
+            "Read-only until 4 Jan 2027",
+        ),
+    ] {
+        let view = ConnectView {
+            shown: Shown::Account(Account {
+                account_id: "acc_k7m2q4x3ca".to_owned(),
+                name: "Rafal".to_owned(),
+                email: Some("synthetic@example.test".to_owned()),
+                plan,
+                devices: Vec::new(),
+                group: None,
+            }),
+            plans: Some(fixture_plans()),
+            locked: false,
+            busy: false,
+            error: None,
+            now: 1_795_000_000,
+        };
+        // The narrowest Settings detail column: the window at its smallest.
+        for width in [380.0, 460.0] {
+            let mut text = String::new();
+            let mut cut = Vec::new();
+            for _ in 0..2 {
+                let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
+                    ui.allocate_ui(egui::vec2(width, 900.0), |ui| {
+                        ui.set_max_width(width);
+                        super::connect::draw(ui, &view);
+                    });
+                });
+                text.clear();
+                cut.clear();
+                for clipped in &output.shapes {
+                    collect(&clipped.shape, &mut text);
+                    elided(&clipped.shape, &mut cut);
+                }
+                output.drop_without_applying_deltas();
+            }
+            assert!(text.contains(expected), "{width}: {text}");
+            assert!(
+                cut.iter().all(|line| !line.contains(expected)),
+                "{width}: the status is cut: {cut:?}"
+            );
+            assert!(text.contains(MANAGE_BILLING), "{width}: {text}");
+        }
+    }
+}
+
 /// Every case of `plan-states.json` shows its state: the plan row, the status line,
 /// the line under the row, and the buttons of the account that pays.
 #[test]
