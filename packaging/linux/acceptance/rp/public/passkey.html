@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>L4 passkey</title><link rel="stylesheet" href="/style.css"></head>
+<body><main>
+<h1>L4 passkey</h1>
+<p class="note">Synthetic account synthetic.passkey@example.test. The server verifies every response. Keys: c create, g sign in, w/x wrong RP ID.</p>
+<div class="actions">
+  <button type="button" id="create">Create passkey</button>
+  <button type="button" id="get">Sign in with passkey</button>
+  <button type="button" id="wrong-create">Create with wrong RP ID</button>
+  <button type="button" id="wrong-get">Sign in with wrong RP ID</button>
+</div>
+<p id="status" role="status" data-state="idle">Ready.</p>
+</main><script src="/passkey.js" type="module"></script></body></html>

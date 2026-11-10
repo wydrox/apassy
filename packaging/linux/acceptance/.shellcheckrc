@@ -1,0 +1,4 @@
+# Acceptance kit only. Single-quoted commands are run by another shell on purpose
+# (SC2016, SC2029: they expand in the owner's session or on the devbox); loop
+# counters are unused by design (SC2034); /etc/os-release exists on the target only.
+disable=SC1091,SC2016,SC2029,SC2034

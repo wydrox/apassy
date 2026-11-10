@@ -1,0 +1,7 @@
+body { font: 18px/1.5 sans-serif; margin: 2rem; }
+button, input { font-size: 18px; margin: 0.4rem; padding: 0.4rem 0.8rem; }
+label { display: block; margin: 0.6rem 0; }
+.note { color: #555; }
+#status { font-weight: bold; }
+#status[data-state="ok"] { color: #0a6b0a; }
+#status[data-state="error"] { color: #a40000; }
