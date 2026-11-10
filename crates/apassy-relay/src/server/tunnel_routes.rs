@@ -56,6 +56,9 @@ pub const DIAL_PREFIX: &str = "/v1/tunnel/dial/";
 /// Seconds between two writes of the usage counters to `tunnel_usage`. A crash loses at
 /// most this much of the month's count; a stop writes them at once.
 pub const USAGE_FLUSH_SECS: u64 = 60;
+/// The months of `tunnel_usage` that stay: the current one and the twelve before it.
+/// Older rows are deleted at the start and with each write.
+pub const USAGE_MONTHS_KEPT: u32 = 13;
 
 // ---- The directory of the broker. ----
 
@@ -853,8 +856,28 @@ pub fn restore_usage(hub: &Hub, broker: &Broker, now: u64) -> RelayResult<usize>
     Ok(rows.len())
 }
 
+/// The first month (`yyyymm`) whose rows stay at `now`: [`USAGE_MONTHS_KEPT`] months with
+/// the current one.
+pub fn first_kept_month(now: u64) -> u32 {
+    let month = month_of(now);
+    let index = (month / 100) * 12 + (month % 100 - 1);
+    let first = index.saturating_sub(USAGE_MONTHS_KEPT - 1);
+    (first / 12) * 100 + first % 12 + 1
+}
+
+/// Deletes the rows of `tunnel_usage` older than [`USAGE_MONTHS_KEPT`] months. Returns
+/// how many.
+pub fn prune_usage(hub: &Hub, now: u64) -> RelayResult<usize> {
+    let first = first_kept_month(now).to_string();
+    hub.directory.store.tx(|tx| {
+        tx.execute("DELETE FROM tunnel_usage WHERE month < ?1", params![first])
+            .map_err(db)
+    })
+}
+
 /// Writes the counters that changed since `written` to `tunnel_usage` (the larger of the
-/// stored and the counted value, so a write never lowers a count). Returns how many rows.
+/// stored and the counted value, so a write never lowers a count), and deletes the rows
+/// older than [`USAGE_MONTHS_KEPT`] months. Returns how many rows it wrote.
 pub fn flush_usage(
     hub: &Hub,
     broker: &Broker,
@@ -900,6 +923,7 @@ pub fn flush_usage(
         }
         Ok(())
     })?;
+    prune_usage(hub, crate::now_unix())?;
     let count = changed.len();
     written.extend(changed);
     Ok(count)
@@ -995,6 +1019,7 @@ pub fn start(hub: &Arc<Hub>) -> RelayResult<Option<TunnelRuntime>> {
         stop: Arc::new(AtomicBool::new(false)),
         writer: None,
     };
+    prune_usage(hub, crate::now_unix())?;
     restore_usage(hub, &broker, crate::now_unix())?;
     if let Some(addr) = settings.ingress_listen {
         let listener = listen(addr, "ingress")?;
@@ -1038,4 +1063,19 @@ pub fn start(hub: &Arc<Hub>) -> RelayResult<Option<TunnelRuntime>> {
         .map_err(|_| RelayError::internal("The tunnel usage thread cannot start."))?;
     runtime.writer = Some(writer);
     Ok(Some(runtime))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thirteen_months_of_usage_stay() {
+        // 2026-11-10: the rows of 2025-11 to 2026-11 stay.
+        assert_eq!(first_kept_month(1_794_268_800), 202511);
+        // 2026-01-01T00:00:00Z: 2025-01 to 2026-01.
+        assert_eq!(first_kept_month(1_767_225_600), 202501);
+        // 2026-12-31T23:59:59Z: 2025-12 to 2026-12.
+        assert_eq!(first_kept_month(1_798_761_599), 202512);
+    }
 }

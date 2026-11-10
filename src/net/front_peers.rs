@@ -12,6 +12,11 @@
 //! not know (a local process that bypasses the front) is keyed by its own address, the
 //! loopback. With the Serve fallback (`FrontRoute::ServeTcp`) every peer is Tailscale's
 //! daemon on the loopback, so the peers share one key there.
+//!
+//! A stream of the Connect tunnel has no peer address (Connect tells the node nothing
+//! about the caller): the front writes it down as a tunnel stream ([`register_tunnel`]),
+//! so the relay knows, without a header, that the request came through Connect
+//! ([`is_tunnel`]).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -19,8 +24,17 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 type Key = (SocketAddr, SocketAddr);
 
-fn table() -> MutexGuard<'static, HashMap<Key, IpAddr>> {
-    static TABLE: OnceLock<Mutex<HashMap<Key, IpAddr>>> = OnceLock::new();
+/// Whose bytes a pumped connection carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// A tailnet peer.
+    Peer(IpAddr),
+    /// A stream of the Connect tunnel.
+    Tunnel,
+}
+
+fn table() -> MutexGuard<'static, HashMap<Key, Origin>> {
+    static TABLE: OnceLock<Mutex<HashMap<Key, Origin>>> = OnceLock::new();
     TABLE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -51,14 +65,32 @@ impl Drop for PeerEntry {
 /// The entry lives until the returned value drops.
 pub fn register(source: SocketAddr, target: SocketAddr, peer: IpAddr) -> PeerEntry {
     let key = key(source, target);
-    table().insert(key, peer.to_canonical());
+    table().insert(key, Origin::Peer(peer.to_canonical()));
+    PeerEntry { key }
+}
+
+/// Write down that the connection from `source` to `target` carries a stream of the
+/// Connect tunnel. The entry lives until the returned value drops.
+pub fn register_tunnel(source: SocketAddr, target: SocketAddr) -> PeerEntry {
+    let key = key(source, target);
+    table().insert(key, Origin::Tunnel);
     PeerEntry { key }
 }
 
 /// The peer of the connection from `source` to the listener at `target`, while a front
-/// pumps it. `None`: no front of this process made that connection.
+/// pumps it. `None`: no front of this process made that connection, or it carries a
+/// tunnel stream.
 pub fn peer_of(source: SocketAddr, target: SocketAddr) -> Option<IpAddr> {
-    table().get(&key(source, target)).copied()
+    match table().get(&key(source, target)) {
+        Some(Origin::Peer(peer)) => Some(*peer),
+        _ => None,
+    }
+}
+
+/// True while the connection from `source` to the listener at `target` carries a stream
+/// of the Connect tunnel that the front of this process pumps.
+pub fn is_tunnel(source: SocketAddr, target: SocketAddr) -> bool {
+    table().get(&key(source, target)) == Some(&Origin::Tunnel)
 }
 
 #[cfg(test)]
@@ -78,6 +110,20 @@ mod tests {
         assert_eq!(peer_of(source, other), None);
         drop(entry);
         assert_eq!(peer_of(source, target), None);
+    }
+
+    #[test]
+    fn a_tunnel_stream_has_no_peer() {
+        let source: SocketAddr = "127.0.0.1:50021".parse().unwrap();
+        let target: SocketAddr = "127.0.0.1:50022".parse().unwrap();
+        assert!(!is_tunnel(source, target));
+        let entry = register_tunnel(source, target);
+        assert!(is_tunnel(source, target));
+        assert_eq!(peer_of(source, target), None);
+        drop(entry);
+        assert!(!is_tunnel(source, target));
+        let _peer = register(source, target, "100.64.0.9".parse().unwrap());
+        assert!(!is_tunnel(source, target));
     }
 
     #[test]

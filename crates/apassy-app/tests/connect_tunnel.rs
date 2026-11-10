@@ -1160,6 +1160,7 @@ fn setup(connect: &Connect, acme: Option<AcmeOptions>, clock: Arc<dyn Clock>) ->
     let mut setup = ConnectSetup::new(TestAuth::new(connect.origin()));
     setup.acme = acme;
     setup.clock = clock;
+    setup.zone = ZONE.to_owned();
     setup
 }
 
@@ -1248,14 +1249,22 @@ fn the_tunnel_carries_dials_public_agents_and_acme_and_ends_with_the_node() {
     }
     let connect_dir = node_dir.join("connect");
     for file in [
-        "public-key.der",
+        "public-key.sealed",
         "public-chain.pem",
-        "acme-account.der",
+        "acme-account.sealed",
         "node.json",
     ] {
         assert_eq!(mode_of(&connect_dir.join(file)), 0o600, "{file}");
     }
     assert_eq!(mode_of(&connect_dir), 0o700);
+    // The keys are sealed under the node key: no PKCS#8 key in the clear.
+    for file in ["public-key.sealed", "acme-account.sealed"] {
+        let bytes = std::fs::read(connect_dir.join(file)).expect("key file");
+        // The sealed form starts with its version byte 1; a PKCS#8 DER with 0x30.
+        assert_eq!(bytes.first(), Some(&1), "{file}: the sealed form");
+    }
+    assert!(!connect_dir.join("public-key.der").exists());
+    assert!(!connect_dir.join("acme-account.der").exists());
     // The node answers nothing but its pending token on the ACME path (none now).
     let mut probe = TcpStream::connect(connect.acme.addr).expect("acme");
     probe.set_read_timeout(Some(WAIT)).expect("timeout");
@@ -1583,6 +1592,7 @@ fn an_outage_reconnects_within_thirty_seconds_on_a_fake_clock_and_ends_open_stre
         "http://127.0.0.1:{}",
         proxy.addr.port()
     )));
+    setup.zone = ZONE.to_owned();
     setup.acme = None;
     setup.clock = clock.clone();
     node.set_connect(Some(setup));
@@ -1664,4 +1674,87 @@ fn an_outage_reconnects_within_thirty_seconds_on_a_fake_clock_and_ends_open_stre
     assert!(attempts >= 3, "tries during the outage: {attempts}");
     node.stop();
     assert!(!connect.broker.online(NODE_ID));
+}
+
+// ---------------------------------------------------------------------------
+// A stranger at the ingress.
+
+/// The first TLS record of a client for `name`.
+fn client_hello(name: &str) -> Vec<u8> {
+    let config = ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth();
+    let mut connection = ClientConnection::new(
+        Arc::new(config),
+        ServerName::try_from(name.to_owned()).expect("name"),
+    )
+    .expect("client");
+    let mut out = Vec::new();
+    while connection.wants_write() {
+        connection.write_tls(&mut out).expect("hello");
+    }
+    out
+}
+
+/// A stranger whose TLS the node ends (here: no public certificate yet) and who keeps its
+/// own side open holds no stream: the node resets and forgets it, Connect ends it, and
+/// later bytes of the stranger count against nothing.
+#[test]
+fn a_stranger_that_keeps_its_side_open_holds_no_stream_at_the_node_or_at_connect() {
+    let dir = TempDir::new("stranger");
+    let connect = Connect::start(Arc::new(ManualClock::new(now())));
+    let mut vault = Vault::create(&dir.0.join("vault.db"), PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    vault.set_cloud_route_on(true).expect("remote access on");
+    let vault: SharedVault = Arc::new(Mutex::new(Some(vault)));
+    let node = Node::new(NodeOptions {
+        backend: Arc::new(EmbeddedRelay::default()),
+        keys: Arc::new(NoKeychain),
+        cli: Arc::new(NoTailscale),
+        data_dir: dir.0.join("node"),
+    });
+    node.set_connect(Some(setup(
+        &connect,
+        None,
+        Arc::new(SystemClock::default()),
+    )));
+    node.set_connect_route(true).expect("route on");
+    node.start(&vault, broker_context(&vault))
+        .expect("the node starts on Connect");
+    wait_until("the tunnel is on", || {
+        tunnel_state(&node) == Some(TunnelState::On) && connect.broker.online(NODE_ID)
+    });
+    for round in 0..3 {
+        let mut stranger = TcpStream::connect(connect.sni.addr).expect("ingress");
+        stranger.set_read_timeout(Some(WAIT)).expect("timeout");
+        stranger
+            .write_all(&client_hello(PUBLIC_NAME))
+            .expect("hello");
+        // Connect ends the connection although the stranger never closes its side.
+        let mut answer = Vec::new();
+        let _ = stranger.read_to_end(&mut answer);
+        wait_until("no stream at Connect", || {
+            connect.broker.ingress_usage(ACCOUNT).open_streams == 0
+        });
+        wait_until("no stream at the node", || {
+            node.connect_status()
+                .tunnel
+                .is_some_and(|tunnel| tunnel.open_streams == 0)
+        });
+        let before = connect.broker.usage(ACCOUNT).bytes;
+        let _ = stranger.write_all(&[0u8; 4096]);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            connect.broker.usage(ACCOUNT).bytes,
+            before,
+            "round {round}: bytes after the end count against nothing"
+        );
+    }
+    // A device dial still works.
+    let mut dial = connect.dial().expect("a dial");
+    let leaf = served_leaf(&mut dial, "device.example.test").expect("handshake");
+    assert!(!leaf.is_empty());
+    node.stop();
 }

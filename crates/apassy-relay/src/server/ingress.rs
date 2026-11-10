@@ -14,8 +14,10 @@
 //! Client addresses stay in memory, for a per-address limit of new connections
 //! ([`IngressConfig::per_address_per_minute`], IPv6 by /64), and are never logged,
 //! stored, or sent to the node. Handshakes in progress are capped
-//! ([`IngressConfig::max_pending`]); after the handshake a connection is a stream and
-//! counts against the tunnel limits of the node's account.
+//! ([`IngressConfig::max_pending`]); after the handshake a connection is a stream of the
+//! ingress class of the node's account (its own slots, per-node open rate, first-byte
+//! deadline, and byte budget: `tunnel::Limits`), apart from the account's dials. A
+//! failing accept backs off ([`accept_backoff`]).
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -390,6 +392,9 @@ pub struct IngressStats {
     pub unrecognized: AtomicU64,
     pub limited: AtomicU64,
     pub forwarded: AtomicU64,
+    /// Accepts that failed (such as a full descriptor table); each waits
+    /// [`accept_backoff`] before the next accept.
+    pub accept_errors: AtomicU64,
 }
 
 impl IngressStats {
@@ -404,6 +409,7 @@ impl IngressStats {
             ("unrecognized", &self.unrecognized),
             ("limited", &self.limited),
             ("forwarded", &self.forwarded),
+            ("accept_errors", &self.accept_errors),
         ]
         .into_iter()
         .map(|(name, counter)| (name, counter.load(Ordering::Relaxed)))
@@ -491,6 +497,13 @@ impl Drop for IngressHandle {
     }
 }
 
+/// The wait after `failures` accepts in a row failed: 10 ms, doubling, at most 1 s. A
+/// failing accept (a full descriptor table, a full backlog) never spins the loop.
+pub fn accept_backoff(failures: u32) -> Duration {
+    let millis = 10u64.saturating_mul(1u64 << failures.saturating_sub(1).min(16));
+    Duration::from_millis(millis.min(1000))
+}
+
 #[derive(Clone, Copy)]
 enum Port {
     Tls,
@@ -545,11 +558,23 @@ fn serve(
     std::thread::Builder::new()
         .name("ingress-accept".into())
         .spawn(move || {
+            let mut failures: u32 = 0;
             for connection in listener.incoming() {
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
-                let Ok(connection) = connection else { continue };
+                let connection = match connection {
+                    Ok(connection) => {
+                        failures = 0;
+                        connection
+                    }
+                    Err(_) => {
+                        failures = failures.saturating_add(1);
+                        stats.accept_errors.fetch_add(1, Ordering::Relaxed);
+                        std::thread::sleep(accept_backoff(failures));
+                        continue;
+                    }
+                };
                 // The address is used here and then dropped; it is never logged.
                 let allowed = connection
                     .peer_addr()
@@ -816,6 +841,15 @@ mod tests {
             "a".repeat(129)
         );
         assert_eq!(acme_host(long.as_bytes()), None);
+    }
+
+    #[test]
+    fn a_failing_accept_backs_off() {
+        let waits: Vec<u64> = (1..=9)
+            .map(|failures| accept_backoff(failures).as_millis() as u64)
+            .collect();
+        assert_eq!(waits, [10, 20, 40, 80, 160, 320, 640, 1000, 1000]);
+        assert_eq!(accept_backoff(u32::MAX), Duration::from_secs(1));
     }
 
     #[test]

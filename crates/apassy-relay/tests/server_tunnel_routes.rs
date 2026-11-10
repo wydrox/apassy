@@ -1566,3 +1566,30 @@ fn every_example_of_the_contract_parses_with_the_relay_types() {
         registered["public_name"].as_str()
     );
 }
+
+#[test]
+fn a_bad_token_on_an_upgrade_route_counts_toward_the_failed_auth_limit() {
+    let c = connect_with(|cfg| cfg.auth_limiter = true);
+    let a = account(&c);
+    let node_id = c.register(&a.mac_token, "MacBook Pro")["node_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let dial = format!("/v1/tunnel/dial/{node_id}");
+    for n in 0..apassy_relay::server::http::AUTH_FAILURES_MAX {
+        let path = if n % 2 == 0 {
+            dial.as_str()
+        } else {
+            "/v1/tunnel/node"
+        };
+        assert_eq!(
+            c.upgrade(path, Some("apa_not_a_token")).err(),
+            Some((401, "unauthenticated".to_string())),
+            "{n}"
+        );
+    }
+    assert_eq!(
+        c.upgrade(&dial, Some("apa_not_a_token")).err(),
+        Some((429, "rate_limited".to_string()))
+    );
+}

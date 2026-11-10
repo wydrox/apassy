@@ -18,6 +18,9 @@ use zeroize::Zeroizing;
 
 /// The HKDF info of the front's private key.
 pub const FRONT_INFO: &[u8] = b"apassy-node-front-v1";
+/// The HKDF info of the private keys of the Connect files of a node: the public
+/// certificate's key and the ACME account key (`crate::node::public_cert`).
+pub const CONNECT_INFO: &[u8] = b"apassy-node-connect-v1";
 /// The first byte of a sealed value.
 pub const VERSION: u8 = 1;
 /// The tag of AES-256-GCM.
@@ -61,6 +64,38 @@ fn derive(master_key: &[u8], info: &[u8]) -> Result<LessSafeKey, SealError> {
     Ok(LessSafeKey::new(UnboundKey::from(okm)))
 }
 
+/// A sealing key derived once from the master key and an info: who holds it can seal and
+/// open values of that info, and nothing else (the master key is not kept).
+pub struct SealKey {
+    key: LessSafeKey,
+}
+
+impl std::fmt::Debug for SealKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SealKey")
+    }
+}
+
+impl SealKey {
+    /// The key of `info` under `master_key`.
+    pub fn derive(master_key: &[u8], info: &[u8]) -> Result<Self, SealError> {
+        Ok(Self {
+            key: derive(master_key, info)?,
+        })
+    }
+
+    /// Seal `plaintext` with the associated data `context` (the form of [`seal`]).
+    pub fn seal(&self, context: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+        seal_with(&self.key, context, plaintext)
+    }
+
+    /// Open a value of [`SealKey::seal`] (or of [`seal`] with the same master key and
+    /// info). The plaintext is erased on drop.
+    pub fn open(&self, context: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError> {
+        open_with(&self.key, context, sealed)
+    }
+}
+
 /// Seal `plaintext` under `master_key` with the HKDF `info` and the associated data
 /// `context`.
 pub fn seal(
@@ -69,7 +104,10 @@ pub fn seal(
     context: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, SealError> {
-    let key = derive(master_key, info)?;
+    seal_with(&derive(master_key, info)?, context, plaintext)
+}
+
+fn seal_with(key: &LessSafeKey, context: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
     let mut nonce = [0u8; NONCE_LEN];
     SystemRandom::new()
         .fill(&mut nonce)
@@ -96,7 +134,14 @@ pub fn open(
     context: &[u8],
     sealed: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, SealError> {
-    let key = derive(master_key, info)?;
+    open_with(&derive(master_key, info)?, context, sealed)
+}
+
+fn open_with(
+    key: &LessSafeKey,
+    context: &[u8],
+    sealed: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, SealError> {
     if sealed.len() < 1 + NONCE_LEN + TAG_LEN || sealed[0] != VERSION {
         return Err(SealError::Open);
     }
@@ -118,6 +163,24 @@ pub fn open(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_derived_key_seals_as_the_master_key_does() {
+        let key = SealKey::derive(MASTER, CONNECT_INFO).expect("derive");
+        let sealed = key.seal(b"context", SECRET).expect("seal");
+        assert_eq!(&key.open(b"context", &sealed).expect("open")[..], SECRET);
+        assert_eq!(
+            &open(MASTER, CONNECT_INFO, b"context", &sealed).expect("open")[..],
+            SECRET
+        );
+        assert_eq!(key.open(b"other", &sealed), Err(SealError::Open));
+        let front = SealKey::derive(MASTER, FRONT_INFO).expect("derive");
+        assert_eq!(front.open(b"context", &sealed), Err(SealError::Open));
+        assert_eq!(
+            SealKey::derive(b"short", CONNECT_INFO).err(),
+            Some(SealError::WeakKey)
+        );
+    }
 
     const MASTER: &[u8] = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const SECRET: &[u8] = b"a PKCS#8 key, in a test";

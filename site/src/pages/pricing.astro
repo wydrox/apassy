@@ -27,7 +27,8 @@ const free = [
 ];
 
 const sees = [
-  { fn: "Reachability without Tailscale: a byte relay, with TLS end to end between your devices", sees: "TLS records, sizes, and times" },
+  { fn: "Reachability without Tailscale: a byte relay, with TLS end to end between your devices, pinned to your Mac's own certificate", sees: "TLS records, sizes, and times" },
+  { fn: "A public name of your Mac for agents in the cloud, through the same relay", sees: "TLS records, sizes, and times. As with a Tailscale Funnel name, whoever runs Connect or controls the DNS of the name could get a certificate for it and then read those agents' requests. Your own devices do not depend on this." },
   { fn: "An always-on sync home: a blind store for the encrypted copy of a vault", sees: "Ciphertext, sizes, and times" },
   { fn: "The hosted bouncer brain, only if you turn it on", sees: "The command and the task of each question to the brain. Never a credential value." },
   { fn: "Support", sees: "What you send" },

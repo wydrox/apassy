@@ -23,7 +23,12 @@ release. Future upgrades must remove/reapply these changes deliberately.
   64 KiB of total header lines. Guarded connections reject upgrades with CL/TE
   framing or of a method other than `GET`, because the upstream upgrade reader ignores
   CL/TE. A body-less `GET` upgrade reaches the handler, for the Connect tunnel
-  (`Request::upgrade_split`, `vendor/tiny_http/APASSY-PATCH.md`).
+  (`Request::upgrade_split`, `vendor/tiny_http/APASSY-PATCH.md`). Whether a request
+  asks for an upgrade is one rule everywhere (`tiny_http::asks_upgrade`): an `Upgrade`
+  header, or the token `upgrade` in any `Connection` header. The guarded transport,
+  the choice of the raw upgrade reader (which also needs a request without CL/TE, so a
+  body keeps its framing), the end of connection reuse, and the relay's upgrade guard
+  all use it; a header value that only contains the letters is not an upgrade.
 - Inbound chunk metadata is limited to 8 KiB per line without allocation, uses
   checked hexadecimal arithmetic and strict CRLF, and rejects incomplete chunks.
   Incomplete length-delimited bodies also fail. Trailers remain unsupported, as in

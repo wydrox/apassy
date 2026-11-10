@@ -196,17 +196,13 @@ where
         }
     };
 
-    // true if the client sent a `Connection: upgrade` header
-    let connection_upgrade = {
-        match headers
-            .iter()
-            .find(|h: &&Header| h.field.equiv("Connection"))
-            .map(|h| h.value.as_str())
-        {
-            Some(v) if v.to_ascii_lowercase().contains("upgrade") => true,
-            _ => false,
-        }
-    };
+    // Apassy: the raw reader is for a request that asks for an upgrade, by the one rule
+    // of the crate (`asks_upgrade`: an `Upgrade` header, or the token `upgrade` in any
+    // `Connection` header), and has no body framing: it never ignores a Content-Length or
+    // a Transfer-Encoding. The guarded transport admits an upgrade only as a body-less GET.
+    let connection_upgrade = crate::common::asks_upgrade(&headers)
+        && content_length.is_none()
+        && transfer_encoding.is_none();
 
     // we wrap `source_data` around a reading whose nature depends on the transfer-encoding and
     // content-length headers
