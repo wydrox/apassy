@@ -1678,7 +1678,19 @@ Settings (all optional; the defaults change nothing):
   `openssl genpkey -algorithm ed25519 -out connect_signing_key.pem` on a machine of the
   owner, keep a copy with the other secrets, and mount it read-only like the master key.
   The well-known document `/.well-known/apassy-connect.json` publishes its public key and
-  its id (`ek_` and 16 hex characters of the key's SHA-256).
+  its id (`ek_` and 16 hex characters of the key's SHA-256). A signing key that this relay
+  did not have before signs one hour after its first start with it (services must see it
+  published first); until then `GET /v1/account/entitlement` answers 503 `busy`. The first
+  key a relay ever has signs at once.
+- `APASSY_CONNECT_PUBLISHED_KEYS_FILE=/run/secrets/connect_published_keys.json`: more
+  public keys for the well-known document, `{"keys":[{"kid","public_key"}]}` (at most 8;
+  each `kid` is the key id of its key). Only the signing key and these are published.
+  A rotation: add the next key here and restart; an hour later make it the signing key,
+  move the old public key here, and restart; a day later remove the old key and restart.
+- `APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY` (default 1000, 0 to 100000; `0`: no new
+  accounts) and `APASSY_RELAY_CONNECT_ACCOUNTS_MAX` (default 100000): over either,
+  `POST /v1/account` is 503 `busy` with `Retry-After: 3600`. One client prefix (proven by
+  the Worker) makes at most 5 accounts a UTC day (429).
 - `APASSY_CONNECT_SITE_URL`: the site of the Stripe return pages (default
   `https://apassy.wyderka.cc`).
 - `APASSY_RELAY_MODE=connect` is the cutover of R3 (unit C5), not this step: it refuses a
@@ -1710,9 +1722,16 @@ in again), and link codes and recovery codes never reach the relay.
   `account_join_requested`, `account_join_refused`, `account_link_created`,
   `account_recovered`, `account_deleted`, `vault_store_created`, `vault_store_deleted`
   (actor `account:<account id>`, ids only), and `auth_failed` refusals of kind
-  `account_token`. A run of `account_recovered` for one account, or many 429 answers of
-  `POST /v1/account/recover`, is someone guessing a recovery code: the relay allows five
-  tries for each account an hour.
+  `account_token`. Many 429 answers of `POST /v1/account/recover` are failed recovery
+  signatures: the relay counts five for each account and twenty for each client prefix an
+  hour.
+- `account_store_removal` rows are removals of a device from a vault store file that
+  waited (the store was suspended, or its file refused the write). The device is out of the
+  store at once; the row goes when the store opens or a maintenance pass applies it. A row
+  that stays with a growing `attempts` names a store whose file does not take writes:
+  look at its file cap (`admin teams`).
+- The maintenance pass deletes links a day after they end (with their joins) and the
+  relay audit rows of accounts after 90 days.
 - `brain_event` rows queue the I-4 events for the bouncer brain; nothing sends them yet
   (a later unit). They are small; leave them.
 
