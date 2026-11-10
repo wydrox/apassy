@@ -143,6 +143,10 @@ pub enum TeamKind {
     Operator,
     /// Made without a code by the app of one device (`POST /v1/connect`).
     Connect,
+    /// A vault store of an Apassy Connect account (connect-account-v1 section 8): one
+    /// vault's relay sync, made by `POST /v1/account/vaults`. Its devices are added by
+    /// their account, never by an invite or a device link.
+    Account,
 }
 
 impl TeamKind {
@@ -150,6 +154,7 @@ impl TeamKind {
         match self {
             Self::Operator => "operator",
             Self::Connect => "connect",
+            Self::Account => "account",
         }
     }
 }
@@ -1257,6 +1262,348 @@ pub struct ActionStatus {
     pub settled_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settle: Option<SealedView>,
+}
+
+// ---- Apassy Connect accounts (connect-account-v1, docs/SPEC.md "Connect accounts"). ----
+//
+// Every request body is strict: unknown, duplicate, and missing fields are refused with
+// 400 `invalid_request`. Results are what the contract lists, nothing more.
+
+/// A platform of an account device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Mac,
+    Iphone,
+    Linux,
+}
+
+impl Platform {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mac => "mac",
+            Self::Iphone => "iphone",
+            Self::Linux => "linux",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "mac" => Some(Self::Mac),
+            "iphone" => Some(Self::Iphone),
+            "linux" => Some(Self::Linux),
+            _ => None,
+        }
+    }
+}
+
+/// `POST /v1/account`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountCreate {
+    pub name: String,
+    pub device_name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    pub recovery_hash: String,
+    pub signature: String,
+}
+
+/// `POST /v1/account` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountCreated {
+    pub account_id: String,
+    pub device_id: String,
+    pub created_at: u64,
+}
+
+/// `POST /v1/account/challenge`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountChallengeRequest {
+    pub account_id: String,
+    pub public_key: String,
+}
+
+/// `POST /v1/account/token`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountTokenRequest {
+    pub account_id: String,
+    pub public_key: String,
+    pub nonce: String,
+    pub signature: String,
+}
+
+/// `POST /v1/account/token` answer: the account token, 15 minutes, in memory only.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountTokenRef<'a> {
+    pub token: &'a str,
+    pub expires_at: u64,
+    pub account_id: &'a str,
+    pub device_id: &'a str,
+}
+
+/// A live device of an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountDevice {
+    pub device_id: String,
+    pub name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    pub created_at: u64,
+    /// Rounded down to the hour, or `None`.
+    pub last_seen_at: Option<u64>,
+}
+
+/// The plan of an account (connect-billing-v1 section 8). Billing (C2) fills it; without
+/// a subscription it is [`PlanView::none`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanView {
+    /// `personal`, `family`, `team`, or `None`.
+    pub plan: Option<String>,
+    /// `none`, `pending`, `active`, `trialing`, `past_due`, `read_only`, or `suspended`.
+    pub status: String,
+    pub entitled: bool,
+    pub interval: Option<String>,
+    pub quantity: Option<u64>,
+    pub renews_at: Option<u64>,
+    pub ends_at: Option<u64>,
+    pub grace_until: Option<u64>,
+    pub read_only_until: Option<u64>,
+    pub delete_at: Option<u64>,
+    pub group_id: Option<String>,
+}
+
+impl PlanView {
+    /// An account without a plan.
+    pub fn none() -> Self {
+        Self {
+            plan: None,
+            status: "none".to_string(),
+            entitled: false,
+            interval: None,
+            quantity: None,
+            renews_at: None,
+            ends_at: None,
+            grace_until: None,
+            read_only_until: None,
+            delete_at: None,
+            group_id: None,
+        }
+    }
+
+    /// Pulls and downloads of the vault stores work (section 8 of connect-billing-v1):
+    /// an entitled plan, or `read_only`.
+    pub fn can_pull(&self) -> bool {
+        self.entitled || self.status == "read_only"
+    }
+}
+
+/// The group of an account in `AccountView` (connect-billing-v1 section 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountGroup {
+    pub group_id: String,
+    /// `family` or `team`.
+    pub kind: String,
+    /// `owner`, `admin`, or `member`.
+    pub role: String,
+    /// `pending` or `active`.
+    pub state: String,
+}
+
+/// `GET /v1/account`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountView {
+    pub account_id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub created_at: u64,
+    pub plan: PlanView,
+    pub devices: Vec<AccountDevice>,
+    pub group: Option<AccountGroup>,
+}
+
+/// An empty JSON object: `DELETE /v1/account`, a refusal of a join.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyRequest {}
+
+/// `DELETE /v1/account` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountDeleted {
+    pub account_id: String,
+    pub deleted_stores: u64,
+    pub subscription_canceled: bool,
+}
+
+/// `POST /v1/account/devices/link`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountLinkRequest {
+    pub link_hash: String,
+}
+
+/// `POST /v1/account/devices/link` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountLinkCreated {
+    pub link_id: u64,
+    pub expires_at: u64,
+}
+
+/// One pending join of a link that the calling device made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountPendingJoin {
+    pub join_id: u64,
+    pub link_id: u64,
+    pub device_name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/account/devices/pending/{join_id}/confirm`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountConfirm {
+    pub public_key: String,
+}
+
+/// `POST /v1/account/devices/join`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountJoin {
+    pub account_id: String,
+    pub link_hash: String,
+    pub device_name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    pub signature: String,
+}
+
+/// The device that confirms a join.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountConfirmer {
+    pub device_id: String,
+    pub name: String,
+    pub public_key: String,
+}
+
+/// `POST /v1/account/devices/join` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountJoined {
+    pub join_id: u64,
+    pub account_id: String,
+    pub confirmer: AccountConfirmer,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/account/devices/join/cancel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountJoinCancel {
+    pub account_id: String,
+    pub link_hash: String,
+    pub public_key: String,
+}
+
+/// `{"join_id": …}`: a refusal or a cancel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountJoinId {
+    pub join_id: u64,
+}
+
+/// `DELETE /v1/account/devices/{device_id}` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRevoked {
+    pub device_id: String,
+    pub removed_from_stores: u64,
+}
+
+/// `POST /v1/account/vaults`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultStoreCreate {
+    pub vault_id: String,
+    pub name: String,
+}
+
+/// A device in a vault store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreDevice {
+    pub store_device_id: u64,
+    pub device_id: String,
+    pub account_id: String,
+}
+
+/// A vault store: a relay-sync-v1 team of kind `account` for one vault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultStoreView {
+    pub team_id: TeamId,
+    pub vault_id: String,
+    pub name: String,
+    pub created_at: u64,
+    pub shared: bool,
+    pub devices: Vec<StoreDevice>,
+}
+
+/// `POST /v1/account/vaults/{team_id}/devices`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceAdd {
+    pub device_id: String,
+}
+
+/// `DELETE /v1/account/vaults/{team_id}` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultStoreDeleted {
+    pub team_id: TeamId,
+}
+
+/// `POST /v1/account/recover`. `recovery` is a secret: it is compared as a hash and
+/// never kept.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountRecover {
+    pub account_id: String,
+    pub recovery: SecretString,
+    pub device_name: String,
+    pub platform: Platform,
+    pub public_key: String,
+    pub recovery_hash: String,
+    pub signature: String,
+}
+
+/// `POST /v1/account/recover` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRecovered {
+    pub account_id: String,
+    pub device_id: String,
+    pub deleted_stores: u64,
+}
+
+/// `GET /v1/account/entitlement` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntitlementAnswer {
+    pub token: String,
+    pub expires_at: u64,
+}
+
+/// A published key of `GET /.well-known/apassy-connect.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WellKnownKey {
+    pub kid: String,
+    pub alg: String,
+    pub public_key: String,
+}
+
+/// `GET /.well-known/apassy-connect.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WellKnown {
+    pub v: u8,
+    pub origin: String,
+    pub keys: Vec<WellKnownKey>,
 }
 
 #[cfg(test)]

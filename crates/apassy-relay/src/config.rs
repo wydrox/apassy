@@ -20,6 +20,10 @@
 //! | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once (active or suspended), 0 to 1000000; at it `POST /v1/connect` is 503 `busy`; `0` turns Connect off | `100` |
 //! | `APASSY_RELAY_CONNECT_SYNC_BYTES` | The largest vault snapshot of a new Connect team (its `sync_bytes`): `0` (no relay sync; a push is 403 `plan_required`) or 1048576 to 67108864. Existing teams keep theirs (`admin limits --sync-bytes`). The hosted relay sets 67108864 until Apassy Connect starts | `0` |
 //! | `APASSY_RELAY_CONNECT_LONG_POLLS` | Long polls that all Connect teams hold at once, 0 to 1024; a poll over it answers at once; `0`: every Connect poll answers at once | `96` |
+//! | `APASSY_RELAY_CONNECT_ACCOUNTS` | `1`: the routes of Apassy Connect accounts (connect-account-v1) on this relay, beside every other route (the transition); `0`: every account route is 404 `not_found` | `0` |
+//! | `APASSY_RELAY_MODE` | `relay` (every route of the relay), or `connect`: Apassy Connect only (ADR 0037 stage 7). In `connect` mode the master key is refused (`APASSY_RELAY_KEY` and `_FILE` must not be set), `relay.db` and the vault stores are plain SQLite files (`Store::open_plain`), shared team vaults are off, and the account routes are on | `relay` |
+//! | `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 signing key of the entitlement token: a PKCS#8 file (DER or PEM). Without it `GET /v1/account/entitlement` is 503 `busy` for an entitled account and the well-known document lists no key | none |
+//! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
@@ -78,6 +82,11 @@ pub const DEFAULT_FEED_LONG_POLLS_PER_TEAM: usize = 16;
 /// the feed lane less one operator team's share, as `DEFAULT_CONNECT_LONG_POLLS` is for
 /// the question lane.
 pub const DEFAULT_CONNECT_FEED_LONG_POLLS: usize = 48;
+/// The site of Apassy Connect (`APASSY_CONNECT_SITE_URL`): the Stripe return pages and the
+/// group invites.
+pub const DEFAULT_CONNECT_SITE_URL: &str = "https://apassy.wyderka.cc";
+/// The largest signing key file of `APASSY_CONNECT_SIGNING_KEY_FILE`.
+const MAX_SIGNING_KEY_FILE_BYTES: u64 = 4096;
 /// The directory of the relay in the data directory: the teams and their keys.
 pub const DIRECTORY_FILE: &str = "relay.db";
 /// The folder of the team files in the data directory.
@@ -265,6 +274,179 @@ impl EdgeMode {
     }
 }
 
+/// What the relay serves (`APASSY_RELAY_MODE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelayMode {
+    /// Every route of the relay (the default).
+    #[default]
+    Relay,
+    /// Apassy Connect only (ADR 0037 stage 7): no master key, plain files, the account
+    /// routes. The retired routes are the cutover unit's (C5).
+    Connect,
+}
+
+/// The Ed25519 signing key of the entitlement token, as the PKCS#8 DER of its file. Debug
+/// is redacted; the bytes are zeroized on drop.
+#[derive(Clone)]
+pub struct ConnectSigningKey(std::sync::Arc<zeroize::Zeroizing<Vec<u8>>>);
+
+impl std::fmt::Debug for ConnectSigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConnectSigningKey(<redacted>)")
+    }
+}
+
+impl ConnectSigningKey {
+    /// A key from the bytes of a PKCS#8 file: DER, or PEM (`-----BEGIN PRIVATE KEY-----`,
+    /// as `openssl genpkey -algorithm ed25519` writes it). Refuses anything that `ring`
+    /// does not take as an Ed25519 key.
+    pub fn from_file_bytes(bytes: &[u8]) -> RelayResult<Self> {
+        let invalid = || {
+            RelayError::invalid(
+                "APASSY_CONNECT_SIGNING_KEY_FILE is not an Ed25519 key in PKCS#8 (DER or PEM).",
+            )
+        };
+        let der = if bytes.starts_with(b"-----BEGIN") {
+            use base64::prelude::{BASE64_STANDARD, Engine as _};
+            let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+            let body: String = text
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect::<Vec<_>>()
+                .concat();
+            let body = zeroize::Zeroizing::new(body);
+            zeroize::Zeroizing::new(
+                BASE64_STANDARD
+                    .decode(body.trim().as_bytes())
+                    .map_err(|_| invalid())?,
+            )
+        } else {
+            zeroize::Zeroizing::new(bytes.to_vec())
+        };
+        ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&der).map_err(|_| invalid())?;
+        Ok(Self(std::sync::Arc::new(der)))
+    }
+
+    /// The PKCS#8 DER. Do not log it.
+    pub fn pkcs8(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The settings of Apassy Connect (ADR 0037 stage 7, connect-account-v1).
+#[derive(Debug, Clone)]
+pub struct ConnectConfig {
+    pub mode: RelayMode,
+    /// The account routes are served (`APASSY_RELAY_CONNECT_ACCOUNTS=1`, or `connect` mode).
+    pub accounts: bool,
+    /// The signing key of the entitlement token (`APASSY_CONNECT_SIGNING_KEY_FILE`).
+    pub signing_key: Option<ConnectSigningKey>,
+    /// The site origin (`APASSY_CONNECT_SITE_URL`), for billing and groups.
+    pub site_url: String,
+}
+
+impl Default for ConnectConfig {
+    /// No accounts: every account route is 404.
+    fn default() -> Self {
+        Self {
+            mode: RelayMode::Relay,
+            accounts: false,
+            signing_key: None,
+            site_url: DEFAULT_CONNECT_SITE_URL.to_string(),
+        }
+    }
+}
+
+impl ConnectConfig {
+    /// The settings of a relay with the account routes on and the signing key `key`, for
+    /// tests and for a self-hosted Connect.
+    pub fn accounts(signing_key: Option<ConnectSigningKey>) -> Self {
+        Self {
+            accounts: true,
+            signing_key,
+            ..Self::default()
+        }
+    }
+
+    /// True in `connect` mode: no master key, plain files.
+    pub fn plain_files(&self) -> bool {
+        self.mode == RelayMode::Connect
+    }
+}
+
+/// The Connect settings from the environment. `master_key_set`: `APASSY_RELAY_KEY` or
+/// `APASSY_RELAY_KEY_FILE` is set, which `connect` mode refuses.
+fn connect_from(
+    lookup: &impl Fn(&str) -> Option<String>,
+    master_key_set: bool,
+) -> RelayResult<ConnectConfig> {
+    let mode = match lookup("APASSY_RELAY_MODE").as_deref().map(str::trim) {
+        None | Some("relay") => RelayMode::Relay,
+        Some("connect") => RelayMode::Connect,
+        Some(_) => {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_MODE is relay or connect.",
+            ));
+        }
+    };
+    if mode == RelayMode::Connect && master_key_set {
+        return Err(RelayError::invalid(
+            "APASSY_RELAY_MODE=connect refuses a master key: unset APASSY_RELAY_KEY and APASSY_RELAY_KEY_FILE (Connect keeps no secret, ADR 0037 stage 7).",
+        ));
+    }
+    let accounts = match lookup("APASSY_RELAY_CONNECT_ACCOUNTS").as_deref() {
+        None => mode == RelayMode::Connect,
+        Some("0") => false,
+        Some("1") => true,
+        Some(_) => {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_CONNECT_ACCOUNTS is 0 or 1.",
+            ));
+        }
+    };
+    if mode == RelayMode::Connect && !accounts {
+        return Err(RelayError::invalid(
+            "APASSY_RELAY_MODE=connect serves the account routes: APASSY_RELAY_CONNECT_ACCOUNTS cannot be 0 there.",
+        ));
+    }
+    let signing_key = match lookup("APASSY_CONNECT_SIGNING_KEY_FILE") {
+        None => None,
+        Some(path) => {
+            let unreadable =
+                || RelayError::invalid("APASSY_CONNECT_SIGNING_KEY_FILE cannot be read.");
+            let file = std::fs::File::open(path.trim()).map_err(|_| unreadable())?;
+            let mut bytes = zeroize::Zeroizing::new(Vec::new());
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(file, MAX_SIGNING_KEY_FILE_BYTES + 1),
+                &mut bytes,
+            )
+            .map_err(|_| unreadable())?;
+            if bytes.len() as u64 > MAX_SIGNING_KEY_FILE_BYTES {
+                return Err(unreadable());
+            }
+            Some(ConnectSigningKey::from_file_bytes(&bytes)?)
+        }
+    };
+    let site_url = match lookup("APASSY_CONNECT_SITE_URL") {
+        None => DEFAULT_CONNECT_SITE_URL.to_string(),
+        Some(text) => {
+            let url = checked_public_url(&text)?;
+            if !url.starts_with("https://") {
+                return Err(RelayError::invalid(
+                    "APASSY_CONNECT_SITE_URL is an https:// origin.",
+                ));
+            }
+            url
+        }
+    };
+    Ok(ConnectConfig {
+        mode,
+        accounts,
+        signing_key,
+        site_url,
+    })
+}
+
 /// What an embedded node needs (`RelayConfig::embedded`, docs/SPEC.md section 30).
 #[derive(Debug, Clone)]
 pub struct EmbeddedOptions {
@@ -366,6 +548,9 @@ pub struct RelayConfig {
     /// 31): its metadata, `/oauth/...`, and `WWW-Authenticate` on a 401 of `/mcp`. `None`
     /// on the hosted relay: every OAuth path is 404 there.
     pub oauth: Option<OAuthConfig>,
+    /// Apassy Connect: the account routes, the mode, the entitlement signing key
+    /// (connect-account-v1). The default has no accounts.
+    pub connect: ConnectConfig,
 }
 
 /// The settings of the MCP authorization flow of an embedded node (docs/SPEC.md section
@@ -695,6 +880,7 @@ impl RelayConfig {
             auth_limiter: true,
             operator_socket: false,
             oauth: Some(OAuthConfig::new(EMBEDDED_MAC_NAME)),
+            connect: ConnectConfig::default(),
         };
         config.check_listeners()?;
         Ok(config)
@@ -723,8 +909,16 @@ impl RelayConfig {
                 "The edge secret must have at least {MIN_EDGE_SECRET_BYTES} bytes."
             )));
         }
-        let master_key = secret_from(&lookup, "APASSY_RELAY_KEY")?;
-        if master_key.len() < MIN_KEY_BYTES {
+        let master_key_set =
+            lookup("APASSY_RELAY_KEY").is_some() || lookup("APASSY_RELAY_KEY_FILE").is_some();
+        let connect = connect_from(&lookup, master_key_set)?;
+        // `connect` mode has no master key: its files are plain (`Store::open_plain`).
+        let master_key = if connect.plain_files() {
+            SecretString::new(String::new())
+        } else {
+            secret_from(&lookup, "APASSY_RELAY_KEY")?
+        };
+        if !connect.plain_files() && master_key.len() < MIN_KEY_BYTES {
             return Err(RelayError::invalid(format!(
                 "The master key must have at least {MIN_KEY_BYTES} bytes."
             )));
@@ -811,6 +1005,8 @@ impl RelayConfig {
             ),
             push: push_from(&lookup)?,
             team_vaults: match lookup("APASSY_RELAY_TEAM_VAULTS").as_deref() {
+                // Shared team vaults hold item keys: never in `connect` mode.
+                _ if connect.plain_files() => false,
                 None | Some("1") => true,
                 Some("0") => false,
                 Some(_) => {
@@ -832,6 +1028,7 @@ impl RelayConfig {
             auth_limiter: false,
             operator_socket: true,
             oauth: None,
+            connect,
         })
     }
 }

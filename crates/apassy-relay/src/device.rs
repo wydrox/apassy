@@ -30,6 +30,136 @@ pub const SAFETY_DOMAIN: &str = "apassy-relay safety v1";
 /// The domain of the proof of key of `POST /v1/connect` (docs/SPEC.md section 26).
 pub const CONNECT_DOMAIN: &str = "apassy-relay connect v1";
 
+/// The domains of Apassy Connect accounts (connect-account-v1 section 5). Each signed
+/// message starts with its own domain, so a signature for one purpose (a team sign-in, an
+/// account sign-in, the bouncer brain's sign-in) is worthless for another.
+pub const ACCOUNT_DOMAIN: &str = "apassy-connect account v1";
+pub const ACCOUNT_SIGN_IN_DOMAIN: &str = "apassy-connect sign-in v1";
+pub const ACCOUNT_JOIN_DOMAIN: &str = "apassy-connect join v1";
+pub const ACCOUNT_RECOVER_DOMAIN: &str = "apassy-connect recover v1";
+/// The bouncer brain's sign-in (plan 0035 A). Connect never accepts it.
+pub const BRAIN_SIGN_IN_DOMAIN: &str = "apassy-bouncer sign-in v1";
+/// The hashes of Connect that are not signatures (section 5).
+pub const ACCOUNT_LINK_DOMAIN: &str = "apassy-connect link v1";
+pub const ACCOUNT_SAFETY_DOMAIN: &str = "apassy-connect safety v1";
+pub const ACCOUNT_RECOVERY_DOMAIN: &str = "apassy-connect recovery v1";
+
+/// The parts joined with one `0x00` byte, no trailing `0x00`.
+fn joined(parts: &[&str]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            message.push(0);
+        }
+        message.extend_from_slice(part.as_bytes());
+    }
+    message
+}
+
+/// `"apassy-connect account v1" 0x00 origin 0x00 public_key_b64`: the proof of key of
+/// `POST /v1/account`.
+pub fn account_message(origin: &str, public_key_b64: &str) -> Vec<u8> {
+    joined(&[ACCOUNT_DOMAIN, origin.trim_end_matches('/'), public_key_b64])
+}
+
+/// `"apassy-connect sign-in v1" 0x00 origin 0x00 account 0x00 public_key_b64 0x00 nonce`:
+/// the sign-in of an account device (`POST /v1/account/token`).
+pub fn account_sign_in_message(
+    origin: &str,
+    account: &str,
+    public_key_b64: &str,
+    nonce_b64: &str,
+) -> Vec<u8> {
+    joined(&[
+        ACCOUNT_SIGN_IN_DOMAIN,
+        origin.trim_end_matches('/'),
+        account,
+        public_key_b64,
+        nonce_b64,
+    ])
+}
+
+/// `"apassy-connect join v1" 0x00 origin 0x00 account 0x00 link_hash 0x00 public_key_b64`:
+/// the request of a new device (`POST /v1/account/devices/join`).
+pub fn account_join_message(
+    origin: &str,
+    account: &str,
+    link_hash: &str,
+    public_key_b64: &str,
+) -> Vec<u8> {
+    joined(&[
+        ACCOUNT_JOIN_DOMAIN,
+        origin.trim_end_matches('/'),
+        account,
+        link_hash,
+        public_key_b64,
+    ])
+}
+
+/// `"apassy-connect recover v1" 0x00 origin 0x00 account 0x00 public_key_b64`
+/// (`POST /v1/account/recover`).
+pub fn account_recover_message(origin: &str, account: &str, public_key_b64: &str) -> Vec<u8> {
+    joined(&[
+        ACCOUNT_RECOVER_DOMAIN,
+        origin.trim_end_matches('/'),
+        account,
+        public_key_b64,
+    ])
+}
+
+/// The link hash of a link code: b64u of SHA-256(`"apassy-connect link v1" 0x00 code`),
+/// 43 characters. The device that made the code sends only this.
+pub fn account_link_hash(code: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ACCOUNT_LINK_DOMAIN.as_bytes());
+    hasher.update([0]);
+    hasher.update(code.as_bytes());
+    encode_b64(&hasher.finalize())
+}
+
+/// The recovery hash of a recovery code's 16 bytes: lowercase hex of
+/// SHA-256(`"apassy-connect recovery v1" 0x00 bytes`).
+pub fn account_recovery_hash(code: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ACCOUNT_RECOVERY_DOMAIN.as_bytes());
+    hasher.update([0]);
+    hasher.update(code);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The six safety words of an account device link (section 7.3):
+/// SHA-256(`"apassy-connect safety v1" 0x00 account 0x00 code 0x00 confirmer key 0x00
+/// joiner key`), the keys as 65 raw bytes, and `WORDS[digest[0]]` to `WORDS[digest[5]]`.
+/// Connect never knows the code, so it cannot compute them; the devices can, and the
+/// relay's CLI and tests use this.
+pub fn account_safety_words(
+    account: &str,
+    code: &str,
+    confirmer_key: &[u8],
+    joiner_key: &[u8],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ACCOUNT_SAFETY_DOMAIN.as_bytes());
+    hasher.update([0]);
+    hasher.update(account.as_bytes());
+    hasher.update([0]);
+    hasher.update(code.as_bytes());
+    hasher.update([0]);
+    hasher.update(confirmer_key);
+    hasher.update([0]);
+    hasher.update(joiner_key);
+    let digest: [u8; 32] = hasher.finalize().into();
+    digest[..6]
+        .iter()
+        .map(|byte| WORDS[usize::from(*byte)])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// A device key failed: a bad key, a bad encoding, or no random source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceKeyError;
