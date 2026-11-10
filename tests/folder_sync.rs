@@ -772,7 +772,10 @@ fn an_old_copy_on_this_mac_waits_for_the_newer_icloud_version() {
         cloud.set(Some(download));
         let report = a.sync.status().expect("status");
         assert_eq!(report.status, FileStatus::NotDownloaded, "{download:?}");
-        assert!(report.file_sha256.is_some(), "the old copy is on this Mac");
+        assert!(
+            report.file_sha256.is_some(),
+            concat!("the old copy is on this ", apassy::computer!())
+        );
     }
     assert!(a.sync.request_download().expect("request"));
     assert_eq!(cloud.requests(), 1);

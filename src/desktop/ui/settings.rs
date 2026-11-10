@@ -1370,7 +1370,7 @@ pub(super) fn passphrase_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> boo
             |_| {},
             |ui| {
                 change = kit::button(ui, "Change passphrase", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -1486,7 +1486,7 @@ pub(super) fn backup_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 backup |= kit::button(ui, "Back up", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -1524,7 +1524,7 @@ pub(super) fn restore_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 restore |= kit::button(ui, "Restore", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },

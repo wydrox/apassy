@@ -1020,27 +1020,30 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui) {
         "3. In your project folder, start the host with this command. A question waits up to 5 minutes for you, so the host waits at least 330 seconds for a tool.",
     );
     kit::code_block(ui, &agent_onboarding::launch_command(selected), 2);
-    let sandbox = std::path::Path::new(&cli_path())
-        .parent()
-        .map(|p| p.join("apassy-sandbox").display().to_string())
-        .unwrap_or_else(|| "apassy-sandbox".to_owned());
-    let protected = if host == "claude" {
-        format!(
-            "{} {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
-            agent_onboarding::CLAUDE_TOOL_TIMEOUT,
-            shell_word(&sandbox)
-        )
-    } else {
-        format!(
-            "{} -- codex -c sandbox_mode=danger-full-access",
-            shell_word(&sandbox)
-        )
-    };
-    kit::note(
-        ui,
-        "Optional, more protection: start the host in the Apassy sandbox. It uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
-    );
-    kit::code_block(ui, &protected, 2);
+    // The Apassy sandbox launcher is macOS only (Seatbelt): Linux shows no sandboxed start.
+    if !cfg!(target_os = "linux") {
+        let sandbox = std::path::Path::new(&cli_path())
+            .parent()
+            .map(|p| p.join("apassy-sandbox").display().to_string())
+            .unwrap_or_else(|| "apassy-sandbox".to_owned());
+        let protected = if host == "claude" {
+            format!(
+                "{} {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
+                agent_onboarding::CLAUDE_TOOL_TIMEOUT,
+                shell_word(&sandbox)
+            )
+        } else {
+            format!(
+                "{} -- codex -c sandbox_mode=danger-full-access",
+                shell_word(&sandbox)
+            )
+        };
+        kit::note(
+            ui,
+            "Optional, more protection: start the host in the Apassy sandbox. It uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
+        );
+        kit::code_block(ui, &protected, 2);
+    }
     kit::note(
         ui,
         "4. Ask the agent to use a credential. The bouncer decides; when it asks you, the question shows in Decisions.",

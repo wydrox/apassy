@@ -465,7 +465,7 @@ fn the_contract_test_vectors_reproduce_exactly() {
         open_action(&record, &other_mac, Some(&key), &devices, 1_790_000_060)
             .unwrap_err()
             .reason,
-        "it is for another Mac"
+        concat!("it is for another ", apassy::computer!())
     );
     // A sender that is a Mac, or whose device number in the team is another one.
     let mut as_mac = phone.clone();
@@ -745,7 +745,7 @@ impl World {
         self.with(|vault| {
             this_device(vault, &self.membership)
                 .unwrap()
-                .expect("this Mac")
+                .expect(concat!("this ", apassy::computer!()))
         })
     }
 
@@ -1257,7 +1257,11 @@ fn no_feed_without_a_live_iphone_or_while_the_vault_is_locked() {
     std::thread::sleep(Duration::from_millis(200));
     let before = world.feed_puts();
     std::thread::sleep(Duration::from_millis(900));
-    assert_eq!(world.feed_puts(), before, "a locked Mac publishes nothing");
+    assert_eq!(
+        world.feed_puts(),
+        before,
+        concat!("a locked ", apassy::computer!(), " publishes nothing")
+    );
     world.with(|vault| vault.unlock(PASS).unwrap());
     wait_until("a feed after the unlock", || {
         (world.feed_puts() > before).then_some(())
@@ -1305,7 +1309,10 @@ fn a_v1_removal_that_gives_authority_back_is_refused() {
             (outcome.as_str(), settle.reason.as_str()),
             (
                 "refused",
-                "update Apassy on Test iPhone to remove this from it, or remove it on this Mac"
+                concat!(
+                    "update Apassy on Test iPhone to remove this from it, or remove it on this ",
+                    apassy::computer!()
+                )
             ),
             "{}",
             exception.kind
@@ -1313,8 +1320,12 @@ fn a_v1_removal_that_gives_authority_back_is_refused() {
         assert_eq!(world.exceptions(), rows, "the row stays");
     }
     assert!(world.activity().iter().any(|line| line
-        == "An action from Test iPhone did not count: update Apassy on Test iPhone to remove \
-            this from it, or remove it on this Mac."));
+        == concat!(
+            "An action from Test iPhone did not count: update Apassy on Test iPhone to remove \
+            this from it, or remove it on this ",
+            apassy::computer!(),
+            "."
+        )));
     // The gate refuses it too, whatever its caller checked.
     let removal = phone.removal_v1(&world, &feed, &feed.agents[0].exceptions[0]);
     let signature = answer_key()
@@ -1572,7 +1583,13 @@ fn a_feed_that_lies_about_the_names_is_stale() {
             let (outcome, settle) = phone.settle(&world, &removal.action_id);
             assert_eq!(
                 (outcome.as_str(), settle.reason.as_str()),
-                ("stale", "the names on the iPhone did not match this Mac"),
+                (
+                    "stale",
+                    concat!(
+                        "the names on the iPhone did not match this ",
+                        apassy::computer!()
+                    )
+                ),
                 "{agent} / {title} / {mac_name}"
             );
             assert_eq!(settle.feed_seq, None);
@@ -1580,7 +1597,11 @@ fn a_feed_that_lies_about_the_names_is_stale() {
         }
     }
     assert!(world.activity().iter().any(|line| line
-        == "An action from Test iPhone did not count: the names on the iPhone did not match this Mac."));
+        == concat!(
+            "An action from Test iPhone did not count: the names on the iPhone did not match this ",
+            apassy::computer!(),
+            "."
+        )));
     // False names with a signature that does not verify: the signature fails first, so no
     // line about names is ever blamed on an iPhone that did not sign.
     let other = DeviceKey::generate().unwrap();
@@ -1705,15 +1726,30 @@ fn bad_removals_are_refused_or_stale() {
     // For another Mac.
     let mut elsewhere = phone.removal(&world, &feed, &never);
     elsewhere.to = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4e".to_owned();
-    expect(&elsewhere, &face_id, "refused", "it is for another Mac");
+    expect(
+        &elsewhere,
+        &face_id,
+        "refused",
+        concat!("it is for another ", apassy::computer!()),
+    );
     // An exception that the feed showed with another `created_at`: made again since.
     let mut remade = phone.removal(&world, &feed, &never);
     remade.created_at -= 1;
-    expect(&remade, &face_id, "stale", "the list on this Mac changed");
+    expect(
+        &remade,
+        &face_id,
+        "stale",
+        concat!("the list on this ", apassy::computer!(), " changed"),
+    );
     // A feed that this Mac never published.
     let mut unseen = phone.removal(&world, &feed, &never);
     unseen.feed_seq = feed.seq + 1_000;
-    expect(&unseen, &face_id, "stale", "the list on this Mac changed");
+    expect(
+        &unseen,
+        &face_id,
+        "stale",
+        concat!("the list on this ", apassy::computer!(), " changed"),
+    );
     // A removed device.
     let gone_key = DeviceKey::generate().unwrap();
     let gone = world.phone("Old iPhone", gone_key);
@@ -2635,7 +2671,10 @@ fn a_mac_shows_the_feed_of_another_mac_of_the_vault_and_never_its_own() {
     let seq = now();
     let first = second.feed(seq);
     second.publish(&world, &first);
-    let macs = world.wait_other_macs("the feed of the other Mac", |macs| !macs.is_empty());
+    let macs = world.wait_other_macs(
+        concat!("the feed of the other ", apassy::computer!()),
+        |macs| !macs.is_empty(),
+    );
     assert_eq!(macs.len(), 1);
     assert_eq!(macs[0].device, second.uuid);
     assert_eq!(macs[0].relay_device_id, second.device_id);
@@ -2645,9 +2684,10 @@ fn a_mac_shows_the_feed_of_another_mac_of_the_vault_and_never_its_own() {
 
     // With another Mac in the team, this Mac publishes its own feed too; the reader does
     // not show it.
-    wait_until("the own feed of this Mac", || {
-        world.relay.feed_of(world.mac_id()).map(|_| ())
-    });
+    wait_until(
+        concat!("the own feed of this ", apassy::computer!()),
+        || world.relay.feed_of(world.mac_id()).map(|_| ()),
+    );
     world.wait_reads();
     let macs = world.other_macs();
     assert_eq!(
@@ -2723,9 +2763,10 @@ fn a_feed_of_a_device_that_is_no_live_mac_of_the_vault_is_ignored() {
     // The other Mac's own feed shows, and leaves with its row.
     let real = second.feed(seq + 2);
     second.publish(&world, &real);
-    world.wait_other_macs("the feed of the other Mac", |macs| {
-        macs.len() == 1 && macs[0].feed == OtherFeed::Ready(real.clone())
-    });
+    world.wait_other_macs(
+        concat!("the feed of the other ", apassy::computer!()),
+        |macs| macs.len() == 1 && macs[0].feed == OtherFeed::Ready(real.clone()),
+    );
     world.with(|vault| assert!(vault.remove_trusted_device(&second.uuid).unwrap()));
     // The next answer of the long poll (here: a new feed of the iPhone) leaves it out.
     let later = mac_feed(&phone.uuid, "Test iPhone", seq + 3);
@@ -2736,7 +2777,10 @@ fn a_feed_of_a_device_that_is_no_live_mac_of_the_vault_is_ignored() {
         seq + 3,
         &later.to_plaintext(),
     );
-    world.wait_other_macs("no other Mac after its row went", |macs| macs.is_empty());
+    world.wait_other_macs(
+        concat!("no other ", apassy::computer!(), " after its row went"),
+        |macs| macs.is_empty(),
+    );
 }
 
 /// Section 7.4 steps 1 and 2 for a Mac with no good feed: a feed under another key says
@@ -2792,7 +2836,10 @@ fn a_lock_clears_the_other_macs() {
     world.start(fast_config());
     let seq = now();
     second.publish(&world, &second.feed(seq));
-    world.wait_other_macs("the feed of the other Mac", |macs| macs.len() == 1);
+    world.wait_other_macs(
+        concat!("the feed of the other ", apassy::computer!()),
+        |macs| macs.len() == 1,
+    );
     let key = world.key();
     world.with(|vault| vault.lock().unwrap());
     // The window's own lock ends the long poll (`QuestionsWorker::forget`); here a new
@@ -2830,9 +2877,10 @@ fn the_feed_goes_out_for_another_mac_and_leaves_with_the_last_other_device() {
     std::thread::sleep(Duration::from_millis(900));
     assert_eq!(world.feed_puts(), 0, "no other device in the team");
     let second = world.second_mac("Studio Mac");
-    wait_until("a feed with only another Mac", || {
-        world.relay.feed_of(world.mac_id()).map(|_| ())
-    });
+    wait_until(
+        concat!("a feed with only another ", apassy::computer!()),
+        || world.relay.feed_of(world.mac_id()).map(|_| ()),
+    );
     assert!(
         world
             .with(|vault| vault.trusted_devices().unwrap())
@@ -2846,7 +2894,7 @@ fn the_feed_goes_out_for_another_mac_and_leaves_with_the_last_other_device() {
         .feeds
         .iter()
         .find(|feed| feed.device_id == world.mac_id())
-        .expect("the feed of this Mac");
+        .expect(concat!("the feed of this ", apassy::computer!()));
     let aad = feed_aad(world.team(), record.device_id, record.seq, &record.key_id);
     let plaintext = record.sealed().open(&world.key(), &aad).expect("it opens");
     assert_eq!(Feed::parse(&plaintext).unwrap().mac.device, world.me().uuid);

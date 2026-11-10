@@ -1118,7 +1118,7 @@ fn list_rows(open: Open, this_mac: &str) -> Vec<Group<ListRow>> {
             remote: false,
             title: r.item_name,
             subtitle: format!(
-                concat!("{} · ", crate::computer_cap!(), " review"),
+                concat!("{} · ", crate::desktop_app!(), " review"),
                 r.agent_name
             ),
             production: false,
@@ -3217,7 +3217,7 @@ fn access_detail(
             c.agent.name, c.agent.id, c.item.name
         ));
         ui.label(format!("{} · Asked on {}", c.vault_name, c.asker.name));
-        ui.strong(concat!(crate::computer_cap!(), "-verified fields"));
+        ui.strong(concat!(crate::desktop_app!(), "-verified fields"));
         ui.label(format!(
             "Agent id {} · Item {} / {} · revision {}",
             c.agent.id, c.item.local_id, c.item.uuid, c.item.revision
@@ -3264,7 +3264,7 @@ fn access_detail(
         ));
         ui.strong(concat!(
             "Requested scope; checked against ",
-            crate::computer!(),
+            crate::desktop_app!(),
             " policy"
         ));
         ui.label(format!(

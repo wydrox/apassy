@@ -248,7 +248,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                     &format!("Connect {}", selected.name()),
                     Style::Prominent,
                 )
-                .on_hover_text(concat!(crate::shortcut!("S")))
+                .on_hover_text(crate::shortcut!("S"))
                 .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },

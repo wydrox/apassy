@@ -313,7 +313,7 @@ fn file_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |ui| {
                 ui.add_enabled_ui(!app.import.path.trim().is_empty(), |ui| {
                     read |= kit::button(ui, "Read", Style::Prominent)
-                        .on_hover_text(concat!(crate::shortcut!("S")))
+                        .on_hover_text(crate::shortcut!("S"))
                         .clicked();
                 });
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
@@ -377,7 +377,7 @@ fn preview_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                         &format!("Import {}", count(selected, "credential", "credentials")),
                         Style::Prominent,
                     )
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 });
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();

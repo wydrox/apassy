@@ -1090,7 +1090,7 @@ fn a_merged_change_from_another_mac_refuses_a_waiting_run() {
             let mut guard = vault.lock().expect("vault");
             let outcome = here
                 .sync(guard.as_mut().expect("open"))
-                .expect("merge on this Mac");
+                .expect(concat!("merge on this ", apassy::computer!()));
             assert!(outcome.merge.is_some(), "{outcome:?}");
         });
         let response = run(
@@ -1146,7 +1146,10 @@ fn the_same_request_after_a_merged_change_asks_again() {
     let old = next_pending(&fx, None);
     let old_card = owner_check(&fx.vault, old.clone());
     with_vault(&fx, |vault| {
-        let outcome = mac_b.here.sync(vault).expect("merge on this Mac");
+        let outcome = mac_b
+            .here
+            .sync(vault)
+            .expect(concat!("merge on this ", apassy::computer!()));
         assert!(outcome.merge.is_some(), "{outcome:?}");
     });
     let second = spawn_run(&fx, script);

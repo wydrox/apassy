@@ -3,7 +3,7 @@
 Generated from the source of `feat/linux-wording` (unit L7, 2026-11-10) by evaluating
 each `concat!` that uses a macro of `src/wording.rs` once with the macOS values and once
 with the Linux values. The macOS column is the text before L7, byte for byte (checked
-by comparing every string literal of the 89 changed Rust files with the base commit
+by comparing every string literal of the changed Rust files with the base commit
 `d7f192af`, macros folded to their macOS values: the only differences are three format
 strings whose named argument became positional, the owner-client error with the same
 output, and the Linux-only note of Settings › Updates).
@@ -132,7 +132,7 @@ About 20 class-a rows (`owner_check!`, `touch_id!`) come from the earlier pass
 | `src/desktop/ui/browser_settings.rs:93` | a | Fills ask for Touch ID as set in Security › How often to ask. Agents never get the password. | Fills ask for the passphrase or system authentication as set in Security › How often to ask. Agents … |
 | `src/desktop/ui/cli_tools.rs:50` | b | …issing {}. Reinstall the complete Apassy.app package. | …issing {}. Reinstall the complete Apassy package. |
 | `src/desktop/ui/cli_tools.rs:62` | b | …xecutable. Reinstall the complete Apassy.app package. | …xecutable. Reinstall the complete Apassy package. |
-| `src/desktop/ui/decisions.rs:1121` | a | {} · Mac review | {} · Computer review |
+| `src/desktop/ui/decisions.rs:1121` | a | {} · Mac review | {} · Apassy review |
 | `src/desktop/ui/decisions.rs:1330` | a | This Mac | This computer |
 | `src/desktop/ui/decisions.rs:1380` | a | …could not be dispatched. Review on this Mac. | …could not be dispatched. Review on this computer. |
 | `src/desktop/ui/decisions.rs:2287` | a | … can read these secrets. An allow needs Touch ID or the passphrase now. A notification is not an app… | … can read these secrets. An allow needs the passphrase or system authentication now. A notification … |
@@ -141,9 +141,9 @@ About 20 class-a rows (`owner_check!`, `touch_id!`) come from the earlier pass
 | `src/desktop/ui/decisions.rs:3185` | a | Review on this Mac. Remote publication is unavailable: {p} | Review on this computer. Remote publication is unavailable: {p} |
 | `src/desktop/ui/decisions.rs:3196` | a | Review on this Mac. The relay connection is not ready. | Review on this computer. The relay connection is not ready. |
 | `src/desktop/ui/decisions.rs:3209` | a | Review on this Mac. Connect an iPhone before creating a request to send there. | Review on this computer. Connect an iPhone before creating a request to send there. |
-| `src/desktop/ui/decisions.rs:3220` | a | Mac-verified fields | Computer-verified fields |
+| `src/desktop/ui/decisions.rs:3220` | a | Mac-verified fields | Apassy-verified fields |
 | `src/desktop/ui/decisions.rs:3226` | a | Mac {} · Vault {} | Computer {} · Vault {} |
-| `src/desktop/ui/decisions.rs:3265` | a | Requested scope; checked against Mac policy | Requested scope; checked against computer policy |
+| `src/desktop/ui/decisions.rs:3265` | a | Requested scope; checked against Mac policy | Requested scope; checked against Apassy policy |
 | `src/desktop/ui/decisions.rs:3340` | a | Grant access on this Mac… | Grant access on this computer… |
 | `src/desktop/ui/decisions.rs:3510` | a | {} · on this Mac · 1 of {count} | {} · on this computer · 1 of {count} |
 | `src/desktop/ui/decisions_activity.rs:29` | a | This Mac | This computer |

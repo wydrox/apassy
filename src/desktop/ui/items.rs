@@ -327,7 +327,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui.horizontal_wrapped(|ui| {
                 kit::note(ui, format!("{} credentials moved", app.ui.move_undo.len()));
                 if kit::small_button(ui, "Undo Move", Style::Bordered)
-                    .on_hover_text(concat!(crate::shortcut!("Z")))
+                    .on_hover_text(crate::shortcut!("Z"))
                     .clicked()
                 {
                     super::folders::undo_move(app);
@@ -3415,7 +3415,7 @@ pub(super) fn archive_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 archive = kit::button(ui, "Archive", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -3607,7 +3607,7 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
             |_| {},
             |ui| {
                 if kit::button(ui, "Add", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked()
                 {
                     action = FormAction::Save;
@@ -3766,7 +3766,7 @@ pub(super) fn edit_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 if kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked()
                 {
                     action = FormAction::Save;
@@ -4490,7 +4490,7 @@ pub(super) fn declaration_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bo
             |_| {},
             |ui| {
                 save = kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -4840,7 +4840,7 @@ pub(super) fn variable_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
             },
             |ui| {
                 save = kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -4958,7 +4958,7 @@ pub(super) fn connector_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool
             },
             |ui| {
                 save = kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },

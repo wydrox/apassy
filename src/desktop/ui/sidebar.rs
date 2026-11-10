@@ -541,7 +541,7 @@ fn bouncer_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, r
             "Overview",
             None,
             None,
-            concat!(crate::shortcut!("2")),
+            crate::shortcut!("2"),
         ),
         (
             Place::Decisions,
@@ -549,7 +549,7 @@ fn bouncer_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, r
             "Decisions",
             None,
             Some(badge),
-            concat!(crate::shortcut!("3")),
+            crate::shortcut!("3"),
         ),
         (
             Place::Agents,
@@ -557,7 +557,7 @@ fn bouncer_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, r
             "Agents",
             count.filter(|count| *count > 0),
             agents_badge,
-            concat!(crate::shortcut!("4")),
+            crate::shortcut!("4"),
         ),
         (
             Place::Logs,
@@ -565,7 +565,7 @@ fn bouncer_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, r
             "Logs",
             None,
             None,
-            concat!(crate::shortcut!("5")),
+            crate::shortcut!("5"),
         ),
     ];
     if !rail {

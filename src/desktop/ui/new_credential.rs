@@ -303,7 +303,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                 add = ui
                     .add_enabled_ui(kept > 0, |ui| kit::button(ui, &label, Style::Prominent))
                     .inner
-                    .on_hover_text(concat!(crate::shortcut!("S")))
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = push_button(ui, "Cancel").clicked();
             },
@@ -368,8 +368,7 @@ fn paste_field(ui: &mut egui::Ui, value: &mut String, detected: &[Detected]) {
                 .font(egui::FontId::monospace(PASTE_FONT))
                 .text_color(kit::palette().label)
                 .hint_text(
-                    kit::text(concat!(crate::shortcut!("V")), Font::Mono)
-                        .color(kit::palette().tertiary),
+                    kit::text(crate::shortcut!("V"), Font::Mono).color(kit::palette().tertiary),
                 )
                 .frame(field_frame(ui))
                 .min_size(egui::Vec2::new(width, PASTE_HEIGHT))

@@ -501,16 +501,28 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
         "Next: nothing to give. The connected agent lists the credentials available to it without values and uses them; the bouncer decides each use."
     );
     eprintln!("When the bouncer asks you, answer in Decisions in the Apassy window.");
-    eprintln!("From the project folder, start the host in the Apassy sandbox:");
-    match host {
-        Host::Claude => eprintln!(
-            "MCP_TOOL_TIMEOUT=660000 apassy-sandbox -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
-        ),
-        Host::Codex => eprintln!("apassy-sandbox -- codex -c sandbox_mode=danger-full-access"),
+    // Linux has no Apassy sandbox launcher (Seatbelt is macOS only).
+    if cfg!(target_os = "linux") {
+        eprintln!(
+            "From the project folder, start the host. On Linux it runs as your user: the Apassy sandbox is macOS only."
+        );
+        match host {
+            Host::Claude => eprintln!("MCP_TOOL_TIMEOUT=660000 claude"),
+            Host::Codex => eprintln!("codex"),
+        }
+        eprintln!("Host approval prompts stay active.");
+    } else {
+        eprintln!("From the project folder, start the host in the Apassy sandbox:");
+        match host {
+            Host::Claude => eprintln!(
+                "MCP_TOOL_TIMEOUT=660000 apassy-sandbox -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
+            ),
+            Host::Codex => eprintln!("apassy-sandbox -- codex -c sandbox_mode=danger-full-access"),
+        }
+        eprintln!(
+            "The Apassy sandbox replaces the host's inner sandbox. Host approval prompts stay active."
+        );
     }
-    eprintln!(
-        "The Apassy sandbox replaces the host's inner sandbox. Host approval prompts stay active."
-    );
     eprintln!(
         "Use a test credential for the first request. Check its result and its entry in Decisions."
     );
