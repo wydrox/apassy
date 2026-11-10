@@ -3,44 +3,52 @@
 ADR [0045](../adr/0045-linux-vault-passkeys.md) extends the existing
 [node-only Linux package](linux-node.md) with a SQLCipher vault, an egui desktop,
 interactive owner commands and browser passkeys. The implementation targets
-x86_64 and aarch64 on Ubuntu and Debian. CI produces architecture-specific
-artifacts; this change does not publish a release or add a public download.
-The CI desktop artifacts depend on `libc6 (>= 2.39)`: Ubuntu 24.04 or later and
-Debian 13 or later. Ubuntu 22.04 and Debian 12 refuse the package. The runtime
-acceptance record is
+x86_64 and aarch64 on Debian 12 and 13 and Ubuntu 22.04 and 24.04. The packages are
+release builds made in Debian 11 (glibc 2.31) by `packaging/linux/build-vault-release.sh`:
+pull-request CI (`linux-vault-package`) and the release workflow (`relay-image.yml`,
+`linux-vault`) build the same packages, and a release publishes them on the relay's
+`/dl/` ([release.md](release.md#linux-vault-packages)). Until a release publishes them,
+they are CI artifacts only. The runtime acceptance record is
 [docs/reviews/linux-acceptance-2026-11.md](../reviews/linux-acceptance-2026-11.md); its
 re-runnable kit is `packaging/linux/acceptance/`.
 
 ## Build and install
 
-What a package is built from:
-
-- A pull request's CI artifact (`apassy-vault-linux-<arch>`) is a **debug build**,
-  stripped, of the synthetic merge of the PR head into its base; Settings > Updates
-  shows "development build". `release-vault-linux-<arch>.json` names the PR head as
-  `commit` and that merge as `built_from`. The acceptance kit's
-  `build-on-devbox.sh` builds the same way from one commit.
-- No workflow builds a release vault package yet. The commands below make a release
-  build by hand, for a local test only; a published package needs the release
-  process (`docs/operations/release.md`).
-
-Build on Linux with the repository's pinned Rust toolchain:
+Build as a release does, in the Debian 11 Rust image on a machine of the architecture
+(a devbox or CI; never on the production VPS):
 
 ```sh
-cargo build --release --locked -p apassy-app -p apassy \
-  --features apassy-app/window,apassy-app/node,apassy-app/owner \
-  --bin apassy-app --bin apassy-browser-host
-packaging/linux/build-vault.sh --binary target/release/apassy-app \
-  --host target/release/apassy-browser-host --arch x86_64 --out dist
+docker run --rm -v "$PWD:/src" -w /src rust:1.97.0-bullseye sh -c \
+  'apt-get update && apt-get install -y --no-install-recommends binutils file python3 &&
+   git config --global --add safe.directory /src &&
+   packaging/linux/build-vault-release.sh --arch x86_64 --out dist'
 ```
 
-Use `--arch aarch64` on an arm64 machine. The packager rejects mismatched ELF
-architectures and records the build's required glibc version, source commit,
-SHA-256 checksums and Debian dependencies. Desktop artifacts use the build
-runner's glibc baseline. The older node-only download retains its glibc 2.31
-contract; do not infer that compatibility for desktop artifacts.
+Use `--arch aarch64` on an arm64 machine. The script builds `--release`, strips both
+executables and refuses a GLIBC symbol newer than 2.31, a shared library other than
+glibc's and libgcc_s, a version other than the shared release version, and a package
+over 25 MiB. The record `release-vault-linux-<arch>.json` has the version, the source
+commit, the glibc requirement, `Depends`, `Suggests`, and each file's SHA-256 and size.
+`Depends` lists the libraries that the window loads at run time (X11, Wayland,
+xkbcommon, GL and EGL); `Suggests` the optional `libsecret-tools` (keyring item),
+`polkitd | policykit-1` (system authentication) and `xdg-desktop-portal` (the file
+chooser of the "Choose…" buttons; a typed path works without it).
 
-Verify `SHA256SUMS-vault-<arch>` from the CI artifact, then install:
+From a release, install with the relay installer. It downloads `dl/SHA256SUMS`,
+checks the SHA-256 of the package, refuses another distribution or architecture with
+the reason, and installs the `.deb` with apt, which brings the dependencies:
+
+```sh
+curl -fsSL https://apassy-relay.wyderka.cc/install.sh -o install.sh
+sudo env APASSY_COMPONENT=vault APASSY_INSTALL_AS_ROOT=1 sh install.sh
+```
+
+`APASSY_VAULT_FORMAT=tar` installs the tarball with `install-vault.sh` instead (the
+dependencies are then yours to install). On another distribution with glibc 2.31 or
+later, `APASSY_ALLOW_UNSUPPORTED=1` installs anyway, untested; an older glibc or musl
+is always refused.
+
+By hand, verify `SHA256SUMS-vault-<arch>` (CI artifact) or `SHA256SUMS` (`/dl/`), then:
 
 ```sh
 sha256sum -c SHA256SUMS-vault-x86_64
@@ -54,12 +62,11 @@ starts during installation. The tar archive includes a root-only installer for
 the same fixed `/usr` layout; install its dependencies first using the package
 record. Tar installation is not tracked by dpkg.
 
-The existing relay `install.sh` keeps node installation as its default.
-`APASSY_COMPONENT=vault APASSY_INSTALL_AS_ROOT=1` selects a vault archive only
-when the download origin's `dl/SHA256SUMS` contains exactly one matching vault
-archive. It refuses a custom installation directory and needs root. This is
-installer support for future publication, not a claim that a released archive
-is available. For CI artifact qualification use a local `file://` origin.
+The relay `install.sh` keeps node installation as its default.
+`APASSY_COMPONENT=vault APASSY_INSTALL_AS_ROOT=1` selects the vault only when the
+download origin's `dl/SHA256SUMS` contains exactly one matching vault package. It
+refuses a custom installation directory and needs root. For CI artifact
+qualification use a local `file://` origin (`packaging/linux/verify-vault.sh` does).
 
 ## Owner use without a desktop
 
@@ -264,11 +271,15 @@ and in the desktop package `apassy::native::linux::session_bus::SessionObserver`
 
 ## Verification evidence
 
-The Linux vault CI matrix builds x86_64 and aarch64 app/host binaries, exercises
-Linux browser identity refusal cases and the shared synthetic WebAuthn
-registration/assertion test with signature verification, independently verifies real vault create/get and persistence with the synthetic RP,
-then builds and checks
-the deb and tar packages and the installer. It uses no real accounts. The same job
+The Linux vault CI matrix (x86_64 and aarch64) exercises Linux browser identity
+refusal cases and the shared synthetic WebAuthn registration/assertion test with
+signature verification, and independently verifies real vault create/get and
+persistence with the synthetic RP. `linux-vault-package` builds the release packages
+(glibc 2.31) from the pull request's head commit, and `linux-vault-verify` installs
+them on Ubuntu 24.04 and runs the installer, then installs each in minimal Debian 12,
+Debian 13, Ubuntu 22.04 and Ubuntu 24.04 containers with `--no-install-recommends`
+and starts the window on an Xvfb display (`verify-vault.sh --containers`). It uses no
+real accounts. The `linux-vault` job
 runs the clipboard ownership against a real X server (Xvfb) and a headless wlroots
 compositor (sway, wlr-data-control) with wl-clipboard as the other client, the
 screen lock and sleep observer against private dbus-daemons with fake

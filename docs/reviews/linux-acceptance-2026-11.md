@@ -381,3 +381,69 @@ In `docs/reviews/linux-acceptance-2026-11/` (1600x1000, synthetic data):
 `l5-debian13-02-chromium-system-extension-card`,
 `l5-debian13-03-chromium-user-extension-refused`, `l5-debian13-04-save-card`,
 `l5-debian13-05-password-filled`, `l5-debian13-06-chrome-chooser`.
+
+## Release packages, 2026-11-10 (unit L6)
+
+The release path of the vault package: release mode, built in `rust:1.97.0-bullseye`
+(glibc 2.31) by `packaging/linux/build-vault-release.sh`, the same script in PR CI
+(`linux-vault-package`) and in `relay-image.yml` (`linux-vault`). Packages under test:
+CI run 42903422377 of draft PR #122, head `1f998a4c`; `release-vault-linux-*.json`
+records `commit` `1f998a4c8948775ad4330edab1872b4b7b0561b7`, the head, not a merge
+commit (R9 fixed for these jobs). Version 0.5.19, release build, stripped.
+
+| File | Size (bytes) | SHA-256 |
+| --- | --- | --- |
+| `apassy-vault_0.5.19_amd64.deb` | 16750076 | `967389334d6a56cd564d6cbb82607446f32a346866f9acf937e86d24959e6849` |
+| `apassy-vault-0.5.19-linux-x86_64.tar.gz` | 23692382 | `37fda34fdad24277e1eddabab7ed12ad17543571c07c9e870f5f475bf1720275` |
+| `apassy-vault_0.5.19_arm64.deb` | 15201868 | `829746688d68891f949f9f5428fb528b0efb069f5dc5054697d18c6dbe75076e` |
+| `apassy-vault-0.5.19-linux-aarch64.tar.gz` | 22280813 | `be637a14d616a24af18d3f8573b1c13bdc1436df1be4a61a7e77c38d94140d88` |
+
+The debug packages of the first run were 22.5 MB (deb) and 34.6 MB (tar). The largest
+release file, the x86_64 tarball, is 90% of the 25 MiB (26214400 bytes) that the relay
+Worker's `/dl/` can serve; the build refuses a larger one.
+
+glibc requirement (newest `GLIBC_` symbol version, `readelf --version-info`): `apassy`
+2.30 and `apassy-browser-host` 2.30, on both architectures (was 2.39 and 2.38). Shared
+libraries linked (`NEEDED`): libc, libm, libdl, libgcc_s, the loader.
+
+### Matrix
+
+Minimal containers, x86_64 on `devbox-x86` (`packaging/linux/acceptance/release-matrix.sh`),
+and both architectures in CI (`verify-vault.sh --containers` on `ubuntu-24.04` and
+`ubuntu-24.04-arm`). PASS is observed.
+
+| Check | Debian 12 (glibc 2.36) | Debian 13 (2.41) | Ubuntu 22.04 (2.35) | Ubuntu 24.04 (2.39) |
+| --- | --- | --- | --- | --- |
+| x86_64: `install.sh` vault from `file://`, deb with apt, no Recommends (packages added) | PASS (56) | PASS (52) | PASS (56) | PASS (52) |
+| x86_64: `ldd -r` of `apassy` and `apassy-browser-host` | PASS | PASS | PASS | PASS |
+| x86_64: window maps on Xvfb (X11), "Apassy" 1180x800, still running after 4 s | PASS | PASS | PASS | PASS |
+| x86_64: headless owner checks of the kit (11) | PASS 11/11 | PASS 11/11 | PASS 11/11 | PASS 11/11 |
+| x86_64: `install.sh` vault tar (`APASSY_VAULT_FORMAT=tar`, Depends installed first), window | PASS | PASS | PASS | PASS |
+| x86_64 CI: apt install, `ldd -r`, tar `--version`, window | PASS | PASS | PASS | PASS |
+| aarch64 CI (native arm64 runner): apt install, `ldd -r`, tar `--version`, window | PASS | PASS | PASS | PASS |
+| aarch64: headless owner checks, `install.sh` deb path | NOT RUN (`devbox-arm` not available) | NOT RUN | NOT RUN | NOT RUN |
+
+Also observed: on the CI runners (Ubuntu 24.04, both architectures) the deb installs,
+`apassy owner create` refuses piped input, the deb removes, and `install.sh` installs
+the tarball twice. `install.sh` refuses Debian 11 and Ubuntu 20.04 before any download:
+"The vault package supports Debian 12 or later and Ubuntu 22.04 or later; this system
+is Debian GNU/Linux 11 (bullseye). Set APASSY_ALLOW_UNSUPPORTED=1 to try it anyway
+(untested)."
+
+### Dependencies found
+
+The window under X11 loaded (LD_DEBUG, the same on all four): libX11, libX11-xcb,
+libxcb (and its dri2, dri3, glx, present, randr, shm, sync, xfixes, xkb extensions,
+through Mesa), libXcursor, libXi, libxkbcommon, libxkbcommon-x11, libGL, libGLX and
+libGLX_mesa with `swrast_dri.so`; no libEGL, no Wayland library, no libXrandr. With
+the previous `Depends` minus `libstdc++6` and `libxrandr2`, the window starts on all
+four. `Depends` now: `libc6 (>= 2.30), libgcc-s1, libx11-6, libx11-xcb1, libxcb1,
+libxcursor1, libxi6, libxkbcommon0, libxkbcommon-x11-0, libgl1, libegl1,
+libwayland-client0, libwayland-cursor0, libwayland-egl1`; the Wayland and EGL entries
+are what winit and glutin load in a Wayland session, which was not run. `Suggests:
+libsecret-tools, polkitd | policykit-1, xdg-desktop-portal`.
+
+Not covered by this section: Wayland sessions; arm64 headless owner checks; Secret
+Service and polkit on Debian 12 and Ubuntu 22.04; browsers on the release build (the
+browser matrix above is of debug builds); the release workflow itself (no `image-*`
+tag was pushed); the published `/dl/` download.
