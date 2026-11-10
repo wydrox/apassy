@@ -652,6 +652,25 @@ mod tests {
         }
     }
 
+    /// The exact process titles of Debian 13's Chromium 156 in the second Linux
+    /// acceptance run (2026-11-10): with the Debian package `chromium-lwn4chrome`
+    /// (accepted), without any system extension (the wrapper's empty value, which the
+    /// title shows without `=`), and with the owner's own extension folder added.
+    #[test]
+    fn observed_debian_13_titles() {
+        let root = FakeRoot::new();
+        fs::create_dir_all(root.path("usr/share/chromium/extensions/lwn4chrome")).unwrap();
+        root.chmod("usr/share/chromium/extensions/lwn4chrome", 0o755);
+        const START: &str = "/usr/lib/chromium/chromium --show-component-extension-options --enable-gpu-rasterization --no-default-browser-check --disable-pings --media-router=0 --disable-dev-shm-usage --enable-remote-extensions";
+        assert!(root.accepts(&format!(
+            "{START} --load-extension=/usr/share/chromium/extensions/lwn4chrome http://localhost:4174/passkey.html"
+        )));
+        assert!(!root.accepts(&format!("{START} --load-extension")));
+        assert!(!root.accepts(&format!(
+            "{START} --load-extension=/usr/share/chromium/extensions/lwn4chrome --load-extension=/home/l5owner/l5-user-ext http://localhost:4174/passkey.html"
+        )));
+    }
+
     #[test]
     fn system_extensions_need_trusted_unwritable_folders_up_to_the_root() {
         let root = FakeRoot::new();

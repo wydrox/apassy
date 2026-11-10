@@ -387,7 +387,7 @@ pub fn state(home: &Path, browser: &Browser, host: &Path) -> State {
 }
 
 /// [`state`] with the system paths of Linux under `root`.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, feature = "vault", target_os = "linux"))]
 fn state_at(root: &Path, home: &Path, browser: &Browser, host: &Path) -> State {
     linux_presence(root, home, browser).unwrap_or_else(|| manifest_state(home, browser, host))
 }
