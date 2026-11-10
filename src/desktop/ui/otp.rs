@@ -365,7 +365,8 @@ const SHOW_HOVER: &str = "Confirm with Touch ID or passphrase. The code is visib
 /// The hover text of "Copy" on a code row.
 fn copy_hover() -> String {
     format!(
-        "Confirm with Touch ID or passphrase. Clipboard clears after {} to {} seconds if unchanged.",
+        "{} Clipboard clears after {} to {} seconds if unchanged.",
+        crate::desktop::clipboard::CONFIRM_HINT,
         MIN_CLEAR.as_secs(),
         MAX_CLEAR.as_secs()
     )
@@ -386,7 +387,7 @@ fn hide_button(ui: &mut egui::Ui, label: &str) -> bool {
 fn copy_button(ui: &mut egui::Ui, label: &str) -> bool {
     if !crate::desktop::clipboard::supported() {
         ui.add_enabled(false, egui::Button::new("Copy"))
-            .on_hover_text(crate::desktop::clipboard::UNSUPPORTED_NOTE);
+            .on_disabled_hover_text(crate::desktop::clipboard::unsupported_note());
         return false;
     }
     rows::pill_button(ui, "Copy", &format!("Copy the code of {label}"))
