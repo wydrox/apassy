@@ -37,14 +37,18 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::client::{
-    AccountDeleted, AccountView, Challenge, ChallengeRequest, ConnectClient, CreateAccount,
-    DeviceView, JoinBody, RecoverBody, RevokeAnswer, StoreDevice, TokenRequest, VaultStoreView,
+    AccountDeleted, AccountView, Challenge, ChallengeRequest, CheckoutAnswer, CheckoutRequest,
+    ConnectClient, CreateAccount, DeviceView, GroupDetail, GroupJoined, GroupMember, InviteAnswer,
+    JoinBody, MemberRemoved, PlanView, PortalAnswer, RecoverBody, RevokeAnswer, SeatsAnswer,
+    StoreDevice, TokenRequest, VaultStoreView,
 };
 use super::device_key::{AccountSigner, DeviceKeyStore};
 use super::entitlement::Entitlement;
-use super::words::{LinkCode, RecoveryCode, safety_words, valid_account_id, valid_device_id};
+use super::words::{
+    LinkCode, RecoveryCode, safety_words, valid_account_id, valid_device_id, valid_group_id,
+};
 use super::{ConnectError, PLATFORM};
-use crate::broker::approvals::{OwnerAction, OwnerProof};
+use crate::broker::approvals::{ConnectGroupChange, OwnerAction, OwnerProof};
 use crate::sync::{decode_b64u, encode_b64u};
 use crate::vault::{Vault, VaultResult};
 
@@ -1023,6 +1027,212 @@ impl ConnectAccount {
         }
         Ok(())
     }
+
+    // ---- Plans, checkout, portal, and groups (connect-billing-v1, unit M2). ----
+
+    /// `GET /v1/account/plan`: the plan state of the account.
+    pub fn plan(&mut self) -> Result<PlanView, ConnectError> {
+        self.with_token(|client, token| client.plan(token))
+    }
+
+    /// `POST /v1/account/checkout` (section 4): a Stripe Checkout session for `request`.
+    /// The caller opens [`CheckoutAnswer::url`] in the default browser and polls
+    /// [`Self::view`] every 3 s until the plan is entitled; the browser's return changes
+    /// nothing. A URL that is not `https://` is [`ConnectError::BadAnswer`]. No owner
+    /// check: a checkout gives no authority over a vault or a device.
+    pub fn checkout(&mut self, request: &CheckoutRequest) -> Result<CheckoutAnswer, ConnectError> {
+        if !valid_checkout(request) {
+            return Err(ConnectError::Invalid);
+        }
+        let answer = self.with_token(|client, token| client.checkout(token, request))?;
+        if !browser_url(&answer.url) || answer.session_id.trim().is_empty() {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(answer)
+    }
+
+    /// `POST /v1/account/portal` (section 5): the Stripe Customer Portal of the account
+    /// that pays. It needs no owner check (section 5): the portal changes nothing in
+    /// Apassy, and Stripe confirms its own changes.
+    pub fn portal(&mut self) -> Result<PortalAnswer, ConnectError> {
+        let answer = self.with_token(|client, token| client.portal(token))?;
+        if !browser_url(&answer.url) {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(answer)
+    }
+
+    /// `GET /v1/account/group` (section 6): the family or team with its members, or
+    /// `None` when the account is in none.
+    pub fn group(&mut self) -> Result<Option<GroupDetail>, ConnectError> {
+        match self.with_token(|client, token| client.group(token)) {
+            Ok(group) if valid_group_id(&group.group_id) => Ok(Some(group)),
+            Ok(_) => Err(ConnectError::BadAnswer),
+            Err(ConnectError::NotFound | ConnectError::NotInGroup) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `POST /v1/account/group/invites`: a link for one person, as `member` or (by a
+    /// Team owner) `admin`. The link works once, for 7 days; Apassy never stores it.
+    pub fn invite(&mut self, role: &str) -> Result<InviteAnswer, ConnectError> {
+        if !matches!(role, "member" | "admin") {
+            return Err(ConnectError::Invalid);
+        }
+        let answer = self.with_token(|client, token| client.invite(token, role))?;
+        if !browser_url(&answer.url) || group_invite_code(&answer.url).is_none() {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(answer)
+    }
+
+    /// `POST /v1/account/group/join` with the invite link or its code, pasted into "Join
+    /// a Family or Team". The account joins as `pending`: it gets nothing until the
+    /// owner or an admin confirms it with an owner check on their Mac, so this needs none.
+    pub fn join_group(&mut self, pasted: &str) -> Result<GroupJoined, ConnectError> {
+        let code = group_invite_code(pasted).ok_or(ConnectError::Invalid)?;
+        let joined = self.with_token(|client, token| client.join_group(token, &code))?;
+        if !valid_group_id(&joined.group_id) || !code.contains(&joined.group_id) {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(joined)
+    }
+
+    /// The owner action of a change of the group `group_id`.
+    pub fn group_change_action(&self, group_id: &str, change: ConnectGroupChange) -> OwnerAction {
+        OwnerAction::ChangeConnectGroup {
+            account_id: self.state.account_id.clone(),
+            group_id: group_id.to_owned(),
+            change,
+        }
+    }
+
+    /// Confirm the pending member `account_id` ("`name`") of the group `group_id` after a
+    /// fresh owner check for [`Self::group_change_action`] with
+    /// [`ConnectGroupChange::ConfirmMember`] in the vault session `epoch`. The proof is
+    /// used up, also when the call fails.
+    pub fn confirm_member(
+        &mut self,
+        group_id: &str,
+        account_id: &str,
+        name: &str,
+        proof: OwnerProof,
+        epoch: &[u8; 32],
+    ) -> Result<GroupMember, ConnectError> {
+        let action = self.group_change_action(
+            group_id,
+            ConnectGroupChange::ConfirmMember {
+                account_id: account_id.to_owned(),
+                name: name.to_owned(),
+            },
+        );
+        proof
+            .check(&action, epoch)
+            .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
+        let member =
+            self.with_token(|client, token| client.confirm_member(token, account_id))?;
+        if member.account_id != account_id {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(member)
+    }
+
+    /// Remove the member `account_id` ("`name`") from the group `group_id`, or leave it
+    /// (`account_id` is this account), after a fresh owner check for
+    /// [`ConnectGroupChange::RemoveMember`] in the vault session `epoch`. The proof is
+    /// used up, also when the call fails.
+    pub fn remove_member(
+        &mut self,
+        group_id: &str,
+        account_id: &str,
+        name: &str,
+        proof: OwnerProof,
+        epoch: &[u8; 32],
+    ) -> Result<MemberRemoved, ConnectError> {
+        let action = self.group_change_action(
+            group_id,
+            ConnectGroupChange::RemoveMember {
+                account_id: account_id.to_owned(),
+                name: name.to_owned(),
+            },
+        );
+        proof
+            .check(&action, epoch)
+            .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
+        let removed = self.with_token(|client, token| client.remove_member(token, account_id))?;
+        if removed.account_id != account_id {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(removed)
+    }
+
+    /// Ask Stripe for `quantity` people or seats of the group `group_id` after a fresh
+    /// owner check for [`ConnectGroupChange::SetSeats`] in the vault session `epoch`. The
+    /// new quantity applies when Stripe confirms it. The proof is used up, also when the
+    /// call fails.
+    pub fn set_seats(
+        &mut self,
+        group_id: &str,
+        quantity: u64,
+        proof: OwnerProof,
+        epoch: &[u8; 32],
+    ) -> Result<SeatsAnswer, ConnectError> {
+        if quantity == 0 {
+            return Err(ConnectError::Invalid);
+        }
+        let action = self.group_change_action(group_id, ConnectGroupChange::SetSeats { quantity });
+        proof
+            .check(&action, epoch)
+            .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
+        let answer = self.with_token(|client, token| client.set_seats(token, quantity))?;
+        if answer.quantity != quantity {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(answer)
+    }
+}
+
+
+/// A URL that the Mac opens in the default browser: `https://`, a host, and no space or
+/// control character. Connect sends the Checkout, Portal, and invite URLs.
+fn browser_url(url: &str) -> bool {
+    url.len() <= 4096
+        && url
+            .strip_prefix("https://")
+            .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// A checkout body of section 4: a known plan and interval, people only for Family and
+/// seats only for Team, each at least 1.
+fn valid_checkout(request: &CheckoutRequest) -> bool {
+    let interval = matches!(request.interval.as_str(), "month" | "year");
+    let counts = match request.plan.as_str() {
+        "personal" => request.people.is_none() && request.seats.is_none(),
+        "family" => request.people.is_some_and(|n| n > 0) && request.seats.is_none(),
+        "team" => request.seats.is_some_and(|n| n > 0) && request.people.is_none(),
+        _ => false,
+    };
+    interval && counts
+}
+
+/// The invite code of a pasted invite link or code (connect-billing-v1 section 6):
+/// `apassy_gin_<group id>_<64 hex>`, also after the `#` of
+/// `https://<site>/connect/join#…`. `None` for any other text.
+pub fn group_invite_code(pasted: &str) -> Option<String> {
+    let text = pasted.trim();
+    let code = text.rsplit_once('#').map_or(text, |(_, code)| code).trim();
+    let rest = code.strip_prefix("apassy_gin_")?;
+    let (group, secret) = rest.rsplit_once('_')?;
+    (valid_group_id(group)
+        && secret.len() == 64
+        && secret
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| code.to_owned())
 }
 
 /// What a poll of a [`JoinRequest`] found.
