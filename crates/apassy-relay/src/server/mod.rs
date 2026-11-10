@@ -17,6 +17,7 @@ pub mod auth;
 pub mod billing;
 pub mod billing_store;
 pub mod connect;
+pub mod cutover;
 pub mod decide;
 pub mod devices;
 pub mod directory;
@@ -182,6 +183,19 @@ impl Core {
             .team_limits
             .read()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The largest snapshot this team may push now: its `sync_bytes`, or 0 for a free
+    /// Connect team once free relay sync is over (`RelayConfig::free_sync_ended`, the
+    /// transition before the cutover). 0 is relay-sync-v1's 403 `plan_required` on a push
+    /// and a receipt; pulls and downloads still work. Operator teams and vault stores
+    /// keep their limit.
+    pub fn sync_bytes(&self) -> u64 {
+        if self.kind == crate::api::TeamKind::Connect && self.config.free_sync_ended() {
+            0
+        } else {
+            self.limits().sync_bytes
+        }
     }
 
     /// Writes at most one audit row per limit kind per ten seconds. Call on the
@@ -382,6 +396,8 @@ pub struct RunningRelay {
     /// The Connect tunnel (with the account routes only): the broker, the ingress, and
     /// the usage writer.
     tunnel: Option<tunnel_routes::TunnelRuntime>,
+    /// A `Proxy` was built: never in `connect` mode (docs/SPEC.md section 37).
+    proxy_built: bool,
 }
 
 impl RunningRelay {
@@ -420,6 +436,18 @@ impl RunningRelay {
     /// The teams of this relay.
     pub fn hub(&self) -> Arc<Hub> {
         self.hub.clone()
+    }
+
+    /// True when this relay built the proxy of `/p/`: never in `connect` mode, where `/p/`
+    /// is 410 `hosted_retired` and no proxy exists.
+    pub fn proxy_built(&self) -> bool {
+        self.proxy_built
+    }
+
+    /// True when this relay started its push senders (`push::Push::start` with a push
+    /// configuration): never in `connect` mode, which refuses the push settings.
+    pub fn push_on(&self) -> bool {
+        self.hub.push.enabled()
     }
 
     /// Blocks until the server stops. An error when the listener died (`http::serve`):
@@ -517,6 +545,11 @@ impl Relay {
     /// Creates a new relay with one team and its owner. Returns the owner token once.
     /// Refuses if the relay exists.
     pub fn init(config: &RelayConfig, team: &str, owner: &str) -> RelayResult<SecretString> {
+        if config.connect.plain_files() {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_MODE=connect has no operator team: run `apassy-relay init` without --team and --owner.",
+            ));
+        }
         let _lock = hub::lock_data_dir(config)?;
         refuse_existing(config)?;
         // The names are checked before any file is made.
@@ -554,6 +587,7 @@ impl Relay {
     /// this team. The original file stays as `team.db.pre-teams`: it opens with the old
     /// key only. Returns the team id.
     pub fn migrate(config: &RelayConfig, old_key: &SecretString) -> RelayResult<TeamId> {
+        config.refuse_connect_mode("`apassy-relay migrate`")?;
         let _lock = hub::lock_data_dir(config)?;
         let legacy = config.legacy_vault_path();
         if std::fs::symlink_metadata(config.directory_path()).is_ok() {
@@ -663,6 +697,7 @@ impl Relay {
     /// (`RelayConfig::check_listeners`).
     pub fn start(config: RelayConfig) -> RelayResult<RunningRelay> {
         config.check_listeners()?;
+        config.check_mode()?;
         let stop = Arc::new(AtomicBool::new(false));
         let hub = Hub::open(config, stop.clone())?;
         // Connect billing: the price cache is filled at start, on a thread of its own, so
@@ -679,8 +714,15 @@ impl Relay {
                 eprintln!("apassy-relay: the Stripe price thread cannot start");
             }
         }
-        let source: Arc<dyn SessionSource> = hub.clone();
-        let proxy = Arc::new(Proxy::new(&hub.config.upstream, source)?);
+        // `connect` mode serves no proxy: `/p/` is 410 `hosted_retired` before it would
+        // reach one, and none is built (docs/SPEC.md section 37).
+        let proxy = if hub.config.connect.plain_files() {
+            None
+        } else {
+            let source: Arc<dyn SessionSource> = hub.clone();
+            Some(Arc::new(Proxy::new(&hub.config.upstream, source)?))
+        };
+        let proxy_built = proxy.is_some();
         let bind = |listen: SocketAddr| {
             let server = tiny_http::Server::http_with_deadlines(
                 listen,
@@ -853,6 +895,7 @@ impl Relay {
             tailnet_local_handle,
             operator,
             tunnel,
+            proxy_built,
         })
     }
 }
