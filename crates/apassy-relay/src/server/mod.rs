@@ -22,6 +22,7 @@ pub mod feed;
 pub mod host;
 pub mod http;
 pub mod hub;
+pub mod ingress;
 pub mod joins;
 pub mod mcp;
 pub mod oauth;
@@ -33,6 +34,7 @@ pub mod runkeys;
 pub mod sessions;
 pub mod store;
 pub mod sync;
+pub mod tunnel;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
