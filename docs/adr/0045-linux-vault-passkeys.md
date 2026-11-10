@@ -25,6 +25,9 @@ and compromised same-user processes remain outside this boundary. Reject unknown
 browsers, stale processes, mismatched users and writable browser binaries.
 This is defense in depth, not an equivalent to macOS signing. Preserve origin,
 RP ID, challenge, approval and user-verification checks in the shared flow.
+Secret and code Copy is offered only where Apassy itself owns the X11 or Wayland
+(ext/wlr data-control) clipboard, learns of foreign replacement, and clears only
+its own copy by replacing it with an empty one; other sessions have no Copy.
 
 Passphrase unlock is the default. Optional Secret Service storage requires explicit
 opt-in explaining that other same-user clients can retrieve an unlocked keyring

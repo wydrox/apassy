@@ -19,9 +19,13 @@ operator must install the dependencies recorded in `release-vault-linux-*.json`.
 The desktop glibc requirement is recorded per artifact; the node's glibc 2.31
 compatibility promise does not extend to these desktop builds.
 
-Run `apassy` from your desktop session. Secure secret/TOTP clipboard Copy is
-currently unsupported on Linux; use Show or browser fill. A Wayland session is preferred; X11 can
-expose keyboard input to other clients. Configure the browser from that user
+Run `apassy` from your desktop session. A Wayland session is preferred; X11 can
+expose keyboard input to other clients. Secret and TOTP Copy works where Apassy can
+own and clear its own clipboard copy: Wayland with ext-data-control-v1 or
+wlr-data-control, X11, or XWayland (GNOME). Apassy marks the copy with
+`x-kde-passwordManagerHint` and replaces only its own copy with an empty one after
+the clear time, on lock and on quit. Elsewhere Copy is disabled with the reason;
+use Show or browser fill. A clipboard manager that ignores the hint can keep a copy. Configure the browser from that user
 account, using Apassy's extension installation flow. Browser manifests point to
 `/usr/lib/apassy/apassy-browser-host`; extension assets live in
 `/usr/share/apassy/browser-extension`. Native manifest templates for both browsers
