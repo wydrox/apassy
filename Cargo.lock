@@ -187,6 +187,7 @@ dependencies = [
  "time",
  "toml_edit",
  "tracing",
+ "zbus",
  "zeroize",
 ]
 
