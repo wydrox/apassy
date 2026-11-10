@@ -4,14 +4,21 @@
 //! It speaks plain HTTP/1.1 on 127.0.0.1, one thread per connection, keeps everything in
 //! memory, and checks what Connect checks with `ring` directly, not with the app's code:
 //! the strict request bodies, the signatures of section 5 over its own origin, the
-//! one-use nonces, the tokens, the links and joins of section 7, the recovery hash of
-//! section 9, and the entitlement token of section 10 (signed with the Ed25519 seed of
-//! the test vectors, kid `ek_test_1`). It is not the relay crate (C1), which replaces it
-//! once C1 merges.
+//! one-use nonces (a challenge never ends another challenge), `403 device_removed` only
+//! after a valid sign-in signature of a key that was a device of the account, the links
+//! and joins of section 7 with the signed cancel, the device statements and the chains
+//! of every `DeviceView`, the vault store devices with the key the caller verified, the
+//! recovery key and the Ed25519 recovery signature of section 9 (a repeat of the same
+//! body answers the same result), and the entitlement token of section 10 (signed with
+//! the Ed25519 seed of the test vectors, kid `ek_test_1`). It is not the relay crate
+//! (C1), which replaces it once C1 merges.
 //!
 //! Hooks act as a broken or hostile Connect: report another origin in the challenge,
-//! shorten the token lifetime, lose the next answers after doing the step, entitle an
-//! account, revoke a device behind the app's back, and read what the app sent.
+//! shorten the token lifetime, lose the next answers after doing the step, drop every
+//! open nonce (a restart), refuse the next token calls with `401` or `503`, name another
+//! confirmer in a join answer, insert a device row without a valid chain, bring a
+//! revoked device back, swap the key of a device, entitle an account, revoke a device
+//! behind the app's back, and read what the app sent.
 //!
 //! Billing and groups (contract connect-billing-v1, plan s7 unit M2): `GET /v1/plans`
 //! answers `tests/fixtures/connect-billing-v1/plans.json`; the checkout, the portal, the
@@ -30,7 +37,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::relay_api::{decode_b64u, encode_b64u, sha256_hex};
-use ring::signature::{ECDSA_P256_SHA256_ASN1, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
+use ring::signature::{
+    ECDSA_P256_SHA256_ASN1, ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey,
+};
 use serde_json::{Value, json};
 
 /// The Ed25519 seed of the test vectors: bytes 32 to 63.
@@ -62,13 +71,21 @@ struct Device {
     public_key: Vec<u8>,
     created_at: u64,
     live: bool,
+    /// The device that confirmed this one, the link hash, and the statement (DER). `None`
+    /// for a root.
+    added_by: Option<String>,
+    link_hash: String,
+    statement: Vec<u8>,
 }
 
 #[derive(Clone)]
 struct Account {
     name: String,
     created_at: u64,
-    recovery_hash: String,
+    /// The Ed25519 public key of the recovery code (32 bytes).
+    recovery_key: Vec<u8>,
+    /// The last recovery: its body, its answer, its time, and the device it made.
+    recovered: Option<(Value, Value, u64, String)>,
     entitled: bool,
     /// A `PlanView` set by [`FakeConnect::set_plan`] or a completed checkout.
     plan: Option<Value>,
@@ -146,8 +163,15 @@ struct State {
     links: Vec<Link>,
     joins: Vec<Join>,
     stores: Vec<Store>,
-    /// nonce → (account, key).
-    nonces: BTreeMap<String, (String, Vec<u8>)>,
+    /// nonce → (account, key, expires_at). A challenge never ends another one.
+    nonces: BTreeMap<String, (String, Vec<u8>, u64)>,
+    /// The next token calls: drop every nonce first (a restart between the challenge and
+    /// the token), answer `401`, or answer `503 busy` (the nonce stays unused).
+    token_restarts: usize,
+    token_unauthenticated: usize,
+    token_busy: usize,
+    /// The `confirmer` of the next join answers, instead of the device of the link.
+    confirmer: Option<Value>,
     /// token → (account, device, expires_at).
     tokens: BTreeMap<String, (String, String, u64)>,
     token_seconds: u64,
@@ -187,6 +211,15 @@ fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
         .verify(message, signature)
         .is_ok()
 }
+
+fn verify_ed25519(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    UnparsedPublicKey::new(&ED25519, public_key)
+        .verify(message, signature)
+        .is_ok()
+}
+
+/// A body seen again within this many seconds answers the same result.
+const REPEAT_SECONDS: u64 = 600;
 
 fn joined(parts: &[&str]) -> Vec<u8> {
     parts.join("\0").into_bytes()
@@ -255,6 +288,93 @@ impl FakeConnect {
     /// one).
     pub fn report_origin(&self, origin: &str) {
         lock(&self.shared).reported_origin = Some(origin.to_owned());
+    }
+
+    /// Every open nonce is gone, as after a restart of Connect.
+    pub fn drop_nonces(&self) {
+        lock(&self.shared).nonces.clear();
+    }
+
+    /// The next `count` token calls find no nonce: Connect restarted after the challenge.
+    pub fn restart_before_next_tokens(&self, count: usize) {
+        lock(&self.shared).token_restarts = count;
+    }
+
+    /// The next `count` token calls are `401 unauthenticated`.
+    pub fn refuse_next_tokens(&self, count: usize) {
+        lock(&self.shared).token_unauthenticated = count;
+    }
+
+    /// The next `count` token calls are `503 busy`; their nonces stay unused.
+    pub fn busy_next_tokens(&self, count: usize) {
+        lock(&self.shared).token_busy = count;
+    }
+
+    /// The next join answers name `confirmer` (`{"device_id","name","public_key","chain"}`)
+    /// instead of the device that made the link; `None` ends it.
+    pub fn answer_confirmer(&self, confirmer: Option<Value>) {
+        lock(&self.shared).confirmer = confirmer;
+    }
+
+    /// A device row of `account` that no live device confirmed: its chain names the first
+    /// device of the account with a statement that does not verify. Returns its id.
+    pub fn insert_device(&self, account: &str, name: &str, public_key: &[u8]) -> String {
+        let mut state = lock(&self.shared);
+        let first = state
+            .devices
+            .iter()
+            .find(|device| device.account == account)
+            .map(|device| device.id.clone());
+        let hash = encode_b64u(&[7u8; 32]);
+        new_device(
+            &mut state,
+            account,
+            name,
+            "mac",
+            public_key.to_vec(),
+            first,
+            &hash,
+            vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01],
+        )
+        .id
+    }
+
+    /// A revoked device is live again, with its old chain.
+    pub fn unrevoke(&self, device: &str) {
+        for entry in &mut lock(&self.shared).devices {
+            if entry.id == device {
+                entry.live = true;
+            }
+        }
+    }
+
+    /// The device `device` gets the key `public_key`; its chain stays.
+    pub fn swap_key(&self, device: &str, public_key: &[u8]) {
+        for entry in &mut lock(&self.shared).devices {
+            if entry.id == device {
+                entry.public_key = public_key.to_vec();
+            }
+        }
+    }
+
+    /// The `DeviceView` of `device`, with its chain, as Connect answers it.
+    pub fn device_view(&self, device: &str) -> Option<Value> {
+        let state = lock(&self.shared);
+        state
+            .devices
+            .iter()
+            .find(|entry| entry.id == device)
+            .map(|entry| device_view(&state, entry))
+    }
+
+    /// The ids of the devices of `store` (a vault store id).
+    pub fn store_devices(&self, store: &str) -> Vec<String> {
+        lock(&self.shared)
+            .stores
+            .iter()
+            .filter(|entry| entry.team_id == store)
+            .flat_map(|entry| entry.devices.iter().map(|(_, id)| id.clone()))
+            .collect()
     }
 
     /// Every link of `account` expires now, and its pending joins with it: a later join
@@ -599,10 +719,39 @@ fn caller(state: &State, request: &Incoming) -> Option<(String, String)> {
         .then_some((account, device))
 }
 
-fn device_view(device: &Device) -> Value {
+/// The statements from `device` to its root, following `added_by` through every row
+/// (revoked ones too), at most 64.
+fn chain(state: &State, device: &Device) -> Vec<Value> {
+    let mut entries = Vec::new();
+    let mut current = device;
+    while let Some(parent) = current.added_by.as_deref() {
+        let Some(confirmer) = state.devices.iter().find(|entry| entry.id == parent) else {
+            break;
+        };
+        if entries.len() == 64 {
+            break;
+        }
+        entries.push(json!({"link_hash": current.link_hash,
+                            "confirmer_key": encode_b64u(&confirmer.public_key),
+                            "statement": encode_b64u(&current.statement)}));
+        current = confirmer;
+    }
+    entries
+}
+
+fn device_view(state: &State, device: &Device) -> Value {
     json!({"device_id": device.id, "name": device.name, "platform": device.platform,
            "public_key": encode_b64u(&device.public_key), "created_at": device.created_at,
-           "last_seen_at": null})
+           "last_seen_at": null, "chain": chain(state, device)})
+}
+
+/// The confirmer of a join answer: the device that made the link, with its chain.
+fn confirmer_view(state: &State, device: &Device) -> Value {
+    if let Some(confirmer) = &state.confirmer {
+        return confirmer.clone();
+    }
+    json!({"device_id": device.id, "name": device.name,
+           "public_key": encode_b64u(&device.public_key), "chain": chain(state, device)})
 }
 
 /// The plans of the default configuration (connect-billing-v1 section 2).
@@ -723,12 +872,16 @@ fn store_view(store: &Store, state: &State) -> Value {
            "created_at": store.created_at, "shared": false, "devices": devices})
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_device(
     state: &mut State,
     account: &str,
     name: &str,
     platform: &str,
     public_key: Vec<u8>,
+    added_by: Option<String>,
+    link_hash: &str,
+    statement: Vec<u8>,
 ) -> Device {
     state.next += 1;
     let device = Device {
@@ -739,6 +892,9 @@ fn new_device(
         public_key,
         created_at: now(),
         live: true,
+        added_by,
+        link_hash: link_hash.to_owned(),
+        statement,
     };
     state.devices.push(device.clone());
     device
@@ -767,7 +923,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 "device_name",
                 "platform",
                 "public_key",
-                "recovery_hash",
+                "recovery_key",
                 "signature",
             ];
             if !strict(&body, &keys) {
@@ -776,10 +932,16 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             let Some(public_key) = point(text(&body, "public_key")) else {
                 return fail(400, "invalid_request");
             };
+            let Some(recovery_key) =
+                decode_b64u(text(&body, "recovery_key")).filter(|key| key.len() == 32)
+            else {
+                return fail(400, "invalid_request");
+            };
             let message = joined(&[
                 "apassy-connect account v1",
                 &origin,
                 text(&body, "public_key"),
+                text(&body, "recovery_key"),
             ]);
             let signature = decode_b64u(text(&body, "signature")).unwrap_or_default();
             if !verify(&public_key, &message, &signature) {
@@ -806,7 +968,8 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 Account {
                     name: text(&body, "name").to_owned(),
                     created_at: now(),
-                    recovery_hash: text(&body, "recovery_hash").to_owned(),
+                    recovery_key,
+                    recovered: None,
                     entitled: false,
                     plan: None,
                     customer: false,
@@ -818,6 +981,9 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 text(&body, "device_name"),
                 text(&body, "platform"),
                 public_key.clone(),
+                None,
+                "",
+                Vec::new(),
             );
             let answer = json!({"account_id": account_id, "device_id": device.id,
                                 "created_at": device.created_at});
@@ -832,10 +998,12 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             let Some(public_key) = point(text(&body, "public_key")) else {
                 return fail(400, "invalid_request");
             };
-            let live = state.devices.iter().any(|device| {
-                device.live && device.account == account && device.public_key == public_key
-            });
-            if !live {
+            // A key that is or was a device of the account gets a nonce.
+            let device = state
+                .devices
+                .iter()
+                .any(|device| device.account == account && device.public_key == public_key);
+            if !device {
                 return match state
                     .joins
                     .iter()
@@ -854,16 +1022,25 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .map(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap())
                 .collect();
             let nonce = encode_b64u(&nonce_bytes);
-            state.nonces.insert(nonce.clone(), (account, public_key));
+            let expires_at = now() + 60;
+            state
+                .nonces
+                .insert(nonce.clone(), (account, public_key, expires_at));
             let reported = state.reported_origin.clone().unwrap_or(origin);
-            ok(json!({"nonce": nonce, "expires_at": now() + 60, "origin": reported}))
+            ok(json!({"nonce": nonce, "expires_at": expires_at, "origin": reported}))
         }
         ("POST", ["v1", "account", "token"]) => {
             if !strict(&body, &["account_id", "public_key", "nonce", "signature"]) {
                 return fail(400, "invalid_request");
             }
+            if state.token_restarts > 0 {
+                state.token_restarts -= 1;
+                state.nonces.clear();
+            }
+            // 1. The nonce, the key, and the signature: any failure is one `401`, and
+            // nothing is used up.
             let nonce = text(&body, "nonce").to_owned();
-            let Some((account, public_key)) = state.nonces.remove(&nonce) else {
+            let Some((account, public_key, expires_at)) = state.nonces.get(&nonce).cloned() else {
                 return fail(401, "unauthenticated");
             };
             let message = joined(&[
@@ -874,20 +1051,42 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 &nonce,
             ]);
             let signature = decode_b64u(text(&body, "signature")).unwrap_or_default();
-            if text(&body, "account_id") != account
+            if expires_at <= now()
+                || text(&body, "account_id") != account
                 || point(text(&body, "public_key")).as_deref() != Some(public_key.as_slice())
                 || !verify(&public_key, &message, &signature)
             {
                 return fail(401, "unauthenticated");
             }
+            // 2. The device: live goes on; a key that was a device of the account is
+            // `403 device_removed`, which only a valid signature reaches.
+            let was_device = state
+                .devices
+                .iter()
+                .any(|entry| entry.account == account && entry.public_key == public_key);
+            if !was_device {
+                return fail(401, "unauthenticated");
+            }
             let Some(device) = state
                 .devices
                 .iter()
-                .find(|device| device.live && device.public_key == public_key)
-                .map(|device| device.id.clone())
+                .find(|entry| {
+                    entry.live && entry.account == account && entry.public_key == public_key
+                })
+                .map(|entry| entry.id.clone())
             else {
-                return fail(401, "unauthenticated");
+                return fail(403, "device_removed");
             };
+            if state.token_unauthenticated > 0 {
+                state.token_unauthenticated -= 1;
+                return fail(401, "unauthenticated");
+            }
+            // 3. A busy Connect keeps the nonce unused.
+            if state.token_busy > 0 {
+                state.token_busy -= 1;
+                return fail(503, "busy");
+            }
+            state.nonces.remove(&nonce);
             state.next += 1;
             let token = format!("apassy_act_{account}_{}", secret_hex(state.next));
             let expires_at = now() + state.token_seconds;
@@ -941,8 +1140,7 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                     .find(|device| device.id == link.device)
                     .expect("confirmer");
                 return ok(json!({"join_id": join_id, "account_id": account,
-                    "confirmer": {"device_id": confirmer.id, "name": confirmer.name,
-                                  "public_key": encode_b64u(&confirmer.public_key)},
+                    "confirmer": confirmer_view(&state, confirmer),
                     "expires_at": link.expires_at}));
             }
             let at = now();
@@ -974,15 +1172,30 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .find(|device| device.id == creator)
                 .expect("confirmer");
             ok(json!({"join_id": join_id, "account_id": account,
-                "confirmer": {"device_id": confirmer.id, "name": confirmer.name,
-                              "public_key": encode_b64u(&confirmer.public_key)},
+                "confirmer": confirmer_view(&state, confirmer),
                 "expires_at": expires_at}))
         }
         ("POST", ["v1", "account", "devices", "join", "cancel"]) => {
-            if !strict(&body, &["account_id", "link_hash", "public_key"]) {
+            if !strict(
+                &body,
+                &["account_id", "link_hash", "public_key", "signature"],
+            ) {
                 return fail(400, "invalid_request");
             }
-            let public_key = point(text(&body, "public_key")).unwrap_or_default();
+            let Some(public_key) = point(text(&body, "public_key")) else {
+                return fail(400, "invalid_request");
+            };
+            let message = joined(&[
+                "apassy-connect join-cancel v1",
+                &origin,
+                text(&body, "account_id"),
+                text(&body, "link_hash"),
+                text(&body, "public_key"),
+            ]);
+            let signature = decode_b64u(text(&body, "signature")).unwrap_or_default();
+            if !verify(&public_key, &message, &signature) {
+                return fail(400, "invalid_request");
+            }
             let link_ids: Vec<u64> = state
                 .links
                 .iter()
@@ -1004,12 +1217,12 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
         ("POST", ["v1", "account", "recover"]) => {
             let keys = [
                 "account_id",
-                "recovery",
                 "device_name",
                 "platform",
                 "public_key",
-                "recovery_hash",
+                "recovery_key",
                 "signature",
+                "recovery_signature",
             ];
             if !strict(&body, &keys) {
                 return fail(400, "invalid_request");
@@ -1018,38 +1231,48 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             let Some(public_key) = point(text(&body, "public_key")) else {
                 return fail(400, "invalid_request");
             };
-            state.recover_tries += 1;
-            let Some(hex) = text(&body, "recovery").strip_prefix("apassy_rec_") else {
-                return fail(403, "forbidden");
-            };
-            let Some(bytes) = (0..16)
-                .map(|index| u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok())
-                .collect::<Option<Vec<u8>>>()
+            let Some(new_recovery_key) =
+                decode_b64u(text(&body, "recovery_key")).filter(|key| key.len() == 32)
             else {
-                return fail(403, "forbidden");
+                return fail(400, "invalid_request");
             };
-            let mut hashed = b"apassy-connect recovery v1\0".to_vec();
-            hashed.extend_from_slice(&bytes);
-            let live = state
-                .devices
-                .iter()
-                .any(|device| device.live && device.account == account);
-            let matches = state
-                .accounts
-                .get(&account)
-                .is_some_and(|entry| entry.recovery_hash == sha256_hex(&hashed));
-            if live || !matches {
-                return fail(403, "forbidden");
-            }
             let message = joined(&[
                 "apassy-connect recover v1",
                 &origin,
                 &account,
                 text(&body, "public_key"),
+                text(&body, "recovery_key"),
             ]);
             let signature = decode_b64u(text(&body, "signature")).unwrap_or_default();
             if !verify(&public_key, &message, &signature) {
                 return fail(400, "invalid_request");
+            }
+            // The same body again, while the device it made is live: the same answer.
+            if let Some((earlier, answer, at, device)) = state
+                .accounts
+                .get(&account)
+                .and_then(|entry| entry.recovered.clone())
+                && earlier == body
+                && now() < at + REPEAT_SECONDS
+                && state
+                    .devices
+                    .iter()
+                    .any(|entry| entry.id == device && entry.live)
+            {
+                return ok(answer);
+            }
+            state.recover_tries += 1;
+            let recovery_signature =
+                decode_b64u(text(&body, "recovery_signature")).unwrap_or_default();
+            let live = state
+                .devices
+                .iter()
+                .any(|device| device.live && device.account == account);
+            let proven = state.accounts.get(&account).is_some_and(|entry| {
+                verify_ed25519(&entry.recovery_key, &message, &recovery_signature)
+            });
+            if live || !proven {
+                return fail(403, "forbidden");
             }
             let deleted = state
                 .stores
@@ -1057,19 +1280,23 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                 .filter(|store| store.account == account)
                 .count();
             state.stores.retain(|store| store.account != account);
-            let new_hash = text(&body, "recovery_hash").to_owned();
-            if let Some(entry) = state.accounts.get_mut(&account) {
-                entry.recovery_hash = new_hash;
-            }
             let device = new_device(
                 &mut state,
                 &account,
                 text(&body, "device_name"),
                 text(&body, "platform"),
                 public_key,
+                None,
+                "",
+                Vec::new(),
             );
-            ok(json!({"account_id": account, "device_id": device.id,
-                      "deleted_stores": deleted}))
+            let answer = json!({"account_id": account, "device_id": device.id,
+                                "deleted_stores": deleted});
+            if let Some(entry) = state.accounts.get_mut(&account) {
+                entry.recovery_key = new_recovery_key;
+                entry.recovered = Some((body.clone(), answer.clone(), now(), device.id));
+            }
+            ok(answer)
         }
         ("GET", ["v1", "plans"]) => ok(plans()),
         ("GET", [".well-known", "apassy-connect.json"]) => ok(json!({
@@ -1104,7 +1331,7 @@ fn authenticated(
                 .devices
                 .iter()
                 .filter(|entry| entry.live && entry.account == account)
-                .map(device_view)
+                .map(|entry| device_view(state, entry))
                 .collect();
             ok(
                 json!({"account_id": account, "name": entry.name, "email": null,
@@ -1219,13 +1446,37 @@ fn authenticated(
                 state.joins[index].state = JoinState::Refused;
                 return ok(json!({"join_id": join_id}));
             }
-            if !strict(body, &["public_key"]) {
+            if !strict(body, &["public_key", "statement"]) {
                 return fail(400, "invalid_request");
             }
             if point(text(body, "public_key")).as_deref()
                 != Some(state.joins[index].public_key.as_slice())
             {
                 return fail(409, "conflict");
+            }
+            // The statement of the caller over the joining key and the link of the join.
+            let link_hash = state
+                .links
+                .iter()
+                .find(|link| link.id == link_id)
+                .map(|link| link.hash.clone())
+                .unwrap_or_default();
+            let message = joined(&[
+                "apassy-connect device v1",
+                origin,
+                account,
+                &link_hash,
+                &encode_b64u(&state.joins[index].public_key),
+            ]);
+            let statement = decode_b64u(text(body, "statement")).unwrap_or_default();
+            let caller_key = state
+                .devices
+                .iter()
+                .find(|entry| entry.id == device)
+                .map(|entry| entry.public_key.clone())
+                .unwrap_or_default();
+            if !verify(&caller_key, &message, &statement) {
+                return fail(400, "invalid_request");
             }
             state.joins[index].state = JoinState::Confirmed;
             let join = &state.joins[index];
@@ -1234,8 +1485,17 @@ fn authenticated(
                 join.platform.clone(),
                 join.public_key.clone(),
             );
-            let added = new_device(state, account, &name, &platform, key);
-            ok(device_view(&added))
+            let added = new_device(
+                state,
+                account,
+                &name,
+                &platform,
+                key,
+                Some(device.to_owned()),
+                &link_hash,
+                statement,
+            );
+            ok(device_view(state, &added))
         }
         ("DELETE", ["devices", target]) => {
             let Some(entry) = state
@@ -1289,20 +1549,22 @@ fn authenticated(
             ok(view)
         }
         ("POST", ["vaults", team, "devices"]) => {
-            if !strict(body, &["device_id"]) {
+            if !strict(body, &["device_id", "public_key"]) {
                 return fail(400, "invalid_request");
             }
             let device_id = text(body, "device_id").to_owned();
-            let Some(added) = state
+            // Unknown, revoked, or of another account: one answer.
+            let Some((added, key)) = state
                 .devices
                 .iter()
                 .find(|entry| entry.id == device_id && entry.live)
-                .map(|entry| entry.account.clone())
+                .map(|entry| (entry.account.clone(), entry.public_key.clone()))
+                .filter(|(owner, _)| owner == account)
             else {
-                return fail(404, "not_found");
-            };
-            if added != account {
                 return fail(403, "not_in_group");
+            };
+            if point(text(body, "public_key")).as_deref() != Some(key.as_slice()) {
+                return fail(409, "conflict");
             }
             let Some(store) = state
                 .stores

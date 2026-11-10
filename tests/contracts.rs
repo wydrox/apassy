@@ -3832,7 +3832,7 @@ mod connect_v1 {
 
     /// connect-account-v1 section 4: every Connect code with its status, and the
     /// relay-sync-v1 codes that the Connect examples use.
-    const CODES: [(&str, u16); 14] = [
+    const CODES: [(&str, u16); 15] = [
         ("account_required", 403),
         ("not_in_group", 403),
         ("plan_required", 403),
@@ -3847,6 +3847,7 @@ mod connect_v1 {
         ("forbidden", 403),
         ("join_pending", 403),
         ("not_found", 404),
+        ("device_removed", 403),
     ];
 
     /// The codes that unit D1 of the stage 7 plan names.
@@ -4142,10 +4143,12 @@ mod connect_v1 {
         const RELAY_SYNC_PUBLIC_KEY: &str = "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA";
 
         /// Section 5: the only messages that an account device key signs.
-        pub const DEVICE_KEY_TAGS: [&str; 7] = [
+        pub const DEVICE_KEY_TAGS: [&str; 9] = [
             "apassy-connect account v1",
             "apassy-connect sign-in v1",
             "apassy-connect join v1",
+            "apassy-connect join-cancel v1",
+            "apassy-connect device v1",
             "apassy-connect recover v1",
             "apassy-bouncer sign-in v1",
             "apassy-relay sign-in v1",
@@ -4159,7 +4162,7 @@ mod connect_v1 {
             device_name: String,
             platform: String,
             public_key: String,
-            recovery_hash: String,
+            recovery_key: String,
             signature: String,
         }
 
@@ -4204,6 +4207,15 @@ mod connect_v1 {
             device_id: String,
         }
 
+        /// One device statement of a chain.
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ChainEntry {
+            link_hash: String,
+            confirmer_key: String,
+            statement: String,
+        }
+
         #[derive(Debug, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct DeviceView {
@@ -4213,6 +4225,7 @@ mod connect_v1 {
             public_key: String,
             created_at: u64,
             last_seen_at: Option<u64>,
+            chain: Vec<ChainEntry>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4278,6 +4291,7 @@ mod connect_v1 {
             device_id: String,
             name: String,
             public_key: String,
+            chain: Vec<ChainEntry>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4295,6 +4309,7 @@ mod connect_v1 {
             account_id: String,
             link_hash: String,
             public_key: String,
+            signature: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4319,6 +4334,7 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct Confirm {
             public_key: String,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4358,6 +4374,7 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct StoreDeviceAdd {
             device_id: String,
+            public_key: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4370,12 +4387,12 @@ mod connect_v1 {
         #[serde(deny_unknown_fields)]
         struct Recover {
             account_id: String,
-            recovery: String,
             device_name: String,
             platform: String,
             public_key: String,
-            recovery_hash: String,
+            recovery_key: String,
             signature: String,
+            recovery_signature: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4459,6 +4476,20 @@ mod connect_v1 {
             b64u_decode(text).is_some_and(|hash| hash.len() == 32)
         }
 
+        /// An Ed25519 public key on the wire: b64u of 32 bytes.
+        fn is_recovery_key(text: &str) -> bool {
+            text.len() == 43 && b64u_decode(text).is_some_and(|key| key.len() == 32)
+        }
+
+        fn chain_is_valid(chain: &[ChainEntry]) -> bool {
+            chain.len() <= 64
+                && chain.iter().all(|entry| {
+                    is_link_hash(&entry.link_hash)
+                        && is_public_key(&entry.confirmer_key)
+                        && is_signature(&entry.statement)
+                })
+        }
+
         fn is_account_token(text: &str, account: &str) -> bool {
             text.strip_prefix("apassy_act_")
                 .and_then(|rest| rest.strip_prefix(account))
@@ -4474,6 +4505,7 @@ mod connect_v1 {
                 && view
                     .last_seen_at
                     .is_none_or(|t| t.is_multiple_of(3600) && t >= view.created_at)
+                && chain_is_valid(&view.chain)
         }
 
         fn store_view(view: &VaultStoreView) -> bool {
@@ -4499,7 +4531,7 @@ mod connect_v1 {
                     let body: AccountCreate = strict(example);
                     assert!(is_name(&body.name) && is_name(&body.device_name));
                     assert!(is_platform(&body.platform) && is_public_key(&body.public_key));
-                    assert!(is_hex(&body.recovery_hash, 64) && is_signature(&body.signature));
+                    assert!(is_recovery_key(&body.recovery_key) && is_signature(&body.signature));
                 }
                 "account_created" => {
                     let body: AccountCreated = strict(example);
@@ -4562,10 +4594,12 @@ mod connect_v1 {
                     let body: JoinAnswer = strict(example);
                     assert!(is_id(&body.confirmer.device_id, "dev_"));
                     assert!(is_public_key(&body.confirmer.public_key));
+                    assert!(chain_is_valid(&body.confirmer.chain));
                 }
                 "join_cancel" => {
                     let body: JoinCancel = strict(example);
                     assert!(is_link_hash(&body.link_hash) && is_public_key(&body.public_key));
+                    assert!(is_signature(&body.signature));
                 }
                 "join_cancel_answer" | "refuse_answer" => {
                     let body: JoinId = strict(example);
@@ -4582,11 +4616,11 @@ mod connect_v1 {
                 }
                 "confirm" => {
                     let body: Confirm = strict(example);
-                    assert!(is_public_key(&body.public_key));
+                    assert!(is_public_key(&body.public_key) && is_signature(&body.statement));
                 }
                 "confirm_answer" => {
                     let body: DeviceView = strict(example);
-                    assert!(device_view(&body));
+                    assert!(device_view(&body) && !body.chain.is_empty());
                 }
                 "revoke_answer" => {
                     let body: Revoked = strict(example);
@@ -4606,7 +4640,7 @@ mod connect_v1 {
                 }
                 "store_device" => {
                     let body: StoreDeviceAdd = strict(example);
-                    assert!(is_id(&body.device_id, "dev_"));
+                    assert!(is_id(&body.device_id, "dev_") && is_public_key(&body.public_key));
                 }
                 "store_device_answer" => {
                     let body: StoreDevice = strict(example);
@@ -4618,9 +4652,11 @@ mod connect_v1 {
                 }
                 "recover" => {
                     let body: Recover = strict(example);
-                    let code = body.recovery.strip_prefix("apassy_rec_");
-                    assert!(code.is_some_and(|code| is_hex(code, 32)));
-                    assert!(is_hex(&body.recovery_hash, 64) && is_signature(&body.signature));
+                    assert!(is_recovery_key(&body.recovery_key) && is_signature(&body.signature));
+                    assert_eq!(
+                        b64u_decode(&body.recovery_signature).map(|s| s.len()),
+                        Some(64)
+                    );
                     assert!(is_public_key(&body.public_key) && is_platform(&body.platform));
                 }
                 "recover_answer" => {
@@ -4672,8 +4708,9 @@ mod connect_v1 {
             for tag in [
                 "apassy-connect entitlement v1",
                 "apassy-connect link v1",
+                "apassy-connect link-keys v1",
                 "apassy-connect safety v1",
-                "apassy-connect recovery v1",
+                "apassy-connect recovery key v1",
             ] {
                 assert!(ACCOUNT_CONTRACT.contains(&format!("`{tag}`")), "{tag}");
             }
@@ -4692,8 +4729,10 @@ mod connect_v1 {
             nonce_b64u: String,
             messages: Vec<VectorMessage>,
             link: VectorLink,
+            device_b_chain: Vec<ChainEntry>,
             safety: VectorSafety,
             recovery: VectorRecovery,
+            new_recovery: VectorNewRecovery,
             entitlement: VectorEntitlement,
         }
 
@@ -4723,6 +4762,9 @@ mod connect_v1 {
         struct VectorLink {
             code: String,
             link_hash: String,
+            root: String,
+            confirmer: String,
+            fingerprint: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4738,7 +4780,17 @@ mod connect_v1 {
             bytes_hex: String,
             code: String,
             words: String,
-            recovery_hash: String,
+            seed_hex: String,
+            public_b64u: String,
+            recover_signature_b64u: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct VectorNewRecovery {
+            bytes_hex: String,
+            seed_hex: String,
+            public_b64u: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4886,29 +4938,66 @@ mod connect_v1 {
                 Some((0u8..32).collect::<Vec<u8>>())
             );
 
-            // The link hash (section 2).
+            // The link code with the fingerprint of the root and the confirmer (device A
+            // for both), and the link hash (section 2).
             let code = &v.link.code;
             let prefix = format!("apassy_alk_{}_", v.account_id);
-            assert!(
-                code.strip_prefix(&prefix)
-                    .is_some_and(|rest| is_hex(rest, 64))
+            assert_eq!(code.len(), 123);
+            let (secret, fingerprint) = code
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.split_once('_'))
+                .expect("the parts of the code");
+            assert!(is_hex(secret, 64) && is_hex(fingerprint, 32));
+            assert_eq!(fingerprint, v.link.fingerprint);
+            assert_eq!(
+                (v.link.root.as_str(), v.link.confirmer.as_str()),
+                ("device_a", "device_a")
             );
+            let keys = sha256(&joined(&[b"apassy-connect link-keys v1", &a, &a]));
+            assert_eq!(hex_encode(&keys[..16]), fingerprint);
             let link_hash = b64u_encode(&sha256(&joined(&[
                 b"apassy-connect link v1",
                 code.as_bytes(),
             ])));
             assert_eq!(link_hash, v.link.link_hash);
 
+            // The recovery keys (section 9): Ed25519 key pairs of seeds made from the codes.
+            let recovery_public = |bytes_hex: &str, seed_hex: &str, public: &str| {
+                let seed = sha256(&joined(&[
+                    b"apassy-connect recovery key v1",
+                    &hex_decode(bytes_hex),
+                ]));
+                assert_eq!(hex_encode(&seed), seed_hex);
+                let pair = Ed25519KeyPair::from_seed_unchecked(&seed).expect("seed");
+                assert_eq!(b64u_encode(pair.public_key().as_ref()), public);
+                assert_eq!(public.len(), 43);
+                pair.public_key().as_ref().to_vec()
+            };
+            let old_recovery = recovery_public(
+                &v.recovery.bytes_hex,
+                &v.recovery.seed_hex,
+                &v.recovery.public_b64u,
+            );
+            recovery_public(
+                &v.new_recovery.bytes_hex,
+                &v.new_recovery.seed_hex,
+                &v.new_recovery.public_b64u,
+            );
+            let (rec64, new64) = (
+                v.recovery.public_b64u.as_bytes(),
+                v.new_recovery.public_b64u.as_bytes(),
+            );
+
             // The messages of section 5.
             let mut names = Vec::new();
             for m in &v.messages {
                 let expected = match m.name.as_str() {
-                    "account" => joined(&[m.tag.as_bytes(), origin, a64]),
+                    "account" => joined(&[m.tag.as_bytes(), origin, a64, rec64]),
                     "sign_in" => joined(&[m.tag.as_bytes(), origin, account, a64, nonce]),
-                    "join" => {
+                    "join" | "join_cancel" | "device" => {
                         joined(&[m.tag.as_bytes(), origin, account, link_hash.as_bytes(), b64])
                     }
-                    "recover" => joined(&[m.tag.as_bytes(), origin, account, b64]),
+                    "recover" => joined(&[m.tag.as_bytes(), origin, account, b64, new64]),
                     "brain_sign_in" => joined(&[
                         m.tag.as_bytes(),
                         v.brain_origin.as_bytes(),
@@ -4941,8 +5030,56 @@ mod connect_v1 {
             }
             assert_eq!(
                 names,
-                ["account", "sign_in", "join", "recover", "brain_sign_in"]
+                [
+                    "account",
+                    "sign_in",
+                    "join",
+                    "join_cancel",
+                    "device",
+                    "recover",
+                    "brain_sign_in"
+                ]
             );
+            let tag_of = |name: &str| {
+                v.messages
+                    .iter()
+                    .find(|m| m.name == name)
+                    .map(|m| m.tag.as_str())
+                    .expect("message")
+            };
+            assert_eq!(tag_of("join_cancel"), "apassy-connect join-cancel v1");
+            assert_eq!(tag_of("device"), "apassy-connect device v1");
+
+            // The chain of device B: one statement of device A, the root.
+            assert_eq!(v.device_b_chain.len(), 1);
+            let entry = &v.device_b_chain[0];
+            assert_eq!(entry.link_hash, link_hash);
+            assert_eq!(entry.confirmer_key, v.device_a.public_b64u);
+            assert_eq!(entry.statement, message_signature(&v, "device"));
+            let statement = b64u_decode(&entry.statement).expect("statement");
+            let device = joined(&[
+                b"apassy-connect device v1",
+                origin,
+                account,
+                entry.link_hash.as_bytes(),
+                b64,
+            ]);
+            assert!(ecdsa_verifies(&a, &device, &statement));
+
+            // The recovery signature: the old recovery key over the recover message.
+            let recover = joined(&[b"apassy-connect recover v1", origin, account, b64, new64]);
+            let recovery_signature =
+                b64u_decode(&v.recovery.recover_signature_b64u).expect("signature");
+            assert_eq!(recovery_signature.len(), 64);
+            let ed25519_verifies = |public: &[u8], message: &[u8]| {
+                ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public)
+                    .verify(message, &recovery_signature)
+                    .is_ok()
+            };
+            assert!(ed25519_verifies(&old_recovery, &recover));
+            let mut changed = recover.clone();
+            *changed.last_mut().expect("bytes") ^= 1;
+            assert!(!ed25519_verifies(&old_recovery, &changed));
 
             // A fresh signature with the vector key verifies too (ECDSA is randomized).
             let pair = EcdsaKeyPair::from_private_key_and_public_key(
@@ -4985,8 +5122,6 @@ mod connect_v1 {
             );
             let sixteen: Vec<&str> = recovery.iter().map(|&i| words[usize::from(i)]).collect();
             assert_eq!(sixteen.join(" "), v.recovery.words);
-            let hash = sha256(&joined(&[b"apassy-connect recovery v1", &recovery]));
-            assert_eq!(hex_encode(&hash), v.recovery.recovery_hash);
 
             // The entitlement tokens of section 10.
             let seed = hex_decode(&v.entitlement.seed_hex);
@@ -5084,8 +5219,8 @@ mod connect_v1 {
                 v.device_a.public_b64u.as_str()
             );
             assert_eq!(
-                body("account_create")["recovery_hash"],
-                v.recovery.recovery_hash.as_str()
+                body("account_create")["recovery_key"],
+                v.recovery.public_b64u.as_str()
             );
             assert_eq!(body("token")["signature"], signature("sign_in").as_str());
             assert_eq!(body("token")["nonce"], v.nonce_b64u.as_str());
@@ -5101,8 +5236,32 @@ mod connect_v1 {
                 body("confirm")["public_key"],
                 v.device_b.public_b64u.as_str()
             );
+            assert_eq!(body("confirm")["statement"], signature("device").as_str());
+            assert_eq!(
+                body("confirm_answer")["chain"][0]["statement"],
+                signature("device").as_str()
+            );
+            assert_eq!(body("join_cancel")["link_hash"], v.link.link_hash.as_str());
+            assert_eq!(
+                body("join_cancel")["signature"],
+                signature("join_cancel").as_str()
+            );
+            assert_eq!(
+                body("store_device")["public_key"],
+                v.device_b.public_b64u.as_str()
+            );
             assert_eq!(body("recover")["signature"], signature("recover").as_str());
-            assert_eq!(body("recover")["recovery"], v.recovery.code.as_str());
+            assert_eq!(
+                body("recover")["recovery_key"],
+                v.new_recovery.public_b64u.as_str()
+            );
+            assert_eq!(
+                body("recover")["recovery_signature"],
+                v.recovery.recover_signature_b64u.as_str()
+            );
+            // The recovery code is never on the wire.
+            assert!(!EXAMPLES.contains(&v.recovery.code));
+            assert!(!EXAMPLES.contains("recovery_hash"));
             assert_eq!(
                 body("entitlement")["token"],
                 v.entitlement.tokens[0].token.as_str()

@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::ConnectError;
-use crate::sync::relay::{ApiError, call, json_request};
+use super::trust::ChainEntry;
+use crate::sync::relay::{ApiError, call, call_without_busy_retries, json_request};
 use crate::sync::relay_http::Request;
 use crate::sync::{RelayUrl, SyncError};
 
@@ -44,6 +45,7 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             retry_after,
         } => match (status, code.as_str()) {
             (401, _) => ConnectError::Unauthenticated,
+            (403, "device_removed") => ConnectError::Revoked,
             (403, "join_pending") => ConnectError::JoinPending,
             (403, "join_refused") => ConnectError::JoinRefused,
             (403, "plan_required") => ConnectError::PlanRequired,
@@ -89,7 +91,8 @@ pub(super) struct CreateAccount<'a> {
     pub device_name: &'a str,
     pub platform: &'a str,
     pub public_key: &'a str,
-    pub recovery_hash: &'a str,
+    /// b64u of the Ed25519 public key of the recovery code.
+    pub recovery_key: &'a str,
     pub signature: &'a str,
 }
 
@@ -112,9 +115,11 @@ struct LinkRequest<'a> {
     link_hash: &'a str,
 }
 
+/// `POST …/pending/{join_id}/confirm`: the key that this device adds, and its statement.
 #[derive(Serialize)]
-struct KeyRequest<'a> {
+struct ConfirmRequest<'a> {
     public_key: &'a str,
+    statement: &'a str,
 }
 
 #[derive(Serialize)]
@@ -128,10 +133,11 @@ pub(super) struct JoinBody<'a> {
 }
 
 #[derive(Serialize)]
-struct JoinCancel<'a> {
-    account_id: &'a str,
-    link_hash: &'a str,
-    public_key: &'a str,
+pub(super) struct JoinCancel<'a> {
+    pub account_id: &'a str,
+    pub link_hash: &'a str,
+    pub public_key: &'a str,
+    pub signature: &'a str,
 }
 
 #[derive(Serialize)]
@@ -140,20 +146,25 @@ struct VaultCreate<'a> {
     name: &'a str,
 }
 
+/// The device to add to a store and the key that this device verified for it.
 #[derive(Serialize)]
 struct StoreDeviceRequest<'a> {
     device_id: &'a str,
+    public_key: &'a str,
 }
 
 #[derive(Serialize)]
 pub(super) struct RecoverBody<'a> {
     pub account_id: &'a str,
-    pub recovery: &'a str,
     pub device_name: &'a str,
     pub platform: &'a str,
     pub public_key: &'a str,
-    pub recovery_hash: &'a str,
+    /// b64u of the Ed25519 public key of the new recovery code.
+    pub recovery_key: &'a str,
+    /// The new device's signature over the `apassy-connect recover v1` message.
     pub signature: &'a str,
+    /// The old recovery key's Ed25519 signature over the same message.
+    pub recovery_signature: &'a str,
 }
 
 /// `POST /v1/account/checkout` (connect-billing-v1 section 4): `people` only for Family,
@@ -271,6 +282,15 @@ pub struct DeviceView {
     /// Rounded down to the hour, or `None`.
     #[serde(default)]
     pub last_seen_at: Option<u64>,
+    /// The statements that added this device, from its own key to the account root
+    /// ([`super::trust`]). Empty for the root.
+    #[serde(default)]
+    pub chain: Vec<ChainEntry>,
+    /// Set by this device, never by Connect: the chain of the device verified against the
+    /// trust store of this device ([`super::ConnectAccount::view`]). An unverified device
+    /// is not an account device for any decision.
+    #[serde(skip)]
+    pub verified: bool,
 }
 
 /// The group of the account (connect-billing-v1).
@@ -327,12 +347,14 @@ pub(super) struct PendingView {
     pub expires_at: u64,
 }
 
-/// The device that confirms a join.
+/// The device that confirms a join, with its chain.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(super) struct Confirmer {
     pub device_id: String,
     pub name: String,
     pub public_key: String,
+    #[serde(default)]
+    pub chain: Vec<ChainEntry>,
 }
 
 /// `POST /v1/account/devices/join`.
@@ -639,29 +661,20 @@ impl ConnectClient {
         self.post("/v1/account/challenge", None, body)
     }
 
+    /// The token call never repeats a body after `503 busy`: the nonce of a refused body
+    /// stays unused, and the sign-in takes a fresh challenge instead.
     pub(super) fn token(&self, body: &TokenRequest<'_>) -> Result<TokenAnswer, ConnectError> {
-        self.post("/v1/account/token", None, body)
+        let mut request = json_request("POST", "/v1/account/token", None, body);
+        request.deadline = Some(Instant::now() + CALL_DEADLINE);
+        call_without_busy_retries(&self.url, &request).map_err(connect_error)
     }
 
     pub(super) fn join(&self, body: &JoinBody<'_>) -> Result<JoinAnswer, ConnectError> {
         self.post("/v1/account/devices/join", None, body)
     }
 
-    pub(super) fn cancel_join(
-        &self,
-        account_id: &str,
-        link_hash: &str,
-        public_key: &str,
-    ) -> Result<JoinId, ConnectError> {
-        self.post(
-            "/v1/account/devices/join/cancel",
-            None,
-            &JoinCancel {
-                account_id,
-                link_hash,
-                public_key,
-            },
-        )
+    pub(super) fn cancel_join(&self, body: &JoinCancel<'_>) -> Result<JoinId, ConnectError> {
+        self.post("/v1/account/devices/join/cancel", None, body)
     }
 
     pub(super) fn recover(&self, body: &RecoverBody<'_>) -> Result<RecoverAnswer, ConnectError> {
@@ -734,11 +747,15 @@ impl ConnectClient {
         token: &str,
         join_id: u64,
         public_key: &str,
+        statement: &str,
     ) -> Result<DeviceView, ConnectError> {
         self.post(
             &format!("/v1/account/devices/pending/{join_id}/confirm"),
             Some(token),
-            &KeyRequest { public_key },
+            &ConfirmRequest {
+                public_key,
+                statement,
+            },
         )
     }
 
@@ -787,6 +804,7 @@ impl ConnectClient {
         token: &str,
         team_id: &str,
         device_id: &str,
+        public_key: &str,
     ) -> Result<StoreDevice, ConnectError> {
         if !crate::sync::relay_crypto::valid_team_id(team_id)
             || !super::words::valid_device_id(device_id)
@@ -796,7 +814,10 @@ impl ConnectClient {
         self.post(
             &format!("/v1/account/vaults/{team_id}/devices"),
             Some(token),
-            &StoreDeviceRequest { device_id },
+            &StoreDeviceRequest {
+                device_id,
+                public_key,
+            },
         )
     }
 
