@@ -1102,6 +1102,7 @@ fn delete_account(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Va
         )
     })?;
     hub.accounts.state().drop_account(&caller.account);
+    crate::server::tunnel_routes::account_deleted(hub, &caller.account);
     to_value(&AccountDeleted {
         account_id: caller.account.clone(),
         deleted_stores,
@@ -1493,6 +1494,7 @@ fn revoke(hub: &Hub, caller: &AccountCaller, device: &str, now: u64) -> RelayRes
         Ok(key_hash(&target.public_key))
     })?;
     hub.accounts.state().drop_device(device, Some(&key));
+    crate::server::tunnel_routes::device_revoked(hub, device);
     let removed_from_stores = leave_stores(hub, device, now)?;
     to_value(&AccountRevoked {
         device_id: device.to_string(),

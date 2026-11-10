@@ -566,3 +566,104 @@ impl Connect {
         )
     }
 }
+
+// ---- The tunnel (connect-tunnel-v1): WebSocket peers. ----
+
+/// One end of a tunnel WebSocket: a node or a dialing device.
+pub struct Peer {
+    reader: apassy_relay::server::tunnel::ws::Reader<std::net::TcpStream>,
+    writer: std::net::TcpStream,
+}
+
+impl Peer {
+    pub fn send(&mut self, bytes: &[u8]) {
+        use apassy_relay::server::tunnel::ws;
+        ws::client::send(&mut self.writer, ws::OP_BINARY, bytes).unwrap();
+    }
+
+    /// The next message that is not a ping (pings are answered).
+    pub fn next(&mut self) -> apassy_relay::server::tunnel::ws::Message {
+        use apassy_relay::server::tunnel::ws::{self, Message};
+        loop {
+            match self.reader.read_message() {
+                Ok(Message::Ping(payload)) => {
+                    let _ = ws::client::send(&mut self.writer, ws::OP_PONG, &payload);
+                }
+                Ok(message) => return message,
+                Err(error) => panic!("read: {error:?}"),
+            }
+        }
+    }
+
+    /// The next binary message.
+    pub fn binary(&mut self) -> Vec<u8> {
+        match self.next() {
+            apassy_relay::server::tunnel::ws::Message::Binary(bytes) => bytes,
+            other => panic!("expected bytes, got {other:?}"),
+        }
+    }
+
+    /// Reads binary messages until `len` bytes came.
+    pub fn read_bytes(&mut self, len: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        while out.len() < len {
+            out.extend(self.binary());
+        }
+        out
+    }
+
+    /// Waits for the close, skipping data; answers its code.
+    pub fn closed(&mut self) -> Option<u16> {
+        loop {
+            match self.next() {
+                apassy_relay::server::tunnel::ws::Message::Close(code) => return code,
+                apassy_relay::server::tunnel::ws::Message::Binary(_) => {}
+                other => panic!("expected a close, got {other:?}"),
+            }
+        }
+    }
+}
+
+impl Connect {
+    /// A WebSocket handshake to `path` with `token`; `Err` is the refusal's status and code.
+    pub fn upgrade(&self, path: &str, token: &str) -> Result<Peer, (u16, String)> {
+        use apassy_relay::server::tunnel::ws::client;
+        use std::io::Write;
+        let address = self.relay.url.trim_start_matches("http://");
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let key = client::new_key();
+        let mut text =
+            String::from_utf8(client::request("relay.test", path, &key, Some(token))).unwrap();
+        text.truncate(text.len() - 2);
+        text.push_str(&format!("X-Apassy-Edge: {EDGE_SECRET}\r\n\r\n"));
+        stream.write_all(text.as_bytes()).unwrap();
+        match client::finish(&mut stream, &key) {
+            Ok(()) => {
+                let writer = stream.try_clone().unwrap();
+                Ok(Peer {
+                    reader: apassy_relay::server::tunnel::ws::Reader::client(stream, 1 << 20),
+                    writer,
+                })
+            }
+            Err(client::HandshakeError::Refused(refused)) => {
+                let body: Value = serde_json::from_slice(&refused.body).unwrap_or_default();
+                Err((
+                    refused.status,
+                    body["error"]["code"].as_str().unwrap_or("").to_string(),
+                ))
+            }
+            Err(other) => panic!("handshake: {other:?}"),
+        }
+    }
+
+    /// Whether the node has an open WebSocket.
+    pub fn online(&self, node_id: &str) -> bool {
+        self.relay
+            .hub()
+            .tunnel()
+            .is_some_and(|broker| broker.online(node_id))
+    }
+}

@@ -584,48 +584,51 @@ pub fn maintain(hub: &Hub, billing: &ConnectBilling, now: u64) -> RelayResult<us
 }
 
 /// Deletes the tunnel nodes of `account` and the grants of those nodes (an ended plan at
-/// its deletion day). Answers how many nodes went.
+/// its deletion day), and closes their WebSockets. Answers how many nodes went.
 fn delete_nodes_of(hub: &Hub, account: &str) -> RelayResult<u64> {
-    let nodes = hub.directory.store.tx(|tx| {
+    let nodes: Vec<String> = hub.directory.store.tx(|tx| {
+        let nodes = {
+            let mut statement = tx
+                .prepare("SELECT id FROM tunnel_node WHERE account_id = ?1 ORDER BY id")
+                .map_err(db)?;
+            statement
+                .query_map(params![account], |row| row.get(0))
+                .map_err(db)?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(db)?
+        };
         tx.execute(
             "DELETE FROM tunnel_grant WHERE node_id IN (SELECT id FROM tunnel_node WHERE account_id = ?1)",
             params![account],
         )
         .map_err(db)?;
-        let nodes = tx
-            .execute("DELETE FROM tunnel_node WHERE account_id = ?1", params![account])
+        tx.execute("DELETE FROM tunnel_node WHERE account_id = ?1", params![account])
             .map_err(db)?;
-        Ok(nodes as u64)
+        Ok(nodes)
     })?;
-    crate::server::billing_store::tunnel_plan_ended(hub, account);
-    Ok(nodes)
+    if let Some(broker) = hub.tunnel() {
+        for node in &nodes {
+            broker.remove_node(node);
+        }
+    }
+    tunnel_plan_ended(hub, account);
+    Ok(nodes.len() as u64)
 }
 
-/// The open tunnel streams of an account whose plan ended close (the tunnel's hook; new
-/// dials are refused by the plan check of each dial).
-pub fn tunnel_plan_ended(_hub: &Hub, _account: &str) {}
+/// The open tunnel streams of an account whose plan ended close (4003); new dials and
+/// ingress streams are refused by the plan check of each one (section 35).
+pub fn tunnel_plan_ended(hub: &Hub, account: &str) {
+    crate::server::tunnel_routes::plan_ended(hub, account);
+}
 
-/// The tunnel grants between `account` and each of `others` end, both ways (a member left
-/// its group, connect-billing-v1 section 6). Answers how many grants went.
+/// The tunnel grants between `account` and each of `others` end, both ways, and their
+/// streams close (a member left its group, connect-billing-v1 section 6). Answers how
+/// many grants went.
 pub fn tunnel_grants_end(
     hub: &Hub,
     account: &str,
     others: &[String],
-    _now: u64,
+    now: u64,
 ) -> RelayResult<usize> {
-    hub.directory.store.tx(|tx| {
-        let mut ended = 0;
-        for other in others {
-            for (granter, grantee) in [(account, other.as_str()), (other.as_str(), account)] {
-                ended += tx
-                    .execute(
-                        "DELETE FROM tunnel_grant WHERE account_id = ?2 AND node_id IN \
-                         (SELECT id FROM tunnel_node WHERE account_id = ?1)",
-                        params![granter, grantee],
-                    )
-                    .map_err(db)?;
-            }
-        }
-        Ok(ended)
-    })
+    crate::server::tunnel_routes::grants_end_between(hub, account, others, now)
 }

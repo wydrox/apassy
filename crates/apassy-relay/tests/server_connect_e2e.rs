@@ -17,10 +17,14 @@ mod relay;
 use apassy::connect::{ConnectAccount, ConnectClient};
 use apassy_relay::config::EdgeMode;
 use apassy_relay::hostkeys::encode_b64;
+use apassy_relay::server::tunnel::frame::{self, Kind};
+use apassy_relay::server::tunnel::ws::close;
 use connect::{Connect, Pusher, send, start_with_config};
 use serde_json::{Value, json};
 
 const VAULT: &str = "0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77";
+/// A node certificate pin: b64u of 32 bytes (synthetic).
+const PIN: &str = "7a1oa64ozJdU3s56iDjUthpkQFsZwnCaD5CYEkabiDk";
 
 /// An app device: its key store and its account file.
 struct AppDevice {
@@ -235,9 +239,65 @@ fn connect_works_end_to_end_with_the_app_client() {
     assert_eq!(added["store_device_id"], 2);
     assert!(anna.vault_stores().unwrap()[0].shared);
 
-    // 6. The tunnel: see `tunnel_end_to_end` below (the node and the dial).
+    // 6. The tunnel: the owner's Mac registers its node and keeps its WebSocket; the
+    // owner grants Anna's account, and Anna's Mac dials the node: bytes go through.
+    let node = with_account(
+        &mut owner,
+        &base,
+        "POST",
+        "/v1/tunnel/nodes",
+        Some(&json!({"name": "MacBook Pro", "pin": PIN})),
+    )
+    .expect("register the node");
+    let node_id = node["node_id"].as_str().unwrap().to_string();
+    let owner_token = owner.with_token(|_, token| Ok(token.to_string())).unwrap();
+    let anna_token = anna.with_token(|_, token| Ok(token.to_string())).unwrap();
+    let mut node_socket = c
+        .upgrade("/v1/tunnel/node", &owner_token)
+        .expect("node 101");
+    let wait = std::time::Instant::now();
+    while !c.online(&node_id) {
+        assert!(
+            wait.elapsed() < std::time::Duration::from_secs(10),
+            "the node is online"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let dial_path = format!("/v1/tunnel/dial/{node_id}");
+    assert_eq!(
+        c.upgrade(&dial_path, &anna_token).err(),
+        Some((403, "not_in_group".to_string()))
+    );
+    with_account(
+        &mut owner,
+        &base,
+        "POST",
+        "/v1/tunnel/grants",
+        Some(&json!({"node_id": node_id, "account_id": anna_id})),
+    )
+    .expect("grant");
+    let mut dial = c.upgrade(&dial_path, &anna_token).expect("dial 101");
+    let open = frame::decode(&node_socket.binary()).unwrap();
+    assert_eq!(
+        (open.kind, open.is_open(), open.payload.len()),
+        (Kind::Device, true, 0)
+    );
+    dial.send(b"a TLS ClientHello, in fact");
+    let data = frame::decode(&node_socket.binary()).unwrap();
+    assert_eq!(
+        (data.stream, data.payload.as_slice()),
+        (open.stream, &b"a TLS ClientHello, in fact"[..])
+    );
+    node_socket.send(&frame::encode(
+        open.stream,
+        Kind::Device,
+        0,
+        b"a ServerHello",
+    ));
+    assert_eq!(dial.read_bytes(13), b"a ServerHello");
 
-    // 7. The owner cancels: the plan ends; read-only refuses a push and allows a pull.
+    // 7. The owner cancels: the plan ends; the open dial closes (4003) and a new one is
+    // refused; read-only refuses a push and allows a pull.
     c.deliver_ok(&c.subscription_event(
         "deleted",
         &owner_id,
@@ -247,6 +307,11 @@ fn connect_works_end_to_end_with_the_app_client() {
         4,
         "canceled",
     ));
+    assert_eq!(dial.closed(), Some(close::REVOKED));
+    assert_eq!(
+        c.upgrade(&dial_path, &anna_token).err(),
+        Some((403, "plan_required".to_string()))
+    );
     let view = owner.view().unwrap();
     assert_eq!(
         (view.plan.status.as_str(), view.plan.entitled),
