@@ -23,8 +23,9 @@ fi
 component=${APASSY_COMPONENT:-node}
 case "$component" in node|vault) ;; *) fail 'APASSY_COMPONENT must be node or vault.' ;; esac
 if [ "$component" = vault ]; then
-    [ "$(id -u)" = 0 ] && [ "${APASSY_INSTALL_AS_ROOT:-0}" = 1 ] ||
+    if [ "$(id -u)" != 0 ] || [ "${APASSY_INSTALL_AS_ROOT:-0}" != 1 ]; then
         fail 'Vault installation requires root and APASSY_INSTALL_AS_ROOT=1. Prefer the .deb package.'
+    fi
     [ -z "${APASSY_INSTALL_DIR:-}" ] || fail 'Vault uses fixed /usr paths; do not set APASSY_INSTALL_DIR.'
 fi
 

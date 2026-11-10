@@ -15,7 +15,7 @@ mod help;
 pub mod import;
 pub mod print;
 mod setup;
-pub mod terminal;
+pub use crate::owner::terminal;
 
 use std::path::PathBuf;
 

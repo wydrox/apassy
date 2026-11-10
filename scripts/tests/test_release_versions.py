@@ -69,7 +69,7 @@ class ReleaseVersionsTests(unittest.TestCase):
     def test_the_linux_node_package_is_checked(self):
         for relative, old, new in (
             (f"{APP}/Cargo.toml", "\nnode = []", "\nnode-less = []"),
-            (f"{APP}/Cargo.toml", 'default = ["window", "node"]', 'default = ["window"]'),
+            (f"{APP}/Cargo.toml", 'default = ["window", "node", "owner"]', 'default = ["window", "owner"]'),
             (f"{APP}/Cargo.toml", 'name = "apassy-app"', 'name = "apassy-other"'),
             ("packaging/linux/deb/control.in", "Version: @VERSION@", f"Version: {self.version}"),
             ("packaging/linux/build.sh", "crates/apassy-relay/Cargo.toml", "Cargo.toml"),
