@@ -32,9 +32,6 @@ use eframe::egui::{self, Label, Rect, Sense, Stroke, Ui, Vec2};
 use super::devices::rows;
 use super::kit::{self, Font, Icon, Style, Tone};
 
-/// The color of the tile of the section (System Settings green).
-pub(crate) const TILE: egui::Color32 = egui::Color32::from_rgb(52, 199, 89);
-
 /// `GET /v1/account` while the waiting sheet is open (connect-billing-v1 section 4).
 pub(crate) const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 /// The waiting sheet stops asking after this long.
@@ -238,7 +235,7 @@ pub(crate) fn money(currency: &str, cents: u64) -> String {
         "gbp" => "£".to_owned(),
         other => format!("{} ", other.to_ascii_uppercase()),
     };
-    if cents % 100 == 0 {
+    if cents.is_multiple_of(100) {
         format!("{sign}{}", cents / 100)
     } else {
         format!("{sign}{}.{:02}", cents / 100, cents % 100)
@@ -453,6 +450,7 @@ impl Account {
 
 /// What the section shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // One value for each frame; a box buys nothing.
 pub(crate) enum Shown {
     /// This Mac has no Connect account.
     None,
@@ -1508,7 +1506,7 @@ fn sheet_body(
                     |ui| {
                         kit::button(ui, CHECK_AGAIN, Style::Bordered)
                             .clicked()
-                            .then(|| SheetChoice::CheckAgain)
+                            .then_some(SheetChoice::CheckAgain)
                     },
                     |ui| {
                         kit::button(ui, "Close", Style::Prominent)
@@ -1534,7 +1532,7 @@ fn sheet_body(
                 |ui| {
                     kit::button(ui, OPEN_AGAIN, Style::Bordered)
                         .clicked()
-                        .then(|| SheetChoice::OpenAgain)
+                        .then_some(SheetChoice::OpenAgain)
                 },
                 |ui| {
                     kit::alert_cancel(ui)

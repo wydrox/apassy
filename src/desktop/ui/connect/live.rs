@@ -66,6 +66,7 @@ struct Snapshot {
 }
 
 /// The result of one worker step.
+#[allow(clippy::large_enum_variant)] // One message at a time on the channel; a box buys nothing.
 enum Outcome {
     Opened(Result<AccountState, ConnectError>),
     Created(Result<(AccountState, Zeroizing<String>), ConnectError>),

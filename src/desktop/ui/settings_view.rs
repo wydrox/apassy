@@ -86,7 +86,7 @@ impl SettingsSection {
             #[cfg(feature = "vault")]
             Self::Security => (kit::fixed::SETTINGS_SECURITY, Icon::Lock),
             Self::Devices => (kit::fixed::SETTINGS_DEVICES, Icon::Laptop),
-            Self::Connect => (super::connect::TILE, Icon::Cloud),
+            Self::Connect => (kit::fixed::SETTINGS_CONNECT, Icon::Cloud),
             #[cfg(feature = "vault")]
             Self::Bouncer => (kit::fixed::SETTINGS_BOUNCER, Icon::Shield),
             #[cfg(feature = "vault")]
