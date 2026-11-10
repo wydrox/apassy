@@ -218,6 +218,16 @@ pub(super) fn check_browser_parent() -> Result<(), WireError> {
     .map_err(|_| super::refused())
 }
 
+/// True when procfs hides `pid`'s executable because the task is not dumpable:
+/// the kernel then gives the `exe` link (and the other per-process files) to root.
+/// The `/proc/PID` directory itself keeps the task's effective user even then
+/// (`task_dump_owner` exempts world-readable directories), so it cannot tell a
+/// hardened peer from any other refusal.
+#[cfg(target_os = "linux")]
+fn exe_hidden_by_kernel(pid: u32) -> io::Result<bool> {
+    Ok(fs::symlink_metadata(format!("/proc/{pid}/exe"))?.uid() == 0)
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
     (|| -> io::Result<()> {
@@ -238,7 +248,7 @@ pub(super) fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
             }
             Err(error)
                 if error.kind() == io::ErrorKind::PermissionDenied
-                    && fs::metadata(format!("/proc/{pid}"))?.uid() == 0 => {}
+                    && exe_hidden_by_kernel(pid)? => {}
             Err(error) => return Err(error),
         }
         browser(before.parent, uid)?;
@@ -334,6 +344,66 @@ mod tests {
         }
         assert!(!safe_arguments(b""));
         assert!(!safe_arguments(b"chrome\0--remote-debugging-port=0"));
+    }
+
+    /// Set by [`hidden_exe_of_a_non_dumpable_peer_is_recognized`] for its child.
+    #[cfg(target_os = "linux")]
+    const NON_DUMPABLE_CHILD: &str = "APASSY_TEST_NON_DUMPABLE_CHILD";
+
+    /// Child mode of the test below: become non-dumpable, as the hardened host does,
+    /// and wait until the parent closes standard input. A no-op in a normal run.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_dumpable_child_process() {
+        if std::env::var_os(NON_DUMPABLE_CHILD).is_none() {
+            return;
+        }
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+            .unwrap();
+        let mut rest = Vec::new();
+        let _ = io::stdin().read_to_end(&mut rest);
+    }
+
+    /// The real hardened host is non-dumpable. The app must still recognize the kernel
+    /// refusal for it: the `/proc/PID` directory keeps the user of the task, only the
+    /// files in it become root's (found in the Linux acceptance, 2026-11-10).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hidden_exe_of_a_non_dumpable_peer_is_recognized() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "browser::caller::linux::tests::non_dumpable_child_process",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(NON_DUMPABLE_CHILD, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !exe_hidden_by_kernel(pid).unwrap() {
+            assert!(std::time::Instant::now() < deadline, "the child stayed dumpable");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let error = fs::read_link(format!("/proc/{pid}/exe")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::metadata(format!("/proc/{pid}")).unwrap().uid(),
+            rustix::process::getuid().as_raw(),
+            "the directory owner does not reveal a non-dumpable task"
+        );
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        // A dumpable process of the same user shows its executable.
+        let mut plain = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        assert!(!exe_hidden_by_kernel(plain.id()).unwrap());
+        plain.kill().unwrap();
+        plain.wait().unwrap();
     }
 
     #[cfg(target_os = "linux")]
