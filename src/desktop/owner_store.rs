@@ -815,6 +815,8 @@ impl OwnerSession {
 
     /// All decisions as JSON Lines (`docs/operations/learning.md`). They have commands
     /// and user requests, but no secret value.
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn export_decisions_checked(&self, proof: OwnerProof) -> ModelResult<String> {
         self.unlocked_for(proof, &OwnerAction::ExportDecisions)?
             .export_decisions_jsonl()
@@ -1094,6 +1096,8 @@ impl OwnerSession {
         self.code_seeds.remove(&(id, field.to_owned()));
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn cli_code_field(&self, id: u64) -> ModelResult<String> {
         self.unlocked()?
             .code_field(id)
@@ -1101,6 +1105,8 @@ impl OwnerSession {
             .ok_or_else(|| fail("no_code", "This item has no one-time password detail."))
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn cli_code_at(
         &mut self,
         id: u64,
@@ -1198,6 +1204,8 @@ impl OwnerSession {
         self.backup_inner(destination, None)
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn backup_checked(
         &mut self,
         destination: &Path,
@@ -1273,6 +1281,8 @@ impl OwnerSession {
         self.unlocked()?.register_agent(name).map_err(map_err)
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn register_setup_agent_checked(
         &mut self,
         name: &str,
@@ -1294,6 +1304,8 @@ impl OwnerSession {
         Ok((agent, token))
     }
 
+    // The window and its owner command line only (`owner.sock`).
+    #[cfg(feature = "desktop")]
     pub(crate) fn register_agent_checked(
         &mut self,
         name: &str,
@@ -2852,6 +2864,7 @@ fn is_reserved_field(name: &str) -> bool {
 
 /// Windowless round trip used by `--smoke-test` when the vault feature is on.
 /// Errors do not include secret values.
+#[cfg(feature = "desktop")]
 pub(crate) fn smoke_roundtrip() -> Result<(), String> {
     use crate::broker::approvals::{OwnerCheck, OwnerGate};
 

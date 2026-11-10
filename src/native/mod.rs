@@ -850,7 +850,8 @@ impl NativeHelper {
     /// Write a deliberate desktop owner copy. The text travels through the existing
     /// erased `secret_b64` stdin field, never command arguments or a response.
     /// The returned count and random marker identify this exact pasteboard write.
-    #[cfg(all(feature = "desktop", feature = "vault"))]
+    // The macOS helper only: Linux owns its clipboard (desktop::clipboard::linux).
+    #[cfg(all(feature = "desktop", feature = "vault", any(target_os = "macos", test)))]
     pub(crate) fn clipboard_write(&self, text: &str) -> Result<(u64, String), NativeError> {
         // The vault permits 64 KiB fields; base64 fits the helper's 128 KiB limit.
         if text.len() > 65_536 {
@@ -905,7 +906,8 @@ impl NativeHelper {
 
     /// Clear only an unchanged exact owner write. The helper never reads clipboard
     /// text and never returns any value from another app.
-    #[cfg(all(feature = "desktop", feature = "vault"))]
+    // The macOS helper only: Linux owns its clipboard (desktop::clipboard::linux).
+    #[cfg(all(feature = "desktop", feature = "vault", any(target_os = "macos", test)))]
     pub(crate) fn clipboard_clear_if_unchanged(
         &self,
         count: u64,
@@ -1233,7 +1235,8 @@ impl NativeHelper {
         crate::broker::approvals::OwnerFrequency::parse(str_field(&fields, "policy")?)
             .ok_or_else(|| NativeError::Protocol("unknown owner-check policy".into()))
     }
-    #[cfg(all(feature = "vault", feature = "desktop"))]
+    // The macOS helper only: Linux keeps it in native::device_policy.
+    #[cfg(all(feature = "vault", feature = "desktop", any(target_os = "macos", test)))]
     pub(crate) fn owner_policy_write(
         &self,
         policy: crate::broker::approvals::OwnerFrequency,
@@ -1258,7 +1261,8 @@ impl NativeHelper {
         crate::desktop::auto_lock::LockPolicy::parse(str_field(&fields, "policy")?)
             .ok_or_else(|| NativeError::Protocol("unknown owner-check policy".into()))
     }
-    #[cfg(all(feature = "vault", feature = "desktop"))]
+    // The macOS helper only: Linux keeps it in native::device_policy.
+    #[cfg(all(feature = "vault", feature = "desktop", any(target_os = "macos", test)))]
     pub(crate) fn auto_lock_write(
         &self,
         policy: crate::desktop::auto_lock::LockPolicy,

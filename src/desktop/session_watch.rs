@@ -13,19 +13,24 @@
 //!   desktop reports input, else unbounded, so input in the Apassy window decides
 //!   ([`SessionIdle::system_idle_sample`]). The heartbeat refreshes it every 10 s, also
 //!   with no bus, so "Lock after inactivity" always works on input in Apassy.
-// Only the Linux observer delivers session events; macOS builds keep the code for tests.
-#![cfg_attr(
-    all(not(target_os = "linux"), not(test)),
-    allow(dead_code, unused_imports)
-)]
+// Only the Linux observer delivers session events: the applier exists on Linux, and
+// in tests everywhere.
+#[cfg(any(target_os = "linux", test))]
 use crate::broker::approvals::owner_window::OwnerWindow;
+#[cfg(any(target_os = "linux", test))]
 use crate::desktop::auto_lock::IdleSource;
-use crate::native::session_lock::{Coverage, Observation, SessionEvent, SessionIdle};
+use crate::native::session_lock::{Coverage, Observation};
+#[cfg(any(target_os = "linux", test))]
+use crate::native::session_lock::{SessionEvent, SessionIdle};
+#[cfg(any(target_os = "linux", test))]
 use std::sync::Mutex;
+#[cfg(any(target_os = "linux", test))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(target_os = "linux", test))]
 static NEXT_IDENTITY: AtomicU64 = AtomicU64::new(1 << 32);
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 struct ApplyState {
     counter: u64,
@@ -35,6 +40,7 @@ struct ApplyState {
 }
 
 /// Applies one observer's events to the owner window and the auto-lock source.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) struct Applier {
     window: OwnerWindow,
     source: IdleSource,
@@ -43,6 +49,7 @@ pub(crate) struct Applier {
     state: Mutex<ApplyState>,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl Applier {
     pub(crate) fn new(window: OwnerWindow, source: IdleSource, observation: Observation) -> Self {
         let applier = Self {
@@ -347,8 +354,11 @@ mod tests {
                 SessionEvent::Idle(SessionIdle::Unknown),
             ],
         );
-        w.seed([1; 32], CheckMethod::Passphrase, w.generation());
-        assert!(w.ticket([1; 32]).is_none());
+        // Without lock observation neither check opens the window: every action asks.
+        for method in [CheckMethod::Passphrase, CheckMethod::Polkit] {
+            w.seed([1; 32], method, w.generation());
+            assert!(w.ticket([1; 32]).is_none(), "{method:?}");
+        }
     }
 
     #[test]

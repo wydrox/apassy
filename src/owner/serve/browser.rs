@@ -151,7 +151,6 @@ pub(crate) struct Echo {
 }
 
 /// A browser request that waits for the owner in the terminal.
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum BrowserOp {
     Fill {
         item: u64,
@@ -198,7 +197,8 @@ pub(crate) enum BrowserOp {
         echo: Echo,
     },
     Make {
-        action: OwnerAction,
+        /// Boxed: an owner action is much larger than the other variants.
+        action: Box<OwnerAction>,
         attach_name: Option<String>,
         echo: Echo,
     },
@@ -617,7 +617,7 @@ fn passkey_create(
             rid: client.rid.clone(),
             client_data_json: webauthn::encode_bytes(&client.client_data_json),
         },
-        action: OwnerAction::CreatePasskey {
+        action: Box::new(OwnerAction::CreatePasskey {
             origin: Some(client.origin),
             rid: client.rid,
             rp_id: client.rp_id,
@@ -628,7 +628,7 @@ fn passkey_create(
             algorithms: request.algorithms.clone(),
             excluded,
             target,
-        },
+        }),
         attach_name,
     })
 }
@@ -758,47 +758,48 @@ impl BrowserOp {
                 facts
             }
             Self::Make {
-                action:
-                    OwnerAction::CreatePasskey {
-                        origin,
-                        rp_id,
-                        user_name,
-                        user_display_name,
-                        target,
-                        ..
-                    },
+                action,
                 attach_name,
                 ..
-            } => vec![
-                ("Request", "Create a passkey".to_owned()),
-                ("Origin", page_text(origin.as_deref().unwrap_or_default())),
-                ("RP ID", page_text(rp_id)),
-                (
-                    "Account",
-                    format!(
-                        "{} ({})",
-                        page_text(user_name),
-                        page_text(user_display_name)
+            } => match &**action {
+                OwnerAction::CreatePasskey {
+                    origin,
+                    rp_id,
+                    user_name,
+                    user_display_name,
+                    target,
+                    ..
+                } => vec![
+                    ("Request", "Create a passkey".to_owned()),
+                    ("Origin", page_text(origin.as_deref().unwrap_or_default())),
+                    ("RP ID", page_text(rp_id)),
+                    (
+                        "Account",
+                        format!(
+                            "{} ({})",
+                            page_text(user_name),
+                            page_text(user_display_name)
+                        ),
                     ),
-                ),
-                (
-                    "Saved in",
-                    match (target, attach_name) {
-                        (PasskeyTarget::Attach { .. }, Some(name)) => {
-                            format!("the existing login \"{}\"", page_text(name))
-                        }
-                        (PasskeyTarget::NewItem { title }, _) => {
-                            format!("a new login \"{}\"", page_text(title))
-                        }
-                        _ => "an existing login".to_owned(),
-                    },
-                ),
-                (
-                    "User verification",
-                    "yes: the vault passphrase (or polkit) for this request".to_owned(),
-                ),
-            ],
-            Self::Make { .. } => vec![("Request", "Create a passkey".to_owned())],
+                    (
+                        "Saved in",
+                        match (target, attach_name) {
+                            (PasskeyTarget::Attach { .. }, Some(name)) => {
+                                format!("the existing login \"{}\"", page_text(name))
+                            }
+                            (PasskeyTarget::NewItem { title }, _) => {
+                                format!("a new login \"{}\"", page_text(title))
+                            }
+                            _ => "an existing login".to_owned(),
+                        },
+                    ),
+                    (
+                        "User verification",
+                        "yes: the vault passphrase (or polkit) for this request".to_owned(),
+                    ),
+                ],
+                _ => vec![("Request", "Create a passkey".to_owned())],
+            },
         }
     }
 
@@ -893,7 +894,7 @@ impl BrowserOp {
                     },
                 }
             }
-            Self::Make { action, .. } => action.clone(),
+            Self::Make { action, .. } => OwnerAction::clone(action),
         })
     }
 }

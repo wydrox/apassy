@@ -1574,7 +1574,7 @@ fn secret_row(
                             .owner_ui
                             .session
                             .can_copy_field(id, name, details.revision)
-                            && secret_copy_button(ui, &label)
+                            && secret_copy_button(ui, label)
                         {
                             *copy = Some(name.to_owned());
                         }
@@ -1780,7 +1780,11 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
 }
 
 /// The hover text of Copy on the Username row.
-const USERNAME_COPY_HINT: &str = "Copy the username. It is not a secret, so Apassy asks for no Touch ID and does not clear the clipboard later.";
+const USERNAME_COPY_HINT: &str = if cfg!(target_os = "linux") {
+    "Copy the username. It is not a secret, so Apassy asks for no owner check and does not clear the clipboard later."
+} else {
+    "Copy the username. It is not a secret, so Apassy asks for no Touch ID and does not clear the clipboard later."
+};
 
 /// The link of a login without a website.
 const ADD_WEBSITE: &str = "Add website…";

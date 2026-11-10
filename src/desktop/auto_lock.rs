@@ -103,7 +103,7 @@ impl IdleSource {
     pub(crate) fn hold_for_test(&self) -> std::sync::MutexGuard<'_, impl Sized> {
         self.0.lock().unwrap()
     }
-    fn take(&self) -> (Option<Duration>, bool, u64) {
+    pub(super) fn take(&self) -> (Option<Duration>, bool, u64) {
         let mut s = self.0.lock().unwrap();
         // Missing/stale telemetry must not unexpectedly interrupt agent runs.
         let idle = sample_idle(&s).max(s.peak.take());
@@ -236,10 +236,7 @@ impl DesktopApp {
         }));
     }
     /// Read or write the setting on a worker thread (Linux: the device settings file).
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(dead_code, reason = "macOS reads and writes through the helper")
-    )]
+    #[cfg(target_os = "linux")]
     pub(crate) fn start_auto_lock_task(
         &mut self,
         ctx: &egui::Context,
