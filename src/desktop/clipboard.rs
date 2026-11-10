@@ -19,9 +19,11 @@ use zeroize::Zeroizing;
 
 #[cfg(any(target_os = "linux", test))]
 mod linux;
-#[cfg(all(target_os = "linux", not(test)))]
+// Also in test builds: its tests run against a headless compositor (sway in CI).
+#[cfg(target_os = "linux")]
 mod wayland;
-#[cfg(all(target_os = "linux", not(test)))]
+// Also in test builds: its tests run against a real X server (Xvfb in CI).
+#[cfg(target_os = "linux")]
 mod x11;
 
 /// The note on systems without any clipboard ownership adapter.
@@ -62,9 +64,10 @@ pub(crate) fn unsupported_note() -> &'static str {
         .unwrap_or("Clipboard copy is unavailable. Use Show or browser fill instead.")
 }
 
-/// How the owner confirms a copy on this platform, for the hover of Copy.
+/// How the owner confirms on this platform, for the hovers of Copy and Show. The Linux
+/// owner dialog offers the passphrase and "Use system authentication" (polkit).
 pub(crate) const CONFIRM_HINT: &str = if cfg!(target_os = "linux") {
-    "Confirm with your vault passphrase."
+    "Confirm with your vault passphrase or system authentication."
 } else {
     "Confirm with Touch ID or passphrase."
 };
@@ -546,7 +549,7 @@ mod tests {
         assert_eq!(
             CONFIRM_HINT,
             if cfg!(target_os = "linux") {
-                "Confirm with your vault passphrase."
+                "Confirm with your vault passphrase or system authentication."
             } else {
                 "Confirm with Touch ID or passphrase."
             }

@@ -416,7 +416,7 @@ jobs:
         run: |
           test "$(uname -m)" = "${{ matrix.arch }}"
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libxkbcommon-dev libwayland-dev libx11-dev libegl1-mesa-dev libgl1-mesa-dev shellcheck
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libxkbcommon-dev libwayland-dev libx11-dev libegl1-mesa-dev libgl1-mesa-dev shellcheck xvfb sway wl-clipboard dbus-daemon
       - name: Install Rust 1.97.0
         run: rustup toolchain install 1.97.0 --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -428,7 +428,14 @@ jobs:
         run: cargo fetch --locked
       - name: Install cargo-nextest 0.9.150
         run: bash scripts/ci-install-nextest.sh
+      # The clipboard tests start their own Xvfb and headless sway (wl-clipboard is the
+      # other client), the session observer tests their own dbus-daemons; the REQUIRE
+      # variables turn a missing program into a failure instead of a skip.
       - name: Test Linux vault, browser identity, clipboard ownership and synthetic WebAuthn signatures
+        env:
+          APASSY_REQUIRE_X11: "1"
+          APASSY_REQUIRE_WAYLAND: "1"
+          APASSY_REQUIRE_DBUS: "1"
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy --all-features
           --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/) | test(/^desktop::clipboard::/) | test(/^owner::serve::/) | test(/^owner_serve::/)'

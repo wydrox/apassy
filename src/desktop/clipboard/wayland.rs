@@ -60,8 +60,14 @@ pub(super) struct WaylandDisplay {
 impl WaylandDisplay {
     /// Connect to `$WAYLAND_DISPLAY`, find a data-control manager and the seat, and start
     /// the clipboard thread.
+    #[cfg(not(test))]
     pub(super) fn open(served: Arc<Served>) -> Result<Self, WaylandProbe> {
         let conn = Connection::connect_to_env().map_err(|_| WaylandProbe::Failed)?;
+        Self::open_with(served, conn)
+    }
+
+    /// [`WaylandDisplay::open`] on the connection `conn`.
+    fn open_with(served: Arc<Served>, conn: Connection) -> Result<Self, WaylandProbe> {
         let (globals, mut queue) =
             registry_queue_init::<State>(&conn).map_err(|_| WaylandProbe::Failed)?;
         let qh = queue.handle();
@@ -430,11 +436,8 @@ macro_rules! data_control {
             ) {
                 match event {
                     $device::Event::Selection { id } => state.selection(id.map(Offer::$wrap)),
-                    $device::Event::PrimarySelection { id } => {
-                        if let Some(offer) = id {
-                            offer.destroy();
-                        }
-                    }
+                    $device::Event::PrimarySelection { id: Some(offer) } => offer.destroy(),
+                    $device::Event::PrimarySelection { id: None } => {}
                     $device::Event::Finished => {
                         device.destroy();
                         state.finish();
@@ -464,8 +467,7 @@ macro_rules! data_control {
                         source.destroy();
                         state.cancelled(*generation);
                     }
-                    // Generated event enums may be non-exhaustive.
-                    #[allow(unreachable_patterns)]
+                    // The generated event enums are non-exhaustive.
                     _ => {}
                 }
             }
@@ -500,3 +502,267 @@ data_control!(
     wlr_source::ZwlrDataControlSourceV1,
     wlr_offer::ZwlrDataControlOfferV1
 );
+
+/// The Wayland protocol against a real compositor: each test starts its own headless
+/// sway (wlroots, wlr-data-control) in a private runtime directory, so the tests run
+/// side by side and never touch the session's clipboard. The other client is
+/// wl-clipboard (`wl-paste`, `wl-copy`) on that compositor. The linux-vault CI job
+/// installs both and sets `APASSY_REQUIRE_WAYLAND=1`; elsewhere a missing sway or
+/// wl-clipboard is a reported skip. Synthetic values only.
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use wayland_client::Connection;
+
+    use super::WaylandDisplay;
+    use crate::desktop::clipboard::Pasteboard;
+    use crate::desktop::clipboard::linux::{LinuxBoard, Served};
+
+    const VALUE: &str = "synthetic-wayland-clipboard-value";
+    const HINT: &str = "x-kde-passwordManagerHint";
+    const TEXT: &str = "text/plain;charset=utf-8";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn skip(why: &str) -> Option<Sway> {
+        assert!(
+            std::env::var_os("APASSY_REQUIRE_WAYLAND").is_none(),
+            "APASSY_REQUIRE_WAYLAND is set, but {why}"
+        );
+        eprintln!("skipped: {why}");
+        None
+    }
+
+    fn installed(program: &str) -> bool {
+        Command::new(program)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// A private headless compositor for one test. Dropping it stops the compositor.
+    struct Sway {
+        child: Child,
+        runtime: tempfile::TempDir,
+        display: String,
+    }
+
+    impl Sway {
+        fn start() -> Option<Self> {
+            if !installed("sway") || !installed("wl-paste") {
+                return skip("sway or wl-clipboard is not installed");
+            }
+            let runtime = tempfile::Builder::new().prefix("apw").tempdir().unwrap();
+            let child = Command::new("sway")
+                .args(["--config", "/dev/null"])
+                .env("XDG_RUNTIME_DIR", runtime.path())
+                .env("WLR_BACKENDS", "headless")
+                .env("WLR_LIBINPUT_NO_DEVICES", "1")
+                .env("WLR_RENDERER", "pixman")
+                .env_remove("WAYLAND_DISPLAY")
+                .env_remove("DISPLAY")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut sway = Self {
+                child,
+                runtime,
+                display: String::new(),
+            };
+            let deadline = Instant::now() + WAIT;
+            loop {
+                let socket = std::fs::read_dir(sway.runtime.path())
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .find(|name| name.starts_with("wayland-") && !name.ends_with(".lock"));
+                if let Some(name) = socket
+                    && UnixStream::connect(sway.runtime.path().join(&name)).is_ok()
+                {
+                    sway.display = name;
+                    return Some(sway);
+                }
+                if sway.child.try_wait().unwrap().is_some() || Instant::now() > deadline {
+                    return skip("the headless sway did not start");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn socket(&self) -> PathBuf {
+            self.runtime.path().join(&self.display)
+        }
+
+        fn board(&self) -> (LinuxBoard<WaylandDisplay>, Arc<Served>) {
+            let served = Arc::new(Served::default());
+            let conn = Connection::from_socket(UnixStream::connect(self.socket()).unwrap())
+                .expect("the Wayland display");
+            let display = WaylandDisplay::open_with(served.clone(), conn)
+                .unwrap_or_else(|probe| panic!("the Wayland display opens: {probe:?}"));
+            (LinuxBoard::new(served.clone(), display), served)
+        }
+
+        /// A wl-clipboard program on this compositor.
+        fn command(&self, program: &str) -> Command {
+            let mut command = Command::new(program);
+            command
+                .env("XDG_RUNTIME_DIR", self.runtime.path())
+                .env("WAYLAND_DISPLAY", &self.display)
+                .env_remove("DISPLAY")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null());
+            command
+        }
+
+        /// `wl-paste ARGS` as another client: its output, or `None` when it found
+        /// nothing to paste. A paste that hangs fails the test.
+        fn paste(&self, args: &[&str]) -> Option<Vec<u8>> {
+            let mut child = self
+                .command("wl-paste")
+                .args(args)
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("wl-paste starts");
+            let mut stdout = child.stdout.take().unwrap();
+            let reader = std::thread::spawn(move || {
+                let mut out = Vec::new();
+                let _ = stdout.read_to_end(&mut out);
+                out
+            });
+            let deadline = Instant::now() + WAIT;
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    panic!("wl-paste {args:?} did not end");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let out = reader.join().unwrap();
+            status.success().then_some(out)
+        }
+
+        fn text(&self) -> Option<Vec<u8>> {
+            self.paste(&["--no-newline", "--type", TEXT])
+        }
+
+        fn types(&self) -> Vec<String> {
+            self.paste(&["--list-types"])
+                .map(|out| {
+                    String::from_utf8(out)
+                        .unwrap()
+                        .lines()
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        /// Another client's copy, served by `wl-copy` until it is replaced.
+        fn foreign_copy(&self, value: &str) -> ForeignCopy {
+            ForeignCopy(
+                self.command("wl-copy")
+                    .args(["--foreground", "--type", TEXT, value])
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .expect("wl-copy starts"),
+            )
+        }
+    }
+
+    impl Drop for Sway {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    struct ForeignCopy(Child);
+
+    impl Drop for ForeignCopy {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn wayland_a_copy_is_served_with_the_hint_and_the_clear_leaves_an_empty_own_copy() {
+        let Some(sway) = Sway::start() else {
+            return;
+        };
+        let (mut board, served) = sway.board();
+        let copied = board
+            .write_concealed(VALUE)
+            .expect("Apassy owns the clipboard");
+        assert!(served.current().is_some());
+        assert_eq!(sway.text().as_deref(), Some(VALUE.as_bytes()));
+        let offered = sway.types();
+        for mime in [TEXT, "text/plain", "UTF8_STRING", HINT] {
+            assert!(offered.iter().any(|t| t == mime), "{mime} in {offered:?}");
+        }
+        assert_eq!(
+            sway.paste(&["--no-newline", "--type", HINT]).as_deref(),
+            Some(&b"secret"[..])
+        );
+        // A type that Apassy does not offer gets nothing.
+        assert!(
+            sway.paste(&["--no-newline", "--type", "image/png"])
+                .is_none()
+        );
+
+        board.clear_if_unchanged(&copied).unwrap();
+        // Still Apassy's clipboard, now empty and without the hint.
+        assert_eq!(sway.text(), Some(Vec::new()));
+        let offered = sway.types();
+        assert!(offered.iter().any(|t| t == TEXT), "{offered:?}");
+        assert!(!offered.iter().any(|t| t == HINT), "{offered:?}");
+    }
+
+    #[test]
+    fn wayland_another_clients_copy_ends_the_claim_and_the_clear_never_touches_it() {
+        let Some(sway) = Sway::start() else {
+            return;
+        };
+        let (mut board, served) = sway.board();
+        let copied = board
+            .write_concealed(VALUE)
+            .expect("Apassy owns the clipboard");
+        let foreign = sway.foreign_copy("synthetic-foreign-value");
+        // `cancelled` reaches Apassy: it stops serving the value at once.
+        wait_until("cancelled ends the claim", || served.current().is_none());
+        board.clear_if_unchanged(&copied).unwrap();
+        assert_eq!(
+            sway.text().as_deref(),
+            Some(&b"synthetic-foreign-value"[..]),
+            "the clear left the other copy alone"
+        );
+        assert!(served.current().is_none());
+
+        // A new copy takes the clipboard again and serves only the new value.
+        let again = board.write_concealed("synthetic-second-value").unwrap();
+        assert_eq!(sway.text().as_deref(), Some(&b"synthetic-second-value"[..]));
+        drop(foreign);
+        board.clear_if_unchanged(&again).unwrap();
+        assert_eq!(sway.text(), Some(Vec::new()));
+    }
+}

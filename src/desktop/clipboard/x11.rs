@@ -73,8 +73,14 @@ fn fail<E>(_: E) -> PasteboardError {
 
 impl X11Display {
     /// Connect to `$DISPLAY` and start the event thread.
+    #[cfg(not(test))]
     pub(super) fn open(served: Arc<Served>) -> Result<Self, PasteboardError> {
-        let (conn, screen) = x11rb::connect(None).map_err(fail)?;
+        Self::open_on(served, None)
+    }
+
+    /// Connect to `display` (`None`: `$DISPLAY`) and start the event thread.
+    fn open_on(served: Arc<Served>, display: Option<&str>) -> Result<Self, PasteboardError> {
+        let (conn, screen) = x11rb::connect(display).map_err(fail)?;
         let root = conn.setup().roots.get(screen).ok_or(PasteboardError)?.root;
         let window = conn.generate_id().map_err(fail)?;
         conn.create_window(
@@ -326,5 +332,311 @@ impl Display for X11Display {
         // A new owner timestamp, so XFixes listeners such as Mutter take the empty
         // value in place of the copy they kept.
         inner.claim(blank)
+    }
+}
+
+/// The X11 protocol against a real display server: each test starts its own Xvfb on a
+/// free display (`-displayfd`), so the tests run side by side and never touch the
+/// session's clipboard. The linux-vault CI job installs Xvfb and sets
+/// `APASSY_REQUIRE_X11=1`; elsewhere a missing Xvfb is a reported skip. Synthetic
+/// values only.
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::{
+        Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, GetPropertyReply, Window, WindowClass,
+    };
+    use x11rb::rust_connection::RustConnection;
+    use x11rb::{CURRENT_TIME, NONE};
+
+    use super::X11Display;
+    use crate::desktop::clipboard::Pasteboard;
+    use crate::desktop::clipboard::linux::{LinuxBoard, Served};
+
+    const VALUE: &str = "synthetic-x11-clipboard-value";
+    const HINT: &str = "x-kde-passwordManagerHint";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A private X server for one test. Dropping it stops the server.
+    struct Xvfb {
+        child: Child,
+        display: String,
+    }
+
+    impl Xvfb {
+        /// `None` (a reported skip) when Xvfb is not installed, unless
+        /// `APASSY_REQUIRE_X11` is set.
+        fn start() -> Option<Self> {
+            let spawned = Command::new("Xvfb")
+                .args([
+                    "-displayfd",
+                    "1",
+                    "-nolisten",
+                    "tcp",
+                    "-screen",
+                    "0",
+                    "64x64x24",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn();
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(err) => {
+                    assert!(
+                        std::env::var_os("APASSY_REQUIRE_X11").is_none(),
+                        "APASSY_REQUIRE_X11 is set, but Xvfb did not start: {err}"
+                    );
+                    eprintln!("skipped: Xvfb is not installed ({err})");
+                    return None;
+                }
+            };
+            // Xvfb writes the display number once it accepts connections.
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let number = line.trim();
+            assert!(
+                !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()),
+                "Xvfb gave no display number: {line:?}"
+            );
+            Some(Self {
+                display: format!(":{number}"),
+                child,
+            })
+        }
+
+        fn board(&self) -> (LinuxBoard<X11Display>, Arc<Served>) {
+            let served = Arc::new(Served::default());
+            let display = X11Display::open_on(served.clone(), Some(&self.display))
+                .expect("the X11 display opens");
+            (LinuxBoard::new(served.clone(), display), served)
+        }
+
+        fn peer(&self) -> Peer {
+            Peer::new(&self.display)
+        }
+    }
+
+    impl Drop for Xvfb {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Another client of the display: it pastes, and it copies.
+    struct Peer {
+        conn: RustConnection,
+        window: Window,
+        clipboard: Atom,
+        property: Atom,
+    }
+
+    impl Peer {
+        fn new(display: &str) -> Self {
+            let (conn, screen) = x11rb::connect(Some(display)).expect("the X11 display");
+            let root = conn.setup().roots[screen].root;
+            let window = conn.generate_id().unwrap();
+            conn.create_window(
+                0,
+                window,
+                root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_ONLY,
+                x11rb::COPY_FROM_PARENT,
+                &CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            let mut peer = Self {
+                conn,
+                window,
+                clipboard: NONE,
+                property: NONE,
+            };
+            peer.clipboard = peer.atom("CLIPBOARD");
+            peer.property = peer.atom("APASSY_TEST_PASTE");
+            peer
+        }
+
+        fn atom(&self, name: &str) -> Atom {
+            self.conn
+                .intern_atom(false, name.as_bytes())
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom
+        }
+
+        /// Paste `target` as a requestor does (ICCCM 2.4): the property, or `None` when
+        /// the owner refused.
+        fn paste(&self, target: &str) -> Option<GetPropertyReply> {
+            let target = self.atom(target);
+            self.conn
+                .convert_selection(
+                    self.window,
+                    self.clipboard,
+                    target,
+                    self.property,
+                    CURRENT_TIME,
+                )
+                .unwrap();
+            self.conn.flush().unwrap();
+            let deadline = Instant::now() + WAIT;
+            loop {
+                assert!(Instant::now() < deadline, "no SelectionNotify");
+                match self.conn.poll_for_event().unwrap() {
+                    Some(Event::SelectionNotify(event)) if event.requestor == self.window => {
+                        if event.property == NONE {
+                            return None;
+                        }
+                        return Some(
+                            self.conn
+                                .get_property(
+                                    true,
+                                    self.window,
+                                    self.property,
+                                    AtomEnum::ANY,
+                                    0,
+                                    u32::MAX / 4,
+                                )
+                                .unwrap()
+                                .reply()
+                                .unwrap(),
+                        );
+                    }
+                    Some(_) => {}
+                    None => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        }
+
+        fn text(&self) -> Option<Vec<u8>> {
+            self.paste("UTF8_STRING").map(|reply| reply.value)
+        }
+
+        fn targets(&self) -> Vec<Atom> {
+            self.paste("TARGETS")
+                .and_then(|reply| reply.value32().map(Iterator::collect))
+                .unwrap_or_default()
+        }
+
+        /// Copy something of its own: take the clipboard.
+        fn copy(&self) {
+            self.conn
+                .set_selection_owner(self.window, self.clipboard, CURRENT_TIME)
+                .unwrap();
+            self.conn.flush().unwrap();
+        }
+
+        fn owner(&self) -> Window {
+            self.conn
+                .get_selection_owner(self.clipboard)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .owner
+        }
+    }
+
+    #[test]
+    fn x11_a_copy_is_served_with_the_hint_and_the_clear_leaves_an_empty_own_copy() {
+        let Some(server) = Xvfb::start() else {
+            return;
+        };
+        let (mut board, _served) = server.board();
+        let peer = server.peer();
+        let copied = board.write_concealed(VALUE).expect("Apassy owns CLIPBOARD");
+        let owner = peer.owner();
+        assert!(owner != NONE && owner != peer.window, "Apassy is the owner");
+        assert_eq!(peer.text().as_deref(), Some(VALUE.as_bytes()));
+        assert_eq!(
+            peer.paste("text/plain;charset=utf-8").map(|r| r.value),
+            Some(VALUE.as_bytes().to_vec())
+        );
+        assert_eq!(peer.paste(HINT).map(|r| r.value), Some(b"secret".to_vec()));
+        let targets = peer.targets();
+        for name in ["TARGETS", "UTF8_STRING", "text/plain;charset=utf-8", HINT] {
+            assert!(targets.contains(&peer.atom(name)), "{name} in TARGETS");
+        }
+        // A clipboard manager's save request and other targets get nothing.
+        for refused in ["SAVE_TARGETS", "MULTIPLE", "STRING", "image/png"] {
+            assert!(peer.paste(refused).is_none(), "{refused} is refused");
+        }
+
+        board.clear_if_unchanged(&copied).unwrap();
+        // Still Apassy's clipboard, now empty and without the hint, so a keeping
+        // clipboard manager (Mutter) keeps the empty copy.
+        assert_eq!(peer.owner(), owner);
+        assert_eq!(peer.text(), Some(Vec::new()));
+        assert!(peer.paste(HINT).is_none());
+        assert!(!peer.targets().contains(&peer.atom(HINT)));
+    }
+
+    #[test]
+    fn x11_another_clients_copy_ends_the_claim_and_the_clear_never_touches_it() {
+        let Some(server) = Xvfb::start() else {
+            return;
+        };
+        let (mut board, served) = server.board();
+        let peer = server.peer();
+        let copied = board.write_concealed(VALUE).expect("Apassy owns CLIPBOARD");
+        assert!(served.current().is_some());
+        peer.copy();
+        // SelectionClear reaches Apassy: it stops serving the value at once.
+        wait_until("SelectionClear ends the claim", || {
+            served.current().is_none()
+        });
+        assert_eq!(peer.owner(), peer.window);
+        board.clear_if_unchanged(&copied).unwrap();
+        assert_eq!(
+            peer.owner(),
+            peer.window,
+            "the clear left the other copy alone"
+        );
+        assert!(served.current().is_none());
+
+        // A new copy takes the clipboard again and serves only the new value.
+        let again = board.write_concealed("synthetic-second-value").unwrap();
+        assert_ne!(peer.owner(), peer.window);
+        assert_eq!(peer.text().as_deref(), Some(&b"synthetic-second-value"[..]));
+        board.clear_if_unchanged(&again).unwrap();
+        assert_eq!(peer.text(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn x11_a_value_above_the_limit_never_takes_the_clipboard() {
+        let Some(server) = Xvfb::start() else {
+            return;
+        };
+        let (mut board, served) = server.board();
+        let peer = server.peer();
+        peer.copy();
+        let big = "x".repeat(super::MAX_VALUE + 1);
+        assert!(board.write_concealed(&big).is_err());
+        assert_eq!(peer.owner(), peer.window);
+        assert!(served.current().is_none());
     }
 }

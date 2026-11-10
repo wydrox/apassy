@@ -349,7 +349,11 @@ impl SessionObserver {
     /// Find what this session offers. Never fails: missing sources are `false` in
     /// [`SessionObserver::observation`].
     pub fn connect() -> Self {
-        let system = connect_bus(true);
+        Self::connect_with(connect_bus(true), connect_bus(false))
+    }
+
+    /// [`SessionObserver::connect`] on given system and session bus connections.
+    fn connect_with(system: Option<Connection>, session_bus: Option<Connection>) -> Self {
         let logind = system.as_ref().is_some_and(|c| {
             Proxy::new(c, LOGIN1, MANAGER_PATH, PROPERTIES)
                 .and_then(|p| p.call::<_, _, OwnedValue>("Get", &(MANAGER, "PreparingForSleep")))
@@ -359,7 +363,6 @@ impl SessionObserver {
             session: find_session(&conn),
             conn,
         });
-        let session_bus = connect_bus(false);
         let screen_savers: Vec<_> = session_bus
             .as_ref()
             .map(|conn| {
@@ -785,5 +788,314 @@ mod tests {
         let started = std::time::Instant::now();
         ack.wait(Duration::from_millis(20));
         assert!(started.elapsed() >= Duration::from_millis(20));
+    }
+}
+
+/// [`SessionObserver`] against real D-Bus daemons: each test starts two private
+/// `dbus-daemon`s, one as the system bus and one as the session bus, and serves fake
+/// systemd-logind and screen saver services on them. Nothing of the real buses is used.
+/// The linux-vault CI job installs `dbus-daemon` and sets `APASSY_REQUIRE_DBUS=1`;
+/// elsewhere a missing `dbus-daemon` is a reported skip. (`vault` brings `tempfile`.)
+#[cfg(all(test, feature = "vault"))]
+mod live_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::net::UnixStream;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::AtomicU32;
+    use std::time::Instant;
+    use zbus::blocking::connection::Builder;
+    use zbus::zvariant::OwnedFd as BusFd;
+
+    const SESSION_PATH: &str = "/org/freedesktop/login1/session/_3apassy";
+    const SAVER_PATH: &str = "/org/freedesktop/ScreenSaver";
+    const SAVER: &str = "org.freedesktop.ScreenSaver";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A private bus for one test. Dropping it stops the daemon.
+    struct Bus {
+        child: Child,
+        address: String,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Bus {
+        fn start() -> Option<Self> {
+            let dir = tempfile::Builder::new().prefix("apb").tempdir().unwrap();
+            let spawned = Command::new("dbus-daemon")
+                .arg("--session")
+                .arg("--nofork")
+                .arg("--nopidfile")
+                .arg("--print-address=1")
+                .arg(format!(
+                    "--address=unix:path={}",
+                    dir.path().join("bus").display()
+                ))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn();
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(err) => {
+                    assert!(
+                        std::env::var_os("APASSY_REQUIRE_DBUS").is_none(),
+                        "APASSY_REQUIRE_DBUS is set, but dbus-daemon did not start: {err}"
+                    );
+                    eprintln!("skipped: dbus-daemon is not installed ({err})");
+                    return None;
+                }
+            };
+            let mut address = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut address)
+                .unwrap();
+            let address = address.trim().to_owned();
+            assert!(address.starts_with("unix:"), "no bus address: {address:?}");
+            Some(Self {
+                child,
+                address,
+                _dir: dir,
+            })
+        }
+
+        fn builder(&self) -> Builder<'static> {
+            Builder::address(self.address.as_str()).unwrap()
+        }
+
+        /// A client connection as [`connect_bus`] makes it.
+        fn client(&self) -> Option<Connection> {
+            self.builder().method_timeout(REPLY_TIMEOUT).build().ok()
+        }
+    }
+
+    impl Drop for Bus {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[derive(Default)]
+    struct Fake {
+        locked: AtomicBool,
+        inactive: AtomicBool,
+        saver: AtomicBool,
+        inhibits: AtomicU32,
+        /// The far ends of the inhibitor descriptors that Apassy got.
+        held: Mutex<Vec<UnixStream>>,
+    }
+
+    struct Manager(Arc<Fake>);
+    #[zbus::interface(name = "org.freedesktop.login1.Manager")]
+    impl Manager {
+        fn get_session(&self, _id: &str) -> OwnedObjectPath {
+            OwnedObjectPath::try_from(SESSION_PATH).unwrap()
+        }
+        fn inhibit(
+            &self,
+            what: &str,
+            _who: &str,
+            _why: &str,
+            mode: &str,
+        ) -> zbus::fdo::Result<BusFd> {
+            assert_eq!((what, mode), ("sleep", "delay"));
+            let (ours, theirs) =
+                UnixStream::pair().map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+            ours.set_nonblocking(true).unwrap();
+            self.0.held.lock().unwrap().push(ours);
+            self.0.inhibits.fetch_add(1, Ordering::SeqCst);
+            Ok(BusFd::from(std::os::fd::OwnedFd::from(theirs)))
+        }
+        #[zbus(property)]
+        fn preparing_for_sleep(&self) -> bool {
+            false
+        }
+    }
+
+    struct Session(Arc<Fake>);
+    #[zbus::interface(name = "org.freedesktop.login1.Session")]
+    impl Session {
+        #[zbus(property)]
+        fn locked_hint(&self) -> bool {
+            self.0.locked.load(Ordering::SeqCst)
+        }
+        #[zbus(property)]
+        fn active(&self) -> bool {
+            !self.0.inactive.load(Ordering::SeqCst)
+        }
+        #[zbus(property)]
+        fn state(&self) -> String {
+            "active".into()
+        }
+        #[zbus(property)]
+        fn user(&self) -> (u32, OwnedObjectPath) {
+            (
+                rustix::process::getuid().as_raw(),
+                OwnedObjectPath::try_from("/org/freedesktop/login1/user/_apassy").unwrap(),
+            )
+        }
+        #[zbus(property)]
+        fn idle_hint(&self) -> bool {
+            false
+        }
+        #[zbus(property)]
+        fn idle_since_hint(&self) -> u64 {
+            1
+        }
+    }
+
+    struct Saver(Arc<Fake>);
+    #[zbus::interface(name = "org.freedesktop.ScreenSaver")]
+    impl Saver {
+        fn get_active(&self) -> bool {
+            self.0.saver.load(Ordering::SeqCst)
+        }
+    }
+
+    fn serve(fake: &Arc<Fake>, system: &Bus, session: &Bus) -> (Connection, Connection) {
+        let system = system
+            .builder()
+            .name(LOGIN1)
+            .unwrap()
+            .serve_at(MANAGER_PATH, Manager(fake.clone()))
+            .unwrap()
+            .serve_at(SESSION_PATH, Session(fake.clone()))
+            .unwrap()
+            .build()
+            .unwrap();
+        let session = session
+            .builder()
+            .name(SAVER)
+            .unwrap()
+            .serve_at(SAVER_PATH, Saver(fake.clone()))
+            .unwrap()
+            .build()
+            .unwrap();
+        (system, session)
+    }
+
+    /// The next `want` among the events, skipping others (idle readings, heartbeats).
+    fn expect(events: &mpsc::Receiver<SessionEvent>, want: SessionEvent) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match events.recv_timeout(left) {
+                Ok(event) if event == want => return,
+                Ok(_) => {}
+                Err(_) => panic!("no {want:?} event"),
+            }
+        }
+    }
+
+    fn emit<B: serde::Serialize + zbus::zvariant::DynamicType>(
+        conn: &Connection,
+        path: &str,
+        iface: &str,
+        member: &str,
+        body: &B,
+    ) {
+        conn.emit_signal(None::<&str>, path, iface, member, body)
+            .unwrap();
+    }
+
+    /// The far end of inhibitor `index` saw its last copy close.
+    fn released(fake: &Fake, index: usize) -> bool {
+        let mut held = fake.held.lock().unwrap();
+        let mut byte = [0u8; 1];
+        matches!(held[index].read(&mut byte), Ok(0))
+    }
+
+    #[test]
+    fn live_logind_and_screen_saver_signals_reach_the_observer() {
+        let (Some(system_bus), Some(session_bus)) = (Bus::start(), Bus::start()) else {
+            return;
+        };
+        let fake = Arc::new(Fake::default());
+        let (system, session) = serve(&fake, &system_bus, &session_bus);
+        let mut observer = SessionObserver::connect_with(system_bus.client(), session_bus.client());
+        let obs = observer.observation();
+        assert!(
+            obs.session_bus && obs.logind && obs.logind_session && obs.screen_saver,
+            "{obs:?}"
+        );
+        assert_eq!(obs.coverage(), crate::native::session_lock::Coverage::Full);
+        let (send, events) = mpsc::channel();
+        observer.start(Arc::new(move |event| {
+            let _ = send.send(event);
+        }));
+        // The first heartbeat reports the state; the delay inhibitor is held.
+        expect(&events, SessionEvent::ScreenUnlocked);
+        assert!(observer.observation().sleep_inhibitor);
+        assert_eq!(fake.inhibits.load(Ordering::SeqCst), 1);
+        assert!(observer.verify(), "unlocked and active: reuse may go on");
+
+        // The screen saver.
+        fake.saver.store(true, Ordering::SeqCst);
+        emit(&session, SAVER_PATH, SAVER, "ActiveChanged", &true);
+        expect(&events, SessionEvent::ScreenLocked);
+        assert!(!observer.verify(), "an active screen saver ends reuse");
+        fake.saver.store(false, Ordering::SeqCst);
+        emit(&session, SAVER_PATH, SAVER, "ActiveChanged", &false);
+        expect(&events, SessionEvent::ScreenUnlocked);
+        assert!(observer.verify());
+
+        // logind Lock and Unlock of this session, and a lock state read by verify.
+        emit(&system, SESSION_PATH, SESSION, "Lock", &());
+        expect(&events, SessionEvent::ScreenLocked);
+        emit(&system, SESSION_PATH, SESSION, "Unlock", &());
+        expect(&events, SessionEvent::ScreenUnlocked);
+        fake.locked.store(true, Ordering::SeqCst);
+        assert!(!observer.verify(), "LockedHint ends reuse");
+        fake.locked.store(false, Ordering::SeqCst);
+        fake.inactive.store(true, Ordering::SeqCst);
+        assert!(!observer.verify(), "an inactive session ends reuse");
+        fake.inactive.store(false, Ordering::SeqCst);
+        assert!(observer.verify());
+        // Another session's Lock is not ours.
+        emit(
+            &system,
+            "/org/freedesktop/login1/session/_9other",
+            SESSION,
+            "Lock",
+            &(),
+        );
+
+        // Sleep: the event, then the inhibitor stays until the ack.
+        let ack = observer.sleep_ack();
+        emit(&system, MANAGER_PATH, MANAGER, "PrepareForSleep", &true);
+        expect(&events, SessionEvent::Sleep);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!released(&fake, 0), "the inhibitor waits for the lock");
+        ack.ack();
+        let deadline = Instant::now() + WAIT;
+        while !released(&fake, 0) {
+            assert!(Instant::now() < deadline, "the ack releases the inhibitor");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The wake takes a new inhibitor.
+        emit(&system, MANAGER_PATH, MANAGER, "PrepareForSleep", &false);
+        let deadline = Instant::now() + WAIT;
+        while fake.inhibits.load(Ordering::SeqCst) < 2 {
+            assert!(Instant::now() < deadline, "the wake takes a new inhibitor");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // The end of this session.
+        emit(
+            &system,
+            MANAGER_PATH,
+            MANAGER,
+            "SessionRemoved",
+            &("3apassy", OwnedObjectPath::try_from(SESSION_PATH).unwrap()),
+        );
+        expect(&events, SessionEvent::SessionEnded);
+
+        // The screen saver goes away: the reuse check fails closed and reports the loss.
+        drop(session);
+        assert!(!observer.verify(), "a lost screen saver ends reuse");
+        expect(&events, SessionEvent::SourceLost);
+        assert!(!observer.observation().screen_saver);
+        drop(system);
     }
 }
