@@ -201,6 +201,7 @@ fn connect(tune: impl FnOnce(&mut TunnelSettings)) -> Connect {
             connect_teams_per_day: 200,
             connect_teams_max: 1000,
             connect_sync_bytes: 0,
+            free_connect: true,
             auth_limiter: false,
             operator_socket: false,
             oauth: None,
