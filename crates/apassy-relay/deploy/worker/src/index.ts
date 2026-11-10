@@ -56,7 +56,8 @@ export interface Env extends PushEnv {
 }
 
 const EDGE_HEADER = "x-apassy-edge";
-// The coarse client prefix of `POST /v1/connect` for the relay. The relay trusts it only
+// The coarse client prefix of `POST /v1/connect`, `POST /v1/account`, and
+// `POST /v1/account/recover` for the relay. The relay trusts it only
 // together with its MAC (below); the Worker always removes the client's copy of both.
 const CLIENT_PREFIX_HEADER = "x-apassy-client-prefix";
 // The HMAC of that prefix under the edge secret. The relay trusts the prefix only when this
@@ -358,7 +359,9 @@ export default {
     headers.set(EDGE_HEADER, env.EDGE_SECRET);
     headers.delete(CLIENT_PREFIX_HEADER);
     headers.delete(CLIENT_PREFIX_MAC_HEADER);
-    if (isConnect) {
+    // A Connect team, a new account, and a recovery count for the client's coarse prefix on
+    // the relay too; it takes the prefix only with this proof.
+    if (isConnect || isAccount) {
       const prefix = connectPrefix(request.headers.get("cf-connecting-ip") ?? "unknown");
       headers.set(CLIENT_PREFIX_HEADER, prefix);
       headers.set(CLIENT_PREFIX_MAC_HEADER, await prefixMac(env.EDGE_SECRET, prefix));
