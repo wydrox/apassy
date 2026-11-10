@@ -7,7 +7,7 @@ import Testing
 /// the core, the code of "Add a device…", and the Keychain store of the account key. Synthetic
 /// values only.
 @Suite struct ConnectTests {
-    static let code = "apassy_alk_acc_k7m2q4x3ca_" + String(repeating: "cd", count: 32)
+    static let code = "apassy_alk_acc_k7m2q4x3ca_" + String(repeating: "cd", count: 32) + "_" + String(repeating: "ab", count: 16)
 
     @Test func theStatusOfTheCoreDecodes() throws {
         let none = try JSONDecoder().decode(ConnectStatus.self, from: Data(#"{"state":"none","plan":null,"dial_route":false}"#.utf8))
@@ -15,6 +15,12 @@ import Testing
         let removed = try JSONDecoder().decode(
             ConnectStatus.self, from: Data(#"{"state":"none","removed":true,"plan":null,"dial_route":false}"#.utf8))
         #expect(removed.removed)
+        let removedAccount = try JSONDecoder().decode(
+            ConnectStatus.self,
+            from: Data(
+                #"{"state":"account","removed":true,"account_id":"acc_k7m2q4x3ca","device_name":"iPhone","plan":null,"dial_route":false}"#
+                    .utf8))
+        #expect(removedAccount.state == .account && removedAccount.removed)
         let json = """
             {"state":"account","account_id":"acc_k7m2q4x3ca","device_name":"iPhone","stale":true,"dial_route":false,
              "plan":{"plan":"personal","status":"active","entitled":true,"renews_at":1796299200,"ends_at":null,
@@ -25,6 +31,17 @@ import Testing
         #expect(account.stale)
         #expect(account.plan?.renewsAt == 1_796_299_200)
         #expect(account.plan?.status == .active)
+        #expect(account.devices.isEmpty)
+        let listed = try JSONDecoder().decode(
+            ConnectStatus.self,
+            from: Data(
+                """
+                {"state":"account","account_id":"acc_k7m2q4x3ca","device_name":"iPhone","dial_route":false,"plan":null,
+                 "devices":[{"device_id":"dev_m2k7q3x4ab","name":"MacBook Pro","platform":"mac","this":false,"verified":true},
+                 {"device_id":"dev_p4n6r2t7bc","name":"Mac Studio","platform":"mac","this":false,"verified":false}]}
+                """.utf8))
+        #expect(listed.devices.count == 2)
+        #expect(listed.unverifiedDevices.map(\.name) == ["Mac Studio"])
     }
 
     @Test func aJoinOfTheCoreDecodes() throws {
@@ -41,12 +58,16 @@ import Testing
     @Test func onlyTheCodeOfAddADeviceIsAConnectCode() {
         #expect(connectLinkCode(Self.code) == Self.code)
         #expect(connectLinkCode("\n \(Self.code) \t") == Self.code)
+        let secret = String(repeating: "cd", count: 32)
         for text in [
             "", "apassy_alk_", Self.code + "0", String(Self.code.dropLast()),
-            "apassy_alk_acc_k7m2q4x3c1_" + String(repeating: "cd", count: 32),
-            "apassy_alk_acc_k7m2q4x3ca-" + String(repeating: "cd", count: 32),
-            "apassy_alk_acc_k7m2q4x3ca_" + String(repeating: "CD", count: 32),
-            "apassy_lnk_t_7k2m5q4x3c_" + String(repeating: "cd", count: 32),
+            "apassy_alk_acc_k7m2q4x3ca_" + secret,
+            "apassy_alk_acc_k7m2q4x3ca_" + secret + "_" + String(repeating: "ab", count: 15),
+            "apassy_alk_acc_k7m2q4x3ca_" + secret + "_" + String(repeating: "AB", count: 16),
+            "apassy_alk_acc_k7m2q4x3c1_" + secret + "_" + String(repeating: "ab", count: 16),
+            "apassy_alk_acc_k7m2q4x3ca-" + secret + "_" + String(repeating: "ab", count: 16),
+            "apassy_alk_acc_k7m2q4x3ca_" + String(repeating: "CD", count: 32) + "_" + String(repeating: "ab", count: 16),
+            "apassy_lnk_t_7k2m5q4x3c_" + secret,
             "https://apassy.wyderka.cc/link#" + Self.code,
         ] {
             #expect(connectLinkCode(text) == nil, "\(text)")
