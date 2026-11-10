@@ -304,7 +304,11 @@ impl Operations {
                     if vault.cancel_scoped_access_request(scope.1, access).is_err() {
                         return WireResponse::failure(
                             "access_once_unavailable",
-                            "The scoped request could not be withdrawn. Check its status on the Mac.",
+                            concat!(
+                                "The scoped request could not be withdrawn. Check its status on the ",
+                                crate::computer!(),
+                                "."
+                            ),
                         );
                     }
                 }

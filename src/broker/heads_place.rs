@@ -43,12 +43,16 @@ pub const MAX_MANIFEST_BYTES: usize = 12 * 1024;
 
 /// Why a bouncer brain on this Mac takes no head set (plan 0035 unit G): it runs
 /// outside Apassy, and Apassy has no key for it.
-pub const NO_KEY_THIS_MAC: &str = "The bouncer brain on this Mac runs outside Apassy without APASSY_BOUNCER_KEY, so it takes no head set from Apassy. Set APASSY_BOUNCER_KEY to its LAYA_API_KEY, or let Apassy start the bouncer brain (Settings > Bouncer brain).";
+pub const NO_KEY_THIS_MAC: &str = concat!(
+    "The bouncer brain on this ",
+    crate::computer!(),
+    " runs outside Apassy without APASSY_BOUNCER_KEY, so it takes no head set from Apassy. Set APASSY_BOUNCER_KEY to its LAYA_API_KEY, or let Apassy start the bouncer brain (Settings > Bouncer brain)."
+);
 
 /// The host of a host key ([`host_key`]) in a sentence.
 pub fn host_label(host: &str) -> String {
     if host == THIS_MAC_HOST {
-        "the bouncer brain on this Mac".to_owned()
+        concat!("the bouncer brain on this ", crate::computer!()).to_owned()
     } else {
         format!("the bouncer brain server {host}")
     }
@@ -103,7 +107,14 @@ impl PlaceError {
             PlaceFailure::NoCandidate => "The vault has no such head set.".to_owned(),
             PlaceFailure::Vault => "The vault did not store the upload of the head set.".to_owned(),
             PlaceFailure::Files(text) => {
-                format!("The head set on this Mac cannot go up: {text}.")
+                format!(
+                    concat!(
+                        "The head set on this ",
+                        crate::computer!(),
+                        " cannot go up: {text}."
+                    ),
+                    text = text
+                )
             }
             PlaceFailure::NoKey if this_mac => NO_KEY_THIS_MAC.to_owned(),
             PlaceFailure::NoKey => {
@@ -298,11 +309,19 @@ struct Upload {
 fn upload_of(record: &CandidateRecord) -> Result<Upload, PlaceFailure> {
     let checkpoint = PathBuf::from(&record.checkpoint);
     if !checkpoint.is_file() {
-        return Err(PlaceFailure::Files("the head file is not on this Mac"));
+        return Err(PlaceFailure::Files(concat!(
+            "the head file is not on this ",
+            crate::computer!()
+        )));
     }
     let mut manifest = Vec::new();
     fs::File::open(checkpoint.with_file_name(MANIFEST_FILE))
-        .map_err(|_| PlaceFailure::Files("its manifest.json is not on this Mac"))?
+        .map_err(|_| {
+            PlaceFailure::Files(concat!(
+                "its manifest.json is not on this ",
+                crate::computer!()
+            ))
+        })?
         .take(MAX_MANIFEST_BYTES as u64 + 1)
         .read_to_end(&mut manifest)
         .map_err(|_| PlaceFailure::Files("its manifest.json cannot be read"))?;
@@ -341,9 +360,10 @@ fn upload_of(record: &CandidateRecord) -> Result<Upload, PlaceFailure> {
     .filter(|path| path.len() > 1)
     .any(|path| text.contains(path));
     if named {
-        return Err(PlaceFailure::Files(
-            "its manifest.json names a folder on this Mac",
-        ));
+        return Err(PlaceFailure::Files(concat!(
+            "its manifest.json names a folder on this ",
+            crate::computer!()
+        )));
     }
     Ok(Upload {
         heads: record.heads_sha256().to_owned(),

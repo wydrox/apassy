@@ -752,7 +752,11 @@ fn a_pairing_goes_from_the_phone_through_the_code_and_the_owner_check() {
     let text = super::owner_tests::app_frame(&ctx, &mut app);
     assert!(text.contains(WIFI_NOTICE_TITLE), "{text}");
     assert!(
-        text.contains("The iPhone app now reaches this Mac through Apassy relay."),
+        text.contains(concat!(
+            "The iPhone app now reaches this ",
+            crate::computer!(),
+            " through Apassy relay."
+        )),
         "{text}"
     );
     let escape = egui::Event::Key {

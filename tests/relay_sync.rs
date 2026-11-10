@@ -107,7 +107,7 @@ fn join(relay: &FakeRelay, a: &Mac, vault_a: &Vault) -> JoinedDevice {
     assert_eq!(
         links[0].safety.as_deref(),
         Some(pending.safety.as_str()),
-        "both Macs show the same words"
+        concat!("both ", apassy::computers!(), " show the same words")
     );
     a.sync.confirm_link(vault_a, &links[0]).expect("confirm");
     pending.poll().expect("poll").expect("confirmed")
@@ -292,7 +292,11 @@ fn push_and_pull_between_two_macs() {
     assert_eq!(
         relay.last_since(),
         Some(4),
-        "the receipts ask from the version this Mac saw"
+        concat!(
+            "the receipts ask from the version this ",
+            apassy::computer!(),
+            " saw"
+        )
     );
 }
 
@@ -1679,7 +1683,11 @@ fn a_relay_rollback_before_a_passphrase_change_keeps_the_passphrase_of_this_mac(
     assert_eq!(
         a.sync.take_new_passphrase(&mut vault, NEW).unwrap_err(),
         SyncError::Vault(VaultErrorKind::WrongKeyOrCorrupt),
-        "the passphrase of this Mac does not open the older copy"
+        concat!(
+            "the passphrase of this ",
+            apassy::computer!(),
+            " does not open the older copy"
+        )
     );
     let synced = a
         .sync
@@ -1689,9 +1697,10 @@ fn a_relay_rollback_before_a_passphrase_change_keeps_the_passphrase_of_this_mac(
     assert_eq!(relay.version(), 2);
     assert!(!a.sync.keeps_passphrase(), "the anchor is back");
     vault.add(item("Gamma", "SYNTH-gamma")).expect("add");
-    a.sync
-        .sync(&mut vault)
-        .expect("syncs again under the passphrase of this Mac");
+    a.sync.sync(&mut vault).expect(concat!(
+        "syncs again under the passphrase of this ",
+        apassy::computer!()
+    ));
     assert_eq!(relay.version(), 3);
     assert_eq!(titles(&vault), ["Alpha", "Beta", "Gamma"]);
     vault.lock().expect("lock");
@@ -1700,9 +1709,10 @@ fn a_relay_rollback_before_a_passphrase_change_keeps_the_passphrase_of_this_mac(
         VaultErrorKind::WrongKeyOrCorrupt,
         "the old passphrase does not come back"
     );
-    vault
-        .unlock(NEW)
-        .expect("the vault keeps the passphrase of this Mac");
+    vault.unlock(NEW).expect(concat!(
+        "the vault keeps the passphrase of this ",
+        apassy::computer!()
+    ));
 
     // A second Mac adopts the copy that went up with the passphrase of this Mac.
     let b = mac(&root, "b", &relay.url);
@@ -2114,6 +2124,6 @@ fn a_new_relay_copy_without_a_code_joins_the_team_that_another_mac_holds() {
     assert!(
         ConnectError::JoinOtherMac
             .to_string()
-            .contains("Join from another Mac")
+            .contains(concat!("Join from another ", apassy::computer!()))
     );
 }

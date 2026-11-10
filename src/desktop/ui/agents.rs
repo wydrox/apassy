@@ -803,9 +803,21 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
                 .filter(|item| !archived.contains_key(&item.id))
                 .count();
             if count == 1 {
-                "The vault is open. 1 active credential is available on this Mac.".to_owned()
+                concat!(
+                    "The vault is open. 1 active credential is available on this ",
+                    crate::computer!(),
+                    "."
+                )
+                .to_owned()
             } else {
-                format!("The vault is open. {count} active credentials are available on this Mac.")
+                format!(
+                    concat!(
+                        "The vault is open. {count} active credentials are available on this ",
+                        crate::computer!(),
+                        "."
+                    ),
+                    count = count
+                )
             }
         }
         _ => "The vault is open. Check Credentials for the available items.".to_owned(),
@@ -813,34 +825,43 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
     let mut host = None;
     let mut skip = false;
     let mut cli = app.ui.is_expanded("next-step-cli");
-    kit::section(ui, Some("Use this vault on this Mac"), Some(&intro), |s| {
-        s.row(|ui| {
-            kit::note(
-                ui,
-                "Agents stay on this Mac. Connect them here before an agent can use a credential.",
-            );
-        });
-        s.row(|ui| {
-            ui.horizontal_wrapped(|ui| {
-                if kit::button(ui, "Claude Code", Style::Bordered).clicked() {
-                    host = Some(0);
-                }
-                if kit::button(ui, "Codex", Style::Bordered).clicked() {
-                    host = Some(1);
-                }
-                if kit::button(ui, "CLI", Style::Bordered).clicked() {
-                    cli = !cli;
-                }
-                skip = kit::button(ui, "Skip", Style::Link).clicked();
+    kit::section(
+        ui,
+        Some(concat!("Use this vault on this ", crate::computer!())),
+        Some(&intro),
+        |s| {
+            s.row(|ui| {
+                kit::note(
+                    ui,
+                    concat!(
+                        "Agents stay on this ",
+                        crate::computer!(),
+                        ". Connect them here before an agent can use a credential."
+                    ),
+                );
             });
-        });
-        s.row(|ui| {
-            kit::note(
-                ui,
-                "You can do these steps later in Agents or Settings > Agents > Command line.",
-            );
-        });
-    });
+            s.row(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if kit::button(ui, "Claude Code", Style::Bordered).clicked() {
+                        host = Some(0);
+                    }
+                    if kit::button(ui, "Codex", Style::Bordered).clicked() {
+                        host = Some(1);
+                    }
+                    if kit::button(ui, "CLI", Style::Bordered).clicked() {
+                        cli = !cli;
+                    }
+                    skip = kit::button(ui, "Skip", Style::Link).clicked();
+                });
+            });
+            s.row(|ui| {
+                kit::note(
+                    ui,
+                    "You can do these steps later in Agents or Settings > Agents > Command line.",
+                );
+            });
+        },
+    );
     app.ui.set_expanded("next-step-cli", cli);
     if cli {
         connection_progress(app, ui, true);
@@ -999,27 +1020,30 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui) {
         "3. In your project folder, start the host with this command. A question waits up to 5 minutes for you, so the host waits at least 330 seconds for a tool.",
     );
     kit::code_block(ui, &agent_onboarding::launch_command(selected), 2);
-    let sandbox = std::path::Path::new(&cli_path())
-        .parent()
-        .map(|p| p.join("apassy-sandbox").display().to_string())
-        .unwrap_or_else(|| "apassy-sandbox".to_owned());
-    let protected = if host == "claude" {
-        format!(
-            "{} {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
-            agent_onboarding::CLAUDE_TOOL_TIMEOUT,
-            shell_word(&sandbox)
-        )
-    } else {
-        format!(
-            "{} -- codex -c sandbox_mode=danger-full-access",
-            shell_word(&sandbox)
-        )
-    };
-    kit::note(
-        ui,
-        "Optional, more protection: start the host in the Apassy sandbox. It uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
-    );
-    kit::code_block(ui, &protected, 2);
+    // The Apassy sandbox launcher is macOS only (Seatbelt): Linux shows no sandboxed start.
+    if !cfg!(target_os = "linux") {
+        let sandbox = std::path::Path::new(&cli_path())
+            .parent()
+            .map(|p| p.join("apassy-sandbox").display().to_string())
+            .unwrap_or_else(|| "apassy-sandbox".to_owned());
+        let protected = if host == "claude" {
+            format!(
+                "{} {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
+                agent_onboarding::CLAUDE_TOOL_TIMEOUT,
+                shell_word(&sandbox)
+            )
+        } else {
+            format!(
+                "{} -- codex -c sandbox_mode=danger-full-access",
+                shell_word(&sandbox)
+            )
+        };
+        kit::note(
+            ui,
+            "Optional, more protection: start the host in the Apassy sandbox. It uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
+        );
+        kit::code_block(ui, &protected, 2);
+    }
     kit::note(
         ui,
         "4. Ask the agent to use a credential. The bouncer decides; when it asks you, the question shows in Decisions.",

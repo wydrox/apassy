@@ -187,9 +187,12 @@ fn folder_error(error: &VaultError) -> String {
         VaultErrorKind::InvalidInput => format!(
             "Type a name of at most {MAX_FOLDER_NAME_BYTES} bytes, without control characters. Folders nest at most {MAX_FOLDER_DEPTH} levels deep."
         ),
-        VaultErrorKind::NotFound => {
-            "The folder is gone. Another Mac may have deleted it.".to_owned()
-        }
+        VaultErrorKind::NotFound => concat!(
+            "The folder is gone. Another ",
+            crate::computer!(),
+            " may have deleted it."
+        )
+        .to_owned(),
         _ => format!("The folder did not change: {error}."),
     }
 }

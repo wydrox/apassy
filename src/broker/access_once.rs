@@ -164,7 +164,7 @@ fn create_with_source(
             qid:crate::questions::envelope::new_qid().ok_or(VaultErrorKind::Storage)?,
             key_id:key.map_or_else(||"0000000000000000".into(),|k|k.key_id()),to:"member".into(),request_id:"1".into(),
             asker:wire::Asker{device:device.as_ref().map_or("00000000-0000-0000-0000-000000000000",|d|d.uuid.as_str()).into(),
-                relay_device_id:membership.as_ref().map_or(1,|m|m.device_id),name:device.as_ref().map_or_else(||"this Mac".into(),|d|short(&d.name,64))},
+                relay_device_id:membership.as_ref().map_or(1,|m|m.device_id),name:device.as_ref().map_or_else(||concat!("this ", crate::computer!()).into(),|d|short(&d.name,64))},
             vault_name:"Vault".into(),agent:wire::Agent{id:agent.id.to_string(),name:short(&agent.name,64),host:None,host_source:wire::HostSource::Unknown},
             item:wire::Item{local_id:item.to_string(),uuid,revision:details.summary.revision.to_string(),name:short(&details.summary.title,128),
                 environment,delivery:if matches!(binding.delivery,EnvDelivery::Value){wire::Delivery::RealValue}else{wire::Delivery::Placeholder},
@@ -200,12 +200,20 @@ fn create_with_source(
                 } else {
                     "access_request_rate_limited"
                 },
-                "Review on this Mac. Another scope is active or the conservative local request budget is exhausted.",
+                concat!(
+                    "Review on this ",
+                    crate::computer!(),
+                    ". Another scope is active or the conservative local request budget is exhausted."
+                ),
             )
         }
         Err(_) => WireResponse::failure(
             "not_visible",
-            "This credential or scope is unavailable to this agent. Review on this Mac.",
+            concat!(
+                "This credential or scope is unavailable to this agent. Review on this ",
+                crate::computer!(),
+                "."
+            ),
         ),
     }
 }

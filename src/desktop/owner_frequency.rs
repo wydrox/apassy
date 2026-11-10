@@ -77,7 +77,7 @@ impl DesktopApp {
                     self.set_ok(if cfg!(target_os = "linux") {
                         "Saved for this computer."
                     } else {
-                        "Saved for this Mac."
+                        concat!("Saved for this ", crate::computer!(), ".")
                     });
                 }
             }

@@ -1046,7 +1046,12 @@ impl Node {
         let (certificate, new) = tailnet::certificate(&self.data_dir, certificate_key, &name)?;
         if new && state.node_questions {
             lock(&self.notes).tailnet_notes.push(
-                "The node certificate of this Mac is new, so its pin changed. Pair your iPhone again.".to_owned(),
+                concat!(
+                    "The node certificate of this ",
+                    crate::computer!(),
+                    " is new, so its pin changed. Pair your iPhone again."
+                )
+                .to_owned(),
             );
         }
         self.check_not_stopping()?;
@@ -1081,8 +1086,13 @@ impl Node {
             && state.node_questions
         {
             lock(&self.notes).tailnet_notes.push(format!(
-                "The address of this Mac on the tailnet changed from {last} to {}. Pair your iPhone again.",
-                route.origin
+                concat!(
+                    "The address of this ",
+                    crate::computer!(),
+                    " on the tailnet changed from {last} to {}. Pair your iPhone again."
+                ),
+                route.origin,
+                last = last
             ));
         }
         let mut guard = lock(vault);
@@ -1281,7 +1291,16 @@ impl Node {
             }
         }
         if route_on {
-            warnings.push("The name of this Mac is in public certificate logs while the route is on. The Mac must stay awake and the vault unlocked for each run.".to_owned());
+            warnings.push(
+                concat!(
+                    "The name of this ",
+                    crate::computer!(),
+                    " is in public certificate logs while the route is on. The ",
+                    crate::computer!(),
+                    " must stay awake and the vault unlocked for each run."
+                )
+                .to_owned(),
+            );
         }
         warnings.extend(lock(&self.notes).tailnet_notes.iter().cloned());
         let keychain_fallback = lock(&self.notes).keychain_fallback;
@@ -1502,13 +1521,21 @@ impl Node {
         let running = running.as_ref().ok_or_else(|| {
             error(
                 "tailnet_off",
-                "The node of this Mac is not on the tailnet. Turn on “Reachable on your tailnet”.",
+                concat!(
+                    "The node of this ",
+                    crate::computer!(),
+                    " is not on the tailnet. Turn on “Reachable on your tailnet”."
+                ),
             )
         })?;
         let route = running.tailnet.as_ref().ok_or_else(|| {
             error(
                 "tailnet_off",
-                "The node of this Mac is not on the tailnet. Turn on “Reachable on your tailnet”.",
+                concat!(
+                    "The node of this ",
+                    crate::computer!(),
+                    " is not on the tailnet. Turn on “Reachable on your tailnet”."
+                ),
             )
         })?;
         Ok((
@@ -1605,13 +1632,25 @@ impl Node {
             (Some(_), _) => {
                 return Err(error(
                     "conflict",
-                    "The approvals of this vault go through another relay. Move them to this Mac first.",
+                    concat!(
+                        "The approvals of this vault go through another relay. Move them to this ",
+                        crate::computer!(),
+                        " first."
+                    ),
                 ));
             }
             (None, Some(_)) => {
                 return Err(error(
                     "conflict",
-                    "This vault has its approvals on another Mac. Join them from that Mac with “Add an iPhone or a Mac…”.",
+                    concat!(
+                        "This vault has its approvals on another ",
+                        crate::computer!(),
+                        ". Join them from that ",
+                        crate::computer!(),
+                        " with “Add an iPhone or a ",
+                        crate::computer!(),
+                        "…”."
+                    ),
                 ));
             }
             (None, None) => {}
@@ -1658,7 +1697,11 @@ impl Node {
         .ok_or_else(|| {
             error(
                 "not_found",
-                "This vault has no approvals on this Mac yet. Turn them on first.",
+                concat!(
+                    "This vault has no approvals on this ",
+                    crate::computer!(),
+                    " yet. Turn them on first."
+                ),
             )
         })?;
         // The link names the certificate that the front serves now, never a stored pin
@@ -1691,11 +1734,24 @@ impl Node {
                 .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
             questions_team::node_questions_membership(open, &origin)?
         }
-        .ok_or_else(|| error("not_found", "This vault has no approvals on this Mac."))?;
+        .ok_or_else(|| {
+            error(
+                "not_found",
+                concat!(
+                    "This vault has no approvals on this ",
+                    crate::computer!(),
+                    "."
+                ),
+            )
+        })?;
         if device_id == membership.device_id {
             return Err(error(
                 "conflict",
-                "This Mac holds the approvals of the vault. Turn them off instead.",
+                concat!(
+                    "This ",
+                    crate::computer!(),
+                    " holds the approvals of the vault. Turn them off instead."
+                ),
             ));
         }
         // Resolve the request's stable UUID before making any remote change.
@@ -1916,9 +1972,9 @@ impl Node {
                     operation: if on { ACTIVITY_ROUTE_ON } else { ACTIVITY_ROUTE_OFF }.to_owned(),
                     decision: ActivityDecision::Allow,
                     reason: if on {
-                        "Remote access is on: remote agents can reach this Mac through Tailscale Funnel while it is awake and the vault is unlocked. Every remote run still asks you."
+                        concat!("Remote access is on: remote agents can reach this ", crate::computer!(), " through Tailscale Funnel while it is awake and the vault is unlocked. Every remote run still asks you.")
                     } else {
-                        "Remote access is off: no remote agent reaches this Mac."
+                        concat!("Remote access is off: no remote agent reaches this ", crate::computer!(), ".")
                     }
                     .to_owned(),
                 });
@@ -2000,7 +2056,7 @@ impl Node {
                 )
             })?;
         let by = device.map_or_else(
-            || "Allowed with Touch ID on this Mac.".to_owned(),
+            || concat!("Allowed with Touch ID on this ", crate::computer!(), ".").to_owned(),
             |device| format!("Allowed with Face ID on {}.", cut(device, MAX_NAME_BYTES)),
         );
         let made = shared.add_agent(

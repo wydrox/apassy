@@ -214,6 +214,9 @@ fn go(app: &mut DesktopApp, place: Place) {
 /// - ⌃⌘S: collapse or expand the sidebar; in a narrow window, open or close it over
 ///   the list.
 ///
+/// Linux: ⌘ is Ctrl. The sidebar is F9 (Ctrl+S means Save in GNOME and KDE
+/// applications), Back is also Alt+Left, and [`window_keys`] adds Ctrl+W and Ctrl+Q.
+///
 /// Tab and Shift-Tab move the focus, and the page scrolls to it. Space or Return
 /// presses the focused control. Page Up, Page Down, Home, and End scroll the page.
 pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
@@ -235,8 +238,8 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
     if busy {
         return;
     }
-    // Before ⌘ alone: ⌃⌘S must not reach a ⌘S handler.
-    if kit::shortcut(ctx, Modifiers::COMMAND | Modifiers::CTRL, Key::S) {
+    // Before ⌘ alone: ⌃⌘S must not reach a ⌘S handler. On Linux the sidebar is F9.
+    if kit::shortcut(ctx, kit::SIDEBAR_SHORTCUT.0, kit::SIDEBAR_SHORTCUT.1) {
         app.ui
             .toggle_sidebar_in(ctx.content_rect().width() < kit::NARROW_WINDOW);
         return;
@@ -259,7 +262,10 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
         app.ui.focus.focus_page_start();
         return;
     }
-    if kit::shortcut(ctx, Modifiers::COMMAND, Key::OpenBracket) {
+    // Linux also takes Alt+Left, the Back key of GNOME and KDE applications.
+    if kit::shortcut(ctx, Modifiers::COMMAND, Key::OpenBracket)
+        || (cfg!(target_os = "linux") && kit::shortcut(ctx, Modifiers::ALT, Key::ArrowLeft))
+    {
         if app.place.is_credentials() && app.selected_item_id.is_some() {
             app.selected_item_id = None;
             app.ui.focus.focus_page_start();
@@ -304,6 +310,20 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
     } else if kit::shortcut(ctx, Modifiers::COMMAND, Key::F) {
         app.show_credentials();
         app.ui.focus_search = true;
+    }
+}
+
+/// Linux only, on every screen: Ctrl+W closes the window as its close button does
+/// (while the node serves cloud agents, that minimizes it), and Ctrl+Q quits Apassy.
+/// The Mac has both in its menu bar.
+#[cfg(target_os = "linux")]
+pub(super) fn window_keys(ctx: &egui::Context) {
+    use eframe::egui::{Key, Modifiers};
+
+    if kit::shortcut(ctx, Modifiers::COMMAND, Key::Q) {
+        crate::desktop::request_quit(ctx);
+    } else if kit::shortcut(ctx, Modifiers::COMMAND, Key::W) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 

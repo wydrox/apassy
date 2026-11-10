@@ -102,9 +102,10 @@ pub(super) fn load(
         &local.devices,
         &app.remote_macs,
     );
-    let this_name = data
-        .environment(&DeviceScope::ThisMac)
-        .map_or_else(|| "This Mac".to_owned(), |env| env.name.clone());
+    let this_name = data.environment(&DeviceScope::ThisMac).map_or_else(
+        || concat!("This ", crate::computer!()).to_owned(),
+        |env| env.name.clone(),
+    );
     data.remote_access_on = local.route_on;
 
     // This Mac.

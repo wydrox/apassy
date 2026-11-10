@@ -335,7 +335,7 @@ fn a_notification_of_an_activity_line_opens_logs() {
     assert_eq!(
         app.ui.activity_scope,
         ActivityScope::default(),
-        "the row is of this Mac"
+        concat!("the row is of this ", crate::computer!())
     );
     // ⌘[ in Logs leaves the selection.
     app.ui.logs.clear_selection();

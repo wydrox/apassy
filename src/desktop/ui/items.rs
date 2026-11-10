@@ -252,7 +252,12 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         &title,
         &columns::count_label(active, "item", "items"),
         |ui| {
-            add = kit::plain_icon_button(ui, Icon::Plus, "New credential  ⌘N").clicked();
+            add = kit::plain_icon_button(
+                ui,
+                Icon::Plus,
+                concat!("New credential  ", crate::shortcut!("N")),
+            )
+            .clicked();
             if let Place::Folder(Some(uuid)) = &place {
                 let uuid = uuid.clone();
                 ui.menu_button("More", |ui| {
@@ -305,7 +310,10 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui.horizontal_wrapped(|ui| {
                 kit::note(ui, format!("{} selected", app.ui.selected_items.len()));
                 if kit::small_button(ui, "Move…", Style::Bordered)
-                    .on_hover_text("Move selected credentials  ⇧⌘M")
+                    .on_hover_text(concat!(
+                        "Move selected credentials  ",
+                        crate::shift_shortcut!("M")
+                    ))
                     .clicked()
                 {
                     super::folders::open_move_many(app);
@@ -319,7 +327,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui.horizontal_wrapped(|ui| {
                 kit::note(ui, format!("{} credentials moved", app.ui.move_undo.len()));
                 if kit::small_button(ui, "Undo Move", Style::Bordered)
-                    .on_hover_text("⌘Z")
+                    .on_hover_text(crate::shortcut!("Z"))
                     .clicked()
                 {
                     super::folders::undo_move(app);
@@ -655,7 +663,10 @@ fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
 /// away when no duplicate is left.
 fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, duplicates: usize) {
     let field = kit::search_field(ui, &mut app.search, "credential-search", "Search")
-        .on_hover_text("Search by name, username, website, host, project, service, or notes  ⌘F");
+        .on_hover_text(concat!(
+            "Search by name, username, website, host, project, service, or notes  ",
+            crate::shortcut!("F")
+        ));
     ui.ctx()
         .accesskit_node_builder(field.id, |node| node.set_label("Search credentials"));
     app.ui.credential_search_focused = field.has_focus();
@@ -1326,9 +1337,11 @@ pub(super) fn share_sheet(app: &mut DesktopApp, ctx: &egui::Context, item_id: u6
         kit::sheet_title(
             ui,
             &format!("Share “{name}”"),
-            Some(
-                "A shared vault gets the same credential, not a copy. This Mac has no shared vault yet.",
-            ),
+            Some(concat!(
+                "A shared vault gets the same credential, not a copy. This ",
+                crate::computer!(),
+                " has no shared vault yet."
+            )),
         );
         kit::sheet_buttons(
             ui,
@@ -1535,7 +1548,10 @@ fn mask_button(ui: &mut egui::Ui, revealed: bool) -> bool {
         "Show the secret values"
     };
     rows::pill_button(ui, label, name)
-        .on_hover_text("Show or hide secret values  ⌘⇧H")
+        .on_hover_text(concat!(
+            "Show or hide secret values  ",
+            crate::shortcut_shift!("H")
+        ))
         .clicked()
 }
 
@@ -3399,7 +3415,7 @@ pub(super) fn archive_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 archive = kit::button(ui, "Archive", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -3591,7 +3607,7 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
             |_| {},
             |ui| {
                 if kit::button(ui, "Add", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked()
                 {
                     action = FormAction::Save;
@@ -3750,7 +3766,7 @@ pub(super) fn edit_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 if kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked()
                 {
                     action = FormAction::Save;
@@ -4474,7 +4490,7 @@ pub(super) fn declaration_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bo
             |_| {},
             |ui| {
                 save = kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -4824,7 +4840,7 @@ pub(super) fn variable_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
             },
             |ui| {
                 save = kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -4942,7 +4958,7 @@ pub(super) fn connector_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool
             },
             |ui| {
                 save = kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(crate::shortcut!("S"))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },

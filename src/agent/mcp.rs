@@ -369,7 +369,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_REQUEST_ACCESS,
             "title": "Tell the owner why you need a credential",
-            "description": "Usually not needed: no grant is required. Use a catalog credential directly with apassy_run_with_secrets; the bouncer decides, and when it asks the owner the call waits up to 5 minutes. Without scope this legacy tool records a note. With scope it requests one asynchronous access consent, expiring in 300 seconds; the bouncer still checks the eventual command. Scoped requests appear in Mac Decisions and iPhone Requests. Query apassy_access_request_status; then explicitly reference one matching run. Without scope the original local note remains available through apassy request list. It returns at once. For a credential that is not in Apassy, use apassy_ask_owner_for_credential.",
+            "description": concat!("Usually not needed: no grant is required. Use a catalog credential directly with apassy_run_with_secrets; the bouncer decides, and when it asks the owner the call waits up to 5 minutes. Without scope this legacy tool records a note. With scope it requests one asynchronous access consent, expiring in 300 seconds; the bouncer still checks the eventual command. Scoped requests appear in ", crate::desktop_app!(), " Decisions and iPhone Requests. Query apassy_access_request_status; then explicitly reference one matching run. Without scope the original local note remains available through apassy request list. It returns at once. For a credential that is not in Apassy, use apassy_ask_owner_for_credential."),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1268,11 +1268,21 @@ pub(crate) fn broker_error(code: &str) -> Value {
         ),
         "access_request_waiting" => (
             code,
-            "Another scope is active for this agent. Query its access status or review on the Mac.",
+            concat!(
+                "Another scope is active for this agent. Query its access status or review on the ",
+                crate::computer!(),
+                "."
+            ),
         ),
         "access_request_rate_limited" => (
             code,
-            "The conservative Mac-local access-request budget is exhausted. Review on the Mac.",
+            concat!(
+                "The conservative ",
+                crate::computer!(),
+                "-local access-request budget is exhausted. Review on the ",
+                crate::computer!(),
+                "."
+            ),
         ),
         "not_found" => (code, "This request is unavailable to this agent."),
         "cancelled" => (code, "The operation was cancelled before execution."),
