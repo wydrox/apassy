@@ -160,12 +160,22 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
 pub(super) fn notification_rows(app: &DesktopApp, g: &mut rows::Group<'_>) -> Option<NotifyAction> {
     let mut notify_action = None;
     let Some(view) = app.owner.notifications.as_ref().map(|center| center.view()) else {
+        // Linux has no notifier yet (the macOS one is a signed helper app).
+        let (value, note) = if cfg!(target_os = "linux") {
+            (
+                "Not available",
+                "Apassy on Linux shows no desktop notifications yet. Questions wait in Decisions.",
+            )
+        } else {
+            (
+                "Not running",
+                "They start with the broker. Questions still wait in Decisions.",
+            )
+        };
         g.line_note(
             "Notifications",
-            Some(rows::value("Not running")),
-            Some(rows::note(
-                "They start with the broker. Questions still wait in Decisions.",
-            )),
+            Some(rows::value(value)),
+            Some(rows::note(note)),
             |_| {},
         );
         return None;
@@ -319,7 +329,7 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         g.note_row(if cfg!(target_os = "linux") {
             crate::desktop::session_watch::owner_note(&app.owner.session.observation())
         } else {
-            "After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your Mac locks or sleeps.".to_owned()
+            concat!("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your ", crate::computer!(), " locks or sleeps.").to_owned()
         });
     });
     if let Some(note) = &app.owner.frequency_note {
@@ -511,21 +521,34 @@ fn backup_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The keyboard shortcuts of the window.
-const SHORTCUTS: [(&str, &str); 15] = [
+/// The keyboard shortcuts of the window, with the modifier names of the platform.
+const SHORTCUTS: &[(&str, &str)] = &[
     (
-        "⌘1 to ⌘5",
+        concat!(crate::shortcut!("1"), " to ", crate::shortcut!("5")),
         "All credentials, Overview, Decisions, Agents, Logs",
     ),
-    ("⌘,", "Settings"),
-    ("⌘[", "Back to the list"),
-    ("⌘N", "New credential"),
-    ("⌘F", "Search credentials"),
-    ("⌘L", "Lock the vault"),
-    ("⌃⌘S", "Hide or show the sidebar"),
-    ("Return, ⌘S", "The default action of the open sheet"),
-    ("⌘⇧H", "Show or hide the secret values"),
-    ("Tab, ⇧Tab", "Next or previous control"),
+    (crate::shortcut!(","), "Settings"),
+    (crate::back_shortcut!(), "Back to the list"),
+    (crate::shortcut!("N"), "New credential"),
+    (crate::shortcut!("F"), "Search credentials"),
+    (crate::shortcut!("L"), "Lock the vault"),
+    (crate::sidebar_shortcut!(), "Hide or show the sidebar"),
+    (
+        concat!("Return, ", crate::shortcut!("S")),
+        "The default action of the open sheet",
+    ),
+    (
+        crate::shortcut_shift!("H"),
+        "Show or hide the secret values",
+    ),
+    #[cfg(target_os = "linux")]
+    (crate::shortcut!("W"), "Close the window"),
+    #[cfg(target_os = "linux")]
+    (crate::shortcut!("Q"), "Quit Apassy"),
+    (
+        concat!("Tab, ", crate::shift_key!(), "Tab"),
+        "Next or previous control",
+    ),
     ("← → ↑ ↓", "Nearest control"),
     ("Space", "Press the control, or the next option"),
     ("← → on a picker", "Previous or next option"),
@@ -544,13 +567,15 @@ fn shortcuts_section(ui: &mut egui::Ui) {
             show_more_button(ui, id, open, "keyboard shortcuts");
         });
         if open {
-            for (keys, action) in SHORTCUTS {
+            for &(keys, action) in SHORTCUTS {
                 g.line(
                     action,
                     Some(kit::text(keys, Font::Mono).color(kit::palette().secondary)),
                     |_| {},
                 );
             }
+            // macOS only: its app menu owns ⌘H. Linux has no such menu.
+            #[cfg(not(target_os = "linux"))]
             g.note_row(
                 "⌘H stays the macOS shortcut for \"Hide Apassy\", so showing values uses ⌘⇧H.",
             );
@@ -1345,7 +1370,7 @@ pub(super) fn passphrase_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> boo
             |_| {},
             |ui| {
                 change = kit::button(ui, "Change passphrase", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(concat!(crate::shortcut!("S")))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -1461,7 +1486,7 @@ pub(super) fn backup_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 backup |= kit::button(ui, "Back up", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(concat!(crate::shortcut!("S")))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -1499,7 +1524,7 @@ pub(super) fn restore_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |_| {},
             |ui| {
                 restore |= kit::button(ui, "Restore", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(concat!(crate::shortcut!("S")))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },

@@ -218,7 +218,7 @@ fn each_environment_has_its_own_table_and_header() {
     for expected in [
         "Agents",
         "2 agents",
-        "This Mac",
+        concat!("This ", crate::computer!()),
         "Codex",
         "MacBook Pro",
         "Read-only",
@@ -357,7 +357,10 @@ fn the_remote_access_block_runs_no_tailscale_command_on_the_ui_thread() {
     let mut window = Window::new();
     window.frame(&mut app, Vec::new());
     assert!(window.has("Checking Tailscale…"), "{}", window.text);
-    window.until_shows(&mut app, "Cloud agents can reach this Mac");
+    window.until_shows(
+        &mut app,
+        concat!("Cloud agents can reach this ", crate::computer!()),
+    );
     while window.has("Checking Tailscale…") {
         window.frame(&mut app, Vec::new());
         std::thread::sleep(Duration::from_millis(20));
@@ -644,7 +647,10 @@ fn the_connect_card_warns_about_a_local_redirect() {
         crate::questions::envelope::LOCAL_CONNECT_WARNING,
         "Deny unless you just added Apassy to Grok Bot.",
         // The two sentences of the warning line keep their period between them.
-        "Returns to a program on a computer (localhost). A program on this Mac",
+        concat!(
+            "Returns to a program on a computer (localhost). A program on this ",
+            crate::computer!()
+        ),
     ] {
         assert!(window.has(expected), "{expected}: {}", window.text);
     }

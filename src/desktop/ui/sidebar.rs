@@ -84,9 +84,9 @@ pub(super) fn navigate(app: &mut DesktopApp, place: Place) {
 /// sidebar shows.
 fn toggle_button(app: &mut DesktopApp, ui: &mut egui::Ui, rect: Rect, narrow: bool, shown: bool) {
     let name = if shown {
-        "Hide sidebar  ⌃⌘S"
+        concat!("Hide sidebar  ", crate::sidebar_shortcut!())
     } else {
-        "Show sidebar  ⌃⌘S"
+        concat!("Show sidebar  ", crate::sidebar_shortcut!())
     };
     let clicked = ui
         .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
@@ -253,7 +253,10 @@ fn rail_content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     if kit::rail_row(
         ui,
         &Lead::Icon(Icon::Key),
-        &format!("All credentials, {count}  ⌘1"),
+        &format!(
+            concat!("All credentials, {count}  ", crate::shortcut!("1")),
+            count = count
+        ),
         selected,
         None,
     )
@@ -321,7 +324,7 @@ fn personal_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             disclosure: None,
         },
     );
-    response.on_hover_text("All credentials  ⌘1");
+    response.on_hover_text(concat!("All credentials  ", crate::shortcut!("1")));
     if click == SidebarClick::Select {
         navigate(app, Place::CREDENTIALS);
     }
@@ -532,14 +535,21 @@ fn bouncer_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, r
     let (count, agents_badge) = agents_count(app);
     let mut chosen = None;
     let rows = [
-        (Place::Overview, Icon::Gauge, "Overview", None, None, "⌘2"),
+        (
+            Place::Overview,
+            Icon::Gauge,
+            "Overview",
+            None,
+            None,
+            concat!(crate::shortcut!("2")),
+        ),
         (
             Place::Decisions,
             Icon::CheckCircle,
             "Decisions",
             None,
             Some(badge),
-            "⌘3",
+            concat!(crate::shortcut!("3")),
         ),
         (
             Place::Agents,
@@ -547,9 +557,16 @@ fn bouncer_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, r
             "Agents",
             count.filter(|count| *count > 0),
             agents_badge,
-            "⌘4",
+            concat!(crate::shortcut!("4")),
         ),
-        (Place::Logs, Icon::Lines, "Logs", None, None, "⌘5"),
+        (
+            Place::Logs,
+            Icon::Lines,
+            "Logs",
+            None,
+            None,
+            concat!(crate::shortcut!("5")),
+        ),
     ];
     if !rail {
         kit::sidebar_section(ui, "Bouncer", None);
@@ -593,7 +610,14 @@ fn bouncer_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, r
 /// The Settings button: selected while Settings shows. A click shows Settings.
 fn settings_button(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let selected = app.place == Place::Settings;
-    if kit::plain_icon_toggle(ui, Icon::Gearshape, "Settings  ⌘,", selected).clicked() {
+    if kit::plain_icon_toggle(
+        ui,
+        Icon::Gearshape,
+        concat!("Settings  ", crate::shortcut!(",")),
+        selected,
+    )
+    .clicked()
+    {
         super::settings_view::show(app);
     }
 }
@@ -605,7 +629,13 @@ fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
     if rail {
         settings_button(app, ui);
         #[cfg(feature = "vault")]
-        if kit::plain_icon_button(ui, Icon::Lock, "Lock the vault  ⌘L").clicked() {
+        if kit::plain_icon_button(
+            ui,
+            Icon::Lock,
+            concat!("Lock the vault  ", crate::shortcut!("L")),
+        )
+        .clicked()
+        {
             let ctx = ui.ctx().clone();
             app.lock_vault(Some(&ctx));
         }

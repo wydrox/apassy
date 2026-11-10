@@ -243,6 +243,35 @@ pub struct DesktopApp {
     native_menu: Option<native_menu::NativeMenu>,
 }
 
+/// The key of the quit mark in the memory of egui.
+#[cfg(target_os = "linux")]
+fn quit_id() -> eframe::egui::Id {
+    eframe::egui::Id::new("apassy-quit-requested")
+}
+
+/// Linux, Ctrl+Q: close the window as a quit. [`DesktopApp::keep_open_for_node`] then
+/// lets the close through, as the Mac's Quit Apassy (⌘Q) does.
+#[cfg(target_os = "linux")]
+pub(crate) fn request_quit(ctx: &eframe::egui::Context) {
+    ctx.data_mut(|data| data.insert_temp(quit_id(), true));
+    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+}
+
+/// True after [`request_quit`]. Always false on macOS: its menu quits without a close
+/// request.
+#[cfg(feature = "vault")]
+pub(crate) fn quit_requested(ctx: &eframe::egui::Context) -> bool {
+    #[cfg(target_os = "linux")]
+    return ctx
+        .data(|data| data.get_temp::<bool>(quit_id()))
+        .unwrap_or(false);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = ctx;
+        false
+    }
+}
+
 /// Broker state for the Agents view.
 #[cfg(feature = "vault")]
 #[derive(Debug, Default)]

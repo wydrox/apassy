@@ -73,7 +73,11 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
                 Level::Problem,
                 "Apassy window",
                 message,
-                Some("Check the owner socket path. If Apassy is closed, open Apassy.app."),
+                Some(concat!(
+                    "Check the owner socket path. If Apassy is closed, open ",
+                    crate::app_package!(),
+                    "."
+                )),
             );
             None
         }
@@ -96,7 +100,7 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
                     "version {} answers, but this apassy is {ours}",
                     status.version
                 ),
-                Some("Use the apassy program inside the running Apassy.app."),
+                Some(concat!("Use ", crate::running_app_cli!(), ".")),
             );
         }
         match status.vault {
@@ -141,20 +145,29 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
                 Some("Quit and open Apassy again. Settings > Agents > Broker and bouncer shows the reason."),
             );
         }
-        report.add(
-            if status.touch_id {
-                Level::Ok
-            } else {
-                Level::Note
-            },
-            "Touch ID",
-            if status.touch_id {
-                "available for owner checks"
-            } else {
-                "not available: owner checks ask for the passphrase"
-            },
-            None,
-        );
+        if cfg!(target_os = "linux") {
+            report.add(
+                Level::Note,
+                "Owner check",
+                super::commands::LINUX_OWNER_CHECK,
+                None,
+            );
+        } else {
+            report.add(
+                if status.touch_id {
+                    Level::Ok
+                } else {
+                    Level::Note
+                },
+                "Touch ID",
+                if status.touch_id {
+                    "available for owner checks"
+                } else {
+                    "not available: owner checks ask for the passphrase"
+                },
+                None,
+            );
+        }
         match (status.session, cli.has_session()) {
             (true, _) => report.add(Level::Ok, "Session", "open", None),
             (false, true) => report.add(
@@ -205,7 +218,7 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
                 Level::Problem,
                 "Program",
                 format!("{name} is not next to apassy"),
-                Some("Reinstall Apassy.app. For a source build, build all programs with cargo build --locked --features desktop,vault --bins."),
+                Some(concat!("Reinstall ", crate::app_package!(), ". For a source build, build all programs with cargo build --locked --features desktop,vault --bins.")),
             ),
         }
     }

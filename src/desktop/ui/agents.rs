@@ -803,9 +803,21 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
                 .filter(|item| !archived.contains_key(&item.id))
                 .count();
             if count == 1 {
-                "The vault is open. 1 active credential is available on this Mac.".to_owned()
+                concat!(
+                    "The vault is open. 1 active credential is available on this ",
+                    crate::computer!(),
+                    "."
+                )
+                .to_owned()
             } else {
-                format!("The vault is open. {count} active credentials are available on this Mac.")
+                format!(
+                    concat!(
+                        "The vault is open. {count} active credentials are available on this ",
+                        crate::computer!(),
+                        "."
+                    ),
+                    count = count
+                )
             }
         }
         _ => "The vault is open. Check Credentials for the available items.".to_owned(),
@@ -813,34 +825,43 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
     let mut host = None;
     let mut skip = false;
     let mut cli = app.ui.is_expanded("next-step-cli");
-    kit::section(ui, Some("Use this vault on this Mac"), Some(&intro), |s| {
-        s.row(|ui| {
-            kit::note(
-                ui,
-                "Agents stay on this Mac. Connect them here before an agent can use a credential.",
-            );
-        });
-        s.row(|ui| {
-            ui.horizontal_wrapped(|ui| {
-                if kit::button(ui, "Claude Code", Style::Bordered).clicked() {
-                    host = Some(0);
-                }
-                if kit::button(ui, "Codex", Style::Bordered).clicked() {
-                    host = Some(1);
-                }
-                if kit::button(ui, "CLI", Style::Bordered).clicked() {
-                    cli = !cli;
-                }
-                skip = kit::button(ui, "Skip", Style::Link).clicked();
+    kit::section(
+        ui,
+        Some(concat!("Use this vault on this ", crate::computer!())),
+        Some(&intro),
+        |s| {
+            s.row(|ui| {
+                kit::note(
+                    ui,
+                    concat!(
+                        "Agents stay on this ",
+                        crate::computer!(),
+                        ". Connect them here before an agent can use a credential."
+                    ),
+                );
             });
-        });
-        s.row(|ui| {
-            kit::note(
-                ui,
-                "You can do these steps later in Agents or Settings > Agents > Command line.",
-            );
-        });
-    });
+            s.row(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if kit::button(ui, "Claude Code", Style::Bordered).clicked() {
+                        host = Some(0);
+                    }
+                    if kit::button(ui, "Codex", Style::Bordered).clicked() {
+                        host = Some(1);
+                    }
+                    if kit::button(ui, "CLI", Style::Bordered).clicked() {
+                        cli = !cli;
+                    }
+                    skip = kit::button(ui, "Skip", Style::Link).clicked();
+                });
+            });
+            s.row(|ui| {
+                kit::note(
+                    ui,
+                    "You can do these steps later in Agents or Settings > Agents > Command line.",
+                );
+            });
+        },
+    );
     app.ui.set_expanded("next-step-cli", cli);
     if cli {
         connection_progress(app, ui, true);

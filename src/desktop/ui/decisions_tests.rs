@@ -961,7 +961,7 @@ fn the_agent_page_saves_the_note_and_removes_an_exception_after_the_check() {
     let (text, _) = frames(&mut app, WIDE, 3);
     for expected in [
         "CI on GitHub",
-        "This Mac · connected",
+        concat!("This ", crate::computer!(), " · connected"),
         // Four tiles, as in the mockup (frame 4).
         "Runs",
         "Asked you",
@@ -2053,7 +2053,12 @@ fn a_question_of_another_mac_waits_from_that_mac_and_allow_needs_the_owner_check
     assert!(app.owner.check.is_none(), "no owner check");
     app.settle_remote_answers_for_test();
     assert_eq!(
-        app.status_text, "This question no longer waits on this Mac.",
+        app.status_text,
+        concat!(
+            "This question no longer waits on this ",
+            crate::computer!(),
+            "."
+        ),
         "{}",
         app.status_text
     );

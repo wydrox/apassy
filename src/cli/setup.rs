@@ -18,7 +18,7 @@ use super::terminal;
 use super::{Cli, Failure, Outcome};
 use crate::owner::wire::{Command, Data, SecretText};
 
-pub const HELP: &str = "\
+pub const HELP: &str = concat!("\
 apassy setup claude|codex [--name NAME] [--token-stdin] [--hook PATH] [--write] [--repair] [--agent-id ID]
 
 Prepare an agent host for Apassy:
@@ -35,9 +35,9 @@ Prepare an agent host for Apassy:
        codex    [mcp_servers.apassy] in ~/.codex/config.toml, and the hook in
                 ~/.codex/hooks.json. Then trust the hook in Codex with /hooks.
 
-Apassy.app includes the MCP server, prompt hook, and sandbox.
+", crate::app_includes!(), "
 Use --hook PATH only to select a different prompt hook.
-Agents, tokens, exceptions, and your answers stay on this Mac. A synced vault does not
+Agents, tokens, exceptions, and your answers stay on this ", crate::computer!(), ". A synced vault does not
 copy them.
 --repair --write restores missing managed files using the saved token; it never registers
 an agent or changes catalog access. --agent-id ID records an explicit agent identity.
@@ -48,11 +48,8 @@ This command writes configuration. It does not check the host connection or a fi
 
 Then there is nothing to give: the agent lists your credentials without values and uses
 them, and the bouncer decides each use. When it asks you, the question is in Decisions.
-Start the host in the Apassy sandbox (see docs/operations/isolation.md):
-  claude: MCP_TOOL_TIMEOUT=660000 apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
-  codex:  apassy-sandbox -- codex -c sandbox_mode=danger-full-access
-Host approval prompts stay active.
-";
+", crate::setup_start_help!(), "Host approval prompts stay active.
+");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Host {
@@ -266,8 +263,12 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
     let mcp = sibling("apassy-mcp")
         .ok_or_else(|| {
             Failure::Other(
-                "apassy-mcp is not next to this program. Use the apassy program inside Apassy.app."
-                    .to_owned(),
+                concat!(
+                    "apassy-mcp is not next to this program. Use ",
+                    crate::app_cli!(),
+                    "."
+                )
+                .to_owned(),
             )
         })
         .map_err(|failure| at_stage(failure, "missing_mcp"))?;
@@ -286,10 +287,17 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
         None => sibling("apassy-hook"),
     };
     if write && hook.is_none() {
-        return Err(at_stage(Failure::Other(
-            "The prompt hook is missing. Reinstall the complete Apassy.app package, then try setup again."
+        return Err(at_stage(
+            Failure::Other(
+                concat!(
+                    "The prompt hook is missing. Reinstall the complete ",
+                    crate::app_package!(),
+                    " package, then try setup again."
+                )
                 .to_owned(),
-        ), "missing_hook"));
+            ),
+            "missing_hook",
+        ));
     }
     let dir = home()?.join(".config").join("apassy");
     let mcp_wrapper = dir.join(format!("apassy-mcp-{}.sh", host.id()));
@@ -481,9 +489,11 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
             "Host configuration is shown above"
         }
     );
-    eprintln!(
-        "Keep Apassy.app open and the vault unlocked. Restart the host. Check Apassy with /mcp."
-    );
+    eprintln!(concat!(
+        "Keep ",
+        crate::app_package!(),
+        " open and the vault unlocked. Restart the host. Check Apassy with /mcp."
+    ));
     if host == Host::Codex {
         eprintln!("Use /hooks to trust the Apassy hook before the first request.");
     }

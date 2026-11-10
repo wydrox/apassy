@@ -1220,7 +1220,16 @@ impl OwnerRequest {
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
             Self::BrowserDebugging { identity, scope, request_label, .. } => format!("{} asks to {}. Request: {}. Other programs can control all its profiles.", identity.description(), match scope { Some(crate::browser::bypass::BypassScope::Once) => "allow only the exact refused passkey or code request once", Some(crate::browser::bypass::BypassScope::FiveMinutes) => "allow owner passkeys and codes for 5 minutes across this instance", None => "trust this instance for agent fills with remote debugging" }, request_label),
             Self::ChangeOwnerFrequency { new, .. } if cfg!(target_os = "linux") => format!("Change how often Apassy asks for the owner check to {} on this computer?", new.label()),
-            Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac?", new.label()),
+            Self::ChangeOwnerFrequency { new, .. } => format!(
+                concat!(
+                    "Change how often Apassy asks for ",
+                    crate::touch_id!(),
+                    " to {} on this ",
+                    crate::computer!(),
+                    "?"
+                ),
+                new.label()
+            ),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
             Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line.", if *copy { "Copy" } else { "Show" }),
             Self::ShowCode { field, .. } => format!(
@@ -1571,8 +1580,8 @@ impl OwnerRequest {
                     )
                 } else {
                     format!(
-                        "Add the Mac \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them after Touch ID on it. It gets no vault and no secret value through the relay."
-                    )
+                        concat!("Add the ", crate::computer!(), " \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them after ", crate::touch_id_on_it!(), ". It gets no vault and no secret value through the relay.")
+                    , name = name)
                 }
             }
             Self::EnableRelayQuestions {
@@ -1593,10 +1602,10 @@ impl OwnerRequest {
                         answer.run().map_or("the agent", |run| run.agent.as_str()),
                         asker.as_str(),
                     ),
-                    _ => ("the agent", "another Mac"),
+                    _ => ("the agent", concat!("another ", crate::computer!())),
                 };
                 format!(
-                    "Answer \"{}\" to the question of {} on {}. Apassy signs the answer with the key of this Mac and sends it, end-to-end encrypted, through the relay.",
+                    concat!("Answer \"{}\" to the question of {} on {}. Apassy signs the answer with the key of this ", crate::computer!(), " and sends it, end-to-end encrypted, through the relay."),
                     choice_words(choice),
                     page_text(agent),
                     page_text(asker)
@@ -1614,7 +1623,7 @@ impl OwnerRequest {
                 this_device: true,
                 ..
             } => format!(
-                "Forget this Mac (\"{}\") in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this Mac.",
+                concat!("Forget this Mac (\"{}\") in your Apassy Connect account? It leaves every vault store of the account and signs out. Your vaults stay on this ", crate::computer!(), "."),
                 page_text(device_name)
             ),
             Self::RevokeConnectDevice { device_name, .. } => format!(
@@ -1648,10 +1657,10 @@ impl OwnerRequest {
                     "Change your Apassy Connect plan to {quantity} people or seats? Stripe charges the difference."
                 ),
             },
-            Self::SetTailnetRoute { on: true } => "Make this Mac reachable on your tailnet. Your iPhone and Macs then reach it directly over Tailscale. Only devices on your tailnet can connect, and each signs in with its own key.".to_owned(),
-            Self::SetTailnetRoute { on: false } => "Stop the tailnet route of this Mac. Approvals then go through Apassy relay.".to_owned(),
+            Self::SetTailnetRoute { on: true } => concat!("Make this ", crate::computer!(), " reachable on your tailnet. Your iPhone and ", crate::computers!(), " then reach it directly over Tailscale. Only devices on your tailnet can connect, and each signs in with its own key.").to_owned(),
+            Self::SetTailnetRoute { on: false } => concat!("Stop the tailnet route of this ", crate::computer!(), ". Approvals then go through Apassy relay.").to_owned(),
             Self::RevokeNodeDevice(request) if request.linux_vault.is_some() => format!(
-                "Revoke \"{}\". This Mac stops syncing through it. Its copy stays there.",
+                concat!("Revoke \"{}\". This ", crate::computer!(), " stops syncing through it. Its copy stays there."),
                 page_text(&request.device_name)
             ),
             Self::RevokeNodeDevice(request) => format!(
@@ -1669,7 +1678,7 @@ impl OwnerRequest {
                 let local = redirect_host.is_empty()
                     || crate::questions::envelope::is_local_redirect_host(redirect_host);
                 format!(
-                    "Connect {} to this Mac as a new agent? {}.{} Allow only if the page in your browser shows this code: {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you.",
+                    concat!("Connect {} to this ", crate::computer!(), " as a new agent? {}.{} Allow only if the page in your browser shows this code: {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you."),
                     page_text(client_name),
                     page_text(&crate::questions::envelope::connect_returns_to(redirect_host)),
                     if local {
@@ -1684,7 +1693,7 @@ impl OwnerRequest {
                 "Add the remote agent {} and issue its token to the command line? The token works for {days} days. The agent sees no credential until you choose some, and every run asks you.",
                 page_text(name)
             ),
-            Self::TurnOnRemoteAccess => "Turn on remote access? Remote agents can then reach this Mac through Tailscale Funnel while it is awake and the vault is unlocked. The name of this Mac appears in public certificate logs. Every remote run still asks you.".to_owned(),
+            Self::TurnOnRemoteAccess => concat!("Turn on remote access? Remote agents can then reach this ", crate::computer!(), " through Tailscale Funnel while it is awake and the vault is unlocked. The name of this ", crate::computer!(), " appears in public certificate logs. Every remote run still asks you.").to_owned(),
             Self::ChooseAgentItems {
                 agent_name, add, ..
             } => format!(
@@ -1705,12 +1714,23 @@ impl OwnerRequest {
 fn hosting_words(change: &crate::vault::BouncerHostChange) -> String {
     use crate::vault::BouncerHostKind;
     let url = page_text(&change.normalized_url());
-    let sent = "Each bouncer request goes there: the user request, purpose, and shell command, with item values masked and project and home paths shortened. The bouncer heads trained on your decisions go there too: numbers, no text. No secret value, the vault, or a full path of your project or home folder leaves this Mac, and the bouncer gate still decides on this Mac.";
+    let sent = concat!(
+        "Each bouncer request goes there: the user request, purpose, and shell command, with item values masked and project and home paths shortened. The bouncer heads trained on your decisions go there too: numbers, no text. No secret value, the vault, or a full path of your project or home folder leaves this ",
+        crate::computer!(),
+        ", and the bouncer gate still decides on this ",
+        crate::computer!(),
+        "."
+    );
     let trust = crate::desktop::brain_hosting_ui::TRUST_WARNING;
     match change.kind {
-        BouncerHostKind::ThisMac => {
-            "Run the bouncer brain on this Mac again. Bouncer requests stay on this Mac.".to_owned()
-        }
+        BouncerHostKind::ThisMac => concat!(
+            "Run the bouncer brain on this ",
+            crate::computer!(),
+            " again. Bouncer requests stay on this ",
+            crate::computer!(),
+            "."
+        )
+        .to_owned(),
         BouncerHostKind::OwnServer => {
             format!("Use the bouncer brain on your server at {url}. {sent} {trust}")
         }
@@ -1759,10 +1779,14 @@ fn training_words(change: &crate::vault::BouncerHostChange) -> String {
     let url = page_text(&change.normalized_url());
     let sent = "For each training, the training examples go there: your past decisions with their requests, without secret values. A new head set always starts in shadow mode, and only you promote it.";
     match change.kind {
-        BouncerHostKind::ThisMac => {
-            "Train the bouncer brain on this Mac again. Training examples stay on this Mac."
-                .to_owned()
-        }
+        BouncerHostKind::ThisMac => concat!(
+            "Train the bouncer brain on this ",
+            crate::computer!(),
+            " again. Training examples stay on this ",
+            crate::computer!(),
+            "."
+        )
+        .to_owned(),
         BouncerHostKind::OwnServer => {
             format!("Train the bouncer brain on your server at {url}. {sent}")
         }
@@ -2323,7 +2347,7 @@ impl DesktopApp {
                 } else {
                     self.browser.trusted_instances = None;
                     let Some(epoch) = session.epoch() else { return; };
-                    match crate::browser::trust::add(&identity, proof, epoch) { Ok(()) => self.set_ok("Instance trusted on this Mac."), Err(e) => self.set_err(e) }
+                    match crate::browser::trust::add(&identity, proof, epoch) { Ok(()) => self.set_ok(concat!("Instance trusted on this ", crate::computer!(), ".")), Err(e) => self.set_err(e) }
                 }
             }
             OwnerRequest::BackupVault { path } => self.complete_fresh_backup(&path, proof),
@@ -3669,13 +3693,18 @@ mod connect_prompt_tests {
             "{text}"
         );
         assert!(
-            text.starts_with(
-                "Connect Grok Bot to this Mac as a new agent? Returns to grok.example. Allow only"
-            ),
+            text.starts_with(concat!(
+                "Connect Grok Bot to this ",
+                crate::computer!(),
+                " as a new agent? Returns to grok.example. Allow only"
+            )),
             "{text}"
         );
         assert!(!text.contains("page of the agent"), "{text}");
-        assert!(!text.contains("A program on this Mac"), "{text}");
+        assert!(
+            !text.contains(concat!("A program on this ", crate::computer!())),
+            "{text}"
+        );
     }
 
     /// Review 0.5.16: the node's listener is on the loopback, so any program of this Mac
@@ -3691,7 +3720,11 @@ mod connect_prompt_tests {
             };
             let text = request.describe();
             assert!(
-                text.contains("A program on this Mac can start this request."),
+                text.contains(concat!(
+                    "A program on this ",
+                    crate::computer!(),
+                    " can start this request."
+                )),
                 "{host}: {text}"
             );
             assert!(text.contains("K7Q-4MD"), "{text}");

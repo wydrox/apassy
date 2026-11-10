@@ -207,7 +207,12 @@ impl FunnelError {
                 "Port {port} of Tailscale Serve already serves {target}. Apassy does not change it. Remove that handler."
             ),
             Self::HttpsPublic => format!(
-                "Port {NEVER_PORT} of this Mac is public through Tailscale Funnel. Apassy adds no route while it is: check `tailscale serve status`."
+                concat!(
+                    "Port {NEVER_PORT} of this ",
+                    crate::computer!(),
+                    " is public through Tailscale Funnel. Apassy adds no route while it is: check `tailscale serve status`."
+                ),
+                NEVER_PORT = NEVER_PORT
             ),
             Self::Policy { message, link } => match link {
                 Some(link) => format!(

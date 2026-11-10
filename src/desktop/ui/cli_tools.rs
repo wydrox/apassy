@@ -47,14 +47,24 @@ fn install_in(source: &Path, destination: &Path) -> Result<(), String> {
         let target = source.join(name);
         if !target.is_file() {
             return Err(format!(
-                "The app package is missing {name}. Reinstall the complete Apassy.app package."
+                concat!(
+                    "The app package is missing {}. Reinstall the complete ",
+                    crate::app_package!(),
+                    " package."
+                ),
+                name
             ));
         }
         let metadata = std::fs::metadata(&target)
             .map_err(|e| format!("Cannot check {}: {e}", target.display()))?;
         if metadata.permissions().mode() & 0o111 == 0 {
             return Err(format!(
-                "The app tool {name} is not executable. Reinstall the complete Apassy.app package."
+                concat!(
+                    "The app tool {} is not executable. Reinstall the complete ",
+                    crate::app_package!(),
+                    " package."
+                ),
+                name
             ));
         }
         let link = destination.join(name);

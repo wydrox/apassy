@@ -520,7 +520,13 @@ pub(super) fn sidebar_switcher(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         ui.separator();
         if ui
-            .selectable_label(false, format!("Lock “{name}”   ⌘L"))
+            .selectable_label(
+                false,
+                format!(
+                    concat!("Lock “{name}”   ", crate::shortcut!("L")),
+                    name = name
+                ),
+            )
             .clicked()
         {
             lock = true;
@@ -686,7 +692,7 @@ pub(super) fn short_location(path: &Path, home: Option<&Path>, data_dir: &Path) 
         return shown_path(path);
     };
     if folder == data_dir {
-        return "On this Mac".to_owned();
+        return concat!("On this ", crate::computer!()).to_owned();
     }
     let names = |rest: &Path| -> Vec<String> {
         rest.components()
@@ -921,7 +927,7 @@ fn rename_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) -
             |_| {},
             |ui| {
                 save |= kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text("⌘S")
+                    .on_hover_text(concat!(crate::shortcut!("S")))
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },

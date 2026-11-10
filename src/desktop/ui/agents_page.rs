@@ -82,7 +82,12 @@ impl AccessProblem {
             Self::NotConnected => "Tailscale is not connected.".to_owned(),
             Self::Policy { .. } => "Your tailnet policy blocks Funnel.".to_owned(),
             Self::PortTaken { port, .. } => format!("Another app uses port {port}."),
-            Self::HttpsPublic => "Port 443 of this Mac is public through Funnel.".to_owned(),
+            Self::HttpsPublic => concat!(
+                "Port 443 of this ",
+                crate::computer!(),
+                " is public through Funnel."
+            )
+            .to_owned(),
             Self::Failed(message) => bouncer::clip(message),
         }
     }
@@ -169,12 +174,16 @@ impl AccessView {
 /// The ⓘ of remote access (frame 2).
 const ACCESS_HELP: [&str; 4] = [
     "Tailscale Funnel opens only the MCP endpoint and the proxy.",
-    "Credential values stay on this Mac.",
+    concat!("Credential values stay on this ", crate::computer!(), "."),
     "Give a cloud agent the address. It asks to connect; you approve it in Decisions.",
     if cfg!(target_os = "linux") {
         "Switching on needs the passphrase or system authentication. Keep this computer unlocked and awake."
     } else {
-        "Switching on needs Touch ID. Keep this Mac unlocked and awake."
+        concat!(
+            "Switching on needs Touch ID. Keep this ",
+            crate::computer!(),
+            " unlocked and awake."
+        )
     },
 ];
 
@@ -602,8 +611,11 @@ fn access_block(ui: &mut Ui, access: &AccessView, has_remote: bool) -> Option<Ac
                                     .color(kit::palette().label),
                             );
                             ui.label(
-                                kit::text("Cloud agents can reach this Mac", Font::Callout)
-                                    .color(kit::palette().secondary),
+                                kit::text(
+                                    concat!("Cloud agents can reach this ", crate::computer!()),
+                                    Font::Callout,
+                                )
+                                .color(kit::palette().secondary),
                             );
                         });
                         kit::help_button(ui, "Remote Access", &ACCESS_HELP);
@@ -727,7 +739,7 @@ fn section_empty_block(ui: &mut Ui, empty: &SectionEmpty) -> Option<Action> {
         SectionEmpty::OtherMac { name, link } => {
             let line = fit_line(
                 format!("Connect agents on {name}."),
-                "Connect agents on that Mac.",
+                concat!("Connect agents on that ", crate::computer!(), "."),
             );
             (kit::empty_block(
                 ui,
@@ -742,7 +754,11 @@ fn section_empty_block(ui: &mut Ui, empty: &SectionEmpty) -> Option<Action> {
             kit::empty_block(
                 ui,
                 "No report yet",
-                Some("Turn on Show agents on my other devices on that Mac."),
+                Some(concat!(
+                    "Turn on Show agents on my other devices on that ",
+                    crate::computer!(),
+                    "."
+                )),
                 None,
                 None,
             );
@@ -753,7 +769,7 @@ fn section_empty_block(ui: &mut Ui, empty: &SectionEmpty) -> Option<Action> {
                     ui,
                     "No report yet",
                     &[
-                        "On that Mac, open Apassy.",
+                        concat!("On that ", crate::computer!(), ", open Apassy."),
                         "Unlock the vault.",
                         "Turn on Settings > Devices > Relay > \"Show agents on my other devices\".",
                     ],
@@ -928,7 +944,12 @@ impl AgentPage {
         }
         let env = data.environment(&agent.env());
         let env_name = env.map_or_else(
-            || line.map_or_else(|| "This Mac".to_owned(), |line| line.env_name.clone()),
+            || {
+                line.map_or_else(
+                    || concat!("This ", crate::computer!()).to_owned(),
+                    |line| line.env_name.clone(),
+                )
+            },
             |env| env.name.clone(),
         );
         let name = local.map_or_else(
@@ -1116,7 +1137,7 @@ pub(crate) fn draw_agent(ui: &mut Ui, page: &AgentPage, now: u64) -> Option<Acti
             Some(if page.local_id().is_some() {
                 "Connect it again to give it access."
             } else {
-                "Connect it again on its Mac."
+                concat!("Connect it again on its ", crate::computer!(), ".")
             }),
             |_| {},
         );

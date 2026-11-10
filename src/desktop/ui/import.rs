@@ -151,12 +151,22 @@ impl ImportState {
         let Some(file) = &report.file else {
             return;
         };
-        report.deleted = Some(std::fs::remove_file(file).map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => "The file is already gone.".to_owned(),
-            std::io::ErrorKind::PermissionDenied => {
-                "Apassy may not delete the file. Delete it in Finder.".to_owned()
+        report.deleted = Some(std::fs::remove_file(file).map_err(|err| {
+            match err.kind() {
+                std::io::ErrorKind::NotFound => "The file is already gone.".to_owned(),
+                std::io::ErrorKind::PermissionDenied => concat!(
+                    "Apassy may not delete the file. Delete it ",
+                    crate::in_file_manager!(),
+                    "."
+                )
+                .to_owned(),
+                _ => concat!(
+                    "Apassy could not delete the file. Delete it ",
+                    crate::in_file_manager!(),
+                    "."
+                )
+                .to_owned(),
             }
-            _ => "Apassy could not delete the file. Delete it in Finder.".to_owned(),
         }));
     }
 }
@@ -303,7 +313,7 @@ fn file_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             |ui| {
                 ui.add_enabled_ui(!app.import.path.trim().is_empty(), |ui| {
                     read |= kit::button(ui, "Read", Style::Prominent)
-                        .on_hover_text("⌘S")
+                        .on_hover_text(concat!(crate::shortcut!("S")))
                         .clicked();
                 });
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
@@ -367,7 +377,7 @@ fn preview_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                         &format!("Import {}", count(selected, "credential", "credentials")),
                         Style::Prominent,
                     )
-                    .on_hover_text("⌘S")
+                    .on_hover_text(concat!(crate::shortcut!("S")))
                     .clicked();
                 });
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();

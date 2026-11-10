@@ -1117,7 +1117,10 @@ fn list_rows(open: Open, this_mac: &str) -> Vec<Group<ListRow>> {
             mark: Mark::Agent(r.agent_name.clone()),
             remote: false,
             title: r.item_name,
-            subtitle: format!("{} · Mac review", r.agent_name),
+            subtitle: format!(
+                concat!("{} · ", crate::computer_cap!(), " review"),
+                r.agent_name
+            ),
             production: false,
             left: None,
         })
@@ -1323,7 +1326,10 @@ fn this_mac_name(app: &DesktopApp) -> String {
         .bouncer
         .data
         .environment(&super::bouncer::DeviceScope::ThisMac)
-        .map_or_else(|| "This Mac".to_owned(), |env| env.name.clone())
+        .map_or_else(
+            || concat!("This ", crate::computer!()).to_owned(),
+            |env| env.name.clone(),
+        )
 }
 
 // ---- The detail column. ----
@@ -1371,9 +1377,11 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
                                     app.ui.decisions.selected = Some(Key::Access(id));
                                 }
                             }
-                            _ => {
-                                app.set_err("The note could not be dispatched. Review on this Mac.")
-                            }
+                            _ => app.set_err(concat!(
+                                "The note could not be dispatched. Review on this ",
+                                crate::computer!(),
+                                "."
+                            )),
                         }
                     }
                 });
@@ -3173,33 +3181,51 @@ fn access_detail(
                 .cloned()
                 .or_else(|| {
                     view.problem.map(|p| {
-                        format!("Review on this Mac. Remote publication is unavailable: {p}")
+                        format!(
+                            concat!(
+                                "Review on this ",
+                                crate::computer!(),
+                                ". Remote publication is unavailable: {p}"
+                            ),
+                            p = p
+                        )
                     })
                 })
                 .or_else(|| {
-                    (!view.on)
-                        .then(|| "Review on this Mac. The relay connection is not ready.".into())
+                    (!view.on).then(|| {
+                        concat!(
+                            "Review on this ",
+                            crate::computer!(),
+                            ". The relay connection is not ready."
+                        )
+                        .into()
+                    })
                 })
         });
         if let Some(note) = export_note {
             ui.label(note);
         }
         if c.team_id == "local" {
-            ui.label(
-                "Review on this Mac. Connect an iPhone before creating a request to send there.",
-            );
+            ui.label(concat!(
+                "Review on this ",
+                crate::computer!(),
+                ". Connect an iPhone before creating a request to send there."
+            ));
         }
         ui.heading(format!(
             "{} (id {}) asks for {}",
             c.agent.name, c.agent.id, c.item.name
         ));
         ui.label(format!("{} · Asked on {}", c.vault_name, c.asker.name));
-        ui.strong("Mac-verified fields");
+        ui.strong(concat!(crate::computer_cap!(), "-verified fields"));
         ui.label(format!(
             "Agent id {} · Item {} / {} · revision {}",
             c.agent.id, c.item.local_id, c.item.uuid, c.item.revision
         ));
-        ui.label(format!("Mac {} · Vault {}", c.asker.device, c.vault_id));
+        ui.label(format!(
+            concat!(crate::computer_cap!(), " {} · Vault {}"),
+            c.asker.device, c.vault_id
+        ));
         if c.agent.host.is_none() {
             ui.label("Agent host: unknown");
         }
@@ -3236,7 +3262,11 @@ fn access_detail(
             "Folder: {}",
             crate::questions::access_request::display_text(&c.cwd)
         ));
-        ui.strong("Requested scope; checked against Mac policy");
+        ui.strong(concat!(
+            "Requested scope; checked against ",
+            crate::computer!(),
+            " policy"
+        ));
         ui.label(format!(
             "Action: {}",
             c.action.map_or("Incomplete", |a| match a {
@@ -3305,7 +3335,10 @@ fn access_detail(
             }
         }
         if ui
-            .add_enabled(live, egui::Button::new("Grant access on this Mac…"))
+            .add_enabled(
+                live,
+                egui::Button::new(concat!("Grant access on this ", crate::computer!(), "…")),
+            )
             .clicked()
         {
             app.ask_owner(
@@ -3473,7 +3506,11 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
             }
             ui.ctx().request_repaint_after(Duration::from_secs(1));
             ui.label(kit::medium(
-                format!("{} · on this Mac · 1 of {count}", run.agent),
+                format!(
+                    concat!("{} · on this ", crate::computer!(), " · 1 of {count}"),
+                    run.agent,
+                    count = count
+                ),
                 Font::Body,
             ));
             ui.strong(question_headline(&run.question));

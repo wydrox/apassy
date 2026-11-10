@@ -562,7 +562,9 @@ fn delivery_words(kind: crate::vault::ShortLivedKind) -> &'static str {
 /// shows it.
 fn host_words(kind: crate::vault::BouncerHostKind, url: &str) -> String {
     match kind {
-        crate::vault::BouncerHostKind::ThisMac => "on this Mac".to_owned(),
+        crate::vault::BouncerHostKind::ThisMac => {
+            concat!("on this ", crate::computer!()).to_owned()
+        }
         crate::vault::BouncerHostKind::OwnServer => format!("on your server {}", host_name(url)),
         crate::vault::BouncerHostKind::Connect => format!("at Apassy Connect {}", host_name(url)),
     }
@@ -725,7 +727,9 @@ impl OwnerAction {
             Self::DeleteVaultStore { .. } => "Delete a relay copy at Apassy Connect",
             Self::AddStoreDevice { .. } => "Add a device to a relay copy",
             Self::ChangeConnectGroup { .. } => "Change your family or team",
-            Self::SetTailnetRoute { on: true } => "Reach this Mac on your tailnet",
+            Self::SetTailnetRoute { on: true } => {
+                concat!("Reach this ", crate::computer!(), " on your tailnet")
+            }
             Self::SetTailnetRoute { on: false } => "Stop the tailnet route",
             Self::RevokeNodeDevice { .. } => "Revoke a device",
             _ => "Confirm with Touch ID",
@@ -960,12 +964,20 @@ impl OwnerAction {
                     format!("change your Apassy Connect plan to {quantity} people or seats")
                 }
             },
-            Self::SetTailnetRoute { on: true } => {
-                "let your iPhone and Macs reach this Mac directly on your tailnet".to_owned()
-            }
-            Self::SetTailnetRoute { on: false } => {
-                "stop the tailnet route of this Mac; approvals go through Apassy relay".to_owned()
-            }
+            Self::SetTailnetRoute { on: true } => concat!(
+                "let your iPhone and ",
+                crate::computers!(),
+                " reach this ",
+                crate::computer!(),
+                " directly on your tailnet"
+            )
+            .to_owned(),
+            Self::SetTailnetRoute { on: false } => concat!(
+                "stop the tailnet route of this ",
+                crate::computer!(),
+                "; approvals go through Apassy relay"
+            )
+            .to_owned(),
             Self::RevokeNodeDevice { device_name, .. } => format!(
                 "revoke the device \"{}\"; it can no longer see or answer questions",
                 short_device_name(device_name)
@@ -984,17 +996,24 @@ impl OwnerAction {
                     short_device_name(redirect_host)
                 };
                 format!(
-                    "connect \"{}\", which returns to {back}, to this Mac",
-                    short_device_name(client_name)
+                    concat!(
+                        "connect \"{}\", which returns to {back}, to this ",
+                        crate::computer!()
+                    ),
+                    short_device_name(client_name),
+                    back = back
                 )
             }
             Self::AddRemoteAgent { name, .. } => format!(
                 "add the remote agent \"{}\" and issue its token",
                 short_device_name(name)
             ),
-            Self::TurnOnRemoteAccess => {
-                "let remote agents reach this Mac through Tailscale Funnel".to_owned()
-            }
+            Self::TurnOnRemoteAccess => concat!(
+                "let remote agents reach this ",
+                crate::computer!(),
+                " through Tailscale Funnel"
+            )
+            .to_owned(),
         }
     }
 
@@ -1401,11 +1420,19 @@ impl OwnerAuthError {
 pub fn touch_id_detail(code: HelperErrorCode) -> &'static str {
     match code {
         HelperErrorCode::NotAvailable => {
-            "the Touch ID keyboard is not connected or not paired, or this Mac has no Touch ID sensor."
+            concat!(
+                "the Touch ID keyboard is not connected or not paired, or this ",
+                crate::computer!(),
+                " has no Touch ID sensor."
+            )
         }
         HelperErrorCode::NotEnrolled => "no fingerprint is enrolled in System Settings.",
         HelperErrorCode::LockedOut => {
-            "Touch ID is locked after failed attempts. Unlock the Mac with its password to reset it."
+            concat!(
+                "Touch ID is locked after failed attempts. Unlock the ",
+                crate::computer!(),
+                " with its password to reset it."
+            )
         }
         _ => "the Touch ID check did not start.",
     }
@@ -2573,7 +2600,7 @@ mod evaluation_tests {
         );
         assert_eq!(
             hosting(BouncerHostKind::ThisMac, "").reason(),
-            "run the bouncer brain on this Mac"
+            concat!("run the bouncer brain on this ", crate::computer!())
         );
         let training = OwnerAction::ChangeBouncerTraining {
             kind: BouncerHostKind::Connect,
@@ -2776,12 +2803,18 @@ mod touch_id_title_tests {
         };
         assert_eq!(
             connect("grok.example").reason(),
-            "connect \"Grok Bot\", which returns to grok.example, to this Mac"
+            concat!(
+                "connect \"Grok Bot\", which returns to grok.example, to this ",
+                crate::computer!()
+            )
         );
         for host in ["127.0.0.1", "localhost", "[::1]", ""] {
             assert_eq!(
                 connect(host).reason(),
-                "connect \"Grok Bot\", which returns to localhost, to this Mac",
+                concat!(
+                    "connect \"Grok Bot\", which returns to localhost, to this ",
+                    crate::computer!()
+                ),
                 "{host}"
             );
         }

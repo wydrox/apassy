@@ -44,24 +44,44 @@ pub(crate) const CONNECT_ITEM: &str = "Apassy Connect";
 pub(crate) const COMING_WITH_CONNECT: &str = "Coming with Connect";
 const CONNECT_HOVER: &str = "Apassy Connect hosting comes with the Connect sign-in.";
 /// The note of the row while a server runs the brain, after its host name.
-pub(crate) const GATE_STAYS: &str = "The bouncer gate still decides on this Mac.";
+pub(crate) const GATE_STAYS: &str = concat!(
+    "The bouncer gate still decides on this ",
+    crate::computer!(),
+    "."
+);
 /// The note of the row for an Apassy Connect host, which another version chose.
 pub(crate) const CONNECT_ELSEWHERE: &str = "Apassy Connect · chosen on another version";
 /// The headline when the chosen host cannot be used.
-pub(crate) const FALLBACK_HEADLINE: &str =
-    "The chosen host cannot be used, so the bouncer brain runs on this Mac.";
+pub(crate) const FALLBACK_HEADLINE: &str = concat!(
+    "The chosen host cannot be used, so the bouncer brain runs on this ",
+    crate::computer!(),
+    "."
+);
 const HELP_TITLE: &str = "Where the bouncer brain runs";
 const HELP: [&str; 4] = [
-    "This Mac: nothing leaves this Mac.",
+    concat!(
+        "This ",
+        crate::computer!(),
+        ": nothing leaves this ",
+        crate::computer!(),
+        "."
+    ),
     "My Server: your server answers over https with a token. Free.",
     "Apassy Connect: Apassy runs it for you. Comes with Connect.",
-    "The bouncer gate on this Mac decides every run. No answer means Apassy asks you.",
+    concat!(
+        "The bouncer gate on this ",
+        crate::computer!(),
+        " decides every run. No answer means Apassy asks you."
+    ),
 ];
 
 /// The sheet: its titles, notes and buttons.
 pub(crate) const SERVER_TITLE: &str = "Use My Server";
-const SERVER_LEAD: &str =
-    "Your server runs the bouncer brain. The bouncer gate still decides on this Mac.";
+const SERVER_LEAD: &str = concat!(
+    "Your server runs the bouncer brain. The bouncer gate still decides on this ",
+    crate::computer!(),
+    "."
+);
 const ADDRESS_PLACEHOLDER: &str = "https://brain.your-tailnet.ts.net";
 /// Under the address while it is not an `https://` address with a host name.
 pub(crate) const ADDRESS_HINT: &str = "Use https:// and a host name.";
@@ -70,8 +90,11 @@ const ADDRESS_HELP: [&str; 2] = [
     "A private certificate does not work.",
 ];
 pub(crate) const RUN_HEADER: &str = "Start your server with this token";
-pub(crate) const TOKEN_SHOWN_ONCE: &str =
-    "The token shows only here. Apassy keeps it in the vault on this Mac.";
+pub(crate) const TOKEN_SHOWN_ONCE: &str = concat!(
+    "The token shows only here. Apassy keeps it in the vault on this ",
+    crate::computer!(),
+    "."
+);
 /// How the token gets into the token file of the start commands.
 pub(crate) const START_NOTE: &str = "Run these on your server. At the cat line, paste the token, press Return, then Control-D. The token never goes on a command line.";
 const PASTE_HEADER: &str = "Token";
@@ -81,7 +104,7 @@ const TOKEN_PLACEHOLDER: &str = "LAYA_API_KEY";
 const TOKEN_FIELD: &str = "brain-host-token";
 /// The masked token.
 const MASK: &str = "••••••••••••••••";
-pub(crate) const CONSENT_TITLE: &str = "What Leaves This Mac";
+pub(crate) const CONSENT_TITLE: &str = concat!("What Leaves This ", crate::computer!());
 /// What goes to the server: exactly what `bouncer::state_text` puts in the state, with
 /// the command of `bouncer::shorten_paths`, and the head sets that the trainer uploads
 /// (ADR 0035 sections 4 and 7, ADR 0007 state). The broker sends no owner rule.
@@ -226,7 +249,7 @@ pub(crate) fn host_of(url: &str) -> String {
 /// The menu label of a kind (macOS title case).
 pub(crate) fn kind_title(kind: BouncerHostKind) -> &'static str {
     match kind {
-        BouncerHostKind::ThisMac => "This Mac",
+        BouncerHostKind::ThisMac => concat!("This ", crate::computer!()),
         BouncerHostKind::OwnServer => "My Server",
         BouncerHostKind::Connect => "Apassy Connect",
     }
@@ -248,7 +271,11 @@ pub(crate) fn host_note(host: &BouncerHost) -> String {
 pub(crate) fn fallback_lines(problem: &str) -> (&'static str, String) {
     let reason = problem
         .trim()
-        .trim_end_matches("The bouncer brain runs on this Mac.")
+        .trim_end_matches(concat!(
+            "The bouncer brain runs on this ",
+            crate::computer!(),
+            "."
+        ))
         .trim()
         .to_owned();
     (FALLBACK_HEADLINE, reason)
@@ -757,7 +784,11 @@ mod tests {
         };
         assert_eq!(
             host_note(&host),
-            "brain.synthetic.ts.net:8443 · The bouncer gate still decides on this Mac."
+            concat!(
+                "brain.synthetic.ts.net:8443 · The bouncer gate still decides on this ",
+                crate::computer!(),
+                "."
+            )
         );
         assert_eq!(kind_title(BouncerHostKind::OwnServer), "My Server");
         let connect = BouncerHost {

@@ -26,7 +26,7 @@ pub(super) const RECENT: usize = 20;
 /// The agents of "Most active".
 const TOP_AGENTS: usize = 5;
 /// The name of this Mac in the scope and in the rows.
-pub(super) const THIS_MAC: &str = "This Mac";
+pub(super) const THIS_MAC: &str = concat!("This ", crate::computer!());
 /// The longest name of a Mac, an agent, or a credential in a row.
 const SHOWN_NAME: usize = 40;
 /// The longest task of "Why".
@@ -212,7 +212,7 @@ impl VaultActivity {
 fn mac_name(remote: &RemoteMac, feed: Option<&Feed>) -> String {
     let name = match (remote.name.trim(), feed) {
         ("", Some(feed)) => feed.mac.name.as_str(),
-        ("", None) => "another Mac",
+        ("", None) => concat!("another ", crate::computer!()),
         (name, _) => name,
     };
     shown_path(name, SHOWN_NAME)
