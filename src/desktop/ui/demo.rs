@@ -2115,6 +2115,7 @@ fn demo_access(frame: BouncerFrame) -> super::agents_page::AccessView {
         problem,
         no_remote_agents: frame == BouncerFrame::NoRemoteAgentYet,
         reading: false,
+        connect: None,
     }
 }
 

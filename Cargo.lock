@@ -164,6 +164,7 @@ name = "apassy"
 version = "0.5.19"
 dependencies = [
  "arboard",
+ "base64",
  "ciborium",
  "eframe",
  "flate2",
@@ -208,6 +209,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "tempfile",
+ "tiny_http",
  "tracing",
  "ureq",
  "zeroize",

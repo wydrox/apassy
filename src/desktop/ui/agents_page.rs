@@ -140,6 +140,69 @@ pub(crate) struct AccessView {
     pub(crate) no_remote_agents: bool,
     /// The first read of the block has not ended.
     pub(crate) reading: bool,
+    /// The second route, "Apassy Connect" (plan s7 unit M4); `None`: this build has no
+    /// Connect route.
+    pub(crate) connect: Option<ConnectRow>,
+}
+
+/// The state of the "Apassy Connect" route, in the words of its row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConnectState {
+    /// This Mac has no Connect account, or the account has no Connect plan.
+    NotOnConnect,
+    Off,
+    Connecting,
+    On,
+    /// The connection ended or was refused; Apassy tries again.
+    Reconnecting(String),
+}
+
+/// The "Apassy Connect" row of the remote access block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConnectRow {
+    /// The owner's switch.
+    pub(crate) on: bool,
+    pub(crate) state: ConnectState,
+    /// `https://<node>.node.<zone>/mcp`, while the route is on and remote access is on.
+    pub(crate) address: Option<String>,
+    /// Why there is no public certificate yet, while the route is on.
+    pub(crate) no_certificate: Option<String>,
+}
+
+impl ConnectRow {
+    /// The line under "Apassy Connect".
+    pub(crate) fn line(&self) -> String {
+        match &self.state {
+            ConnectState::NotOnConnect => {
+                "Not on Apassy Connect. Choose a plan in Settings > Connect.".to_owned()
+            }
+            ConnectState::Off => "Off".to_owned(),
+            ConnectState::Connecting => "Connecting…".to_owned(),
+            ConnectState::On => "On".to_owned(),
+            ConnectState::Reconnecting(why) => format!("Reconnecting: {why}"),
+        }
+    }
+
+    pub(crate) fn tone(&self) -> Tone {
+        match self.state {
+            ConnectState::On => Tone::Good,
+            ConnectState::Reconnecting(_) => Tone::Warning,
+            _ => Tone::Neutral,
+        }
+    }
+
+    /// The switch takes a click: not while this Mac is not on Connect and the route is
+    /// off (a route that is on can always go off).
+    pub(crate) fn switch_enabled(&self) -> bool {
+        self.on || self.state != ConnectState::NotOnConnect
+    }
+
+    /// "No certificate yet: <reason>".
+    pub(crate) fn certificate_line(&self) -> Option<String> {
+        self.no_certificate
+            .as_ref()
+            .map(|reason| format!("No certificate yet: {reason}."))
+    }
 }
 
 impl AccessView {
@@ -165,6 +228,14 @@ impl AccessView {
         self.on && !self.held()
     }
 }
+
+/// The ⓘ of the Apassy Connect route.
+const CONNECT_HELP: [&str; 4] = [
+    "Apassy Connect relays encrypted bytes between this Mac and your devices or cloud agents. TLS ends on this Mac.",
+    "Your devices reach this Mac without Tailscale. Cloud agents use the address below while remote access is on.",
+    "Credential values stay on this Mac.",
+    "It is part of Connect Personal, Connect Family, and Connect Team.",
+];
 
 /// The ⓘ of remote access (frame 2).
 const ACCESS_HELP: [&str; 4] = [
@@ -390,6 +461,8 @@ pub(crate) enum Action {
     ConnectAgent,
     /// The remote access switch: on (Touch ID) or off.
     RemoteAccess(bool),
+    /// The "Apassy Connect" switch: on or off.
+    ConnectRoute(bool),
     CopyAddress(String),
     Problem(ProblemButton),
     ToggleDisconnected(DeviceScope),
@@ -697,6 +770,91 @@ fn access_block(ui: &mut Ui, access: &AccessView, has_remote: bool) -> Option<Ac
                     ui.label(
                         kit::text("No remote agents yet. Give one this address.", Font::Body)
                             .color(Tone::Accent.text()),
+                    );
+                });
+            });
+        }
+    });
+    if let Some(connect) = &access.connect
+        && let Some(chosen) = connect_block(ui, connect)
+    {
+        action = Some(chosen);
+    }
+    action
+}
+
+/// The second route of the remote access block: "Apassy Connect", its switch, its
+/// state, its address with Copy, and the certificate line.
+fn connect_block(ui: &mut Ui, row: &ConnectRow) -> Option<Action> {
+    let mut action = None;
+    ui.add_space(8.0);
+    kit::section(ui, None, None, |s| {
+        s.row(|ui| {
+            egui::Sides::new().shrink_left().show(
+                ui,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(
+                                kit::medium("Apassy Connect", Font::Body)
+                                    .color(kit::palette().label),
+                            );
+                            ui.horizontal(|ui| {
+                                if row.state == ConnectState::Connecting {
+                                    ui.spinner();
+                                }
+                                ui.add(
+                                    Label::new(
+                                        kit::text(row.line(), Font::Callout)
+                                            .color(row.tone().text()),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        });
+                        kit::help_button(ui, "Apassy Connect", &CONNECT_HELP);
+                    });
+                },
+                |ui| {
+                    let mut on = row.on;
+                    let response = ui
+                        .add_enabled_ui(row.switch_enabled(), |ui| {
+                            kit::toggle(ui, &mut on, "Apassy Connect")
+                        })
+                        .inner;
+                    if response.changed() && on != row.on {
+                        action = Some(Action::ConnectRoute(on));
+                    }
+                },
+            );
+        });
+        if let Some(address) = &row.address {
+            s.row(|ui| {
+                egui::Sides::new().shrink_left().show(
+                    ui,
+                    |ui| {
+                        ui.label(kit::text("MCP address", Font::Body).color(kit::palette().label));
+                        ui.add_space(12.0);
+                        ui.add(
+                            Label::new(kit::text(address, Font::Mono).color(kit::palette().label))
+                                .truncate(),
+                        );
+                    },
+                    |ui| {
+                        if kit::small_button(ui, "Copy", Style::Bordered).clicked() {
+                            action = Some(Action::CopyAddress(address.clone()));
+                        }
+                    },
+                );
+            });
+        }
+        if let Some(line) = row.certificate_line() {
+            s.row(|ui| {
+                ui.horizontal(|ui| {
+                    kit::paint_icon_in(ui, Icon::Warning, 14.0, Tone::Warning.mark());
+                    ui.add(
+                        Label::new(kit::text(line, Font::Body).color(Tone::Warning.text())).wrap(),
                     );
                 });
             });

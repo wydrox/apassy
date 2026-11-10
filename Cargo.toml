@@ -25,7 +25,7 @@ desktop = ["dep:eframe", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit"
 # The desktop turns it on; a headless owner service may name it. No effect on macOS.
 session-bus = ["dep:zbus"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
-vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium"]
+vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium", "dep:base64"]
 # Tests only (docs/operations/checks.md, "Test vault KDF"): in a debug build, a vault
 # file in a `tempfile` directory uses 2 PBKDF2 iterations. CI tests with --all-features.
 # The release builds name their features, and a release build keeps 256,000 also
@@ -54,6 +54,11 @@ rcgen = { version = "=0.14.10", optional = true, default-features = false, featu
 # ADR 0020: ECDSA P-256 verification, HMAC-SHA256, and SHA-256 for the iPhone companion.
 # The version and the features are the ones that rustls and rcgen already build.
 ring = { version = "=0.17.14", optional = true, default-features = false, features = ["alloc"] }
+# The Connect tunnel of the node (plan s7 unit M4): the core compiles the relay crate's own
+# WebSocket code (`crates/apassy-relay/src/server/tunnel/ws.rs`, through `#[path]` in
+# `src/node/tunnel.rs`), which uses this crate for the handshake keys. The relay's pin: the
+# app binary links it already.
+base64 = { version = "=0.23.1", optional = true }
 # Passkeys (schema 17): the CBOR of the attestation object and the COSE public key.
 ciborium = { version = "=0.2.2", optional = true, default-features = false, features = ["std"] }
 # WebAuthn RP validation includes ICANN and private public suffixes.
