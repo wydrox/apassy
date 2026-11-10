@@ -28,7 +28,7 @@ use std::os::unix::net::UnixStream;
 
 use super::DesktopApp;
 use super::owner_check::{
-    OwnerRequest, PasskeyAccount, PasskeyRequest, PasskeyRequestExtensions, page_text,
+    NO_ACCOUNT, OwnerRequest, PasskeyAccount, PasskeyRequest, PasskeyRequestExtensions, page_text,
 };
 use super::owner_cli::bring_to_front;
 use super::owner_socket::{self, Envelope, LineWire, OwnerSocket, PeerGone, WireEnvelope};
@@ -1136,10 +1136,15 @@ impl DesktopApp {
                 added: info.added,
             })
             .collect();
-        // The vault lists the newest passkey first, and the dialog selects it: the
-        // older one of two for one account may be unknown to the site. The owner sees
-        // the selection, can choose another, and the check names the selected one.
-        let chosen = 0;
+        // The vault lists the newest passkey first. Several passkeys of ONE account:
+        // the dialog selects the newest, because the older one may be unknown to the
+        // site; the owner sees the selection and can choose another. Passkeys of
+        // different accounts: the owner chooses first, and no check starts before.
+        let one_account = !accounts[0].user_name.is_empty()
+            && accounts
+                .iter()
+                .all(|account| account.user_name == accounts[0].user_name);
+        let chosen = if one_account { 0 } else { NO_ACCOUNT };
         ticket.echo = Some(PasskeyEcho {
             rid: client.rid.clone(),
             client_data_json: webauthn::encode_bytes(&client.client_data_json),

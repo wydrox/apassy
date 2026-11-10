@@ -212,10 +212,9 @@ pub struct PasskeyAccount {
 
 /// The `chosen` value of a passkey request with several accounts that the owner has not
 /// chosen from yet. It is no index of the list: the request has no account, no action
-/// that a proof can name, and no check starts. The browser request selects the newest
-/// account, so only tests build such a request; the dialog and the controller treat any
-/// index outside the list this way.
-#[cfg(test)]
+/// that a proof can name, and no check starts. A browser request for passkeys of
+/// different accounts starts this way; for several passkeys of one account it selects
+/// the newest. The dialog and the controller treat any index outside the list this way.
 pub(crate) const NO_ACCOUNT: usize = usize::MAX;
 
 /// The WebAuthn extensions of an assertion request, before the owner chooses an
