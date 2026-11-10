@@ -49,7 +49,8 @@ use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{
-    Core, account, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, push, sync,
+    Core, account, admin, approvals, billing_store, connect, decide, devices, host, joins, mcp,
+    oauth, push, sync,
 };
 use crate::session::SessionSource;
 
@@ -1223,6 +1224,17 @@ pub fn maintain(hub: &Hub, now: u64) {
             );
         }
     }
+    // Connect billing: event ids older than 30 days, and the stores of plans at their
+    // deletion day (docs/SPEC.md section 34.6), at most once an hour.
+    if let Some(billing) = hub.billing.as_deref() {
+        let last = hub.billing_maintained_at.load(Ordering::Relaxed);
+        if last == 0 || now >= last.saturating_add(billing_store::MAINTENANCE_SECS) {
+            hub.billing_maintained_at.store(now, Ordering::Relaxed);
+            if billing_store::maintain(hub, billing, now).is_err() {
+                eprintln!("apassy-relay: the billing maintenance pass failed");
+            }
+        }
+    }
 }
 
 fn header_value(request: &Request, name: &'static str) -> Option<String> {
@@ -1423,6 +1435,12 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
     // the paths fall through to the route table and are 404.
     if hub.config.connect.accounts && account::is_account_path(&path) {
         respond_account(hub, listener, counted, request, &method, &path, now);
+        return;
+    }
+    // Connect billing (connect-billing-v1): the public plans and Stripe's webhook, only
+    // with the account routes on.
+    if hub.config.connect.accounts && billing_store::is_billing_path(&path) {
+        respond_billing(hub, request, &method, &path, now);
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
@@ -1747,7 +1765,7 @@ fn vault_store_allows(hub: &Hub, core: &Core, endpoint: Endpoint, now: u64) -> R
     let plan = |hub: &Hub| -> RelayResult<api::PlanView> {
         let account = hub
             .account_of_team(&core.team)?
-            .ok_or_else(account::account_required)?;
+            .ok_or_else(|| RelayError::internal("A vault store has no account."))?;
         hub.accounts
             .plans()
             .plan(&hub.directory.store, &account, now)
@@ -1866,6 +1884,78 @@ fn respond_account(
     };
     match account::dispatch(hub, &caller, &endpoint, &body, now) {
         Ok(result) => respond_ok(request, result),
+        Err(error) => respond_error(request, &error),
+    }
+}
+
+/// `GET /v1/plans` (public: no `Authorization`, 400 with one) and `POST
+/// /v1/stripe/webhook` (connect-billing-v1 sections 2 and 7). The webhook takes the raw
+/// body: at most 256 KiB, read with one byte more to see a longer one (413 before the
+/// signature), then the `Stripe-Signature` check, the event, and the effect. Without
+/// Stripe set up both answer 503 `busy`.
+fn respond_billing(hub: &Hub, mut request: Request, method: &str, path: &str, now: u64) {
+    let wanted = if path == billing_store::PLANS_PATH {
+        "GET"
+    } else {
+        "POST"
+    };
+    if method != wanted {
+        respond_error(
+            request,
+            &RelayError::new(
+                codes::METHOD_NOT_ALLOWED,
+                "This path does not allow this method.",
+            ),
+        );
+        return;
+    }
+    let billing = match account::billing(hub) {
+        Ok(billing) => billing,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    if path == billing_store::PLANS_PATH {
+        if header_value(&request, "Authorization").is_some() {
+            respond_error(
+                request,
+                &RelayError::invalid("GET /v1/plans takes no Authorization."),
+            );
+            return;
+        }
+        match billing.plans(now).and_then(|view| {
+            serde_json::to_value(view)
+                .map_err(|_| RelayError::internal("The plans cannot be written."))
+        }) {
+            Ok(result) => respond_ok(request, result),
+            Err(error) => respond_error(request, &error),
+        }
+        return;
+    }
+    let signature = header_value(&request, crate::server::stripe::SIGNATURE_HEADER);
+    let body = match read_body_max(
+        &mut request,
+        "POST",
+        crate::server::stripe::MAX_WEBHOOK_BODY,
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    match billing.webhook(signature.as_deref(), &body, now) {
+        Ok(outcome) => {
+            billing_store::after_webhook(hub, billing, &outcome.effect, now);
+            match serde_json::to_value(&outcome.answer) {
+                Ok(result) => respond_ok(request, result),
+                Err(_) => respond_error(
+                    request,
+                    &RelayError::internal("The answer cannot be written."),
+                ),
+            }
+        }
         Err(error) => respond_error(request, &error),
     }
 }

@@ -388,6 +388,11 @@ pub struct Hub {
     /// Apassy Connect accounts: the sign-in state in memory, the plan and group seams,
     /// and the entitlement signer (`server::account`).
     pub(crate) accounts: crate::server::account::Accounts,
+    /// Connect billing (docs/SPEC.md section 34): with the account routes on and the
+    /// Stripe files set. It is also the `Plans` seam of the accounts.
+    pub(crate) billing: Option<Arc<crate::server::billing_store::ConnectBilling>>,
+    /// The time of the last billing maintenance pass (`billing_store::maintain`).
+    pub(crate) billing_maintained_at: std::sync::atomic::AtomicU64,
 }
 
 impl Hub {
@@ -415,8 +420,20 @@ impl Hub {
             .as_ref()
             .map(crate::server::entitlement::EntitlementSigner::from_key)
             .transpose()?;
+        let billing = match (&config.connect.billing, config.connect.accounts) {
+            (Some(settings), true) => {
+                settings.check_api_base()?;
+                Some(Arc::new(crate::server::billing_store::build(
+                    settings,
+                    directory.store.clone(),
+                )?))
+            }
+            _ => None,
+        };
         let hub = Arc::new(Self {
             accounts: crate::server::account::Accounts::new(signer),
+            billing,
+            billing_maintained_at: std::sync::atomic::AtomicU64::new(0),
             public_host: crate::decision::public_host(&config.public_url),
             config: Arc::new(config),
             directory,
@@ -437,6 +454,14 @@ impl Hub {
         });
         if hub.config.connect.accounts {
             crate::server::account::record_signing_key(&hub, crate::now_unix())?;
+        }
+        if hub.config.connect.accounts {
+            hub.set_groups(Arc::new(crate::server::group::DirectoryGroups));
+        }
+        if let Some(billing) = &hub.billing {
+            hub.set_plans(Arc::new(crate::server::billing_store::BillingPlans(
+                billing.clone(),
+            )));
         }
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
@@ -611,6 +636,12 @@ impl Hub {
     /// Installs the plans of billing (C2): until then every account has none.
     pub fn set_plans(&self, plans: Arc<dyn crate::server::account::Plans>) {
         self.accounts.set_plans(plans);
+    }
+
+    /// Connect billing, when it is configured (the tests call its maintenance pass and
+    /// read its store through it).
+    pub fn billing(&self) -> Option<&Arc<crate::server::billing_store::ConnectBilling>> {
+        self.billing.as_ref()
     }
 
     /// Installs the groups (C3): until then no account is in a group.

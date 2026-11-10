@@ -160,7 +160,8 @@ CREATE TABLE stripe_subscription (
   account_id TEXT, group_id TEXT, lookup_key TEXT, quantity INTEGER, status TEXT NOT NULL,
   current_period_end INTEGER, cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
   first_failure_at INTEGER, ended_at INTEGER, event_created INTEGER NOT NULL DEFAULT 0,
-  updated_at INTEGER NOT NULL);
+  updated_at INTEGER NOT NULL, last_invoice_created INTEGER NOT NULL DEFAULT 0,
+  stores_deleted_at INTEGER);
 CREATE INDEX stripe_subscription_account ON stripe_subscription(account_id);
 CREATE INDEX stripe_subscription_group ON stripe_subscription(group_id);
 CREATE TABLE stripe_event (

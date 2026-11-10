@@ -183,6 +183,12 @@ pub enum AccountEndpoint {
     StoreDeviceAdd(TeamId),
     VaultDelete(TeamId),
     Entitlement,
+    // connect-billing-v1 (docs/SPEC.md section 34).
+    Plan,
+    Checkout,
+    Portal,
+    /// `/v1/account/group/…` (connect-billing-v1 section 6, `server::group`).
+    Group(crate::server::group::GroupEndpoint),
 }
 
 /// True for a path of this contract: `/v1/account` and below, and the well-known document.
@@ -224,6 +230,13 @@ pub fn route(method: &str, path: &str) -> RelayResult<(Need, AccountEndpoint)> {
         ["v1", "account", "token"] => pick(vec![("POST", Need::Edge, Token)]),
         ["v1", "account", "recover"] => pick(vec![("POST", Need::Edge, Recover)]),
         ["v1", "account", "entitlement"] => pick(vec![("GET", Need::Account, Entitlement)]),
+        ["v1", "account", "plan"] => pick(vec![("GET", Need::Account, Plan)]),
+        ["v1", "account", "checkout"] => pick(vec![("POST", Need::Account, Checkout)]),
+        ["v1", "account", "portal"] => pick(vec![("POST", Need::Account, Portal)]),
+        ["v1", "account", "group", rest @ ..] => {
+            let (need, endpoint) = crate::server::group::route(method, rest)?;
+            Ok((need, Group(endpoint)))
+        }
         ["v1", "account", "devices", "link"] => pick(vec![("POST", Need::Account, Link)]),
         ["v1", "account", "devices", "pending"] => pick(vec![("GET", Need::Account, Pending)]),
         ["v1", "account", "devices", "join"] => pick(vec![("POST", Need::Edge, Join)]),
@@ -285,8 +298,8 @@ fn not_in_group() -> RelayError {
     )
 }
 
-/// 403 `account_required`: a route of Connect called with something that is not a live
-/// account device, or for a team that is not a vault store.
+/// 403 `account_required`: a route of Connect that needs an account token, called with a
+/// relay-sync team token (a token of a revoked device is 401 `unauthenticated`).
 pub fn account_required() -> RelayError {
     RelayError::new(
         codes::ACCOUNT_REQUIRED,
@@ -643,8 +656,28 @@ pub fn dispatch(
             vault_delete(hub, caller, team, now)
         }
         AccountEndpoint::Entitlement => entitlement(hub, caller, now),
+        AccountEndpoint::Plan => to_value(&hub.accounts.plans().plan(
+            &hub.directory.store,
+            &caller.account,
+            now,
+        )?),
+        AccountEndpoint::Checkout => {
+            to_value(&billing(hub)?.checkout(&caller.account, body, now)?)
+        }
+        AccountEndpoint::Portal => to_value(&billing(hub)?.portal(&caller.account, body)?),
+        AccountEndpoint::Group(endpoint) => {
+            crate::server::group::dispatch(hub, caller, endpoint, body, now)
+        }
         _ => Err(RelayError::internal("Not an account endpoint.")),
     }
+}
+
+/// The billing of this relay, or 503 `busy` when Stripe is not set up
+/// (`STRIPE_SECRET_KEY_FILE`, `STRIPE_WEBHOOK_SECRET_FILE`).
+pub(crate) fn billing(hub: &Hub) -> RelayResult<&crate::server::billing_store::ConnectBilling> {
+    hub.billing
+        .as_deref()
+        .ok_or_else(|| busy("Billing is not set up on this relay."))
 }
 
 // ---- Account and sign-in (section 6). ----
@@ -1051,6 +1084,9 @@ fn delete_account(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Va
             params![caller.account],
         )
         .map_err(db)?;
+        // Its group rows (a member's membership; an owner's group without confirmed
+        // members, with its pending members and invites).
+        crate::server::group::forget_account(tx, &caller.account)?;
         // The links, the joins, and the devices go with the account (ON DELETE CASCADE).
         tx.execute("DELETE FROM account WHERE id = ?1", params![caller.account])
             .map_err(db)?;
@@ -1595,8 +1631,9 @@ fn vault_list(hub: &Hub, caller: &AccountCaller) -> RelayResult<Value> {
     to_value(&views)
 }
 
-/// The vault store `team` and whether `caller`'s device is in it. 404 for no team, 403
-/// `account_required` for a team that is not a vault store.
+/// The vault store `team` and whether `caller`'s device is in it. 404 for no team and for
+/// a team that is not a vault store (connect-account-v1 section 8: `account_required` is
+/// only for a team token on an account route).
 fn store_of(
     conn: &Connection,
     caller: &AccountCaller,
@@ -1605,7 +1642,7 @@ fn store_of(
     let row = crate::server::directory::team_by_id(conn, team)?
         .ok_or_else(|| RelayError::not_found("vault store"))?;
     if row.kind != TeamKind::Account {
-        return Err(account_required());
+        return Err(RelayError::not_found("vault store"));
     }
     let member: bool = conn
         .query_row(
@@ -1720,8 +1757,9 @@ fn vault_delete(hub: &Hub, caller: &AccountCaller, team: &TeamId, now: u64) -> R
     })
 }
 
-/// Deletes every vault store that `account` made. Returns how many.
-fn delete_stores_of(hub: &Hub, account: &str, now: u64) -> RelayResult<u64> {
+/// Deletes every vault store that `account` made (also the billing maintenance pass, at
+/// the deletion day of an ended plan). Returns how many.
+pub(crate) fn delete_stores_of(hub: &Hub, account: &str, now: u64) -> RelayResult<u64> {
     let stores = hub
         .directory
         .store

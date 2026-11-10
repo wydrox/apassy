@@ -1197,16 +1197,24 @@ fn a_device_of_another_account_cannot_read_or_join_a_store_without_a_group() {
         Some(&json!({"team_id": team, "public_key": other.key.public_key_b64()})),
     );
     assert_eq!(status, 401);
-    // A team that is not a vault store: 403 account_required.
+    // A team that is not a vault store: 404 not_found, as no team (connect-account-v1
+    // section 8; `account_required` is only for a team token on an account route).
     let operator_team = c.relay.team_id.clone();
-    c.fails(
-        "POST",
-        &format!("/v1/account/vaults/{operator_team}/devices"),
-        Some(&token),
-        Some(&json!({"device_id": a.id})),
-        403,
-        "account_required",
-    );
+    for (method, path, body) in [
+        (
+            "POST",
+            format!("/v1/account/vaults/{operator_team}/devices"),
+            Some(json!({"device_id": a.id})),
+        ),
+        (
+            "DELETE",
+            format!("/v1/account/vaults/{operator_team}"),
+            None,
+        ),
+    ] {
+        c.fails(method, &path, Some(&token), body.as_ref(), 404, "not_found");
+    }
+    assert!(c.relay.hub().team(&operator_team).is_some());
 }
 
 /// Recovery works only with zero live devices and the right code, replaces the code,

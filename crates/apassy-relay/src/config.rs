@@ -24,6 +24,12 @@
 //! | `APASSY_RELAY_MODE` | `relay` (every route of the relay), or `connect`: Apassy Connect only (ADR 0037 stage 7). In `connect` mode the master key is refused (`APASSY_RELAY_KEY` and `_FILE` must not be set), `relay.db` and the vault stores are plain SQLite files (`Store::open_plain`), shared team vaults are off, and the account routes are on | `relay` |
 //! | `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 signing key of the entitlement token: a PKCS#8 file (DER or PEM). Without it `GET /v1/account/entitlement` is 503 `busy` for an entitled account and the well-known document lists no key | none |
 //! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
+//! | `STRIPE_SECRET_KEY_FILE` | With the account routes on: a file with the restricted Stripe key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox; `sk_live_…` is refused). Set it and the next one together, or neither: without them the billing routes answer 503 `busy` and no account has a plan | none |
+//! | `STRIPE_WEBHOOK_SECRET_FILE` | A file with the signing secret of the Stripe webhook endpoint (`whsec_…`) | none |
+//! | `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that a checkout expects (cents, VAT included); a Family checkout is 503 `busy` while Stripe's price differs | `100`, `1000` |
+//! | `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment, 1 to 60 | `14` |
+//! | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end of a plan, 1 to 365 | `30` |
+//! | `APASSY_CONNECT_DELETE_DAYS` | Days from the end of a plan to the deletion of its vault stores, above the read-only days, at most 730 | `90` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
@@ -343,6 +349,61 @@ pub struct ConnectConfig {
     pub signing_key: Option<ConnectSigningKey>,
     /// The site origin (`APASSY_CONNECT_SITE_URL`), for billing and groups.
     pub site_url: String,
+    /// Stripe billing (`STRIPE_SECRET_KEY_FILE`, `STRIPE_WEBHOOK_SECRET_FILE`), or `None`:
+    /// the billing routes answer 503 `busy` and no account has a plan.
+    pub billing: Option<BillingSettings>,
+}
+
+/// The settings of Connect billing (docs/SPEC.md section 34.7).
+#[derive(Clone)]
+pub struct BillingSettings {
+    /// The restricted Stripe key (`STRIPE_SECRET_KEY_FILE`).
+    pub secret_key: SecretString,
+    /// The webhook endpoint secret (`STRIPE_WEBHOOK_SECRET_FILE`).
+    pub webhook_secret: SecretString,
+    /// The site, the Family extra price, and the durations of the plan state.
+    pub config: crate::server::billing::BillingConfig,
+    /// The Stripe API base: always `https://api.stripe.com` from the environment. Only
+    /// code sets another one, and `Relay::start` takes no other than a loopback `http://`
+    /// base (the fake Stripe server of the tests).
+    pub stripe_api_base: String,
+}
+
+impl std::fmt::Debug for BillingSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BillingSettings")
+            .field("config", &self.config)
+            .field("stripe_api_base", &self.stripe_api_base)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BillingSettings {
+    /// Settings with the default configuration, for tests and a self-hosted Connect.
+    pub fn new(secret_key: SecretString, webhook_secret: SecretString) -> Self {
+        Self {
+            secret_key,
+            webhook_secret,
+            config: crate::server::billing::BillingConfig::default(),
+            stripe_api_base: crate::server::stripe::API_BASE.to_string(),
+        }
+    }
+
+    /// The Stripe base that `Relay::start` accepts: the real API, or a loopback `http://`
+    /// address.
+    pub fn check_api_base(&self) -> RelayResult<()> {
+        let base = self.stripe_api_base.trim_end_matches('/');
+        let loopback = ["http://127.0.0.1:", "http://[::1]:", "http://localhost:"]
+            .iter()
+            .any(|prefix| base.starts_with(prefix));
+        if base == crate::server::stripe::API_BASE || loopback {
+            Ok(())
+        } else {
+            Err(RelayError::invalid(
+                "The Stripe API base is https://api.stripe.com, or a loopback http:// address in a test.",
+            ))
+        }
+    }
 }
 
 impl Default for ConnectConfig {
@@ -353,6 +414,7 @@ impl Default for ConnectConfig {
             accounts: false,
             signing_key: None,
             site_url: DEFAULT_CONNECT_SITE_URL.to_string(),
+            billing: None,
         }
     }
 }
@@ -439,12 +501,44 @@ fn connect_from(
             url
         }
     };
+    let billing = billing_from(lookup, &site_url)?;
     Ok(ConnectConfig {
         mode,
         accounts,
         signing_key,
         site_url,
+        billing,
     })
+}
+
+/// The billing settings from the environment: both Stripe files or neither, and the five
+/// settings of `BillingConfig::from_lookup` (checked even without the files, so a typo
+/// stops the start). The site is `APASSY_CONNECT_SITE_URL` as checked above.
+fn billing_from(
+    lookup: &impl Fn(&str) -> Option<String>,
+    site_url: &str,
+) -> RelayResult<Option<BillingSettings>> {
+    let mut config = crate::server::billing::BillingConfig::from_lookup(&|name| lookup(name))?;
+    config.site_url = site_url.trim_end_matches('/').to_string();
+    let key = lookup("STRIPE_SECRET_KEY_FILE");
+    let webhook = lookup("STRIPE_WEBHOOK_SECRET_FILE");
+    let (key, webhook) = match (key, webhook) {
+        (None, None) => return Ok(None),
+        (Some(key), Some(webhook)) => (key, webhook),
+        _ => {
+            return Err(RelayError::invalid(
+                "Set STRIPE_SECRET_KEY_FILE and STRIPE_WEBHOOK_SECRET_FILE together, or neither.",
+            ));
+        }
+    };
+    Ok(Some(BillingSettings {
+        secret_key: crate::server::stripe::read_secret_key_file(std::path::Path::new(key.trim()))?,
+        webhook_secret: crate::server::stripe::read_webhook_secret_file(std::path::Path::new(
+            webhook.trim(),
+        ))?,
+        config,
+        stripe_api_base: crate::server::stripe::API_BASE.to_string(),
+    }))
 }
 
 /// What an embedded node needs (`RelayConfig::embedded`, docs/SPEC.md section 30).

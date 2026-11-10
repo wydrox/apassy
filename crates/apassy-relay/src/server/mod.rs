@@ -15,6 +15,7 @@ pub mod approvals;
 pub mod audit;
 pub mod auth;
 pub mod billing;
+pub mod billing_store;
 pub mod connect;
 pub mod decide;
 pub mod devices;
@@ -22,6 +23,7 @@ pub mod directory;
 pub mod entitlement;
 pub mod env;
 pub mod feed;
+pub mod group;
 pub mod host;
 pub mod http;
 pub mod hub;
@@ -643,6 +645,20 @@ impl Relay {
         config.check_listeners()?;
         let stop = Arc::new(AtomicBool::new(false));
         let hub = Hub::open(config, stop.clone())?;
+        // Connect billing: the price cache is filled at start, on a thread of its own, so
+        // a Stripe outage never delays or stops the start (`GET /v1/plans` asks again).
+        if let Some(billing) = hub.billing().cloned() {
+            let warm = std::thread::Builder::new()
+                .name("relay-stripe-prices".to_string())
+                .spawn(move || {
+                    if billing.prices(crate::now_unix()).is_err() {
+                        eprintln!("apassy-relay: the Stripe prices could not be read at start");
+                    }
+                });
+            if warm.is_err() {
+                eprintln!("apassy-relay: the Stripe price thread cannot start");
+            }
+        }
         let source: Arc<dyn SessionSource> = hub.clone();
         let proxy = Arc::new(Proxy::new(&hub.config.upstream, source)?);
         let bind = |listen: SocketAddr| {

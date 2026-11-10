@@ -2156,14 +2156,14 @@ After `/healthz` and the edge secret, before the proxy and the route table: an a
 
 - A vault store is a team of kind `account` (`TeamKind::Account`) with `team.account_id` and `team.vault_id` (unique together), `TeamLimits::account(members)`: 64 MiB snapshots, 120 pushes an hour, no items, no agents, the smallest question and feed budgets, a file cap of 24 MiB plus 1 MiB for each further member. `Hub::create_vault_store` makes its file with the owner member named by the account id and device 1 named by the account device id, with the account device's public key; `account_store_device` maps each account device to its store device. A race for the same vault answers the store that won.
 - `POST /v1/account/vaults` needs `Plans::plan(...).entitled` (403 `plan_required`) and at most `10 × Plans::people` stores (403 `account_limit`); the same vault id answers the existing store. `GET /v1/account/vaults` lists the stores the account made or holds a device in.
-- `POST /v1/account/vaults/{team_id}/devices`: the caller's device must be in the store (403 `forbidden`); the team must be a vault store (404, or 403 `account_required` for another kind); the target is a live device (404) of the caller's account or of an account for which `Groups::share_group` is true (else 403 `not_in_group`); at most 10 devices of one account in a store. `Hub::add_store_device` adds a member for the account (when there is none) and the device without the item keys; a key that is in the store keeps its id.
+- `POST /v1/account/vaults/{team_id}/devices`: the caller's device must be in the store (403 `forbidden`); the team must be a vault store (404 `not_found` for no team and for a team of another kind: `account_required` is only a team token on an account route); the target is a live device (404) of the caller's account or of an account for which `Groups::share_group` is true (else 403 `not_in_group`); at most 10 devices of one account in a store. `Hub::add_store_device` adds a member for the account (when there is none) and the device without the item keys; a key that is in the store keeps its id.
 - `DELETE /v1/account/vaults/{team_id}` by a device of the account that made it: `Hub::delete_vault_store` takes the store out of service, waits for its requests (at most 10 s, else 409), deletes its row, its device map, and its file with the snapshots.
 - A device leaves a store (`Hub::remove_store_device`) by its row there being revoked, its relay-sync tokens of the store dropped at once, its long polls woken, and its map row deleted. The heads it signed stay verifiable.
 - **What a store serves** (`http::vault_store_allows`, after the token check): `GET /v1/me`, `GET /v1/devices`, `DELETE /v1/sync` always; a push and a receipt with an entitled plan of the store's account (403 `plan_required`, the place of the `sync_bytes` check of section 24); `GET /v1/sync/head` and `…/snapshot` with `PlanView::can_pull` (entitled or `read_only`); every other team route is 403 `forbidden` (invites, joins, device links, members, items, agents, questions, feed, push). The relay-sync sign-in (`/v1/auth/challenge`, `/v1/auth/token`) and the sync routes are those of section 24, unchanged. A store's outside refusals go to the relay audit and its polls and requests have the Connect bounds (`Core::hosted`).
 
 ### 33.6 Seams for billing and groups
 
-`account::Plans` (`plan`, `people`, `cancel_for_deletion`) and `account::Groups` (`group_of`, `share_group`, `blocks_deletion`) are installed with `Hub::set_plans` and `Hub::set_groups`. Until billing (C2) and groups (C3) install theirs, `NoPlans` answers `PlanView::none()` for every account (no new store, no push, no pull, no entitlement token: 403 `plan_required`) and `NoGroups` answers no group (a device of another account is 403 `not_in_group`). Each call gets the directory store and takes its own lock. The tables of both are in directory 1006 already (33.10). `tunnel_node`, `tunnel_grant`, and `tunnel_usage` are unused by C1, except that a revoke and a deletion delete the rows of their device or account.
+`account::Plans` (`plan`, `people`, `cancel_for_deletion`) and `account::Groups` (`group_of`, `share_group`, `blocks_deletion`) are installed with `Hub::set_plans` and `Hub::set_groups`. With the account routes on, `Hub::open` installs the groups of section 36 (`group::DirectoryGroups`) and, when Stripe is set up, billing (section 34, `billing_store::BillingPlans`). Without Stripe, `NoPlans` answers `PlanView::none()` for every account (no new store, no push, no pull, no entitlement token: 403 `plan_required`); a test may install its own plans with `Hub::set_plans`. Each call gets the directory store and takes its own lock. The tables of both are in directory 1006 already (33.10). `tunnel_node`, `tunnel_grant`, and `tunnel_usage` are unused by C1, except that a revoke and a deletion delete the rows of their device or account.
 
 ### 33.7 Recovery and deletion
 
@@ -2180,7 +2180,7 @@ After `/healthz` and the edge secret, before the proxy and the route table: an a
 
 ### 33.10 Directory version 1006
 
-`DIRECTORY_VERSION` is 1006 (`BEFORE_ACCOUNTS_VERSION` 1005; the step is one constant, so it can be renumbered if another plan lands a step first). `MIGRATE_ACCOUNTS`, additive, in the transaction that moves 1001 to 1005 up: the table `team` is rebuilt with the kind `account` and the columns `account_id`, `vault_id` (SQLite cannot widen a CHECK; the rows are copied and `team_legacy` is made again), and the tables `account`, `account_device`, `account_key`, `account_link`, `account_join`, `account_store_device`, `brain_event`, `"group"`, `group_member`, `group_invite`, `stripe_customer`, `stripe_subscription`, `stripe_event`, `tunnel_node`, `tunnel_grant`, `tunnel_usage`, and `entitlement_key` are made. A new file runs the 1005 schema and then the same step, so a new and a migrated file have the same schema. Nothing in them is secret; tokens, link codes, recovery codes, client addresses, and the signing key are never stored. The images before refuse 1006.
+`DIRECTORY_VERSION` is 1006 (`BEFORE_ACCOUNTS_VERSION` 1005; the step is one constant, so it can be renumbered if another plan lands a step first). `MIGRATE_ACCOUNTS`, additive, in the transaction that moves 1001 to 1005 up: the table `team` is rebuilt with the kind `account` and the columns `account_id`, `vault_id` (SQLite cannot widen a CHECK; the rows are copied and `team_legacy` is made again), and the tables `account`, `account_device`, `account_key`, `account_link`, `account_join`, `account_store_device`, `brain_event`, `"group"`, `group_member`, `group_invite`, `stripe_customer`, `stripe_subscription`, `stripe_event`, `tunnel_node`, `tunnel_grant`, `tunnel_usage`, and `entitlement_key` are made. `stripe_subscription` has the columns of billing (34.10), `last_invoice_created` and `stores_deleted_at` included. A new file runs the 1005 schema and then the same step, so a new and a migrated file have the same schema. Nothing in them is secret; tokens, link codes, recovery codes, client addresses, and the signing key are never stored. The images before refuse 1006.
 
 The way back in place: `apassy-relay downgrade-directory-1005` (`Directory::downgrade_to_1005`), with the relay stopped: the vault store rows and their device map go and the version is 1005, in one transaction; then their files are deleted. Every other table and column stays (the 1005 image never reads them; the next open of 1006 keeps them). `downgrade-directory-1004` and `-1003` take a 1006 file down with the same step first. docs/OPERATIONS.md section 26.3.
 
@@ -2198,7 +2198,7 @@ The way back in place: `apassy-relay downgrade-directory-1005` (`Directory::down
 
 ADR 0037 stage 7, D3 (docs/design/implementation-plan-s7-connect.md of the core, unit C2; contract `connect-billing-v1` of the core, which wins over this section where they differ). Connect sells three plans through Stripe Checkout and the Stripe Customer Portal, with no Stripe SDK: `src/server/stripe.rs` is the Stripe client and the webhook check, `src/server/billing.rs` the plans, the plan state, and the handlers. Section 33 (Connect accounts, unit C1) gives the account, the account token, and the directory tables; this section numbers its parts on the assumption that C1 takes 33.
 
-**Status of this revision (C2-core):** the modules, their tests (`tests/server_billing.rs`, `tests/connect_billing_sandbox.rs`), the products script, and the edge Worker are in place. The routes and the configuration are wired in a second step, after C1: until then no route of this section is served.
+**Wired (unit CW):** with the account routes on (`APASSY_RELAY_CONNECT_ACCOUNTS=1` or `connect` mode) and both Stripe files set, `Hub::open` makes billing on the directory tables (`server/billing_store.rs`, `DirectoryBilling`) and installs it as the `Plans` seam of the accounts (`BillingPlans`): the plan of every account, its people for the store limit, and the cancel of `DELETE /v1/account` come from it. The routes are in 34.11, the maintenance pass in 34.6, the settings in 34.7. Without the Stripe files the billing routes answer 503 `busy` and no account has a plan; without the account routes nothing of this section exists (every path is 404).
 
 ### 34.1 Rules
 
@@ -2262,7 +2262,7 @@ An event that does not apply is logged and answered `200` with its id stored, so
 
 `end` is `grace_until` for a past due beyond its grace, else the stored end, else the period end; a past due without a failure time counts the grace from the period end. The account's `PlanView` comes from its own subscriptions and, for an active member that is not the owner, from the group's subscription when its plan is of the group's kind; an entitled state wins over one that is not, then the newest. A pending member has `none`.
 
-`Billing::maintenance(now)` prunes event ids older than 30 days and lists each ended plan whose `delete_at ≤ now` and whose stores were not deleted (`DueDeletion`). The caller deletes the vault stores and the nodes, writes the audit row with counts, sends I-4 `forget`, and calls `Billing::mark_stores_deleted`. A renewal before that keeps the stores; `active` again clears the mark.
+`Billing::maintenance(now)` prunes event ids older than 30 days and lists each ended plan whose `delete_at ≤ now` and whose stores were not deleted (`DueDeletion`). `billing_store::maintain`, part of the relay's maintenance pass at most once an hour, then deletes the vault stores and the tunnel nodes of the buying account and of each active member of its group whose plan is over too (status `none`; a member with a plan of its own keeps its stores), queues I-4 `forget` for each of them (`brain_event`), writes one audit row `plan_stores_deleted` (actor `billing`; the subscription, the account, the group, and the counts of accounts, stores, and nodes), and calls `Billing::mark_stores_deleted`. Read-only and suspended are states that each request reads, not actions of the pass. A renewal before the deletion keeps the stores; `active` again clears the mark. After an applied webhook that leaves an account (or a member of the group it owns) without an entitled plan, its open tunnel streams close (section 35).
 
 ### 34.7 Configuration
 
@@ -2276,7 +2276,7 @@ An event that does not apply is logged and answered `200` with its id stored, so
 | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end (1 to 365) | 30 |
 | `APASSY_CONNECT_DELETE_DAYS` | Days from the end to the deletion of the stores (above the read-only days, at most 730) | 90 |
 
-`BillingConfig::from_lookup` reads the last five; `stripe::read_secret_key_file` and `read_webhook_secret_file` the files.
+`config::billing_from` reads them into `ConnectConfig.billing` (`BillingSettings`): both files or neither (one alone stops the start), the five settings checked even without the files, and the site from `APASSY_CONNECT_SITE_URL` as section 33.1 checks it. The Stripe API base is `https://api.stripe.com`; no setting changes it. Only code sets another base (`BillingSettings.stripe_api_base`, the fake Stripe of the tests), and `Hub::open` refuses any base other than Stripe's own or a loopback `http://` address. The debug form of the settings never shows the key or the secret.
 
 ### 34.8 The edge Worker
 
@@ -2284,7 +2284,25 @@ An event that does not apply is logged and answered `200` with its id stored, so
 
 ### 34.9 Tests
 
-`tests/server_billing.rs` runs the handlers against `tests/common/fake_stripe.rs` (an in-process server on a free loopback port that records calls and replays idempotent POSTs) and `MemoryBillingStore`, with the fixtures of `tests/fixtures/connect-billing-v1/` of the core. `tests/connect_billing_sandbox.rs` is the test-clock flow against the Stripe sandbox, ignored unless `STRIPE_SANDBOX_KEY_FILE` is set, run only by `.github/workflows/connect-sandbox.yml` (manual).
+`tests/server_billing.rs` runs the handlers against `tests/common/fake_stripe.rs` (an in-process server on a free loopback port that records calls and replays idempotent POSTs) and `MemoryBillingStore`, with the fixtures of `tests/fixtures/connect-billing-v1/` of the core. `tests/server_billing_routes.rs` runs a relay with billing against the fake Stripe over HTTP: the price warm-up and the public plans (equal to `plans.json`), the checkout form, the raw webhook (exact bytes, a changed byte, another secret, 301 s late, no `v1`, 256 KiB + 1, a repeat, an unknown account), every plan state against a real vault store (push, pull, download, new store, entitlement token), the deletion day with its audit row, the account deletion, and the settings. `tests/server_group.rs` (section 36) and `tests/server_connect_e2e.rs` (the app client end to end) use the same helpers (`tests/common/connect.rs`). `tests/connect_billing_sandbox.rs` is the test-clock flow against the Stripe sandbox, ignored unless `STRIPE_SANDBOX_KEY_FILE` is set, run only by `.github/workflows/connect-sandbox.yml` (manual).
+
+### 34.10 Storage
+
+`DirectoryBilling` keeps every billing transaction in one immediate transaction of `relay.db`: an event id and its effect commit together. `stripe_customer` (customer id, account id, the email copy, also copied to `account.email` for `GET /v1/account`), `stripe_subscription` (the `SubscriptionRow`: ids, item, account, group, lookup key, quantity, status, period end, `cancel_at_period_end`, first failure, end, `event_created` of the last applied subscription event, `last_invoice_created` of the last applied invoice event, `stores_deleted_at`), `stripe_event` (id, type, time), `"group"` (with its `subscription_id`), `group_member` (the owner row of a new group). No card, address, or tax id.
+
+### 34.11 Routes
+
+| Route | Where | Notes |
+| --- | --- | --- |
+| `GET /v1/plans` | `http::respond_billing` | public: no `Authorization` (400 with one); 405 for another method; the cached prices (an hour), resolved at start on a thread of its own |
+| `POST /v1/stripe/webhook` | `http::respond_billing` | the edge secret as every route; `Stripe-Signature`; the raw body read up to 256 KiB + 1 byte (413 above, before the signature); then 34.5 |
+| `GET /v1/account/plan` | `account::dispatch` | the `PlanView` of `Plans::plan` (also without Stripe: `none`) |
+| `POST /v1/account/checkout` | `account::dispatch` | `Billing::checkout` (34.3) |
+| `POST /v1/account/portal` | `account::dispatch` | `Billing::portal` (34.4) |
+| `POST /v1/account/group/seats` | `group::dispatch` | `Billing::change_seats` (34.4) |
+| `DELETE /v1/account` | `account::delete_account` | `Plans::cancel_for_deletion` = `Billing::cancel_for_account_deletion` before any row goes: a Stripe failure leaves the account as it was |
+
+The account routes need the account token (section 33.2). Without the Stripe files every route of this table but `GET /v1/account/plan` and `DELETE /v1/account` answers 503 `busy`.
 
 ## 35. Tunnel and ingress
 
@@ -2341,3 +2359,40 @@ Both keep each client address only in memory, for 30 new connections a minute pe
 - Connect sees the sizes and times of the TLS records of every stream, the server names of the ingress, and the client addresses of the ingress (in memory).
 - A node can hold the slots of its own account's streams (up to 64) until the idle reset; it cannot reach another account's streams.
 - The ingress is a raw TCP port on the Connect host: the per-address limit and the pending cap bound the work of one address, not of many.
+
+## 36. Groups: Family and Team
+
+ADR 0037 stage 7, plan s7 unit C3; the wire is [connect-billing-v1](../../../docs/contracts/connect-billing-v1.md) section 6 (the contract wins where this section is shorter). Code: `src/server/group.rs`, on the directory tables `"group"`, `group_member`, and `group_invite` of directory 1006 (section 33.10). The routes exist only with the account routes on; each needs the account token (section 33.2) and a strict body.
+
+### 36.1 What a group is
+
+The Stripe webhook makes a group when a Family or Team subscription is bound (34.5), with the buying account as its active `owner`. A Family has one organizer (`owner`) and `member`s: no admins, 4 people included, at most 10. A Team has `owner`, `admin`s, and `member`s, one seat each, at most 250. A member keeps its own account, devices, and stores. Only an **active** member gets the group's plan (34.6); a pending member has none.
+
+### 36.2 Routes
+
+| Route | Who | Answer, refusals |
+| --- | --- | --- |
+| `GET /v1/account/group` | any member | the `GroupView` (`group_id`, `kind`, `role`, `owner_account`, `included`, `quantity` of the subscription, `members`); a pending member sees the owner and itself only; no group: 404 `not_found` |
+| `POST /v1/account/group/invites` `{"role"}` | the owner or an active admin | `{invite_id, url, expires_at}`; `url` is `<APASSY_CONNECT_SITE_URL>/connect/join#apassy_gin_<group id>_<64 hex>`. `admin` only in a Team and only by the owner (403 `forbidden`); a role other than `member` or `admin`: 400; the owner's plan not entitled: 403 `plan_required`; 20 open invites: 403 `account_limit` |
+| `POST /v1/account/group/join` `{"code"}` | the invited account | `{group_id, kind, state: "pending", owner_name}`; a malformed code: 400; an unknown, used, or expired code: 403 `forbidden` (one answer); an account in a group, or with an entitled plan of its own: 409 `conflict`; the same code again by the account that used it answers the same |
+| `POST /v1/account/group/members/{account}/confirm` `{}` | the owner or an active admin | the member view, `active`; when the active members would exceed the subscription's quantity, `Billing::request_group_quantity` asks Stripe for the member count first (`create_prorations`; 409 `seat_limit` above the plan's maximum; nothing changes when Stripe refuses); the owner's plan not entitled: 403 `plan_required`; an account not in this group: 404 |
+| `DELETE /v1/account/group/members/{account}` | the owner or an active admin; a member itself | `{account_id, removed_from_stores}`. The owner cannot be removed (403); only the owner removes an admin (403); a member may remove itself (a pending one cancels its join) |
+| `POST /v1/account/group/seats` `{"quantity"}` | the owner | 34.4 |
+
+A caller in no group: 403 `not_in_group` (404 for the view); a role that may not: 403 `forbidden`. The owner's device runs the owner check (`OwnerAction::ChangeConnectGroup`) before a confirm or a removal; Connect does not see it.
+
+### 36.3 Invites
+
+The code is 32 random bytes in hex after the group id. Connect stores only its SHA-256 (`group_invite.code_hash`), the role, the inviting account, the times, and, once used, the account that used it. A code works once, for 7 days (`INVITE_SECS`). The join marks the invite used and adds the member as `pending` in one transaction, so two accounts never use one code.
+
+### 36.4 Removal
+
+A removal, in this order: the devices of the removed account leave the vault stores of the group's other accounts, and their devices leave the removed account's stores (`Hub::remove_store_device`; `removed_from_stores` counts the first kind); the tunnel grants between it and the group end, both ways, and their streams close (section 35); its `group_member` row goes and `account.group_id` is cleared; an audit row `group_member_removed`. The removed account keeps a free account; its next request has no plan (34.6). The quantity at Stripe does not change: the owner lowers it with the seats route.
+
+### 36.5 The seam of the accounts
+
+`group::DirectoryGroups` is the `Groups` seam (33.6): `group_of` (the `group` of `GET /v1/account`: id, kind, role, state), `share_group` (both accounts are **active** members of one group: a device of the other account may join a vault store, and the store becomes `shared`), and `blocks_deletion` (an owner with another active member: `DELETE /v1/account` is 409 `conflict`). An account that is deleted leaves its group in the same transaction (`group::forget_account`): a member's row goes; an owner's group, its pending members, and its invites go.
+
+### 36.6 Tests
+
+`tests/server_group.rs`, one test for each bullet of the plan's C3 acceptance, with subscriptions from signed synthetic webhooks against the fake Stripe: the group made by the webhook; an invite is one use and 7 days, stored as a hash; a pending member has no entitlement until confirmed, and a member does not buy; the Family quantity follows the people (4 included, the fifth raises it with prorations, the change applied only on the webhook, `seat_limit` below the members and above 10) and the Team quantity its members; a removed member keeps a free account, loses the plan within one request, and leaves the shared store; a member's device joins a shared store and a stranger's or a pending member's does not; roles (a Family has no admins, only the owner invites or removes an admin, the owner cannot be removed, a member may leave); an owner with members cannot delete the account, a member can, and then the owner can (the subscription canceled at once).

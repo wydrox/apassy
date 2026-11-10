@@ -1755,10 +1755,11 @@ A later start of a 1006 image moves the file to 1006 again.
 
 ## 27. Connect billing (Stripe)
 
-SPEC section 34; contract `connect-billing-v1` of the core. **Not wired yet:** until the
-wiring step after Connect accounts (C1), a relay serves no billing route and reads none of
-these settings. Nothing here changes the hosted relay without the owner's confirmation;
-the live Stripe account changes only with it.
+SPEC section 34; contract `connect-billing-v1` of the core. Billing runs only with the
+account routes on (`APASSY_RELAY_CONNECT_ACCOUNTS=1`, section 26) **and** both Stripe files
+of 27.1 set; with the routes on and no files, the billing routes answer 503 `busy` and no
+account has a plan. Nothing here changes the hosted relay without the owner's
+confirmation; the live Stripe account changes only with it.
 
 ### 27.1 Keys as files
 
@@ -1845,7 +1846,32 @@ and the sandbox prices of 27.4. Record each run in the pull request as "run on <
 `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS`, `APASSY_CONNECT_GRACE_DAYS` (14),
 `APASSY_CONNECT_READ_ONLY_DAYS` (30), `APASSY_CONNECT_DELETE_DAYS` (90): SPEC 34.7. A
 change takes effect at the next start; durations apply to every plan at once, including
-plans already lapsed.
+plans already lapsed. A bad value, or only one of the two Stripe files, stops the start
+with a message that names the setting. No setting points the relay at another Stripe API
+than `https://api.stripe.com`.
+
+### 27.7 What the relay does on its own
+
+- **At start:** it reads the six prices from Stripe on a thread of its own (a failure is
+  logged as `the Stripe prices could not be read at start` and the next `GET /v1/plans`
+  asks again); the start never waits for Stripe.
+- **Each hour** (the maintenance pass): event ids older than 30 days go; each ended plan at
+  its deletion day (end + `APASSY_CONNECT_DELETE_DAYS`) loses its vault stores and tunnel
+  nodes, those of its group's active members whose plan is over too, with one audit row
+  `plan_stores_deleted` (actor `billing`, counts only) and an I-4 `forget` for each account.
+  The accounts and their devices stay. The rows are in the relay audit of
+  `relay.db` (`audit` table); a failed pass logs `the billing maintenance pass failed`.
+- **On `DELETE /v1/account`:** the subscription is canceled at Stripe first; if Stripe
+  fails, nothing is deleted and the app can ask again.
+
+### 27.8 Groups
+
+Family and Team groups (SPEC section 36) need no setting of their own: the webhook makes a
+group for a Family or Team subscription, and the invite links use
+`APASSY_CONNECT_SITE_URL` (`/connect/join#apassy_gin_…`; the site page reads only the
+fragment, which never reaches a server). The relay keeps the SHA-256 of each invite code,
+never the code. A support question about a member: `group_member` in `relay.db` names the
+group, the role, and the state (`pending` until the owner or an admin confirms).
 
 ## 28. The Connect tunnel and the ingress
 
