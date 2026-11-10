@@ -1563,23 +1563,33 @@ describe("relay mode (one build for the hosted relay and Connect)", () => {
     assert.equal(vpcTargets.length, 0);
   });
 
-  it("does not use the free Connect guards or the client prefix in connect mode", async () => {
-    const limits = everyLimiter(false);
-    const response = await call("/v1/connect", {
-      method: "POST",
-      body: '{"v":1}',
-      headers: {
-        "cf-connecting-ip": "198.51.100.42",
-        "x-apassy-client-prefix": "203.0.113.0/24",
-        "x-apassy-client-prefix-mac": "00",
-      },
-    }, { ...limits.env, RELAY_MODE: "connect" });
-    // Forwarded: the relay answers 410 hosted_retired; no guard refused it here.
-    assert.equal(response.status, 201);
-    assert.deepEqual(limits.used, []);
-    assert.equal(seen.length, 1);
-    assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), []);
-    assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix-mac"), []);
+  it("answers the free Connect routes with 410 at the edge in connect mode, without a guard or the relay", async () => {
+    for (const [method, path] of [
+      ["POST", "/v1/connect"],
+      ["GET", "/v1/connect"],
+      ["POST", "/v1/connect/challenge"],
+      ["POST", "/v1/./connect"],
+    ]) {
+      const limits = everyLimiter(false);
+      const response = await call(path!, {
+        method,
+        ...(method === "POST" ? { body: '{"v":1}' } : {}),
+        headers: {
+          "cf-connecting-ip": "198.51.100.42",
+          "x-apassy-client-prefix": "203.0.113.0/24",
+          "x-apassy-client-prefix-mac": "00",
+        },
+      }, { ...limits.env, RELAY_MODE: "connect", RELAY: vpc() });
+      assert.equal(response.status, 410, `${method} ${path}`);
+      const answer = await response.json() as { ok: boolean; error: { code: string } };
+      assert.equal(answer.ok, false);
+      assert.equal(answer.error.code, "hosted_retired");
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      // No guard is asked (none can be flooded), and nothing reaches the relay.
+      assert.deepEqual(limits.used, []);
+      assert.equal(seen.length, 0);
+      assert.equal(vpcTargets.length, 0);
+    }
     // The guards of Connect stay: a new account and a dial are limited as before.
     const account = everyLimiter(false);
     const refused = await call("/v1/account", {
