@@ -12,11 +12,13 @@
 // One build serves both phases of the hosted relay (docs/operations/connect.md): the var
 // RELAY_MODE is `relay` (unset: today's hosted relay) or `connect` (after the cutover,
 // ADR 0037 stage 7). In `connect` mode the APNs sender `/internal/push` is off (404), the
-// two guards of the free Connect teams (CONNECT_LIMITER, CONNECT_PREFIX_LIMITER) and the
-// client prefix they send are not used, and the agent proxy `/p/` has the JSON cap (the
-// relay has no proxy there and answers 410). `/dl/*`, `/guide`, and `/install.sh` are the
-// same in both. Any other value is a configuration error: 503 on every relay route, 404
-// on `/internal/*`; the static files stay.
+// free Connect routes `/v1/connect` and `/v1/connect/challenge` answer 410 `hosted_retired`
+// here (so they need no guard: CONNECT_LIMITER and CONNECT_PREFIX_LIMITER are not used, and
+// nothing reaches the relay), and the agent proxy `/p/` has the JSON cap (the relay has no
+// proxy there and answers 410). `/dl/*`, `/guide`, and `/install.sh` are the same in both.
+// Any other value is a configuration error: 503 on every relay route, 404 on
+// `/internal/*`; the static files stay. The deploy refuses a RELAY_MODE that differs from
+// the mode of the relay (scripts/check-relay-mode.mjs).
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
 // Node can run it with type stripping in the tests.
 // workerd accepts only handlers as exports of this main module, so values such as
@@ -247,21 +249,25 @@ function staticResponse(response: Response, noStore: boolean): Response {
 
 /** The codeless team route (SPEC 26): anyone can call it, so its limiter is the strictest. */
 const CONNECT_PATH = "/v1/connect";
+/** The challenge of the codeless team route. */
+const CONNECT_CHALLENGE_PATH = "/v1/connect/challenge";
+/** The answer of the relay in `connect` mode to a retired route (relay SPEC 37.2). */
+const HOSTED_RETIRED =
+  "This route is retired: this relay serves Apassy Connect only (accounts, vault stores, billing, groups, and the tunnel). Approvals and teams run on your own Apassy node (ADR 0037).";
 
 // The per-IP limiter of a route. Creation (a team, a join, a device link) is rare;
 // sign-in is frequent (a waiting CLI asks every 5 s); a snapshot push holds a relay
 // thread for its whole body. A Connect team needs no code at all. The Stripe webhook has
 // none on purpose: Stripe sends every event from a few shared addresses, and a limit there
 // would drop paid events; its signature is the relay's check.
-function limiterFor(method: string, path: string, env: Env, connectMode: boolean): CreateLimiter | undefined {
+function limiterFor(method: string, path: string, env: Env): CreateLimiter | undefined {
   if (method === "PUT" && path === SNAPSHOT_PATH) return env.SYNC_LIMITER;
   if (method !== "POST") return undefined;
   switch (path) {
     case STRIPE_WEBHOOK_PATH:
       return undefined;
     case CONNECT_PATH:
-      // In `connect` mode the free Connect teams are gone: the relay answers 410 at once.
-      return connectMode ? undefined : env.CONNECT_LIMITER;
+      return env.CONNECT_LIMITER;
     case "/v1/join":
     case "/v1/teams":
     case "/v1/devices/link":
@@ -323,6 +329,11 @@ export default {
     }
 
     if (mode === undefined) return text(503, "relay not configured");
+    // Connect has no free Connect teams: their two routes are retired, and the edge answers
+    // as the relay would, before a guard, a body, or the relay.
+    if (connectMode && (url.pathname === CONNECT_PATH || url.pathname === CONNECT_CHALLENGE_PATH)) {
+      return jsonError(410, "hosted_retired", HOSTED_RETIRED);
+    }
 
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     if (hasBody) {
@@ -332,16 +343,16 @@ export default {
 
     // Connect has two guards, each on its own key: the client's /64 (or IPv4 address) first,
     // then its coarser /48 (or /24) prefix, asked only when the first one lets the call pass.
-    // Every other route has one guard, keyed by the full address.
-    // Not in `connect` mode: there the route is retired and has no guard of its own.
-    const isConnect = !connectMode && request.method === "POST" && url.pathname === CONNECT_PATH;
+    // Every other route has one guard, keyed by the full address. (In `connect` mode the
+    // route answered 410 above.)
+    const isConnect = request.method === "POST" && url.pathname === CONNECT_PATH;
     // A new account, and a recovery, are keyed like Connect's first guard: one client usually
     // holds a whole /64.
     const isAccount =
       request.method === "POST" && (url.pathname === ACCOUNT_PATH || url.pathname === RECOVER_PATH);
     // A dial is keyed the same way.
     const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
-    const limiter = limiterFor(request.method, url.pathname, env, connectMode);
+    const limiter = limiterFor(request.method, url.pathname, env);
     if (limiter || isConnect || isAccount || isDial) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.

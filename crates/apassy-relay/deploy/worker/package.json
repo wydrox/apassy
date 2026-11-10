@@ -8,7 +8,7 @@
   "scripts": {
     "test": "node --test 'test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json",
-    "preflight": "node scripts/verify-assets.mjs",
+    "preflight": "node scripts/verify-assets.mjs && node scripts/check-relay-mode.mjs",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
