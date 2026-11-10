@@ -1217,22 +1217,12 @@ fn launch_agent_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
 /// all", and a socket that failed.
 fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let open = app.cli_sessions_open();
-    let installed = super::cli_tools::installed();
+    let row = super::cli_tools::place().row();
     let mut end = false;
     let mut install = false;
-    let footer = if installed {
-        "In Terminal: add ~/.local/bin to PATH, then run eval \"$(apassy login)\"."
-    } else {
-        "Commands never show a secret value."
-    };
-    rows::section(ui, Some("Command line"), Some(footer), |g| {
-        let place = if installed {
-            "~/.local/bin"
-        } else {
-            "Not installed"
-        };
-        g.line("apassy", Some(rows::value(place)), |ui| {
-            if !installed {
+    rows::section(ui, Some("Command line"), Some(row.footer), |g| {
+        g.line("apassy", Some(rows::value(row.value)), |ui| {
+            if row.install {
                 install = kit::small_button(ui, "Install tools…", Style::Bordered)
                     .on_hover_text(
                         "Install links in ~/.local/bin. Existing commands are not replaced.",
