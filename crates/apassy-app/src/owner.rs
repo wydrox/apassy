@@ -63,15 +63,24 @@ fn execute(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let mut vault = Vault::open(path).map_err(err)?;
-    #[cfg(target_os = "linux")]
-    if command == "unlock-keyring" {
-        let pass = apassy::native::linux::read_passphrase(path)?;
-        vault.unlock(&pass).map_err(err)?;
+    // `change-passphrase VAULT` unlocks with the current passphrase and uses that same
+    // answer for the change: one prompt, not two.
+    let mut current = None;
+    if command == "change-passphrase" {
+        let pass = terminal::read_hidden("Current passphrase: ").map_err(err)?;
+        vault.unlock(pass.expose()).map_err(unlock_err)?;
+        current = Some(pass);
+    } else if command == "unlock-keyring" {
+        #[cfg(target_os = "linux")]
+        {
+            let pass = apassy::native::linux::read_passphrase(path)?;
+            vault.unlock(&pass).map_err(unlock_err)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        unlock(&mut vault)?;
     } else {
         unlock(&mut vault)?;
     }
-    #[cfg(not(target_os = "linux"))]
-    unlock(&mut vault)?;
     let shared = Arc::new(Mutex::new(Some(vault)));
     if matches!(command, "shell" | "unlock" | "unlock-keyring") {
         println!(
@@ -89,7 +98,8 @@ fn execute(args: &[String]) -> Result<(), String> {
             if action.is_empty() {
                 continue;
             }
-            if let Err(error) = operation(&shared, action, (!rest.is_empty()).then_some(rest)) {
+            if let Err(error) = operation(&shared, action, (!rest.is_empty()).then_some(rest), None)
+            {
                 eprintln!("apassy owner: {error}");
             }
             // Backup and passphrase changes intentionally lock the source, including
@@ -104,7 +114,7 @@ fn execute(args: &[String]) -> Result<(), String> {
             }
         }
     } else {
-        operation(&shared, command, args.get(2).map(String::as_str))?;
+        operation(&shared, command, args.get(2).map(String::as_str), current)?;
     }
     shared
         .lock()
@@ -187,7 +197,31 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 fn unlock(vault: &mut Vault) -> Result<(), String> {
     let pass = terminal::read_hidden("Vault passphrase: ").map_err(err)?;
-    vault.unlock(pass.expose()).map_err(err)
+    vault.unlock(pass.expose()).map_err(unlock_err)
+}
+
+/// One clear line for a refused unlock. The vault error does not tell a wrong
+/// passphrase from a damaged file, so neither does this line.
+fn unlock_err(error: apassy::vault::VaultError) -> String {
+    match error.kind() {
+        apassy::vault::VaultErrorKind::WrongKeyOrCorrupt => {
+            "The passphrase is wrong, or the vault file is damaged. The vault stays locked."
+                .to_owned()
+        }
+        _ => err(error),
+    }
+}
+
+/// What to say about a keyring unlock item after a passphrase change, from whether
+/// `secret-tool` is installed and from the result of removing the item. Nothing when
+/// the item is gone or Apassy could never have stored one (no `secret-tool`). When
+/// the keyring could not be reached from this terminal (no session bus, a locked
+/// keyring), say so and where to remove it: the item would hold the old passphrase.
+#[cfg(any(target_os = "linux", test))]
+fn keyring_note(secret_tool: bool, removed: Result<(), String>) -> Option<&'static str> {
+    (secret_tool && removed.is_err()).then_some(
+        "This terminal could not reach your keyring. If you turned on keyring unlock for this vault, its keyring item still holds the old passphrase: run apassy owner keyring-disable VAULT in your desktop session.",
+    )
 }
 fn read_line(prompt: &str) -> Result<Option<String>, String> {
     let mut tty = std::fs::OpenOptions::new()
@@ -212,7 +246,13 @@ fn clean(s: &str) -> String {
         .filter(|c| !apassy::text::is_hidden_char(*c))
         .collect()
 }
-fn operation(shared: &SharedVault, command: &str, argument: Option<&str>) -> Result<(), String> {
+/// `current`: the passphrase that `change-passphrase VAULT` already read to unlock.
+fn operation(
+    shared: &SharedVault,
+    command: &str,
+    argument: Option<&str>,
+    current: Option<apassy::owner::wire::SecretText>,
+) -> Result<(), String> {
     // Backup confirmation uses the same action-bound, session-bound proof as the UI.
     let backup = if command == "backup" {
         let path = PathBuf::from(argument.ok_or("backup requires a destination")?);
@@ -266,17 +306,26 @@ fn operation(shared: &SharedVault, command: &str, argument: Option<&str>) -> Res
             println!("Encrypted backup written.");
         }
         "change-passphrase" => {
-            let current = terminal::read_hidden("Current passphrase: ").map_err(err)?;
+            let current = match current {
+                Some(current) => current,
+                None => terminal::read_hidden("Current passphrase: ").map_err(err)?,
+            };
             let new = terminal::read_hidden_twice("New passphrase: ", "Repeat new passphrase: ")
                 .map_err(err)?;
             vault
                 .change_passphrase(current.expose(), new.expose())
                 .map_err(err)?;
             #[cfg(target_os = "linux")]
-            if apassy::native::linux::delete_passphrase(vault.path()).is_err() {
-                terminal::tell(
-                    "If a keyring unlock item exists, remove it with owner keyring-disable. It contains the old passphrase.",
-                );
+            {
+                let secret_tool = apassy::native::linux::secret_tool_installed();
+                let removed = if secret_tool {
+                    apassy::native::linux::delete_passphrase(vault.path())
+                } else {
+                    Ok(())
+                };
+                if let Some(note) = keyring_note(secret_tool, removed) {
+                    terminal::tell(note);
+                }
             }
             println!("Passphrase changed. Old backups still require the old passphrase.");
         }
@@ -371,6 +420,15 @@ mod tests {
         ] {
             assert!(serve_args(&words(bad)).is_err(), "{bad}");
         }
+    }
+    #[test]
+    fn the_keyring_note_appears_only_when_an_item_may_still_exist() {
+        assert_eq!(keyring_note(false, Err("no bus".into())), None);
+        assert_eq!(keyring_note(false, Ok(())), None);
+        assert_eq!(keyring_note(true, Ok(())), None);
+        let note = keyring_note(true, Err("no bus".into())).unwrap();
+        assert!(note.contains("keyring-disable"));
+        assert!(note.contains("desktop session"));
     }
     #[test]
     fn terminal_names_strip_control_and_bidi_characters() {

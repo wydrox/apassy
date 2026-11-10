@@ -73,6 +73,11 @@ impl Terminal {
     /// Start `apassy owner serve VAULT` with a new session whose controlling terminal
     /// is a new pseudo-terminal.
     fn start(home: &Home) -> (Self, Child) {
+        Self::start_owner(home, "serve")
+    }
+
+    /// Start `apassy owner COMMAND VAULT` on a new pseudo-terminal, as [`Self::start`].
+    fn start_owner(home: &Home, command: &str) -> (Self, Child) {
         use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
         let controller = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
         grantpt(&controller).unwrap();
@@ -90,7 +95,7 @@ impl Terminal {
             .command("setsid")
             .arg("--ctty")
             .arg(program())
-            .args(["owner", "serve"])
+            .args(["owner", command])
             .arg(home.vault())
             .stdin(Stdio::from(open()))
             .stdout(Stdio::from(open()))
@@ -229,6 +234,69 @@ fn quit_locks_and_removes_the_sockets() {
     terminal.wait_for("Vault locked on request");
     assert!(!socket_exists(&home.data().join("browser.sock")));
     assert!(!socket_exists(&home.data().join("broker.sock")));
+}
+
+/// `change-passphrase VAULT` unlocks with the current passphrase and changes it with
+/// that same answer: it asked twice before (Linux acceptance, 2026-11-10). Without a
+/// session bus it never repeats the old keyring advice.
+#[test]
+fn change_passphrase_asks_for_the_current_passphrase_once() {
+    const NEW: &str = "synthetic-serve-passphrase-new";
+    let home = Home::new();
+    let (mut terminal, mut child) = Terminal::start_owner(&home, "change-passphrase");
+    terminal.wait_for("Current passphrase: ");
+    terminal.type_line(PASSPHRASE);
+    terminal.wait_for("New passphrase: ");
+    terminal.type_line(NEW);
+    terminal.wait_for("Repeat new passphrase: ");
+    terminal.type_line(NEW);
+    let status = wait_exit(&mut child);
+    let text = terminal.text();
+    assert!(status.success(), "{text}");
+    assert!(text.contains("Passphrase changed."), "{text}");
+    assert_eq!(text.matches("Current passphrase: ").count(), 1, "{text}");
+    assert!(!text.contains("Vault passphrase: "), "{text}");
+    assert!(
+        !text.contains(PASSPHRASE) && !text.contains(NEW),
+        "echoed: {text}"
+    );
+    assert!(!text.contains("If a keyring unlock item exists"), "{text}");
+    if !Path::new("/usr/bin/secret-tool").exists() {
+        assert!(!text.contains("keyring"), "{text}");
+    }
+    let mut vault = Vault::open(&home.vault()).unwrap();
+    assert!(vault.unlock(PASSPHRASE).is_err());
+    vault.unlock(NEW).unwrap();
+}
+
+/// A wrong passphrase gives one clear line, without SQLCipher's internal log lines
+/// (`ERROR CORE sqlcipher_page_cipher: hmac check failed`, Linux acceptance).
+#[test]
+fn a_wrong_passphrase_prints_one_clear_line() {
+    let home = Home::new();
+    let (mut terminal, mut child) = Terminal::start_owner(&home, "list");
+    terminal.wait_for("Vault passphrase: ");
+    terminal.type_line("synthetic-wrong-passphrase");
+    let status = wait_exit(&mut child);
+    terminal.wait_for("apassy owner: ");
+    let text = terminal.text();
+    assert_eq!(status.code(), Some(1), "{text}");
+    assert!(
+        text.contains("apassy owner: The passphrase is wrong, or the vault file is damaged."),
+        "{text}"
+    );
+    for internal in ["sqlcipher", "hmac", "ERROR", "pgno"] {
+        assert!(!text.contains(internal), "{text}");
+    }
+    let after_prompt = &text[text.find("Vault passphrase: ").unwrap()..];
+    assert_eq!(
+        after_prompt
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        2,
+        "the prompt and one message: {text}"
+    );
 }
 
 fn socket_exists(path: &Path) -> bool {
