@@ -16,6 +16,7 @@ real relying party.
 | File | Purpose |
 | --- | --- |
 | `build-on-devbox.sh` | On the Mac: build and package a commit like the CI `linux-vault` job, in a container on the devbox (`git archive`, Ubuntu 24.04, Rust 1.97.0, debug build stripped, `build-vault.sh`) |
+| `release-matrix.sh` | On the devbox: one release build (CI artifact `apassy-vault-linux-x86_64`) in minimal Debian 12, 13 and Ubuntu 22.04, 24.04 containers: `install.sh` deb and tar from a `file://` origin, `ldd -r`, the window under Xvfb with the libraries it loads, the headless owner checks; Debian 11 and Ubuntu 20.04 refused |
 | `setup-host.sh` | Install Xvfb, openbox, xdotool, ImageMagick, gnome-keyring, libsecret-tools, polkitd, Google Chrome stable, Chromium (Debian: deb; Ubuntu: snap), Node.js 22 and the RP's dependency |
 | `container.sh` | Create the disposable `debian:trixie` container for the Debian target |
 | `run-target.sh` | One command per target: install the package as documented, run the scripted checks, create the vault in the window, start the RP |
