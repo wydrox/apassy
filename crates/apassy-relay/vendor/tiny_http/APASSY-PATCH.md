@@ -43,3 +43,24 @@ changes to `Cargo.toml` follow:
   (openssl, rustls 0.20 with ring 0.16, rustls-pemfile, zeroize) and the dev-dependencies are
   removed. A member locks every optional and dev dependency, and these old versions carry
   advisories. The relay never enabled them. Enabling a TLS feature now fails to compile.
+
+## WebSocket upgrade for the tunnel (2026-11-10, connect-tunnel-v1, unit C4)
+
+The Connect tunnel (`crates/apassy-relay/src/server/tunnel.rs`) upgrades
+`GET /v1/tunnel/node` and `GET /v1/tunnel/dial/{node}` on the deadline transport.
+
+- `client.rs`: the guarded transport still refuses an upgrade with `Content-Length` or
+  `Transfer-Encoding`, or of another method; a body-less `GET` upgrade now reaches the
+  handler. Its reader is the raw stream, and the connection still serves one request.
+- `request.rs`: new `Request::upgrade_split` returns the read half (the same buffered
+  reader that read the head, so bytes that came with the head are kept), the write
+  half, and a shutdown function. It first releases the request's deadlines.
+- `deadline.rs`, `connection.rs`: `Deadline::release(idle)` ends the header/body/handle
+  deadlines of an upgraded transport, sets read and write timeouts to `idle`, and makes
+  the reaper forget it (it no longer counts against the 1024 live transports; the
+  tunnel caps its own WebSockets).
+
+Open question settled: upstream `Request::upgrade` (and `upgrade_split`) keep bytes in
+the read buffer, because the head and the upgraded stream share one
+`BufReader<RefinedTcpStream>` through `SequentialReader`. The regression test is
+`upgrade_keeps_bytes_sent_with_the_head` in `crates/apassy-relay/tests/server_tunnel.rs`.
