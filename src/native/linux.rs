@@ -131,22 +131,22 @@ pub fn authenticate(cancel: Option<&AuthCancel>) -> Result<(), String> {
         start,
         rustix::process::getuid().as_raw()
     );
-    run(
-        "/usr/bin/pkcheck",
-        &[
-            "--action-id",
-            "com.wydrox.apassy.owner-presence",
-            "--process",
-            &subject,
-            "--allow-user-interaction",
-            "--detail",
-            "operation",
-            "Confirm the pending action shown in Apassy",
-        ],
-        None,
-        cancel,
-    )?;
+    run("/usr/bin/pkcheck", &pkcheck_args(&subject), None, cancel)?;
     Ok(())
+}
+
+/// The polkit request. No `--detail`: polkitd refuses details from a caller that is
+/// not root or the action owner ("Only trusted callers ... can use
+/// CheckAuthorization() and pass details"), so a detail would fail every check. The
+/// agent shows the fixed message of the action; Apassy's window shows the purpose.
+fn pkcheck_args(subject: &str) -> [&str; 5] {
+    [
+        "--action-id",
+        "com.wydrox.apassy.owner-presence",
+        "--process",
+        subject,
+        "--allow-user-interaction",
+    ]
 }
 
 fn process_start(stat: &str) -> Option<u64> {
@@ -235,6 +235,22 @@ mod tests {
                 .unwrap_err()
                 .contains("consent")
         );
+    }
+    #[test]
+    fn polkit_request_names_the_action_and_process_without_details() {
+        let args = pkcheck_args("123,456,1000");
+        assert_eq!(
+            args,
+            [
+                "--action-id",
+                "com.wydrox.apassy.owner-presence",
+                "--process",
+                "123,456,1000",
+                "--allow-user-interaction",
+            ]
+        );
+        // An unprivileged caller that passes details is refused by polkitd itself.
+        assert!(!args.contains(&"--detail"));
     }
     #[test]
     fn process_start_handles_parentheses_in_comm() {
