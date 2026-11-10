@@ -21,12 +21,24 @@
 //! [`FakeConnect::set_plan`] sets any `PlanView` of section 8. A seats change applies at
 //! once here (Connect waits for `customer.subscription.updated`).
 
+//!
+//! Vault stores (connect-account-v1 section 8, plan s7 unit M3): with a backing relay
+//! ([`FakeConnect::with_relay`], a [`StoreRelay`] such as the fake relay of
+//! `fake_relay.rs`), a store is a relay-sync-v1 team of that relay, made with the account
+//! key of the creating device, and the relay-sync-v1 routes (`/v1/auth/…`, `/v1/sync…`,
+//! `/v1/devices…`) of this origin go to that relay byte for byte, so the app signs in,
+//! pushes, and pulls at the Connect origin as it does at the hosted Connect. The relay
+//! checks the signed heads with `ring`. A plan that does not push (`set_plan` with
+//! `entitled: false`) gives the stores of the account `sync_bytes` 0: a push is
+//! `403 plan_required`, a pull works. A device link of a store adds only a device of the
+//! account or of an active member of its group (`403 not_in_group`).
+
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::relay_api::{decode_b64u, encode_b64u, sha256_hex};
@@ -44,6 +56,31 @@ pub fn entitlement_seed() -> [u8; 32] {
 
 /// The kid of the entitlement key of the test vectors.
 pub const KID: &str = "ek_test_1";
+
+/// The check of a device link of a store: the store, the key of the device, and the
+/// device id that the relay would give it. True adds it.
+pub type StoreGuard = Arc<dyn Fn(&str, &[u8], u64) -> bool + Send + Sync>;
+
+/// The relay that keeps the vault stores of [`FakeConnect::with_relay`].
+pub trait StoreRelay: Send + Sync {
+    /// The relay origin, `http://127.0.0.1:<port>`.
+    fn url(&self) -> String;
+    /// The origin that the relay's challenges report and its sign-ins sign.
+    fn set_origin(&self, origin: &str);
+    /// A new store team with `public_key` as its first device: (team id, device id).
+    fn add_store_team(&self, name: &str, device_name: &str, public_key: &[u8]) -> (String, u64);
+    /// Another device in the store: its device id.
+    fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64;
+    /// Delete the store with its copy.
+    fn remove_team(&self, team_id: &str);
+    /// The size limit of the store; 0 refuses pushes with `403 plan_required`.
+    fn set_team_sync_bytes(&self, team_id: &str, bytes: u64);
+    /// The check of a device link of a store.
+    fn set_store_guard(&self, guard: StoreGuard);
+}
+
+/// The size limit of a store of an account that pushes: 64 MiB.
+const STORE_BYTES: u64 = 67_108_864;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JoinState {
@@ -163,6 +200,8 @@ struct State {
     checkouts: Vec<Checkout>,
     groups: Vec<Group>,
     invites: Vec<Invite>,
+    /// The relay of the vault stores ([`FakeConnect::with_relay`]).
+    relay: Option<Arc<dyn StoreRelay>>,
 }
 
 /// A running fake Connect.
@@ -249,6 +288,82 @@ impl FakeConnect {
             }
         });
         Self { url, shared }
+    }
+
+    /// A fake Connect whose vault stores are teams of `relay`: see the module
+    /// documentation. The relay then reports and checks the origin of this Connect.
+    pub fn with_relay(relay: Arc<dyn StoreRelay>) -> Self {
+        let connect = Self::start();
+        relay.set_origin(&connect.url);
+        let weak: Weak<Mutex<State>> = Arc::downgrade(&connect.shared);
+        relay.set_store_guard(Arc::new(move |team, key, number| {
+            weak.upgrade()
+                .is_some_and(|shared| store_link_allowed(&mut lock(&shared), team, key, number))
+        }));
+        lock(&connect.shared).relay = Some(relay);
+        connect
+    }
+
+    /// Make a group of `kind` (`family` or `team`) with `owner` as its owner, for a test
+    /// that does not go through a checkout. The owner's plan becomes that plan, active.
+    pub fn make_group(&self, owner: &str, kind: &str) -> String {
+        let mut state = lock(&self.shared);
+        state.next += 1;
+        let group_id = id("grp_", state.next);
+        if let Some(entry) = state.accounts.get_mut(owner) {
+            entry.entitled = true;
+            entry.plan = Some(json!({"plan": kind, "status": "active", "entitled": true,
+                "interval": "month", "quantity": 4, "renews_at": now() + 2_592_000,
+                "ends_at": null, "grace_until": null, "read_only_until": null,
+                "delete_at": null, "group_id": group_id}));
+        }
+        state.groups.push(Group {
+            id: group_id.clone(),
+            kind: kind.to_owned(),
+            owner: owner.to_owned(),
+            included: 4,
+            max: 12,
+            quantity: 4,
+            members: vec![Member {
+                account: owner.to_owned(),
+                role: "owner".to_owned(),
+                state: "active".to_owned(),
+                joined_at: now(),
+            }],
+        });
+        group_id
+    }
+
+    /// Add `member` to the group of `owner` as an active member (the invite, the join,
+    /// and the confirmation of connect-billing-v1 section 6 in one step).
+    pub fn add_member(&self, owner: &str, member: &str) {
+        let mut state = lock(&self.shared);
+        let index = group_of(&state, owner).expect("a group");
+        state.groups[index].members.push(Member {
+            account: member.to_owned(),
+            role: "member".to_owned(),
+            state: "active".to_owned(),
+            joined_at: now(),
+        });
+    }
+
+    /// The store of `vault_id` of `account`, when Connect holds one.
+    pub fn store_of(&self, account: &str, vault_id: &str) -> Option<String> {
+        lock(&self.shared)
+            .stores
+            .iter()
+            .find(|store| store.account == account && store.vault_id == vault_id)
+            .map(|store| store.team_id.clone())
+    }
+
+    /// The account device ids in the store `team_id`.
+    pub fn store_devices(&self, team_id: &str) -> Vec<String> {
+        lock(&self.shared)
+            .stores
+            .iter()
+            .find(|store| store.team_id == team_id)
+            .map(|store| store.devices.iter().map(|(_, id)| id.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// The challenge reports `origin` (a Connect behind another address, or a hostile
@@ -374,9 +489,26 @@ impl FakeConnect {
     /// The `PlanView` that `GET /v1/account` and `GET /v1/account/plan` answer for
     /// `account`; `entitled` follows its `entitled` field.
     pub fn set_plan(&self, account: &str, plan: Value) {
-        if let Some(entry) = lock(&self.shared).accounts.get_mut(account) {
-            entry.entitled = plan["entitled"].as_bool().unwrap_or(false);
-            entry.plan = Some(plan);
+        let pushes = plan["entitled"].as_bool().unwrap_or(false);
+        let (relay, stores) = {
+            let mut state = lock(&self.shared);
+            if let Some(entry) = state.accounts.get_mut(account) {
+                entry.entitled = pushes;
+                entry.plan = Some(plan);
+            }
+            let stores: Vec<String> = state
+                .stores
+                .iter()
+                .filter(|store| store.account == account)
+                .map(|store| store.team_id.clone())
+                .collect();
+            (state.relay.clone(), stores)
+        };
+        // A read-only plan: pulls work, pushes are `403 plan_required`.
+        if let Some(relay) = relay {
+            for team in stores {
+                relay.set_team_sync_bytes(&team, if pushes { STORE_BYTES } else { 0 });
+            }
         }
     }
 
@@ -480,8 +612,15 @@ impl FakeConnect {
 struct Incoming {
     method: String,
     path: String,
+    /// The path with its query, as it came.
+    target: String,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
+}
+
+/// A relay-sync-v1 route of a vault store: it goes to the relay of the stores.
+fn relay_route(path: &str) -> bool {
+    path.starts_with("/v1/auth/") || path.starts_with("/v1/sync") || path.starts_with("/v1/devices")
 }
 
 impl Incoming {
@@ -536,12 +675,19 @@ fn read_request(stream: &TcpStream) -> Option<Incoming> {
         .get("content-length")
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    let mut body = vec![0u8; length.min(64 * 1024)];
-    reader.read_exact(&mut body).ok()?;
     let path = target.split('?').next().unwrap_or_default().to_owned();
+    // A snapshot for the relay of the stores comes whole.
+    let cap = if relay_route(&path) {
+        128 * 1024 * 1024
+    } else {
+        64 * 1024
+    };
+    let mut body = vec![0u8; length.min(cap)];
+    reader.read_exact(&mut body).ok()?;
     Some(Incoming {
         method,
         path,
+        target,
         headers,
         body,
     })
@@ -552,6 +698,12 @@ fn handle(shared: &Arc<Mutex<State>>, mut stream: TcpStream) {
         return;
     };
     let line = format!("{} {}", request.method, request.path);
+    let relay = lock(shared).relay.clone();
+    if let Some(relay) = relay.filter(|_| relay_route(&request.path)) {
+        lock(shared).log.push(line);
+        proxy(&relay.url(), &request, &mut stream);
+        return;
+    }
     let lost = {
         let mut state = lock(shared);
         state.log.push(line.clone());
@@ -583,6 +735,74 @@ fn handle(shared: &Arc<Mutex<State>>, mut stream: TcpStream) {
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(&answer.body);
     let _ = stream.flush();
+}
+
+/// Send `request` to the relay at `url` and its answer back, byte for byte.
+fn proxy(url: &str, request: &Incoming, stream: &mut TcpStream) {
+    let Ok(mut relay) = TcpStream::connect(url.trim_start_matches("http://")) else {
+        return;
+    };
+    let mut head = format!("{} {} HTTP/1.1\r\n", request.method, request.target);
+    for (name, value) in &request.headers {
+        if !matches!(name.as_str(), "connection" | "content-length") {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+    }
+    head.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        request.body.len()
+    ));
+    if relay.write_all(head.as_bytes()).is_err() || relay.write_all(&request.body).is_err() {
+        return;
+    }
+    let mut answer = Vec::new();
+    let _ = relay.read_to_end(&mut answer);
+    let _ = stream.write_all(&answer);
+    let _ = stream.flush();
+}
+
+/// Whether the device link of the store `team` may add the key `key` (relay device
+/// `number`): a live device of the store's account, or of an active member of the same
+/// group. A device that may is recorded in the store.
+fn store_link_allowed(state: &mut State, team: &str, key: &[u8], number: u64) -> bool {
+    let Some(owner) = state
+        .stores
+        .iter()
+        .find(|store| store.team_id == team)
+        .map(|store| store.account.clone())
+    else {
+        return false;
+    };
+    let Some((device, account)) = state
+        .devices
+        .iter()
+        .find(|device| device.live && device.public_key == key)
+        .map(|device| (device.id.clone(), device.account.clone()))
+    else {
+        return false;
+    };
+    if !same_group(state, &owner, &account) {
+        return false;
+    }
+    if let Some(store) = state.stores.iter_mut().find(|store| store.team_id == team)
+        && !store.devices.iter().any(|(_, held)| *held == device)
+    {
+        store.devices.push((number, device));
+    }
+    true
+}
+
+/// Whether `a` and `b` are the same account, or active members of one group.
+fn same_group(state: &State, a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let active = |account: &str| {
+        membership(state, account)
+            .filter(|(_, member)| member.state == "active")
+            .map(|(group, _)| group.id.clone())
+    };
+    active(a).is_some_and(|group| active(b) == Some(group))
 }
 
 /// The account and the device of the bearer token, when the device is live.
@@ -719,8 +939,11 @@ fn store_view(store: &Store, state: &State) -> Value {
             json!({"store_device_id": number, "device_id": device, "account_id": account})
         })
         .collect();
+    let shared = devices
+        .iter()
+        .any(|device| device["account_id"] != json!(store.account));
     json!({"team_id": store.team_id, "vault_id": store.vault_id, "name": store.name,
-           "created_at": store.created_at, "shared": false, "devices": devices})
+           "created_at": store.created_at, "shared": shared, "devices": devices})
 }
 
 fn new_device(
@@ -1276,13 +1499,25 @@ fn authenticated(
                 return ok(store_view(store, state));
             }
             state.next += 1;
+            let (team_id, number) = match state.relay.clone() {
+                Some(relay) => {
+                    let me = state
+                        .devices
+                        .iter()
+                        .find(|entry| entry.id == device)
+                        .cloned()
+                        .expect("the caller");
+                    relay.add_store_team(text(body, "name"), &me.name, &me.public_key)
+                }
+                None => (id("t_", state.next), 1),
+            };
             let store = Store {
-                team_id: id("t_", state.next),
+                team_id,
                 vault_id,
                 name: text(body, "name").to_owned(),
                 account: account.to_owned(),
                 created_at: now(),
-                devices: vec![(1, device.to_owned())],
+                devices: vec![(number, device.to_owned())],
             };
             let view = store_view(&store, state);
             state.stores.push(store);
@@ -1293,28 +1528,47 @@ fn authenticated(
                 return fail(400, "invalid_request");
             }
             let device_id = text(body, "device_id").to_owned();
-            let Some(added) = state
+            let Some((added, name, key)) = state
                 .devices
                 .iter()
                 .find(|entry| entry.id == device_id && entry.live)
-                .map(|entry| entry.account.clone())
+                .map(|entry| {
+                    (
+                        entry.account.clone(),
+                        entry.name.clone(),
+                        entry.public_key.clone(),
+                    )
+                })
             else {
                 return fail(404, "not_found");
             };
-            if added != account {
+            // The caller must be a device in the store.
+            let Some(owner) = state
+                .stores
+                .iter()
+                .find(|store| {
+                    store.team_id == *team && store.devices.iter().any(|(_, held)| held == device)
+                })
+                .map(|store| store.account.clone())
+            else {
+                return fail(404, "not_found");
+            };
+            if !same_group(state, &owner, &added) {
                 return fail(403, "not_in_group");
             }
-            let Some(store) = state
+            let relay = state.relay.clone();
+            let store = state
                 .stores
                 .iter_mut()
-                .find(|store| store.account == account && store.team_id == *team)
-            else {
-                return fail(404, "not_found");
-            };
+                .find(|store| store.team_id == *team)
+                .expect("the store");
             let number = match store.devices.iter().find(|(_, id)| *id == device_id) {
                 Some((number, _)) => *number,
                 None => {
-                    let number = store.devices.len() as u64 + 1;
+                    let number = match &relay {
+                        Some(relay) => relay.add_store_device(team, &name, &key),
+                        None => store.devices.len() as u64 + 1,
+                    };
                     store.devices.push((number, device_id.clone()));
                     number
                 }
@@ -1329,13 +1583,25 @@ fn authenticated(
             if state.stores.len() == before {
                 return fail(404, "not_found");
             }
+            if let Some(relay) = state.relay.clone() {
+                relay.remove_team(team);
+            }
             ok(json!({"team_id": team}))
         }
         ("GET", ["vaults"]) => {
+            // The stores that hold a device of this account.
             let views: Vec<Value> = state
                 .stores
                 .iter()
-                .filter(|store| store.account == account)
+                .filter(|store| {
+                    store.account == account
+                        || store.devices.iter().any(|(_, held)| {
+                            state
+                                .devices
+                                .iter()
+                                .any(|entry| entry.id == *held && entry.account == account)
+                        })
+                })
                 .map(|store| store_view(store, state))
                 .collect();
             ok(Value::Array(views))

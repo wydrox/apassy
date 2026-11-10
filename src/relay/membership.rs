@@ -60,6 +60,22 @@ pub fn on_hosted_relay(url: &str) -> bool {
     RelayUrl::parse(url).is_ok_and(|url| url.as_str() == crate::sync::DEFAULT_RELAY_URL)
 }
 
+/// The sync membership of `vault` when it is a vault store of Apassy Connect (plan s7
+/// unit M3, connect-account-v1 section 8): a membership whose device key is the Connect
+/// account device key of this Mac. Its row keeps the public key of that key and no
+/// private key (schema 34, `key_source = 'account'`); the account signs its sign-ins and
+/// heads (`crate::sync::RelaySync::set_account_signer`). `None` for a vault that syncs
+/// another way or with a key of its own.
+pub fn connect_store_membership(vault: &Vault) -> VaultResult<Option<crate::vault::RelayDevice>> {
+    Ok(vault.relay_device()?.filter(|row| row.uses_account_key()))
+}
+
+/// Whether `membership` signs with the Connect account key: its row holds no private key
+/// (only an account row of schema 34 has none).
+pub fn signs_with_account_key(membership: &RelayMembership) -> bool {
+    membership.key_pkcs8.is_empty()
+}
+
 /// A new team on the relay: its ID and the device number of its first device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreatedTeam {
@@ -248,6 +264,11 @@ pub fn enable_questions(vault: &mut Vault, device_name: &str) -> Result<TrustedD
         return Ok(register_this_device(vault, &membership, device_name)?);
     }
     let sync = vault.relay_device()?.ok_or(SyncError::NotEnabled)?;
+    // A vault store of Apassy Connect has no key of its own here (schema 34): its store
+    // keeps no questions (connect-account-v1 section 8). A notifications-only team does.
+    if sync.uses_account_key() {
+        return Err(SyncError::NotEnabled);
+    }
     if vault.trusted_key_removed(&sync.public_key)? {
         return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
     }
