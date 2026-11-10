@@ -457,15 +457,21 @@ jobs:
         run: >-
           shellcheck packaging/linux/build-vault.sh packaging/linux/install-vault.sh
           packaging/linux/verify-vault.sh crates/apassy-relay/deploy/worker/public/install.sh
-      - name: Prepare protected shared-data prefix on disposable CI runner
-        # Hosted images may make /usr/share group-writable for tool provisioning.
-        # The shipped installer must continue to refuse that unsafe configuration.
+      - name: Prepare protected package parents on disposable CI runner
+        # Hosted images make shared directories writable for tool provisioning.
+        # Normalize only the installer's shared parents, never recursively. The
+        # shipped installer must continue to refuse unsafe customer directories.
         run: |
-          stat -c '%n owner=%u group=%g mode=%a' /usr /usr/share
-          test ! -L /usr/share
-          test "$(stat -c %u /usr/share)" = 0
-          sudo chmod go-w /usr/share
-          test -z "$(find /usr/share -maxdepth 0 -perm /022 -print)"
+          for path in /usr /usr/bin /usr/lib /usr/share /usr/share/applications /usr/share/doc /usr/share/polkit-1 /usr/share/polkit-1/actions; do
+            test ! -L "$path"
+            if [ -e "$path" ]; then
+              stat -c '%n owner=%u group=%g mode=%a' "$path"
+              test -d "$path"
+              test "$(stat -c %u "$path")" = 0
+              sudo chmod go-w "$path"
+              test -z "$(find "$path" -maxdepth 0 -perm /022 -print)"
+            fi
+          done
       - name: Package and verify the Linux vault build
         run: |
           mkdir -p target/vault-dist
