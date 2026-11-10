@@ -16,11 +16,14 @@
 //! hang-up end a card as in the window.
 //!
 //! The service ends and locks the vault on `lock`, `quit`, the end of the terminal, the
-//! inactivity time, and the lock hook ([`lock_observer`], unit L2). SIGTERM, SIGHUP and
-//! SIGINT keep their default action: the process ends at once, so the kernel frees the
-//! key memory (no core file: [`crate::harden`]), closes the sockets and releases the
-//! owner lock ([`instance`]). The crate forbids `unsafe`, and no safe API installs a
-//! signal handler. A later start removes the stale socket files.
+//! inactivity time, and, with the device policy "When the screen locks or the computer
+//! sleeps", a screen lock, sleep, user switch or session end ([`lock`], unit L2).
+//! SIGTERM, SIGHUP and SIGINT keep their default action: the process ends at once, so
+//! the kernel frees the key memory (no core file: [`crate::harden`]), closes the sockets
+//! and releases the owner lock ([`instance`]). The vault file needs no lock step: the
+//! key lives only in this process. Waiting agent runs and browser requests see a closed
+//! socket. The crate forbids `unsafe`, and no safe API installs a signal handler. A
+//! later start removes the stale socket files.
 //!
 //! Without a terminal on stdin and stdout the service refuses to start
 //! ([`console::TtyConsole::open`]): no approval can come from a pipe, a file,
@@ -29,6 +32,7 @@
 pub mod browser;
 pub mod console;
 pub mod instance;
+pub mod lock;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -42,9 +46,12 @@ use self::browser::{
 };
 use self::console::{Console, Input};
 use self::instance::OwnerInstance;
+pub use self::lock::{DEFAULT_IDLE, LockObserver, LockSettings};
+use self::lock::{event_reason, sleep_inclusive_now};
 use crate::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, PendingRun};
 use crate::broker::{BrokerHandle, BrokerOptions};
 use crate::browser::wire::Response;
+use crate::native::session_lock::{LockRule, SessionEvent, SessionLock};
 use crate::owner::owner_store::OwnerSession;
 use crate::owner::socket::{self, Envelope, OwnerSocket};
 use crate::vault::{AccessRequest, ExecMode, GrantPlace};
@@ -57,18 +64,12 @@ const BROWSER_MARGIN: Duration = Duration::from_secs(15);
 const ACCESS_POLL: Duration = Duration::from_secs(2);
 /// Wrong passphrases for one card before it is refused.
 const MAX_TRIES: u32 = 3;
-/// The default inactivity time.
-pub const DEFAULT_IDLE: Duration = Duration::from_secs(15 * 60);
 
-/// Unit L2's lock and sleep observer: polled on every tick, it returns why the vault
-/// must lock now (a session lock, sleep), or `None`.
-pub type LockObserver = Box<dyn FnMut() -> Option<String> + Send>;
-
-/// THE HOOK FOR UNIT L2. The lock and sleep observer of this system for the headless
-/// service, or `None` when there is none. Unit L2 replaces the body with its reusable
-/// observer; [`ServeOptions::system`] calls this, and the loop polls the result.
-pub fn lock_observer() -> Option<LockObserver> {
-    None
+/// The session observer of this system for the service (unit L2, [`lock`]): D-Bus in a
+/// build with the `session-bus` feature, else the clock gap that shows a past sleep.
+/// [`ServeOptions::system`] calls this, and the loop polls the result on every tick.
+pub fn lock_observer() -> Option<Box<dyn LockObserver>> {
+    Some(lock::system_observer())
 }
 
 /// How the vault is unlocked at the start.
@@ -91,15 +92,19 @@ pub struct ServeOptions {
     pub broker: Option<BrokerOptions>,
     /// How long a browser card waits for the owner.
     pub browser_wait: Duration,
-    /// Lock and end after this long without a typed line.
+    /// Lock and end after this long without a typed line (on the sleep-inclusive
+    /// clock: time asleep counts).
     pub idle: Duration,
+    /// Also lock and end at a screen lock, sleep, user switch or session end.
+    pub lock_on_session: bool,
     pub unlock: Unlock,
-    pub lock_observer: Option<LockObserver>,
+    pub lock_observer: Option<Box<dyn LockObserver>>,
 }
 
 impl ServeOptions {
-    /// The sockets and the data directory of this user, as the window uses them.
-    pub fn system(vault: PathBuf, idle: Duration, unlock: Unlock) -> Self {
+    /// The sockets and the data directory of this user, as the window uses them, and
+    /// the system's session observer.
+    pub fn system(vault: PathBuf, lock: &LockSettings, unlock: Unlock) -> Self {
         Self {
             vault,
             data_dir: crate::paths::data_dir(),
@@ -107,7 +112,8 @@ impl ServeOptions {
             agent_socket: crate::agent::client::default_socket_path(),
             broker: None,
             browser_wait: socket::REPLY_TIMEOUT.saturating_sub(BROWSER_MARGIN),
-            idle,
+            idle: lock.idle,
+            lock_on_session: lock.on_session_lock,
             unlock,
             lock_observer: lock_observer(),
         }
@@ -123,8 +129,9 @@ pub enum Ended {
     TerminalClosed,
     /// No typed line for the inactivity time.
     Idle,
-    /// The lock hook asked, with its reason.
-    Observer(String),
+    /// A session event locked the vault (the device policy "When the screen locks or
+    /// the computer sleeps").
+    Session(SessionEvent),
 }
 
 /// Run the service until it ends. The caller checks that this is an interactive
@@ -174,17 +181,23 @@ pub fn serve<P: PeerCheck>(
         inbox,
         browser_wait: options.browser_wait,
         idle: options.idle,
+        inactivity: SessionLock::new(LockRule::After(options.idle), sleep_inclusive_now()),
+        lock_on_session: options.lock_on_session,
         observer: options.lock_observer.take(),
-        last_input: Instant::now(),
         queue: VecDeque::new(),
         seen_runs: BTreeSet::new(),
         seen_access: BTreeSet::new(),
         access_read: None,
     };
     host.console.show(&format!(
-        "Vault unlocked. Apassy serves the browser at {} and agents at {} until you type lock or quit, close this terminal, or after {} minutes without input. Requests that need you show here. Type help for the commands.",
+        "Vault unlocked. Apassy serves the browser at {} and agents at {} until you type lock or quit, close this terminal, {}after {} minutes without input. Requests that need you show here. Type help for the commands.",
         options.browser_socket.display(),
         options.agent_socket.display(),
+        if options.lock_on_session {
+            "the screen locks, the computer sleeps, "
+        } else {
+            "or "
+        },
         options.idle.as_secs().div_ceil(60)
     ));
     let ended = host.run();
@@ -257,8 +270,10 @@ struct Host<'a> {
     inbox: Receiver<Envelope<HeadlessRequest, Response>>,
     browser_wait: Duration,
     idle: Duration,
-    observer: Option<LockObserver>,
-    last_input: Instant,
+    /// The inactivity rule: typed lines are owner input, the idle hint can postpone.
+    inactivity: SessionLock,
+    lock_on_session: bool,
+    observer: Option<Box<dyn LockObserver>>,
     queue: VecDeque<Card>,
     seen_runs: BTreeSet<u64>,
     seen_access: BTreeSet<u64>,
@@ -282,7 +297,7 @@ impl Host<'_> {
             }
             match self.console.ask("apassy owner serve> ", TICK) {
                 Input::Line(line) => {
-                    self.last_input = Instant::now();
+                    self.input();
                     if let Some(ended) = self.command(line.trim()) {
                         return ended;
                     }
@@ -293,17 +308,32 @@ impl Host<'_> {
         }
     }
 
-    /// The inactivity time, the lock hook, and an outside lock of the vault.
+    /// The session events and the inactivity time.
     fn must_end(&mut self) -> Option<Ended> {
-        if self.last_input.elapsed() >= self.idle {
-            return Some(Ended::Idle);
+        let now = sleep_inclusive_now();
+        if let Some(observer) = self.observer.as_mut() {
+            let events = observer.events();
+            let mut ended = None;
+            for event in &events {
+                if ended.is_none() && self.lock_on_session && event.locks_session() {
+                    ended = Some(Ended::Session(*event));
+                }
+                // The idle hint and a lost source change the inactivity rule.
+                let _ = self.inactivity.event(*event, now);
+            }
+            if ended.is_some() {
+                // `end` locks the vault, then lets a held sleep go.
+                return ended;
+            }
+            if events.contains(&SessionEvent::Sleep) {
+                observer.sleep_decided();
+            }
         }
-        if let Some(observer) = self.observer.as_mut()
-            && let Some(reason) = observer()
-        {
-            return Some(Ended::Observer(reason));
-        }
-        None
+        self.inactivity.due(now).map(|_| Ended::Idle)
+    }
+
+    fn input(&mut self) {
+        self.inactivity.input(sleep_inclusive_now());
     }
 
     fn command(&mut self, line: &str) -> Option<Ended> {
@@ -469,7 +499,7 @@ impl Host<'_> {
             };
             match self.console.ask(prompt, TICK) {
                 Input::Line(line) => {
-                    self.last_input = Instant::now();
+                    self.input();
                     match parse_answer(line.trim(), &card) {
                         Some(answer) => break answer,
                         None => self.console.show("Type exactly one of the answers above."),
@@ -546,7 +576,7 @@ impl Host<'_> {
                         Input::Closed => return Flow::End(Ended::TerminalClosed),
                     }
                 };
-                self.last_input = Instant::now();
+                self.input();
                 OwnerCheck::passphrase(&passphrase)
             };
             let gate = OwnerGate::new(self.session.shared_vault(), None)
@@ -682,12 +712,16 @@ impl Host<'_> {
         }
         let why = match ended {
             Ended::Idle => "The vault was locked after the inactivity time in apassy owner serve.",
-            Ended::Observer(_) => "The vault was locked when the session locked or slept.",
+            Ended::Session(_) => "The vault was locked when the session locked or slept.",
             _ => ENDED_HERE,
         };
         let locked = self
             .session
             .lock_ending_runs(Some(self.broker.approvals().as_ref()), why);
+        // A sleep held for this lock may go now.
+        if let Some(observer) = self.observer.as_mut() {
+            observer.sleep_decided();
+        }
         self.broker.stop();
         let reason = match ended {
             Ended::Quit => "on request".to_owned(),
@@ -696,7 +730,7 @@ impl Host<'_> {
                 "after {} minutes without input",
                 self.idle.as_secs().div_ceil(60)
             ),
-            Ended::Observer(reason) => page_text(reason),
+            Ended::Session(event) => event_reason(*event).to_owned(),
         };
         match locked {
             Ok(()) => self

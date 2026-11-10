@@ -22,6 +22,7 @@ use apassy::broker::BrokerOptions;
 use apassy::broker::http::TlsClient;
 use apassy::browser::webauthn::{TYPE_CREATE, TYPE_GET, encode_bytes};
 use apassy::browser::wire::WireError;
+use apassy::native::session_lock::{SessionEvent, SessionIdle};
 use apassy::owner::serve::browser::{PeerCheck, SystemPeers};
 use apassy::owner::serve::console::{Console, Input};
 use apassy::owner::serve::instance::OwnerInstance;
@@ -150,6 +151,7 @@ impl Setup {
             broker: Some(broker),
             browser_wait,
             idle: Duration::from_secs(120),
+            lock_on_session: false,
             unlock: Unlock::Terminal,
             lock_observer: None,
         }
@@ -463,28 +465,133 @@ fn the_inactivity_time_locks_and_ends() {
     assert!(UnixStream::connect(setup.browser()).is_err());
 }
 
-/// The lock hook of unit L2: when it reports a session lock, the vault locks.
+/// A switch that a test turns on, and the events that a fake observer then reports.
+fn fake_observer(
+    events: Vec<SessionEvent>,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    Box<dyn apassy::owner::serve::LockObserver>,
+) {
+    let fire = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired = Arc::clone(&fire);
+    let observer = move || {
+        if fired.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            events.clone()
+        } else {
+            Vec::new()
+        }
+    };
+    (fire, Box::new(observer))
+}
+
+/// Unit L2's session events: with the device policy "When the screen locks or the
+/// computer sleeps", each locking event locks the vault and ends the service.
 #[test]
-fn the_lock_observer_locks_and_ends() {
+fn a_session_event_locks_and_ends_with_the_session_policy() {
+    for (event, reason) in [
+        (SessionEvent::ScreenLocked, "because the screen locked"),
+        (SessionEvent::Sleep, "because the computer slept"),
+        (
+            SessionEvent::SessionInactive,
+            "because another session became active",
+        ),
+        (
+            SessionEvent::SessionEnded,
+            "because the login session ended",
+        ),
+    ] {
+        let setup = Setup::new();
+        let script = Script::new(&[(UNLOCK, PASSPHRASE)]);
+        let mut options = setup.options(Duration::from_secs(5));
+        options.lock_on_session = true;
+        let (fire, observer) = fake_observer(vec![SessionEvent::ScreenUnlocked, event]);
+        options.lock_observer = Some(observer);
+        let service = setup.start::<AcceptPeers>(options, &script);
+        fire.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(service.join().unwrap(), Ok(Ended::Session(event)));
+        assert!(
+            script.shown().contains(&format!("Vault locked {reason}")),
+            "{event:?}: {}",
+            script.shown()
+        );
+        assert!(UnixStream::connect(setup.browser()).is_err());
+    }
+}
+
+/// Without the session policy a screen lock or a sleep does not end the service, and
+/// events that do not lock (unlock, active, a lost source) never do.
+#[test]
+fn session_events_do_not_end_the_service_without_the_session_policy() {
     let setup = Setup::new();
     let script = Script::new(&[(UNLOCK, PASSPHRASE)]);
     let mut options = setup.options(Duration::from_secs(5));
-    let fire = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let fired = Arc::clone(&fire);
-    options.lock_observer = Some(Box::new(move || {
-        fired
-            .load(std::sync::atomic::Ordering::SeqCst)
-            .then(|| "because the session locked".to_owned())
-    }));
+    let (fire, observer) = fake_observer(vec![
+        SessionEvent::ScreenLocked,
+        SessionEvent::Sleep,
+        SessionEvent::SourceLost,
+    ]);
+    options.lock_observer = Some(observer);
     let service = setup.start::<AcceptPeers>(options, &script);
     fire.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        service.join().unwrap(),
-        Ok(Ended::Observer("because the session locked".to_owned()))
-    );
+    let started = Instant::now();
+    while fire.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(started.elapsed() < Duration::from_secs(10), "never polled");
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::sleep(Duration::from_millis(300));
+    script.push(MAIN, "quit");
+    assert_eq!(service.join().unwrap(), Ok(Ended::Quit));
+
+    let setup = Setup::new();
+    let script = Script::new(&[(UNLOCK, PASSPHRASE)]);
+    let mut options = setup.options(Duration::from_secs(5));
+    options.lock_on_session = true;
+    let (fire, observer) = fake_observer(vec![
+        SessionEvent::ScreenUnlocked,
+        SessionEvent::SessionActive,
+        SessionEvent::SourceLost,
+        SessionEvent::Idle(SessionIdle::Idle),
+    ]);
+    options.lock_observer = Some(observer);
+    let service = setup.start::<AcceptPeers>(options, &script);
+    fire.store(true, std::sync::atomic::Ordering::SeqCst);
+    let started = Instant::now();
+    while fire.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(started.elapsed() < Duration::from_secs(10), "never polled");
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::sleep(Duration::from_millis(300));
+    script.push(MAIN, "quit");
+    assert_eq!(service.join().unwrap(), Ok(Ended::Quit));
+}
+
+/// When the desktop's idle hint says the session is active (the owner works in another
+/// app), the inactivity time does not lock, as on the desktop. A lost source returns
+/// to typed input only, and the inactivity time locks again.
+#[test]
+fn an_active_idle_hint_keeps_the_service_open_until_the_source_is_lost() {
+    let setup = Setup::new();
+    let script = Script::new(&[(UNLOCK, PASSPHRASE)]);
+    let mut options = setup.options(Duration::from_secs(5));
+    options.idle = Duration::from_secs(1);
+    let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lose = Arc::clone(&lost);
+    let observer = move || {
+        if lose.load(std::sync::atomic::Ordering::SeqCst) {
+            vec![SessionEvent::SourceLost]
+        } else {
+            vec![SessionEvent::Idle(SessionIdle::Active)]
+        }
+    };
+    options.lock_observer = Some(Box::new(observer));
+    let service = setup.start::<AcceptPeers>(options, &script);
+    thread::sleep(Duration::from_millis(2500));
     assert!(
-        script
-            .shown()
-            .contains("Vault locked because the session locked")
+        !service.is_finished(),
+        "an active session must keep the vault open"
     );
+    let locked_at = Instant::now();
+    lost.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(service.join().unwrap(), Ok(Ended::Idle));
+    assert!(locked_at.elapsed() < Duration::from_secs(5));
 }

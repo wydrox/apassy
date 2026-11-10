@@ -133,7 +133,12 @@ fn serve(args: &[String]) -> Result<(), String> {
     } else {
         apassy::owner::serve::Unlock::Terminal
     };
-    let options = apassy::owner::serve::ServeOptions::system(vault, idle, unlock);
+    // --idle-minutes, else the device policy's time, else 15 minutes (ADR 0045).
+    let lock = apassy::owner::serve::lock::system_lock_settings(idle);
+    if let Some(note) = &lock.note {
+        eprintln!("{note}");
+    }
+    let options = apassy::owner::serve::ServeOptions::system(vault, &lock, unlock);
     apassy::owner::serve::serve::<apassy::owner::serve::browser::SystemPeers>(
         options,
         &mut console,
@@ -151,21 +156,22 @@ fn keyring_unlock(_vault: &Path) -> Result<apassy::owner::serve::Unlock, String>
     Err("The keyring unlock is for Linux.".into())
 }
 
-fn serve_args(args: &[String]) -> Result<(PathBuf, std::time::Duration, bool), String> {
+/// The vault, `--idle-minutes` (`None` when not given) and `--keyring`.
+fn serve_args(args: &[String]) -> Result<(PathBuf, Option<std::time::Duration>, bool), String> {
     let mut vault = None;
-    let mut idle = apassy::owner::serve::DEFAULT_IDLE;
+    let mut idle = None;
     let mut keyring = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--keyring" if !keyring => keyring = true,
-            "--idle-minutes" => {
+            "--idle-minutes" if idle.is_none() => {
                 let minutes: u64 = rest
                     .next()
                     .and_then(|n| n.parse().ok())
                     .filter(|n| (1..=24 * 60).contains(n))
                     .ok_or("--idle-minutes needs a number from 1 to 1440")?;
-                idle = std::time::Duration::from_secs(minutes * 60);
+                idle = Some(std::time::Duration::from_secs(minutes * 60));
             }
             other if vault.is_none() && !other.starts_with('-') => {
                 vault = Some(PathBuf::from(other));
@@ -344,17 +350,22 @@ mod tests {
         };
         let (vault, idle, keyring) = serve_args(&words("/v.db")).unwrap();
         assert_eq!(vault, PathBuf::from("/v.db"));
-        assert_eq!(idle, apassy::owner::serve::DEFAULT_IDLE);
+        // Not given: the device policy decides, else 15 minutes (owner::serve::lock).
+        assert_eq!(idle, None);
         assert!(!keyring);
         let (_, idle, keyring) = serve_args(&words("/v.db --idle-minutes 5 --keyring")).unwrap();
-        assert_eq!(idle, std::time::Duration::from_secs(300));
+        assert_eq!(idle, Some(std::time::Duration::from_secs(300)));
         assert!(keyring);
+        let (_, idle, _) = serve_args(&words("/v.db --idle-minutes 1440")).unwrap();
+        assert_eq!(idle, Some(std::time::Duration::from_secs(1440 * 60)));
         // No passphrase or secret is ever an argument.
         for bad in [
             "",
             "/v.db /w.db",
             "/v.db --idle-minutes 0",
+            "/v.db --idle-minutes 1441",
             "/v.db --idle-minutes",
+            "/v.db --idle-minutes 5 --idle-minutes 6",
             "/v.db --passphrase x",
             "/v.db --keyring --keyring",
         ] {
