@@ -107,10 +107,15 @@ impl Connect {
     /// A handle of a relay started on its own (`relay::start_existing`) and the fake Stripe
     /// that its billing settings name.
     pub fn around(relay: TestRelay, stripe: FakeStripe) -> Self {
+        apassy_relay::server::billing_store::defer_background_pass(
+            &relay.hub(),
+            apassy_relay::now_unix(),
+        );
         Self {
             relay,
             stripe,
             clock: AtomicU64::new(apassy_relay::now_unix()),
+            stripe_state: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -338,13 +343,19 @@ impl Connect {
 
     /// The Stripe customer of `dev`: the one Connect made at its first checkout, else
     /// `cus_<account tail>`.
+    /// Read through the relay's billing store, so it works for a plain `relay.db` too.
     pub fn customer_of(&self, dev: &Dev) -> String {
-        self.rows(&format!(
-            "SELECT customer_id FROM stripe_customer WHERE account_id = '{}'",
-            dev.account
-        ))
-        .pop()
-        .unwrap_or_else(|| format!("cus_{}", &dev.account[4..]))
+        use apassy_relay::server::billing::BillingStore;
+        let hub = self.relay.hub();
+        hub.billing()
+            .and_then(|billing| {
+                billing
+                    .store
+                    .transaction(|tx| tx.customer_of_account(&dev.account))
+                    .unwrap()
+            })
+            .map(|row| row.customer)
+            .unwrap_or_else(|| format!("cus_{}", &dev.account[4..]))
     }
 
     /// A paid subscription: the checkout and the subscription's own `created` event.
