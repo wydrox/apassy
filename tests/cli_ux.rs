@@ -503,6 +503,7 @@ fn audit_export_json_wraps_jsonl_and_file_metadata() {
 }
 
 #[test]
+#[cfg(not(target_os = "linux"))]
 fn audit_browser_json_reports_success_and_partial_manifest_changes() {
     let dir = TempDir::new().unwrap();
     let macos = dir.path().join("Synthetic.app/Contents/MacOS");
@@ -548,4 +549,29 @@ fn audit_browser_json_reports_success_and_partial_manifest_changes() {
     assert_eq!(status.code(), Some(1));
     assert_eq!(result["stage"], "manifests");
     assert_eq!(result["partial_state"]["changes"][0]["state"], "written");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn audit_browser_json_refuses_uninstalled_linux_program_without_writes() {
+    let dir = TempDir::new().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_apassy"))
+        .args(["setup", "browser", "--browser", "chrome", "--json"])
+        .env_remove("APASSY_SESSION")
+        .env("HOME", dir.path())
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["code"], "failed");
+    assert_eq!(result["stage"], "request");
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("Source builds are not accepted browser hosts")
+    );
+    assert!(!dir.path().join(".config").exists());
 }

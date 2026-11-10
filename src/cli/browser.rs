@@ -222,6 +222,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn setup_writes_only_for_existing_profiles_and_removes() {
         let home = tempfile::tempdir().unwrap();
         let first = &BROWSERS[0];
@@ -243,5 +244,21 @@ mod tests {
         let changes = apply(home.path(), host, None, true).unwrap();
         assert!(changes.contains(&(first.name, Change::Removed(first_file.clone()))));
         assert!(!first_file.exists() && !second_file.exists());
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn setup_refuses_uninstalled_hosts_and_can_remove_existing_manifests() {
+        let home = tempfile::tempdir().unwrap();
+        let chrome = install::find("chrome").unwrap();
+        let file = install::manifest_path(home.path(), chrome);
+        let host = Path::new("/tmp/apassy-browser-host");
+        let error = apply(home.path(), host, Some(chrome), false).unwrap_err();
+        assert!(format!("{error:?}").contains("installed Apassy host"));
+        assert!(!file.exists());
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, install::manifest(host)).unwrap();
+        let changes = apply(home.path(), host, Some(chrome), true).unwrap();
+        assert_eq!(changes, vec![(chrome.name, Change::Removed(file.clone()))]);
+        assert!(!file.exists());
     }
 }
