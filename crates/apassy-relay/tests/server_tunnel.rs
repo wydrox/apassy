@@ -1,0 +1,1177 @@
+//! The Connect tunnel broker and the ingress (unit C4, docs/contracts/connect-tunnel-v1.md).
+//!
+//! A fake node registers and echoes, fake devices dial, and the SNI and ACME listeners run
+//! on free loopback ports. The HTTP side is the relay's own transport: the vendored
+//! `tiny_http` with deadlines, as `Relay::start` binds it, routing the two tunnel paths
+//! to `Broker::serve_node` and `Broker::serve_dial`. No fixed port, no fixed path.
+
+use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use apassy_relay::server::ingress::{self, IngressConfig};
+use apassy_relay::server::tunnel::frame::{
+    self, Applied, CLOSE, Dir, Kind, OPEN, RESET, Sequencer,
+};
+use apassy_relay::server::tunnel::ws::{self, Message, client, close};
+use apassy_relay::server::tunnel::{Broker, Limits, ManualClock, MemoryDirectory};
+
+const ZONE: &str = "node.example.test";
+/// 2026-11-10T00:00:00Z.
+const NOW: u64 = 1_794_268_800;
+const NODE_A: &str = "node_aaaaaaaaaa";
+const NODE_A2: &str = "node_dddddddddd";
+const NODE_B: &str = "node_bbbbbbbbbb";
+const NODE_NONE: &str = "node_cccccccccc";
+
+// ---------------------------------------------------------------------------
+// The harness.
+
+struct Harness {
+    broker: Broker,
+    directory: Arc<MemoryDirectory>,
+    clock: Arc<ManualClock>,
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+}
+
+fn test_limits() -> Limits {
+    Limits {
+        tick: Duration::from_millis(50),
+        close_grace: Duration::from_millis(300),
+        ..Limits::default()
+    }
+}
+
+impl Harness {
+    fn new() -> Self {
+        Self::with(test_limits(), Duration::from_secs(30))
+    }
+
+    /// A broker and the relay transport with the given request handle deadline.
+    fn with(limits: Limits, handle_deadline: Duration) -> Self {
+        let directory = Arc::new(MemoryDirectory::new());
+        directory.add_device("tok-a1", "acc_a", "dev_a1");
+        directory.add_device("tok-a2", "acc_a", "dev_a2");
+        directory.add_device("tok-b", "acc_b", "dev_b");
+        directory.add_team_token("tok-team");
+        directory.add_node(NODE_A, "acc_a", "dev_a1");
+        directory.add_node(NODE_A2, "acc_a", "dev_a2");
+        directory.add_node(NODE_B, "acc_b", "dev_b");
+        let clock = Arc::new(ManualClock::new(NOW));
+        let broker = Broker::new(directory.clone(), limits, clock.clone(), ZONE);
+        let server = tiny_http::Server::http_with_deadlines(
+            "127.0.0.1:0",
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+            handle_deadline,
+        )
+        .unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (routed, stopped) = (broker.clone(), stop.clone());
+        thread::spawn(move || {
+            while !stopped.load(Ordering::SeqCst) {
+                let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(50)) else {
+                    continue;
+                };
+                let path = request.url().split('?').next().unwrap_or("").to_string();
+                if path == "/v1/tunnel/node" {
+                    routed.serve_node(request);
+                } else if let Some(node_id) = path.strip_prefix("/v1/tunnel/dial/") {
+                    routed.serve_dial(request, node_id);
+                } else {
+                    let _ = request.respond(tiny_http::Response::empty(404));
+                }
+            }
+        });
+        Self {
+            broker,
+            directory,
+            clock,
+            addr,
+            stop,
+        }
+    }
+
+    fn connect(&self) -> TcpStream {
+        let stream = TcpStream::connect(self.addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+    }
+
+    /// The WebSocket handshake to `path`; `Err` is the refusal (status and error code).
+    fn upgrade(&self, path: &str, token: Option<&str>) -> Result<TcpStream, (u16, String)> {
+        let mut stream = self.connect();
+        match client::handshake(&mut stream, "relay.test", path, token) {
+            Ok(()) => Ok(stream),
+            Err(client::HandshakeError::Refused(refused)) => {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&refused.body).unwrap_or_default();
+                let code = body["error"]["code"].as_str().unwrap_or("").to_string();
+                Err((refused.status, code))
+            }
+            Err(other) => panic!("handshake: {other:?}"),
+        }
+    }
+
+    fn dial(&self, token: &str, node_id: &str) -> Result<Peer, (u16, String)> {
+        self.upgrade(&format!("/v1/tunnel/dial/{node_id}"), Some(token))
+            .map(Peer::new)
+    }
+
+    fn node(&self, token: &str) -> Result<Peer, (u16, String)> {
+        self.upgrade("/v1/tunnel/node", Some(token)).map(Peer::new)
+    }
+
+    fn open_streams(&self, account: &str) -> usize {
+        self.broker.usage(account).open_streams
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.broker.stop();
+    }
+}
+
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < until, "timed out waiting: {what}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A client WebSocket (a device or a node).
+struct Peer {
+    reader: ws::Reader<TcpStream>,
+    writer: TcpStream,
+}
+
+impl Peer {
+    fn new(stream: TcpStream) -> Self {
+        let writer = stream.try_clone().unwrap();
+        Self {
+            reader: ws::Reader::client(stream, 1 << 20),
+            writer,
+        }
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
+        client::send(&mut self.writer, ws::OP_BINARY, bytes).unwrap();
+    }
+
+    fn send_frame(&mut self, stream: u32, kind: Kind, flags: u8, payload: &[u8]) {
+        self.send(&frame::encode(stream, kind, flags, payload));
+    }
+
+    /// The next message that is not a ping (pings are answered).
+    fn next(&mut self) -> Message {
+        loop {
+            match self.reader.read_message() {
+                Ok(Message::Ping(payload)) => {
+                    let _ = client::send(&mut self.writer, ws::OP_PONG, &payload);
+                }
+                Ok(message) => return message,
+                Err(error) => panic!("read: {error:?}"),
+            }
+        }
+    }
+
+    fn next_frame(&mut self) -> frame::Frame {
+        match self.next() {
+            Message::Binary(bytes) => frame::decode(&bytes).unwrap(),
+            other => panic!("expected a frame, got {other:?}"),
+        }
+    }
+
+    fn expect_close(&mut self, code: u16) {
+        loop {
+            match self.next() {
+                Message::Close(got) => {
+                    assert_eq!(got, Some(code));
+                    return;
+                }
+                Message::Binary(_) => {}
+                other => panic!("expected close {code}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Bytes until `len` arrived.
+    fn read_bytes(&mut self, len: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        while out.len() < len {
+            match self.next() {
+                Message::Binary(bytes) => out.extend(bytes),
+                other => panic!("expected bytes, got {other:?}"),
+            }
+        }
+        out
+    }
+}
+
+/// Opens seen by a fake node: stream id, kind, flags, first bytes.
+type Opens = mpsc::Receiver<(u32, Kind, u8, Vec<u8>)>;
+
+/// A node that echoes every stream back, in random pieces, and closes when Connect
+/// closes. It reports each `open` and each `reset` it receives.
+struct EchoNode {
+    opens: Opens,
+    resets: mpsc::Receiver<u32>,
+    closed: mpsc::Receiver<Option<u16>>,
+}
+
+fn echo_node(h: &Harness, token: &str, seed: u64) -> EchoNode {
+    let mut node = h.node(token).expect("node connects");
+    let (open_tx, opens) = mpsc::channel();
+    let (reset_tx, resets) = mpsc::channel();
+    let (close_tx, closed) = mpsc::channel();
+    thread::spawn(move || {
+        let mut rng = Rng(seed | 1);
+        let mut kinds: HashMap<u32, Kind> = HashMap::new();
+        loop {
+            let message = match node.reader.read_message() {
+                Ok(message) => message,
+                Err(_) => {
+                    let _ = close_tx.send(None);
+                    return;
+                }
+            };
+            let frame = match message {
+                Message::Binary(bytes) => frame::decode(&bytes).unwrap(),
+                Message::Ping(payload) => {
+                    let _ = client::send(&mut node.writer, ws::OP_PONG, &payload);
+                    continue;
+                }
+                Message::Close(code) => {
+                    let _ = close_tx.send(code);
+                    return;
+                }
+                _ => continue,
+            };
+            if frame.is_reset() {
+                kinds.remove(&frame.stream);
+                let _ = reset_tx.send(frame.stream);
+                continue;
+            }
+            if frame.is_open() {
+                kinds.insert(frame.stream, frame.kind);
+                let _ =
+                    open_tx.send((frame.stream, frame.kind, frame.flags, frame.payload.clone()));
+            }
+            let Some(kind) = kinds.get(&frame.stream).copied() else {
+                continue;
+            };
+            let mut rest = &frame.payload[..];
+            while !rest.is_empty() {
+                let take = 1 + (rng.next() as usize % rest.len());
+                let (piece, after) = rest.split_at(take);
+                node.send_frame(frame.stream, kind, 0, piece);
+                rest = after;
+            }
+            if frame.is_close() {
+                node.send_frame(frame.stream, kind, CLOSE, &[]);
+                kinds.remove(&frame.stream);
+            }
+        }
+    });
+    EchoNode {
+        opens,
+        resets,
+        closed,
+    }
+}
+
+impl EchoNode {
+    fn open(&self) -> (u32, Kind, u8, Vec<u8>) {
+        self.opens
+            .recv_timeout(Duration::from_secs(10))
+            .expect("an open")
+    }
+}
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn bytes(&mut self, len: usize) -> Vec<u8> {
+        (0..len).map(|_| self.next() as u8).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contract vectors (section 11).
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap())
+        .collect()
+}
+
+fn vectors() -> serde_json::Value {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/connect-tunnel-v1/frames.json");
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn contract_frames_decode_encode_and_fail_with_their_codes() {
+    let vectors = vectors();
+    assert_eq!(vectors["header_bytes"], frame::HEADER_LEN);
+    assert_eq!(vectors["max_payload"], frame::MAX_PAYLOAD);
+    for valid in vectors["frames"].as_array().unwrap() {
+        let bytes = unhex(valid["hex"].as_str().unwrap());
+        let decoded = frame::decode(&bytes).unwrap_or_else(|error| {
+            panic!("{}: {error:?}", valid["name"]);
+        });
+        assert_eq!(u64::from(decoded.stream), valid["stream"].as_u64().unwrap());
+        assert_eq!(decoded.kind as u64, valid["kind"].as_u64().unwrap());
+        assert_eq!(u64::from(decoded.flags), valid["flags"].as_u64().unwrap());
+        assert_eq!(
+            decoded.payload,
+            unhex(valid["payload_hex"].as_str().unwrap())
+        );
+        assert_eq!(decoded.encode(), bytes, "{}", valid["name"]);
+    }
+    for invalid in vectors["invalid"].as_array().unwrap() {
+        let bytes = unhex(invalid["hex"].as_str().unwrap());
+        let error = frame::decode(&bytes).expect_err(invalid["name"].as_str().unwrap());
+        assert_eq!(error.code(), invalid["reason"], "{}", invalid["name"]);
+    }
+}
+
+#[test]
+fn contract_sequences_give_their_first_error() {
+    for sequence in vectors()["sequences"].as_array().unwrap() {
+        let mut seq: Sequencer<()> = Sequencer::new();
+        let mut first = None;
+        for (index, step) in sequence["frames"].as_array().unwrap().iter().enumerate() {
+            let dir = match step[0].as_str().unwrap() {
+                "to_node" => Dir::ToNode,
+                _ => Dir::ToConnect,
+            };
+            let frame = frame::decode(&unhex(step[1].as_str().unwrap())).unwrap();
+            if let Err(error) = seq.apply(dir, &frame, || ()) {
+                first = Some((index, error.code()));
+                break;
+            }
+        }
+        let expected = sequence["error"].as_array().map(|pair| {
+            (
+                pair[0].as_u64().unwrap() as usize,
+                pair[1].as_str().unwrap(),
+            )
+        });
+        assert_eq!(first, expected, "{}", sequence["name"]);
+    }
+}
+
+#[test]
+fn sequencer_keeps_streams_apart_under_random_interleaving() {
+    // Property: for random scripts of many streams, interleaved at random (each stream
+    // keeps its own order), every frame lands on its own stream and no rule breaks.
+    for seed in 1..200u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let streams = 1 + rng.next() as usize % 12;
+        let mut scripts: Vec<VecDeque<(Dir, u8)>> = Vec::new();
+        for _ in 0..streams {
+            let mut script = VecDeque::from([(Dir::ToNode, OPEN)]);
+            for _ in 0..rng.next() % 6 {
+                let dir = if rng.next().is_multiple_of(2) {
+                    Dir::ToNode
+                } else {
+                    Dir::ToConnect
+                };
+                script.push_back((dir, 0));
+            }
+            if rng.next().is_multiple_of(4) {
+                let dir = if rng.next().is_multiple_of(2) {
+                    Dir::ToNode
+                } else {
+                    Dir::ToConnect
+                };
+                script.push_back((dir, RESET));
+            } else {
+                script.push_back((Dir::ToNode, CLOSE));
+                script.push_back((Dir::ToConnect, CLOSE));
+            }
+            scripts.push(script);
+        }
+        // Opens go in id order; the rest interleave freely.
+        let mut seq: Sequencer<u32> = Sequencer::new();
+        let mut opened = 0usize;
+        loop {
+            let mut candidates: Vec<usize> = (0..opened)
+                .filter(|&index| !scripts[index].is_empty())
+                .collect();
+            if opened < streams {
+                candidates.push(opened);
+            }
+            if candidates.is_empty() {
+                break;
+            }
+            let pick = candidates[rng.next() as usize % candidates.len()];
+            let (dir, flags) = scripts[pick].pop_front().unwrap();
+            let id = pick as u32 + 1;
+            let kind = if pick.is_multiple_of(2) {
+                Kind::Device
+            } else {
+                Kind::Public
+            };
+            match seq.apply_head(dir, id, kind, flags, || id).unwrap() {
+                Applied::Opened(value) => {
+                    assert_eq!(value, id);
+                    opened += 1;
+                }
+                Applied::Frame { value, ended } => {
+                    assert_eq!(value, id, "seed {seed}: a frame crossed streams");
+                    assert_eq!(ended, scripts[pick].is_empty(), "seed {seed}: early end");
+                }
+                Applied::Dropped => panic!("seed {seed}: dropped a live frame"),
+            }
+        }
+        assert_eq!(seq.live(), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The checks before the 101 (contract 3.3).
+
+#[test]
+fn a_dial_to_an_unknown_node_is_404() {
+    let h = Harness::new();
+    assert_eq!(
+        h.dial("tok-a1", NODE_NONE).err(),
+        Some((404, "node_unknown".into()))
+    );
+    assert_eq!(
+        h.dial("tok-a1", "node_NOTVALID1").err(),
+        Some((404, "node_unknown".into()))
+    );
+}
+
+#[test]
+fn a_dial_to_an_offline_node_is_503_tunnel_offline() {
+    let h = Harness::new();
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((503, "tunnel_offline".into()))
+    );
+}
+
+#[test]
+fn tokens_upgrades_and_plans_are_checked_in_order() {
+    let h = Harness::new();
+    assert_eq!(
+        h.upgrade(&format!("/v1/tunnel/dial/{NODE_A}"), None).err(),
+        Some((401, "unauthenticated".into()))
+    );
+    assert_eq!(
+        h.dial("tok-unknown", NODE_A).err(),
+        Some((401, "unauthenticated".into()))
+    );
+    assert_eq!(
+        h.dial("tok-team", NODE_A).err(),
+        Some((403, "account_required".into()))
+    );
+    // Not an upgrade, or another subprotocol: 400 before the token is looked at.
+    let mut plain = h.connect();
+    write!(
+        plain,
+        "GET /v1/tunnel/dial/{NODE_A} HTTP/1.1\r\nHost: relay.test\r\n\r\n"
+    )
+    .unwrap();
+    let mut answer = String::new();
+    let _ = plain.read_to_string(&mut answer);
+    assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+    assert!(answer.contains("invalid_request"), "{answer}");
+    let mut other = h.connect();
+    let request = String::from_utf8(client::request(
+        "relay.test",
+        "/v1/tunnel/node",
+        &client::new_key(),
+        None,
+    ))
+    .unwrap()
+    .replace("apassy-tunnel-v1", "chat");
+    other.write_all(request.as_bytes()).unwrap();
+    let mut answer = String::new();
+    let _ = other.read_to_string(&mut answer);
+    assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+    // The node's account without a plan.
+    let _node = echo_node(&h, "tok-a1", 1);
+    h.directory.set_entitled("acc_a", false);
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((403, "plan_required".into()))
+    );
+    assert_eq!(h.node("tok-a2").err(), Some((403, "plan_required".into())));
+    h.directory.set_entitled("acc_a", true);
+    assert!(h.dial("tok-a2", NODE_A).is_ok());
+}
+
+#[test]
+fn another_account_needs_a_grant_and_loses_it_at_once() {
+    let h = Harness::new();
+    let _node = echo_node(&h, "tok-a1", 2);
+    assert_eq!(
+        h.dial("tok-b", NODE_A).err(),
+        Some((403, "not_in_group".into()))
+    );
+    h.directory.grant(NODE_A, "acc_b");
+    let mut device = h.dial("tok-b", NODE_A).expect("granted");
+    device.send(b"hello from b");
+    assert_eq!(device.read_bytes(12), b"hello from b");
+    let mut own = h.dial("tok-a2", NODE_A).unwrap();
+    // DELETE /v1/tunnel/grants/{id}: the grantee's streams end with 4003, others stay.
+    h.directory.revoke(NODE_A, "acc_b");
+    assert_eq!(h.broker.revoke_grant(NODE_A, "acc_b"), 1);
+    device.expect_close(close::REVOKED);
+    assert_eq!(
+        h.dial("tok-b", NODE_A).err(),
+        Some((403, "not_in_group".into()))
+    );
+    own.send(b"still here");
+    assert_eq!(own.read_bytes(10), b"still here");
+}
+
+#[test]
+fn a_node_without_a_registration_is_404_and_the_ninth_node_is_403() {
+    let h = Harness::with(
+        Limits {
+            nodes_per_account: 1,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    h.directory.add_device("tok-a3", "acc_a", "dev_a3");
+    assert_eq!(h.node("tok-a3").err(), Some((404, "node_unknown".into())));
+    let _first = echo_node(&h, "tok-a1", 3);
+    assert_eq!(h.node("tok-a2").err(), Some((403, "account_limit".into())));
+    // A reconnect of the same node is not a second node.
+    assert!(h.node("tok-a1").is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Dials.
+
+#[test]
+fn upgrade_keeps_bytes_sent_with_the_head() {
+    // The open question of the plan: the handshake and the first WebSocket frame arrive in
+    // one TCP segment. The vendored `tiny_http` reads the head through a buffered reader;
+    // `Request::upgrade_split` hands that same reader over, so the frame is not lost.
+    let h = Harness::new();
+    let node = echo_node(&h, "tok-a1", 4);
+    let mut stream = h.connect();
+    let key = client::new_key();
+    let mut segment = client::request(
+        "relay.test",
+        &format!("/v1/tunnel/dial/{NODE_A}"),
+        &key,
+        Some("tok-a2"),
+    );
+    let hello = b"\x16\x03\x01\x00\x05first";
+    segment.extend(ws::encode_frame(
+        ws::OP_BINARY,
+        hello,
+        Some(ws::random_mask()),
+    ));
+    stream.set_nodelay(true).unwrap();
+    stream.write_all(&segment).unwrap();
+    client::finish(&mut stream, &key).unwrap();
+    let (_, kind, flags, payload) = node.open();
+    assert_eq!((kind, flags, payload.len()), (Kind::Device, OPEN, 0));
+    let mut device = Peer::new(stream);
+    assert_eq!(device.read_bytes(hello.len()), hello);
+}
+
+#[test]
+fn an_upgraded_socket_outlives_the_request_deadlines() {
+    // The relay transport closes a request after its handle deadline; an upgraded tunnel
+    // is released from it.
+    let h = Harness::with(test_limits(), Duration::from_millis(500));
+    let _node = echo_node(&h, "tok-a1", 5);
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    thread::sleep(Duration::from_millis(1500));
+    device.send(b"after the deadline");
+    assert_eq!(device.read_bytes(18), b"after the deadline");
+}
+
+#[test]
+fn frames_never_cross_streams_with_random_interleaving() {
+    let h = Harness::with(
+        Limits {
+            dials_per_minute: 1000,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 6);
+    for round in 0..3u64 {
+        let workers: Vec<_> = (0..8u64)
+            .map(|index| {
+                let mut device = h.dial("tok-a2", NODE_A).unwrap();
+                thread::spawn(move || {
+                    let mut rng =
+                        Rng((round * 100 + index + 1).wrapping_mul(0x2545_F491_4F6C_DD1D));
+                    let mut sent = Vec::new();
+                    for _ in 0..(1 + rng.next() % 12) {
+                        let len = 1 + rng.next() as usize % frame::MAX_PAYLOAD;
+                        let mut bytes = rng.bytes(len);
+                        bytes[0] = index as u8; // a marker of the sender
+                        device.send(&bytes);
+                        sent.extend(bytes);
+                        if rng.next().is_multiple_of(3) {
+                            thread::sleep(Duration::from_millis(rng.next() % 5));
+                        }
+                    }
+                    let echoed = device.read_bytes(sent.len());
+                    assert_eq!(echoed.len(), sent.len());
+                    assert!(
+                        echoed == sent,
+                        "round {round} device {index}: bytes crossed"
+                    );
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_closed_stream_frees_its_slot_and_the_65th_stream_is_429() {
+    let h = Harness::with(
+        Limits {
+            dials_per_minute: 1000,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 7);
+    let mut devices: Vec<Peer> = (0..64)
+        .map(|_| h.dial("tok-a2", NODE_A).expect("within the limit"))
+        .collect();
+    assert_eq!(h.open_streams("acc_a"), 64);
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((429, "tunnel_limit".into()))
+    );
+    // The ingress counts against the same 64.
+    let sni = ingress::serve_sni(
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        h.broker.clone(),
+        IngressConfig::default(),
+    )
+    .unwrap();
+    let mut agent = TcpStream::connect(sni.addr).unwrap();
+    agent
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    agent
+        .write_all(&client_hello("aaaaaaaaaa.node.example.test"))
+        .unwrap();
+    let mut rest = Vec::new();
+    let _ = agent.read_to_end(&mut rest);
+    assert!(rest.is_empty(), "a limited ingress connection is closed");
+    // A WebSocket close of one dial ends its stream; the node's echo closes the other way.
+    let mut last = devices.pop().unwrap();
+    client::send(
+        &mut last.writer,
+        ws::OP_CLOSE,
+        &ws::close_payload(close::NORMAL),
+    )
+    .unwrap();
+    last.expect_close(close::NORMAL);
+    wait_until("the slot is free", || h.open_streams("acc_a") == 63);
+    let mut again = h.dial("tok-a2", NODE_A).expect("the freed slot");
+    again.send(b"x");
+    assert_eq!(again.read_bytes(1), b"x");
+    assert_eq!(h.broker.usage("acc_a").streams, 65);
+}
+
+#[test]
+fn the_dial_rate_is_per_minute() {
+    let h = Harness::with(
+        Limits {
+            dials_per_minute: 3,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let _node = echo_node(&h, "tok-a1", 8);
+    let _held: Vec<_> = (0..3).map(|_| h.dial("tok-a2", NODE_A).unwrap()).collect();
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((429, "tunnel_limit".into()))
+    );
+    h.clock.advance(60);
+    assert!(h.dial("tok-a2", NODE_A).is_ok());
+}
+
+#[test]
+fn the_byte_budget_trips_and_resets_on_the_first_of_the_month() {
+    let h = Harness::with(
+        Limits {
+            bytes_per_month: 1000,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    // 2026-11-30T23:59:00Z.
+    h.clock.set(1_796_083_140);
+    let _node = echo_node(&h, "tok-a1", 9);
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    device.send(&[7u8; 400]);
+    assert_eq!(device.read_bytes(400), vec![7u8; 400]);
+    assert_eq!(h.broker.usage("acc_a").bytes, 800);
+    // 200 more each way crosses 1000: the open streams close with 4002.
+    device.send(&[8u8; 200]);
+    device.expect_close(close::TUNNEL_LIMIT);
+    assert!(h.broker.usage("acc_a").tripped);
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((429, "tunnel_limit".into()))
+    );
+    // Other accounts are not affected, and the budget scales with the plan's people.
+    h.directory.set_budget_units("acc_a", 3);
+    assert_eq!(
+        h.dial("tok-a2", NODE_A).err(),
+        Some((429, "tunnel_limit".into())),
+        "a tripped month stays tripped"
+    );
+    // 2026-12-01T00:00:00Z.
+    h.clock.set(1_796_083_200);
+    let mut next_month = h.dial("tok-a2", NODE_A).expect("a new month");
+    next_month.send(b"ok");
+    assert_eq!(next_month.read_bytes(2), b"ok");
+    let usage = h.broker.usage("acc_a");
+    assert_eq!(
+        (usage.month, usage.bytes, usage.tripped),
+        (202612, 4, false)
+    );
+}
+
+#[test]
+fn a_node_reconnect_replaces_the_registration_and_resets_its_streams() {
+    let h = Harness::new();
+    let first = echo_node(&h, "tok-a1", 10);
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    device.send(b"one");
+    assert_eq!(device.read_bytes(3), b"one");
+    let _second = echo_node(&h, "tok-a1", 11);
+    assert_eq!(
+        first.closed.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Some(close::REPLACED)
+    );
+    device.expect_close(close::NODE_OFFLINE);
+    wait_until("the old stream is released", || {
+        h.open_streams("acc_a") == 0
+    });
+    let mut again = h.dial("tok-a2", NODE_A).unwrap();
+    again.send(b"two");
+    assert_eq!(again.read_bytes(3), b"two");
+    assert_eq!(h.broker.online_nodes(), vec![NODE_A.to_string()]);
+}
+
+#[test]
+fn a_node_that_goes_away_closes_its_dials_with_4001() {
+    let h = Harness::new();
+    let mut node = h.node("tok-a1").unwrap();
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    let open = node.next_frame();
+    assert!(open.is_open());
+    drop(node);
+    device.expect_close(close::NODE_OFFLINE);
+    wait_until("offline", || !h.broker.online(NODE_A));
+}
+
+#[test]
+fn node_close_and_reset_reach_the_device() {
+    let h = Harness::new();
+    let mut node = h.node("tok-a1").unwrap();
+    let mut closing = h.dial("tok-a2", NODE_A).unwrap();
+    let first = node.next_frame();
+    node.send_frame(first.stream, Kind::Device, CLOSE, b"last bytes");
+    assert_eq!(closing.read_bytes(10), b"last bytes");
+    closing.expect_close(close::NORMAL);
+    // Connect closes the other direction, and the stream ends.
+    let other_way = node.next_frame();
+    assert_eq!((other_way.stream, other_way.flags), (first.stream, CLOSE));
+    let mut reset = h.dial("tok-a2", NODE_A).unwrap();
+    let second = node.next_frame();
+    assert!(second.stream > first.stream);
+    node.send_frame(second.stream, Kind::Device, RESET, &[]);
+    reset.expect_close(close::RESET_BY_NODE);
+    wait_until("both streams released", || h.open_streams("acc_a") == 0);
+}
+
+#[test]
+fn a_broken_stream_rule_resets_only_that_stream_and_a_bad_frame_closes_1002() {
+    let h = Harness::new();
+    let mut node = h.node("tok-a1").unwrap();
+    let mut bad = h.dial("tok-a2", NODE_A).unwrap();
+    let first = node.next_frame();
+    let mut good = h.dial("tok-a2", NODE_A).unwrap();
+    let second = node.next_frame();
+    // kind_mismatch on the first stream: Connect resets it; the second one works.
+    node.send_frame(first.stream, Kind::Public, 0, b"x");
+    let reset = node.next_frame();
+    assert_eq!((reset.stream, reset.flags), (first.stream, RESET));
+    bad.expect_close(close::RESET_BY_NODE);
+    // A frame for a stream that was never opened has nothing to reset.
+    node.send_frame(second.stream + 10, Kind::Device, 0, b"y");
+    node.send_frame(second.stream, Kind::Device, 0, b"ok");
+    assert_eq!(good.read_bytes(2), b"ok");
+    // An open from the node resets that (live) stream.
+    node.send_frame(second.stream, Kind::Device, OPEN, &[]);
+    let reset = node.next_frame();
+    assert_eq!((reset.stream, reset.flags), (second.stream, RESET));
+    good.expect_close(close::RESET_BY_NODE);
+    // A malformed frame closes the node's WebSocket with 1002.
+    node.send(&[0, 0, 0, 1, 1, 0]);
+    node.expect_close(close::PROTOCOL);
+}
+
+#[test]
+fn text_messages_are_refused_with_1003() {
+    let h = Harness::new();
+    let mut node = h.node("tok-a1").unwrap();
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    let open = node.next_frame();
+    client::send(&mut device.writer, ws::OP_TEXT, b"text").unwrap();
+    device.expect_close(close::UNSUPPORTED);
+    let reset = node.next_frame();
+    assert_eq!((reset.stream, reset.flags), (open.stream, RESET));
+    client::send(&mut node.writer, ws::OP_TEXT, b"text").unwrap();
+    node.expect_close(close::UNSUPPORTED);
+}
+
+#[test]
+fn a_dial_message_over_16384_bytes_closes_1009() {
+    let h = Harness::new();
+    let _node = echo_node(&h, "tok-a1", 12);
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    device.send(&vec![1u8; frame::MAX_PAYLOAD + 1]);
+    device.expect_close(close::TOO_BIG);
+}
+
+#[test]
+fn a_slow_reader_resets_its_own_stream_and_no_other() {
+    let h = Harness::with(
+        Limits {
+            stream_buffer: 64 * 1024,
+            ..test_limits()
+        },
+        Duration::from_secs(30),
+    );
+    let mut node = h.node("tok-a1").unwrap();
+    let slow = h.dial("tok-a2", NODE_A).unwrap(); // never reads
+    let slow_open = node.next_frame();
+    let mut fast = h.dial("tok-a2", NODE_A).unwrap();
+    let fast_open = node.next_frame();
+    // The node floods the slow stream: Connect buffers at most 64 KiB toward it (plus
+    // what the sockets hold), then resets it. The node's writes never block on it.
+    let chunk = vec![0xEEu8; frame::MAX_PAYLOAD];
+    let mut reset_seen = false;
+    for _ in 0..1024 {
+        node.send_frame(slow_open.stream, Kind::Device, 0, &chunk);
+    }
+    node.send_frame(fast_open.stream, Kind::Device, 0, b"fast");
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
+        let frame = node.next_frame();
+        if frame.stream == slow_open.stream && frame.is_reset() {
+            reset_seen = true;
+            break;
+        }
+    }
+    assert!(reset_seen, "the slow stream was reset");
+    assert_eq!(fast.read_bytes(4), b"fast");
+    drop(slow);
+}
+
+// ---------------------------------------------------------------------------
+// The ingress.
+
+/// A real ClientHello from rustls for `name`: the bytes a cloud agent sends first.
+fn client_hello(name: &str) -> Vec<u8> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+    let server = rustls::pki_types::ServerName::try_from(name.to_string()).unwrap();
+    let mut connection = rustls::ClientConnection::new(Arc::new(config), server).unwrap();
+    let mut out = Vec::new();
+    while connection.wants_write() {
+        connection.write_tls(&mut out).unwrap();
+    }
+    out
+}
+
+fn sni_listener(h: &Harness, config: IngressConfig) -> ingress::IngressHandle {
+    ingress::serve_sni(
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        h.broker.clone(),
+        config,
+    )
+    .unwrap()
+}
+
+fn agent(addr: SocketAddr) -> TcpStream {
+    let stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+}
+
+#[test]
+fn the_ingress_forwards_a_recorded_client_hello_unchanged_both_ways() {
+    let h = Harness::new();
+    let node = echo_node(&h, "tok-a1", 13);
+    let sni = sni_listener(&h, IngressConfig::default());
+    let hello = client_hello("AAAAAAAAAA.node.example.test");
+    assert_eq!(
+        ingress::server_name(&hello).unwrap(),
+        "aaaaaaaaaa.node.example.test"
+    );
+    let mut agent = agent(sni.addr);
+    // The ClientHello and the next bytes in one segment: the ingress reads only the
+    // first record for the open and forwards the rest as data.
+    let mut segment = hello.clone();
+    segment.extend_from_slice(b"\x17\x03\x03\x00\x03abc");
+    agent.write_all(&segment).unwrap();
+    let (_, kind, flags, payload) = node.open();
+    assert_eq!((kind, flags), (Kind::Public, OPEN));
+    assert_eq!(payload, hello, "the open carries the exact first record");
+    let mut echoed = vec![0u8; segment.len()];
+    agent.read_exact(&mut echoed).unwrap();
+    assert_eq!(echoed, segment);
+    // A half-close of the agent reaches the node, whose close ends the connection.
+    agent.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut rest = Vec::new();
+    agent.read_to_end(&mut rest).unwrap();
+    assert!(rest.is_empty());
+    wait_until("released", || h.open_streams("acc_a") == 0);
+    let stats: HashMap<_, _> = sni.stats.snapshot().into_iter().collect();
+    assert_eq!(stats["forwarded"], 1);
+}
+
+#[test]
+fn the_ingress_refuses_unknown_offline_and_foreign_names_with_unrecognized_name() {
+    let h = Harness::new();
+    let node = echo_node(&h, "tok-a1", 14);
+    let sni = sni_listener(&h, IngressConfig::default());
+    for name in [
+        "cccccccccc.node.example.test", // no such node
+        "bbbbbbbbbb.node.example.test", // registered, offline
+        "aaaaaaaaaa.other.example",     // another zone
+        "node.example.test",
+    ] {
+        let mut agent = agent(sni.addr);
+        agent.write_all(&client_hello(name)).unwrap();
+        let mut answer = Vec::new();
+        let _ = agent.read_to_end(&mut answer);
+        assert_eq!(answer, ingress::ALERT_UNRECOGNIZED_NAME, "{name}");
+    }
+    // A node whose account has no plan: the same answer.
+    h.directory.set_entitled("acc_a", false);
+    let mut agent = agent(sni.addr);
+    agent
+        .write_all(&client_hello("aaaaaaaaaa.node.example.test"))
+        .unwrap();
+    let mut answer = Vec::new();
+    let _ = agent.read_to_end(&mut answer);
+    assert_eq!(answer, ingress::ALERT_UNRECOGNIZED_NAME);
+    assert!(node.opens.try_recv().is_err(), "nothing was forwarded");
+}
+
+#[test]
+fn the_ingress_closes_truncated_malformed_and_slow_hellos() {
+    let h = Harness::new();
+    let node = echo_node(&h, "tok-a1", 15);
+    let sni = sni_listener(
+        &h,
+        IngressConfig {
+            read_limit: Duration::from_millis(300),
+            ..IngressConfig::default()
+        },
+    );
+    let hello = client_hello("aaaaaaaaaa.node.example.test");
+    let mut not_tls = b"GET / HTTP/1.1\r\n\r\n".to_vec();
+    not_tls.resize(64, b' ');
+    let mut too_long = hello.clone();
+    too_long[3..5].copy_from_slice(&(16 * 1024 + 1u16).to_be_bytes());
+    for (what, bytes) in [
+        ("slow", hello[..20].to_vec()),
+        ("not tls", not_tls),
+        ("record over 16 KiB", too_long),
+    ] {
+        let started = Instant::now();
+        let mut agent = agent(sni.addr);
+        agent.write_all(&bytes).unwrap();
+        let mut answer = Vec::new();
+        let _ = agent.read_to_end(&mut answer);
+        assert!(answer.is_empty(), "{what}: {answer:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{what}: deadline"
+        );
+    }
+    // A client that sends nothing is closed at the deadline.
+    let started = Instant::now();
+    let mut silent = agent(sni.addr);
+    let mut answer = Vec::new();
+    let _ = silent.read_to_end(&mut answer);
+    assert!(answer.is_empty());
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    assert!(node.opens.try_recv().is_err(), "nothing was forwarded");
+    let stats: HashMap<_, _> = sni.stats.snapshot().into_iter().collect();
+    assert_eq!(stats["timeouts"], 2);
+    assert_eq!(stats["malformed"], 2);
+}
+
+#[test]
+fn the_ingress_limits_new_connections_by_address() {
+    let h = Harness::new();
+    let _node = echo_node(&h, "tok-a1", 16);
+    let sni = sni_listener(
+        &h,
+        IngressConfig {
+            per_address_per_minute: 2,
+            ..IngressConfig::default()
+        },
+    );
+    let hello = client_hello("cccccccccc.node.example.test");
+    for _ in 0..2 {
+        let mut agent = agent(sni.addr);
+        agent.write_all(&hello).unwrap();
+        let mut answer = Vec::new();
+        let _ = agent.read_to_end(&mut answer);
+        assert_eq!(answer, ingress::ALERT_UNRECOGNIZED_NAME);
+    }
+    let mut third = agent(sni.addr);
+    let _ = third.write_all(&hello);
+    let mut answer = Vec::new();
+    let _ = third.read_to_end(&mut answer);
+    assert!(
+        answer.is_empty(),
+        "the third connection of the minute is closed"
+    );
+    let stats: HashMap<_, _> = sni.stats.snapshot().into_iter().collect();
+    assert_eq!(stats["rate_limited"], 1);
+}
+
+fn acme_request(host: &str, path: &str) -> Vec<u8> {
+    format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: synthetic-acme\r\n\r\n")
+        .into_bytes()
+}
+
+#[test]
+fn the_acme_path_forwards_only_challenges_for_a_known_name() {
+    let h = Harness::new();
+    let node = echo_node(&h, "tok-a1", 17);
+    let acme = ingress::serve_acme(
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        h.broker.clone(),
+        IngressConfig::default(),
+    )
+    .unwrap();
+    let request = acme_request(
+        "aaaaaaaaaa.node.example.test",
+        "/.well-known/acme-challenge/SynthToken_0123",
+    );
+    let mut client = agent(acme.addr);
+    client.write_all(&request).unwrap();
+    let (_, kind, flags, payload) = node.open();
+    assert_eq!((kind, flags), (Kind::Acme, OPEN | CLOSE));
+    assert_eq!(payload, request);
+    let mut answer = Vec::new();
+    client.read_to_end(&mut answer).unwrap();
+    assert_eq!(answer, request, "the node's answer comes back unchanged");
+    for (host, path) in [
+        ("aaaaaaaaaa.node.example.test", "/mcp"),
+        (
+            "aaaaaaaaaa.node.example.test",
+            "/.well-known/acme-challenge/../x",
+        ),
+        ("aaaaaaaaaa.node.example.test", "/.well-known/other"),
+        (
+            "cccccccccc.node.example.test",
+            "/.well-known/acme-challenge/tok",
+        ),
+        (
+            "bbbbbbbbbb.node.example.test",
+            "/.well-known/acme-challenge/tok",
+        ),
+        ("example.org", "/.well-known/acme-challenge/tok"),
+    ] {
+        let mut client = agent(acme.addr);
+        client.write_all(&acme_request(host, path)).unwrap();
+        let mut answer = Vec::new();
+        let _ = client.read_to_end(&mut answer);
+        assert_eq!(answer, ingress::ACME_NOT_FOUND, "{host}{path}");
+    }
+    assert!(node.opens.try_recv().is_err(), "nothing else was forwarded");
+}
+
+#[test]
+fn removing_a_node_and_ending_a_plan_close_the_tunnel() {
+    let h = Harness::new();
+    let node = echo_node(&h, "tok-a1", 18);
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    assert!(h.broker.remove_node(NODE_A));
+    assert_eq!(
+        node.closed.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Some(close::REVOKED)
+    );
+    device.expect_close(close::NODE_OFFLINE);
+    let node = echo_node(&h, "tok-a1", 19);
+    h.directory.grant(NODE_A, "acc_b");
+    let mut granted = h.dial("tok-b", NODE_A).unwrap();
+    granted.send(b"b");
+    assert_eq!(granted.read_bytes(1), b"b");
+    h.broker.end_account("acc_b");
+    granted.expect_close(close::REVOKED);
+    assert!(node.resets.recv_timeout(Duration::from_secs(10)).is_ok());
+    assert!(h.broker.online(NODE_A), "the granting account's node stays");
+}
+
+#[test]
+fn usage_counts_bytes_and_streams_and_restores_after_a_restart() {
+    let h = Harness::new();
+    let _node = echo_node(&h, "tok-a1", 20);
+    let mut device = h.dial("tok-a2", NODE_A).unwrap();
+    device.send(&[1u8; 100]);
+    assert_eq!(device.read_bytes(100), vec![1u8; 100]);
+    let usage = h.broker.usage("acc_a");
+    assert_eq!((usage.bytes, usage.dials, usage.streams), (200, 1, 1));
+    let restarted = Harness::new();
+    restarted.broker.restore_usage("acc_a", &usage);
+    assert_eq!(restarted.broker.usage("acc_a").bytes, 200);
+    let mut stale = usage.clone();
+    stale.month = 202610;
+    let other = Harness::new();
+    other.broker.restore_usage("acc_a", &stale);
+    assert_eq!(other.broker.usage("acc_a").bytes, 0);
+}
