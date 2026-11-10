@@ -19,8 +19,8 @@ use apassy::broker::approvals::{
 };
 use apassy::connect::device_key::join_message;
 use apassy::connect::{
-    AccountSigner, CheckoutRequest, ConnectAccount, ConnectClient, DeviceKeyStore, DeviceLink,
-    MemoryKeyStore, account_file, safety_words,
+    AccountSigner, CheckoutRequest, ConnectAccount, ConnectClient, ConnectError, DeviceKeyStore,
+    DeviceLink, MemoryKeyStore, account_file, safety_words,
 };
 use apassy::sync::{WORDS, decode_b64u, verify_signature};
 use apassy::vault::Vault;
@@ -311,6 +311,17 @@ fn the_iphone_joins_with_its_own_key_and_the_mac_confirms() {
     assert_eq!(status["device_name"], "Synthetic iPhone");
     assert_eq!(status["plan"]["status"], "none");
     assert_eq!(status["dial_route"], false);
+    // Both devices of the account, each verified by the iPhone.
+    let devices = status["devices"].as_array().expect("devices");
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().all(|device| device["verified"] == true));
+    assert_eq!(
+        devices
+            .iter()
+            .filter(|device| device["this"] == true)
+            .count(),
+        1
+    );
     assert_no_purchase_text(&status.to_string());
     assert_state_file_holds_no_secret(&phone.state_file(), &link);
 
@@ -365,7 +376,12 @@ fn a_code_that_does_not_work_is_refused_and_leaves_nothing() {
     assert!(!phone.keys.has_key());
 
     // A well-formed code that Connect does not know.
-    let unknown = format!("apassy_alk_{}_{}", mac.id(), "ab".repeat(32));
+    let unknown = format!(
+        "apassy_alk_{}_{}_{}",
+        mac.id(),
+        "ab".repeat(32),
+        "ab".repeat(16)
+    );
     assert_eq!(
         fail(&phone.core, json!({"op": "connect_join", "link": unknown})),
         "link_invalid"
@@ -496,8 +512,29 @@ fn connect_forget_removes_the_key_and_the_state() {
     assert!(phone.keys.has_key());
 }
 
+/// The id of this iPhone in the device list of `status`.
+fn own_device_id(status: &Value) -> String {
+    status["devices"]
+        .as_array()
+        .expect("devices")
+        .iter()
+        .find(|device| device["this"] == true)
+        .and_then(|device| device["device_id"].as_str())
+        .expect("this iPhone")
+        .to_owned()
+}
+
+/// Whether the device `device_id` is verified in `status`; `None` when it is not listed.
+fn listed_verified(status: &Value, device_id: &str) -> Option<bool> {
+    status["devices"]
+        .as_array()?
+        .iter()
+        .find(|device| device["device_id"] == device_id)
+        .and_then(|device| device["verified"].as_bool())
+}
+
 #[test]
-fn a_revoke_on_the_mac_removes_the_account_from_the_iphone() {
+fn a_revoke_on_the_mac_shows_removed_and_keeps_the_key_until_forget() {
     let connect = FakeConnect::start();
     let owner = owner();
     let mut mac = mac(&connect, "Rafal");
@@ -514,14 +551,130 @@ fn a_revoke_on_the_mac_removes_the_account_from_the_iphone() {
     let (proof, epoch) = owner.proof(mac.account.revoke_action(&device));
     mac.account.revoke(&device, proof, &epoch).expect("revoke");
 
+    // Connect says the iPhone was removed; the core deletes nothing.
+    for _ in 0..2 {
+        let status = call(&phone.core, json!({"op": "connect_status"}));
+        assert_eq!(status["state"], "account");
+        assert_eq!(status["removed"], true);
+        assert_eq!(status["account_id"], mac.id());
+        assert!(phone.keys.has_key());
+        assert!(phone.state_file().exists());
+    }
+    // After a lock the core asks again, and the answer is the same.
+    call(&phone.core, json!({"op": "lock"}));
     let status = call(&phone.core, json!({"op": "connect_status"}));
-    assert_eq!(status["state"], "none");
     assert_eq!(status["removed"], true);
+    assert!(phone.keys.has_key());
+    // Only the owner's forget deletes the key and the state file.
+    let forgot = call(&phone.core, json!({"op": "connect_forget"}));
+    assert_eq!(forgot["forgotten"], true);
     assert!(!phone.keys.has_key());
     assert!(!phone.state_file().exists());
     let again = call(&phone.core, json!({"op": "connect_status"}));
     assert_eq!(again["state"], "none");
     assert!(again.get("removed").is_none());
+}
+
+#[test]
+fn a_lost_nonce_or_a_refused_token_is_never_a_removal_on_the_iphone() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let mut mac = mac(&connect, "Rafal");
+    let phone = phone(&connect);
+    join(&mut mac, &owner, &phone);
+    let hooks: [&dyn Fn(&FakeConnect); 3] = [
+        &|connect: &FakeConnect| connect.restart_before_next_tokens(1),
+        &|connect: &FakeConnect| connect.refuse_next_tokens(1),
+        &|connect: &FakeConnect| connect.busy_next_tokens(1),
+    ];
+    for hook in hooks {
+        call(&phone.core, json!({"op": "lock"}));
+        hook(&connect);
+        let sign_ins = connect.count("POST /v1/account/token");
+        let status = call(&phone.core, json!({"op": "connect_status"}));
+        assert_eq!(status["state"], "account");
+        assert!(status.get("removed").is_none(), "{status}");
+        assert_eq!(connect.count("POST /v1/account/token"), sign_ins + 2);
+        assert!(phone.keys.has_key());
+        assert!(phone.state_file().exists());
+    }
+}
+
+#[test]
+fn the_iphone_marks_every_device_that_it_cannot_verify() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let mut mac = mac(&connect, "Rafal");
+    let account_id = mac.id();
+    connect.entitle(&account_id);
+    let store = mac
+        .account
+        .create_vault_store("0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77", "Personal")
+        .expect("store");
+    let phone = phone(&connect);
+    join(&mut mac, &owner, &phone);
+    let (second, third) = (phone_with(&connect, "app"), phone_with(&connect, "app"));
+    join(&mut mac, &owner, &second);
+    join(&mut mac, &owner, &third);
+    let second_id = own_device_id(&call(&second.core, json!({"op": "connect_status"})));
+    let third_id = own_device_id(&call(&third.core, json!({"op": "connect_status"})));
+    // The iPhone sees both new devices verified: the Mac confirmed them.
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(listed_verified(&status, &second_id), Some(true));
+    assert_eq!(listed_verified(&status, &third_id), Some(true));
+
+    // (a) A row that no device confirmed.
+    let stranger = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
+    let inserted = connect.insert_device(&account_id, "Mac Studio", stranger.public_key());
+    // (b) A device that left the account and comes back.
+    connect.revoke(&second_id);
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    assert_eq!(listed_verified(&status, &second_id), None);
+    connect.unrevoke(&second_id);
+    // (c) A device whose key Connect swapped.
+    let swapped = AccountSigner::open_or_create(&MemoryKeyStore::new()).unwrap();
+    connect.swap_key(&third_id, swapped.public_key());
+
+    let status = call(&phone.core, json!({"op": "connect_status"}));
+    for device_id in [&inserted, &second_id, &third_id] {
+        assert_eq!(
+            listed_verified(&status, device_id),
+            Some(false),
+            "{device_id}"
+        );
+    }
+    assert_eq!(
+        listed_verified(&status, &own_device_id(&status)),
+        Some(true)
+    );
+
+    // The same account of this iPhone, opened from its state file and its key, refuses
+    // them for a vault store and leaves their keys out of the head signers.
+    call(&phone.core, json!({"op": "lock"}));
+    let mut account = ConnectAccount::open(phone.keys.as_ref(), &phone.state_file())
+        .expect("open")
+        .expect("the account");
+    let keys = account.verified_keys().expect("verified keys");
+    assert!(keys.contains(&mac.public_key()));
+    assert!(keys.contains(&phone.public_key()));
+    assert!(!keys.contains(&stranger.public_key().to_vec()));
+    assert!(!keys.contains(&swapped.public_key().to_vec()));
+    assert!(!keys.contains(&second.public_key()));
+    for device_id in [&inserted, &second_id, &third_id] {
+        let (proof, epoch) = owner.proof(ConnectAccount::add_store_device_action(
+            &store.team_id,
+            device_id,
+            &account_id,
+        ));
+        assert_eq!(
+            account
+                .add_store_device(&store.team_id, device_id, &account_id, proof, &epoch)
+                .unwrap_err(),
+            ConnectError::NotVerified,
+            "{device_id}"
+        );
+    }
+    assert!(!connect.store_devices(&store.team_id).contains(&inserted));
 }
 
 #[test]
@@ -549,7 +702,7 @@ fn lock_drops_the_key_and_the_token_from_memory() {
 }
 
 #[test]
-fn a_key_that_the_keychain_lost_ends_the_account_on_this_iphone() {
+fn a_key_that_the_keychain_lost_shows_removed_until_forget() {
     let connect = FakeConnect::start();
     let owner = owner();
     let mut mac = mac(&connect, "Rafal");
@@ -558,9 +711,18 @@ fn a_key_that_the_keychain_lost_ends_the_account_on_this_iphone() {
     call(&phone.core, json!({"op": "lock"}));
     assert!(phone.keys.delete().unwrap());
     let status = call(&phone.core, json!({"op": "connect_status"}));
-    assert_eq!(status["state"], "none");
+    assert_eq!(status["state"], "account");
     assert_eq!(status["removed"], true);
+    assert!(phone.state_file().exists());
+    assert_eq!(
+        call(&phone.core, json!({"op": "connect_forget"}))["forgotten"],
+        true
+    );
     assert!(!phone.state_file().exists());
+    assert_eq!(
+        call(&phone.core, json!({"op": "connect_status"}))["state"],
+        "none"
+    );
 }
 
 #[test]
@@ -585,7 +747,11 @@ fn only_the_app_with_a_key_store_uses_connect() {
     let dir = TempDir::new().expect("dir");
     let config = json!({"data_dir": dir.path(), "connect_url": connect.url});
     let core = Core::new(&config.to_string()).expect("core");
-    let code = format!("apassy_alk_acc_k7m2q4x3ca_{}", "cd".repeat(32));
+    let code = format!(
+        "apassy_alk_acc_k7m2q4x3ca_{}_{}",
+        "cd".repeat(32),
+        "ab".repeat(16)
+    );
     assert_eq!(
         fail(&core, json!({"op": "connect_join", "link": code})),
         "not_allowed"

@@ -96,6 +96,11 @@ pub(crate) const ADDED_LEAD: &str = "It is a device of your Connect account now.
 pub(crate) const REVOKE_LEAD: &str =
     "It leaves your Connect account and every vault copy at Connect. Its vaults stay on it.";
 pub(crate) const FORGET_TITLE: &str = "Forget This Mac?";
+pub(crate) const NOT_VERIFIED: &str = "Not verified";
+pub(crate) const REMOVED: &str = "Removed from the account";
+pub(crate) const REMOVED_NOTE: &str = "Apassy Connect says this Mac was removed from its account. Its Connect key and its account file stay on this Mac until you forget the account here.";
+pub(crate) const FORGET_THIS_MAC: &str = "Forget This Mac…";
+pub(crate) const FORGET_REMOVED_LEAD: &str = "The Connect key and the account file of this Mac are deleted, and the vault copies of the account stop syncing on this Mac. To use the account here again, add this Mac from another device of the account.";
 pub(crate) const FORGET_LEAD: &str = "This Mac leaves your Connect account, and its Connect key is deleted. To use the account here again, add this Mac from another device of the account.";
 pub(crate) const JOIN_ACCOUNT_TITLE: &str = "Add This Mac to an Account";
 pub(crate) const JOIN_ACCOUNT_LEAD: &str =
@@ -169,6 +174,11 @@ pub(crate) const TEXTS: &[&str] = &[
     REVOKE_LEAD,
     FORGET_TITLE,
     FORGET_LEAD,
+    NOT_VERIFIED,
+    REMOVED,
+    REMOVED_NOTE,
+    FORGET_THIS_MAC,
+    FORGET_REMOVED_LEAD,
     JOIN_ACCOUNT_TITLE,
     JOIN_ACCOUNT_LEAD,
     JOINED_TITLE,
@@ -357,6 +367,10 @@ pub(crate) struct Device {
     pub(crate) last_seen_at: Option<u64>,
     /// This Mac.
     pub(crate) this: bool,
+    /// This Mac verified the device's chain of statements to the account root. A device
+    /// that is not verified shows "Not verified" and is no device of the account for any
+    /// step.
+    pub(crate) verified: bool,
 }
 
 impl Device {
@@ -463,6 +477,14 @@ pub(crate) enum Shown {
     Loading {
         name: Option<String>,
     },
+    /// Connect says this Mac was removed from its account, or the key of this Mac cannot
+    /// be read any more. The account file and the key stay until the owner chooses
+    /// "Forget This Mac…". `note` says why.
+    Removed {
+        name: Option<String>,
+        device_name: String,
+        note: String,
+    },
     Account(Account),
 }
 
@@ -495,6 +517,7 @@ impl ConnectView {
         let Shown::Account(account) = &self.shown else {
             return match &self.shown {
                 Shown::None => NOT_ON_CONNECT.to_owned(),
+                Shown::Removed { .. } => REMOVED.to_owned(),
                 _ => SIGNED_OUT.to_owned(),
             };
         };
@@ -610,6 +633,8 @@ pub(crate) enum Action {
     AddDevice,
     /// Revoke… or Forget… of the device with this index.
     Revoke(usize),
+    /// "Forget This Mac…" of a Mac that Connect removed from its account.
+    ForgetRemoved,
     Invite,
     /// Confirm… of the member with this index.
     ConfirmMember(usize),
@@ -655,6 +680,29 @@ pub(crate) fn draw(ui: &mut Ui, view: &ConnectView) -> Option<Action> {
                         ui.add(egui::Spinner::new().size(12.0));
                         ui.label(rows::value("Asking Apassy Connect…"));
                     });
+                });
+            });
+        }
+        Shown::Removed {
+            name,
+            device_name,
+            note,
+        } => {
+            rows::group(ui, Some(GROUP_LABEL), |g| {
+                if let Some(name) = name {
+                    g.labeled("Name", rows::value(name.as_str()));
+                }
+                g.labeled("This Mac", rows::value(device_name.as_str()));
+                g.line_note(REMOVED, None, Some(rows::note(note)), |ui| {
+                    if ui
+                        .add_enabled_ui(!view.locked, |ui| {
+                            kit::small_button(ui, FORGET_THIS_MAC, Style::Bordered)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        action = Some(Action::ForgetRemoved);
+                    }
                 });
             });
         }
@@ -842,7 +890,7 @@ fn entity_row(
     g: &mut rows::Group<'_>,
     glyph: impl FnOnce(&mut Ui),
     title: &str,
-    cap: Option<&str>,
+    cap: Option<(&str, Tone)>,
     subline: &str,
     controls: impl FnOnce(&mut Ui),
 ) {
@@ -861,8 +909,8 @@ fn entity_row(
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             ui.add(Label::new(rows::label_text(title)).truncate());
-                            if let Some(cap) = cap {
-                                kit::cap_toned(ui, cap, Tone::Neutral);
+                            if let Some((cap, tone)) = cap {
+                                kit::cap_toned(ui, cap, tone);
                             }
                         });
                         ui.add(Label::new(rows::note(subline)).truncate());
@@ -881,7 +929,13 @@ fn devices_group(ui: &mut Ui, view: &ConnectView, account: &Account, action: &mu
     rows::group_box(ui, |g| {
         for (index, device) in account.devices.iter().enumerate() {
             let subline = format!("{} · Added {}", device.kind(), day(device.created_at));
-            let cap = device.this.then_some("This Mac");
+            let cap = if device.this {
+                Some(("This Mac", Tone::Neutral))
+            } else if !device.verified {
+                Some((NOT_VERIFIED, Tone::Warning))
+            } else {
+                None
+            };
             entity_row(
                 g,
                 |ui| device_glyph(ui, &device.platform),
@@ -992,7 +1046,7 @@ fn group_section(
                     kit::avatar(ui, &member.name, 28.0);
                 },
                 &member.name,
-                role_cap(&group.kind, &member.role),
+                role_cap(&group.kind, &member.role).map(|cap| (cap, Tone::Neutral)),
                 &subline,
                 |ui| {
                     ui.add_enabled_ui(!view.locked, |ui| {
@@ -1055,6 +1109,8 @@ pub(crate) enum Sheet {
         name: String,
         this: bool,
     },
+    /// "Forget This Mac…" after Connect removed this Mac: the confirmation.
+    ForgetRemoved,
     /// Frame 8a.
     JoinAccount { code: zeroize::Zeroizing<String> },
     /// Frame 8b.
@@ -1606,6 +1662,7 @@ fn sheet_body(
                 created_at: 0,
                 last_seen_at: None,
                 this: false,
+                verified: false,
             }
             .kind();
             rows::group_box(ui, |g| g.labeled("Kind", rows::value(kind)));
@@ -1628,6 +1685,7 @@ fn sheet_body(
             .inner
         }
         Sheet::DeviceAdded { name } => done_sheet(ui, &format!("{name} Added"), &[ADDED_LEAD]),
+        Sheet::ForgetRemoved => destructive(ui, FORGET_TITLE, FORGET_REMOVED_LEAD, "Forget"),
         Sheet::Revoke { name, this, .. } => {
             if *this {
                 destructive(ui, FORGET_TITLE, FORGET_LEAD, "Forget…")

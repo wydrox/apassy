@@ -3,12 +3,17 @@
 //!
 //! - [`ConnectAccount::create`]: a new account with the account device key and a
 //!   recovery code that the Mac shows once and never stores.
-//! - Sign-in: `POST /v1/account/challenge`, the origin check, `POST /v1/account/token`.
-//!   The account token lives at most 15 minutes, in memory only (`Zeroizing`), and goes
-//!   only to the Connect origin of the account ([`ConnectAccount::with_token`]: the
-//!   client of that origin is the only thing that gets it). A `401` after a fresh sign-in,
-//!   or a challenge refused with `401`, is [`ConnectError::Revoked`]: the token is dropped
-//!   at once.
+//! - Sign-in: `POST /v1/account/challenge`, the origin check, `POST /v1/account/token`,
+//!   in up to three rounds, each with a fresh challenge. The account token lives at most
+//!   15 minutes, in memory only (`Zeroizing`), and goes only to the Connect origin of the
+//!   account ([`ConnectAccount::with_token`]: the client of that origin is the only thing
+//!   that gets it). Only `403 device_removed` at the token call, which Connect answers
+//!   after a valid signature of this device, is [`ConnectError::Revoked`]; a `401` is
+//!   never a removal. Even then nothing is deleted on this device: the owner forgets the
+//!   account here with an explicit confirmation ([`forget_this_device`]).
+//! - The device list has a cryptographic root ([`super::trust`]): [`ConnectAccount::view`]
+//!   verifies the chain of every device against the trust store of the account file, and
+//!   only a verified device counts as a device of the account.
 //! - "Add a device…" on this Mac: [`ConnectAccount::start_link`],
 //!   [`ConnectAccount::pending_joins`] with the six safety words, and
 //!   [`ConnectAccount::confirm_join`] with a fresh owner check
@@ -22,7 +27,8 @@
 //!
 //! The account file ([`account_file`], `connect/account.json` in the data directory,
 //! mode 0600 in a 0700 directory) is [`AccountState`]: the origin, the ids, the names, the
-//! public key, and the creation time. It holds no private key, no token, no email, no
+//! public key, the creation time, and the trust store (the pinned root, the known keys,
+//! the keys that left the account). It holds no private key, no token, no email, no
 //! link code, and no recovery code.
 
 use std::fmt;
@@ -31,7 +37,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -39,13 +45,15 @@ use zeroize::Zeroizing;
 use super::client::{
     AccountDeleted, AccountView, Challenge, ChallengeRequest, CheckoutAnswer, CheckoutRequest,
     ConnectClient, CreateAccount, DeviceView, GroupDetail, GroupJoined, GroupMember, InviteAnswer,
-    JoinBody, MemberRemoved, PlanView, PortalAnswer, RecoverBody, RevokeAnswer, SeatsAnswer,
-    StoreDevice, TokenRequest, VaultStoreView,
+    JoinBody, JoinCancel, MemberRemoved, PlanView, PortalAnswer, RecoverBody, RevokeAnswer,
+    SeatsAnswer, StoreDevice, TokenRequest, VaultStoreView,
 };
-use super::device_key::{AccountSigner, DeviceKeyStore};
+use super::device_key::{AccountSigner, DeviceKeyStore, recover_message};
 use super::entitlement::Entitlement;
+use super::trust::{self, Listed, MAX_KNOWN, MAX_REVOKED, Trust, point};
 use super::words::{
-    LinkCode, RecoveryCode, safety_words, valid_account_id, valid_device_id, valid_group_id,
+    LinkCode, RecoveryCode, link_fingerprint, safety_words, valid_account_id, valid_device_id,
+    valid_group_id,
 };
 use super::{ConnectError, PLATFORM};
 use crate::broker::approvals::{ConnectGroupChange, OwnerAction, OwnerProof};
@@ -56,15 +64,28 @@ use crate::vault::{Vault, VaultResult};
 pub const TOKEN_SECONDS: u64 = 900;
 /// A token is renewed when it has less than this left.
 const TOKEN_MARGIN: u64 = 60;
-/// The version of the account file.
-const STATE_VERSION: u8 = 1;
+/// The version of the account file: 2 adds the trust store. A file of version 1 is
+/// refused.
+const STATE_VERSION: u8 = 2;
 /// The longest account file that is read.
-const MAX_STATE_BYTES: u64 = 16 * 1024;
+const MAX_STATE_BYTES: u64 = 64 * 1024;
+/// A sign-in tries at most this many rounds, each with a fresh challenge.
+const SIGN_IN_ROUNDS: usize = 3;
+/// The waits before the second and the third round.
+const SIGN_IN_WAITS: [Duration; SIGN_IN_ROUNDS - 1] =
+    [Duration::from_secs(1), Duration::from_secs(3)];
 /// A person's name or a device name: 1 to 64 bytes (section 2).
 const MAX_NAME_BYTES: usize = 64;
 
 /// The time source: Unix seconds. Tests move it.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// The waits between sign-in rounds. Tests make them instant.
+pub type Sleeper = Arc<dyn Fn(Duration) + Send + Sync>;
+
+fn system_sleeper() -> Sleeper {
+    Arc::new(std::thread::sleep)
+}
 
 fn system_clock() -> Clock {
     Arc::new(|| {
@@ -88,11 +109,6 @@ fn clean_name(text: &str) -> Result<String, ConnectError> {
     Ok(name.to_owned())
 }
 
-/// A P-256 public key in X9.63 form from its b64u.
-fn point(b64u: &str) -> Option<Vec<u8>> {
-    decode_b64u(b64u).filter(|key| key.len() == 65 && key[0] == 0x04)
-}
-
 /// What the account file holds. No secret: see the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,9 +127,34 @@ pub struct AccountState {
     pub public_key: String,
     /// Unix seconds when this Mac became a device of the account.
     pub created_at: u64,
+    /// b64u of the account root that this Mac pinned: its own key after a creation or a
+    /// recovery, the root of the confirming device's chain after a join.
+    pub root: String,
+    /// b64u of the keys that this Mac knows as devices of the account (at most 64).
+    pub known: Vec<String>,
+    /// b64u of the keys that this Mac saw leave the account (at most 128): never a
+    /// device of the account again.
+    pub revoked: Vec<String>,
 }
 
 impl AccountState {
+    /// The trust store of a new account file: `root`, with this Mac's key and `others`
+    /// known.
+    fn new_trust(public_key: &str, root: &[u8], others: &[&[u8]]) -> (String, Vec<String>) {
+        let mut known = vec![public_key.to_owned()];
+        for key in others {
+            let text = encode_b64u(key);
+            if !known.contains(&text) {
+                known.push(text);
+            }
+        }
+        (encode_b64u(root), known)
+    }
+
+    fn keys(texts: &[String]) -> Vec<Vec<u8>> {
+        texts.iter().filter_map(|text| point(text)).collect()
+    }
+
     fn is_valid(&self) -> bool {
         self.v == STATE_VERSION
             && ConnectClient::new(&self.origin).is_ok_and(|client| client.origin() == self.origin)
@@ -125,6 +166,14 @@ impl AccountState {
                 .is_none_or(|name| clean_name(name).is_ok_and(|clean| clean == name))
             && clean_name(&self.device_name).is_ok_and(|clean| clean == self.device_name)
             && point(&self.public_key).is_some()
+            && point(&self.root).is_some()
+            && self.known.len() <= MAX_KNOWN
+            && self.revoked.len() <= MAX_REVOKED
+            && self
+                .known
+                .iter()
+                .chain(&self.revoked)
+                .all(|key| point(key).is_some())
     }
 
     /// The account file at `path`, or `None` when there is none. A file of a bad shape,
@@ -190,27 +239,17 @@ impl AccountState {
     }
 }
 
-/// The proof that this Mac is no longer a device of its account: it forgot the account
-/// ([`forget_this_device`], also after a revoke of this Mac or a deletion), or Connect
-/// answered a fresh sign-in with `401` ([`ConnectError::Revoked`]). Only it lets
-/// [`drop_account_rows`] remove every vault row of the account key: a missing or
-/// unreadable account file never does (B-L2).
+/// The proof that the owner forgot the account on this Mac ([`forget_this_device`]: after
+/// an explicit confirmation, a revoke of this Mac, or a deletion). Only it lets
+/// [`drop_account_rows`] remove every vault row of the account key: no answer of Connect,
+/// and no missing or unreadable account file, ever does (B-L2).
 #[derive(Debug)]
 pub struct Forgotten(());
 
-impl Forgotten {
-    /// The proof from a confirmed `401` of Connect: `Some` only for
-    /// [`ConnectError::Revoked`] (a second `401` after a fresh sign-in, or a refused
-    /// challenge).
-    pub fn revoked(error: &ConnectError) -> Option<Self> {
-        (*error == ConnectError::Revoked).then_some(Self(()))
-    }
-}
-
-/// Forget the account on this Mac: the account file and the account device key go.
-/// Connect is not asked (a revoked or deleted device cannot ask). The vault rows that
-/// signed with the key go with [`drop_account_rows`] and the returned proof, when each
-/// vault is open.
+/// Forget the account on this Mac: the account file and the account device key go. Call
+/// it only for an action of the owner on this device. Connect is not asked (a removed or
+/// deleted device cannot ask). The vault rows that signed with the key go with
+/// [`drop_account_rows`] and the returned proof, when each vault is open.
 pub fn forget_this_device(
     store: &dyn DeviceKeyStore,
     path: &Path,
@@ -286,7 +325,9 @@ fn valid_token(token: &str, account_id: &str) -> bool {
 
 /// The second half of a sign-in: check the challenge, sign, and take the token.
 /// `expected_device` is the device id that the token must name (`None` for the first
-/// sign-in of a join). Returns the token and the device id.
+/// sign-in of a join). Returns the token and the device id. A `401` stays
+/// [`ConnectError::Unauthenticated`]: only `403 device_removed` is
+/// [`ConnectError::Revoked`].
 fn finish_sign_in(
     client: &ConnectClient,
     signer: &AccountSigner,
@@ -304,16 +345,12 @@ fn finish_sign_in(
     let public_key = signer.public_key_b64u();
     let signature =
         encode_b64u(&signer.sign_sign_in(client.origin(), account_id, &challenge.nonce)?);
-    let answer = match client.token(&TokenRequest {
+    let answer = client.token(&TokenRequest {
         account_id,
         public_key: &public_key,
         nonce: &challenge.nonce,
         signature: &signature,
-    }) {
-        Ok(answer) => answer,
-        Err(ConnectError::Unauthenticated) => return Err(ConnectError::Revoked),
-        Err(error) => return Err(error),
-    };
+    })?;
     let value = Zeroizing::new(answer.token);
     if !valid_token(&value, account_id)
         || answer.account_id != account_id
@@ -401,6 +438,15 @@ impl PendingJoin {
     }
 }
 
+/// Whether a failed token call ends only this round of a sign-in: a nonce that Connect
+/// does not take any more (`401`), or a busy Connect (`503`).
+fn next_round(error: &ConnectError) -> bool {
+    matches!(
+        error,
+        ConnectError::Unauthenticated | ConnectError::Refused { status: 503, .. }
+    )
+}
+
 /// What a revoke did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeOutcome {
@@ -420,10 +466,12 @@ pub struct ConnectAccount {
     signer: Option<Arc<AccountSigner>>,
     token: Option<AccountToken>,
     entitlement: Option<Entitlement>,
-    /// Connect confirmed that this Mac is no longer a device of the account: every later
-    /// call is [`ConnectError::Revoked`], also without the key in memory.
+    /// Connect answered `403 device_removed` to a valid signature of this Mac: every
+    /// later call is [`ConnectError::Revoked`], also without the key in memory. The key
+    /// and the account file stay until the owner forgets the account here.
     revoked: bool,
     clock: Clock,
+    sleeper: Sleeper,
 }
 
 impl fmt::Debug for ConnectAccount {
@@ -460,6 +508,7 @@ impl ConnectAccount {
             entitlement: None,
             revoked: false,
             clock: system_clock(),
+            sleeper: system_sleeper(),
         }
     }
 
@@ -482,21 +531,23 @@ impl ConnectAccount {
         let device_name = clean_name(device_name)?;
         let signer = AccountSigner::open_or_create(store)?;
         let recovery = RecoveryCode::generate()?;
-        let recovery_hash = recovery.hash();
+        let recovery_key = recovery.key()?.public_key_b64u();
         let public_key = signer.public_key_b64u();
-        let signature = encode_b64u(&signer.sign_account(client.origin())?);
+        let signature = encode_b64u(&signer.sign_account(client.origin(), &recovery_key)?);
         let body = CreateAccount {
             name: &name,
             device_name: &device_name,
             platform: PLATFORM,
             public_key: &public_key,
-            recovery_hash: &recovery_hash,
+            recovery_key: &recovery_key,
             signature: &signature,
         };
         let created = twice(|| client.create_account(&body))?;
         if !valid_account_id(&created.account_id) || !valid_device_id(&created.device_id) {
             return Err(ConnectError::BadAnswer);
         }
+        // This Mac is the account root.
+        let (root, known) = AccountState::new_trust(&public_key, signer.public_key(), &[]);
         let state = AccountState {
             v: STATE_VERSION,
             origin: client.origin().to_owned(),
@@ -506,6 +557,9 @@ impl ConnectAccount {
             device_name,
             public_key,
             created_at: created.created_at,
+            root,
+            known,
+            revoked: Vec::new(),
         };
         state.save(path)?;
         Ok((Self::build(client, state, path, Arc::new(signer)), recovery))
@@ -527,9 +581,11 @@ impl ConnectAccount {
     }
 
     /// Recover an account that has no live device (section 9): this Mac becomes its first
-    /// device with its account key, every vault store of the account is deleted at
-    /// Connect, and a new recovery code replaces the old one. The new code comes back
-    /// once, with the number of deleted stores.
+    /// device (the new root) with its account key, every vault store of the account is
+    /// deleted at Connect, and a new recovery code replaces the old one. The old code
+    /// never leaves this Mac: its key signs the request. A lost answer is sent once more
+    /// with the same body. The new code comes back once, with the number of deleted
+    /// stores.
     pub fn recover(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -549,23 +605,27 @@ impl ConnectAccount {
         let device_name = clean_name(device_name)?;
         let signer = AccountSigner::open_or_create(store)?;
         let new = RecoveryCode::generate()?;
-        let new_hash = new.hash();
-        let old_wire = old.wire();
+        let recovery_key = new.key()?.public_key_b64u();
         let public_key = signer.public_key_b64u();
-        let signature = encode_b64u(&signer.sign_recover(client.origin(), account_id)?);
+        let message = recover_message(client.origin(), account_id, &public_key, &recovery_key);
+        let signature = encode_b64u(&signer.sign(&message)?);
+        let recovery_signature = encode_b64u(&old.key()?.sign_recover(&message)?);
+        drop(old);
         let body = RecoverBody {
             account_id,
-            recovery: &old_wire,
             device_name: &device_name,
             platform: PLATFORM,
             public_key: &public_key,
-            recovery_hash: &new_hash,
+            recovery_key: &recovery_key,
             signature: &signature,
+            recovery_signature: &recovery_signature,
         };
-        let answer = client.recover(&body)?;
+        let answer = twice(|| client.recover(&body))?;
         if answer.account_id != account_id || !valid_device_id(&answer.device_id) {
             return Err(ConnectError::BadAnswer);
         }
+        // This Mac is the new account root.
+        let (root, known) = AccountState::new_trust(&public_key, signer.public_key(), &[]);
         let mut account = Self::build(
             client,
             AccountState {
@@ -577,6 +637,9 @@ impl ConnectAccount {
                 device_name,
                 public_key,
                 created_at: 0,
+                root,
+                known,
+                revoked: Vec::new(),
             },
             path,
             Arc::new(signer),
@@ -590,6 +653,18 @@ impl ConnectAccount {
     /// Use `clock` for every time of this account (tests).
     pub fn set_clock(&mut self, clock: Clock) {
         self.clock = clock;
+    }
+
+    /// Use `sleeper` for the waits between sign-in rounds (tests).
+    pub fn set_sleeper(&mut self, sleeper: Sleeper) {
+        self.sleeper = sleeper;
+    }
+
+    /// Whether Connect said that this device was removed from its account
+    /// (`403 device_removed`). The account file and the key stay until the owner forgets
+    /// the account on this device.
+    pub fn is_removed(&self) -> bool {
+        self.revoked
     }
 
     fn now(&self) -> u64 {
@@ -618,8 +693,9 @@ impl ConnectAccount {
         self.signer.clone().ok_or(ConnectError::SignedOut)
     }
 
-    /// Drop everything from memory after Connect confirmed the revoke: [`Self::sign_out`],
-    /// and every later call is [`ConnectError::Revoked`].
+    /// Drop the token and the key from memory after Connect said `403 device_removed`:
+    /// [`Self::sign_out`], and every later call is [`ConnectError::Revoked`]. Nothing is
+    /// deleted.
     fn revoked(&mut self) -> ConnectError {
         self.sign_out();
         self.revoked = true;
@@ -660,36 +736,43 @@ impl ConnectAccount {
         self.signer = None;
     }
 
-    /// Sign in now: a challenge, the origin check, the signature, the token. A key that
-    /// Connect does not know any more is [`ConnectError::Revoked`] and drops the token.
+    /// Sign in now: a challenge, the origin check, the signature, the token, in up to
+    /// three rounds. A token call refused with `401` or `503` waits (1 s, then 3 s) and
+    /// starts the next round with a fresh challenge; after the last round the sign-in is
+    /// [`ConnectError::Unauthenticated`]. A challenge refused with `401` is
+    /// [`ConnectError::Unauthenticated`] at once. Neither is a removal: only
+    /// `403 device_removed` at the token call is [`ConnectError::Revoked`].
     pub fn sign_in(&mut self) -> Result<(), ConnectError> {
         self.token = None;
         let signer = self.signer()?;
         let public_key = signer.public_key_b64u();
-        let challenge = match self.client.challenge(&ChallengeRequest {
-            account_id: &self.state.account_id,
-            public_key: &public_key,
-        }) {
-            Ok(challenge) => challenge,
-            Err(ConnectError::Unauthenticated) => return Err(self.revoked()),
-            Err(error) => return Err(error),
-        };
-        let now = self.now();
-        match finish_sign_in(
-            &self.client,
-            &signer,
-            &self.state.account_id,
-            challenge,
-            Some(self.state.device_id.as_str()),
-            now,
-        ) {
-            Ok((token, _)) => {
-                self.token = Some(token);
-                Ok(())
+        for round in 0..SIGN_IN_ROUNDS {
+            if round > 0 {
+                (self.sleeper)(SIGN_IN_WAITS[round - 1]);
             }
-            Err(ConnectError::Revoked) => Err(self.revoked()),
-            Err(error) => Err(error),
+            let challenge = self.client.challenge(&ChallengeRequest {
+                account_id: &self.state.account_id,
+                public_key: &public_key,
+            })?;
+            let now = self.now();
+            match finish_sign_in(
+                &self.client,
+                &signer,
+                &self.state.account_id,
+                challenge,
+                Some(self.state.device_id.as_str()),
+                now,
+            ) {
+                Ok((token, _)) => {
+                    self.token = Some(token);
+                    return Ok(());
+                }
+                Err(ConnectError::Revoked) => return Err(self.revoked()),
+                Err(error) if next_round(&error) => {}
+                Err(error) => return Err(error),
+            }
         }
+        Err(ConnectError::Unauthenticated)
     }
 
     /// The token text, after a sign-in when the token is missing or nearly over.
@@ -705,7 +788,7 @@ impl ConnectAccount {
 
     /// Run `call` with the client of the account origin and the account token: the only
     /// way the token leaves this type. A `401` signs in again once and repeats the call;
-    /// a second `401` is [`ConnectError::Revoked`] and drops the token.
+    /// a second `401` is [`ConnectError::Unauthenticated`] and drops the token.
     pub fn with_token<T>(
         &mut self,
         mut call: impl FnMut(&ConnectClient, &str) -> Result<T, ConnectError>,
@@ -719,19 +802,70 @@ impl ConnectAccount {
         self.sign_in()?;
         let token = self.fresh_token()?;
         match call(&self.client, token.as_str()) {
-            Err(ConnectError::Unauthenticated) => Err(self.revoked()),
+            Err(ConnectError::Unauthenticated) => {
+                self.token = None;
+                Err(ConnectError::Unauthenticated)
+            }
             other => other,
         }
     }
 
+    /// The trust store of the account file.
+    fn trust_keys(&self) -> (Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        (
+            point(&self.state.root).unwrap_or_default(),
+            AccountState::keys(&self.state.known),
+            AccountState::keys(&self.state.revoked),
+        )
+    }
+
+    /// Mark each device of `devices` verified or not against the trust store, and learn
+    /// the verified keys. Writes the account file when the trust store changed.
+    fn verify(&mut self, devices: &mut [DeviceView]) -> Result<(), ConnectError> {
+        let (root, mut known, mut revoked) = self.trust_keys();
+        let list: Vec<Listed<'_>> = devices
+            .iter()
+            .map(|device| Listed {
+                public_key: &device.public_key,
+                chain: &device.chain,
+            })
+            .collect();
+        let verified = trust::verify_devices(
+            self.client.origin(),
+            &self.state.account_id,
+            &list,
+            Trust {
+                root: &root,
+                known: &known,
+                revoked: &revoked,
+            },
+        );
+        let mut keys = Vec::new();
+        for (device, verified) in devices.iter_mut().zip(verified) {
+            device.verified = verified;
+            if verified && let Some(key) = point(&device.public_key) {
+                keys.push(key);
+            }
+        }
+        if trust::learn(&mut known, &mut revoked, &self.own_public_key(), &keys) {
+            self.state.known = known.iter().map(|key| encode_b64u(key)).collect();
+            self.state.revoked = revoked.iter().map(|key| encode_b64u(key)).collect();
+            self.state.save(&self.path)?;
+        }
+        Ok(())
+    }
+
     /// `GET /v1/account`: the account, its plan, its devices, its group. The Mac polls
-    /// it every 3 s while the checkout sheet is open (M2). The name of the person goes
-    /// into the account file when this Mac did not know it; the email never does.
+    /// it every 3 s while the checkout sheet is open (M2). Every device is verified
+    /// against the trust store ([`DeviceView::verified`]), and the trust store learns the
+    /// verified keys. The name of the person goes into the account file when this Mac did
+    /// not know it; the email never does.
     pub fn view(&mut self) -> Result<AccountView, ConnectError> {
-        let view = self.with_token(|client, token| client.account(token))?;
+        let mut view = self.with_token(|client, token| client.account(token))?;
         if view.account_id != self.state.account_id {
             return Err(ConnectError::BadAnswer);
         }
+        self.verify(&mut view.devices)?;
         if self.state.name.is_none()
             && let Ok(name) = clean_name(&view.name)
         {
@@ -739,6 +873,19 @@ impl ConnectAccount {
             self.state.save(&self.path)?;
         }
         Ok(view)
+    }
+
+    /// The keys (X9.63) of the verified devices of the account, from a fresh
+    /// [`Self::view`]: the only keys whose heads a vault store of the account accepts
+    /// (`RelayTransport::with_signer_keys`).
+    pub fn verified_keys(&mut self) -> Result<Vec<Vec<u8>>, ConnectError> {
+        Ok(self
+            .view()?
+            .devices
+            .iter()
+            .filter(|device| device.verified)
+            .filter_map(|device| point(&device.public_key))
+            .collect())
     }
 
     /// The owner action of the deletion of this account.
@@ -774,10 +921,12 @@ impl ConnectAccount {
 
     // ---- Devices (section 7). ----
 
-    /// "Add a device…": a new link code in memory and its hash at Connect. The link works
-    /// once and for 10 minutes.
+    /// "Add a device…": a new link code in memory and its hash at Connect. The code names
+    /// the account root that this Mac pinned and this Mac's key, so the new device checks
+    /// the keys that Connect gives it. The link works once and for 10 minutes.
     pub fn start_link(&mut self) -> Result<DeviceLink, ConnectError> {
-        let code = LinkCode::generate(&self.state.account_id)?;
+        let (root, _, _) = self.trust_keys();
+        let code = LinkCode::generate(&self.state.account_id, &root, &self.own_public_key())?;
         let hash = code.link_hash();
         let answer = self.with_token(|client, token| client.link(token, &hash))?;
         Ok(DeviceLink {
@@ -820,10 +969,12 @@ impl ConnectAccount {
     }
 
     /// Confirm `join` of `link` after a fresh owner check for
-    /// [`PendingJoin::owner_action`] in the vault session `epoch`: Connect adds exactly
-    /// the key for which this Mac computed the words. The words are computed again from
-    /// the code and the key, so a changed entry is [`ConnectError::WordsMismatch`] and
-    /// nothing is sent. The proof is used up, also when the call fails.
+    /// [`PendingJoin::owner_action`] in the vault session `epoch`: this Mac signs the
+    /// device statement for exactly the key for which it computed the words, and Connect
+    /// adds that key. The words are computed again from the code and the key, so a
+    /// changed entry is [`ConnectError::WordsMismatch`] and nothing is sent. The answer's
+    /// chain must verify to the root of this Mac; its key is then known here. The proof
+    /// is used up, also when the call fails.
     pub fn confirm_join(
         &mut self,
         link: &DeviceLink,
@@ -846,10 +997,42 @@ impl ConnectAccount {
             .map_err(ConnectError::OwnerCheck)?;
         drop(proof);
         let public_key = encode_b64u(&join.public_key);
-        let device =
-            self.with_token(|client, token| client.confirm(token, join.join_id, &public_key))?;
-        if device.public_key != public_key || !valid_device_id(&device.device_id) {
+        let signer = self.signer()?;
+        let statement = encode_b64u(&signer.sign_device(
+            self.client.origin(),
+            &self.state.account_id,
+            &link.code.link_hash(),
+            &public_key,
+        )?);
+        drop(signer);
+        let mut device = self.with_token(|client, token| {
+            client.confirm(token, join.join_id, &public_key, &statement)
+        })?;
+        let (root, mut known, revoked) = self.trust_keys();
+        let own = encode_b64u(&self.own_public_key());
+        let by_this_mac = device
+            .chain
+            .first()
+            .is_some_and(|entry| entry.confirmer_key == own);
+        let chained = trust::chain_root(
+            self.client.origin(),
+            &self.state.account_id,
+            &device.public_key,
+            &device.chain,
+        )
+        .is_some_and(|found| found == root);
+        if device.public_key != public_key
+            || !valid_device_id(&device.device_id)
+            || !by_this_mac
+            || !chained
+        {
             return Err(ConnectError::BadAnswer);
+        }
+        device.verified = !revoked.contains(&join.public_key);
+        if device.verified && !known.contains(&join.public_key) && known.len() < MAX_KNOWN {
+            known.push(join.public_key.clone());
+            self.state.known = known.iter().map(|key| encode_b64u(key)).collect();
+            self.state.save(&self.path)?;
         }
         Ok(device)
     }
@@ -894,6 +1077,17 @@ impl ConnectAccount {
         let this_device = answer.device_id == self.state.device_id;
         if this_device {
             self.sign_out();
+        } else if let Some(key) = point(&device.public_key) {
+            // The key left the account: it is never a device of it again here.
+            let text = encode_b64u(&key);
+            self.state.known.retain(|known| *known != text);
+            if !self.state.revoked.contains(&text) {
+                self.state.revoked.push(text);
+                if self.state.revoked.len() > MAX_REVOKED {
+                    self.state.revoked.remove(0);
+                }
+            }
+            self.state.save(&self.path)?;
         }
         Ok(RevokeOutcome {
             answer,
@@ -973,11 +1167,14 @@ impl ConnectAccount {
         }
     }
 
-    /// `POST /v1/account/vaults/{team_id}/devices`: add another live device of the
-    /// account (or of the group) to a store this Mac is in, after a fresh owner check
-    /// for [`Self::add_store_device_action`] in the vault session `epoch`: the device can
-    /// then read and write the relay copy. The proof is used up, also when the call
-    /// fails. An answer for another device or account is [`ConnectError::BadAnswer`].
+    /// `POST /v1/account/vaults/{team_id}/devices`: add another device of the account to
+    /// a store this Mac is in, after a fresh owner check for
+    /// [`Self::add_store_device_action`] in the vault session `epoch`: the device can then
+    /// read and write the relay copy. This Mac views the account first and adds only a
+    /// device that it verified ([`DeviceView::verified`]), with the key that it verified;
+    /// any other device is [`ConnectError::NotVerified`] and nothing is sent. The proof is
+    /// used up, also when the call fails. An answer for another device or account is
+    /// [`ConnectError::BadAnswer`].
     pub fn add_store_device(
         &mut self,
         team_id: &str,
@@ -993,8 +1190,20 @@ impl ConnectAccount {
             )
             .map_err(ConnectError::OwnerCheck)?;
         drop(proof);
-        let added =
-            self.with_token(|client, token| client.add_store_device(token, team_id, device_id))?;
+        if account_id != self.state.account_id {
+            return Err(ConnectError::NotVerified);
+        }
+        let public_key = self
+            .view()?
+            .devices
+            .into_iter()
+            .find(|device| device.device_id == device_id)
+            .filter(|device| device.verified)
+            .map(|device| device.public_key)
+            .ok_or(ConnectError::NotVerified)?;
+        let added = self.with_token(|client, token| {
+            client.add_store_device(token, team_id, device_id, &public_key)
+        })?;
         if added.device_id != device_id || added.account_id != account_id {
             return Err(ConnectError::BadAnswer);
         }
@@ -1254,6 +1463,10 @@ pub struct JoinRequest {
     device_name: String,
     join_id: u64,
     confirmer_name: String,
+    /// The key of the confirming device and the account root of its chain, both named by
+    /// the fingerprint of the code.
+    confirmer_key: Vec<u8>,
+    root: Vec<u8>,
     words: String,
     expires_at: u64,
     clock: Clock,
@@ -1269,11 +1482,34 @@ impl fmt::Debug for JoinRequest {
     }
 }
 
+/// Cancel the join of `code` with the signed `apassy-connect join-cancel v1` body.
+fn cancel_join(
+    client: &ConnectClient,
+    signer: &AccountSigner,
+    code: &LinkCode,
+) -> Result<u64, ConnectError> {
+    let link_hash = code.link_hash();
+    let public_key = signer.public_key_b64u();
+    let signature =
+        encode_b64u(&signer.sign_join_cancel(client.origin(), code.account_id(), &link_hash)?);
+    let answer = client.cancel_join(&JoinCancel {
+        account_id: code.account_id(),
+        link_hash: &link_hash,
+        public_key: &public_key,
+        signature: &signature,
+    })?;
+    Ok(answer.join_id)
+}
+
 impl JoinRequest {
     /// Ask to join with the pasted or scanned `code`: the account device key of this Mac
     /// (made now if this Mac has none) signs the join, and the safety words come from the
     /// key of the confirming device. Show: `Waiting for <confirmer>… Both devices show:
     /// <words>.`
+    ///
+    /// The confirming device that Connect names must be the one of the code: its key and
+    /// the root of its chain give the fingerprint of the code. Any other device is
+    /// [`ConnectError::LinkMismatch`], and the join is cancelled.
     pub fn start(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -1320,6 +1556,18 @@ impl JoinRequest {
         if answer.account_id != account_id || !valid_device_id(&answer.confirmer.device_id) {
             return Err(ConnectError::BadAnswer);
         }
+        let root = trust::chain_root(
+            client.origin(),
+            &account_id,
+            &answer.confirmer.public_key,
+            &answer.confirmer.chain,
+        )
+        .filter(|root| link_fingerprint(root, &confirmer_key) == code.fingerprint());
+        let Some(root) = root else {
+            // Best effort: the link of the code is used up anyway.
+            let _ = cancel_join(&client, &signer, &code);
+            return Err(ConnectError::LinkMismatch);
+        };
         let words = safety_words(
             &account_id,
             code.expose(),
@@ -1335,6 +1583,8 @@ impl JoinRequest {
             join_id: answer.join_id,
             confirmer_name: clean_name(&answer.confirmer.name)
                 .unwrap_or_else(|_| "your other device".to_owned()),
+            confirmer_key,
+            root,
             words,
             expires_at: answer.expires_at,
             clock: system_clock(),
@@ -1370,7 +1620,8 @@ impl JoinRequest {
 
     /// Ask whether the other device confirmed: `403 join_pending` waits, `403
     /// join_refused` ends, a nonce means confirmed, and this Mac signs in and writes the
-    /// account file.
+    /// account file with the root of the code and the confirming device known. A token
+    /// call refused with `401` or `503` waits for the next poll.
     pub fn poll(&mut self) -> Result<JoinPoll, ConnectError> {
         let public_key = self.signer.public_key_b64u();
         let account_id = self.code.account_id().to_owned();
@@ -1384,14 +1635,20 @@ impl JoinRequest {
             Err(error) => return Err(error),
         };
         let now = (self.clock)();
-        let (token, device_id) = finish_sign_in(
+        let (token, device_id) = match finish_sign_in(
             &self.client,
             &self.signer,
             &account_id,
             challenge,
             None,
             now,
-        )?;
+        ) {
+            Ok(signed_in) => signed_in,
+            Err(error) if next_round(&error) => return Ok(JoinPoll::Waiting),
+            Err(error) => return Err(error),
+        };
+        let (root, known) =
+            AccountState::new_trust(&public_key, &self.root, &[&self.confirmer_key]);
         let state = AccountState {
             v: STATE_VERSION,
             origin: self.client.origin().to_owned(),
@@ -1401,6 +1658,9 @@ impl JoinRequest {
             device_name: self.device_name.clone(),
             public_key,
             created_at: now,
+            root,
+            known,
+            revoked: Vec::new(),
         };
         state.save(&self.path)?;
         let mut account = ConnectAccount::build(
@@ -1416,13 +1676,9 @@ impl JoinRequest {
         Ok(JoinPoll::Confirmed(Box::new(account)))
     }
 
-    /// Cancel before the confirmation.
+    /// Cancel before the confirmation, with the signature of this Mac's key.
     pub fn cancel(self) -> Result<(), ConnectError> {
-        let public_key = self.signer.public_key_b64u();
-        let answer =
-            self.client
-                .cancel_join(self.code.account_id(), &self.code.link_hash(), &public_key)?;
-        if answer.join_id != self.join_id {
+        if cancel_join(&self.client, &self.signer, &self.code)? != self.join_id {
             return Err(ConnectError::BadAnswer);
         }
         Ok(())
@@ -1433,16 +1689,58 @@ impl JoinRequest {
 mod tests {
     use super::*;
 
+    const KEY: &str =
+        "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA";
+
     fn state() -> AccountState {
         AccountState {
-            v: 1,
+            v: 2,
             origin: "https://connect.example.test".to_owned(),
             account_id: "acc_k7m2q4x3ca".to_owned(),
             device_id: "dev_m2k7q3x4ab".to_owned(),
             name: Some("Rafal".to_owned()),
             device_name: "MacBook Pro".to_owned(),
-            public_key: "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA".to_owned(),
+            public_key: KEY.to_owned(),
             created_at: 1_790_000_000,
+            root: KEY.to_owned(),
+            known: vec![KEY.to_owned()],
+            revoked: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_account_file_without_a_trust_store_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = account_file(dir.path());
+        state().save(&path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        // The earlier version: no root, no known, no revoked keys.
+        let object = value.as_object_mut().unwrap();
+        object.insert("v".to_owned(), serde_json::json!(1));
+        for field in ["root", "known", "revoked"] {
+            object.remove(field);
+        }
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(AccountState::load(&path).unwrap_err(), ConnectError::Local);
+        // A key of the trust store that is not a point of the curve is refused too.
+        let mut off = vec![4u8];
+        off.extend_from_slice(&[9; 64]);
+        for bad in [
+            AccountState {
+                root: encode_b64u(&off),
+                ..state()
+            },
+            AccountState {
+                known: vec![encode_b64u(&off)],
+                ..state()
+            },
+            AccountState {
+                revoked: vec![KEY.to_owned(); MAX_REVOKED + 1],
+                ..state()
+            },
+        ] {
+            assert_eq!(bad.save(&path).unwrap_err(), ConnectError::Invalid);
         }
     }
 

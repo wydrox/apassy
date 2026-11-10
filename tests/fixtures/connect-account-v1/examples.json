@@ -10,8 +10,8 @@
         "device_name": "MacBook Pro",
         "platform": "mac",
         "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
-        "recovery_hash": "480e5d5b48881b734d093b637f4d49183f0b1b050cc83b7bd656a871351e93a1",
-        "signature": "MEYCIQDLCqQAaXw6ELz0osjgUd6ep-PWtaTWQChc4LNjAdzqrwIhAM_yc2zz20100IW4BGjGWKmEXcSkGvhMUyJMFKuBRLnG"
+        "recovery_key": "P3VZgQkKwrU01IKiaSsnbCkDDAnFmM4Quzo8s1pM_w0",
+        "signature": "MEQCIAYAZa1iXdLffMIosDVrC-CW2Hb5HTvpsOvNEnDcPdnDAiACYvCjxAmi5ZwQZEo8Ot5Om3-pcxXatoZKc6UTRrDHZw"
       }
     },
     {
@@ -51,7 +51,7 @@
         "account_id": "acc_k7m2q4x3ca",
         "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
         "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-        "signature": "MEUCIDHdgGPhR4AKRBXenUGCgo6g1S9nD4CAgFdrbQl64ZcfAiEAk7EVrrC_JG4A8GL4Ts9vxlqu_WVbbcJ5Cy06EYPVl9M"
+        "signature": "MEYCIQDJs8U_ma0RlWJd6DqItHfw9lfxZoF5eXiNLbXmtzRKsgIhAPSnHvueBxP0grlP845ONQymwhQCzFA9UusBuVvNGTgU"
       }
     },
     {
@@ -94,7 +94,8 @@
             "platform": "mac",
             "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
             "created_at": 1790000000,
-            "last_seen_at": 1790002800
+            "last_seen_at": 1790002800,
+            "chain": []
           },
           {
             "device_id": "dev_p4n6r2t7bc",
@@ -102,7 +103,14 @@
             "platform": "iphone",
             "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
             "created_at": 1790000200,
-            "last_seen_at": null
+            "last_seen_at": null,
+            "chain": [
+              {
+                "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
+                "confirmer_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+                "statement": "MEUCIHkGrw3d46MSPTzRiZdtZuxHc96FukSS9-Npj7XoflfTAiEAt4_5fO-4p59iiw4Y63kK3RHMQLrluEPK1k7020fQiDQ"
+              }
+            ]
           }
         ],
         "group": null
@@ -160,7 +168,7 @@
       "route": "POST /v1/account/devices/link",
       "part": "request",
       "body": {
-        "link_hash": "K6tgKp_oqj7XbiWqWmDhJq-DIThtvhqbEWY8teg5JbY"
+        "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To"
       }
     },
     {
@@ -178,11 +186,11 @@
       "part": "request",
       "body": {
         "account_id": "acc_k7m2q4x3ca",
-        "link_hash": "K6tgKp_oqj7XbiWqWmDhJq-DIThtvhqbEWY8teg5JbY",
+        "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
         "device_name": "iPhone",
         "platform": "iphone",
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
-        "signature": "MEYCIQCo0191DUmH6H6NGblv-i2IdCeYf3xb8sLUxGeaNVVTUQIhANkozKZhV8QLRitHg-IPmsZJhq7cDrKmeyzqif2IgK_H"
+        "signature": "MEQCIA12emKdHUUZL7TyBoVOlND8W9JoEKV053DbZlrTYWZjAiBgI1PAerUFmK_4JEnJup_0XSmAls58Fh7iNKRk5Pp0Ew"
       }
     },
     {
@@ -195,7 +203,8 @@
         "confirmer": {
           "device_id": "dev_m2k7q3x4ab",
           "name": "MacBook Pro",
-          "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA"
+          "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+          "chain": []
         },
         "expires_at": 1790000600
       }
@@ -206,8 +215,9 @@
       "part": "request",
       "body": {
         "account_id": "acc_k7m2q4x3ca",
-        "link_hash": "K6tgKp_oqj7XbiWqWmDhJq-DIThtvhqbEWY8teg5JbY",
-        "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U"
+        "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
+        "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+        "signature": "MEUCIQCNOAuES0hlGDyCqkKDOHZ3JR70Bni8puM3sdrmOv-JNAIgbS0qivzl9tCVyJOWatnonj1JT8dncSpc-9sbgH6xEZo"
       }
     },
     {
@@ -239,7 +249,8 @@
       "route": "POST /v1/account/devices/pending/{join_id}/confirm",
       "part": "request",
       "body": {
-        "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U"
+        "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+        "statement": "MEUCIHkGrw3d46MSPTzRiZdtZuxHc96FukSS9-Npj7XoflfTAiEAt4_5fO-4p59iiw4Y63kK3RHMQLrluEPK1k7020fQiDQ"
       }
     },
     {
@@ -252,7 +263,14 @@
         "platform": "iphone",
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
         "created_at": 1790000200,
-        "last_seen_at": null
+        "last_seen_at": null,
+        "chain": [
+          {
+            "link_hash": "P6yDGvx5eZkwzldGxhuX1gKcaigN7dFHw2-q26Eb9To",
+            "confirmer_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+            "statement": "MEUCIHkGrw3d46MSPTzRiZdtZuxHc96FukSS9-Npj7XoflfTAiEAt4_5fO-4p59iiw4Y63kK3RHMQLrluEPK1k7020fQiDQ"
+          }
+        ]
       }
     },
     {
@@ -337,7 +355,8 @@
       "route": "POST /v1/account/vaults/{team_id}/devices",
       "part": "request",
       "body": {
-        "device_id": "dev_p4n6r2t7bc"
+        "device_id": "dev_p4n6r2t7bc",
+        "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U"
       }
     },
     {
@@ -364,12 +383,12 @@
       "part": "request",
       "body": {
         "account_id": "acc_k7m2q4x3ca",
-        "recovery": "apassy_rec_101112131415161718191a1b1c1d1e1f",
         "device_name": "MacBook Air",
         "platform": "mac",
         "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
-        "recovery_hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
-        "signature": "MEQCIAP_PjwLasP5lX3a-GoqJmIaRlnfof23sd2YPICtdpg7AiAQqrZwojrdi2imx533HM_W65GdPGKM29x0Vp4ViJa5YA"
+        "recovery_key": "Rm63i8k0aVY1Ue7s6R-B6veiHsYyxRzhNiJ_0vk8tO0",
+        "signature": "MEUCIQDKNnhDum6vDg12VsLDRtXZUFOgrfL94gvsIPRNP6GruAIgYvNHa-LTV1ZRoIsYELRHuE7PTCa06CSEWbz3c2xGNog",
+        "recovery_signature": "9wL6-LQByIGG-1Asx18qK5yt1z9se3lc8ovubXsEclOm91FEwUhPQ7aR2ZeOdgqoqRjtLUr5DyRk7gNEFuTTAQ"
       }
     },
     {
@@ -502,6 +521,16 @@
       "body": {
         "code": "join_pending",
         "message": "The other device has not confirmed yet."
+      }
+    },
+    {
+      "name": "error_device_removed",
+      "route": "POST /v1/account/token",
+      "part": "error",
+      "status": 403,
+      "body": {
+        "code": "device_removed",
+        "message": "This device was removed from its Apassy Connect account."
       }
     },
     {

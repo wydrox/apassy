@@ -111,12 +111,40 @@ public struct ConnectPlan: Codable, Sendable, Equatable {
     }
 }
 
+/// A device of the Connect account, as `connect_status` lists it.
+public struct ConnectDevice: Codable, Sendable, Equatable {
+    public var deviceID: String
+    public var name: String
+    /// `mac`, `iphone`, or `linux`.
+    public var platform: String
+    /// True for this iPhone.
+    public var isThisDevice: Bool
+    /// True when the core verified the chain of statements of this device. When false, the app
+    /// shows "Not verified".
+    public var verified: Bool
+
+    public init(deviceID: String, name: String, platform: String, isThisDevice: Bool, verified: Bool) {
+        self.deviceID = deviceID
+        self.name = name
+        self.platform = platform
+        self.isThisDevice = isThisDevice
+        self.verified = verified
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, platform, verified
+        case deviceID = "device_id"
+        case isThisDevice = "this"
+    }
+}
+
 /// `connect_status`: whether this iPhone is a device of a Connect account, and its plan.
 public struct ConnectStatus: Codable, Sendable, Equatable {
     public enum State: String, Codable, Sendable { case none, account }
 
     public var state: State
-    /// True once, when the core found that a Mac removed this iPhone from its account.
+    /// True when Connect says a Mac removed this iPhone from its account, or the key of this iPhone
+    /// is gone. With state `account`, the key and the account file stay until `connectForget`.
     public var removed: Bool
     public var accountID: String?
     public var deviceName: String?
@@ -128,10 +156,16 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     public var dialRoute: Bool
     /// A join that waits for the Mac.
     public var join: ConnectJoin?
+    /// The devices of the account, each with `verified`; empty when Connect did not answer.
+    public var devices: [ConnectDevice]
+
+    /// The devices of the account that this iPhone could not verify.
+    public var unverifiedDevices: [ConnectDevice] { devices.filter { !$0.verified } }
 
     public init(
         state: State, removed: Bool = false, accountID: String? = nil, deviceName: String? = nil,
-        plan: ConnectPlan? = nil, stale: Bool = false, dialRoute: Bool = false, join: ConnectJoin? = nil
+        plan: ConnectPlan? = nil, stale: Bool = false, dialRoute: Bool = false, join: ConnectJoin? = nil,
+        devices: [ConnectDevice] = []
     ) {
         self.state = state
         self.removed = removed
@@ -141,6 +175,7 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         self.stale = stale
         self.dialRoute = dialRoute
         self.join = join
+        self.devices = devices
     }
 
     public init(from decoder: any Decoder) throws {
@@ -153,10 +188,11 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         stale = try container.decodeIfPresent(Bool.self, forKey: .stale) ?? false
         dialRoute = try container.decodeIfPresent(Bool.self, forKey: .dialRoute) ?? false
         join = try container.decodeIfPresent(ConnectJoin.self, forKey: .join)
+        devices = try container.decodeIfPresent([ConnectDevice].self, forKey: .devices) ?? []
     }
 
     enum CodingKeys: String, CodingKey {
-        case state, removed, plan, stale, join
+        case state, removed, plan, stale, join, devices
         case accountID = "account_id"
         case deviceName = "device_name"
         case dialRoute = "dial_route"
@@ -164,7 +200,8 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
 }
 
 /// Whether `text` is the code of "Add a device…" of Apassy Connect on the Mac:
-/// `apassy_alk_<account id>_<64 hex>` (connect-account-v1 section 2). Returns the trimmed code, or
+/// `apassy_alk_<account id>_<64 hex>_<32 hex>`: the account id, the secret, and the fingerprint of the
+/// keys (connect-account-v1 section 2), 123 characters in all. Returns the trimmed code, or
 /// nil. The core checks it again.
 public func connectLinkCode(_ text: String) -> String? {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -176,7 +213,11 @@ public func connectLinkCode(_ text: String) -> String? {
     guard account.count == 14, account.hasPrefix("acc_"), account.dropFirst(4).allSatisfy(base32.contains),
         rest.dropFirst(14).first == "_"
     else { return nil }
-    let secret = rest.dropFirst(15)
-    guard secret.count == 64, secret.allSatisfy(hex.contains) else { return nil }
+    let tail = rest.dropFirst(15)
+    guard tail.count == 64 + 1 + 32 else { return nil }
+    let secret = tail.prefix(64)
+    let fingerprint = tail.dropFirst(65)
+    guard secret.allSatisfy(hex.contains), tail.dropFirst(64).first == "_", fingerprint.allSatisfy(hex.contains)
+    else { return nil }
     return trimmed
 }

@@ -3,10 +3,12 @@
 //!
 //! - [`device_key`]: the account device key. One non-exportable-by-Apassy P-256 key for
 //!   each device, kept in the Keychain outside every vault through the signed helper
-//!   (this device only, not synchronizable, behind Touch ID). It signs only the seven
+//!   (this device only, not synchronizable, behind Touch ID). It signs only the nine
 //!   messages of section 5 ([`SIGNING_TAGS`]) and refuses any other.
-//! - [`words`]: the ids, the link code and its hash, the six safety words, and the
-//!   recovery code.
+//! - [`words`]: the ids, the link code with its key fingerprint and its hash, the six
+//!   safety words, and the recovery code with its Ed25519 key.
+//! - [`trust`]: the chains of device statements and their check against the trust store
+//!   of this device: an account device is one that this device verified.
 //! - [`client`]: one call for each route of the contract, over the relay HTTP client of
 //!   the app (`https://` anywhere, `http://` on loopback only).
 //! - [`account`]: the account of this Mac. Creation with the device key and a recovery
@@ -14,8 +16,8 @@
 //!   and goes only to the Connect origin); "Add a device…" with the safety words and a
 //!   fresh owner check on this Mac; the join of this Mac to an account; revoke, recovery,
 //!   deletion; the entitlement token kept in memory. The account file
-//!   (`connect/account.json` in the data directory) holds ids, names, the origin, and the
-//!   public key: no private key, no token, no email, no code.
+//!   (`connect/account.json` in the data directory) holds ids, names, the origin, the
+//!   public key, and the trust store: no private key, no token, no email, no code.
 //! - [`entitlement`]: the check of an entitlement token (section 10).
 //!
 //! **No account sign-in adds a device** (section 1): a new device joins only through
@@ -26,14 +28,15 @@ pub mod account;
 pub mod client;
 pub mod device_key;
 pub mod entitlement;
+pub mod trust;
 pub mod words;
 
 use std::fmt;
 
 pub use account::{
     AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest, PendingJoin,
-    RevokeOutcome, account_file, drop_account_rows, drop_stale_account_rows, forget_this_device,
-    group_invite_code,
+    RevokeOutcome, Sleeper, account_file, drop_account_rows, drop_stale_account_rows,
+    forget_this_device, group_invite_code,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
@@ -46,7 +49,11 @@ pub use device_key::{
     SIGNING_TAGS,
 };
 pub use entitlement::{Entitlement, EntitlementClaims, EntitlementError, EntitlementKey, Feature};
-pub use words::{LinkCode, RecoveryCode, link_hash, safety_words, same_safety_words};
+pub use trust::ChainEntry;
+pub use words::{
+    LinkCode, RecoveryCode, RecoveryKey, link_fingerprint, link_hash, safety_words,
+    same_safety_words,
+};
 
 use crate::broker::approvals::ProofRefusal;
 
@@ -69,7 +76,7 @@ pub const PLATFORM: &str = if cfg!(target_os = "ios") {
 pub const PLATFORMS: [&str; 3] = ["mac", "iphone", "linux"];
 
 /// Sign `message` with the account device key, only when it begins with one of the
-/// seven tags of section 5 (plan 0035 I-1: the allow-list contains
+/// nine tags of section 5 (plan 0035 I-1: the allow-list contains
 /// `apassy-bouncer sign-in v1`). The same as [`AccountSigner::sign`].
 pub fn sign(signer: &AccountSigner, message: &[u8]) -> Result<Vec<u8>, ConnectError> {
     signer.sign(message)
@@ -82,10 +89,11 @@ pub enum ConnectError {
     Offline,
     /// The connection broke after the request started: the step may have happened.
     Broken,
-    /// `401`: the key, the nonce, or the token is not valid at Connect.
+    /// `401`: the key, the nonce, or the token is not valid at Connect. Never a removal.
     Unauthenticated,
-    /// This Mac is no longer a device of its account: it was revoked, or the account was
-    /// deleted. Forget it ([`forget_this_device`]) and add it again from another device.
+    /// `403 device_removed`: Connect says that this device was removed from its account
+    /// (revoked, or the account was deleted). Nothing is deleted on this device; the owner
+    /// may forget the account here ([`forget_this_device`]) and add the device again.
     Revoked,
     /// `403 join_pending`: the other device has not confirmed yet.
     JoinPending,
@@ -133,6 +141,12 @@ pub enum ConnectError {
     OwnerCheck(ProofRefusal),
     /// The safety words of a join are not those of its link and keys.
     WordsMismatch,
+    /// The device that Connect names for a link code is not the one of the code: its key
+    /// or the root of its chain does not give the fingerprint of the code.
+    LinkMismatch,
+    /// This device did not verify that device as a device of the account (its chain of
+    /// statements does not reach the account root, or its key left the account).
+    NotVerified,
     /// This Mac already has a Connect account.
     AccountExists,
     /// This Mac has no Connect account.
@@ -154,7 +168,7 @@ impl fmt::Display for ConnectError {
             }
             Self::Unauthenticated => "Apassy Connect did not accept this Mac's sign-in.",
             Self::Revoked => {
-                "This Mac is no longer a device of its Apassy Connect account. Forget the account on this Mac, then add it again from another device."
+                "Apassy Connect says this device was removed from its account. To use the account here again, forget it on this device, then add the device from another device of the account."
             }
             Self::JoinPending => "The other device has not confirmed yet.",
             Self::JoinRefused => {
@@ -198,6 +212,12 @@ impl fmt::Display for ConnectError {
             Self::Cancelled => "Touch ID was cancelled. Nothing changed.",
             Self::OwnerCheck(refusal) => refusal.message(),
             Self::WordsMismatch => "The safety words do not match. Nothing was confirmed.",
+            Self::LinkMismatch => {
+                "This code does not match the device that Apassy Connect named for it. Nothing was joined. Make a new code on the other device."
+            }
+            Self::NotVerified => {
+                "Apassy could not verify that device as a device of your account. Nothing was changed."
+            }
             Self::AccountExists => "This Mac already has an Apassy Connect account.",
             Self::NoAccount => "This Mac has no Apassy Connect account.",
             Self::Invalid => "That value is not valid.",

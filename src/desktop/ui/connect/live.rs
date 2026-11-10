@@ -11,6 +11,10 @@
 //! - A step that needs the owner check asks for it with an [`OwnerRequest`]; the owner
 //!   flows keep the proof until [`OwnerFlows::take_connect_proof`] takes it here, once,
 //!   and the account checks it again against the exact action before it calls Connect.
+//! - When Connect says this Mac was removed (`403 device_removed`), or the key of this
+//!   Mac cannot be read any more, the section shows it and deletes nothing: only "Forget
+//!   This Mac…" and its confirmation delete the key, the account file, and the account
+//!   rows of the open vault.
 //!
 //! [`OwnerFlows::take_connect_proof`]: crate::desktop::owner_check::OwnerFlows::take_connect_proof
 
@@ -24,7 +28,7 @@ use zeroize::Zeroizing;
 
 use super::{
     Account, Action, ConnectView, DELETED, Device, Group, JOIN_POLL_EVERY, Member, Offer,
-    POLL_EVERY, Plan, Plans, Price, Sheet, SheetChoice, Shown, WAIT_AT_MOST,
+    POLL_EVERY, Plan, Plans, Price, REMOVED_NOTE, Sheet, SheetChoice, Shown, WAIT_AT_MOST,
 };
 use crate::broker::approvals::{ConnectGroupChange, OwnerProof};
 use crate::connect::{
@@ -89,8 +93,11 @@ enum Outcome {
     /// A poll of this Mac's join: `None` waits, `Some(state)` is confirmed.
     JoinPolled(Result<Option<AccountState>, ConnectError>),
     JoinCancelled,
-    /// Connect said this Mac is no longer a device of its account: it was forgotten here.
-    Gone(Option<Forgotten>, String),
+    /// Connect said this Mac was removed from its account, or its key cannot be read: the
+    /// note of the removed state. Nothing was deleted.
+    Removed(String),
+    /// "Forget This Mac…" after a removal, confirmed by the owner.
+    Forgot(Result<Forgotten, ConnectError>),
 }
 
 /// The checkout that the waiting sheet follows.
@@ -121,6 +128,9 @@ pub(crate) struct Live {
     pending_at: Option<Instant>,
     join: Slot<JoinRequest>,
     join_at: Option<Instant>,
+    /// The note of the removed state: Connect said this Mac was removed, or its key is
+    /// gone. The account file and the key stay until "Forget This Mac…".
+    removed: Option<String>,
     /// Tests: the key store, the data directory, and the Connect origin. Without a data
     /// directory a test never reads the real account file.
     pub(crate) store: Option<Arc<dyn DeviceKeyStore>>,
@@ -173,6 +183,7 @@ impl Live {
         self.link = slot();
         self.pending.clear();
         self.join = slot();
+        self.removed = None;
     }
 
     /// The poll intervals.
@@ -280,6 +291,7 @@ fn account_of(snapshot: &Snapshot, this_device: &str) -> Account {
             created_at: device.created_at,
             last_seen_at: device.last_seen_at,
             this: device.device_id == this_device,
+            verified: device.verified,
         })
         .collect();
     devices.sort_by_key(|device| !device.this);
@@ -339,6 +351,11 @@ pub(crate) fn view(app: &DesktopApp) -> ConnectView {
     let live = &app.ui.connect.live;
     let file = live.file();
     let shown = match (&live.snapshot, file) {
+        (_, Some(state)) if live.removed.is_some() => Shown::Removed {
+            name: state.name.clone(),
+            device_name: state.device_name.clone(),
+            note: live.removed.clone().unwrap_or_default(),
+        },
         (Some(snapshot), Some(state)) if live.open => {
             Shown::Account(account_of(snapshot, &state.device_id))
         }
@@ -466,8 +483,6 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
         return;
     }
     let want_plans = live.plans.is_none();
-    let store = store(app);
-    let path = app.ui.connect.live.path();
     app.ui.connect.live.with_account(ctx, move |account| {
         let snapshot = account.view().and_then(|view| {
             let group = if view.group.is_some() {
@@ -482,23 +497,19 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
                 let plans = want_plans.then(|| account.client().plans().ok()).flatten();
                 Outcome::Refreshed(Ok((snapshot, plans)))
             }
-            Err(error @ ConnectError::Revoked) => gone(store.as_deref(), path, &error),
             Err(error) => Outcome::Refreshed(Err(error)),
         }
     });
 }
 
-/// This Mac is no longer a device of its account: forget it here.
-fn gone(
-    store: Option<&dyn DeviceKeyStore>,
-    path: Option<PathBuf>,
-    error: &ConnectError,
-) -> Outcome {
-    let forgotten = match (store, path) {
-        (Some(store), Some(path)) => forget_this_device(store, &path).ok(),
+/// The note of the removed state for `error`, when it is one: Connect said this Mac was
+/// removed, or the key of this Mac cannot be read any more.
+fn removed_note(error: &ConnectError) -> Option<String> {
+    match error {
+        ConnectError::Revoked => Some(REMOVED_NOTE.to_owned()),
+        ConnectError::KeyLost => Some(message(error)),
         _ => None,
-    };
-    Outcome::Gone(forgotten, message(error))
+    }
 }
 
 /// Drop the account rows of the open vault after this Mac was forgotten.
@@ -671,14 +682,19 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         Outcome::JoinCancelled => {
             live.join = slot();
         }
-        Outcome::Gone(forgotten, text) => {
-            if let Some(forgotten) = forgotten {
-                drop_rows(app, &forgotten);
-            }
+        Outcome::Removed(note) => {
+            live.removed = Some(note);
+            live.snapshot = None;
+            live.waiting = None;
+            app.ui.connect.sheet = None;
+        }
+        Outcome::Forgot(Ok(forgotten)) => {
+            drop_rows(app, &forgotten);
             app.ui.connect.live.reset();
             app.ui.connect.sheet = None;
-            app.ui.connect.live.error = Some(text);
+            app.set_ok("This Mac forgot the Connect account.");
         }
+        Outcome::Forgot(Err(error)) => live.error = Some(message(&error)),
         Outcome::Polled(Err(error)) => {
             // A failed poll waits for the next one; it is not the owner's problem yet.
             if let Some(waiting) = &mut live.waiting {
@@ -701,12 +717,10 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
         | Outcome::JoinedGroup(Err(error))
         | Outcome::GroupChanged(Err(error))
         | Outcome::JoinStarted(Err(error)) => {
-            if error == ConnectError::Revoked {
-                let store = store(app);
-                let path = app.ui.connect.live.path();
-                if let Outcome::Gone(forgotten, text) = gone(store.as_deref(), path, &error) {
-                    apply(app, ctx, Outcome::Gone(forgotten, text));
-                }
+            if let Some(note) = removed_note(&error)
+                && live.file().is_some()
+            {
+                apply(app, ctx, Outcome::Removed(note));
                 return;
             }
             live.error = Some(message(&error));
@@ -1052,6 +1066,10 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
             });
         }
         Action::Delete => app.ui.connect.sheet = Some(Sheet::Delete),
+        Action::ForgetRemoved => {
+            app.ui.connect.live.error = None;
+            app.ui.connect.sheet = Some(Sheet::ForgetRemoved);
+        }
     }
 }
 
@@ -1402,6 +1420,23 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
                 },
                 Some(ctx),
             );
+        }
+        (Sheet::ForgetRemoved, SheetChoice::Go) => {
+            // Only the owner's confirmation deletes the key and the account file here.
+            let (Some(store), Some(path)) = (store(app), app.ui.connect.live.path()) else {
+                app.ui.connect.live.error = Some(message(&ConnectError::KeychainUnavailable));
+                return;
+            };
+            let account = Arc::clone(&app.ui.connect.live.account);
+            app.ui.connect.live.spawn(ctx, move || {
+                drop(
+                    account
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take(),
+                );
+                Outcome::Forgot(forget_this_device(store.as_ref(), &path))
+            });
         }
         (Sheet::DeviceAdded { .. } | Sheet::Joined | Sheet::JoinSent { .. }, _) => {
             refresh(app, ctx);

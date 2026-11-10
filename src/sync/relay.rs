@@ -312,6 +312,24 @@ pub(crate) fn call<T: DeserializeOwned>(
     url: &RelayUrl,
     request: &Request<'_>,
 ) -> Result<T, ApiError> {
+    call_with_busy_retries(url, request, BUSY_RETRIES)
+}
+
+/// One call that never sends the same body again after `503 busy`: the caller decides
+/// what comes next (a Connect sign-in takes a fresh challenge). A `429` is handled as in
+/// [`call`].
+pub(crate) fn call_without_busy_retries<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+) -> Result<T, ApiError> {
+    call_with_busy_retries(url, request, 0)
+}
+
+fn call_with_busy_retries<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+    busy_retries: usize,
+) -> Result<T, ApiError> {
     let mut attempt = 0;
     loop {
         if let Some(left) = rate_limited(url) {
@@ -324,7 +342,7 @@ pub(crate) fn call<T: DeserializeOwned>(
             retry_after,
             ..
         }) = &result
-            && attempt < BUSY_RETRIES
+            && attempt < busy_retries
         {
             let wait = Duration::from_secs(retry_after.unwrap_or(2)).min(MAX_BUSY_WAIT);
             if !pause(request, wait) {
@@ -794,8 +812,9 @@ struct Signer {
 
 /// Whether one of `signers` signed `head` (contract section 13, check 3): a live device
 /// of the team for any version, a removed device only for a version up to the last one
-/// it pushed while it was a member.
-fn signed_by_member(head: &SignedHead, signers: &[Signer]) -> bool {
+/// it pushed while it was a member. With `allowed` (a vault store of a Connect account:
+/// the keys of its verified devices) the signer's key must also be one of them.
+fn signed_by_member(head: &SignedHead, signers: &[Signer], allowed: Option<&[Vec<u8>]>) -> bool {
     signers
         .iter()
         .find(|signer| signer.device_id == head.fields.device_id)
@@ -807,6 +826,7 @@ fn signed_by_member(head: &SignedHead, signers: &[Signer]) -> bool {
             in_time
                 && decode_b64u(&signer.public_key)
                     .filter(|key| key.len() == 65 && key[0] == 0x04)
+                    .filter(|key| allowed.is_none_or(|allowed| allowed.contains(key)))
                     .is_some_and(|key| head.verify(&key))
         })
 }
@@ -874,6 +894,8 @@ pub struct RelayTransport {
     anchor: Arc<Mutex<Anchor>>,
     /// Every relay call of this transport ends by then (the step before a lock).
     deadline: Option<Instant>,
+    /// The keys that may sign a head of this copy, when set ([`Self::with_signer_keys`]).
+    signer_keys: Option<Arc<[Vec<u8>]>>,
 }
 
 impl RelayTransport {
@@ -894,7 +916,22 @@ impl RelayTransport {
                 current: None,
             })),
             deadline: None,
+            signer_keys: None,
         }
+    }
+
+    /// Accept a head, and each head of its chain, only when the key of its signer is one
+    /// of `keys` (X9.63): for a vault store of a Connect account, the keys of the
+    /// verified devices of the account (`ConnectAccount::verified_keys`). A device that
+    /// Connect lists but this Mac did not verify signs nothing that this Mac merges.
+    pub fn with_signer_keys(mut self, keys: Vec<Vec<u8>>) -> Self {
+        self.signer_keys = Some(keys.into());
+        self
+    }
+
+    /// Whether a device of `signers` that this transport accepts signed `head`.
+    fn signed_by_accepted(&self, head: &SignedHead, signers: &[Signer]) -> bool {
+        signed_by_member(head, signers, self.signer_keys.as_deref())
     }
 
     /// End every relay call of this transport by `deadline`.
@@ -961,7 +998,7 @@ impl RelayTransport {
         {
             return Err(SyncError::OtherVault);
         }
-        if signed_by_member(head, signers) {
+        if self.signed_by_accepted(head, signers) {
             Ok(())
         } else {
             Err(SyncError::Damaged)
@@ -1042,7 +1079,7 @@ impl SyncTransport for RelayTransport {
                         .is_none_or(|vault_id| &entry.fields.vault_id == vault_id);
                     Ok(entry.fields.team_id == self.session.team_id
                         && same_vault
-                        && signed_by_member(entry, &view.signers))
+                        && self.signed_by_accepted(entry, &view.signers))
                 })?;
             if last == version {
                 return match entries.last() {
@@ -3061,23 +3098,72 @@ mod tests {
             removed,
             last_version,
         };
-        assert!(signed_by_member(&two, &[signer(false, None)]));
-        assert!(signed_by_member(&two, &[signer(true, Some(2))]));
-        assert!(signed_by_member(&two, &[signer(true, Some(7))]));
-        assert!(!signed_by_member(&two, &[signer(true, Some(1))]));
-        assert!(!signed_by_member(&two, &[signer(true, None)]));
-        assert!(!signed_by_member(&two, &[]));
+        assert!(signed_by_member(&two, &[signer(false, None)], None));
+        assert!(signed_by_member(&two, &[signer(true, Some(2))], None));
+        assert!(signed_by_member(&two, &[signer(true, Some(7))], None));
+        assert!(!signed_by_member(&two, &[signer(true, Some(1))], None));
+        assert!(!signed_by_member(&two, &[signer(true, None)], None));
+        assert!(!signed_by_member(&two, &[], None));
         let stranger = DeviceKey::generate().unwrap();
         let other = Signer {
             public_key: stranger.public_key_b64u(),
             ..signer(false, None)
         };
-        assert!(!signed_by_member(&two, &[other]));
+        assert!(!signed_by_member(&two, &[other], None));
         let elsewhere = Signer {
             device_id: 3,
             ..signer(false, None)
         };
-        assert!(!signed_by_member(&two, &[elsewhere]));
+        assert!(!signed_by_member(&two, &[elsewhere], None));
+    }
+
+    /// A vault store of a Connect account accepts a head only from the keys of the
+    /// verified devices of the account, also when the relay lists another signer.
+    #[test]
+    fn an_account_store_accepts_heads_only_from_the_verified_keys() {
+        let two = SignedHead::from_wire(HEAD_2, SIGNATURE_2).unwrap();
+        let public = decode_b64u(PUBLIC).unwrap();
+        let signers = [Signer {
+            device_id: 2,
+            public_key: PUBLIC.to_owned(),
+            removed: false,
+            last_version: None,
+        }];
+        let transport = |keys: Option<Vec<Vec<u8>>>| {
+            let session = Session::new(
+                RelayUrl::parse("http://127.0.0.1:9").unwrap(),
+                "t_7k2m5q4x3c",
+                DeviceKey::generate().unwrap(),
+                Some(1),
+            );
+            let transport = RelayTransport::new(
+                Arc::new(session),
+                Some("0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77"),
+                0,
+                None,
+                1 << 20,
+            );
+            match keys {
+                Some(keys) => transport.with_signer_keys(keys),
+                None => transport,
+            }
+        };
+        assert_eq!(transport(None).check_identity(&two, &signers), Ok(()));
+        assert_eq!(
+            transport(Some(vec![public.clone()])).check_identity(&two, &signers),
+            Ok(())
+        );
+        let stranger = DeviceKey::generate().unwrap();
+        for keys in [vec![stranger.public_key().to_vec()], Vec::new()] {
+            assert_eq!(
+                transport(Some(keys)).check_identity(&two, &signers),
+                Err(SyncError::Damaged)
+            );
+        }
+        // Each head of a chain is checked the same way.
+        let only_stranger = transport(Some(vec![stranger.public_key().to_vec()]));
+        assert!(!only_stranger.signed_by_accepted(&two, &signers));
+        assert!(transport(Some(vec![public])).signed_by_accepted(&two, &signers));
     }
 
     #[test]

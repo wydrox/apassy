@@ -24,11 +24,22 @@
 //! key belongs to no vault. The core reads the PKCS#8 document into an erasing buffer for
 //! as long as it signs (as the Mac does after Touch ID), and drops it with `lock` and
 //! `suspend`; it never writes it to a file, a log, the state file, or an answer. The key
-//! signs only the seven messages of section 5 (`AccountSigner::sign`).
+//! signs only the nine messages of section 5 (`AccountSigner::sign`).
+//!
+//! **Removal.** Only `403 device_removed` of Connect, an answer to a valid signature of
+//! this iPhone, means that a Mac removed it (or the account was deleted). Even then the
+//! core deletes nothing: `connect_status` says `removed` with `state: "account"`, and
+//! the key and the state file stay until `connect_forget`. A key that the Keychain lost
+//! is shown the same way. A `401` is never a removal.
+//!
+//! **Devices.** `connect_status` lists the devices of the account with `verified`: the
+//! core checks the chain of statements of each device against the trust store of the
+//! state file (`apassy::connect::trust`), and the app shows "Not verified" for the others.
 //!
 //! **The state file** is the Mac's account file, `connect/account.json` in the data
-//! directory (mode 0600): the origin, the ids, the names, and the public key. No key, no
-//! token, no email, no code, no plan.
+//! directory (mode 0600): the origin, the ids, the names, the public key, and the trust
+//! store (the pinned account root and the known and departed device keys). No private
+//! key, no token, no email, no code, no plan.
 //!
 //! The account token stays inside the core: [`Core::connect_with_token`] gives it to a
 //! call of the Connect client of the account's origin only (unit I2 dials with it).
@@ -111,13 +122,29 @@ pub struct People {
     pub of: u64,
 }
 
+/// A device of the account as the app lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeviceOut {
+    pub device_id: String,
+    pub name: String,
+    /// `mac`, `iphone`, or `linux`.
+    pub platform: String,
+    /// This iPhone.
+    pub this: bool,
+    /// The core verified the device's chain of statements to the account root. The app
+    /// shows "Not verified" when it is false.
+    pub verified: bool,
+}
+
 /// `connect_status`.
 #[derive(Debug, Serialize)]
 pub struct StatusOut {
-    /// `none`: this iPhone is no device of a Connect account. `account`: it is.
+    /// `none`: this iPhone is no device of a Connect account. `account`: it has the state
+    /// file of an account.
     pub state: &'static str,
-    /// True once, when this call found that a Mac removed this iPhone from its account
-    /// (or the account was deleted): the key and the state file are gone.
+    /// True when Connect says a Mac removed this iPhone from its account (or the account
+    /// was deleted), or the Keychain lost the key of this iPhone. With `state: "account"`:
+    /// the key and the state file stay until `connect_forget`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub removed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +162,10 @@ pub struct StatusOut {
     /// A waiting join, as `connect_join` answered it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join: Option<JoinOut>,
+    /// The devices of the account, each with `verified`. Empty when Connect did not
+    /// answer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceOut>,
 }
 
 #[derive(Serialize)]
@@ -176,12 +207,18 @@ fn core_error(error: ConnectError) -> CoreError {
             "removed",
             "A Mac removed this iPhone from its Apassy Connect account.",
         ),
-        ConnectError::KeychainUnavailable | ConnectError::NoDeviceKey | ConnectError::KeyLost => {
-            CoreError::new(
-                "not_allowed",
-                "The Keychain of this iPhone is not available to Apassy now. Unlock the iPhone and try again.",
-            )
-        }
+        ConnectError::KeyLost => CoreError::new(
+            "removed",
+            "The Apassy Connect key of this iPhone is gone. Forget the account on this iPhone, then add it again from your Mac.",
+        ),
+        ConnectError::LinkMismatch => CoreError::new(
+            "link_invalid",
+            "This code does not match the Mac that Apassy Connect named for it. Nothing was joined. On your Mac, make a new code with “Add a device…”.",
+        ),
+        ConnectError::KeychainUnavailable | ConnectError::NoDeviceKey => CoreError::new(
+            "not_allowed",
+            "The Keychain of this iPhone is not available to Apassy now. Unlock the iPhone and try again.",
+        ),
         ConnectError::AccountLimit => CoreError::new(
             "not_allowed",
             "This Apassy Connect account has the most devices it can have. Remove a device on your Mac first.",
@@ -368,8 +405,8 @@ impl Core {
 
     /// Run `call` with the account of this iPhone, opened from the state file and the
     /// Keychain when it is not in memory. `None` without an account. The account is put
-    /// back after the call unless a forget or a join came in between. A confirmed revoke
-    /// forgets the account on this iPhone (the key and the state file).
+    /// back after the call unless a forget or a join came in between, also after Connect
+    /// said this iPhone was removed: nothing is deleted until `connect_forget`.
     fn with_account<T>(
         &self,
         call: impl FnOnce(&mut ConnectAccount) -> Result<T, ConnectError>,
@@ -385,22 +422,13 @@ impl Core {
                 match ConnectAccount::open(store.as_ref(), &self.account_path()) {
                     Ok(Some(account)) => account,
                     Ok(None) => return Ok(None),
-                    // The state file names a key that the Keychain does not hold: the
-                    // account cannot be used on this iPhone any more.
-                    Err(ConnectError::KeyLost) => {
-                        self.forget_locally()?;
-                        return Err(core_error(ConnectError::Revoked));
-                    }
+                    // A state file that names a key that the Keychain does not hold is
+                    // `removed`; the file stays until `connect_forget`.
                     Err(error) => return Err(core_error(error)),
                 }
             }
         };
         let result = call(&mut account);
-        if matches!(result, Err(ConnectError::Revoked)) {
-            drop(account);
-            self.forget_locally()?;
-            return Err(core_error(ConnectError::Revoked));
-        }
         {
             let mut state = guard(&self.connect);
             if state.generation == generation && state.account.is_none() {
@@ -427,15 +455,16 @@ impl Core {
             .join
             .as_ref()
             .map(|join| join_out(join, "waiting"));
-        let none = |removed: bool, join: Option<JoinOut>| StatusOut {
+        let none = |join: Option<JoinOut>| StatusOut {
             state: "none",
-            removed,
+            removed: false,
             account_id: None,
             device_name: None,
             plan: None,
             stale: false,
             dial_route: false,
             join,
+            devices: Vec::new(),
         };
         let answer = self.with_account(|account| {
             let view = account.view()?;
@@ -463,16 +492,44 @@ impl Core {
                 _ => None,
             };
             let state = account.state();
+            let devices = view
+                .devices
+                .iter()
+                .map(|device| DeviceOut {
+                    device_id: device.device_id.clone(),
+                    name: device.name.clone(),
+                    platform: device.platform.clone(),
+                    this: device.device_id == state.device_id,
+                    verified: device.verified,
+                })
+                .collect();
             Ok((
                 state.account_id.clone(),
                 state.device_name.clone(),
                 status_plan(&view.plan, group, people),
+                devices,
             ))
         });
-        let (account_id, device_name, plan) = match answer {
+        let (account_id, device_name, plan, devices) = match answer {
             Ok(Some(found)) => found,
-            Ok(None) => return Ok(none(false, join)),
-            Err(error) if error.code == "removed" => return Ok(none(true, join)),
+            Ok(None) => return Ok(none(join)),
+            Err(error) if error.code == "removed" => {
+                // Removed at Connect, or the key is gone: the state file stays.
+                let Ok(Some(state)) = AccountState::load(&self.account_path()) else {
+                    return Ok(none(join));
+                };
+                return Ok(StatusOut {
+                    state: "account",
+                    removed: true,
+                    account_id: Some(state.account_id),
+                    device_name: Some(state.device_name),
+                    plan: None,
+                    stale: false,
+                    dial_route: false,
+                    join,
+                    devices: Vec::new(),
+                });
+            }
             Err(error) if matches!(error.code, "relay_unreachable" | "rate_limited") => {
                 // Connect did not answer: the last plan of this process, marked stale.
                 let Ok(Some(state)) = AccountState::load(&self.account_path()) else {
@@ -488,6 +545,7 @@ impl Core {
                     stale: true,
                     dial_route: false,
                     join,
+                    devices: Vec::new(),
                 });
             }
             Err(error) => return Err(error),
@@ -502,6 +560,7 @@ impl Core {
             stale: false,
             dial_route: false,
             join,
+            devices,
         })
     }
 

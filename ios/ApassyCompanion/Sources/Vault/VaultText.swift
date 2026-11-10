@@ -265,8 +265,8 @@ enum ConnectPlanRow: Equatable {
     static let title = "Apassy Connect"
     /// The only line about where the plan is managed: text, no link.
     static let managedLine = "Managed in Apassy on your Mac"
-    /// Once, after the core found that this iPhone is no device of its account any more: a Mac
-    /// removed it, the account was deleted, or the Keychain lost the key.
+    /// Shown when Connect says a Mac removed this iPhone, the account was deleted, or the Keychain
+    /// lost the key. The key and the account file stay until Forget.
     static let removedLine = "This iPhone is no longer a device of its Apassy Connect account."
 
     /// What the row shows: its value and the lines under it, all of them text.
@@ -279,6 +279,7 @@ enum ConnectPlanRow: Equatable {
     /// The row of `status`. `failed`: the last `connect_status` failed.
     static func of(_ status: ConnectStatus?, failed: Bool = false) -> ConnectPlanRow {
         guard let status else { return failed ? .unavailable : .checking }
+        if status.removed { return .notOnConnect }
         guard status.state == .account else { return .notOnConnect }
         guard let plan = status.plan else { return .unavailable }
         switch plan.status {
@@ -337,12 +338,19 @@ enum ConnectPlanRow: Equatable {
         }
     }
 
+    /// The one line that names the devices of the account that this iPhone could not verify.
+    static func notVerifiedLine(_ devices: [ConnectDevice]) -> String? {
+        guard !devices.isEmpty else { return nil }
+        return "Not verified: " + devices.map(\.name).joined(separator: ", ")
+    }
+
     /// The whole row for `status`.
     static func content(_ status: ConnectStatus?, failed: Bool = false, timeZone: TimeZone = .current) -> Content {
         let row = of(status, failed: failed)
         var lines: [String] = []
         if row.isOnAccount { lines.append(managedLine) }
         if status?.removed == true { lines.append(removedLine) }
+        if status?.removed != true, let line = notVerifiedLine(status?.unverifiedDevices ?? []) { lines.append(line) }
         return Content(title: title, value: row.value(timeZone: timeZone), lines: lines)
     }
 }

@@ -15,7 +15,7 @@
 //! Secure Enclave `sign`, [`DeviceKeyStore`] is the seam: a store that signs inside the
 //! Enclave replaces the read, and the allow-list of [`AccountSigner::sign`] stays.
 //!
-//! The key signs **only** messages that begin with one of the seven ECDSA tags of
+//! The key signs **only** messages that begin with one of the nine ECDSA tags of
 //! section 5 ([`SIGNING_TAGS`]), each followed by its separator (`0x00`, or `\n` for the
 //! head of relay-sync-v1 section 8). It refuses any other message, also the tags of the
 //! free Connect (`apassy-relay connect v1`) and of the entitlement token, which only
@@ -45,6 +45,11 @@ pub const ACCOUNT_TAG: &str = "apassy-connect account v1";
 pub const SIGN_IN_TAG: &str = "apassy-connect sign-in v1";
 /// `POST /v1/account/devices/join`.
 pub const JOIN_TAG: &str = "apassy-connect join v1";
+/// `POST /v1/account/devices/join/cancel`.
+pub const JOIN_CANCEL_TAG: &str = "apassy-connect join-cancel v1";
+/// The device statement of `POST …/pending/{join_id}/confirm`: the confirming device
+/// signs the key that it adds. The chain of a device is made of these statements.
+pub const DEVICE_TAG: &str = "apassy-connect device v1";
 /// `POST /v1/account/recover`.
 pub const RECOVER_TAG: &str = "apassy-connect recover v1";
 /// The sign-in of the hosted bouncer brain (bouncer-brain-v2, plan 0035 A and H).
@@ -54,11 +59,13 @@ pub const RELAY_SIGN_IN_TAG: &str = crate::sync::relay_crypto::SIGN_IN_TAG;
 /// The first line of a relay-sync-v1 head of a vault store.
 pub const SYNC_HEAD_TAG: &str = crate::sync::relay_crypto::HEAD_TAG;
 
-/// The seven tags that the account device key signs (section 5), and nothing else.
-pub const SIGNING_TAGS: [&str; 7] = [
+/// The nine tags that the account device key signs (section 5), and nothing else.
+pub const SIGNING_TAGS: [&str; 9] = [
     ACCOUNT_TAG,
     SIGN_IN_TAG,
     JOIN_TAG,
+    JOIN_CANCEL_TAG,
+    DEVICE_TAG,
     RECOVER_TAG,
     BRAIN_SIGN_IN_TAG,
     RELAY_SIGN_IN_TAG,
@@ -80,9 +87,10 @@ fn joined(parts: &[&str]) -> Vec<u8> {
     parts.join("\0").into_bytes()
 }
 
-/// The `apassy-connect account v1` message.
-pub fn account_message(origin: &str, public_key_b64u: &str) -> Vec<u8> {
-    joined(&[ACCOUNT_TAG, origin, public_key_b64u])
+/// The `apassy-connect account v1` message: the new device key and the public key of
+/// the recovery code (Ed25519, b64u).
+pub fn account_message(origin: &str, public_key_b64u: &str, recovery_key_b64u: &str) -> Vec<u8> {
+    joined(&[ACCOUNT_TAG, origin, public_key_b64u, recovery_key_b64u])
 }
 
 /// The `apassy-connect sign-in v1` message.
@@ -105,9 +113,48 @@ pub fn join_message(
     joined(&[JOIN_TAG, origin, account_id, link_hash, public_key_b64u])
 }
 
-/// The `apassy-connect recover v1` message.
-pub fn recover_message(origin: &str, account_id: &str, public_key_b64u: &str) -> Vec<u8> {
-    joined(&[RECOVER_TAG, origin, account_id, public_key_b64u])
+/// The `apassy-connect join-cancel v1` message.
+pub fn join_cancel_message(
+    origin: &str,
+    account_id: &str,
+    link_hash: &str,
+    public_key_b64u: &str,
+) -> Vec<u8> {
+    joined(&[
+        JOIN_CANCEL_TAG,
+        origin,
+        account_id,
+        link_hash,
+        public_key_b64u,
+    ])
+}
+
+/// The `apassy-connect device v1` message: the statement that adds the key
+/// `added_key_b64u` through the link of `link_hash`, signed by the confirming device.
+pub fn device_message(
+    origin: &str,
+    account_id: &str,
+    link_hash: &str,
+    added_key_b64u: &str,
+) -> Vec<u8> {
+    joined(&[DEVICE_TAG, origin, account_id, link_hash, added_key_b64u])
+}
+
+/// The `apassy-connect recover v1` message: the new device key and the public key of the
+/// new recovery code. The new device signs it, and so does the old recovery key.
+pub fn recover_message(
+    origin: &str,
+    account_id: &str,
+    public_key_b64u: &str,
+    recovery_key_b64u: &str,
+) -> Vec<u8> {
+    joined(&[
+        RECOVER_TAG,
+        origin,
+        account_id,
+        public_key_b64u,
+        recovery_key_b64u,
+    ])
 }
 
 /// The `apassy-bouncer sign-in v1` message: the account id in the place of the team id
@@ -360,9 +407,18 @@ impl AccountSigner {
         self.key.sign(message).map_err(|_| ConnectError::Local)
     }
 
-    /// The signature of `POST /v1/account` for `origin`.
-    pub fn sign_account(&self, origin: &str) -> Result<Vec<u8>, ConnectError> {
-        self.sign(&account_message(origin, &self.public_key_b64u()))
+    /// The signature of `POST /v1/account` for `origin`, with the public key of the
+    /// recovery code.
+    pub fn sign_account(
+        &self,
+        origin: &str,
+        recovery_key_b64u: &str,
+    ) -> Result<Vec<u8>, ConnectError> {
+        self.sign(&account_message(
+            origin,
+            &self.public_key_b64u(),
+            recovery_key_b64u,
+        ))
     }
 
     /// The signature of `POST /v1/account/token`.
@@ -395,12 +451,51 @@ impl AccountSigner {
         ))
     }
 
-    /// The signature of `POST /v1/account/recover`.
-    pub fn sign_recover(&self, origin: &str, account_id: &str) -> Result<Vec<u8>, ConnectError> {
+    /// The signature of `POST /v1/account/devices/join/cancel`.
+    pub fn sign_join_cancel(
+        &self,
+        origin: &str,
+        account_id: &str,
+        link_hash: &str,
+    ) -> Result<Vec<u8>, ConnectError> {
+        self.sign(&join_cancel_message(
+            origin,
+            account_id,
+            link_hash,
+            &self.public_key_b64u(),
+        ))
+    }
+
+    /// The device statement of a confirmation: this device adds `added_key_b64u` through
+    /// the link of `link_hash`.
+    pub fn sign_device(
+        &self,
+        origin: &str,
+        account_id: &str,
+        link_hash: &str,
+        added_key_b64u: &str,
+    ) -> Result<Vec<u8>, ConnectError> {
+        self.sign(&device_message(
+            origin,
+            account_id,
+            link_hash,
+            added_key_b64u,
+        ))
+    }
+
+    /// The signature of `POST /v1/account/recover` by the new device, with the public key
+    /// of the new recovery code.
+    pub fn sign_recover(
+        &self,
+        origin: &str,
+        account_id: &str,
+        recovery_key_b64u: &str,
+    ) -> Result<Vec<u8>, ConnectError> {
         self.sign(&recover_message(
             origin,
             account_id,
             &self.public_key_b64u(),
+            recovery_key_b64u,
         ))
     }
 
@@ -484,17 +579,22 @@ mod tests {
     }
 
     #[test]
-    fn only_the_seven_tags_are_signed() {
+    fn only_the_nine_tags_are_signed() {
         let store = MemoryKeyStore::new();
         let signer = AccountSigner::open_or_create(&store).unwrap();
         let origin = "https://connect.example.test";
         let account = "acc_k7m2q4x3ca";
         let nonce = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+        let recovery = "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc";
         for signature in [
-            signer.sign_account(origin).unwrap(),
+            signer.sign_account(origin, recovery).unwrap(),
             signer.sign_sign_in(origin, account, nonce).unwrap(),
             signer.sign_join(origin, account, "K6tgKp").unwrap(),
-            signer.sign_recover(origin, account).unwrap(),
+            signer.sign_join_cancel(origin, account, "K6tgKp").unwrap(),
+            signer
+                .sign_device(origin, account, "K6tgKp", &signer.public_key_b64u())
+                .unwrap(),
+            signer.sign_recover(origin, account, recovery).unwrap(),
             signer
                 .sign_brain_sign_in("https://brain.example.test", account, nonce)
                 .unwrap(),
@@ -504,13 +604,16 @@ mod tests {
         ] {
             assert!(signature.len() <= 72);
         }
-        let message = account_message(origin, &signer.public_key_b64u());
+        let message = account_message(origin, &signer.public_key_b64u(), recovery);
         let signature = signer.sign(&message).unwrap();
         assert!(verify_signature(signer.public_key(), &message, &signature));
         for refused in [
             b"apassy-relay connect v1\0https://connect.example.test\0key".to_vec(),
             b"apassy-connect entitlement v1\0payload".to_vec(),
             b"apassy-connect link v1\0code".to_vec(),
+            b"apassy-connect link-keys v1\0keys".to_vec(),
+            b"apassy-connect recovery key v1\0bytes".to_vec(),
+            b"apassy-connect join-cancel v1".to_vec(),
             b"apassy-connect account v1".to_vec(),
             b"apassy-connect account v1x\0origin".to_vec(),
             b"apassy-connect account v1\norigin".to_vec(),

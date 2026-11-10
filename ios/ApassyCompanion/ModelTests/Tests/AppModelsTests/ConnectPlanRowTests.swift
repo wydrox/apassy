@@ -126,6 +126,30 @@ struct ConnectPlanRowTests {
         #expect(removed.lines == [ConnectPlanRow.removedLine])
     }
 
+    @Test("a removed account and devices that are not verified are text lines")
+    func removedAndNotVerified() {
+        let removed = ConnectStatus(state: .account, removed: true, accountID: "acc_k7m2q4x3ca", deviceName: "iPhone")
+        let removedContent = ConnectPlanRow.content(removed, timeZone: Self.utc)
+        #expect(removedContent.value == "Not on Connect")
+        #expect(removedContent.lines == [ConnectPlanRow.removedLine])
+
+        let devices = [
+            ConnectDevice(deviceID: "dev_m2k7q3x4ab", name: "MacBook Pro", platform: "mac", isThisDevice: false, verified: true),
+            ConnectDevice(deviceID: "dev_p4n6r2t7bc", name: "Mac Studio", platform: "mac", isThisDevice: false, verified: false),
+            ConnectDevice(deviceID: "dev_q5m3s7v2cd", name: "iPad", platform: "iphone", isThisDevice: false, verified: false),
+        ]
+        var active = Self.account(ConnectPlan(plan: "personal", status: .active, entitled: true, renewsAt: Self.renews))
+        active.devices = devices
+        let content = ConnectPlanRow.content(active, timeZone: Self.utc)
+        #expect(content.lines == [ConnectPlanRow.managedLine, "Not verified: Mac Studio, iPad"])
+
+        for text in removedContent.lines + content.lines {
+            for word in Self.banned {
+                #expect(!text.contains(word), "\(word) in “\(text)”")
+            }
+        }
+    }
+
     @Test("a stale answer keeps the last plan")
     func stale() {
         let plan = ConnectPlan(plan: "personal", status: .active, entitled: true, renewsAt: Self.renews)
@@ -225,7 +249,7 @@ struct ConnectPlanRowTests {
 @MainActor
 @Suite("Apassy Connect join")
 struct ConnectJoinModelTests {
-    static let code = "apassy_alk_acc_k7m2q4x3ca_" + String(repeating: "cd", count: 32)
+    static let code = "apassy_alk_acc_k7m2q4x3ca_" + String(repeating: "cd", count: 32) + "_" + String(repeating: "ab", count: 16)
 
     @MainActor
     final class Fixture {
