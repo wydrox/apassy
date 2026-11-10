@@ -13,6 +13,17 @@ re-runnable kit is `packaging/linux/acceptance/`.
 
 ## Build and install
 
+What a package is built from:
+
+- A pull request's CI artifact (`apassy-vault-linux-<arch>`) is a **debug build**,
+  stripped, of the synthetic merge of the PR head into its base; Settings > Updates
+  shows "development build". `release-vault-linux-<arch>.json` names the PR head as
+  `commit` and that merge as `built_from`. The acceptance kit's
+  `build-on-devbox.sh` builds the same way from one commit.
+- No workflow builds a release vault package yet. The commands below make a release
+  build by hand, for a local test only; a published package needs the release
+  process (`docs/operations/release.md`).
+
 Build on Linux with the repository's pinned Rust toolchain:
 
 ```sh
@@ -174,16 +185,26 @@ Run `apassy setup browser --browser chrome` (or `chromium`) once: without
 `--browser` it writes nothing for a browser that has not created its profile
 yet. Then, in the browser, turn on Developer mode on `chrome://extensions`, choose
 Load unpacked and select `/usr/share/apassy/browser-extension`; its manifest key
-gives it the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Observed browser limits
-(2026-11-10):
+gives it the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Browser limits:
 
 - Ubuntu ships Chromium only as a snap. The snap cannot see
   `/usr/lib/apassy` or `/usr/share/apassy`, reads its manifests from
   `~/snap/chromium/common/chromium`, and runs from a `/snap` path that the caller
-  check refuses. Use Google Chrome on Ubuntu.
-- Debian's `chromium` package adds `--load-extension=…` to every start
-  (`/etc/chromium.d/extensions`). Apassy refuses a browser started with that
-  switch, so passkeys, fill and save are refused in Debian's Chromium as packaged.
+  check refuses. A Flatpak browser cannot start a program of the host either.
+  Settings > Tools > Browser extension and `apassy setup browser` list such a
+  browser as "Not supported", with the reason and "Use Google Chrome, or Chromium
+  from a .deb.", offer no Connect and write no manifest for it. A profile folder
+  without the packaged executable (`/opt/google/chrome/chrome`,
+  `/usr/lib/chromium/chromium` or `/usr/lib/chromium-browser/chromium-browser`) is
+  listed the same way. Use Google Chrome on Ubuntu.
+- Debian's `chromium` package adds `--load-extension=` with the system extension
+  folders under `/usr/share/chromium/extensions` to every start
+  (`/etc/chromium.d/extensions`; the `webext-*-chromium` packages install them).
+  Apassy accepts that switch only for root-owned, non-writable directories in that
+  folder (ADR 0045): passkeys, fill and save work in Debian's Chromium when at least
+  one Debian extension package is installed. With none, the wrapper passes an empty
+  `--load-extension=` and Apassy refuses the browser, as it refuses every other
+  extension path, a second value and a test extension of your own.
 
 Browser authentication verifies kernel peer credentials, process ancestry and
 root-owned executable paths. Unknown browser builds, writable executables,
