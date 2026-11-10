@@ -15,3 +15,7 @@
 
 pub mod client;
 pub mod wire;
+
+/// Interactive terminal prompts shared with headless owner commands.
+#[path = "../cli/terminal.rs"]
+pub mod terminal;

@@ -35,7 +35,7 @@ toml_edit = { version = "=0.25.15", optional = true, default-features = false, f
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 zeroize = "=1.9.0"
-eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 # A guarded, concealed clipboard copy for one-time codes.
 arboard = { version = "=3.6.1", optional = true, default-features = false }
 # Native open/save panels. The async API keeps the desktop event loop free.
@@ -70,7 +70,7 @@ flate2 = { version = "=1.1.10", optional = true, default-features = false, featu
 # Cargo.lock through tempfile. `termios`: the owner command line turns off the echo
 # when it reads a secret (ADR 0017). `fs`: the open flags of each target (`O_NOFOLLOW`
 # differs by architecture), not written numbers.
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process", "termios", "time"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process", "termios", "time", "net"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Main-process native menus through a safe API; no application framework or GTK.

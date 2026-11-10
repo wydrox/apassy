@@ -6,12 +6,15 @@ rust-version = "1.97"
 publish = false
 license = "Apache-2.0"
 repository = "https://github.com/wydrox/apassy"
-description = "The Apassy app: on macOS the window, the owner command line, and the Mac's own node; on Linux the node without a window"
+description = "The Apassy desktop, interactive owner command line, and node on macOS and Linux"
 
 [features]
-# The window and the owner command line (the macOS bundle). The Linux package builds
-# `--no-default-features --features node`: no eframe, no desktop code (plan S2-S3, D8).
-default = ["window", "node"]
+# The desktop vault package uses the defaults on macOS and Linux. The separate
+# Linux node package keeps `--no-default-features --features node`; add `owner` for
+# interactive vault operations without eframe or a graphical session.
+default = ["window", "node", "owner"]
+# Interactive terminal vault operations, also available without a window.
+owner = ["apassy/vault"]
 window = ["apassy/desktop", "dep:eframe", "dep:tracing"]
 # The node commands (`serve`, `up`, `pair`, `status`, `doctor`, `team`), in the relay
 # crate (`apassy_relay::node`). Always on; the feature names the Linux build.
@@ -25,7 +28,7 @@ apassy = { path = "../..", features = ["vault"] }
 # The embedded node behind `apassy::node::backend` (crates/apassy-relay/src/embedded.rs),
 # and the node commands of Linux (`apassy_relay::node`).
 apassy-relay = { path = "../apassy-relay" }
-eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 tracing = { version = "=0.1.44", optional = true }
 
 [dev-dependencies]

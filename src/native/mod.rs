@@ -33,6 +33,9 @@
 
 pub(crate) mod base64;
 pub mod check;
+/// Optional Linux system authentication and explicitly enabled keyring storage.
+#[cfg(target_os = "linux")]
+pub mod linux;
 
 #[cfg(all(feature = "vault", feature = "desktop"))]
 pub(crate) mod owner_lifecycle;
