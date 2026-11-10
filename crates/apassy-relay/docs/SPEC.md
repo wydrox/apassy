@@ -2193,3 +2193,95 @@ The way back in place: `apassy-relay downgrade-directory-1005` (`Directory::down
 - Connect sees the public keys, names, and platforms of the devices, the vault ids, the times of sign-ins (rounded to the hour), and which devices share a store. It never sees a link code, a recovery code, a vault key, or a value.
 - The per-address limits of the edge routes are the Worker's (contract section 3); the relay bounds the nonces, tokens, and recovery tries in memory only, so a restart resets them (and ends every account token).
 - The I-4 events (`brain_event`) are queued, not sent: the delivery to the bouncer brain and its internal routes (contract section 11) are a later unit.
+
+## 34. Billing
+
+ADR 0037 stage 7, D3 (docs/design/implementation-plan-s7-connect.md of the core, unit C2; contract `connect-billing-v1` of the core, which wins over this section where they differ). Connect sells three plans through Stripe Checkout and the Stripe Customer Portal, with no Stripe SDK: `src/server/stripe.rs` is the Stripe client and the webhook check, `src/server/billing.rs` the plans, the plan state, and the handlers. Section 33 (Connect accounts, unit C1) gives the account, the account token, and the directory tables; this section numbers its parts on the assumption that C1 takes 33.
+
+**Status of this revision (C2-core):** the modules, their tests (`tests/server_billing.rs`, `tests/connect_billing_sandbox.rs`), the products script, and the edge Worker are in place. The routes and the configuration are wired in a second step, after C1: until then no route of this section is served.
+
+### 34.1 Rules
+
+- **Prices are configuration.** No amount is in code. Connect resolves the prices of six lookup keys (`connect_<plan>_<month|year>`) at start with `GET /v1/prices?lookup_keys[]=…&active=true&expand[]=data.tiers` and keeps them for an hour (`PRICE_TTL`); a failed lookup keeps the last prices. A price is used only in the form of the contract: `eur`, `tax_behavior=inclusive`, recurring at the interval of its key; Personal and Team `per_unit`; Family `tiered` and `graduated`, tier 1 `up_to=4` with a flat amount, tier 2 `up_to=inf` with the unit amount of each further person. A price that fails is logged and left out, so its plan or interval is not offered.
+- **State only from verified webhooks.** Checkout, the portal, and a seats change call Stripe and change nothing in the directory. The webhook (34.5) is the only writer of customers, subscriptions, and the groups it makes; the maintenance pass only records that the stores of an ended plan were deleted.
+- **What Stripe gets:** the account id (`client_reference_id`, `metadata[account_id]`, `subscription_data[metadata][account_id]`), price ids, quantities, customer and subscription ids, and the site URLs. Never a device key, a token, a vault id, a device name, or a value.
+- **Every Stripe call** carries `Authorization: Bearer <restricted key>`, `Stripe-Version: 2025-03-31.basil` (the version of the webhook endpoint), and form encoding; every POST an `Idempotency-Key`. A transport failure, 409, 429, or 5xx is tried once more with the same key. A Stripe refusal is `502 upstream_failed`; an outage or 429 is `503 busy`. The client accepts `https://` bases, and `http://` on a loopback address only (the fake server of the tests).
+- **Logs** name event ids and types, Stripe object ids, account ids, HTTP statuses, and Stripe's error type and code. Never an email, a key, a body, or Stripe's error message.
+
+### 34.2 Plans and totals
+
+| Plan | Unit | Included | Max | Stripe quantity |
+| --- | --- | --- | --- | --- |
+| `personal` Connect Personal | account | 1 | 1 | 1 |
+| `family` Connect Family | person | 4 | 10 | people |
+| `team` Connect Team | member | 1 | 250 | seats |
+
+The total for `n` units is `amount + max(0, n − included) × extra` for `1 ≤ n ≤ max` (`billing::total_cents`); a count outside is `409 seat_limit`. A Family of 2 pays the price of 4; a Family of 6 pays 700 a month or 7000 a year in the default configuration. `GET /v1/plans` (public) answers the `PlansView` of the contract from the resolved prices (`Billing::plans`); a plan without a usable price is left out.
+
+### 34.3 Checkout
+
+`Billing::checkout(account, body, now)` takes `{"plan","interval","people"?,"seats"?}` with unknown fields refused: `people` for Family only, `seats` for Team only. Refused: an account that is a pending or active member of a group (not its owner), or one whose plan is entitled (`409 conflict`: the portal changes a plan); a count outside the plan (`409 seat_limit`); a plan without a usable price, or a Family price whose tier 2 differs from `APASSY_CONNECT_FAMILY_EXTRA_CENTS` or `_YEAR_CENTS` (`503 busy`, logged). An owner whose plan lapsed may buy again, and the new subscription keeps the group.
+
+The form is the contract's, in its order (`billing::checkout_form`), plus `tax_id_collection[enabled]=true` for Team and `customer` with `customer_update[address]=auto` for an account that has a Stripe customer. The idempotency key is a hash of the account, the plan, the interval, the count, the customer, and the hour: a repeated click within the hour gets the same session, so one click cannot make two subscriptions. The answer is `{url, session_id, expires_at}`.
+
+### 34.4 The portal, seats, and cancellation
+
+- `Billing::portal(account, body)`: `{}` only. A member that is not the owner: `403 forbidden`; no Stripe customer: `404 not_found`. `POST /v1/billing_portal/sessions` with `customer` and `return_url=<site>/connect/done`.
+- `Billing::change_seats(account, body, now)`: `{"quantity"}` from the active owner of a group (another member: `403 forbidden`; an account outside, or pending: `403 not_in_group`). `Billing::request_group_quantity(group, quantity, now)` is the same without the role check, for C3's confirm of a member (owner or admin, checked by the caller). Refused: an ended group plan (`403 plan_required`); a count outside the plan or below the active members, the owner included (`409 seat_limit`, "The family has 5 people; choose at least 5."). The same quantity answers `pending: false` without a call. Otherwise `POST /v1/subscription_items/{item}` with `quantity` and `proration_behavior=create_prorations`, with a fresh idempotency key for each change, and the answer `{quantity, pending: true}`. The stored quantity changes only when `customer.subscription.updated` arrives.
+- `Billing::cancel_for_account_deletion(account)` (for `DELETE /v1/account`): `DELETE /v1/subscriptions/{id}` for each subscription that has not ended (a 404 counts as ended), then the email copy is deleted. The customer row stays for support; the state changes with the webhook.
+
+### 34.5 The webhook
+
+`Billing::webhook(signature, body, now)` checks, in this order, and every refusal changes nothing:
+
+1. the size: above 256 KiB (`MAX_WEBHOOK_BODY`) is `413 payload_too_large`;
+2. the signature (`stripe::verify_signature`): `Stripe-Signature: t=<seconds>,v1=<hex>[,v1=…]` (at most 4 KiB, 8 `v1`; one `t`; other schemes ignored); HMAC-SHA256 with the endpoint secret over `<t>.<body>`, compared with `ring::hmac::verify`; `|now − t| ≤ 300`. A failure is `400 invalid_request` ("The Stripe signature does not verify."); the log names the reason;
+3. the event JSON (`id` of form `evt_…`, `type`, `created`, `data.object`): `400 invalid_request`;
+4. the event id, stored in `stripe_event` in the same transaction as the effect: a repeat answers `{"received":true,"duplicate":true}` and changes nothing. A failed transaction keeps no id, so Stripe retries.
+
+The effects (fields as the contract's table; every other field ignored):
+
+- `checkout.session.completed`: needs `mode=subscription`, `client_reference_id` equal to `metadata.account_id`, a known account, and `cus_`/`sub_` ids. An account bound to another customer, a customer bound to another account, or a subscription bound elsewhere is ignored. Stores the customer with the email copy and binds the subscription (`incomplete` until its own event).
+- `customer.subscription.created|updated|deleted`: a known subscription must keep its customer and account; a new one needs a known account in `metadata.account_id` and a customer not bound elsewhere. An event older than the last applied subscription event of that subscription is ignored (a `created` with the same `created` time too). An unknown lookup key is ignored. Stores the item, the plan and interval of the lookup key, the quantity, the status (`deleted` is `canceled`), `cancel_at_period_end`, and the period end (of the item, else the top level). The end of an ended status is `ended_at`, else the one stored, else the event time. `active` and `trialing` clear the failure time; `past_due` without one starts the grace at the event time. A Family or Team plan makes its group with the buyer as the active `owner`, unless the buyer is in another group (logged).
+- `invoice.paid` and `invoice.payment_failed`: the subscription of `parent.subscription_details.subscription` (or `subscription`) must be known and have the invoice's customer; an invoice event older than the last applied one is ignored. `paid` clears the first failure; `payment_failed` sets it if none is set.
+- Any other type: stored id, no effect.
+
+An event that does not apply is logged and answered `200` with its id stored, so Stripe does not retry it. The answer is `{"received":true,"duplicate":false}`.
+
+### 34.6 The plan state
+
+`billing::plan_state` is a pure function of the stored subscription and the time (contract section 8; `plan-states.json`). `PlanState::allows` gives the permissions: a new store, a push, a dial, and an entitlement token need `entitled`; a pull and a download also work in `read_only`. `PlanState::require` answers `403 plan_required` ("This account is not on Apassy Connect.").
+
+| Stripe status | Plan status | Times |
+| --- | --- | --- |
+| none | `none` | — |
+| `incomplete`, an unknown status | `pending` | — |
+| `active`, `trialing` | `active`, `trialing` (entitled) | `renews_at` = period end, or `ends_at` with `cancel_at_period_end` |
+| `past_due`, `now <` first failure + grace | `past_due` (entitled) | `grace_until` |
+| `past_due` beyond the grace; `canceled`, `unpaid`, `incomplete_expired`, `paused` | `read_only` while `now < end + read-only days`, then `suspended` until `end + delete days`, then `none` | `read_only_until`, `delete_at`; `grace_until` stays for a past due |
+
+`end` is `grace_until` for a past due beyond its grace, else the stored end, else the period end; a past due without a failure time counts the grace from the period end. The account's `PlanView` comes from its own subscriptions and, for an active member that is not the owner, from the group's subscription when its plan is of the group's kind; an entitled state wins over one that is not, then the newest. A pending member has `none`.
+
+`Billing::maintenance(now)` prunes event ids older than 30 days and lists each ended plan whose `delete_at ≤ now` and whose stores were not deleted (`DueDeletion`). The caller deletes the vault stores and the nodes, writes the audit row with counts, sends I-4 `forget`, and calls `Billing::mark_stores_deleted`. A renewal before that keeps the stores; `active` again clears the mark.
+
+### 34.7 Configuration
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `STRIPE_SECRET_KEY_FILE` | A file with the restricted key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox). A live secret key `sk_live_…` is refused. | required for billing |
+| `STRIPE_WEBHOOK_SECRET_FILE` | A file with the endpoint secret (`whsec_…`) | required for billing |
+| `APASSY_CONNECT_SITE_URL` | The https origin of the done, cancel, and join pages, without a path | `https://apassy.wyderka.cc` |
+| `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that checkouts expect | 100, 1000 |
+| `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment (1 to 60) | 14 |
+| `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end (1 to 365) | 30 |
+| `APASSY_CONNECT_DELETE_DAYS` | Days from the end to the deletion of the stores (above the read-only days, at most 730) | 90 |
+
+`BillingConfig::from_lookup` reads the last five; `stripe::read_secret_key_file` and `read_webhook_secret_file` the files.
+
+### 34.8 The edge Worker
+
+`POST /v1/stripe/webhook` (exactly) has its own cap of 256 KiB (`MAX_STRIPE_WEBHOOK_LENGTH`), needs `Content-Length` (chunked is `400`), and has no per-address limiter: Stripe sends every event from a few shared addresses, and the signature is the relay's check. The Worker forwards the body bytes and `Stripe-Signature` unchanged. `POST /v1/account` has `ACCOUNT_LIMITER` (namespace 1006, 5 a minute), keyed by the IPv4 address or the IPv6 /64.
+
+### 34.9 Tests
+
+`tests/server_billing.rs` runs the handlers against `tests/common/fake_stripe.rs` (an in-process server on a free loopback port that records calls and replays idempotent POSTs) and `MemoryBillingStore`, with the fixtures of `tests/fixtures/connect-billing-v1/` of the core. `tests/connect_billing_sandbox.rs` is the test-clock flow against the Stripe sandbox, ignored unless `STRIPE_SANDBOX_KEY_FILE` is set, run only by `.github/workflows/connect-sandbox.yml` (manual).
