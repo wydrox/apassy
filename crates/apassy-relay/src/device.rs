@@ -36,30 +36,47 @@ pub const CONNECT_DOMAIN: &str = "apassy-relay connect v1";
 pub const ACCOUNT_DOMAIN: &str = "apassy-connect account v1";
 pub const ACCOUNT_SIGN_IN_DOMAIN: &str = "apassy-connect sign-in v1";
 pub const ACCOUNT_JOIN_DOMAIN: &str = "apassy-connect join v1";
+pub const ACCOUNT_JOIN_CANCEL_DOMAIN: &str = "apassy-connect join-cancel v1";
+/// The device statement: a device of the account vouches for the key it adds.
+pub const ACCOUNT_DEVICE_DOMAIN: &str = "apassy-connect device v1";
 pub const ACCOUNT_RECOVER_DOMAIN: &str = "apassy-connect recover v1";
 /// The bouncer brain's sign-in (plan 0035 A). Connect never accepts it.
 pub const BRAIN_SIGN_IN_DOMAIN: &str = "apassy-bouncer sign-in v1";
 /// The hashes of Connect that are not signatures (section 5).
 pub const ACCOUNT_LINK_DOMAIN: &str = "apassy-connect link v1";
 pub const ACCOUNT_SAFETY_DOMAIN: &str = "apassy-connect safety v1";
-pub const ACCOUNT_RECOVERY_DOMAIN: &str = "apassy-connect recovery v1";
+pub const ACCOUNT_LINK_KEYS_DOMAIN: &str = "apassy-connect link-keys v1";
+pub const ACCOUNT_RECOVERY_KEY_DOMAIN: &str = "apassy-connect recovery key v1";
+/// The length of an Ed25519 public key (the recovery key) and of its signature.
+pub const RECOVERY_KEY_BYTES: usize = 32;
+pub const RECOVERY_SIGNATURE_BYTES: usize = 64;
 
 /// The parts joined with one `0x00` byte, no trailing `0x00`.
-fn joined(parts: &[&str]) -> Vec<u8> {
+fn joined_bytes(parts: &[&[u8]]) -> Vec<u8> {
     let mut message = Vec::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
     for (index, part) in parts.iter().enumerate() {
         if index > 0 {
             message.push(0);
         }
-        message.extend_from_slice(part.as_bytes());
+        message.extend_from_slice(part);
     }
     message
 }
 
-/// `"apassy-connect account v1" 0x00 origin 0x00 public_key_b64`: the proof of key of
-/// `POST /v1/account`.
-pub fn account_message(origin: &str, public_key_b64: &str) -> Vec<u8> {
-    joined(&[ACCOUNT_DOMAIN, origin.trim_end_matches('/'), public_key_b64])
+fn joined(parts: &[&str]) -> Vec<u8> {
+    let parts: Vec<&[u8]> = parts.iter().map(|part| part.as_bytes()).collect();
+    joined_bytes(&parts)
+}
+
+/// `"apassy-connect account v1" 0x00 origin 0x00 public_key_b64 0x00 recovery_key_b64`:
+/// the proof of key of `POST /v1/account`. It binds the recovery key of the new account.
+pub fn account_message(origin: &str, public_key_b64: &str, recovery_key_b64: &str) -> Vec<u8> {
+    joined(&[
+        ACCOUNT_DOMAIN,
+        origin.trim_end_matches('/'),
+        public_key_b64,
+        recovery_key_b64,
+    ])
 }
 
 /// `"apassy-connect sign-in v1" 0x00 origin 0x00 account 0x00 public_key_b64 0x00 nonce`:
@@ -96,14 +113,58 @@ pub fn account_join_message(
     ])
 }
 
-/// `"apassy-connect recover v1" 0x00 origin 0x00 account 0x00 public_key_b64`
-/// (`POST /v1/account/recover`).
-pub fn account_recover_message(origin: &str, account: &str, public_key_b64: &str) -> Vec<u8> {
+/// `"apassy-connect join-cancel v1" 0x00 origin 0x00 account 0x00 link_hash 0x00
+/// public_key_b64`: the joining device ends its own pending join
+/// (`POST /v1/account/devices/join/cancel`).
+pub fn account_join_cancel_message(
+    origin: &str,
+    account: &str,
+    link_hash: &str,
+    public_key_b64: &str,
+) -> Vec<u8> {
+    joined(&[
+        ACCOUNT_JOIN_CANCEL_DOMAIN,
+        origin.trim_end_matches('/'),
+        account,
+        link_hash,
+        public_key_b64,
+    ])
+}
+
+/// `"apassy-connect device v1" 0x00 origin 0x00 account 0x00 link_hash 0x00
+/// joining_key_b64`: the device statement that the confirming device signs
+/// (`POST /v1/account/devices/pending/{join_id}/confirm`). The statements of an account
+/// lead each of its devices back to its root key.
+pub fn account_device_message(
+    origin: &str,
+    account: &str,
+    link_hash: &str,
+    joining_key_b64: &str,
+) -> Vec<u8> {
+    joined(&[
+        ACCOUNT_DEVICE_DOMAIN,
+        origin.trim_end_matches('/'),
+        account,
+        link_hash,
+        joining_key_b64,
+    ])
+}
+
+/// `"apassy-connect recover v1" 0x00 origin 0x00 account 0x00 public_key_b64 0x00
+/// recovery_key_b64` (`POST /v1/account/recover`): signed by the new device key and by
+/// the account's current recovery key; it names the next recovery key.
+pub fn account_recover_message(
+    origin: &str,
+    account: &str,
+    public_key_b64: &str,
+    recovery_key_b64: &str,
+) -> Vec<u8> {
     joined(&[
         ACCOUNT_RECOVER_DOMAIN,
         origin.trim_end_matches('/'),
         account,
         public_key_b64,
+        recovery_key_b64,
     ])
 }
 
@@ -117,18 +178,94 @@ pub fn account_link_hash(code: &str) -> String {
     encode_b64(&hasher.finalize())
 }
 
-/// The recovery hash of a recovery code's 16 bytes: lowercase hex of
-/// SHA-256(`"apassy-connect recovery v1" 0x00 bytes`).
-pub fn account_recovery_hash(code: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(ACCOUNT_RECOVERY_DOMAIN.as_bytes());
-    hasher.update([0]);
-    hasher.update(code);
-    hasher
-        .finalize()
+/// The key fingerprint of a link code: the first 16 bytes of
+/// SHA-256(`"apassy-connect link-keys v1" 0x00 root_key 0x00 confirmer_key`), the keys as
+/// 65 raw bytes, as 32 lowercase hex characters. The code names the account's root key
+/// and the confirming device's key, so the joining device knows both before the answer.
+pub fn account_link_fingerprint(root_key: &[u8], confirmer_key: &[u8]) -> String {
+    let digest = Sha256::digest(joined_bytes(&[
+        ACCOUNT_LINK_KEYS_DOMAIN.as_bytes(),
+        root_key,
+        confirmer_key,
+    ]));
+    digest[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// The Ed25519 seed of the recovery key of a recovery code's 16 bytes:
+/// SHA-256(`"apassy-connect recovery key v1" 0x00 bytes`).
+pub fn account_recovery_seed(code: &[u8]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(
+        Sha256::digest(joined_bytes(&[
+            ACCOUNT_RECOVERY_KEY_DOMAIN.as_bytes(),
+            code,
+        ]))
+        .into(),
+    )
+}
+
+/// The recovery key of an account: the Ed25519 key pair of [`account_recovery_seed`].
+/// Connect holds its public key only; the recovery code stays with the person.
+pub struct RecoveryKey {
+    pair: ring::signature::Ed25519KeyPair,
+}
+
+impl std::fmt::Debug for RecoveryKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RecoveryKey(<redacted>)")
+    }
+}
+
+impl RecoveryKey {
+    /// The recovery key of the 16 bytes of a recovery code.
+    pub fn from_code(code: &[u8]) -> Result<Self, DeviceKeyError> {
+        let seed = account_recovery_seed(code);
+        let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(seed.as_slice())
+            .map_err(|_| DeviceKeyError)?;
+        Ok(Self { pair })
+    }
+
+    /// The 32 bytes of the public key.
+    pub fn public_key(&self) -> [u8; RECOVERY_KEY_BYTES] {
+        let mut key = [0u8; RECOVERY_KEY_BYTES];
+        key.copy_from_slice(self.pair.public_key().as_ref());
+        key
+    }
+
+    /// The public key on the wire: b64u, 43 characters.
+    pub fn public_key_b64(&self) -> String {
+        encode_b64(&self.public_key())
+    }
+
+    /// The 64-byte Ed25519 signature of `message`.
+    pub fn sign(&self, message: &[u8]) -> [u8; RECOVERY_SIGNATURE_BYTES] {
+        let mut signature = [0u8; RECOVERY_SIGNATURE_BYTES];
+        signature.copy_from_slice(self.pair.sign(message).as_ref());
+        signature
+    }
+}
+
+/// Decodes a recovery key from the wire: b64u of 32 bytes, 43 characters.
+pub fn decode_recovery_key(text: &str) -> Result<[u8; RECOVERY_KEY_BYTES], DeviceKeyError> {
+    if text.len() != 43 {
+        return Err(DeviceKeyError);
+    }
+    decode_b64(text, RECOVERY_KEY_BYTES)
+        .map_err(|_| DeviceKeyError)?
+        .try_into()
+        .map_err(|_| DeviceKeyError)
+}
+
+/// True when `signature` (64 bytes) is the Ed25519 signature of `message` by the recovery
+/// key `public_key` (32 bytes).
+pub fn verify_recovery(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    public_key.len() == RECOVERY_KEY_BYTES
+        && signature.len() == RECOVERY_SIGNATURE_BYTES
+        && ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key)
+            .verify(message, signature)
+            .is_ok()
 }
 
 /// The six safety words of an account device link (section 7.3):
@@ -489,6 +626,74 @@ mod tests {
             &connect_message("https://other.test", &key.public_key_b64()),
             &signature
         ));
+    }
+
+    #[test]
+    fn the_account_messages_have_one_form() {
+        assert_eq!(
+            account_message("https://c.test/", "PK", "RK"),
+            b"apassy-connect account v1\0https://c.test\0PK\0RK".to_vec()
+        );
+        assert_eq!(
+            account_join_cancel_message("https://c.test", "acc_a", "LH", "PK"),
+            b"apassy-connect join-cancel v1\0https://c.test\0acc_a\0LH\0PK".to_vec()
+        );
+        assert_eq!(
+            account_device_message("https://c.test/", "acc_a", "LH", "PK"),
+            b"apassy-connect device v1\0https://c.test\0acc_a\0LH\0PK".to_vec()
+        );
+        assert_eq!(
+            account_recover_message("https://c.test", "acc_a", "PK", "RK"),
+            b"apassy-connect recover v1\0https://c.test\0acc_a\0PK\0RK".to_vec()
+        );
+        // The fingerprint of a link: raw keys joined, the first 16 bytes of the hash.
+        let root: Vec<u8> = std::iter::once(4u8).chain([1u8; 64]).collect();
+        let confirmer: Vec<u8> = std::iter::once(4u8).chain([2u8; 64]).collect();
+        assert_eq!(
+            account_link_fingerprint(&root, &confirmer),
+            "586e3b37bebf6d16108a30de31e68499"
+        );
+        assert_ne!(
+            account_link_fingerprint(&confirmer, &root),
+            account_link_fingerprint(&root, &confirmer)
+        );
+    }
+
+    #[test]
+    fn a_recovery_code_makes_one_recovery_key() {
+        use crate::sync_head::hex;
+        let code: Vec<u8> = (16u8..32).collect();
+        assert_eq!(
+            hex(account_recovery_seed(&code).as_slice()),
+            "01a7c586b139da386c54e38672688a157f0c798a657c5cdc91e2b57adfb142e6"
+        );
+        let key = RecoveryKey::from_code(&code).unwrap();
+        let again = RecoveryKey::from_code(&code).unwrap();
+        assert_eq!(key.public_key(), again.public_key());
+        assert_eq!(key.public_key_b64().len(), 43);
+        assert_eq!(
+            decode_recovery_key(&key.public_key_b64()).unwrap(),
+            key.public_key()
+        );
+        assert!(decode_recovery_key(&encode_b64(&[1u8; 33])).is_err());
+        assert!(decode_recovery_key("").is_err());
+        let message = account_recover_message("https://c.test", "acc_a", "PK", "RK");
+        let signature = key.sign(&message);
+        assert!(verify_recovery(&key.public_key(), &message, &signature));
+        let other = RecoveryKey::from_code(&[0u8; 16]).unwrap();
+        assert_ne!(other.public_key(), key.public_key());
+        assert!(!verify_recovery(&other.public_key(), &message, &signature));
+        assert!(!verify_recovery(
+            &key.public_key(),
+            &account_recover_message("https://c.test", "acc_a", "PK", "R2"),
+            &signature
+        ));
+        assert!(!verify_recovery(
+            &key.public_key(),
+            &message,
+            &signature[..63]
+        ));
+        assert!(format!("{key:?}").contains("redacted"));
     }
 
     #[test]

@@ -1305,7 +1305,9 @@ pub struct AccountCreate {
     pub device_name: String,
     pub platform: Platform,
     pub public_key: String,
-    pub recovery_hash: String,
+    /// The Ed25519 public key of the recovery code (b64u, 32 bytes): only it reaches
+    /// Connect (`device::RecoveryKey`).
+    pub recovery_key: String,
     pub signature: String,
 }
 
@@ -1354,6 +1356,19 @@ pub struct AccountDevice {
     pub created_at: u64,
     /// Rounded down to the hour, or `None`.
     pub last_seen_at: Option<u64>,
+    /// The device statements from this device's key to the account's root key; empty for
+    /// a root.
+    pub chain: Vec<ChainEntry>,
+}
+
+/// One device statement of a chain: `confirmer_key` signed, over `apassy-connect device v1`
+/// with `link_hash`, the key of the entry before (the first entry: the device's own key).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainEntry {
+    pub link_hash: String,
+    pub confirmer_key: String,
+    /// b64u of the DER signature.
+    pub statement: String,
 }
 
 /// The plan of an account (connect-billing-v1 section 8). Billing (C2) fills it; without
@@ -1468,6 +1483,9 @@ pub struct AccountPendingJoin {
 #[serde(deny_unknown_fields)]
 pub struct AccountConfirm {
     pub public_key: String,
+    /// The device statement: b64u of the caller's DER signature over the
+    /// `apassy-connect device v1` message of the join's link and this key.
+    pub statement: String,
 }
 
 /// `POST /v1/account/devices/join`.
@@ -1488,6 +1506,8 @@ pub struct AccountConfirmer {
     pub device_id: String,
     pub name: String,
     pub public_key: String,
+    /// The confirming device's chain to the account's root key.
+    pub chain: Vec<ChainEntry>,
 }
 
 /// `POST /v1/account/devices/join` answer.
@@ -1506,6 +1526,8 @@ pub struct AccountJoinCancel {
     pub account_id: String,
     pub link_hash: String,
     pub public_key: String,
+    /// The joining key's signature over `apassy-connect join-cancel v1`.
+    pub signature: String,
 }
 
 /// `{"join_id": …}`: a refusal or a cancel.
@@ -1553,6 +1575,9 @@ pub struct VaultStoreView {
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceAdd {
     pub device_id: String,
+    /// The key of that device as the caller verified it: the device is added only when
+    /// it is this key.
+    pub public_key: String,
 }
 
 /// `DELETE /v1/account/vaults/{team_id}` answer.
@@ -1561,18 +1586,20 @@ pub struct VaultStoreDeleted {
     pub team_id: TeamId,
 }
 
-/// `POST /v1/account/recover`. `recovery` is a secret: it is compared as a hash and
-/// never kept.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// `POST /v1/account/recover`. The recovery code never travels: the account's recovery
+/// key signs the request (`recovery_signature`), and `recovery_key` is the next one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountRecover {
     pub account_id: String,
-    pub recovery: SecretString,
     pub device_name: String,
     pub platform: Platform,
     pub public_key: String,
-    pub recovery_hash: String,
+    pub recovery_key: String,
+    /// The new device key's DER signature over the recover message.
     pub signature: String,
+    /// The current recovery key's Ed25519 signature (64 bytes, b64u) over the same message.
+    pub recovery_signature: String,
 }
 
 /// `POST /v1/account/recover` answer.

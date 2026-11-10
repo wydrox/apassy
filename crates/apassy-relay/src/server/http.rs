@@ -1224,6 +1224,11 @@ pub fn maintain(hub: &Hub, now: u64) {
             );
         }
     }
+    // Connect accounts: the removals that wait for a vault store, old links, and old
+    // account audit rows (docs/SPEC.md section 33).
+    if hub.config.connect.accounts {
+        account::maintain(hub, now);
+    }
     // Connect billing: event ids older than 30 days, and the stores of plans at their
     // deletion day (docs/SPEC.md section 34.6), at most once an hour.
     if let Some(billing) = hub.billing.as_deref() {
@@ -1850,18 +1855,41 @@ fn respond_account(
                 return;
             }
         };
-        match account::dispatch_edge(hub, &endpoint, &body, now) {
+        // A new account and a recovery count for the client prefix that the Worker proved,
+        // as `POST /v1/connect` does; any other call, or one without the proof, has none.
+        let prefix = matches!(
+            endpoint,
+            account::AccountEndpoint::Create | account::AccountEndpoint::Recover
+        )
+        .then(|| {
+            (
+                header_value(&request, CLIENT_PREFIX_HEADER),
+                header_value(&request, CLIENT_PREFIX_MAC_HEADER),
+            )
+        });
+        let prefix = match (&prefix, hub.config.edge.secret()) {
+            (Some((prefix, mac)), Some(secret)) => {
+                connect::verified_prefix(secret.expose(), prefix.as_deref(), mac.as_deref())
+            }
+            _ => None,
+        };
+        let created = endpoint == account::AccountEndpoint::Create;
+        match account::dispatch_edge(hub, &endpoint, &body, prefix, now) {
             Ok(result) => respond_ok(request, result),
-            Err(error) if error.code == codes::RATE_LIMITED => respond_json_with(
-                request,
-                error.status(),
-                &error.to_envelope(),
-                false,
-                Header::from_bytes(&b"Retry-After"[..], b"3600")
-                    .ok()
-                    .into_iter()
-                    .collect(),
-            ),
+            Err(error)
+                if error.code == codes::RATE_LIMITED || (created && error.code == codes::BUSY) =>
+            {
+                respond_json_with(
+                    request,
+                    error.status(),
+                    &error.to_envelope(),
+                    false,
+                    Header::from_bytes(&b"Retry-After"[..], b"3600")
+                        .ok()
+                        .into_iter()
+                        .collect(),
+                )
+            }
             Err(error) => respond_error(request, &error),
         }
         return;

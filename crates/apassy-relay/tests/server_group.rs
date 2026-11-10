@@ -12,7 +12,7 @@ mod fake_stripe;
 #[path = "common/relay.rs"]
 mod relay;
 
-use connect::{Connect, Dev, invite_code, start};
+use connect::{Connect, Dev, invite_code, start, store_add_body};
 use serde_json::{Value, json};
 
 const VAULT: &str = "0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77";
@@ -363,7 +363,7 @@ fn a_removed_member_keeps_a_free_account_and_leaves_the_shared_stores() {
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
         Some(&owner.token),
-        Some(&json!({"device_id": anna.id})),
+        Some(&store_add_body(&anna)),
     );
     assert_eq!(added["account_id"], anna.account.as_str());
     let listed = c.ok("GET", "/v1/account/vaults", Some(&anna.token), None);
@@ -403,7 +403,7 @@ fn a_removed_member_keeps_a_free_account_and_leaves_the_shared_stores() {
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
         Some(&owner.token),
-        Some(&json!({"device_id": anna.id})),
+        Some(&store_add_body(&anna)),
         403,
         "not_in_group",
     );
@@ -436,7 +436,7 @@ fn a_members_device_joins_a_shared_store_and_a_strangers_does_not() {
             "POST",
             &path,
             Some(&owner.token),
-            Some(&json!({"device_id": outsider.id})),
+            Some(&store_add_body(outsider)),
             403,
             "not_in_group",
         );
@@ -445,7 +445,7 @@ fn a_members_device_joins_a_shared_store_and_a_strangers_does_not() {
         "POST",
         &path,
         Some(&owner.token),
-        Some(&json!({"device_id": anna.id})),
+        Some(&store_add_body(&anna)),
     );
     assert_eq!(added["store_device_id"], 2);
     // The member's device, now in the store, may add the owner's other devices; a stranger
@@ -454,7 +454,7 @@ fn a_members_device_joins_a_shared_store_and_a_strangers_does_not() {
         "POST",
         &path,
         Some(&stranger.token),
-        Some(&json!({"device_id": stranger.id})),
+        Some(&store_add_body(&stranger)),
         403,
         "forbidden",
     );
@@ -589,4 +589,94 @@ fn an_owner_with_confirmed_members_cannot_delete_the_account() {
     assert_eq!(c.stripe.calls_to("DELETE", &cancel).len(), 1);
     assert!(c.rows("SELECT id FROM \"group\"").is_empty());
     assert!(c.rows("SELECT account_id FROM group_member").is_empty());
+}
+
+/// A removed member leaves every shared store, also when one store file refuses the write:
+/// the removal goes on to the next store, the member is out of both at once (no relay-sync
+/// sign-in), and the refused store gets the revoke at the next maintenance pass.
+#[test]
+fn a_member_removal_goes_on_past_a_store_that_refuses_the_write() {
+    use apassy_relay::ids::TeamId;
+    use apassy_relay::server::store::db;
+    let c = start();
+    let owner = family(&c, 4);
+    let anna = c.account("Anna");
+    c.add_member(&owner, &anna);
+    let mut stores = Vec::new();
+    for vault in [VAULT, "1f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77"] {
+        let team = c.ok(
+            "POST",
+            "/v1/account/vaults",
+            Some(&owner.token),
+            Some(&json!({"vault_id": vault, "name": "Family"})),
+        )["team_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        c.ok(
+            "POST",
+            &format!("/v1/account/vaults/{team}/devices"),
+            Some(&owner.token),
+            Some(&store_add_body(&anna)),
+        );
+        stores.push(TeamId::parse(&team).unwrap());
+    }
+    let hub = c.relay.hub();
+    let query_only = |team: &TeamId, on: bool| {
+        let sql = if on {
+            "PRAGMA query_only = 1;"
+        } else {
+            "PRAGMA query_only = 0;"
+        };
+        hub.team(team)
+            .unwrap()
+            .store
+            .with(|conn| conn.execute_batch(sql).map_err(db))
+            .unwrap();
+    };
+    let revoked = |team: &TeamId| -> bool {
+        hub.team(team)
+            .unwrap()
+            .store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT revoked_at IS NOT NULL FROM device WHERE name = ?1",
+                    [anna.id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(db)
+            })
+            .unwrap()
+    };
+    query_only(&stores[0], true);
+    let removed = remove(&c, &owner, &anna);
+    assert_eq!(removed.0, 200, "{}", removed.1);
+    assert_eq!(removed.1["result"]["removed_from_stores"], 2);
+    assert!(!revoked(&stores[0]));
+    assert!(revoked(&stores[1]));
+    assert_eq!(
+        c.rows("SELECT team_id FROM account_store_removal"),
+        [stores[0].to_string()]
+    );
+    // Out of both at once: the relay-sync sign-in of each store refuses the device (a
+    // challenge writes to its store, so the first one takes writes again for it).
+    query_only(&stores[0], false);
+    for team in &stores {
+        let (status, _) = c.call(
+            "POST",
+            "/v1/auth/challenge",
+            None,
+            Some(&json!({"team_id": team, "public_key": anna.key.public_key_b64()})),
+        );
+        assert_eq!(status, 401, "{team}");
+    }
+    apassy_relay::server::http::maintain(
+        &hub,
+        connect::now() + apassy_relay::server::hub::STORE_REMOVAL_MAX_WAIT_SECS,
+    );
+    assert!(revoked(&stores[0]));
+    assert!(
+        c.rows("SELECT team_id FROM account_store_removal")
+            .is_empty()
+    );
 }

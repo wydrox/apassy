@@ -742,9 +742,15 @@ fn leave_group_stores(hub: &Hub, account: &str, others: &[String], now: u64) -> 
             continue;
         }
         if let Some(team) = TeamId::parse(&team) {
-            hub.remove_store_device(&team, &device, to_u(store_device), now)?;
-            if theirs {
-                left += 1;
+            // One store that fails does not keep the others: each removal is done now or
+            // waits for its store (`Hub::remove_store_device`).
+            match hub.remove_store_device(&team, &device, to_u(store_device), now) {
+                Ok(()) if theirs => left += 1,
+                Ok(()) => {}
+                Err(error) => eprintln!(
+                    "apassy-relay: a device could not leave vault store {team}: {}",
+                    error.message
+                ),
             }
         }
     }

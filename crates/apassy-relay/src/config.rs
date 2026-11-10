@@ -22,7 +22,10 @@
 //! | `APASSY_RELAY_CONNECT_LONG_POLLS` | Long polls that all Connect teams hold at once, 0 to 1024; a poll over it answers at once; `0`: every Connect poll answers at once | `96` |
 //! | `APASSY_RELAY_CONNECT_ACCOUNTS` | `1`: the routes of Apassy Connect accounts (connect-account-v1) on this relay, beside every other route (the transition); `0`: every account route is 404 `not_found` | `0` |
 //! | `APASSY_RELAY_MODE` | `relay` (every route of the relay), or `connect`: Apassy Connect only (ADR 0037 stage 7). In `connect` mode the master key is refused (`APASSY_RELAY_KEY` and `_FILE` must not be set), `relay.db` and the vault stores are plain SQLite files (`Store::open_plain`), shared team vaults are off, and the account routes are on | `relay` |
-//! | `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 signing key of the entitlement token: a PKCS#8 file (DER or PEM). Without it `GET /v1/account/entitlement` is 503 `busy` for an entitled account and the well-known document lists no key | none |
+//! | `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 signing key of the entitlement token: a PKCS#8 file (DER or PEM). Without it `GET /v1/account/entitlement` is 503 `busy` for an entitled account and the well-known document lists no key. A key that this relay did not have before signs one hour after its first start (it is published first), unless it is the relay's first key | none |
+//! | `APASSY_CONNECT_PUBLISHED_KEYS_FILE` | More Ed25519 public keys for the well-known document, a JSON file `{"keys":[{"kid","public_key"}]}` (`kid` is `entitlement::key_id` of the key): the next signing key before a rotation, the previous one for a day after it. The signing key and these are the only published keys | none |
+//! | `APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY` | New Connect accounts (`POST /v1/account`) of the whole relay in 24 hours, 0 to 100000; over it 503 `busy`; `0`: no new account | `1000` |
+//! | `APASSY_RELAY_CONNECT_ACCOUNTS_MAX` | Connect accounts the relay holds, 0 to 10000000; at it `POST /v1/account` is 503 `busy` | `100000` |
 //! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
 //! | `STRIPE_SECRET_KEY_FILE` | With the account routes on: a file with the restricted Stripe key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox; `sk_live_…` is refused). Set it and the next one together, or neither: without them the billing routes answer 503 `busy` and no account has a plan | none |
 //! | `STRIPE_WEBHOOK_SECRET_FILE` | A file with the signing secret of the Stripe webhook endpoint (`whsec_…`) | none |
@@ -106,6 +109,15 @@ pub const DEFAULT_CONNECT_SITE_URL: &str = "https://apassy.wyderka.cc";
 pub const DEFAULT_CONNECT_NODE_ZONE: &str = "node.apassy.wyderka.cc";
 /// The largest signing key file of `APASSY_CONNECT_SIGNING_KEY_FILE`.
 const MAX_SIGNING_KEY_FILE_BYTES: u64 = 4096;
+/// The largest file of `APASSY_CONNECT_PUBLISHED_KEYS_FILE`, and its most keys.
+const MAX_PUBLISHED_KEYS_FILE_BYTES: u64 = 16_384;
+pub const MAX_PUBLISHED_KEYS: usize = 8;
+/// New Connect accounts of the whole relay in 24 hours (`APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY`).
+pub const DEFAULT_CONNECT_ACCOUNTS_PER_DAY: u64 = 1000;
+pub const MAX_CONNECT_ACCOUNTS_PER_DAY: u64 = 100_000;
+/// Connect accounts the relay holds at once (`APASSY_RELAY_CONNECT_ACCOUNTS_MAX`).
+pub const DEFAULT_CONNECT_ACCOUNTS_MAX: u64 = 100_000;
+pub const MAX_CONNECT_ACCOUNTS_MAX: u64 = 10_000_000;
 /// The directory of the relay in the data directory: the teams and their keys.
 pub const DIRECTORY_FILE: &str = "relay.db";
 /// The folder of the team files in the data directory.
@@ -360,6 +372,13 @@ pub struct ConnectConfig {
     pub accounts: bool,
     /// The signing key of the entitlement token (`APASSY_CONNECT_SIGNING_KEY_FILE`).
     pub signing_key: Option<ConnectSigningKey>,
+    /// The other published keys of the well-known document
+    /// (`APASSY_CONNECT_PUBLISHED_KEYS_FILE`): the next key and the previous one.
+    pub published_keys: Vec<crate::server::entitlement::PublishedKey>,
+    /// New accounts of the relay in 24 hours (`APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY`).
+    pub accounts_per_day: u64,
+    /// Accounts the relay holds at once (`APASSY_RELAY_CONNECT_ACCOUNTS_MAX`).
+    pub accounts_max: u64,
     /// The site origin (`APASSY_CONNECT_SITE_URL`), for billing and groups.
     pub site_url: String,
     /// Stripe billing (`STRIPE_SECRET_KEY_FILE`, `STRIPE_WEBHOOK_SECRET_FILE`), or `None`:
@@ -428,6 +447,9 @@ impl Default for ConnectConfig {
             mode: RelayMode::Relay,
             accounts: false,
             signing_key: None,
+            published_keys: Vec::new(),
+            accounts_per_day: DEFAULT_CONNECT_ACCOUNTS_PER_DAY,
+            accounts_max: DEFAULT_CONNECT_ACCOUNTS_MAX,
             site_url: DEFAULT_CONNECT_SITE_URL.to_string(),
             billing: None,
             tunnel: TunnelSettings::default(),
@@ -505,6 +527,38 @@ fn connect_from(
             Some(ConnectSigningKey::from_file_bytes(&bytes)?)
         }
     };
+    let published_keys = match lookup("APASSY_CONNECT_PUBLISHED_KEYS_FILE") {
+        None => Vec::new(),
+        Some(path) => {
+            let unreadable =
+                || RelayError::invalid("APASSY_CONNECT_PUBLISHED_KEYS_FILE cannot be read.");
+            let file = std::fs::File::open(path.trim()).map_err(|_| unreadable())?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(file, MAX_PUBLISHED_KEYS_FILE_BYTES + 1),
+                &mut bytes,
+            )
+            .map_err(|_| unreadable())?;
+            if bytes.len() as u64 > MAX_PUBLISHED_KEYS_FILE_BYTES {
+                return Err(unreadable());
+            }
+            published_keys_from(&bytes)?
+        }
+    };
+    let accounts_per_day = number(
+        lookup,
+        "APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY",
+        DEFAULT_CONNECT_ACCOUNTS_PER_DAY,
+        0,
+        MAX_CONNECT_ACCOUNTS_PER_DAY,
+    )?;
+    let accounts_max = number(
+        lookup,
+        "APASSY_RELAY_CONNECT_ACCOUNTS_MAX",
+        DEFAULT_CONNECT_ACCOUNTS_MAX,
+        0,
+        MAX_CONNECT_ACCOUNTS_MAX,
+    )?;
     let site_url = match lookup("APASSY_CONNECT_SITE_URL") {
         None => DEFAULT_CONNECT_SITE_URL.to_string(),
         Some(text) => {
@@ -523,10 +577,62 @@ fn connect_from(
         mode,
         accounts,
         signing_key,
+        published_keys,
+        accounts_per_day,
+        accounts_max,
         site_url,
         billing,
         tunnel,
     })
+}
+
+/// The keys of `APASSY_CONNECT_PUBLISHED_KEYS_FILE`: `{"keys":[{"kid","public_key"}]}`,
+/// at most `MAX_PUBLISHED_KEYS`, each an Ed25519 public key (b64u, 32 bytes) named by its
+/// own `entitlement::key_id`, no kid twice.
+pub fn published_keys_from(
+    bytes: &[u8],
+) -> RelayResult<Vec<crate::server::entitlement::PublishedKey>> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct File {
+        keys: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        kid: String,
+        public_key: String,
+    }
+    let invalid = |why: &str| {
+        RelayError::invalid(format!(
+            "APASSY_CONNECT_PUBLISHED_KEYS_FILE is not valid: {why}"
+        ))
+    };
+    let file: File = serde_json::from_slice(bytes)
+        .map_err(|_| invalid("it is JSON {\"keys\":[{\"kid\",\"public_key\"}]}."))?;
+    if file.keys.len() > MAX_PUBLISHED_KEYS {
+        return Err(invalid("it has more than 8 keys."));
+    }
+    let mut keys: Vec<crate::server::entitlement::PublishedKey> = Vec::new();
+    for entry in file.keys {
+        let text = entry.public_key.trim();
+        let public_key: [u8; 32] = crate::hostkeys::decode_b64(text, 32)
+            .ok()
+            .filter(|_| text.len() == 43)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| invalid("a public key is not b64u of 32 bytes."))?;
+        if entry.kid != crate::server::entitlement::key_id(&public_key) {
+            return Err(invalid("a kid is not the key id of its public key."));
+        }
+        if keys.iter().any(|key| key.kid == entry.kid) {
+            return Err(invalid("a kid is there twice."));
+        }
+        keys.push(crate::server::entitlement::PublishedKey {
+            kid: entry.kid,
+            public_key,
+        });
+    }
+    Ok(keys)
 }
 
 /// The settings of the Connect tunnel (connect-tunnel-v1 sections 7 and 8). Only a relay
@@ -1540,6 +1646,96 @@ mod tests {
         assert!(with("1000001").is_err());
         assert!(with("-1").is_err());
         assert!(with("lots").is_err());
+    }
+
+    #[test]
+    fn connect_accounts_per_day_is_0_to_100000_and_max_0_to_10000000() {
+        let with = |name: &str, value: &str| {
+            RelayConfig::from_lookup(lookup(&[
+                ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+                ("APASSY_RELAY_EDGE_SECRET", EDGE),
+                ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+                (name, value),
+            ]))
+            .map(|config| (config.connect.accounts_per_day, config.connect.accounts_max))
+        };
+        let defaults = with("APASSY_RELAY_SESSION_TTL", "900").unwrap();
+        assert_eq!(
+            defaults,
+            (
+                DEFAULT_CONNECT_ACCOUNTS_PER_DAY,
+                DEFAULT_CONNECT_ACCOUNTS_MAX
+            )
+        );
+        assert_eq!(defaults, (1000, 100_000));
+        let per_day = "APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY";
+        assert_eq!(with(per_day, "0").unwrap().0, 0);
+        assert_eq!(with(per_day, "100000").unwrap().0, 100_000);
+        assert!(with(per_day, "100001").is_err());
+        assert!(with(per_day, "-1").is_err());
+        assert!(with(per_day, "many").is_err());
+        let max = "APASSY_RELAY_CONNECT_ACCOUNTS_MAX";
+        assert_eq!(with(max, "0").unwrap().1, 0);
+        assert_eq!(with(max, "10000000").unwrap().1, 10_000_000);
+        assert!(with(max, "10000001").is_err());
+        assert!(with(max, "lots").is_err());
+    }
+
+    #[test]
+    fn published_keys_come_from_their_file_with_their_own_key_ids() {
+        use crate::server::entitlement::key_id;
+        let key = |byte: u8| {
+            let public = [byte; 32];
+            (key_id(&public), crate::hostkeys::encode_b64(&public))
+        };
+        let (kid_a, key_a) = key(1);
+        let (kid_b, key_b) = key(2);
+        let file = format!(
+            r#"{{"keys":[{{"kid":"{kid_a}","public_key":"{key_a}"}},{{"kid":"{kid_b}","public_key":"{key_b}"}}]}}"#
+        );
+        let keys = published_keys_from(file.as_bytes()).unwrap();
+        assert_eq!(
+            keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
+            [kid_a.as_str(), kid_b.as_str()]
+        );
+        assert_eq!(keys[1].public_key, [2u8; 32]);
+        assert!(published_keys_from(br#"{"keys":[]}"#).unwrap().is_empty());
+        for bad in [
+            "{}".to_string(),
+            "not json".to_string(),
+            format!(r#"{{"keys":[{{"kid":"ek_0000000000000000","public_key":"{key_a}"}}]}}"#),
+            format!(r#"{{"keys":[{{"kid":"{kid_a}","public_key":"AAAA"}}]}}"#),
+            format!(
+                r#"{{"keys":[{{"kid":"{kid_a}","public_key":"{key_a}"}},{{"kid":"{kid_a}","public_key":"{key_a}"}}]}}"#
+            ),
+            format!(r#"{{"keys":[{{"kid":"{kid_a}","public_key":"{key_a}","alg":"Ed25519"}}]}}"#),
+        ] {
+            assert!(published_keys_from(bad.as_bytes()).is_err(), "{bad}");
+        }
+        // From the environment: the file is read once at start.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("published.json");
+        std::fs::write(&path, &file).unwrap();
+        let config = RelayConfig::from_lookup(lookup(&[
+            ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+            ("APASSY_RELAY_EDGE_SECRET", EDGE),
+            ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+            ("APASSY_CONNECT_PUBLISHED_KEYS_FILE", path.to_str().unwrap()),
+        ]))
+        .unwrap();
+        assert_eq!(config.connect.published_keys, keys);
+        assert!(
+            RelayConfig::from_lookup(lookup(&[
+                ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+                ("APASSY_RELAY_EDGE_SECRET", EDGE),
+                ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+                (
+                    "APASSY_CONNECT_PUBLISHED_KEYS_FILE",
+                    dir.path().join("missing.json").to_str().unwrap()
+                ),
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
