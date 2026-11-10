@@ -451,7 +451,7 @@ fn the_page_of_a_remote_agent_has_four_tiles_its_runs_and_what_it_sees() {
     assert!(
         page.help
             .iter()
-            .any(|line| line.ends_with("with Touch ID."))
+            .any(|line| line.ends_with(concat!("with ", crate::touch_id!(), ".")))
     );
     assert!(
         page.help.iter().all(|line| !line.contains("9999")),

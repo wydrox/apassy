@@ -645,6 +645,53 @@ fn copy_code_asks_for_a_new_owner_check_and_the_page_never_writes_the_clipboard(
     window.assert_no_seed();
 }
 
+/// The hover of Show names this platform's owner check: Touch ID only on macOS; the
+/// passphrase or system authentication on Linux.
+#[test]
+fn the_show_hover_names_the_owner_check_of_this_platform() {
+    let hover = super::otp::show_hover();
+    assert!(
+        hover.ends_with("The code is visible for 30 seconds."),
+        "{hover}"
+    );
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            hover,
+            "Confirm with your vault passphrase or system authentication. The code is visible for 30 seconds."
+        );
+        assert!(!hover.contains("Touch ID"), "{hover}");
+    } else {
+        assert_eq!(
+            hover,
+            "Confirm with Touch ID or passphrase. The code is visible for 30 seconds."
+        );
+    }
+}
+
+/// A session that cannot clear its own copy (Linux without a display, or a Wayland
+/// compositor without data-control and no XWayland) shows Copy disabled. A click asks
+/// for no owner check and writes nothing.
+#[test]
+fn copy_code_is_disabled_when_the_session_cannot_clear_its_copy() {
+    let _session = crate::desktop::clipboard::test_session::unavailable(
+        "Clipboard copy is unavailable: synthetic session reason.",
+    );
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = app_with_login(&dir);
+    show_code(&mut app, item_id, otp::LABEL);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(window.beside(otp::LABEL, "Copy"), "{}", window.text);
+    window.click_beside(&mut app, otp::LABEL, "Copy");
+    assert!(
+        app.owner.check.is_none(),
+        "a disabled Copy asks for nothing"
+    );
+    assert_eq!(window.clipboard_writes, 0);
+    assert!(!app.owner.clipboard.is_pending());
+    window.assert_no_seed();
+}
+
 #[test]
 fn the_code_row_is_in_the_first_group_right_after_the_password() {
     let dir = TempDir::new().expect("temp dir");

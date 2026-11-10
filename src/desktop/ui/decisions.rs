@@ -2276,7 +2276,11 @@ fn draw_question(
         ui.add(
             Label::new(
                 kit::text(
-                    "The process can read these secrets. An allow needs Touch ID or the passphrase now. A notification is not an approval.",
+                    concat!(
+                        "The process can read these secrets. An allow needs ",
+                        crate::owner_check!(),
+                        " now. A notification is not an approval."
+                    ),
                     Font::Footnote,
                 )
                 .color(kit::palette().tertiary),
@@ -3081,8 +3085,11 @@ fn suggestion_bar(
     }
     let caption = match checked.as_slice() {
         [] => String::new(),
-        [one] => format!("{one} needs Touch ID or the passphrase."),
-        [first, second, ..] => format!("{first} and {second} need Touch ID or the passphrase."),
+        [one] => format!(concat!("{} needs ", crate::owner_check!(), "."), one),
+        [first, second, ..] => format!(
+            concat!("{} and {} need ", crate::owner_check!(), "."),
+            first, second
+        ),
     };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;

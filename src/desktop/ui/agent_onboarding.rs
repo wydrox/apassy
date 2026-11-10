@@ -218,9 +218,11 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
         kit::section(
             ui,
             None,
-            Some(
-                "You confirm once with Touch ID or the passphrase. Then the bouncer decides each use, and a question waits up to 5 minutes for you.",
-            ),
+            Some(concat!(
+                "You confirm once with ",
+                crate::owner_check!(),
+                ". Then the bouncer decides each use, and a question waits up to 5 minutes for you."
+            )),
             |s| {
                 let field = s.field("Name", |ui| {
                     kit::text_input(

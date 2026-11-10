@@ -19,6 +19,54 @@ because its bearer token works from the internet and the CLI session proves no
 owner at the Mac (`OwnerAction::needs_fresh_local_check`).
 
 
+## Headless owner service: `apassy owner serve` (2026-11-10)
+
+ADR [0045](../adr/0045-linux-vault-passkeys.md), Linux. Code: `src/owner/serve/`
+(service), `crates/apassy-app/src/owner.rs` (command).
+
+```
+apassy owner serve VAULT [--idle-minutes N] [--keyring]
+```
+
+- Runs in the foreground. stdin and stdout must be terminals, and prompts use
+  `/dev/tty`; a pipe, a file, `/dev/null` or a service manager is refused before the
+  vault opens (exit 1). The passphrase is typed without echo; it never comes from an
+  argument or an environment variable. `--keyring` unlocks with the Secret Service
+  item of the explicit `keyring-enable` opt-in; approvals still ask for the passphrase.
+- After the unlock it hosts the window's services with the window's code and modes:
+  the agent broker (`broker.sock`, wire v0) and the browser socket (`browser.sock`,
+  browser-v1) in the data directory (`0700`, sockets `0600`). Guarded browser requests
+  pass the same peer check as in the window (`browser::caller::peer_identity`); on Linux
+  each browser connection must also be the same user by kernel peer credentials. It does
+  not host `owner.sock`: the owner commands of this document need the window.
+- One owner process for each data directory: the window and `owner serve` hold an
+  exclusive lock on `owner.lock` there. A second one exits with "Another Apassy owner
+  process … runs". The browser host and agents find whichever runs.
+- Each request that needs the owner shows as a card with the facts of the window's card
+  (agent, credentials, command and folder; site, login and username; for passkeys the
+  origin, RP ID, account and user verification). Only a typed `approve` (`approve N` to
+  choose a passkey account; `grant`, `grant any` for an access request) followed by the
+  vault passphrase, or `approve polkit` on Linux, makes the owner proof for that one
+  action. `deny` refuses. Three wrong passphrases refuse the request. No answer is
+  reused for another request. While a card is open, another browser request gets `busy`.
+  A browser card closes at 215 s, or when the browser hangs up (`cancelled`); a run
+  closes when the broker stops waiting.
+- Supported browser commands: `status`, `show`, `logins`, `suggestions`, `fill`,
+  `update`, `save`, `create`, `fill_code`, `passkey_get`, `passkey_create`. Agent fills
+  of the browser and browser-debugging permission answer `unsupported`. Access request
+  grants use mode `ask`; "approve and remember" and project answers need the window.
+- It locks the vault and stops on `lock`, `quit`, the end of the terminal, and the
+  inactivity time: `--idle-minutes N` (1 to 1440), else the "Lock after inactivity"
+  time of `device-policy.json` (15 minutes, 1 hour, 4 hours), else 15 minutes
+  (`owner::serve::lock::lock_settings`). Only a typed line is owner input; the time
+  counts on the sleep-inclusive clock, and an active desktop idle hint postpones it.
+  With the policy "When the screen locks or the computer sleeps" it also stops at a
+  screen lock, sleep, user switch or session end (`owner::serve::lock_observer`: D-Bus
+  with the `session-bus` feature, else the clock gap after a sleep). A damaged policy
+  file gives the default time and the session rule. SIGTERM, SIGHUP and SIGINT end
+  the process at once; the kernel frees the key memory, closes the sockets and frees
+  `owner.lock`, and the next start removes the stale socket files.
+
 ## 1. Transport
 
 - A Unix socket: `owner.sock` in the data directory ([`paths::data_dir`](../../src/paths.rs)), or `APASSY_OWNER_SOCKET`. The directory has mode `0700`, the socket `0600`. There is no peer-credential check.

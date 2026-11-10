@@ -448,9 +448,11 @@ pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
     kit::section(
         ui,
         None,
-        Some(
-            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder. Touch ID unlock stays off for the restored file.",
-        ),
+        Some(if cfg!(target_os = "linux") {
+            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder."
+        } else {
+            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder. Touch ID unlock stays off for the restored file."
+        }),
         |s| {
             let source = s.field("Backup file", |ui| {
                 files::path_input(

@@ -90,9 +90,11 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     rows::section(
         ui,
         Some("Browser extension"),
-        Some(
-            "Fills ask for Touch ID as set in Security › How often to ask. Agents never get the password.",
-        ),
+        Some(concat!(
+            "Fills ask for ",
+            crate::touch_id!(),
+            " as set in Security › How often to ask. Agents never get the password."
+        )),
         |g| {
             let (Some(bundle), Some(home)) = (&bundle, &home) else {
                 g.line_note(

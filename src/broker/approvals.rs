@@ -730,7 +730,6 @@ impl ApprovalQueue {
     /// Run a local Development correction while its exact question still waits.
     /// The caller must already hold the vault lock (vault before queue). Keep this
     /// guard through proof validation and persistence; never call UI or biometry here.
-    #[cfg(feature = "desktop")]
     pub(crate) fn with_pending_development<T>(
         &self,
         confirmed: &PendingRun,

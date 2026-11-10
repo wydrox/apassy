@@ -1570,8 +1570,12 @@ fn secret_row(
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         let toggle = mask_button(ui, revealed);
-                        if crate::desktop::clipboard::supported() && app.owner_ui.session.can_copy_field(id, name, details.revision)
-                            && rows::pill_button(ui, "Copy", &format!("Copy {label}")).on_hover_text("Confirm with Touch ID or passphrase. Clipboard clears after 30 seconds if unchanged.").clicked() {
+                        if app
+                            .owner_ui
+                            .session
+                            .can_copy_field(id, name, details.revision)
+                            && secret_copy_button(ui, label)
+                        {
                             *copy = Some(name.to_owned());
                         }
                         if !shown {
@@ -1776,7 +1780,11 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
 }
 
 /// The hover text of Copy on the Username row.
-const USERNAME_COPY_HINT: &str = "Copy the username. It is not a secret, so Apassy asks for no Touch ID and does not clear the clipboard later.";
+const USERNAME_COPY_HINT: &str = if cfg!(target_os = "linux") {
+    "Copy the username. It is not a secret, so Apassy asks for no owner check and does not clear the clipboard later."
+} else {
+    "Copy the username. It is not a secret, so Apassy asks for no Touch ID and does not clear the clipboard later."
+};
 
 /// The link of a login without a website.
 const ADD_WEBSITE: &str = "Add website…";
@@ -3049,11 +3057,19 @@ fn custom_value_row(
             let mut toggle = false;
             egui::Sides::new().show(
                 ui,
-                |ui| ui.label(kit::text(&detail.label, Font::Callout).color(kit::palette().secondary)),
+                |ui| {
+                    ui.label(
+                        kit::text(&detail.label, Font::Callout).color(kit::palette().secondary),
+                    )
+                },
                 |ui| {
                     toggle = mask_button(ui, revealed);
-                    if crate::desktop::clipboard::supported() && app.owner_ui.session.can_copy_field(id, &detail.name, details.revision)
-                        && rows::pill_button(ui, "Copy", &format!("Copy {}", detail.label)).on_hover_text("Confirm with Touch ID or passphrase. Clipboard clears after 30 seconds if unchanged.").clicked() {
+                    if app
+                        .owner_ui
+                        .session
+                        .can_copy_field(id, &detail.name, details.revision)
+                        && secret_copy_button(ui, &detail.label)
+                    {
                         *copy = Some(detail.name.clone());
                     }
                 },
@@ -3062,6 +3078,22 @@ fn custom_value_row(
             toggle
         }),
     }
+}
+
+/// "Copy" of a secret field. A session without a clipboard copy that Apassy can clear
+/// shows it disabled, with the reason.
+fn secret_copy_button(ui: &mut egui::Ui, label: &str) -> bool {
+    if !crate::desktop::clipboard::supported() {
+        ui.add_enabled(false, egui::Button::new("Copy"))
+            .on_disabled_hover_text(crate::desktop::clipboard::unsupported_note());
+        return false;
+    }
+    rows::pill_button(ui, "Copy", &format!("Copy {label}"))
+        .on_hover_text(format!(
+            "{} Clipboard clears after 30 seconds if unchanged.",
+            crate::desktop::clipboard::CONFIRM_HINT
+        ))
+        .clicked()
 }
 
 #[cfg(test)]

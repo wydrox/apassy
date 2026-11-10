@@ -29,6 +29,7 @@ impl OwnerFrequency {
             Self::FiveMinutes => "5 minutes",
             Self::FifteenMinutes => "15 minutes",
             Self::OneHour => "1 hour",
+            Self::UntilLock if cfg!(target_os = "linux") => "Until the screen locks",
             Self::UntilLock => "Until the Mac locks",
         }
     }
@@ -183,11 +184,9 @@ impl OwnerWindow {
     }
     /// Lock, sleep, session switch, quit or observer loss revoke issued proofs
     /// as well as the active window.
-    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn invalidate(&self) {
         self.invalidate_for("explicit_invalidation");
     }
-    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn invalidate_for(&self, event: &'static str) {
         tracing::info!(event, "owner window revoked");
         let mut s = self.state.lock().unwrap();
@@ -199,7 +198,6 @@ impl OwnerWindow {
         s.verified = None;
     }
     /// Start unlock atomically against a native check's original lifecycle fence.
-    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn begin_unlock(&self, expected: Option<u64>) -> Option<u64> {
         let mut s = self.state.lock().unwrap();
         let valid = expected.is_none_or(|g| g == s.generation);
@@ -246,7 +244,10 @@ impl OwnerWindow {
             "observer_unhealthy"
         } else if !matches!(
             method,
-            super::CheckMethod::TouchId | super::CheckMethod::Passphrase
+            // Polkit auth_self is Linux's local owner check (never cached by polkit).
+            super::CheckMethod::TouchId
+                | super::CheckMethod::Passphrase
+                | super::CheckMethod::Polkit
         ) {
             "nonlocal_check"
         } else {
@@ -390,6 +391,7 @@ mod tests {
         for method in [
             super::super::CheckMethod::TouchId,
             super::super::CheckMethod::Passphrase,
+            super::super::CheckMethod::Polkit,
         ] {
             let (w, c) = fixture();
             w.configure(OwnerFrequency::OneMinute);

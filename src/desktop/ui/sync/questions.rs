@@ -1536,9 +1536,11 @@ pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vaul
         kit::section(
             ui,
             None,
-            Some(
-                "Apassy saves a connection key in this encrypted vault before connecting. Then scan the pairing code on your iPhone and compare the safety words. Connecting needs Touch ID or your passphrase.",
-            ),
+            Some(concat!(
+                "Apassy saves a connection key in this encrypted vault before connecting. Then scan the pairing code on your iPhone and compare the safety words. Connecting needs ",
+                crate::owner_check!(),
+                "."
+            )),
             |s| {
                 s.field("Relay address", |ui| {
                     kit::text_input(

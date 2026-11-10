@@ -24,7 +24,7 @@ use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::browser::site::{Page, Website, is_website_field};
 use crate::browser::wire::MAX_LOGINS;
 use crate::contracts::CredentialKind;
-use crate::desktop::model::{ItemDraft, ModelError, ModelResult};
+use crate::owner::model::{ItemDraft, ModelError, ModelResult};
 use crate::owner::wire::SecretText;
 use crate::vault::{
     ItemDetails, PasskeyAssertion, PasskeyCreate, PasskeyCreated, PasskeyError, PasskeyInfo, Vault,
@@ -929,7 +929,7 @@ fn system_login(vault: &Vault, id: u64) -> ModelResult<Option<SystemLogin>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desktop::model::DetailDraft;
+    use crate::owner::model::DetailDraft;
 
     #[test]
     fn browser_matching_canonicalizes_idn_and_refuses_imported_public_suffixes() {

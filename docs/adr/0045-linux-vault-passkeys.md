@@ -8,6 +8,15 @@ and egui owner UI. Ubuntu and Debian are the first supported distributions.
 This extends ADR 0041: Chrome stable and Chromium native messaging are enabled.
 A passphrase must remain sufficient without a session bus, screen lock, biometric
 reader, or desktop. Headless owner operations require an interactive terminal.
+`apassy owner serve` hosts the browser and agent services without a desktop, and
+approves each request only with a typed answer and the passphrase (or polkit) in that
+terminal. It locks after `--idle-minutes`, else the device policy's "Lock after
+inactivity" time, else 15 minutes, counted on the sleep-inclusive clock; the policy
+"When the screen locks or the computer sleeps" also ends it at screen lock, sleep,
+user switch and session end. SIGTERM, SIGHUP and SIGINT keep their default action:
+the process ends at once, the key leaves with its memory, the sockets close and
+waiting requests fail. There is no handler, because the crate forbids `unsafe` and
+no new dependency is added.
 
 ## Security boundary
 
@@ -25,13 +34,34 @@ and compromised same-user processes remain outside this boundary. Reject unknown
 browsers, stale processes, mismatched users and writable browser binaries.
 This is defense in depth, not an equivalent to macOS signing. Preserve origin,
 RP ID, challenge, approval and user-verification checks in the shared flow.
+Secret and code Copy is offered only where Apassy itself owns the X11 or Wayland
+(ext/wlr data-control) clipboard, learns of foreign replacement, and clears only
+its own copy by replacing it with an empty one; other sessions have no Copy.
+GNOME on Wayland offers no data-control protocol, so Copy there uses the X11
+clipboard through XWayland.
 
 Passphrase unlock is the default. Optional Secret Service storage requires explicit
 opt-in explaining that other same-user clients can retrieve an unlocked keyring
 item. Never silently store a passphrase, log it, or pass it on a command line.
 Optional polkit auth_self presence may use system PAM/fprintd; unavailable or
 cancelled authentication must not count as success. Passphrase confirmation is
-always available. Presence approval remains bound to the pending operation.
+always available. Two rules apply, as on macOS. Approval binding: an approval of an
+agent run or a browser request names one pending operation (the run exactly as
+shown; the origin, RP ID, account and user verification of a passkey), and its proof
+is valid for that operation only, also when the reuse window covered it. Reuse
+window: "How often to ask" sets how long one owner check covers the owner's later
+manual actions in the desktop. A passphrase or a polkit check opens it, as Touch ID
+or the passphrase does on macOS, but only while lock observation is available (a
+systemd-logind session or a screen saver service). It ends at screen lock, sleep,
+user switch, session end and the loss of a source; the actions that always ask on
+macOS ask again here too. Without lock observation every action asks again.
+`apassy owner serve` has no reuse window. Auto-lock follows the same signals; while
+the desktop's logind idle hint says the session is active, inactivity does not lock
+the vault, as on macOS. Both settings live in `device-policy.json` in the data
+directory (mode 0600, this user, no symlink). Another process of the same user can
+change that file; that is outside the Linux boundary above. A damaged, foreign or
+too open file gives "Every time" and "Never" in the desktop, and the default
+inactivity time with the session rule in `owner serve`.
 
 ## Delivery and verification
 

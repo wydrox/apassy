@@ -807,7 +807,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                     ui.add_enabled(enabled, egui::Button::selectable(false, label))
                                         .clicked()
                                 };
-                                if item(ui, present, "Show in Finder") {
+                                // `open -R` is macOS only: Linux has no Finder to reveal in.
+                                if cfg!(target_os = "macos") && item(ui, present, "Show in Finder")
+                                {
                                     action = Some(RowAction::Finder(entry.path.clone()));
                                 }
                                 if item(ui, true, "Rename…") {

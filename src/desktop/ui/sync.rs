@@ -1881,9 +1881,11 @@ fn new_passphrase_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vault
             kit::sheet_title(
                 ui,
                 &format!("The passphrase of “{}” changed on another Mac", entry.name),
-                Some(
-                    "Type the new passphrase. Apassy checks it with the synced copy, then uses it for the vault on this Mac too, and syncs. Touch ID unlock on this Mac then needs to be turned on again.",
-                ),
+                Some(if cfg!(target_os = "linux") {
+                    "Type the new passphrase. Apassy checks it with the synced copy, then uses it for the vault on this computer too, and syncs."
+                } else {
+                    "Type the new passphrase. Apassy checks it with the synced copy, then uses it for the vault on this Mac too, and syncs. Touch ID unlock on this Mac then needs to be turned on again."
+                }),
             );
         }
         kit::section(ui, None, None, |s| {

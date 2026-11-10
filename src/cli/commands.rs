@@ -19,8 +19,8 @@ Session commands
 
   apassy status               The vault, the broker, the session, and what waits for you.
   apassy login [--raw] [--shell sh|fish]
-                              Ask the window for a session. Confirm with Touch ID or the
-                              passphrase. Prints a shell line that sets APASSY_SESSION:
+                              Ask the window for a session and confirm it there.
+                              Prints a shell line that sets APASSY_SESSION:
                                 eval \"$(apassy login)\"
                               --raw prints only the token. A session ends after 30 idle
                               minutes, after 12 hours, at a lock, and when Apassy quits.

@@ -1219,6 +1219,7 @@ impl OwnerRequest {
             Self::RegisterSetupAgent { name } => format!("Connect {} and let it see all credential names without values? Its token goes to the command line; the bouncer decides each use.", page_text(name)),
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
             Self::BrowserDebugging { identity, scope, request_label, .. } => format!("{} asks to {}. Request: {}. Other programs can control all its profiles.", identity.description(), match scope { Some(crate::browser::bypass::BypassScope::Once) => "allow only the exact refused passkey or code request once", Some(crate::browser::bypass::BypassScope::FiveMinutes) => "allow owner passkeys and codes for 5 minutes across this instance", None => "trust this instance for agent fills with remote debugging" }, request_label),
+            Self::ChangeOwnerFrequency { new, .. } if cfg!(target_os = "linux") => format!("Change how often Apassy asks for the owner check to {} on this computer?", new.label()),
             Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac?", new.label()),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
             Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line.", if *copy { "Copy" } else { "Show" }),
@@ -1538,7 +1539,7 @@ impl OwnerRequest {
             Self::SetTokenLifetime { days } => {
                 format!("Set the token lifetime to {} days.", days.trim())
             }
-            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. Owner actions, including showing one-time codes, follow your Touch ID frequency setting.".to_owned(),
+            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. Owner actions, including showing one-time codes, follow your \"How often to ask\" setting.".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "Bind 1 credential to the environment variable below. Programs get the real value.".to_owned(),
                 count => format!(
@@ -1927,6 +1928,9 @@ pub struct OwnerFlows {
     /// `None` in tests and when the app cannot find its own executable.
     pub(crate) helper: Option<NativeHelper>,
     pub(crate) lifecycle: Option<crate::native::owner_lifecycle::OwnerLifecycle>,
+    /// Linux: screen lock, sleep and session observation (D-Bus), the counterpart of
+    /// `lifecycle`. Empty on macOS and in tests.
+    pub(crate) session: crate::desktop::session_watch::SessionWatch,
     pub(crate) frequency_read:
         Option<Task<Result<crate::broker::approvals::OwnerFrequency, String>>>,
     pub(crate) frequency_write:
@@ -2012,6 +2016,20 @@ impl DesktopApp {
             None
         };
         self.owner.helper = helper.clone();
+        // Linux: the D-Bus observer feeds the owner window and auto-lock, and the two
+        // device settings live in a private file (no helper, no keychain).
+        #[cfg(target_os = "linux")]
+        {
+            use crate::desktop::session_watch::{SessionWatch, store};
+            self.owner.session = SessionWatch::start(
+                self.owner_ui.session.owner_window.clone(),
+                self.auto_lock.source.clone(),
+                ctx.clone(),
+            );
+            self.start_auto_lock_task(ctx, store::read_auto_lock);
+            self.owner.frequency_read =
+                Some(Task::spawn(Some(ctx.clone()), store::read_owner_frequency));
+        }
         if let Some(helper) = &helper {
             self.owner.lifecycle = crate::native::owner_lifecycle::OwnerLifecycle::start(
                 helper,

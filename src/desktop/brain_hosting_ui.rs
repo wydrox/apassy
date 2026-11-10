@@ -604,7 +604,14 @@ fn consent_step(ui: &mut egui::Ui, draft: &HostingDraft, actions: &mut SheetActi
 
 /// The note under the consent: its version and the fresh check.
 pub(crate) fn consent_note() -> String {
-    format!("Consent version {HOSTING_CONSENT_VERSION}. Each change needs Touch ID.")
+    format!(
+        concat!(
+            "Consent version {}. Each change needs ",
+            crate::touch_id!(),
+            "."
+        ),
+        HOSTING_CONSENT_VERSION
+    )
 }
 
 /// The synthetic address of the tour.

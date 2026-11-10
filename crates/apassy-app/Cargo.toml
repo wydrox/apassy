@@ -32,8 +32,9 @@ eframe = { version = "=0.36.2", optional = true, default-features = false, featu
 tracing = { version = "=0.1.44", optional = true }
 
 [dev-dependencies]
-# The unit test reads the core limit that `apassy::harden` set (src/main.rs).
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "process"] }
+# The unit test reads the core limit that `apassy::harden` set (src/main.rs);
+# tests/owner_serve.rs runs `apassy owner serve` on a pseudo-terminal (`pty`).
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "process", "pty"] }
 # tests/cloud_e2e.rs: the remote agent's OAuth and MCP client (ureq, as the relay tests),
 # a TLS upstream with its own test root (rcgen, rustls), PKCE (ring), the key store in
 # memory (zeroize), and temporary directories. The pins of the workspace: all are in

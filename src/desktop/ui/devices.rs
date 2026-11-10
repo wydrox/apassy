@@ -63,7 +63,11 @@ const ROUTE_HELP: [&str; 4] = [
     "Your iPhone and Macs reach this Mac over Tailscale.",
     "Only devices on your tailnet can connect. Nothing opens to the internet.",
     "Each device still signs in with its own key.",
-    "Switching needs Touch ID. It stops when the vault locks.",
+    concat!(
+        "Switching needs ",
+        crate::touch_id!(),
+        ". It stops when the vault locks."
+    ),
 ];
 /// The help of Node Words: safety words to compare, never proof of the node (N8-7).
 const WORDS_HELP: [&str; 4] = [
@@ -126,7 +130,11 @@ pub(crate) const OLD_RELAY_ENTRY: &str = "Old entry still on Apassy relay";
 const RELAY_HELP: [&str; 4] = [
     "Questions also reach your other devices of this vault.",
     "The relay sees no command and no credential.",
-    "Turning it on needs Touch ID. Off needs none.",
+    concat!(
+        "Turning it on needs ",
+        crate::touch_id!(),
+        ". Off needs none."
+    ),
     "Relay sync of the vault does not change.",
 ];
 /// The help of the feed switch.
