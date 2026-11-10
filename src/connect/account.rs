@@ -1130,8 +1130,7 @@ impl ConnectAccount {
             .check(&action, epoch)
             .map_err(ConnectError::OwnerCheck)?;
         drop(proof);
-        let member =
-            self.with_token(|client, token| client.confirm_member(token, account_id))?;
+        let member = self.with_token(|client, token| client.confirm_member(token, account_id))?;
         if member.account_id != account_id {
             return Err(ConnectError::BadAnswer);
         }
@@ -1194,7 +1193,6 @@ impl ConnectAccount {
         Ok(answer)
     }
 }
-
 
 /// A URL that the Mac opens in the default browser: `https://`, a host, and no space or
 /// control character. Connect sends the Checkout, Portal, and invite URLs.

@@ -865,7 +865,11 @@ impl ConnectClient {
         ))
     }
 
-    pub(super) fn set_seats(&self, token: &str, quantity: u64) -> Result<SeatsAnswer, ConnectError> {
+    pub(super) fn set_seats(
+        &self,
+        token: &str,
+        quantity: u64,
+    ) -> Result<SeatsAnswer, ConnectError> {
         self.post(
             "/v1/account/group/seats",
             Some(token),
