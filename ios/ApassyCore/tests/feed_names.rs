@@ -413,9 +413,15 @@ fn a_planted_feed_with_false_names_is_refused_and_the_row_stays() {
     )));
     assert_eq!(outcome["outcome"], "stale", "{outcome}");
     assert_eq!(outcome["verified"], true);
+    // The app names its own computer by platform (src/wording.rs); CI runs this on Linux.
+    let this_computer = if cfg!(target_os = "linux") {
+        "this computer"
+    } else {
+        "this Mac"
+    };
     assert_eq!(
         outcome["reason"],
-        "the names on the iPhone did not match this Mac"
+        format!("the names on the iPhone did not match {this_computer}")
     );
     assert_eq!(mac.kinds(), rows, "the row stays");
 

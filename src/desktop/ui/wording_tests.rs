@@ -57,6 +57,8 @@ const PENDING_L5: [&str; 3] = [
 
 /// The painted texts and the AccessKit names of one screen after a few frames.
 struct Screen {
+    // Only the Linux guard names the screen, in its failure message.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     name: String,
     text: String,
 }
