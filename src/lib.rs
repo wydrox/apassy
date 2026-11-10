@@ -2,6 +2,9 @@
 //! This crate does not yet provide a secure credential vault or live agent use.
 #![forbid(unsafe_code)]
 
+/// Owner-check wording by platform (`owner_check!`, `touch_id!`).
+mod wording;
+
 pub mod agent;
 /// The browser extension (ADR 0021): wire, site match, and the native messaging host.
 pub mod browser;

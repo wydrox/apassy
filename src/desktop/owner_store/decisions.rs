@@ -482,7 +482,11 @@ impl OwnerSession {
         if !checked && answer_needs_check(&vault, correction_id, answer, chosen) {
             return Err(fail(
                 "owner_check_required",
-                "This answer makes the bouncer less careful. It needs Touch ID or the passphrase.",
+                concat!(
+                    "This answer makes the bouncer less careful. It needs ",
+                    crate::owner_check!(),
+                    "."
+                ),
             ));
         }
         vault

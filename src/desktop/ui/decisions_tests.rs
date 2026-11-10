@@ -1479,7 +1479,7 @@ fn suggestions_accept_a_stricter_value_at_once_and_a_looser_one_after_the_check(
         "Ignore",
         "Development",
         "Production",
-        "Development needs Touch ID or the passphrase.",
+        concat!("Development needs ", crate::owner_check!(), "."),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }

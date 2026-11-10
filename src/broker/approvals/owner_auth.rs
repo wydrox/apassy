@@ -750,7 +750,7 @@ impl OwnerAction {
                 "connect an agent and share the credential catalog without values".to_owned()
             }
             Self::ChangeOwnerFrequency { .. } => {
-                "change how often Apassy asks for Touch ID".to_owned()
+                concat!("change how often Apassy asks for ", crate::touch_id!()).to_owned()
             }
             Self::Reveal { .. } => "show the secret values of an item".to_owned(),
             Self::CliCode { copy, .. } => if *copy {

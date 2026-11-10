@@ -684,7 +684,10 @@ pub(super) fn choose_sheet(
                 });
             let (add, _) = choose_changes(choosing);
             if !add.is_empty() {
-                kit::note(ui, "Adding credentials asks for Touch ID.");
+                kit::note(
+                    ui,
+                    concat!("Adding credentials asks for ", crate::touch_id!(), "."),
+                );
             }
         });
         kit::sheet_buttons(

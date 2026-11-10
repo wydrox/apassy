@@ -645,6 +645,29 @@ fn copy_code_asks_for_a_new_owner_check_and_the_page_never_writes_the_clipboard(
     window.assert_no_seed();
 }
 
+/// The hover of Show names this platform's owner check: Touch ID only on macOS; the
+/// passphrase or system authentication on Linux.
+#[test]
+fn the_show_hover_names_the_owner_check_of_this_platform() {
+    let hover = super::otp::show_hover();
+    assert!(
+        hover.ends_with("The code is visible for 30 seconds."),
+        "{hover}"
+    );
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            hover,
+            "Confirm with your vault passphrase or system authentication. The code is visible for 30 seconds."
+        );
+        assert!(!hover.contains("Touch ID"), "{hover}");
+    } else {
+        assert_eq!(
+            hover,
+            "Confirm with Touch ID or passphrase. The code is visible for 30 seconds."
+        );
+    }
+}
+
 /// A session that cannot clear its own copy (Linux without a display, or a Wayland
 /// compositor without data-control and no XWayland) shows Copy disabled. A click asks
 /// for no owner check and writes nothing.
