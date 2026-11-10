@@ -1662,3 +1662,93 @@ A later start of a 1005 image moves the file to 1005 again and keeps the column.
 `relay.db` at 1005: its node does not start, and the app has no command for the way
 back. Start the app of this version again. (Releases ship all components at one
 version, so a Mac app is not downgraded on its own.)
+
+## 26. Apassy Connect accounts (directory 1006)
+
+Apassy Connect accounts (ADR 0037 stage 7, contract connect-account-v1, docs/SPEC.md
+section 33): accounts, their devices, vault stores (one relay-sync team for each vault),
+recovery, and the entitlement token. They are off unless the operator turns them on.
+
+Settings (all optional; the defaults change nothing):
+
+- `APASSY_RELAY_CONNECT_ACCOUNTS=1`: the account routes beside every other route (the
+  transition). Without it every account route is 404.
+- `APASSY_CONNECT_SIGNING_KEY_FILE=/run/secrets/connect_signing_key`: the Ed25519 key of
+  the entitlement token, PKCS#8 (DER or PEM). Make it once with
+  `openssl genpkey -algorithm ed25519 -out connect_signing_key.pem` on a machine of the
+  owner, keep a copy with the other secrets, and mount it read-only like the master key.
+  The well-known document `/.well-known/apassy-connect.json` publishes its public key and
+  its id (`ek_` and 16 hex characters of the key's SHA-256).
+- `APASSY_CONNECT_SITE_URL`: the site of the Stripe return pages (default
+  `https://apassy.wyderka.cc`).
+- `APASSY_RELAY_MODE=connect` is the cutover of R3 (unit C5), not this step: it refuses a
+  master key (`APASSY_RELAY_KEY` and `_FILE` must be unset) and keeps `relay.db` and the
+  vault stores as plain files. Do not set it on the running relay before the cutover.
+
+What changes at the first start of this version:
+
+- `relay.db` moves from 1005 to 1006 in one transaction: the table `team` is rebuilt with
+  the same rows (the new kind `account` and the columns `account_id`, `vault_id`), and
+  the tables of stage 7 are made, empty (accounts, devices, links, joins, the store map,
+  the brain events, groups, Stripe, the tunnel, the entitlement keys). A failure leaves
+  the file at 1005 and stops the start. The image before (directory 1005) refuses a 1006
+  file.
+- No team file changes. A vault store, when an account makes one, is a new team file of
+  the usual schema.
+- The new command `apassy-relay downgrade-directory-1005` (26.3).
+
+Nothing in the new tables is secret: public keys, names, ids, hashes, and Stripe ids.
+Account tokens live in memory only (15 minutes; a restart ends them and the devices sign
+in again), and link codes and recovery codes never reach the relay.
+
+### 26.1 What to watch
+
+- The relay log at the start: no error about `relay.db`.
+- `admin teams`: vault stores appear with `"kind": "account"`; they do not count for
+  `APASSY_RELAY_CONNECT_TEAMS_MAX` and `connect-sweep` never touches them.
+- Relay audit rows: `account_created`, `account_device_added`, `account_device_revoked`,
+  `account_join_requested`, `account_join_refused`, `account_link_created`,
+  `account_recovered`, `account_deleted`, `vault_store_created`, `vault_store_deleted`
+  (actor `account:<account id>`, ids only), and `auth_failed` refusals of kind
+  `account_token`. A run of `account_recovered` for one account, or many 429 answers of
+  `POST /v1/account/recover`, is someone guessing a recovery code: the relay allows five
+  tries for each account an hour.
+- `brain_event` rows queue the I-4 events for the bouncer brain; nothing sends them yet
+  (a later unit). They are small; leave them.
+
+### 26.2 Owner steps for the deploy
+
+Use the release runbook at the top of this document. Before the deploy take a backup
+(`admin backup`, section 13): it holds `relay.db` at 1005. To turn the accounts on, add
+`APASSY_RELAY_CONNECT_ACCOUNTS=1` and the signing key file to the compose file in a
+separate step after the image runs; until then the deploy changes only the directory
+version.
+
+### 26.3 Rollback of directory 1006
+
+**In place (preferred).** With the relay stopped, before any team downgrade of 25.2:
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay downgrade-directory-1005
+```
+
+It takes `relay.lock`. In one transaction it deletes the vault store rows (kind
+`account`) and their device map and sets the version to 1005; then it deletes the files
+of those stores (the snapshots of the accounts' vaults: each Mac pushes its vault again
+after the next upgrade). It prints `{"from": 1006, "to": 1005, "vault_stores_deleted":
+<n>}`; a 1005 file is left as it is (`{"from": 1005, "to": 1005, ...}`). Any other version
+exits 1 and changes nothing. The accounts, their devices, and every other new table stay:
+the 1005 image never reads them, and the next start of a 1006 image keeps them, so the
+accounts and their devices work again after the upgrade. To go further back, run
+`downgrade-directory-1004` or `downgrade-directory-1003` instead: they take a 1006 file
+down with the same step first. Then select the old image in `compose.yaml` and
+`docker compose up -d --wait`.
+
+**From the backup.** Restore `relay.db` from the backup of 26.2 with the relay stopped,
+and delete `teams/<id>.db` and `teams/<id>.sync/` of every vault store (`admin teams`
+before the stop lists them with `"kind": "account"`; the 1005 image removes a team file
+without a row at its start anyway). Every account made since the backup is gone. Use it
+only when the in-place way fails.
+
+A later start of a 1006 image moves the file to 1006 again.
