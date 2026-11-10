@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Apassy
+Comment=Encrypted credential vault
+Exec=/usr/bin/apassy
+Terminal=false
+Categories=Utility;Security;
+StartupNotify=true

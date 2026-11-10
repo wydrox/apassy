@@ -86,7 +86,7 @@ ask() {
 check_mac() {
   step "Check this Mac"
   if [ "$(uname -s)" != "Darwin" ]; then
-    fail "this installer is for macOS. Apassy builds on Linux, but its app for Linux is not published yet: the isolation of agents uses macOS Seatbelt. See $REPO_URL#install."
+    fail "this source installer is for macOS. For Linux node downloads use the relay install.sh; for Linux vault CI packages and build instructions see $REPO_URL/blob/main/docs/operations/linux-vault.md."
   fi
 
   local version major

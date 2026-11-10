@@ -3,6 +3,8 @@
 # - Linux (x86_64, aarch64): the Apassy node `apassy` and the `apassy-team` shim (which
 #   runs `apassy team`) from apassy-<version>-linux-<arch>.tar.gz. Then run `apassy up`.
 # - macOS (arm64): the team CLI apassy-team. On a Mac the node runs inside the app.
+# APASSY_COMPONENT: node (default) or vault. Vault installs the desktop, owner CLI
+#   and browser host into fixed root-owned /usr paths; requires explicit root opt-in.
 # APASSY_RELAY_URL: download origin (default: https://apassy-relay.wyderka.cc).
 #   A file:// URL can point to a local directory for tests.
 # APASSY_INSTALL_DIR: target directory (default: $HOME/.local/bin).
@@ -18,12 +20,21 @@ if [ "$(id -u)" = 0 ] && [ "${APASSY_INSTALL_AS_ROOT:-0}" != 1 ]; then
     fail 'Do not run as root. Set APASSY_INSTALL_AS_ROOT=1 to permit root.'
 fi
 
+component=${APASSY_COMPONENT:-node}
+case "$component" in node|vault) ;; *) fail 'APASSY_COMPONENT must be node or vault.' ;; esac
+if [ "$component" = vault ]; then
+    [ "$(id -u)" = 0 ] && [ "${APASSY_INSTALL_AS_ROOT:-0}" = 1 ] ||
+        fail 'Vault installation requires root and APASSY_INSTALL_AS_ROOT=1. Prefer the .deb package.'
+    [ -z "${APASSY_INSTALL_DIR:-}" ] || fail 'Vault uses fixed /usr paths; do not set APASSY_INSTALL_DIR.'
+fi
+
 system=$(uname -s)
 case "$system" in
     Darwin) os=darwin; checksum_tool=shasum ;;
     Linux) os=linux; checksum_tool=sha256sum ;;
     *) fail "The operating system is not supported: $system" ;;
 esac
+[ "$component" != vault ] || [ "$os" = linux ] || fail 'The vault package is Linux-only.'
 machine=$(uname -m)
 case "$machine" in
     arm64|aarch64) arch=arm64 ;;
@@ -97,11 +108,13 @@ if [ "$os" = linux ]; then
         arm64) node_arch=aarch64 ;;
         *) node_arch=x86_64 ;;
     esac
-    filename=$(awk -v arch="$node_arch" '
+    package_prefix=apassy
+    if [ "$component" = vault ]; then package_prefix=apassy-vault; fi
+    filename=$(awk -v arch="$node_arch" -v prefix="$package_prefix" '
         {
             name = $2
             sub(/^\*/, "", name)
-            if (name ~ ("^apassy-[0-9]+\\.[0-9]+\\.[0-9]+-linux-" arch "\\.tar\\.gz$")) {
+            if (name ~ ("^" prefix "-[0-9]+\\.[0-9]+\\.[0-9]+-linux-" arch "\\.tar\\.gz$")) {
                 count++
                 found = name
             }
@@ -110,8 +123,8 @@ if [ "$os" = linux ]; then
             if (count != 1) exit 1
             print found
         }
-    ' "$work/SHA256SUMS") || fail "SHA256SUMS has no single node package for Linux $node_arch."
-    package_version=${filename#apassy-}
+    ' "$work/SHA256SUMS") || fail "SHA256SUMS has no single requested package for Linux $node_arch."
+    package_version=${filename#"$package_prefix"-}
     package_version=${package_version%-linux-"$node_arch".tar.gz}
 else
     filename="apassy-team-$os-$arch"
@@ -138,6 +151,25 @@ else
 fi
 actual=${checksum%% *}
 [ "$actual" = "$expected" ] || fail "The SHA-256 check failed for $filename."
+
+if [ "$component" = vault ]; then
+    top=${filename%.tar.gz}
+    tar -tzf "$work/$filename" > "$work/entries" || fail "Cannot read $filename."
+    awk -v top="$top" '
+        $0 != top && $0 != top "/" && index($0, top "/") != 1 { bad = 1 }
+        $0 ~ /(^|\/)\.\.(\/|$)/ { bad = 1 }
+        END { exit bad ? 1 : 0 }
+    ' "$work/entries" || fail "$filename has entries outside its package directory."
+    tar -tvzf "$work/$filename" | awk '$1 !~ /^[-d]/ { bad = 1 } END { exit bad ? 1 : 0 }' ||
+        fail "$filename has a link or a special file."
+    mkdir "$work/unpacked"
+    tar -xzf "$work/$filename" -C "$work/unpacked" || fail "Cannot unpack $filename."
+    actual_version=$("$work/unpacked/$top/usr/bin/apassy" --version) || fail 'Vault executable cannot run.'
+    [ "$actual_version" = "apassy $package_version" ] || fail 'Vault version differs from its filename.'
+    sh "$work/unpacked/$top/install-vault.sh" || fail 'Cannot install the vault package.'
+    printf '%s\n' "$actual_version"
+    exit 0
+fi
 
 mkdir -p "$target" || fail "Cannot make the target directory: $target"
 if [ "$os" = linux ]; then

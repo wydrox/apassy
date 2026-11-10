@@ -6,7 +6,9 @@ A Linux machine on your tailnet runs the Apassy **node** without a window: the r
 
 ## Words
 
-On Linux, `apassy` is the node. On macOS, `apassy status` and `apassy doctor` are the owner commands of the app (with a "Node" section later); `apassy serve`, `up`, `pair`, and `team` are node commands on both.
+The node-only Linux package uses `apassy` for the node. The optional
+[Linux vault package](linux-vault.md) also provides the desktop and interactive
+`apassy owner` commands. On macOS, `apassy status` and `apassy doctor` are the owner commands of the app (with a "Node" section later); `apassy serve`, `up`, `pair`, and `team` are node commands on both.
 
 | Command | What it does |
 | --- | --- |

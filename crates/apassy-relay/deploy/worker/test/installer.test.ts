@@ -2,7 +2,7 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,8 +23,8 @@ function fixture(t: TestContext, os = 'Darwin', arch = 'arm64', version = 'apass
   writeFileSync(join(dl,filename),blob);
   writeFileSync(join(dl,'SHA256SUMS'),`${createHash('sha256').update(blob).digest('hex')}  ${filename}\n`);
   const installed = join(target,'apassy-team'); writeFileSync(installed,'old-binary');
-  return {dir, installed, marker, run: () => execute('/bin/sh',[installer], {env:{...process.env,
-    HOME:dir, PATH:`${bin}:${process.env.PATH}`, APASSY_INSTALL_AS_ROOT:'1', APASSY_INSTALL_DIR:target, APASSY_RELAY_URL:`file://${dir}`}})};
+  return {dir, installed, marker, run: (extraEnv: Record<string, string> = {}) => execute('/bin/sh',[installer], {env:{...process.env,
+    HOME:dir, PATH:`${bin}:${process.env.PATH}`, APASSY_INSTALL_AS_ROOT:'1', APASSY_INSTALL_DIR:target, APASSY_RELAY_URL:`file://${dir}`, APASSY_COMPONENT:'node', ...extraEnv}})};
 }
 for (const [os,arch] of [['Darwin','x86_64']]) {
   test(`unsupported ${os}/${arch} fails before any download`,async t => {
@@ -94,4 +94,75 @@ test('a checksum mismatch never executes or replaces the downloaded binary', asy
   await assert.rejects(f.run(), /SHA-256 check failed/);
   assert.equal(existsSync(executed), false);
   assert.equal(readFileSync(f.installed, 'utf8'), 'old-binary');
+});
+
+// Vault mode is explicit and system-wide. Fixtures replace the packaged installer
+// with a marker script; these tests never write to the host's /usr tree.
+async function vaultFixture(t: TestContext, arch = 'x86_64', extra = false) {
+  const f = fixture(t, 'Linux', arch);
+  writeFileSync(join(f.dir, 'bin', 'id'), '#!/bin/sh\necho 0\n', {mode:0o755});
+  const nodeArch = arch === 'arm64' ? 'aarch64' : arch;
+  const top = `apassy-vault-0.5.8-linux-${nodeArch}`;
+  const tree = join(f.dir, 'vault-tree');
+  mkdirSync(join(tree, top, 'usr', 'bin'), {recursive:true});
+  writeFileSync(join(tree, top, 'usr', 'bin', 'apassy'), "#!/bin/sh\necho 'apassy 0.5.8'\n", {mode:0o755});
+  const executed = join(f.dir, 'vault-installed');
+  writeFileSync(join(tree, top, 'install-vault.sh'), `#!/bin/sh\ntouch '${executed}'\n`, {mode:0o755});
+  const names = [top];
+  if (extra) { writeFileSync(join(tree, 'outside'), 'x'); names.push('outside'); }
+  const tarball = join(f.dir, 'dl', `${top}.tar.gz`);
+  await execute('tar', ['-czf', tarball, '-C', tree, ...names], {env:{...process.env, COPYFILE_DISABLE:'1'}});
+  const blob = readFileSync(tarball);
+  writeFileSync(join(f.dir, 'dl', 'SHA256SUMS'), `${createHash('sha256').update(blob).digest('hex')}  ${top}.tar.gz\n`);
+  return {...f, executed, tarball, runVault: (extraEnv: Record<string, string> = {}) =>
+    f.run({APASSY_COMPONENT:'vault', APASSY_INSTALL_DIR:'', ...extraEnv})};
+}
+for (const arch of ['x86_64', 'arm64']) {
+  test(`vault mode explicitly selects the Linux ${arch} archive`, async t => {
+    const f = await vaultFixture(t, arch);
+    const output = await f.runVault();
+    assert.match(output.stdout, /apassy 0\.5\.8/);
+    assert.equal(existsSync(f.executed), true);
+    assert.equal(readFileSync(f.installed, 'utf8'), 'old-binary');
+  });
+}
+test('vault mode refuses a custom prefix before downloading', async t => {
+  const f = await vaultFixture(t);
+  await assert.rejects(f.runVault({APASSY_INSTALL_DIR:join(f.dir, 'unsafe')}), /fixed \/usr paths/);
+  assert.equal(existsSync(f.marker), false);
+  assert.equal(existsSync(f.executed), false);
+});
+test('vault mode refuses missing explicit root authorization before downloading', async t => {
+  const f = await vaultFixture(t);
+  await assert.rejects(f.runVault({APASSY_INSTALL_AS_ROOT:'0'}), /Do not run as root/);
+  assert.equal(existsSync(f.marker), false);
+  assert.equal(existsSync(f.executed), false);
+});
+test('vault checksum mismatch never executes its installer', async t => {
+  const f = await vaultFixture(t);
+  writeFileSync(f.tarball, 'tampered');
+  await assert.rejects(f.runVault(), /SHA-256 check failed/);
+  assert.equal(existsSync(f.executed), false);
+});
+test('vault tarball with an outside entry never executes its installer', async t => {
+  const f = await vaultFixture(t, 'x86_64', true);
+  await assert.rejects(f.runVault(), /entries outside/);
+  assert.equal(existsSync(f.executed), false);
+});
+test('unknown installer component is refused before downloading', async t => {
+  const f = fixture(t);
+  await assert.rejects(f.run({APASSY_COMPONENT:'unexpected'}), /must be node or vault/);
+  assert.equal(existsSync(f.marker), false);
+});
+
+test('vault archive links are refused before its installer executes', async t => {
+  const f = await vaultFixture(t);
+  const tree = join(f.dir, 'vault-tree');
+  const top = 'apassy-vault-0.5.8-linux-x86_64';
+  symlinkSync('/tmp', join(tree, top, 'unsafe-link'));
+  await execute('tar', ['-czf', f.tarball, '-C', tree, top], {env:{...process.env, COPYFILE_DISABLE:'1'}});
+  const blob = readFileSync(f.tarball);
+  writeFileSync(join(f.dir, 'dl', 'SHA256SUMS'), `${createHash('sha256').update(blob).digest('hex')}  ${top}.tar.gz\n`);
+  await assert.rejects(f.runVault(), /link or a special file/);
+  assert.equal(existsSync(f.executed), false);
 });

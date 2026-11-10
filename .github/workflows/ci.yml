@@ -388,6 +388,89 @@ jobs:
           rm target/node-dist/apassy
           packaging/linux/verify.sh --dist target/node-dist --arch x86_64
 
+  # ADR 0045: real Linux builds/packages on both native architectures. These
+  # artifacts are not published downloads; synthetic crypto/identity tests are
+  # separate from actual desktop and Chrome/Chromium runtime acceptance.
+  linux-vault:
+    needs: reuse-pr
+    if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    name: linux-vault (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      APASSY_RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux desktop build dependencies
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libxkbcommon-dev libwayland-dev libx11-dev libegl1-mesa-dev libgl1-mesa-dev shellcheck
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-linux-vault
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Fetch Cargo dependencies
+        run: cargo fetch --locked
+      - name: Install cargo-nextest 0.9.150
+        run: bash scripts/ci-install-nextest.sh
+      - name: Test Linux vault, browser identity and synthetic WebAuthn signatures
+        run: >-
+          cargo nextest run --profile ci --offline --locked -p apassy --all-features
+          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/)'
+      - name: Test headless owner commands without a desktop
+        run: >-
+          cargo nextest run --profile ci --offline --locked -p apassy-app
+          --no-default-features --features node,owner,apassy/insecure-test-kdf
+          --bin apassy-app -E 'test(/^owner::tests::/)'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Install the independent synthetic RP verifier
+        working-directory: extension-tests
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the real vault synthetic RP driver
+        run: cargo build --offline --locked --features vault,insecure-test-kdf --example passkey-rp-core
+      - name: Verify real vault create/get and persistence with the synthetic RP
+        working-directory: extension-tests
+        run: node fixtures/passkey-rp/core-checks.mjs
+      - name: Build the Linux desktop, owner commands and browser host
+        run: >-
+          cargo build --offline --locked -p apassy-app -p apassy
+          --features apassy-app/window,apassy-app/node,apassy-app/owner
+          --bin apassy-app --bin apassy-browser-host
+      - name: Check vault packaging scripts
+        run: >-
+          shellcheck packaging/linux/build-vault.sh packaging/linux/install-vault.sh
+          packaging/linux/verify-vault.sh crates/apassy-relay/deploy/worker/public/install.sh
+      - name: Package and verify the Linux vault build
+        run: |
+          mkdir -p target/vault-dist
+          strip target/debug/apassy-app target/debug/apassy-browser-host
+          packaging/linux/build-vault.sh --binary target/debug/apassy-app \
+            --host target/debug/apassy-browser-host --arch "${{ matrix.arch }}" --out target/vault-dist
+          packaging/linux/verify-vault.sh --dist target/vault-dist --arch "${{ matrix.arch }}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-vault-linux-${{ matrix.arch }}
+          path: target/vault-dist/
+          if-no-files-found: error
+          retention-days: 7
+
   audit:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
