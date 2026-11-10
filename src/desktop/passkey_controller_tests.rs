@@ -735,7 +735,7 @@ fn browser_prf_by_credential_and_large_blob_reach_the_vault() {
 }
 
 #[test]
-fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
+fn several_accounts_list_the_newest_selected_and_sign_the_chosen_one() {
     let dir = TempDir::new().unwrap();
     let mut app = unlocked_app(&dir);
     let ctx = egui::Context::default();
@@ -743,15 +743,20 @@ fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
     let bob = add_passkey(&app, "bob@example.com", "Bob");
     let answer = ask(&mut app, &ctx, Command::PasskeyGet(get_request(&[])));
     let request = app.owner.check.as_ref().unwrap().request.clone();
-    assert!(!request.is_ready(), "no account is chosen");
-    assert!(!request.starts_touch_id(), "Touch ID waits for the choice");
+    // The newest passkey comes first and is selected (Linux acceptance, 2026-11-10):
+    // Bob's login is the later one. The dialog names the others too.
+    let OwnerRequest::SignPasskey {
+        accounts, chosen, ..
+    } = &request
+    else {
+        panic!("not a passkey request");
+    };
+    assert_eq!(*chosen, 0);
+    assert_eq!(accounts[0].credential_id, bob.credential_id);
+    assert_eq!(accounts[1].credential_id, ada.credential_id);
+    assert!(accounts.iter().all(|account| account.added.is_some()));
+    assert!(request.is_ready(), "the newest account is chosen");
     let text = request.describe();
-    assert!(text.contains("Choose the account"), "{text}");
-    // Nothing starts before the choice, and a proof for no account is never used.
-    app.start_owner_check(OwnerCheck::TouchId, None);
-    assert!(app.owner.check.as_ref().unwrap().running.is_none());
-    app.choose_passkey(0);
-    let text = app.owner.check.as_ref().unwrap().request.describe();
     assert!(text.contains("Other accounts"), "{text}");
     let first = dialog_action(&app);
     app.choose_passkey(1);
@@ -760,14 +765,14 @@ fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
     let OwnerAction::SignPasskey { credential_id, .. } = &chosen else {
         panic!("not a passkey action");
     };
-    assert_eq!(credential_id, &bob.credential_id);
+    assert_eq!(credential_id, &ada.credential_id);
     // A proof for the account before the choice is refused.
     let stale_choice = fresh_proof(&app, first);
     app.finish_owner_check_with(stale_choice);
     assert_eq!(now(&answer).code, "refused");
 
+    // Confirmed as offered, the newest one signs.
     let answer = ask(&mut app, &ctx, Command::PasskeyGet(get_request(&[])));
-    app.choose_passkey(1);
     confirm(&mut app);
     let json = serde_json::to_value(now(&answer)).unwrap();
     assert_eq!(

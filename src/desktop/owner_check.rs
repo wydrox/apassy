@@ -205,11 +205,17 @@ pub struct PasskeyAccount {
     pub user_name: String,
     pub user_display_name: String,
     pub credential_id: Vec<u8>,
+    /// When its login was added ([`crate::vault::passkey::PasskeyInfo::added`]). The
+    /// chooser shows it, so two passkeys of one account differ.
+    pub added: Option<u64>,
 }
 
 /// The `chosen` value of a passkey request with several accounts that the owner has not
 /// chosen from yet. It is no index of the list: the request has no account, no action
-/// that a proof can name, and no check starts.
+/// that a proof can name, and no check starts. The browser request selects the newest
+/// account, so only tests build such a request; the dialog and the controller treat any
+/// index outside the list this way.
+#[cfg(test)]
 pub(crate) const NO_ACCOUNT: usize = usize::MAX;
 
 /// The WebAuthn extensions of an assertion request, before the owner chooses an
@@ -362,8 +368,9 @@ pub enum OwnerRequest {
         field: String,
         origin: String,
     },
-    /// Sign in with a passkey: one assertion for the account `accounts[chosen]`. With
-    /// several accounts `chosen` is [`NO_ACCOUNT`] until the owner chooses one, and the
+    /// Sign in with a passkey: one assertion for the account `accounts[chosen]`. The
+    /// browser request lists the accounts newest first and selects the newest (index 0);
+    /// a `chosen` outside the list waits until the owner chooses one. The
     /// owner can choose another account of the list before the check.
     SignPasskey {
         request: PasskeyRequest,
