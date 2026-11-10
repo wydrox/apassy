@@ -212,6 +212,26 @@ gives it the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Browser limits:
   one Debian extension package is installed. With none, the wrapper passes an empty
   `--load-extension=` and Apassy refuses the browser, as it refuses every other
   extension path, a second value and a test extension of your own.
+- With Debian's system extensions, Debian's Chromium must start as its wrapper
+  starts it. The switches of `/usr/bin/chromium` and `/etc/chromium.d/*`, display,
+  GPU and language switches (such as `--ozone-platform=wayland`,
+  `--force-device-scale-factor=1.25`, `--enable-features=WaylandWindowDecorations`,
+  `--lang=pl`) and page addresses are allowed; any other command-line switch, for
+  example `--password-store=basic`, `--user-data-dir=…` or `--proxy-server=…`, and
+  any comma outside the extension list (so `--enable-features=A,B` too) make
+  Apassy refuse the browser. Then the browser shows its own security-key dialog,
+  and the extension shows "Apassy cannot verify this browser, so the browser
+  handles this request itself." Start Chromium without the extra switch, or set it
+  in the browser's settings instead. Without a system extension (and in Google
+  Chrome) those switches are fine.
+- A browser that runs in a sandbox (another mount or user namespace than Apassy:
+  a snap, a Flatpak, firejail, bubblewrap, `unshare`, or a browser in another
+  container) is not supported, even with the packaged executable. The extension
+  shows "This browser runs in a sandbox, so the browser handles this request
+  itself. Apassy works only with a browser that runs outside any sandbox and sees
+  the files of this computer as Apassy sees them. Use Google Chrome, or Chromium
+  from a .deb." Settings > Tools and `apassy setup browser` give a snap or Flatpak
+  the same explanation.
 
 Browser authentication verifies kernel peer credentials, process ancestry and
 root-owned executable paths. Unknown browser builds, writable executables,
@@ -220,6 +240,19 @@ challenge, pending approval and user verification remain part of the shared
 passkey flow. These checks are defense in depth; root and a compromised process
 of the same user remain outside the software vault's protection. Linux does not
 provide the macOS code-signing, Secure Enclave or Touch ID boundary.
+
+Apassy refuses a browser started with a switch that lets other programs control it,
+loads extensions, apps or other code by path, replaces the programs it starts, or
+weakens how it treats pages and certificates (`--remote-debugging-*`,
+`--enable-automation`, `--load-extension`, `--renderer-cmd-prefix`,
+`--disable-web-security`, `--ignore-certificate-errors`, `--host-resolver-rules`
+and the others in ADR 0045). It reads them from the browser's process title
+(`/proc/PID/cmdline`), the switches of its command line, desktop file and wrapper
+script. It cannot see the browser's environment (`LD_PRELOAD`, `GTK_MODULES`,
+`SSLKEYLOGFILE`), what a wrapper or `/etc/chromium.d/*` does besides adding
+switches, the profile (`chrome://flags`, installed and unpacked extensions,
+`~/.pki/nssdb`) or policy files. Another program of your user can change all of
+these, so against such a program the check is best effort, not a guarantee.
 
 ## Screen lock, sleep and inactivity
 
