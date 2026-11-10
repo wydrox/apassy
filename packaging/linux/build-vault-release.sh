@@ -32,7 +32,9 @@ while [ "$#" -gt 0 ]; do
         *) fail "unknown argument: $1" ;;
     esac
 done
-[ -n "$arch" ] && [ -n "$out" ] || fail 'usage: build-vault-release.sh --arch x86_64|aarch64 --out DIR'
+if [ -z "$arch" ] || [ -z "$out" ]; then
+    fail 'usage: build-vault-release.sh --arch x86_64|aarch64 --out DIR'
+fi
 case "$arch" in x86_64 | aarch64) ;; *) fail "unsupported architecture: $arch" ;; esac
 [ "$(uname -m)" = "$arch" ] || fail "this machine is $(uname -m), not $arch"
 # The baseline: the C library this build links against. A newer one would let the

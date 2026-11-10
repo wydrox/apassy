@@ -36,6 +36,8 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/wydrox/apassy"
+# The Linux downloads and their installer (crates/apassy-relay/deploy/worker/public/install.sh).
+RELAY_URL="https://apassy-relay.wyderka.cc"
 DOCS_URL="$REPO_URL/blob/main/docs/operations/daily-use.md"
 MIN_MACOS=15
 # A release build needs about 1.5 GB (the clone and target/), and some room to spare.
@@ -86,7 +88,14 @@ ask() {
 check_mac() {
   step "Check this Mac"
   if [ "$(uname -s)" != "Darwin" ]; then
-    fail "this source installer is for macOS. For Linux node downloads use the relay install.sh; for Linux vault CI packages and build instructions see $REPO_URL/blob/main/docs/operations/linux-vault.md."
+    # Linux has its own installer on the relay (checksums, distribution and
+    # architecture checks); this one builds the Mac app and installs nothing on Linux.
+    fail "this source installer is for macOS. On Linux (Debian 12+, Ubuntu 22.04+, x86_64 or aarch64), use the relay installer:
+  the vault (window, owner commands, browser host):
+    curl -fsSL $RELAY_URL/install.sh -o apassy-install.sh && sudo env APASSY_COMPONENT=vault APASSY_INSTALL_AS_ROOT=1 sh apassy-install.sh
+  the node only (no window):
+    curl -fsSL $RELAY_URL/install.sh | sh
+  Details: $REPO_URL/blob/main/docs/operations/linux-vault.md"
   fi
 
   local version major

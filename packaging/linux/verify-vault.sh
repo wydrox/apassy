@@ -109,7 +109,8 @@ for image in debian:12-slim debian:13-slim ubuntu:22.04 ubuntu:24.04; do
         "$image" sleep infinity >/dev/null
     docker exec -e DEBIAN_FRONTEND=noninteractive -e VERSION="$version" -e DEB="${deb##*/}" \
         -e TARBALL="$tarball" -e ARCH="$arch" "$container" sh -euc '
-            . /etc/os-release; echo "$PRETTY_NAME, $(ldd --version | head -n 1)"
+            # A subshell: os-release sets VERSION too.
+            (. /etc/os-release; echo "$PRETTY_NAME, $(ldd --version | head -n 1)")
             apt-get update -q >/dev/null
             cp "/dist/$DEB" /tmp/
             apt-get install -y -q --no-install-recommends "/tmp/$DEB" >/tmp/apt.log || { cat /tmp/apt.log; exit 1; }
