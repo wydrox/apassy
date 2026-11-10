@@ -174,6 +174,7 @@ fn a_project_without_agents_has_one_empty_block() {
         problem: None,
         no_remote_agents: false,
         reading: false,
+        connect: None,
     };
     let view = AgentsView::of(&frame_2(), &scope, Some(access.clone()), NOW, 0);
     assert_eq!(
@@ -268,6 +269,7 @@ fn access(on: bool, problem: Option<AccessProblem>) -> AccessView {
         problem,
         no_remote_agents: false,
         reading: false,
+        connect: None,
     }
 }
 

@@ -147,6 +147,8 @@ impl NodeFlows {
     pub(crate) fn platform(backend: Option<Arc<dyn NodeBackend>>) -> Self {
         let node = backend.map(|backend| Arc::new(Node::new(NodeOptions::platform(backend))));
         if let Some(node) = &node {
+            // The "Apassy Connect" route uses the Connect account of this Mac (plan s7 M4).
+            node.set_connect(crate::node::tunnel::ConnectSetup::platform());
             // Before any vault opens: a start waits for it (the start lock).
             let node = Arc::clone(node);
             let _ = std::thread::Builder::new()
@@ -207,11 +209,11 @@ impl DesktopApp {
         self.owner_ui
             .session
             .with_vault(|vault| {
-                let allowed = Node::may_run(vault);
+                let allowed = node.may_run_here(vault);
                 if allowed.is_some() && node.serves().is_some() && node.serves() != allowed {
                     node.adopt(vault);
                 }
-                (Node::wanted(vault), allowed)
+                (node.wanted_here(vault), allowed)
             })
             .unwrap_or((None, None))
     }
@@ -610,6 +612,29 @@ impl DesktopApp {
             Ok(()) => {
                 self.stop_node();
                 self.set_ok("Remote access is off. No remote agent reaches this Mac.");
+            }
+            Err(error) => self.set_err(error.message),
+        }
+    }
+
+    /// The "Apassy Connect" switch of the remote access block (plan s7 unit M4). No owner
+    /// check either way: devices still authenticate inside the pinned TLS, and cloud
+    /// agents reach the public listener only while remote access is on (which needed
+    /// one), where each connect asks the owner. The node starts again with the route.
+    pub(crate) fn set_connect_route(&mut self, on: bool) {
+        let Some(node) = self.node.node.clone() else {
+            self.set_err("This build of Apassy has no remote access.");
+            return;
+        };
+        match node.set_connect_route(on) {
+            Ok(()) => {
+                self.stop_node();
+                self.node_changed();
+                self.set_ok(if on {
+                    "Apassy Connect is on. This Mac connects to it while the vault is unlocked."
+                } else {
+                    "Apassy Connect is off. Nothing reaches this Mac through it."
+                });
             }
             Err(error) => self.set_err(error.message),
         }

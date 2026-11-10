@@ -1733,3 +1733,128 @@ fn run_audit_reads_the_rows_of_one_run_beyond_the_newest_twenty() {
     fx.node.stop();
     assert!(fx.node.run_audit(7).is_empty(), "no node, no rows");
 }
+
+// ---- The "Apassy Connect" route (plan s7 unit M4). ----
+
+/// An account seam whose Connect is not reachable (a port of the loopback that nothing
+/// serves).
+struct UnreachableConnect {
+    account: bool,
+}
+
+impl super::tunnel::TunnelAuth for UnreachableConnect {
+    fn origin(&self) -> String {
+        "http://127.0.0.1:9".to_owned()
+    }
+
+    fn with_token(
+        &self,
+        call: &mut dyn FnMut(&str) -> Result<(), super::tunnel::Failure>,
+    ) -> Result<(), super::tunnel::Failure> {
+        call("tok-synthetic")
+    }
+
+    fn entitled(&self) -> Result<(), super::tunnel::Failure> {
+        Ok(())
+    }
+
+    fn has_account(&self) -> bool {
+        self.account
+    }
+
+    fn device_id(&self) -> Option<String> {
+        None
+    }
+
+    fn sign_out(&self) {}
+}
+
+fn connect_setup(account: bool) -> super::tunnel::ConnectSetup {
+    let mut setup = super::tunnel::ConnectSetup::new(Arc::new(UnreachableConnect { account }));
+    setup.acme = None;
+    setup
+}
+
+#[test]
+fn the_connect_route_is_a_switch_of_this_mac_that_needs_an_account() {
+    let fx = fixture();
+    fx.with_vault(|vault| vault.set_cloud_route_on(false).unwrap());
+    let wanted =
+        |fx: &Fixture| fx.with_vault(|vault| (fx.node.wanted_here(vault), Node::wanted(vault)));
+    assert_eq!(wanted(&fx), (None, None));
+    assert!(!fx.node.connect_route_on());
+
+    // The switch alone wants nothing without a Connect account in this build.
+    fx.node.set_connect_route(true).unwrap();
+    assert!(fx.node.connect_route_on());
+    assert_eq!(wanted(&fx), (None, None));
+    let status = fx.node.connect_status();
+    assert!(!status.available && status.on && status.tunnel.is_none());
+    // An account seam without an account file: still nothing.
+    fx.node.set_connect(Some(connect_setup(false)));
+    assert_eq!(wanted(&fx).0, None);
+    assert!(!fx.node.connect_status().available);
+
+    // With an account, the route alone wants the node; the vault's routes stay off.
+    fx.node.set_connect(Some(connect_setup(true)));
+    let (here, vault_only) = wanted(&fx);
+    assert!(here.is_some());
+    assert_eq!(vault_only, None);
+    assert!(fx.node.connect_status().available);
+
+    // Locked: nothing.
+    fx.with_vault(|vault| {
+        let _ = vault.lock();
+    });
+    assert_eq!(wanted(&fx).0, None);
+    fx.with_vault(|vault| vault.unlock(PASS).unwrap());
+
+    // Off again.
+    fx.node.set_connect_route(false).unwrap();
+    assert!(!fx.node.connect_route_on());
+    assert_eq!(wanted(&fx).0, None);
+}
+
+#[test]
+fn a_start_on_connect_alone_without_connect_fails_and_is_tried_again() {
+    let fx = fixture();
+    fx.with_vault(|vault| vault.set_cloud_route_on(false).unwrap());
+    fx.node.set_connect(Some(connect_setup(true)));
+    fx.node.set_connect_route(true).unwrap();
+    let failure = fx.node.start(&fx.vault, fx.broker.clone()).unwrap_err();
+    assert_eq!(failure.code, "connect_unavailable", "{failure}");
+    assert!(!fx.node.is_running());
+    assert!(fx.node.retry_soon(), "Apassy tries again by itself");
+    let notes = fx.node.status(&fx.vault).warnings;
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("The node did not start")
+                || note.contains("Apassy Connect")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_connect_route_beside_funnel_keeps_funnel_and_a_stop_ends_the_tunnel() {
+    let fx = fixture();
+    fx.node.set_connect(Some(connect_setup(true)));
+    fx.node.set_connect_route(true).unwrap();
+    // Funnel is up (the fake Tailscale): the node starts, the tunnel tries Connect.
+    fx.running();
+    let status = fx.node.connect_status();
+    assert!(status.on && status.running);
+    let tunnel = status.tunnel.expect("the tunnel runs beside Funnel");
+    assert_ne!(
+        tunnel.state,
+        super::tunnel::TunnelState::On,
+        "nothing serves Connect"
+    );
+    // Agents keep the Funnel route: its MCP URL is there.
+    assert!(fx.node.status(&fx.vault).url.is_some());
+    fx.node.stop();
+    assert!(
+        fx.node.connect_status().tunnel.is_none(),
+        "a stop ends the tunnel"
+    );
+}

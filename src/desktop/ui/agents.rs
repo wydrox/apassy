@@ -24,8 +24,8 @@ use eframe::egui::{self, Label};
 
 use super::agent_onboarding::{self, ConnectHost};
 use super::agents_page::{
-    self, AccessProblem, AccessView, Action, AgentPage, AgentsView, CanSee, LocalFacts,
-    ProblemButton, SeeKind, SeeRow,
+    self, AccessProblem, AccessView, Action, AgentPage, AgentsView, CanSee, ConnectRow,
+    ConnectState, LocalFacts, ProblemButton, SeeKind, SeeRow,
 };
 use super::bouncer::{self, AgentRef, DeviceScope};
 use super::kit::{self, Font, Icon, Style, Tone};
@@ -355,6 +355,7 @@ fn access_view(app: &DesktopApp) -> Option<AccessView> {
             problem: None,
             no_remote_agents: false,
             reading: true,
+            connect: None,
         });
     };
     Some(access_of(status, app.remote_agents_cached().is_empty()))
@@ -388,7 +389,50 @@ pub(super) fn access_of(status: &crate::node::NodeStatus, no_remote_agents: bool
         problem,
         no_remote_agents: status.route_on && no_remote_agents,
         reading: false,
+        connect: connect_row(&status.connect, status.route_on),
     }
+}
+
+/// The "Apassy Connect" row for the route of the node (plan s7 unit M4). `None`: this
+/// build has no Connect account seam and the route is off (nothing to show).
+pub(super) fn connect_row(
+    connect: &crate::node::ConnectRouteStatus,
+    remote_access_on: bool,
+) -> Option<ConnectRow> {
+    use crate::node::tunnel::{CertState, TunnelState};
+    if !connect.available && !connect.on {
+        return Some(ConnectRow {
+            on: false,
+            state: ConnectState::NotOnConnect,
+            address: None,
+            no_certificate: None,
+        });
+    }
+    let tunnel = connect.tunnel.as_ref();
+    let state = match tunnel.map(|tunnel| &tunnel.state) {
+        _ if !connect.on => ConnectState::Off,
+        _ if !connect.available => ConnectState::NotOnConnect,
+        None | Some(TunnelState::Off) if connect.running => ConnectState::Off,
+        None | Some(TunnelState::Off | TunnelState::Connecting) => ConnectState::Connecting,
+        Some(TunnelState::On) => ConnectState::On,
+        Some(TunnelState::NotOnConnect) => ConnectState::NotOnConnect,
+        Some(TunnelState::Reconnecting { why }) => ConnectState::Reconnecting(why.clone()),
+    };
+    let address = connect
+        .public_name
+        .as_ref()
+        .filter(|_| connect.on && remote_access_on && state != ConnectState::NotOnConnect)
+        .map(|name| format!("https://{name}/mcp"));
+    let no_certificate = match tunnel.map(|tunnel| &tunnel.certificate) {
+        Some(CertState::Missing(reason)) if connect.on && remote_access_on => Some(reason.clone()),
+        _ => None,
+    };
+    Some(ConnectRow {
+        on: connect.on,
+        state,
+        address,
+        no_certificate,
+    })
 }
 
 /// Do what the owner chose.
@@ -402,6 +446,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
             app.remote_access_off();
             app.node_changed();
         }
+        Action::ConnectRoute(on) => app.set_connect_route(on),
         Action::CopyAddress(address) => {
             // The address is no secret: it names this Mac, not a credential.
             ctx.copy_text(address);
