@@ -1244,7 +1244,7 @@ describe("stripe webhook", () => {
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.method, "POST");
     assert.equal(seen[0]!.url, PATH);
-    assert.ok(seen[0]!.body.equals(body), "the signed bytes reach the relay unchanged");
+    assert.equal(Buffer.compare(seen[0]!.body, body), 0, "the signed bytes reach the relay unchanged");
     assert.deepEqual(values(seen[0]!, "stripe-signature"), [SIGNATURE]);
     assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
   });
