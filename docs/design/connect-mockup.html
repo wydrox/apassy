@@ -1,0 +1,890 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apassy · Settings → Connect</title>
+<!--
+  Mockup for unit M2 of implementation-plan-s7-connect.md: Mac Settings → Connect (plans,
+  checkout, portal, devices, families and teams, account deletion). Static frames, for the
+  owner and the implementer. Synthetic data only; the prices are those of
+  tests/fixtures/connect-billing-v1/plans.json, which the app reads from GET /v1/plans and
+  never from its code. The visual language is the shipped Settings of the app, copied
+  from devices-settings-mockup.html (its CSS block and icons), then a short block of
+  additions. Light appearance only, as the app. One self-contained file: inline CSS and
+  SVG, no script, no font file, no network request. The QR code is decorative.
+-->
+<style>
+:root{
+  --bg:#ffffff;--side:#ececef;--detail:#f6f6f7;--group:#ffffff;
+  --line:rgba(0,0,0,.09);--line2:rgba(0,0,0,.06);
+  --label:rgba(0,0,0,.88);--sec:rgba(0,0,0,.52);--ter:rgba(0,0,0,.30);
+  --fill:rgba(0,0,0,.05);--fill2:rgba(0,0,0,.08);--fill3:rgba(0,0,0,.12);
+  --accent:#0a6cff;--accent-press:#005ee0;--sel:#0a6cff;--link:#0066d6;
+  --red:#e0352b;--orange:#c86a00;--green:#24a148;
+  --t-warn:#a65200;--t-crit:#c81e1e;--t-good:#1d8036;--t-acc:#0066d6;
+  --s-auto:#0a6cff;--s-ask:#e8890c;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;color:var(--label);-webkit-font-smoothing:antialiased;background:#cfd0d5}
+svg{display:block}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+
+/* ---- The page of frames. ---- */
+.page{min-width:1260px;padding:36px 40px 70px}
+.intro{max-width:1180px;margin:0 auto 34px}
+.intro h1{font-size:22px;font-weight:700;margin:0 0 6px;letter-spacing:-.01em}
+.intro p{margin:0 0 6px;color:rgba(0,0,0,.62);max-width:900px}
+.intro ol{margin:10px 0 0;padding-left:20px;color:rgba(0,0,0,.62);columns:2;column-gap:40px;max-width:900px}
+.frame{max-width:1180px;margin:0 auto 52px}
+.flabel{margin:0 0 12px 4px}
+.flabel b{font-size:14px;font-weight:700;color:#232327}
+.flabel span{display:block;font-size:12px;color:rgba(0,0,0,.55);margin-top:2px;max-width:940px}
+.flabel .fnum{display:inline-grid;color:#fff;font-size:11px;margin-top:0;max-width:none}
+.fnum{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#232327;color:#fff;font-size:11px;font-weight:700;margin-right:8px;vertical-align:1px}
+.nf{display:inline-block;font-size:9.5px;font-weight:700;color:#7a3ec2;background:rgba(122,62,194,.12);border-radius:4px;padding:0 4px;margin-left:4px;vertical-align:1px;letter-spacing:.02em;line-height:14px;font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+
+/* ---- The window, as in app-v2-mockup.html. ---- */
+.win{display:flex;width:100%;min-height:660px;background:var(--bg);border-radius:12px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 22px 70px rgba(0,0,0,.28);position:relative}
+.side{width:216px;flex:none;background:var(--side);border-right:.5px solid var(--line);display:flex;flex-direction:column}
+.side .chrome{height:52px;flex:none;display:flex;align-items:center;padding:0 18px;gap:8px}
+.lights{display:flex;gap:8px}.lights i{width:12px;height:12px;border-radius:50%;display:block;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.15)}
+.sidetoggle{margin-left:auto;width:28px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--sec)}
+.sidetoggle svg{width:17px;height:17px}
+.side .scroll{flex:1;padding:0 10px 10px}
+.sh{font-size:11px;font-weight:600;color:var(--sec);padding:12px 8px 4px}
+.si{display:flex;align-items:center;gap:7px;width:100%;height:28px;border-radius:6px;padding:0 8px}
+.si.on{background:rgba(0,0,0,.09)}
+.si svg{width:15px;height:15px;flex:none;color:var(--accent)}
+.si .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.si .cnt{color:var(--sec);font-size:12px;font-variant-numeric:tabular-nums}
+.si .bdg{font-size:11px;font-weight:600;border-radius:9px;padding:0 6px;min-width:18px;text-align:center;background:var(--red);color:#fff}
+.si.l1{padding-left:22px}
+.sq{width:13px;height:13px;border-radius:3.5px;flex:none;margin:0 1px;display:grid;place-items:center;color:#fff;font-size:8.5px;font-weight:700;line-height:1}
+.side .foot{padding:8px 10px 10px;border-top:.5px solid var(--line)}
+.me{display:flex;align-items:center;gap:8px;padding:4px 6px}
+.me .av{width:22px;height:22px;border-radius:50%;background:linear-gradient(#ffa43a,#ff8a00);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:600;flex:none}
+.me .t{flex:1;line-height:1.2}.me .t small{display:block;color:var(--sec);font-size:11px}
+.ib{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--sec);flex:none}
+.ib svg{width:16px;height:16px}
+
+/* The list column and the detail of Decisions, as today. */
+.listcol{width:300px;flex:none;border-right:.5px solid var(--line);display:flex;flex-direction:column;background:var(--bg)}
+.tb{height:52px;flex:none;display:flex;align-items:center;padding:0 10px 0 16px;gap:6px}
+.tb .ttl{flex:1;min-width:0;line-height:1.2}
+.tb .ttl b{font-size:13px;font-weight:700;display:block}
+.tb .ttl small{font-size:11px;color:var(--sec)}
+.rows{flex:1;padding:4px 8px 12px}
+.gh{font-size:11px;font-weight:600;color:var(--sec);padding:10px 8px 4px;display:flex;align-items:center}
+.gh span{margin-left:auto;font-weight:400}
+.r{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;min-height:48px}
+.r.top{align-items:flex-start}
+.r.on{background:var(--sel);color:#fff}
+.r.on .sub,.r.on .meta,.r.on .sub3{color:rgba(255,255,255,.82)}
+.r .tx{flex:1;min-width:0}
+.r .ttl2{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub,.r .sub3{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub3 .bad{color:var(--t-crit)}
+.r .meta{display:flex;align-items:center;gap:6px;color:var(--sec);font-size:12px;flex:none;font-variant-numeric:tabular-nums}
+.dotp{width:7px;height:7px;border-radius:50%;background:var(--red);flex:none}
+.r.on .dotp{background:#fff}
+.tm{color:var(--orange);font-weight:500;font-variant-numeric:tabular-nums}
+.r.on .tm{color:#fff}
+.tile{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px;flex:none;letter-spacing:-.02em;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12)}
+.tile svg{width:16px;height:16px}
+.tile.s{width:20px;height:20px;border-radius:5px;font-size:10px}.tile.s svg{width:11px;height:11px}
+.ava{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px;flex:none;position:relative}
+.ava.l{width:56px;height:56px;font-size:22px}
+.ava.s{width:22px;height:22px;font-size:10.5px}
+.ava .cl{position:absolute;right:-3px;bottom:-3px;width:15px;height:15px;border-radius:50%;background:#fff;color:var(--accent);display:grid;place-items:center;box-shadow:0 0 0 .5px rgba(0,0,0,.15)}
+.ava .cl svg{width:10px;height:10px}
+.ava.s .cl{width:13px;height:13px;right:-4px;bottom:-4px}.ava.s .cl svg{width:8.5px;height:8.5px}
+.ava.l .cl{width:22px;height:22px;right:-2px;bottom:-2px}.ava.l .cl svg{width:14px;height:14px}
+.detail{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.detail .tb{justify-content:flex-end;padding:0 12px;gap:4px}
+.dscroll{flex:1}
+.dpad{max-width:640px;margin:0 auto;padding:0 28px 34px}
+
+/* The wide pages of Bouncer: Overview, Agents, an agent, Logs. */
+.content{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.content .tb{padding:0 16px 0 24px}
+.tbtn{height:28px;border-radius:6px;padding:0 9px 0 5px;display:flex;align-items:center;gap:2px;color:var(--label);flex:none;background:var(--fill)}
+.tbtn svg{width:16px;height:16px;color:var(--sec)}
+.scopebar{display:flex;align-items:center;gap:6px;padding:0 24px 12px;font-size:12.5px;color:var(--sec);flex-wrap:wrap;position:relative}
+.scopebar .grow{flex:1}
+.listcol .scopebar{padding:0 16px 8px;row-gap:6px}
+.popm{display:inline-flex;align-items:center;gap:7px;height:22px;padding:0 8px 0 9px;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 .5px 1px rgba(0,0,0,.07);color:var(--label);font-size:12.5px;white-space:nowrap}
+.popm::after{content:"";width:5px;height:5px;border-right:1.5px solid var(--sec);border-bottom:1.5px solid var(--sec);transform:rotate(45deg) translateY(-2px)}
+.popm.open{box-shadow:0 0 0 2px rgba(10,108,255,.45)}
+.wpad{max-width:900px;margin:0 auto;padding:2px 28px 34px}
+.wpad.n{max-width:720px}
+.menu{position:absolute;background:rgba(250,250,250,.98);border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.2);padding:5px;z-index:30;min-width:290px;font-size:13px;color:var(--label)}
+.menu .mi{display:flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:5px}
+.menu .mi .ck{width:14px;flex:none;font-size:12px;text-align:center}
+.menu .mi small{margin-left:auto;padding-left:14px;color:var(--sec);font-size:12px}
+.menu .mi.sel{background:var(--accent);color:#fff}.menu .mi.sel small{color:rgba(255,255,255,.85)}
+.menu .mi.dim{color:var(--sec)}
+.menu hr{border:0;border-top:.5px solid var(--line);margin:4px 6px}
+
+.hdr{display:flex;align-items:center;gap:14px;margin:6px 0 22px}
+.hdr h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-.01em;line-height:1.2}
+.hdr .s{color:var(--sec);margin-top:2px}
+.caps{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
+.cap{font-size:11px;font-weight:500;border-radius:5px;padding:1px 6px;background:var(--fill2);color:var(--sec);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.cap svg{width:11px;height:11px}
+.cap.red{background:rgba(224,53,43,.1);color:#c42b22}
+.cap.acc{background:rgba(10,108,255,.1);color:var(--t-acc)}
+.gl{font-size:12px;font-weight:600;color:var(--sec);margin:20px 2px 6px;display:flex;align-items:center;gap:6px}
+.gl span{margin-left:auto;font-weight:400}
+.grp{background:var(--group);border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.08),0 .5px 1.5px rgba(0,0,0,.05)}
+.fr{display:flex;align-items:center;gap:10px;min-height:38px;padding:7px 12px;position:relative}
+.fr+.fr::before,.tr+.tr::before,.expand+.tr::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.fr.top{align-items:flex-start}
+.fr .k{flex:none;min-width:130px;color:var(--label)}
+.fr .v{flex:1;min-width:0;text-align:right;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fr .v.l{text-align:left;color:var(--label);white-space:normal}
+.fr .kn{flex:1;min-width:0}
+.fr .kn .nt{font-size:12px;color:var(--sec);margin-top:2px;line-height:1.4}
+.fr .chev,.tr .chev{color:var(--ter);font-size:15px}
+.lnk{color:var(--link)}
+.mono{font-family:var(--mono);font-size:12px}
+.pb{border:0;border-radius:6px;height:24px;padding:0 10px;background:var(--fill2);font-size:12.5px;font-weight:500;flex:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit;color:var(--label)}
+.pb svg{width:13px;height:13px;color:var(--sec)}
+.pb.pri{background:var(--accent);color:#fff}
+.sw{width:32px;height:19px;border-radius:10px;background:var(--fill3);position:relative;flex:none;border:0;padding:0}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 .5px 2px rgba(0,0,0,.3)}
+.sw.on{background:var(--green)}.sw.on::after{left:15px}
+.sw.dis{opacity:.4}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px;vertical-align:0;flex:none}
+.dot.warn{background:#ff9500}.dot.crit{background:#ff3b30}.dot.off{background:#a0a0a6}
+.tn{font-size:12px;line-height:1.4;display:flex;gap:6px;align-items:flex-start}
+.tn svg{width:13px;height:13px;flex:none;margin-top:1.5px}
+.tn.warn{color:var(--t-warn)}.tn.crit{color:var(--t-crit)}.tn.good{color:var(--t-good)}.tn.acc{color:var(--t-acc)}
+.np p{margin:0 0 5px;font-size:12px;color:var(--sec);line-height:1.4}.np p:last-child{margin:0}
+.act{display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0}
+.act .tx{flex:1;min-width:0;text-align:left}
+.act .a1{color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act .a1.mono{font-size:12px}
+.act .a2{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act .when{font-size:12px;color:var(--ter);flex:none}
+.st{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;flex:none;margin-top:1px}
+.st svg{width:10px;height:10px;color:#fff}
+.st.ok{background:var(--green)}.st.you{background:var(--accent)}.st.no{background:var(--red)}.st.wait{background:#ff9500}
+.cmd{font-family:var(--mono);font-size:12px;background:#f2f2f4;border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-all;color:var(--label);flex:1;text-align:left}
+.note{font-size:12px;color:var(--sec);margin:6px 4px 0;line-height:1.4}
+.meta-foot{text-align:center;font-size:11px;color:var(--ter);margin-top:22px;line-height:1.45}
+.abar{flex:none;border-top:.5px solid var(--line);background:rgba(246,246,247,.92);padding:10px 16px;display:flex;align-items:center;gap:8px}
+.abar .cap2{flex:1;font-size:11.5px;color:var(--sec);min-width:0}
+.btn{border:0;border-radius:7px;height:28px;padding:0 14px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.16),0 .5px 1px rgba(0,0,0,.08);font-weight:500;white-space:nowrap;flex:none;font-family:inherit;font-size:13px;color:var(--label);display:inline-flex;align-items:center;gap:6px}
+.btn svg{width:14px;height:14px;color:var(--sec)}
+.btn.pri{background:var(--accent);color:#fff;box-shadow:0 .5px 1px rgba(0,0,0,.2)}
+.btn.pri svg{color:#fff}
+.btn.des{color:var(--red)}
+.field{width:100%;border:0;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.18) inset;padding:5px 9px;display:block;font:inherit;color:inherit;min-height:44px}
+.field.ph{color:var(--ter)}
+.seg{display:inline-flex;background:var(--fill2);border-radius:7px;padding:2px;gap:2px;flex:none}
+.seg span{padding:1px 10px;border-radius:5px;font-size:12px;color:var(--label)}
+.seg span.on{background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.12);font-weight:500}
+.searchf{height:24px;border-radius:7px;background:var(--fill);display:flex;align-items:center;gap:6px;padding:0 8px;color:var(--ter);font-size:12.5px;width:230px}
+.searchf svg{width:13px;height:13px}
+.pgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.pcard{background:var(--detail);border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18);padding:14px 22px 20px}
+.pcard.flush{padding:0;overflow:hidden;display:flex;flex-direction:column}
+.pcard .plabel{font-size:12px;font-weight:600;color:#232327;margin:0 0 2px}
+.pcard .plabel small{display:block;font-weight:400;color:rgba(0,0,0,.5)}
+.pcard.flush .plabel{padding:14px 22px 0}
+
+/* Overview. */
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.stats.four{grid-template-columns:repeat(4,1fr)}
+.stat{background:#fff;border-radius:10px;box-shadow:0 0 0 1px rgba(0,0,0,.07);padding:11px 14px 12px}
+.stat .sl{font-size:12px;color:var(--sec)}
+.stat .sn{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em;margin:1px 0 1px;line-height:1.25}
+.stat .sn small{font-size:13px;font-weight:500;color:var(--sec);margin-left:3px}
+.stat .ss{font-size:11.5px;color:var(--sec);line-height:1.35}
+.two{display:grid;grid-template-columns:1.2fr 1fr;gap:16px;align-items:start}
+.chart{padding:12px 14px 8px}
+.chart svg text{font:11px -apple-system,BlinkMacSystemFont,system-ui,sans-serif;fill:rgba(0,0,0,.52)}
+.chart svg text.v{fill:rgba(0,0,0,.72);font-weight:500}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--sec);margin:0 0 6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.att{display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0}
+.att .ai{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;flex:none;margin-top:1px}
+.att .ai svg{width:13px;height:13px;color:#fff}
+.att .ai.warn{background:#ff9500}.att .ai.crit{background:#ff3b30}.att .ai.off{background:#8e8e93}
+.att .t1{color:var(--label);font-weight:500}
+.att .t2{font-size:12px;color:var(--sec);line-height:1.4;margin-top:1px}
+.att .t3{font-size:12px;margin-top:3px}
+
+/* Tables in groups. */
+.tr{display:grid;align-items:center;gap:10px;padding:7px 12px;min-height:40px;position:relative}
+.tr.th{font-size:11px;font-weight:600;color:var(--sec);min-height:28px;padding:6px 12px 5px}
+.tr .num{text-align:right;font-variant-numeric:tabular-nums}
+.tr .sec{color:var(--sec)}
+.tr .cut{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.tr.warnrow .hl{color:var(--t-warn);font-weight:500}
+.agc{display:flex;align-items:center;gap:9px;min-width:0}
+.agc .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.g-ov{grid-template-columns:2fr 1.5fr .7fr .8fr .7fr 1.1fr}
+.g-ag{grid-template-columns:1.7fr 1.5fr 1.35fr .75fr .75fr 14px}
+.g-lg{grid-template-columns:52px 1.25fr 1.05fr 1.05fr 1.3fr 1.5fr 14px}
+.g-px{grid-template-columns:70px 56px 1fr 1.2fr}
+.stt{display:inline-flex;align-items:center;gap:0;white-space:nowrap}
+.stt.live{color:var(--t-good)}
+.stt.wait{color:var(--t-warn)}
+.stt.idle{color:var(--sec)}
+.envh{display:flex;align-items:center;gap:8px;margin:24px 2px 8px}
+.envh:first-child{margin-top:8px}
+.envh svg{width:17px;height:17px;color:var(--sec)}
+.envh b{font-size:13.5px;font-weight:700}
+.envh .r2{margin-left:auto;font-size:12px;color:var(--sec);display:flex;align-items:center;gap:4px}
+.dim{opacity:.5}
+.expand{background:#fafafb;border-top:.5px solid var(--line2);padding:10px 14px 12px 76px}
+.expand .gl{margin:10px 0 5px}
+.expand .gl:first-child{margin-top:0}
+.disc{display:flex;align-items:center;gap:6px;color:var(--sec);font-size:12.5px;margin:10px 6px 0}
+.disc::before{content:"";width:5px;height:5px;border-right:1.5px solid var(--sec);border-bottom:1.5px solid var(--sec);transform:rotate(-45deg);margin-right:3px}
+
+/* The browser page of the connect flow. */
+.bwin{background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 12px 36px rgba(0,0,0,.18)}
+.bbar{height:38px;background:#ececef;border-bottom:.5px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 12px}
+.bbar .lights i{width:11px;height:11px}
+.burl{flex:1;height:24px;border-radius:6px;background:#fff;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12);display:flex;align-items:center;gap:6px;padding:0 9px;font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden}
+.burl svg{width:11px;height:11px;flex:none}
+.burl b{color:var(--label);font-weight:400}
+.bpage{padding:48px 40px 44px;text-align:center;min-height:360px}
+.bpage .logo{width:44px;height:40px;margin:0 auto 18px}
+.bpage h2{font-size:19px;font-weight:700;margin:0 auto 8px;max-width:360px;line-height:1.3;letter-spacing:-.01em}
+.bpage p{margin:0 auto 6px;color:var(--sec);max-width:340px;line-height:1.45}
+.bcode{display:inline-block;margin:16px 0 4px;font-family:var(--mono);font-size:20px;letter-spacing:3px;background:#f2f2f4;border-radius:8px;padding:8px 16px;color:var(--label)}
+.bwait{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:22px;color:var(--sec);font-size:12.5px}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid rgba(0,0,0,.12);border-top-color:var(--accent)}
+.bdone{width:44px;height:44px;border-radius:50%;background:var(--green);display:grid;place-items:center;margin:0 auto 16px}
+.bdone svg{width:24px;height:24px;color:#fff}
+.bfoot{margin-top:26px;font-size:11px;color:var(--ter)}
+
+/* The notes at the end. */
+.notes{max-width:1180px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.15);padding:22px 28px 24px}
+.notes h2{font-size:15px;margin:0 0 8px}
+.notes h2+p{margin-top:0}
+.notes table{border-collapse:collapse;width:100%;font-size:12.5px;margin:8px 0 18px}
+.notes th,.notes td{text-align:left;vertical-align:top;padding:6px 10px 6px 0;border-top:.5px solid var(--line)}
+.notes th{font-size:11.5px;color:var(--sec);font-weight:600;border-top:0}
+.notes td:first-child{white-space:nowrap}
+.notes ul{margin:6px 0 16px;padding-left:18px;line-height:1.5}
+.notes code{font-family:var(--mono);font-size:11.5px;background:#f2f2f4;border-radius:4px;padding:0 4px}
+
+/* Help (i) and its popover, the Read-only tag, the empty-state block. */
+.hi{width:18px;height:18px;border-radius:50%;display:inline-grid;place-items:center;color:var(--sec);flex:none}
+.hi svg{width:15px;height:15px}
+.hi.open{color:var(--accent);background:rgba(10,108,255,.1)}
+.hpop{position:absolute;width:300px;background:#fff;border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.22);padding:11px 14px 9px;z-index:20;font-size:12px;line-height:1.45;color:var(--label)}
+.hpop p{margin:0 0 5px}
+.cap.ro svg{width:10px;height:10px}
+.es{padding:24px 16px;text-align:center}
+.es b{display:block;font-size:14px;font-weight:600}
+.es .l{color:var(--sec);font-size:12.5px;margin-top:3px}
+.es .bt{margin-top:12px;display:flex;gap:14px;justify-content:center;align-items:center}
+.es .bt:empty{display:none}
+
+/* ---- Added for the Devices mockup (N7). Everything above is copied from cloud-agents-mockup.html. ---- */
+.ib.on{background:rgba(0,0,0,.09);color:var(--label)}
+.listcol.set{width:260px}
+.listcol.set .r{min-height:46px}
+.listcol.set .tile{width:28px;height:28px;border-radius:7px}
+.listcol.set .tile svg{width:16px;height:16px}
+.hdr .tile{width:40px;height:40px;border-radius:10px}.hdr .tile svg{width:22px;height:22px}
+.dv{width:28px;height:28px;border-radius:7px;background:var(--fill2);display:grid;place-items:center;flex:none;color:var(--label)}
+.dv svg{width:17px;height:17px}
+.fr .when{font-size:12px;color:var(--sec);flex:none;min-width:62px;text-align:right;font-variant-numeric:tabular-nums}
+.route{font-size:11px;font-weight:500;border-radius:5px;padding:1px 6px;white-space:nowrap;flex:none;display:inline-flex;align-items:center;gap:4px}
+.route svg{width:11px;height:11px}
+.route.mac{background:rgba(36,161,72,.12);color:var(--t-good)}
+.route.hosted{background:var(--fill2);color:var(--sec)}
+.route.tail{background:rgba(10,108,255,.1);color:var(--t-acc)}
+.route.wifi{background:rgba(255,149,0,.14);color:var(--t-warn)}
+.words{font-family:var(--mono);font-size:12.5px;color:var(--label);letter-spacing:.02em}
+.bigwords{font-size:22px;font-weight:600;letter-spacing:.01em;text-align:center;margin:14px 0 4px;color:var(--label)}
+.bigwords span{display:inline-block;background:#fff;border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.12);padding:6px 14px;margin:0 4px}
+.pgrid.three{grid-template-columns:1fr 1fr 1fr}
+.shc{background:#f6f6f7;border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 18px 50px rgba(0,0,0,.22);padding:18px 20px 16px;display:flex;flex-direction:column}
+.shc .plabel{font-size:11px;font-weight:600;color:rgba(0,0,0,.45);margin:0 0 10px;text-transform:none}
+.shc h2{font-size:13px;font-weight:700;margin:0 0 2px}
+.shc .lead{color:var(--sec);font-size:12px;margin:0 0 12px}
+.shc .sbar{display:flex;gap:8px;justify-content:flex-end;margin-top:auto;padding-top:16px;align-items:center}
+.shc .sbar .left{margin-right:auto}
+.qrbox{display:flex;flex-direction:column;align-items:center;gap:8px;margin:2px 0 12px}
+.qr{width:168px;height:168px;border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.14)}
+.qr.s{width:132px;height:132px}
+.steps{counter-reset:s}
+.step{display:flex;gap:10px;align-items:flex-start;padding:8px 12px;position:relative}
+.step+.step::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.step .n{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;flex:none;font-size:10.5px;font-weight:700;background:var(--fill2);color:var(--sec);margin-top:1px}
+.step .n svg{width:10px;height:10px;color:#fff}
+.step.done .n{background:var(--green)}
+.step.now .n{background:var(--accent);color:#fff}
+.step .t1{font-weight:500}.step .t2{font-size:12px;color:var(--sec)}
+.step.later{color:var(--sec)}.step.later .t1{font-weight:400}
+.alert{display:flex;flex-direction:column;align-items:center;text-align:center}
+.alert .aic{width:44px;height:44px;border-radius:11px;display:grid;place-items:center;margin:4px 0 12px;color:#fff}
+.alert .aic svg{width:24px;height:24px}
+.alert h2{font-size:13px;margin-bottom:6px}
+.alert p{margin:0 0 4px;font-size:12px;color:var(--label);max-width:300px}
+.alert .sbar{justify-content:center;width:100%}
+.alert .sbar .btn{flex:1;justify-content:center}
+.chk{display:inline-grid;place-items:center;width:14px;height:14px;border-radius:4px;background:var(--accent);flex:none}
+.chk svg{width:9px;height:9px;color:#fff}
+.hud{display:inline-flex;align-items:center;gap:8px;background:rgba(40,40,42,.92);color:#fff;border-radius:10px;padding:8px 14px;font-size:12.5px}
+.hud svg{width:14px;height:14px}
+.veilw{position:absolute;inset:0;background:rgba(0,0,0,.12);display:flex;justify-content:center;align-items:flex-start;z-index:40}
+.veilw .shc{margin-top:70px;width:420px}
+.fnotes{max-width:1180px;margin:14px auto 0;padding:10px 16px 10px 34px;background:rgba(255,255,255,.55);border-radius:10px;font-size:12px;color:rgba(0,0,0,.66);line-height:1.5}
+.fnotes li{margin:1px 0}
+.fnotes b{color:#232327}
+.fnotes code,.flabel code{font-family:var(--mono);font-size:11px;background:rgba(0,0,0,.06);border-radius:4px;padding:0 4px}
+.hpop.below::before{content:"";position:absolute;top:-6px;right:18px;width:12px;height:12px;background:#fff;transform:rotate(45deg);box-shadow:-.5px -.5px 0 rgba(0,0,0,.12)}
+
+/* ---- Added for the Connect mockup (M2). Everything above is copied from devices-settings-mockup.html. ---- */
+.plan{display:flex;align-items:flex-start;gap:10px;padding:9px 12px;position:relative}
+.plan+.plan::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.plan .rad{width:16px;height:16px;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(0,0,0,.25);flex:none;margin-top:1px;background:#fff}
+.plan.on .rad{box-shadow:inset 0 0 0 5px var(--accent)}
+.plan .tx{flex:1;min-width:0}.plan .t1{font-weight:500}.plan .t2{font-size:12px;color:var(--sec)}
+.plan .pr{flex:none;text-align:right;font-variant-numeric:tabular-nums}.plan .pr small{display:block;font-size:11.5px;color:var(--sec)}
+.step3{display:inline-flex;align-items:center;border-radius:6px;box-shadow:0 0 0 .5px rgba(0,0,0,.18);background:#fff;overflow:hidden}
+.step3 span{width:22px;text-align:center;color:var(--sec)}.step3 b{min-width:30px;text-align:center;font-weight:500;border-left:.5px solid var(--line);border-right:.5px solid var(--line)}
+.rcode{display:grid;grid-template-columns:repeat(4,1fr);gap:6px 10px;background:#fff;border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.12);padding:10px 14px;font-family:var(--mono);font-size:12.5px;margin:4px 0 10px}
+.rcode span::before{content:attr(data-n);color:var(--ter);margin-right:6px;font-size:10.5px}
+.avl{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px;flex:none}
+.state{display:flex;flex-direction:column;gap:14px}
+.mini{font-size:11px;font-weight:600;color:rgba(0,0,0,.45);margin:0 0 6px 2px}
+</style>
+</head>
+<body>
+
+<!-- The icons, used with <use href="#…">. -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9.5 5v14"/><path d="M5.5 8.5h2M5.5 11h2"/></g></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/></g></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></g></symbol>
+  <symbol id="i-checkc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/></g></symbol>
+  <symbol id="i-agent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/></g></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19.5V13M10 19.5V8M15 19.5v-9M20 19.5V5"/></g></symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r=".6"/><circle cx="4.8" cy="12" r=".6"/><circle cx="4.8" cy="17.5" r=".6"/></g></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.6 4.5 4.5 0 0 0 7 18.5z"/></g></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></g></symbol>
+  <symbol id="i-touch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 5.6A8.5 8.5 0 0 1 20.5 12v1.5M3.5 12a8.5 8.5 0 0 1 1.2-4.4M7 19.5a12 12 0 0 0 1.5-6.5 3.5 3.5 0 0 1 7 0v1M12 13a14 14 0 0 1-2 7.5M15.3 17.5a17 17 0 0 1-1 3M3.6 15.5a9 9 0 0 0 1-3.5"/></g></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4M12 17h.01"/></g></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></g></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6l-6 6 6 6"/></g></symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12.5l4 4 8-9"/></g></symbol>
+  <symbol id="i-no" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10M17 7L7 17"/></g></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6.5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="17.5" cy="12" r="1.7"/></g></symbol>
+  <symbol id="i-mini" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="8" width="17" height="8" rx="2.5"/><path d="M7 13h.01"/></g></symbol>
+  <symbol id="i-laptop" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/></g></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></g></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></g></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></g></symbol>
+  <symbol id="i-mark" viewBox="0 0 229 206.2"><path d="M0,114.5A114.5,114.5 0 0 1 229,114.5L229,204.2A2,2 0 0 1 227,206.2L190.5,206.2A21,21 0 0 1 169.5,185.2L169.5,114.5A55,55 0 0 0 59.5,114.5L59.5,204.2A2,2 0 0 1 57.5,206.2L2,206.2A2,2 0 0 1 0,204.2Z" fill="#0e1820"/><path d="M75,97.76A2.5,2.5 0 0 1 78.47,95.45L105.54,106.78A26,26 0 0 1 121.5,130.76L121.5,178.76A3,3 0 0 1 119.95,181.39L76.48,205.38A1,1 0 0 1 75,204.51Z" fill="#0a77fe"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.6"/><path d="M5 6v12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6M5 12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6"/></g></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l7 2.6v5.4c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V6.1z"/></g></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M7.5 10l2.5 2-2.5 2M12.5 14.5h4"/></g></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5v10M7.5 10.5l4.5 4.5 4.5-4.5M5 19.5h14"/></g></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="10" height="18" rx="2.4"/><path d="M11 18h2"/></g></symbol>
+  <symbol id="i-watch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="6.5" width="10" height="11" rx="2.6"/><path d="M9 6.5l.6-3h4.8l.6 3M9 17.5l.6 3h4.8l.6-3M12 10v2.2l1.4 1"/></g></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4.5" width="16" height="6.5" rx="1.8"/><rect x="4" y="13" width="16" height="6.5" rx="1.8"/><path d="M7.5 7.75h.01M7.5 16.25h.01M11 7.75h5M11 16.25h5"/></g></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 9.5a12 12 0 0 1 17 0M6.5 12.8a7.5 7.5 0 0 1 11 0M9.5 16a3.2 3.2 0 0 1 5 0"/><circle cx="12" cy="19" r=".8" fill="currentColor"/></g></symbol>
+  <symbol id="i-tailnet" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6" cy="6" r="1.9"/><circle cx="12" cy="6" r="1.9"/><circle cx="18" cy="6" r="1.9" opacity=".35"/><circle cx="6" cy="12" r="1.9" opacity=".35"/><circle cx="12" cy="12" r="1.9"/><circle cx="18" cy="12" r="1.9"/><circle cx="6" cy="18" r="1.9" opacity=".35"/><circle cx="12" cy="18" r="1.9"/><circle cx="18" cy="18" r="1.9" opacity=".35"/></g></symbol>
+  <symbol id="i-relay" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.4 5.3 3.4 8.5s-1 6.1-3.4 8.5c-2.4-2.4-3.4-5.3-3.4-8.5s1-6.1 3.4-8.5z"/></g></symbol>
+  <symbol id="i-people" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8.5" r="3"/><path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="16.5" cy="9.5" r="2.4"/><path d="M16 14c2.4.1 4 1.6 4.5 4.5"/></g></symbol>
+  <symbol id="i-move" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h15M14 7l5 5-5 5"/></g></symbol>
+</svg>
+
+<div class="page">
+
+<div class="intro">
+  <h1>Apassy · Settings → Connect</h1>
+  <p>Mockup for unit M2 of implementation-plan-s7-connect.md (ADR 0037 stage 7): the Connect account on the Mac, the plans and the checkout through Stripe in the browser, the Customer Portal, the devices of the account, families and teams, and the deletion. Synthetic data, light appearance only. This Mac: Mac mini (office). Now: Tue 10 Nov 2026, 14:20 UTC. The look is the shipped Settings: no new direction.</p>
+  <ol>
+    <li>Not on Connect</li>
+    <li>Create the account, the recovery code</li>
+    <li>Account, no plan</li>
+    <li>The plan picker</li>
+    <li>Continue in the browser</li>
+    <li>The plan row in each state</li>
+    <li>Devices</li>
+    <li>This Mac joins an account</li>
+    <li>Family or Team members</li>
+    <li>Join a family or team</li>
+    <li>Delete the account</li>
+  </ol>
+</div>
+
+<!-- ============================================================ 1 -->
+<section class="frame" id="f1">
+  <div class="flabel"><b><span class="fnum">1</span>Not on Connect</b>
+    <span>This Mac has no Connect account. One primary button.</span></div>
+  <div class="win" style="min-height:560px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b><small>Personal</small></div></div><div class="rows"><div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · iCloud Drive</div></div></div><div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div><div class="r"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">Tailnet on · 4 devices</div></div></div><div class="r on"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div class="tx"><div class="ttl2">Connect</div><div class="sub">Not on Connect</div></div></div><div class="r"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div><div class="r"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line · Extension</div></div></div><div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Version 0.5.20</div></div></div></div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div><h1>Connect</h1><div class="s">Not on Connect</div></div></div>
+        <div class="gl">Apassy Connect</div>
+        <div class="grp">
+          <div class="fr top"><div class="kn"><div>Not on Connect</div><div class="nt">Apassy Connect is the hosted service of the Apassy project: it reaches your devices without Tailscale, keeps the encrypted copy of your vaults always online, and hosts the bouncer brain.</div></div></div>
+          <div class="fr"><div class="tn acc" style="flex:1"><svg><use href="#i-info"/></svg><span>Everything Connect does also runs on your own hardware, free.</span></div></div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px"><span class="btn pri">Create a Connect Account…</span><span class="btn">Add This Mac to an Account…</span></div>
+        <div class="note">No password and no email: the key of this Mac, in the Keychain, signs in.</div>
+      </div></div>
+    </section>
+  </div>
+  <ul class="fnotes"><li><b>Status line</b> of the list row and the header: <code>Not on Connect</code>.</li><li><b>Create a Connect Account…</b> opens frame 2a. <b>Add This Mac to an Account…</b> opens frame 8 (this Mac joins as a device, connect-account-v1 section 7.2).</li><li>No price on this view: prices show only in the plan picker, from <code>GET /v1/plans</code>.</li><li>Text rules (plans section 5): "free" only for what is self-hosted; relay sync and shared vaults are never called the paid part; the hosted relay is never "for teams".</li></ul>
+</section>
+<!-- ============================================================ 2 -->
+<section class="frame" id="f2">
+  <div class="flabel"><b><span class="fnum">2</span>Create the account</b>
+    <span>The sheet of frame 1, the recovery code once, and the busy state.</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">2a · Create the account</div>
+      <h2>Create a Connect Account</h2>
+      <p class="lead">No password and no email: the key of this Mac, in the Keychain, signs in. You choose a plan later.</p>
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:90px">Your Name</div><div class="v l">Rafal</div></div>
+        <div class="fr"><div class="k" style="min-width:90px">This Mac</div><div class="v l">Mac mini (office)</div></div>
+      </div>
+      <div class="note">The name shows to the members of a family or team.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Create Account</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">2b · The recovery code, shown once</div>
+      <h2>Save Your Recovery Code</h2>
+      <p class="lead">Shown once. Save it in another password manager.</p>
+      <div class="rcode"><span data-n="1">blaze</span><span data-n="2">cable</span><span data-n="3">flute</span><span data-n="4">board</span><span data-n="5">seal</span><span data-n="6">tiger</span><span data-n="7">maple</span><span data-n="8">orbit</span><span data-n="9">cedar</span><span data-n="10">lemon</span><span data-n="11">quartz</span><span data-n="12">otter</span><span data-n="13">harbor</span><span data-n="14">mango</span><span data-n="15">piano</span><span data-n="16">river</span></div>
+      <div class="note">If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.</div>
+      <div class="sbar"><span class="btn left"><svg><use href="#i-copy"/></svg>Copy</span><span class="btn pri">I Saved It</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">2c · Busy and error</div>
+      <h2>Create a Connect Account</h2>
+      <p class="lead">No password and no email: the key of this Mac, in the Keychain, signs in. You choose a plan later.</p>
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:90px">Your Name</div><div class="v l">Rafal</div></div>
+        <div class="fr"><div class="k" style="min-width:90px">This Mac</div><div class="v l">Mac mini (office)</div></div>
+      </div>
+      <div class="note" style="color:var(--t-crit)">Apassy Connect could not be reached. Check the internet connection and try again.</div>
+      <div class="sbar"><span class="spin left"></span><span class="btn">Cancel</span><span class="btn pri" style="opacity:.5">Create Account</span></div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><b>Create Account</b>: <code>ConnectAccount::create</code> (M1): a device key in the Keychain (Touch ID), <code>POST /v1/account</code>, the account file. No owner check: it adds no device to anything and gives no authority over the vault.</li><li><b>2b</b> shows the 16 words of <code>RecoveryCode</code> once; Apassy never stores them. The sheet has no close button other than <b>I Saved It</b>; Escape does nothing. Copy puts the words on the pasteboard.</li><li>Errors show in red above the buttons, with the text of <code>ConnectError</code>.</li></ul>
+</section>
+<!-- ============================================================ 3 -->
+<section class="frame" id="f3">
+  <div class="flabel"><b><span class="fnum">3</span>Account, no plan</b>
+    <span>The account exists; no plan yet. Devices, joining a family or team, deletion.</span></div>
+  <div class="win" style="min-height:820px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b><small>Personal</small></div></div><div class="rows"><div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · iCloud Drive</div></div></div><div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div><div class="r"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">Tailnet on · 4 devices</div></div></div><div class="r on"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div class="tx"><div class="ttl2">Connect</div><div class="sub">No plan</div></div></div><div class="r"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div><div class="r"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line · Extension</div></div></div><div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Version 0.5.20</div></div></div></div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div><h1>Connect</h1><div class="s">No plan</div></div></div>
+        <div class="gl">Apassy Connect</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Name</div><div class="v">Rafal</div></div>
+          <div class="fr"><div class="k">Email</div><div class="v">rafal@example.com</div></div>
+          <div class="fr"><div class="k">Plan</div><div class="v">No plan</div><span class="pb pri">Choose a Plan…</span></div>
+        </div>
+        <div class="gl">Devices<span>3</span></div>
+        <div class="grp">
+<div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Added 21 Sep 2026</div></div><span class="when">Now</span><span class="pb">Forget…</span></div><div class="fr"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div><div class="nt">Mac · Added 22 Sep 2026</div></div><span class="when">2 h ago</span><span class="pb">Revoke…</span></div><div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">iPhone · Added 22 Sep 2026</div></div><span class="when">Yesterday</span><span class="pb">Revoke…</span></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn">Add a Device…</span></div>
+        <div class="gl">Family or Team</div>
+        <div class="grp">
+          <div class="fr"><div class="kn"><div>Join a Family or Team</div><div class="nt">Paste the invite link that the organizer sent you.</div></div><span class="pb">Join…</span></div>
+        </div>
+        <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Delete Account…</div><div class="v"></div></div></div>
+      </div></div>
+    </section>
+  </div>
+  <ul class="fnotes"><li><b>Email</b> shows only when Connect has one (copied from Stripe after a checkout); it is never written to disk.</li><li><b>Choose a Plan…</b> opens frame 4. It is the one primary button of the view.</li><li><b>Forget…</b> on this Mac revokes this Mac itself (frame 7d). <b>Revoke…</b> on another device: frame 7c.</li><li><b>Join…</b>: frame 10. <b>Delete Account…</b>: frame 11.</li></ul>
+</section>
+<!-- ============================================================ 4 -->
+<section class="frame" id="f4">
+  <div class="flabel"><b><span class="fnum">4</span>The plan picker</b>
+    <span>Three plans, monthly or yearly, people or seats, and the total. Every amount comes from GET /v1/plans.</span></div>
+  <div class="pgrid three"><div class="shc">
+      <div class="plabel">4a · Connect Personal, monthly</div>
+      <h2>Choose a Plan</h2>
+      <p class="lead">Apassy Connect, the hosted service of the Apassy project.</p>
+      <div style="display:flex;justify-content:center;margin:0 0 10px"><div class="seg"><span class="on">Monthly</span><span>Yearly</span></div></div>
+      <div class="grp"><div class="plan on"><span class="rad"></span><div class="tx"><div class="t1">Connect Personal</div><div class="t2">One person and all of their devices</div></div><div class="pr">€3<small>a month</small></div></div><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Family</div><div class="t2">4 people; each further person €1 a month</div></div><div class="pr">€5<small>a month</small></div></div><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Team</div><div class="t2">Members, roles, and billing per seat</div></div><div class="pr">€4<small>a member a month</small></div></div></div>
+      <div class="grp" style="margin-top:10px"><div class="fr"><div class="k" style="min-width:76px"><b>Total</b></div><div class="v" style="color:var(--label);font-weight:600">€3 a month</div></div></div>
+      <div class="note">VAT included. You pay in your browser, through Stripe; Apassy never sees your card.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue in the Browser…</span></div>
+    </div><div class="shc">
+      <div class="plabel">4b · Connect Family, yearly, 6 people</div>
+      <h2>Choose a Plan</h2>
+      <p class="lead">Apassy Connect, the hosted service of the Apassy project.</p>
+      <div style="display:flex;justify-content:center;margin:0 0 10px"><div class="seg"><span>Monthly</span><span class="on">Yearly</span></div></div>
+      <div class="grp"><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Personal</div><div class="t2">One person and all of their devices</div></div><div class="pr">€30<small>a year</small></div></div><div class="plan on"><span class="rad"></span><div class="tx"><div class="t1">Connect Family</div><div class="t2">4 people; each further person €10 a year</div></div><div class="pr">€50<small>a year</small></div></div><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Team</div><div class="t2">Members, roles, and billing per seat</div></div><div class="pr">€40<small>a member a year</small></div></div></div>
+      <div class="grp" style="margin-top:10px"><div class="fr"><div class="k" style="min-width:76px">People</div><div class="v"></div><span class="step3"><span>−</span><b>6</b><span>+</span></span></div><div class="fr"><div class="k" style="min-width:76px"><b>Total</b></div><div class="v" style="color:var(--label);font-weight:600">€70 a year</div></div></div>
+      <div class="note">VAT included. You pay in your browser, through Stripe; Apassy never sees your card.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue in the Browser…</span></div>
+    </div><div class="shc">
+      <div class="plabel">4c · Connect Team, monthly, 5 seats</div>
+      <h2>Choose a Plan</h2>
+      <p class="lead">Apassy Connect, the hosted service of the Apassy project.</p>
+      <div style="display:flex;justify-content:center;margin:0 0 10px"><div class="seg"><span class="on">Monthly</span><span>Yearly</span></div></div>
+      <div class="grp"><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Personal</div><div class="t2">One person and all of their devices</div></div><div class="pr">€3<small>a month</small></div></div><div class="plan"><span class="rad"></span><div class="tx"><div class="t1">Connect Family</div><div class="t2">4 people; each further person €1 a month</div></div><div class="pr">€5<small>a month</small></div></div><div class="plan on"><span class="rad"></span><div class="tx"><div class="t1">Connect Team</div><div class="t2">Members, roles, and billing per seat</div></div><div class="pr">€4<small>a member a month</small></div></div></div>
+      <div class="grp" style="margin-top:10px"><div class="fr"><div class="k" style="min-width:76px">Seats</div><div class="v"></div><span class="step3"><span>−</span><b>5</b><span>+</span></span></div><div class="fr"><div class="k" style="min-width:76px"><b>Total</b></div><div class="v" style="color:var(--label);font-weight:600">€20 a month</div></div></div>
+      <div class="note">VAT included. You pay in your browser, through Stripe; Apassy never sees your card.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue in the Browser…</span></div>
+    </div></div>
+  <ul class="fnotes"><li><b>Prices</b>: only from <code>GET /v1/plans</code> (connect-billing-v1 section 2). Nothing in the app holds an amount. While the plans load, the rows show "Loading prices…"; if Connect does not answer, the sheet shows the error and <b>Try Again</b>, and <b>Continue</b> stays off.</li><li><b>Total</b> = <code>amount + max(0, n − included) × extra</code>, for 1 ≤ n ≤ max: a Family of 2 pays the price of 4. The stepper stays inside 1…max (Family 10, Team 250, from the plans).</li><li><b>Yearly</b> shows the year prices. The segment says nothing about savings: the app does not compute a discount.</li><li><b>Continue in the Browser…</b>: <code>POST /v1/account/checkout</code>, then the URL that Connect returned opens in the default browser. Then frame 5.</li><li>Plan names: Connect Personal, Connect Family, Connect Team (plans section 5), as Connect sends them.</li></ul>
+</section>
+<!-- ============================================================ 5 -->
+<section class="frame" id="f5">
+  <div class="flabel"><b><span class="fnum">5</span>Continue in the browser</b>
+    <span>The sheet while Stripe Checkout is open in the browser.</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">5a · Waiting for the payment</div>
+      <h2>Finish in Your Browser</h2>
+      <p class="lead">Stripe opened in your browser. This sheet closes by itself when Connect confirms the plan.</p>
+      <div class="bwait" style="margin:18px 0 8px"><span class="spin"></span>Waiting for Connect…</div>
+      <div class="note">Closing this sheet does not cancel a payment that you finish.</div>
+      <div class="sbar"><span class="btn left">Open the Page Again</span><span class="btn">Cancel</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">5b · Confirmed</div>
+      <div class="alert" style="margin-top:14px">
+        <div class="bdone"><svg><use href="#i-ok"/></svg></div>
+        <h2>Connect Family Is Active</h2>
+        <p>Renews 10 Nov 2027.</p>
+        <p style="color:var(--sec)">Invite the people of your family in Settings › Connect.</p>
+      </div>
+      <div class="sbar"><span class="btn pri">Done</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">5c · Stopped waiting (30 minutes)</div>
+      <h2>Finish in Your Browser</h2>
+      <p class="lead">Apassy stopped waiting. If you paid, the plan shows here within a few minutes.</p>
+      <div class="sbar"><span class="btn left">Check Again</span><span class="btn pri">Close</span></div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><b>Polling</b>: <code>GET /v1/account</code> every 3 s while the sheet is open; it stops on an entitled plan (5b), on Cancel, or after 30 minutes (5c). The browser's return never changes the plan: only the webhook does.</li><li><b>Open the Page Again</b> opens the same Checkout URL again. Cancel closes the sheet; a payment that the owner still finishes in the browser shows on the next refresh of the section.</li><li><b>apassy://connect/done</b>: the app bundle has no URL scheme yet, and eframe gives no open-URL event; polling is the only path (the plan allows it). The done page's link does nothing until a later unit registers the scheme.</li></ul>
+</section>
+<!-- ============================================================ 6 -->
+<section class="frame" id="f6">
+  <div class="flabel"><b><span class="fnum">6</span>The plan row in each state</b>
+    <span>The Plan row of the Apassy Connect group, from the PlanView of GET /v1/account (connect-billing-v1 section 8).</span></div>
+  <div class="pgrid"><div class="pcard"><div class="plabel">6a · Active<small>Status line: Connect Personal · Renews 10 Dec 2026</small></div>
+      <div class="grp" style="margin-top:10px">
+<div class="fr"><div class="k">Plan</div><div class="v">Connect Personal · Renews 10 Dec 2026</div><span class="pb">Manage Billing…</span></div>
+      </div></div><div class="pcard"><div class="plabel">6b · Canceled at the end of the period<small>Status line: Connect Personal · Ends 10 Dec 2026</small></div>
+      <div class="grp" style="margin-top:10px">
+<div class="fr"><div class="k">Plan</div><div class="v">Connect Personal · Ends 10 Dec 2026</div><span class="pb">Manage Billing…</span></div>
+      </div></div><div class="pcard"><div class="plabel">6c · Past due (grace)<small>Status line: Connect Personal · Past due</small></div>
+      <div class="grp" style="margin-top:10px">
+<div class="fr"><div class="k">Plan</div><div class="v" style="color:var(--t-warn)">Connect Personal · Past due</div><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>The last payment failed. Update the payment method by 17 Nov 2026 to keep Connect.</span></div></div>
+      </div></div><div class="pcard"><div class="plabel">6d · Read-only until a date<small>Status line: Read-only until 4 Jan 2027</small></div>
+      <div class="grp" style="margin-top:10px">
+<div class="fr"><div class="k">Plan</div><div class="v" style="color:var(--t-warn)">Read-only until 4 Jan 2027</div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Your devices can still download their copies from Connect; nothing new is uploaded. The copies at Connect are deleted on 3 Mar 2027.</span></div></div>
+      </div></div><div class="pcard"><div class="plabel">6e · Suspended<small>Status line: Connect ended</small></div>
+      <div class="grp" style="margin-top:10px">
+<div class="fr"><div class="k">Plan</div><div class="v" style="color:var(--t-crit)">Ended</div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn crit" style="flex:1"><svg><use href="#i-warn"/></svg><span>The copies at Connect are deleted on 3 Mar 2027. Choose a plan before then to keep them.</span></div></div>
+      </div></div><div class="pcard"><div class="plabel">6f · Waiting for the payment<small>Status line: Waiting for the payment</small></div>
+      <div class="grp" style="margin-top:10px">
+<div class="fr"><div class="k">Plan</div><div class="v">Waiting for the payment</div><span class="pb">Manage Billing…</span></div>
+      </div></div><div class="pcard"><div class="plabel">6g · Connect Family, organizer<small>Status line: Connect Family · 3 of 4 people</small></div>
+      <div class="grp" style="margin-top:10px">
+<div class="fr"><div class="k">Plan</div><div class="v">Connect Family · Renews 10 Nov 2027</div><span class="pb">Manage Billing…</span></div><div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
+      </div></div><div class="pcard"><div class="plabel">6h · Member of a family<small>Status line: Connect Family · Renews 10 Nov 2027</small></div>
+      <div class="grp" style="margin-top:10px">
+<div class="fr"><div class="k">Plan</div><div class="v">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><svg><use href="#i-info"/></svg><span>Rafal manages the plan and the billing.</span></div></div>
+      </div></div></div>
+  <ul class="fnotes"><li><b>active</b> and <b>trialing</b>: "Renews &lt;renews_at&gt;", or "Ends &lt;ends_at&gt;" when the plan is canceled at the end of the period. <b>past_due</b>: the warning line with <code>grace_until</code>. <b>read_only</b>: <code>read_only_until</code> and <code>delete_at</code>. <b>suspended</b>: <code>delete_at</code>. <b>pending</b>: "Waiting for the payment". <b>none</b>: "No plan" with Choose a Plan… (frame 3).</li><li><b>Manage Billing…</b>: <code>POST /v1/account/portal</code>, then the URL that Connect returned opens in the default browser. No owner check: the portal changes nothing in Apassy, and Stripe asks for its own confirmation. It shows only for the account that pays (no group, or the owner of the group).</li><li>Dates are UTC days, "10 Dec 2026". The list row and the header show the status line under each card.</li><li>A member of a family or team sees the plan without a price, a button, or the billing (6h).</li></ul>
+</section>
+<!-- ============================================================ 7 -->
+<section class="frame" id="f7">
+  <div class="flabel"><b><span class="fnum">7</span>Devices</b>
+    <span>Add a device with the safety words; revoke; forget this Mac.</span></div>
+  <div class="pgrid">
+    <div class="shc">
+      <div class="plabel">7a · Add a Device…</div>
+      <h2>Add a Device</h2>
+      <p class="lead">On the new device, choose Add This Mac to an Account (on a Mac) or scan this code (on the iPhone).</p>
+      <div class="qrbox"><svg viewBox="0 0 29 29" class="qr s" role="img" aria-label="Decorative QR code"><rect width="29" height="29" fill="#fff"/><path d="M1 1h7v7h-7zM2 2v5h5v-5zM3 3h3v3h-3zM21 1h7v7h-7zM22 2v5h5v-5zM23 3h3v3h-3zM1 21h7v7h-7zM2 22v5h5v-5zM3 23h3v3h-3zM10 1h1v2h-1zM12 2h2v1h-2zM15 1h1v3h-1zM17 3h2v1h-2zM10 5h3v1h-3zM14 6h2v2h-2zM10 10h2v1h-2zM13 9h3v1h-3zM17 10h1v3h-1zM20 10h3v1h-3zM24 11h2v2h-2zM1 10h2v1h-2zM4 11h3v1h-3zM2 13h2v2h-2zM6 14h3v1h-3zM10 13h1v4h-1zM12 15h3v1h-3zM16 14h2v2h-2zM19 13h1v3h-1zM21 15h4v1h-4zM26 14h2v1h-2zM1 17h3v1h-3zM5 18h2v2h-2zM11 18h3v1h-3zM15 19h1v3h-1zM17 18h3v1h-3zM22 18h2v2h-2zM25 19h3v1h-3zM10 21h2v2h-2zM13 22h1v3h-1zM17 21h2v1h-2zM20 22h3v1h-3zM24 23h1v3h-1zM26 22h2v1h-2zM10 25h3v1h-3zM15 24h2v2h-2zM18 25h3v1h-3zM22 26h2v2h-2zM11 27h2v1h-2zM16 27h1v1h-1zM26 26h2v2h-2z" fill="#0e1820"/></svg></div>
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:76px">Code</div><div class="v mono" style="color:var(--label);text-align:left">apassy_alk_acc_k7m2q4x3ca_…</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+        <div class="fr"><div class="k" style="min-width:76px">Expires In</div><div class="v"><span class="tm">9:41</span></div></div>
+      </div>
+      <div class="bwait" style="margin:12px 0 0"><span class="spin"></span>Waiting for the other device…</div>
+      <div class="sbar"><span class="btn">Cancel</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">7b · The safety words</div>
+      <h2>"Rafal's iPhone" Asks to Join</h2>
+      <p class="lead">"Rafal's iPhone" asks to join your Apassy Connect account. Confirm only if the other device shows the same words.</p>
+      <div class="bigwords" style="font-size:18px"><span>blaze</span><span>cable</span><span>flute</span></div>
+      <div class="bigwords" style="font-size:18px;margin-top:6px"><span>board</span><span>seal</span><span>tiger</span></div>
+      <div class="grp" style="margin-top:14px"><div class="fr"><div class="k" style="min-width:76px">Kind</div><div class="v">iPhone</div></div></div>
+      <div class="sbar"><span class="btn des left">Refuse</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Confirm…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">7c · Revoke another device</div>
+      <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
+        <h2>Revoke MacBook Pro?</h2>
+        <p>It leaves your Connect account and every vault copy at Connect. Its vaults stay on it.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Revoke…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">7d · Forget this Mac</div>
+      <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
+        <h2>Forget This Mac?</h2>
+        <p>This Mac leaves your Connect account, and its Connect key is deleted. To use the account here again, add this Mac from another device of the account.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Forget…</span></div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><b>7a</b>: <code>ConnectAccount::start_link</code>; the code is text with Copy and a QR code of the same text (error correction M). Connect never sees the code. The sheet asks <code>GET /v1/account/devices/pending</code> every 5 s and moves to 7b when a device asks.</li><li><b>7b</b>: the six words of <code>safety_words</code> (connect-account-v1 section 7.3). <b>Confirm…</b> runs the owner check <code>OwnerAction::ConfirmConnectDevice</code> (Touch ID), then <code>confirm_join</code>. <b>Refuse</b> needs no check.</li><li><b>7c</b> and <b>7d</b>: Cancel is the default button. Revoke… and Forget… run the owner check <code>OwnerAction::RevokeConnectDevice</code> first. After 7d this Mac is "Not on Connect" (frame 1).</li><li>Rows: the platform glyph, the name, "Mac · Added 21 Sep 2026", the last contact ("Now", "2 h ago", "Yesterday", "12 Sep").</li></ul>
+</section>
+<!-- ============================================================ 8 -->
+<section class="frame" id="f8">
+  <div class="flabel"><b><span class="fnum">8</span>This Mac joins an account</b>
+    <span>From frame 1: Add This Mac to an Account….</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">8a · Paste the code</div>
+      <h2>Add This Mac to an Account</h2>
+      <p class="lead">On a device of the account, choose Add a Device…, then paste its code here.</p>
+      <div class="field ph" style="min-height:30px">apassy_alk_…</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">8b · Waiting for the other device</div>
+      <h2>Waiting for MacBook Pro…</h2>
+      <p class="lead">Both devices show these words. Confirm on MacBook Pro only if they match.</p>
+      <div class="bigwords" style="font-size:18px"><span>blaze</span><span>cable</span><span>flute</span></div>
+      <div class="bigwords" style="font-size:18px;margin-top:6px"><span>board</span><span>seal</span><span>tiger</span></div>
+      <div class="bwait" style="margin:12px 0 0"><span class="spin"></span>Waiting…</div>
+      <div class="sbar"><span class="btn">Cancel</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">8c · Added</div>
+      <div class="alert" style="margin-top:14px">
+        <div class="bdone"><svg><use href="#i-ok"/></svg></div>
+        <h2>This Mac Is Added</h2>
+        <p>It is a device of the Connect account now.</p>
+      </div>
+      <div class="sbar"><span class="btn pri">Done</span></div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><code>JoinRequest::start</code> with the pasted code, then <code>poll</code> every 5 s: waiting, refused ("The other device refused, or the link expired. Make a new link on the other device."), or confirmed (8c). Cancel calls <code>JoinRequest::cancel</code>.</li><li>No owner check on this Mac: joining gives this Mac nothing until a live device of the account confirms with the words and Touch ID.</li></ul>
+</section>
+<!-- ============================================================ 9 -->
+<section class="frame" id="f9">
+  <div class="flabel"><b><span class="fnum">9</span>Family or Team members</b>
+    <span>The organizer's view of Connect Family: members, a pending confirmation, Invite, Remove, and the people.</span></div>
+  <div class="win" style="min-height:980px">
+    <aside class="side">
+      <div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><span class="sidetoggle"><svg><use href="#i-sidebar"/></svg></span></div>
+      <div class="scroll">
+        <div class="sh">Personal</div>
+        <div class="si"><svg><use href="#i-key"/></svg><span class="lbl">All credentials</span><span class="cnt">14</span></div>
+        <div class="si l1"><svg><use href="#i-folder"/></svg><span class="lbl">Work</span><span class="cnt">9</span></div>
+        <div class="sh">Bouncer</div>
+        <div class="si"><svg><use href="#i-chart"/></svg><span class="lbl">Overview</span></div>
+        <div class="si"><svg><use href="#i-checkc"/></svg><span class="lbl">Decisions</span></div>
+        <div class="si"><svg><use href="#i-agent"/></svg><span class="lbl">Agents</span><span class="cnt">3</span></div>
+        <div class="si"><svg><use href="#i-logs"/></svg><span class="lbl">Logs</span></div>
+      </div>
+      <div class="foot"><div class="me"><div class="av">R</div><div class="t">Rafal<small>Unlocked</small></div><span class="ib on"><svg><use href="#i-gear"/></svg></span></div></div>
+    </aside>
+    <section class="listcol set"><div class="tb"><div class="ttl"><b>Settings</b><small>Personal</small></div></div><div class="rows"><div class="r"><div class="tile" style="background:rgb(0,122,255)"><svg><use href="#i-db"/></svg></div><div class="tx"><div class="ttl2">Vault</div><div class="sub">Personal · iCloud Drive</div></div></div><div class="r"><div class="tile" style="background:rgb(88,86,214)"><svg><use href="#i-lock"/></svg></div><div class="tx"><div class="ttl2">Security</div><div class="sub">Unlock with Touch ID</div></div></div><div class="r"><div class="tile" style="background:rgb(48,160,200)"><svg><use href="#i-laptop"/></svg></div><div class="tx"><div class="ttl2">Devices</div><div class="sub">Tailnet on · 4 devices</div></div></div><div class="r on"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div class="tx"><div class="ttl2">Connect</div><div class="sub">Connect Family · 3 of 4 people</div></div></div><div class="r"><div class="tile" style="background:rgb(175,82,222)"><svg><use href="#i-shield"/></svg></div><div class="tx"><div class="ttl2">Bouncer</div><div class="sub">Brain: Ready</div></div></div><div class="r"><div class="tile" style="background:rgb(99,99,102)"><svg><use href="#i-term"/></svg></div><div class="tx"><div class="ttl2">Tools</div><div class="sub">Command line · Extension</div></div></div><div class="r"><div class="tile" style="background:rgb(142,142,147)"><svg><use href="#i-dl"/></svg></div><div class="tx"><div class="ttl2">Updates</div><div class="sub">Version 0.5.20</div></div></div></div></section>
+    <section class="detail">
+      <div class="tb"></div>
+      <div class="dscroll"><div class="dpad">
+        <div class="hdr"><div class="tile" style="background:rgb(52,199,89)"><svg><use href="#i-cloud"/></svg></div><div><h1>Connect</h1><div class="s">Connect Family · 3 of 4 people</div></div></div>
+        <div class="gl">Apassy Connect</div>
+        <div class="grp">
+          <div class="fr"><div class="k">Name</div><div class="v">Rafal</div></div>
+          <div class="fr"><div class="k">Email</div><div class="v">rafal@example.com</div></div>
+<div class="fr"><div class="k">Plan</div><div class="v">Connect Family · Renews 10 Nov 2027</div><span class="pb">Manage Billing…</span></div>
+          <div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
+        </div>
+        <div class="gl">Family<span>3 of 4</span></div>
+        <div class="grp">
+<div class="fr"><div class="avl" style="background:#ff9500">R</div><div class="kn"><div>Rafal <span class="cap">Organizer</span></div><div class="nt">Since 21 Sep 2026</div></div></div><div class="fr"><div class="avl" style="background:#34c759">O</div><div class="kn"><div>Ola</div><div class="nt">Since 22 Sep 2026</div></div><span class="pb">Remove…</span></div><div class="fr"><div class="avl" style="background:#5856d6">J</div><div class="kn"><div>Jan</div><div class="nt">Waits for your confirmation</div></div><span class="pb">Remove…</span><span class="pb">Confirm…</span></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn">Invite…</span></div>
+        <div class="gl">Devices<span>3</span></div>
+        <div class="grp">
+<div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Added 21 Sep 2026</div></div><span class="when">Now</span><span class="pb">Forget…</span></div><div class="fr"><div class="dv"><svg><use href="#i-laptop"/></svg></div><div class="kn"><div>MacBook Pro</div><div class="nt">Mac · Added 22 Sep 2026</div></div><span class="when">2 h ago</span><span class="pb">Revoke…</span></div><div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">iPhone · Added 22 Sep 2026</div></div><span class="when">Yesterday</span><span class="pb">Revoke…</span></div>
+        </div>
+        <div style="margin-top:12px"><span class="btn">Add a Device…</span></div>
+        <div class="grp" style="margin-top:22px"><div class="fr"><div class="k" style="color:var(--red)">Delete Account…</div><div class="v"></div></div></div>
+      </div></div>
+    </section>
+  </div>
+  <div class="pgrid three" style="margin-top:22px">
+    <div class="shc">
+      <div class="plabel">9a · Invite…</div>
+      <h2>Invite to Your Family</h2>
+      <p class="lead">Send this link to the person. It works once, for 7 days.</p>
+      <div class="grp"><div class="fr"><div class="k" style="min-width:60px">Link</div><div class="v mono" style="color:var(--label);text-align:left">https://apassy.wyderka.cc/connect/join#…</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+      <div class="fr"><div class="k" style="min-width:60px">Expires</div><div class="v">17 Nov 2026</div></div></div>
+      <div class="note">The person pastes it in Settings › Connect › Join a Family or Team. You confirm them here.</div>
+      <div class="sbar"><span class="btn pri">Done</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9b · Invite to a team (owner)</div>
+      <h2>Invite to Your Team</h2>
+      <p class="lead">Send the link to the person. It works once, for 7 days.</p>
+      <div class="grp"><div class="fr"><div class="k" style="min-width:60px">Role</div><div class="v"></div><div class="seg"><span class="on">Member</span><span>Admin</span></div></div></div>
+      <div class="note">An admin invites, confirms, and removes members. Only you change the seats and the billing.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Create Link</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9c · Remove a member</div>
+      <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
+        <h2>Remove Ola?</h2>
+        <p>Ola leaves your family and its shared vaults. Ola keeps an Apassy Connect account without a plan.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Remove…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9d · Change the people</div>
+      <h2>People in Your Family</h2>
+      <p class="lead">Each person after 4 costs €1 a month.</p>
+      <div class="grp"><div class="fr"><div class="k" style="min-width:76px">People</div><div class="v"></div><span class="step3"><span>−</span><b>6</b><span>+</span></span></div>
+      <div class="fr"><div class="k" style="min-width:76px">Total</div><div class="v" style="color:var(--label)">€7 a month</div></div></div>
+      <div class="note">Stripe charges or credits the difference for the rest of the period.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Change…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9e · A member's view</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>Rafal's family</div><div class="nt">Rafal manages the plan and the members.</div></div><span class="pb">Leave…</span></div>
+      </div>
+      <div class="mini" style="margin-top:14px">Pending</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>Rafal's family</div><div class="nt">Waiting for Rafal to confirm you.</div></div><span class="pb">Leave…</span></div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><b>Group label</b>: "Family" or "Team", with "3 of 4" (active members of <code>quantity</code>). Roles: the Family owner is "Organizer"; a Team has "Owner" and "Admin" caps.</li><li><b>Confirm…</b> on a pending member runs the owner check <code>OwnerAction::ChangeConnectGroup</code> (ConfirmMember), then <code>POST …/members/{id}/confirm</code>. <b>Remove…</b> (9c) runs the check (RemoveMember), then <code>DELETE …/members/{id}</code>. <b>Change…</b> (9d) runs the check (SetSeats), then <code>POST /v1/account/group/seats</code>; the new count shows when Stripe confirms it.</li><li><b>Invite…</b> (owner or admin): <code>POST /v1/account/group/invites</code>; the link that Connect returned, with Copy. A Team owner chooses Member or Admin first (9b); a Family and a Team admin invite members at once (9a).</li><li><b>9e</b>: a member sees the group, who manages it, and Leave… (the owner check, then <code>DELETE …/members/&lt;own id&gt;</code>). Seats below the members: "seat_limit" shows as "Remove members first, or choose more."</li></ul>
+</section>
+<!-- ============================================================ 10 -->
+<section class="frame" id="f10">
+  <div class="flabel"><b><span class="fnum">10</span>Join a family or team</b>
+    <span>From the Family or Team group of frame 3.</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">10a · Paste the link</div>
+      <h2>Join a Family or Team</h2>
+      <p class="lead">Paste the invite link that the organizer sent you.</p>
+      <div class="field ph" style="min-height:30px">https://apassy.wyderka.cc/connect/join#…</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Join</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">10b · Sent</div>
+      <div class="alert" style="margin-top:14px">
+        <div class="bdone"><svg><use href="#i-ok"/></svg></div>
+        <h2>Request Sent to Rafal</h2>
+        <p>Rafal confirms you on their Mac. Then the family plan covers you.</p>
+      </div>
+      <div class="sbar"><span class="btn pri">Done</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">10c · Refused</div>
+      <h2>Join a Family or Team</h2>
+      <p class="lead">Paste the invite link that the organizer sent you.</p>
+      <div class="field" style="min-height:30px">https://apassy.wyderka.cc/connect/join#apassy_gin_…</div>
+      <div class="note" style="color:var(--t-crit)">This account has its own plan, or is in another family or team. Cancel the plan or leave first.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Join</span></div>
+    </div>
+  </div>
+  <ul class="fnotes"><li>The field takes the whole link or only the code after <code>#</code> (<code>apassy_gin_grp_…_&lt;64 hex&gt;</code>). <b>Join</b>: <code>POST /v1/account/group/join</code>. No owner check: a pending member gets nothing until the organizer confirms with Touch ID.</li><li>A <code>409 conflict</code> shows 10c's line. The invite link is never stored.</li></ul>
+</section>
+<!-- ============================================================ 11 -->
+<section class="frame" id="f11">
+  <div class="flabel"><b><span class="fnum">11</span>Delete the account</b>
+    <span>The red row at the end of the section.</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">11a · Delete Account…</div>
+      <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
+        <h2>Delete Your Connect Account?</h2>
+        <p>The plan ends now, and every vault copy, device, and link of the account is deleted at Connect. Your vaults stay on your devices. Your invoices stay at Stripe.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des">Delete…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">11b · Organizer with members</div>
+      <div class="alert"><div class="aic" style="background:#ff9500"><svg><use href="#i-warn"/></svg></div>
+        <h2>Remove the Members First</h2>
+        <p>Your family or team still has members. Remove them, then delete the account.</p>
+      </div>
+      <div class="sbar"><span class="btn pri">OK</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">11c · After the deletion</div>
+      <div class="grp" style="margin-top:6px">
+        <div class="fr"><div class="tn good" style="flex:1"><svg><use href="#i-checkc"/></svg><span>The Connect account is deleted.</span></div></div>
+      </div>
+      <div class="note">The section shows frame 1 again.</div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><b>Delete…</b> runs the owner check <code>OwnerAction::DeleteConnectAccount</code> (Touch ID), then <code>ConnectAccount::delete</code>: <code>DELETE /v1/account</code>; the account file and the Keychain key go, and the account rows of the vault are dropped.</li><li>A <code>409 conflict</code> for an organizer or a Team owner with members shows 11b.</li><li>Cancel is the default button; Return never deletes.</li></ul>
+</section>
+<section class="notes">
+  <h2>Rules for every view</h2>
+  <ul>
+    <li><b>Prices</b> come only from <code>GET /v1/plans</code>; the app has no amount in its code. Amounts show as "€3", "€3.50"; the currency comes from the plans.</li>
+    <li><b>Text</b> follows plans section 5: the paid part is Apassy Connect, never relay sync or shared vaults; the hosted relay is never "for teams"; "free" without a limit only for what is self-hosted; the plan names are Connect Personal, Connect Family, and Connect Team.</li>
+    <li><b>Owner checks</b> (Touch ID or the passphrase) before: confirming a device (<code>ConfirmConnectDevice</code>), revoking or forgetting one (<code>RevokeConnectDevice</code>), deleting the account (<code>DeleteConnectAccount</code>), and every group change: confirm, remove, leave, seats (<code>ChangeConnectGroup</code>). None for the plan picker, the checkout, the portal, an invite link, joining a group, or creating the account.</li>
+    <li><b>Browser</b>: the Checkout and Portal URLs come from Connect and open in the default browser. Apassy sends Stripe nothing.</li>
+    <li><b>Locked vault</b>: the section shows the account and the plan; every button that needs an owner check is off, with "Unlock Apassy to change Connect." under the first group.</li>
+    <li><b>Errors</b> show as one red line with the text of <code>ConnectError</code>, under the group that failed, or in the sheet.</li>
+    <li><b>The iPhone</b> shows none of this: only the plan name and its state, and "Managed in Apassy on your Mac" (I1).</li>
+  </ul>
+</section>
+
+</div>
+</body>
+</html>
