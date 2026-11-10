@@ -12,8 +12,11 @@
 //! - an answer that takes authority away is signed here with the relay key of the
 //!   membership, without Face ID.
 //!
-//! The questions team is the membership of the vault with the purpose `questions`, else
-//! the relay sync membership. An iCloud vault gets a membership of its own with
+//! Every call reaches the relay through the transport of the core (`transport.rs`,
+//! ios-core-v1 section 5.15): the member of each vault comes from `Transport::member`, so
+//! a team on a node with a Connect route is reached through the dial when the tailnet is
+//! not there, with the same requests and digests. The questions team is the membership of
+//! the vault with the purpose `questions`, else the relay sync membership. An iCloud vault gets a membership of its own with
 //! `join_attach`: the iPhone joins a notifications-only team that a Mac made (plan §A7),
 //! confirmed with the safety words and Touch ID on the Mac, and downloads nothing.
 //!
@@ -1163,13 +1166,6 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
     Ok(Some((membership, keys)))
 }
 
-/// The device of `membership`, with the pin and the alternatives of a node relay that
-/// the membership keeps (node-pairing-v1 section 9): it never connects to a pinned
-/// node without its pin.
-fn member_of(membership: &RelayMembership) -> CoreResult<RelayMember> {
-    Ok(RelayMember::from_membership(membership)?)
-}
-
 fn settle_out(settle: envelope::Settle) -> SettleOut {
     SettleOut {
         outcome: settle.outcome,
@@ -1552,7 +1548,7 @@ impl Core {
             Some((membership, keys)) => {
                 let migration = self.migrate_history_before_capture(&mut state, &vault_id, &keys);
                 state.keep(&vault_id, keys, &membership.public_key, migration, || {
-                    member_of(&membership)
+                    self.transport.member(&membership)
                 })
             }
             None => {
@@ -1711,7 +1707,7 @@ impl Core {
             read?
         };
         let member = match &read {
-            Some((membership, _)) => Some(member_of(membership)?),
+            Some((membership, _)) => Some(self.transport.member(membership)?),
             None => None,
         };
         // Lock order: the list, then the questions. A removal of this vault in between
@@ -3170,8 +3166,17 @@ impl Core {
             ));
         }
         let channel = parsed.map(|(_, channel)| channel);
-        let pending = PendingJoin::request(full_link, DEFAULT_RELAY_URL, device_name)
-            .map_err(join_link_error)?;
+        // A pinned link with a Connect route joins through the dial when the tailnet does
+        // not answer (node-pairing-v1 section 7a): the transport of this core.
+        let key = apassy::sync::DeviceKey::generate().map_err(join_link_error)?;
+        let pending = PendingJoin::request_via(
+            full_link,
+            DEFAULT_RELAY_URL,
+            device_name,
+            key,
+            self.transport.dialer(),
+        )
+        .map_err(join_link_error)?;
         let attaching = Attaching {
             device_name: device_name.to_owned(),
             answer_key: apassy::questions::device_link::split_link_device_name(device_name).1,

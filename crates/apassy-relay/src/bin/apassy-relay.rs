@@ -1,7 +1,8 @@
 //! The relay server.
 //!
 //! `apassy-relay serve` (default), `apassy-relay init [--team <name> --owner <name>]`,
-//! `apassy-relay migrate`, and `apassy-relay admin <command>` for the operator.
+//! `apassy-relay migrate`, `apassy-relay backup` and `apassy-relay connect-cutover` with the
+//! relay stopped, and `apassy-relay admin <command>` for the operator.
 //!
 //! Exit codes: 0 success, 1 a failure (bad configuration, no relay, wrong key), 2 a
 //! usage error. `init` with a team prints the owner token once on stdout, and
@@ -31,6 +32,8 @@ const USAGE: &str = "Usage:
   apassy-relay downgrade-directory-1004
   apassy-relay downgrade-directory-1005
   apassy-relay snapshot-check
+  apassy-relay backup
+  apassy-relay connect-cutover [--dry-run | --confirm-delete-teams] [--backup <folder>]
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin node-code [--minutes <n>]
   apassy-relay admin teams
@@ -55,7 +58,9 @@ The configuration is read from the environment:
   APASSY_RELAY_BLOCKED_ADDRESSES, APASSY_RELAY_BACKUP_DIR, and for push all of
   APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, APASSY_RELAY_PUSH_SECRET or _FILE,
   APASSY_RELAY_QUESTIONS_TO_APPROVERS (0 or 1), APASSY_RELAY_CONNECT_TEAMS_PER_DAY,
-  APASSY_RELAY_CONNECT_TEAMS_MAX, APASSY_RELAY_CONNECT_LONG_POLLS.
+  APASSY_RELAY_CONNECT_TEAMS_MAX, APASSY_RELAY_CONNECT_LONG_POLLS,
+  APASSY_RELAY_FREE_CONNECT (0 or 1), APASSY_RELAY_MODE (relay or connect), and the
+  Connect settings of docs/OPERATIONS.md sections 26 to 29.
 `migrate` also reads APASSY_RELAY_OLD_KEY or _FILE: the key of the old team.db.
 `admin` reads only APASSY_RELAY_DATA and talks to the running relay.
 `rollback-check` reads relay.db and the team files read-only, with or without a running
@@ -74,7 +79,18 @@ node pairing codes are dropped (docs/OPERATIONS.md 24.3).
 1004 in place, and its unused node pairing codes are dropped (docs/OPERATIONS.md 25.3).
 `downgrade-directory-1005` runs with the relay stopped: relay.db goes from 1006 (Apassy
 Connect accounts) back to 1005 in place, and the vault stores of the accounts are deleted
-with their snapshots; the accounts stay, unread by that image (docs/OPERATIONS.md 26.3).";
+with their snapshots; the accounts stay, unread by that image (docs/OPERATIONS.md 26.3).
+The downgrades and `rollback-check` refuse APASSY_RELAY_MODE=connect: its files are plain.
+`backup` runs with the relay stopped: a byte-for-byte copy of the data directory in a new
+folder of APASSY_RELAY_BACKUP_DIR, with MANIFEST.json (\"stopped\": true); `admin backup`
+is the one of a running relay.
+`connect-cutover` runs with the relay stopped and the master key, once, at the end of the
+hosted relay (docs/operations/connect.md): it checks the newest stopped backup (or
+--backup <folder>), keeps relay.db and the vault stores of the accounts as plain files,
+and deletes every other team with its files and keys; then the relay starts with
+APASSY_RELAY_MODE=connect and no master key. --dry-run (the default) changes nothing and
+prints the plan; --confirm-delete-teams does it and writes cutover.json. A run that
+stopped is finished by the next one. It exits 1 when a check fails.";
 
 /// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
 /// before a deletion.
@@ -84,7 +100,9 @@ const DEFAULT_SWEEP_DAYS: u64 = 30;
 #[allow(clippy::large_enum_variant)]
 enum Command {
     Serve,
-    Init { team: Option<(String, String)> },
+    Init {
+        team: Option<(String, String)>,
+    },
     Migrate,
     RollbackCheck,
     DowngradeSchema6,
@@ -93,6 +111,11 @@ enum Command {
     DowngradeDirectory1004,
     DowngradeDirectory1005,
     SnapshotCheck,
+    Backup,
+    ConnectCutover {
+        confirm: bool,
+        backup: Option<PathBuf>,
+    },
     Admin(Operator),
     Help,
     Version,
@@ -311,6 +334,8 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "downgrade-directory-1004" if args.len() == 1 => Ok(Command::DowngradeDirectory1004),
         "downgrade-directory-1005" if args.len() == 1 => Ok(Command::DowngradeDirectory1005),
         "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
+        "backup" if args.len() == 1 => Ok(Command::Backup),
+        "connect-cutover" => parse_cutover(&args[1..]),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
             let flags = parse_flags(&args[1..], &["--team", "--owner"])?;
@@ -325,6 +350,35 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "admin" => parse_admin(&args[1..]).map(Command::Admin),
         other => Err(format!("Unknown command: {other}")),
     }
+}
+
+/// `connect-cutover [--dry-run | --confirm-delete-teams] [--backup <folder>]`: a dry run
+/// unless `--confirm-delete-teams` is given.
+fn parse_cutover(args: &[String]) -> Result<Command, String> {
+    let mut confirm = false;
+    let mut dry_run = false;
+    let mut backup = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--confirm-delete-teams" if !confirm => confirm = true,
+            "--dry-run" if !dry_run => dry_run = true,
+            "--backup" if backup.is_none() => {
+                let folder = rest
+                    .next()
+                    .ok_or_else(|| "--backup needs a folder.".to_string())?;
+                backup = Some(PathBuf::from(folder));
+            }
+            "--confirm-delete-teams" | "--dry-run" | "--backup" => {
+                return Err(format!("{arg} is given twice."));
+            }
+            other => return Err(format!("Unknown option: {other}")),
+        }
+    }
+    if confirm && dry_run {
+        return Err("Give --dry-run or --confirm-delete-teams, not both.".to_string());
+    }
+    Ok(Command::ConnectCutover { confirm, backup })
 }
 
 fn fail(message: &str) -> ExitCode {
@@ -542,6 +596,57 @@ fn main() -> ExitCode {
                 Err(error) => fail(&error.message),
             }
         }
+        Command::Backup => {
+            match apassy_relay::server::cutover::stopped_backup(&config, apassy_relay::now_unix()) {
+                Ok(manifest) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&manifest).unwrap_or_default()
+                    );
+                    eprintln!(
+                        "apassy-relay: the stopped relay is copied to {} ({} files). The master key is not in it: keep it apart.",
+                        manifest["dir"].as_str().unwrap_or_default(),
+                        manifest["files"].as_array().map_or(0, Vec::len)
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error.message),
+            }
+        }
+        Command::ConnectCutover { confirm, backup } => {
+            let options = apassy_relay::server::cutover::Options {
+                confirm,
+                backup,
+                interrupt: None,
+            };
+            match apassy_relay::server::cutover::run(&config, &options, apassy_relay::now_unix()) {
+                Ok(report) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).unwrap_or_default()
+                    );
+                    match report.state.as_str() {
+                        "done" if confirm => eprintln!(
+                            "apassy-relay: the cutover is done: {} vault stores kept as plain files, {} teams deleted. Start the relay with APASSY_RELAY_MODE=connect and without APASSY_RELAY_KEY_FILE.",
+                            report.kept.len(),
+                            report.deleted.len()
+                        ),
+                        "done" => eprintln!(
+                            "apassy-relay: the cutover was done at {}; nothing changed.",
+                            report.finished_at.unwrap_or_default()
+                        ),
+                        _ => eprintln!(
+                            "apassy-relay: a dry run, nothing changed: {} vault stores would stay, {} teams would be deleted. The backup check passed ({}).",
+                            report.kept.len(),
+                            report.deleted.len(),
+                            report.backup.dir
+                        ),
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error.message),
+            }
+        }
         Command::SnapshotCheck => match apassy_relay::server::sync::verify_restored(&config) {
             Ok(teams) => {
                 println!("Verified snapshots of {teams} teams.");
@@ -551,7 +656,15 @@ fn main() -> ExitCode {
         },
         Command::Serve => match Relay::start(config) {
             Ok(running) => {
-                eprintln!("apassy-relay: listening on {}", running.addr);
+                eprintln!(
+                    "apassy-relay: listening on {} ({} mode)",
+                    running.addr,
+                    if running.hub().config.connect.plain_files() {
+                        "connect"
+                    } else {
+                        "relay"
+                    }
+                );
                 if running.hub().config.push.is_none() {
                     eprintln!(
                         "apassy-relay: push is off (APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, and APASSY_RELAY_PUSH_SECRET are not set): questions reach the devices by their long polls only"
@@ -779,6 +892,55 @@ mod tests {
         ] {
             assert!(parse_admin(&args(&values)).is_err(), "{values:?}");
         }
+    }
+
+    #[test]
+    fn cutover_and_backup_commands() {
+        for (words, confirm, backup) in [
+            (vec!["connect-cutover"], false, None),
+            (vec!["connect-cutover", "--dry-run"], false, None),
+            (
+                vec!["connect-cutover", "--confirm-delete-teams"],
+                true,
+                None,
+            ),
+            (
+                vec![
+                    "connect-cutover",
+                    "--backup",
+                    "/backups/x",
+                    "--confirm-delete-teams",
+                ],
+                true,
+                Some(PathBuf::from("/backups/x")),
+            ),
+        ] {
+            match parse(&args(&words)).unwrap() {
+                Command::ConnectCutover {
+                    confirm: got,
+                    backup: folder,
+                } => assert_eq!((got, folder), (confirm, backup), "{words:?}"),
+                _ => panic!("{words:?}"),
+            }
+        }
+        for words in [
+            vec!["connect-cutover", "--dry-run", "--confirm-delete-teams"],
+            vec![
+                "connect-cutover",
+                "--confirm-delete-teams",
+                "--confirm-delete-teams",
+            ],
+            vec!["connect-cutover", "--backup"],
+            vec!["connect-cutover", "--force"],
+            vec!["connect-cutover", "--yes"],
+            vec!["backup", "--now"],
+        ] {
+            assert!(parse(&args(&words)).is_err(), "{words:?}");
+        }
+        assert!(matches!(
+            parse(&args(&["backup"])).unwrap(),
+            Command::Backup
+        ));
     }
 
     #[test]

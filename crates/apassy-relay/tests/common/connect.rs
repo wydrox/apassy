@@ -104,6 +104,18 @@ pub fn now() -> u64 {
 }
 
 impl Connect {
+    /// A handle of a relay started on its own (`relay::start_existing`) and the fake Stripe
+    /// that its billing settings name.
+    pub fn around(relay: TestRelay, stripe: FakeStripe) -> Self {
+        Self {
+            relay,
+            stripe,
+            clock: AtomicU64::new(apassy_relay::now_unix()),
+        }
+    }
+}
+
+impl Connect {
     pub fn origin(&self) -> &str {
         &self.relay.config.public_url
     }

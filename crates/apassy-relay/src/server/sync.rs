@@ -203,12 +203,13 @@ pub fn verify_snapshots(conn: &Connection, dir: &Path) -> RelayResult<()> {
 
 /// Validates a restored data directory, read-only, including suspended teams.
 pub fn verify_restored(config: &crate::config::RelayConfig) -> RelayResult<usize> {
+    use crate::server::store::Store;
+    // `connect` mode: the files are plain (docs/SPEC.md section 37).
     let directory =
-        crate::server::store::Store::open_read_only(&config.directory_path(), &config.master_key)?;
+        Store::open_read_only_for(config, &config.directory_path(), &config.master_key)?;
     let rows = directory.with(crate::server::directory::read_teams)?;
     for row in &rows {
-        let store =
-            crate::server::store::Store::open_read_only(&config.team_path(&row.id), &row.file_key)?;
+        let store = Store::open_read_only_for(config, &config.team_path(&row.id), &row.file_key)?;
         store.with(|conn| verify_snapshots(conn, &config.sync_dir(&row.id)))?;
     }
     Ok(rows.len())
@@ -411,7 +412,8 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
 /// `GET /v1/sync/head?since=N&wait=S`. While the current version equals `since`, holds
 /// the answer up to `wait` seconds on the team notifier (a push or a delete wakes it).
 /// A device has at most one sync long poll; a second is answered at once. A team whose
-/// `sync_bytes` is 0 can get no new version, so it is answered at once too, and so is a
+/// `sync_bytes` is 0 (`Core::sync_bytes`: also a free Connect team after the end of free
+/// relay sync) can get no new version, so it is answered at once too, and so is a
 /// Connect team's poll over `Limits::connect_long_polls`. Marks the device as seen, as a
 /// push, a download, and a receipt do.
 pub fn head(
@@ -423,7 +425,7 @@ pub fn head(
 ) -> RelayResult<SyncHeadView> {
     let device = device_of(by)?;
     seen(core, device, now);
-    let poll = if wait_secs > 0 && core.limits().sync_bytes > 0 {
+    let poll = if wait_secs > 0 && core.sync_bytes() > 0 {
         core.sync_polls.enter(device.0)
     } else {
         None
@@ -600,8 +602,9 @@ pub fn push(
     let head = &request.head.head;
     let limits = core.limits();
     // `sync_bytes` 0: the team has no vault sync on the relay (a Connect team on Free,
-    // docs/SPEC.md section 26). Before the size, so the answer names the plan.
-    if limits.sync_bytes == 0 {
+    // docs/SPEC.md section 26, or any free Connect team once free relay sync is over,
+    // section 37). Before the size, so the answer names the plan.
+    if core.sync_bytes() == 0 {
         refused(core, now, "plan_required");
         return Err(plan_required().into());
     }
@@ -929,7 +932,7 @@ pub fn record_fetch(core: &Core, by: &MemberAuth, version: u64, now: u64) -> Rel
 }
 
 /// `POST /v1/sync/receipt`: this device merged `version`. 403 `plan_required` when the
-/// team's `sync_bytes` is 0. The `sync_received` row is written only when the device's
+/// team's `sync_bytes` is 0 (`Core::sync_bytes`). The `sync_received` row is written only when the device's
 /// version changes; the same receipt again only moves its time.
 pub fn receipt(
     core: &Core,
@@ -939,7 +942,7 @@ pub fn receipt(
 ) -> RelayResult<Value> {
     let device = device_of(by)?;
     seen(core, device, now);
-    if core.limits().sync_bytes == 0 {
+    if core.sync_bytes() == 0 {
         refused(core, now, "plan_required");
         return Err(plan_required());
     }

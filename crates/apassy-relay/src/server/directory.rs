@@ -761,7 +761,7 @@ pub const CONNECT_SYNC_PUSHES_PER_HOUR: u64 = 30;
 pub const CONNECT_SYNC_BYTES_PER_HOUR: u64 = 512 * 1_048_576;
 pub const MEMBER_FILE_BYTES: u64 = 1_048_576;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamState {
     Active,
@@ -924,6 +924,7 @@ impl Directory {
     /// refresh it. A file of version 1003 is left as it is. Returns the version before and
     /// after.
     pub fn downgrade_to_1003(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+        config.refuse_connect_mode("`apassy-relay downgrade-directory-1003`")?;
         let _lock = crate::server::hub::lock_data_dir(config)?;
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         let from = store.user_version()?;
@@ -961,6 +962,7 @@ impl Directory {
     /// the `kind` column stays: that image never reads it, and the next open of 1005 keeps
     /// it. A file of version 1004 is left as it is. Returns the version before and after.
     pub fn downgrade_to_1004(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+        config.refuse_connect_mode("`apassy-relay downgrade-directory-1004`")?;
         let _lock = crate::server::hub::lock_data_dir(config)?;
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         let from = store.user_version()?;
@@ -994,6 +996,7 @@ impl Directory {
     /// them. A file of version 1005 is left as it is. Returns the version before and after,
     /// and the vault stores removed. The only complete way back is the backup of the deploy.
     pub fn downgrade_to_1005(config: &RelayConfig) -> RelayResult<(i64, i64, usize)> {
+        config.refuse_connect_mode("`apassy-relay downgrade-directory-1005`")?;
         let _lock = crate::server::hub::lock_data_dir(config)?;
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         let from = store.user_version()?;

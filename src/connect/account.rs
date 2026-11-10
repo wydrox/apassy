@@ -1001,6 +1001,33 @@ impl ConnectAccount {
         Ok(added)
     }
 
+    /// `POST /v1/account/vaults/{team_id}/devices` for `device_id`, another live device
+    /// of **this** account, without an owner check: the sync through Apassy Connect of
+    /// unit M3 registers the account's own devices in a store that this Mac turned on
+    /// (connect-account-v1 section 8). Those devices joined the account with the safety
+    /// words and a fresh owner check on a live device, and each still needs the vault
+    /// passphrase. A device that `devices` of the last [`Self::view`] does not list as a
+    /// live device of this account is [`ConnectError::NotInGroup`] before any call; a
+    /// member of a group goes through the link of relay-sync-v1 section 7 or
+    /// [`Self::add_store_device`] with the owner check.
+    pub(crate) fn register_own_store_device(
+        &mut self,
+        team_id: &str,
+        device_id: &str,
+        live: &[DeviceView],
+    ) -> Result<StoreDevice, ConnectError> {
+        if device_id == self.state.device_id || !live.iter().any(|d| d.device_id == device_id) {
+            return Err(ConnectError::NotInGroup);
+        }
+        let account_id = self.state.account_id.clone();
+        let added =
+            self.with_token(|client, token| client.add_store_device(token, team_id, device_id))?;
+        if added.device_id != device_id || added.account_id != account_id {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(added)
+    }
+
     /// The owner action of deleting the store `team_id`.
     pub fn delete_vault_store_action(team_id: &str) -> OwnerAction {
         OwnerAction::DeleteVaultStore {

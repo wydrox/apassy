@@ -86,6 +86,15 @@ pub enum Command {
 
 /// Runs one command.
 pub fn run(hub: &Hub, command: &Command, now: u64) -> RelayResult<Value> {
+    // `connect` mode has no operator team and no node (docs/SPEC.md section 37): a code
+    // would only make a team that the relay never serves.
+    if hub.config.connect.plain_files()
+        && matches!(command, Command::TeamCode { .. } | Command::NodeCode { .. })
+    {
+        return Err(RelayError::invalid(
+            "APASSY_RELAY_MODE=connect makes no team codes: teams run on their own Apassy node (ADR 0037).",
+        ));
+    }
     match command {
         Command::TeamCode { hours } => {
             let (code, expires_at) = hub.directory.new_team_code(*hours, now)?;

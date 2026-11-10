@@ -19,9 +19,10 @@
 //! | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams (`POST /v1/connect`) the whole relay makes in 24 hours, 0 to 100000; over it 503 `busy`; `0` turns Connect off | `50` |
 //! | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once (active or suspended), 0 to 1000000; at it `POST /v1/connect` is 503 `busy`; `0` turns Connect off | `100` |
 //! | `APASSY_RELAY_CONNECT_SYNC_BYTES` | The largest vault snapshot of a new Connect team (its `sync_bytes`): `0` (no relay sync; a push is 403 `plan_required`) or 1048576 to 67108864. Existing teams keep theirs (`admin limits --sync-bytes`). The hosted relay sets 67108864 until Apassy Connect starts | `0` |
+//! | `APASSY_RELAY_FREE_CONNECT` | `1`: the free Connect paths of ADR 0032 (`POST /v1/connect`, questions, feed, and push of free Connect teams); `0` (the transition before the cutover, ADR 0037 D14): `POST /v1/connect` and its challenge answer 410 `free_connect_ended`, and so do the questions, feed, and push routes of every free Connect team; with `APASSY_RELAY_CONNECT_SYNC_BYTES` 0 too, their pushes and receipts are 403 `plan_required` whatever their own `sync_bytes`. Operator teams and vault stores never change. Forced to `0` in `connect` mode | `1` |
 //! | `APASSY_RELAY_CONNECT_LONG_POLLS` | Long polls that all Connect teams hold at once, 0 to 1024; a poll over it answers at once; `0`: every Connect poll answers at once | `96` |
 //! | `APASSY_RELAY_CONNECT_ACCOUNTS` | `1`: the routes of Apassy Connect accounts (connect-account-v1) on this relay, beside every other route (the transition); `0`: every account route is 404 `not_found` | `0` |
-//! | `APASSY_RELAY_MODE` | `relay` (every route of the relay), or `connect`: Apassy Connect only (ADR 0037 stage 7). In `connect` mode the master key is refused (`APASSY_RELAY_KEY` and `_FILE` must not be set), `relay.db` and the vault stores are plain SQLite files (`Store::open_plain`), shared team vaults are off, and the account routes are on | `relay` |
+//! | `APASSY_RELAY_MODE` | `relay` (every route of the relay), or `connect`: Apassy Connect only (ADR 0037 stage 7). In `connect` mode the master key is refused (`APASSY_RELAY_KEY` and `_FILE` must not be set), `relay.db` and the vault stores are plain SQLite files (`Store::open_plain`), shared team vaults are off, the account routes are on, the push settings are refused, no proxy is built, and every other route of the relay answers 410 `hosted_retired` (docs/SPEC.md section 37) | `relay` |
 //! | `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 signing key of the entitlement token: a PKCS#8 file (DER or PEM). Without it `GET /v1/account/entitlement` is 503 `busy` for an entitled account and the well-known document lists no key | none |
 //! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
 //! | `STRIPE_SECRET_KEY_FILE` | With the account routes on: a file with the restricted Stripe key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox; `sk_live_…` is refused). Set it and the next one together, or neither: without them the billing routes answer 503 `busy` and no account has a plan | none |
@@ -776,6 +777,13 @@ pub struct RelayConfig {
     /// (no relay sync, 403 `plan_required`) or 1 MiB to 64 MiB. A team keeps the value
     /// it was made with; `admin limits` changes it for one team.
     pub connect_sync_bytes: u64,
+    /// The free Connect paths of ADR 0032 are served (`APASSY_RELAY_FREE_CONNECT`, 1 by
+    /// default). Off (the transition before the cutover, ADR 0037 D14): `POST /v1/connect`
+    /// and the questions, feed, and push routes of free Connect teams are 410
+    /// `free_connect_ended`, and with `connect_sync_bytes` 0 their pushes and receipts are
+    /// 403 `plan_required` (`free_sync_ended`). Operator teams and vault stores never see
+    /// it. Always off in `connect` mode.
+    pub free_connect: bool,
     /// Each listener counts bad bearer tokens and session keys: after
     /// `http::AUTH_FAILURES_MAX` in `http::AUTH_FAILURE_WINDOW_SECS`, the listener answers
     /// 429 `rate_limited` until the window ends (docs/SPEC.md section 30.5). On for an
@@ -1054,6 +1062,66 @@ impl RelayConfig {
         Ok(())
     }
 
+    /// True when the free relay sync of Connect teams is over (the transition before the
+    /// cutover, ADR 0037 D14): `APASSY_RELAY_FREE_CONNECT=0` and
+    /// `APASSY_RELAY_CONNECT_SYNC_BYTES` 0. A push or a receipt of a free Connect team is
+    /// then 403 `plan_required` whatever its own `sync_bytes`; its pulls and downloads
+    /// still work, so its devices can move their vault. Operator teams and vault stores
+    /// never see it.
+    pub fn free_sync_ended(&self) -> bool {
+        !self.free_connect && self.connect_sync_bytes == 0
+    }
+
+    /// Refuses a configuration that `connect` mode cannot run (docs/SPEC.md section 37):
+    /// a master key, push, shared team vaults, the public or tailnet listener of a node,
+    /// the MCP authorization flow, or no account routes (`free_connect` has no effect
+    /// there: every free Connect route is 410 `hosted_retired` before it is read). The
+    /// environment cannot make one (`from_lookup` refuses it first); this keeps a
+    /// configuration made in code (a test, a self-hosted Connect) to the same rules. Any
+    /// configuration in `relay` mode passes.
+    pub fn check_mode(&self) -> RelayResult<()> {
+        if !self.connect.plain_files() {
+            return Ok(());
+        }
+        let refused = |what: &str| {
+            Err(RelayError::invalid(format!(
+                "APASSY_RELAY_MODE=connect cannot run with {what} (docs/SPEC.md section 37)."
+            )))
+        };
+        if !self.master_key.is_empty() {
+            return refused("a master key");
+        }
+        if self.push.is_some() {
+            return refused("push");
+        }
+        if self.team_vaults {
+            return refused("shared team vaults");
+        }
+        if self.public_listen.is_some() || self.tailnet_listen.is_some() {
+            return refused("the public or tailnet listener of a node");
+        }
+        if self.oauth.is_some() {
+            return refused("the MCP authorization flow");
+        }
+        if !self.connect.accounts {
+            return refused("the account routes off");
+        }
+        Ok(())
+    }
+
+    /// Refuses `what` (an operator command that opens the files with their keys) in
+    /// `connect` mode, where the files are plain and no image before Connect can read them:
+    /// the way back from Connect is the backup made before the cutover and the previous
+    /// image (docs/operations/connect.md).
+    pub fn refuse_connect_mode(&self, what: &str) -> RelayResult<()> {
+        if self.connect.plain_files() {
+            return Err(RelayError::invalid(format!(
+                "{what} does not apply in APASSY_RELAY_MODE=connect: relay.db and the vault stores are plain files that no image before Apassy Connect opens. Roll back with the backup made before the cutover and the previous image (docs/operations/connect.md)."
+            )));
+        }
+        Ok(())
+    }
+
     /// The configuration of a Mac's own node (docs/SPEC.md section 30): the node
     /// listener on `127.0.0.1:0`, the public listener of `options`, no edge, shared team
     /// vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs that wait
@@ -1120,6 +1188,7 @@ impl RelayConfig {
             connect_teams_per_day: 0,
             connect_teams_max: 0,
             connect_sync_bytes: DEFAULT_CONNECT_SYNC_BYTES,
+            free_connect: true,
             auth_limiter: true,
             operator_socket: false,
             oauth: Some(OAuthConfig::new(EMBEDDED_MAC_NAME)),
@@ -1213,6 +1282,35 @@ impl RelayConfig {
             0,
             MAX_CONNECT_LONG_POLLS as u64,
         )?;
+        let free_connect = match lookup("APASSY_RELAY_FREE_CONNECT")
+            .as_deref()
+            .map(str::trim)
+        {
+            // Connect has no free path: everything of ADR 0032 is retired there.
+            _ if connect.plain_files() => false,
+            None | Some("1") => true,
+            Some("0") => false,
+            Some(_) => {
+                return Err(RelayError::invalid("APASSY_RELAY_FREE_CONNECT is 0 or 1."));
+            }
+        };
+        // Connect sends no push: the nodes push through the push gateway (ADR 0037 D7),
+        // and the Worker's push route is off there. A push value left in the compose file
+        // would otherwise start the push thread of a relay that has no question.
+        if connect.plain_files()
+            && [
+                "APASSY_RELAY_PUSH_URL",
+                "APASSY_RELAY_PUSH_TOPIC",
+                "APASSY_RELAY_PUSH_SECRET",
+                "APASSY_RELAY_PUSH_SECRET_FILE",
+            ]
+            .iter()
+            .any(|name| lookup(name).is_some())
+        {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_MODE=connect sends no push: unset APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, and APASSY_RELAY_PUSH_SECRET (or _FILE).",
+            ));
+        }
         let mut upstream = UpstreamOptions::default();
         if let Some(text) = lookup("APASSY_RELAY_BLOCKED_ADDRESSES") {
             for part in text.split(',').filter(|part| !part.trim().is_empty()) {
@@ -1268,6 +1366,7 @@ impl RelayConfig {
             connect_teams_per_day,
             connect_teams_max,
             connect_sync_bytes,
+            free_connect,
             auth_limiter: false,
             operator_socket: true,
             oauth: None,
