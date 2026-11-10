@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import worker, { type RelayService } from "../src/index.ts";
-import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "../src/limits.ts";
+import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH, MAX_STRIPE_WEBHOOK_LENGTH } from "../src/limits.ts";
 
 const SECRET = "edge-secret-synthetic-0123456789abcdef0123";
 const PUBLIC = "https://apassy-relay.wyderka.cc";
@@ -1189,5 +1189,332 @@ describe("main module", () => {
   it("exports only the handler, because workerd refuses any other value there", async () => {
     const main = await import("../src/index.ts");
     assert.deepEqual(Object.keys(main), ["default"]);
+  });
+});
+
+/** Every limiter of the Worker, recording `<name>:<key>`; each answers `success`. */
+function everyLimiter(success: boolean) {
+  const used: string[] = [];
+  const limiter = (name: string) => ({
+    async limit({ key }: { key: string }) {
+      used.push(`${name}:${key}`);
+      return { success };
+    },
+  });
+  return {
+    used,
+    env: {
+      CREATE_LIMITER: limiter("create"),
+      AUTH_LIMITER: limiter("auth"),
+      SYNC_LIMITER: limiter("sync"),
+      CONNECT_LIMITER: limiter("connect"),
+      CONNECT_PREFIX_LIMITER: limiter("prefix"),
+      ACCOUNT_LIMITER: limiter("account"),
+      TUNNEL_LIMITER: limiter("tunnel"),
+    },
+  };
+}
+
+describe("stripe webhook", () => {
+  const PATH = "/v1/stripe/webhook";
+  const SIGNATURE = "t=1790000000,v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336";
+
+  it("has the 256 KiB cap of the contract", () => {
+    assert.equal(MAX_STRIPE_WEBHOOK_LENGTH, 262144);
+    assert.ok(MAX_STRIPE_WEBHOOK_LENGTH > MAX_JSON_LENGTH);
+  });
+
+  it("passes a body of 256 KiB with its exact bytes and signature, without any limiter", async () => {
+    const limits = everyLimiter(false);
+    const head = Buffer.from('{"id":"evt_1","pad":"');
+    const tail = Buffer.from('"}');
+    const body = Buffer.concat([head, Buffer.alloc(MAX_STRIPE_WEBHOOK_LENGTH - head.length - tail.length, 0x61), tail]);
+    assert.equal(body.length, MAX_STRIPE_WEBHOOK_LENGTH);
+    const response = await call(PATH, {
+      method: "POST",
+      body,
+      headers: {
+        "content-length": String(body.length),
+        "content-type": "application/json; charset=utf-8",
+        "stripe-signature": SIGNATURE,
+        "cf-connecting-ip": "3.18.12.63",
+      },
+    }, { ...limits.env, RELAY: vpc() });
+    assert.equal(response.status, 201);
+    assert.deepEqual(limits.used, []);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.method, "POST");
+    assert.equal(seen[0]!.url, PATH);
+    assert.equal(Buffer.compare(seen[0]!.body, body), 0, "the signed bytes reach the relay unchanged");
+    assert.deepEqual(values(seen[0]!, "stripe-signature"), [SIGNATURE]);
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+  });
+
+  it("does not limit many events from one Stripe address", async () => {
+    const limits = everyLimiter(false);
+    for (let i = 0; i < 20; i++) {
+      const response = await call(PATH, {
+        method: "POST",
+        body: "{}",
+        headers: { "content-length": "2", "stripe-signature": SIGNATURE, "cf-connecting-ip": "3.18.12.63" },
+      }, limits.env);
+      assert.equal(response.status, 201, String(i));
+    }
+    assert.deepEqual(limits.used, []);
+  });
+
+  it("refuses a declared length above 256 KiB before the relay", async () => {
+    const { forwarded, relay } = recordingRelay();
+    for (const declared of [String(MAX_STRIPE_WEBHOOK_LENGTH + 1), String(MAX_FEED_LENGTH), "99999999"]) {
+      const response = await call(PATH, { method: "POST", body: "x", headers: { "content-length": declared } }, { RELAY: relay });
+      assert.equal(response.status, 413, declared);
+      assert.equal(response.headers.get("cache-control"), "no-store", declared);
+      assert.equal((await envelope(response)).error.code, "payload_too_large", declared);
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("refuses a missing, malformed, or chunked length", async () => {
+    const { forwarded, relay } = recordingRelay();
+    for (const headers of [
+      {},
+      { "content-length": "" },
+      { "content-length": "abc" },
+      { "content-length": "3, 3" },
+      { "content-length": "3", "transfer-encoding": "chunked" },
+    ] as Record<string, string>[]) {
+      const label = JSON.stringify(headers);
+      const response = await call(PATH, { method: "POST", body: "abc", headers }, { RELAY: relay });
+      assert.equal(response.status, 400, label);
+      assert.equal((await envelope(response)).error.code, "invalid_request", label);
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("keeps the 64 KiB cap on every other path and method near the webhook", async () => {
+    const { forwarded, relay } = recordingRelay();
+    const declared = String(MAX_JSON_LENGTH + 1);
+    for (const [method, path] of [
+      ["POST", "/v1/stripe/webhook/"],
+      ["POST", "/v1/stripe/webhooks"],
+      ["POST", "/v1/stripe"],
+      ["PUT", PATH],
+      ["PATCH", PATH],
+    ]) {
+      const response = await call(path!, { method, body: "x", headers: { "content-length": declared } }, { RELAY: relay });
+      assert.equal(response.status, 413, `${method} ${path}`);
+    }
+    assert.deepEqual(forwarded, []);
+  });
+});
+
+describe("account rate limit", () => {
+  it("uses ACCOUNT_LIMITER, and no other, for POST /v1/account, keyed by the address or the /64", async () => {
+    for (const [address, key] of [
+      ["198.51.100.7", "198.51.100.7"],
+      ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+    ]) {
+      const refused = everyLimiter(false);
+      const response = await call("/v1/account", {
+        method: "POST",
+        body: "{}",
+        headers: { "cf-connecting-ip": address! },
+      }, { ...refused.env, RELAY: vpc() });
+      assert.equal(response.status, 429, address);
+      assert.equal(response.headers.get("retry-after"), "60");
+      assert.equal((await envelope(response)).error.code, "rate_limited");
+      assert.deepEqual(refused.used, [`account:${key}`], address);
+      assert.equal(seen.length, 0);
+      assert.equal(vpcTargets.length, 0);
+    }
+    const allowed = everyLimiter(true);
+    const passed = await call("/v1/account", { method: "POST", body: '{"v":1}' }, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.equal(await passed.text(), 'echo:{"v":1}');
+    assert.deepEqual(allowed.used, ["account:unknown"]);
+  });
+
+  it("uses ACCOUNT_LIMITER for POST /v1/account/recover too, keyed by the /64", async () => {
+    const refused = everyLimiter(false);
+    const response = await call("/v1/account/recover", {
+      method: "POST",
+      body: "{}",
+      headers: { "cf-connecting-ip": "2001:db8:1:2:3:4:5:6" },
+    }, { ...refused.env, RELAY: vpc() });
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "60");
+    assert.deepEqual(refused.used, ["account:2001:db8:1:2::/64"]);
+    assert.equal(seen.length, 0);
+    const allowed = everyLimiter(true);
+    const passed = await call("/v1/account/recover", { method: "POST", body: "{}" }, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.deepEqual(allowed.used, ["account:unknown"]);
+  });
+
+  for (const path of [
+    "/v1/account/challenge",
+    "/v1/account/token",
+    "/v1/account/devices/join",
+    "/v1/account/devices/join/cancel",
+  ]) {
+    it(`uses AUTH_LIMITER, and no other, for POST ${path}`, async () => {
+      const refused = everyLimiter(false);
+      const response = await call(path, {
+        method: "POST",
+        body: "{}",
+        headers: { "cf-connecting-ip": "203.0.113.9" },
+      }, refused.env);
+      assert.equal(response.status, 429);
+      assert.equal((await envelope(response)).error.code, "rate_limited");
+      assert.deepEqual(refused.used, ["auth:203.0.113.9"]);
+      assert.equal(seen.length, 0);
+      const allowed = everyLimiter(true);
+      const passed = await call(path, { method: "POST", body: "{}" }, allowed.env);
+      assert.equal(passed.status, 201);
+      assert.deepEqual(allowed.used, ["auth:unknown"]);
+    });
+  }
+
+  it("passes POST /v1/account when the limiter is missing or fails", async () => {
+    for (const ACCOUNT_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+      const response = await call("/v1/account", { method: "POST", body: "{}" }, { ACCOUNT_LIMITER });
+      assert.equal(response.status, 201);
+    }
+  });
+
+  it("does not limit other account routes or methods", async () => {
+    const refused = everyLimiter(false);
+    for (const [method, path] of [
+      ["GET", "/v1/account"],
+      ["DELETE", "/v1/account"],
+      ["POST", "/v1/account/checkout"],
+      ["POST", "/v1/account/portal"],
+      ["GET", "/v1/account/plan"],
+      ["GET", "/v1/plans"],
+    ]) {
+      const response = await call(path!, { method, ...(method === "POST" ? { body: "{}" } : {}) }, refused.env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+    }
+    assert.deepEqual(refused.used, []);
+  });
+});
+
+describe("tunnel", () => {
+  const UPGRADE = {
+    connection: "Upgrade",
+    upgrade: "websocket",
+    "sec-websocket-version": "13",
+    "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+    "sec-websocket-protocol": "apassy-tunnel-v1",
+    authorization: "Bearer apassy_act_acc_k7m2q4x3ca_00",
+  };
+
+  /** A relay that answers the upgrade: one response object, to check it comes back as it is. */
+  function upgradingRelay() {
+    const forwarded: { target: string; method: string; headers: Headers; body: unknown }[] = [];
+    const answer = new Response(null, { status: 200, headers: { "x-switching": "yes" } });
+    const relay: RelayService = {
+      async fetch(input, init) {
+        forwarded.push({ target: input, method: init?.method ?? "", headers: new Headers(init?.headers), body: init?.body });
+        return answer;
+      },
+    };
+    return { forwarded, relay, answer };
+  }
+
+  it("passes a WebSocket upgrade on the two tunnel routes to the relay unchanged and returns its answer", async () => {
+    for (const path of ["/v1/tunnel/node", "/v1/tunnel/dial/node_k7m2q4x3ca"]) {
+      const { forwarded, relay, answer } = upgradingRelay();
+      const response = await call(path, { headers: { ...UPGRADE, "x-apassy-edge": "attacker", "cf-connecting-ip": "198.51.100.7" } }, { RELAY: relay });
+      assert.equal(response, answer, `${path}: the relay's answer is returned as it is`);
+      assert.equal(forwarded.length, 1, path);
+      assert.equal(forwarded[0]!.target, "http://relay" + path);
+      assert.equal(forwarded[0]!.method, "GET");
+      assert.equal(forwarded[0]!.body, undefined);
+      const headers = forwarded[0]!.headers;
+      for (const [name, value] of Object.entries(UPGRADE)) {
+        assert.equal(headers.get(name), value, `${path}: ${name}`);
+      }
+      assert.equal(headers.get("x-apassy-edge"), SECRET);
+      assert.equal(headers.get("content-length"), null);
+    }
+  });
+
+  it("refuses an upgrade on every other path or method before the relay", async () => {
+    const { forwarded, relay } = upgradingRelay();
+    const cases: [string, string][] = [
+      ["GET", "/v1/me"],
+      ["GET", "/mcp"],
+      ["POST", "/mcp"],
+      ["GET", "/p/apassy_ses_x/api.example.com/socket"],
+      ["GET", "/v1/account"],
+      ["GET", "/v1/questions"],
+      ["GET", "/v1/feed"],
+      ["GET", "/v1/tunnel"],
+      ["POST", "/v1/tunnel/nodes"],
+      ["DELETE", "/v1/tunnel/nodes/node_k7m2q4x3ca"],
+      ["GET", "/v1/tunnel/../me"],
+      ["GET", "/install.sh"],
+      ["GET", "/dl/apassy-team"],
+      ["GET", "/"],
+    ];
+    for (const headers of [UPGRADE, { upgrade: "h2c" }, { connection: "keep-alive, Upgrade" }] as Record<string, string>[]) {
+      for (const [method, path] of cases) {
+        const label = `${method} ${path} ${JSON.stringify(headers)}`;
+        const response = await call(path, { method, headers, ...(method === "POST" ? { body: "{}" } : {}) }, { RELAY: relay, ASSETS: { async fetch() { return new Response("asset"); } } });
+        assert.equal(response.status, 400, label);
+        assert.equal((await envelope(response)).error.code, "invalid_request", label);
+      }
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("forwards the JSON tunnel routes as any other route", async () => {
+    const response = await call("/v1/tunnel/nodes", { method: "POST", body: '{"name":"Mac"}' });
+    assert.equal(response.status, 201);
+    assert.equal(await response.text(), 'echo:{"name":"Mac"}');
+    assert.equal(seen[0]!.url, "/v1/tunnel/nodes");
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+  });
+
+  it("uses TUNNEL_LIMITER, and no other, for GET /v1/tunnel/dial/*, keyed by the address or the /64", async () => {
+    for (const [address, key] of [
+      ["198.51.100.7", "198.51.100.7"],
+      ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+    ]) {
+      const refused = everyLimiter(false);
+      const { forwarded, relay } = upgradingRelay();
+      const response = await call("/v1/tunnel/dial/node_k7m2q4x3ca", { headers: { ...UPGRADE, "cf-connecting-ip": address! } }, { ...refused.env, RELAY: relay });
+      assert.equal(response.status, 429, address);
+      assert.equal(response.headers.get("retry-after"), "60");
+      assert.equal((await envelope(response)).error.code, "rate_limited");
+      assert.deepEqual(refused.used, [`tunnel:${key}`], address);
+      assert.deepEqual(forwarded, []);
+    }
+    const allowed = everyLimiter(true);
+    const passed = await call("/v1/tunnel/dial/node_k7m2q4x3ca", {}, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.deepEqual(allowed.used, ["tunnel:unknown"]);
+  });
+
+  it("does not limit the other tunnel routes, and passes a dial when the limiter is missing or fails", async () => {
+    const refused = everyLimiter(false);
+    for (const [method, path] of [
+      ["GET", "/v1/tunnel/node"],
+      ["GET", "/v1/tunnel/nodes"],
+      ["POST", "/v1/tunnel/nodes"],
+      ["POST", "/v1/tunnel/grants"],
+      ["GET", "/v1/tunnel/grants"],
+      ["DELETE", "/v1/tunnel/grants/tgr_w2x4y6z3ab"],
+      ["POST", "/v1/tunnel/dial/node_k7m2q4x3ca"],
+    ]) {
+      const response = await call(path!, { method, ...(method === "POST" ? { body: "{}" } : {}) }, refused.env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+    }
+    assert.deepEqual(refused.used, []);
+    for (const TUNNEL_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+      const response = await call("/v1/tunnel/dial/node_k7m2q4x3ca", {}, { TUNNEL_LIMITER });
+      assert.equal(response.status, 201);
+    }
   });
 });

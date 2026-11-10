@@ -1662,3 +1662,240 @@ A later start of a 1005 image moves the file to 1005 again and keeps the column.
 `relay.db` at 1005: its node does not start, and the app has no command for the way
 back. Start the app of this version again. (Releases ship all components at one
 version, so a Mac app is not downgraded on its own.)
+
+## 26. Apassy Connect accounts (directory 1006)
+
+Apassy Connect accounts (ADR 0037 stage 7, contract connect-account-v1, docs/SPEC.md
+section 33): accounts, their devices, vault stores (one relay-sync team for each vault),
+recovery, and the entitlement token. They are off unless the operator turns them on.
+
+Settings (all optional; the defaults change nothing):
+
+- `APASSY_RELAY_CONNECT_ACCOUNTS=1`: the account routes beside every other route (the
+  transition). Without it every account route is 404.
+- `APASSY_CONNECT_SIGNING_KEY_FILE=/run/secrets/connect_signing_key`: the Ed25519 key of
+  the entitlement token, PKCS#8 (DER or PEM). Make it once with
+  `openssl genpkey -algorithm ed25519 -out connect_signing_key.pem` on a machine of the
+  owner, keep a copy with the other secrets, and mount it read-only like the master key.
+  The well-known document `/.well-known/apassy-connect.json` publishes its public key and
+  its id (`ek_` and 16 hex characters of the key's SHA-256).
+- `APASSY_CONNECT_SITE_URL`: the site of the Stripe return pages (default
+  `https://apassy.wyderka.cc`).
+- `APASSY_RELAY_MODE=connect` is the cutover of R3 (unit C5), not this step: it refuses a
+  master key (`APASSY_RELAY_KEY` and `_FILE` must be unset) and keeps `relay.db` and the
+  vault stores as plain files. Do not set it on the running relay before the cutover.
+
+What changes at the first start of this version:
+
+- `relay.db` moves from 1005 to 1006 in one transaction: the table `team` is rebuilt with
+  the same rows (the new kind `account` and the columns `account_id`, `vault_id`), and
+  the tables of stage 7 are made, empty (accounts, devices, links, joins, the store map,
+  the brain events, groups, Stripe, the tunnel, the entitlement keys). A failure leaves
+  the file at 1005 and stops the start. The image before (directory 1005) refuses a 1006
+  file.
+- No team file changes. A vault store, when an account makes one, is a new team file of
+  the usual schema.
+- The new command `apassy-relay downgrade-directory-1005` (26.3).
+
+Nothing in the new tables is secret: public keys, names, ids, hashes, and Stripe ids.
+Account tokens live in memory only (15 minutes; a restart ends them and the devices sign
+in again), and link codes and recovery codes never reach the relay.
+
+### 26.1 What to watch
+
+- The relay log at the start: no error about `relay.db`.
+- `admin teams`: vault stores appear with `"kind": "account"`; they do not count for
+  `APASSY_RELAY_CONNECT_TEAMS_MAX` and `connect-sweep` never touches them.
+- Relay audit rows: `account_created`, `account_device_added`, `account_device_revoked`,
+  `account_join_requested`, `account_join_refused`, `account_link_created`,
+  `account_recovered`, `account_deleted`, `vault_store_created`, `vault_store_deleted`
+  (actor `account:<account id>`, ids only), and `auth_failed` refusals of kind
+  `account_token`. A run of `account_recovered` for one account, or many 429 answers of
+  `POST /v1/account/recover`, is someone guessing a recovery code: the relay allows five
+  tries for each account an hour.
+- `brain_event` rows queue the I-4 events for the bouncer brain; nothing sends them yet
+  (a later unit). They are small; leave them.
+
+### 26.2 Owner steps for the deploy
+
+Use the release runbook at the top of this document. Before the deploy take a backup
+(`admin backup`, section 13): it holds `relay.db` at 1005. To turn the accounts on, add
+`APASSY_RELAY_CONNECT_ACCOUNTS=1` and the signing key file to the compose file in a
+separate step after the image runs; until then the deploy changes only the directory
+version.
+
+### 26.3 Rollback of directory 1006
+
+**In place (preferred).** With the relay stopped, before any team downgrade of 25.2:
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay downgrade-directory-1005
+```
+
+It takes `relay.lock`. In one transaction it deletes the vault store rows (kind
+`account`) and their device map and sets the version to 1005; then it deletes the files
+of those stores (the snapshots of the accounts' vaults: each Mac pushes its vault again
+after the next upgrade). It prints `{"from": 1006, "to": 1005, "vault_stores_deleted":
+<n>}`; a 1005 file is left as it is (`{"from": 1005, "to": 1005, ...}`). Any other version
+exits 1 and changes nothing. The accounts, their devices, and every other new table stay:
+the 1005 image never reads them, and the next start of a 1006 image keeps them, so the
+accounts and their devices work again after the upgrade. To go further back, run
+`downgrade-directory-1004` or `downgrade-directory-1003` instead: they take a 1006 file
+down with the same step first. Then select the old image in `compose.yaml` and
+`docker compose up -d --wait`.
+
+**From the backup.** Restore `relay.db` from the backup of 26.2 with the relay stopped,
+and delete `teams/<id>.db` and `teams/<id>.sync/` of every vault store (`admin teams`
+before the stop lists them with `"kind": "account"`; the 1005 image removes a team file
+without a row at its start anyway). Every account made since the backup is gone. Use it
+only when the in-place way fails.
+
+A later start of a 1006 image moves the file to 1006 again.
+
+## 27. Connect billing (Stripe)
+
+SPEC section 34; contract `connect-billing-v1` of the core. Billing runs only with the
+account routes on (`APASSY_RELAY_CONNECT_ACCOUNTS=1`, section 26) **and** both Stripe files
+of 27.1 set; with the routes on and no files, the billing routes answer 503 `busy` and no
+account has a plan. Nothing here changes the hosted relay without the owner's
+confirmation; the live Stripe account changes only with it.
+
+### 27.1 Keys as files
+
+Two secrets, each in its own file readable by the relay user only (`chmod 0400`), next to
+the master key and the edge secret, never in the compose file or the environment:
+
+| File | Content | Setting |
+| --- | --- | --- |
+| `stripe-key` | A **restricted** key (`rk_live_…`; in a sandbox `rk_test_…`). The relay refuses a live secret key (`sk_live_…`). | `STRIPE_SECRET_KEY_FILE` |
+| `stripe-webhook-secret` | The signing secret of the webhook endpoint (`whsec_…`) | `STRIPE_WEBHOOK_SECRET_FILE` |
+
+The restricted key needs these permissions and no other: Checkout Sessions (write),
+Customer portal (write), Customers (read), Subscriptions (write: item quantity and
+cancel), Prices and Products (read), Events (read; for support and the sandbox job). To
+rotate either secret: make the new one in the Stripe dashboard, replace the file, restart
+the relay, then revoke the old key (or roll the webhook secret with an overlap; Stripe
+signs with both while the old one lives, and the relay accepts any matching `v1`).
+
+### 27.2 The webhook endpoint
+
+In the Stripe dashboard (sandbox first, then live), Developers › Webhooks › Add endpoint:
+
+- URL: `https://apassy-relay.wyderka.cc/v1/stripe/webhook` (through the edge Worker).
+- API version: `2025-03-31.basil` (the relay's pinned `Stripe-Version`).
+- Events: `checkout.session.completed`, `customer.subscription.created`,
+  `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`,
+  `invoice.payment_failed`. Others are stored and ignored.
+
+The Worker caps this path at 256 KiB and does not rate-limit it (SPEC 34.8). The relay
+answers `400` to a bad or stale signature (the clock of the VPS must be right within 5
+minutes: check `timedatectl`), and `200` with `duplicate: true` to a repeat. Stripe's
+dashboard shows each delivery and its answer; the relay log has one line per event with its
+id, type, and effect, never an email.
+
+### 27.3 The Customer Portal
+
+Settings › Billing › Customer portal, in the sandbox and the live account:
+
+- Cancellations: on, **at the end of the billing period**; no immediate cancel.
+- Payment methods: update on. Invoices: history on.
+- Subscriptions: switch plans on, products Connect Personal and Connect Family (both
+  intervals); **quantity changes off** (people and seats change through Connect, SPEC 34.4).
+- Business information: the terms and privacy URLs of the site; the return link is set by
+  Connect (`<APASSY_CONNECT_SITE_URL>/connect/done`).
+
+Whether the portal can switch to the tiered Family price is confirmed in the sandbox (plan,
+"Not verified"). If it cannot, Personal ↔ Family goes through a new checkout.
+
+### 27.4 The products script
+
+`crates/apassy-relay/scripts/stripe-products.sh` makes the three products
+(`apassy_connect_personal`, `_family`, `_team`) and the six prices with their lookup keys,
+idempotently: a price whose lookup key exists with the same amounts is kept; other amounts
+get a new price that takes the lookup key (`transfer_lookup_key=true`) and the old one is
+archived. It needs the Stripe CLI and jq.
+
+```sh
+stripe login                                   # the sandbox account
+crates/apassy-relay/scripts/stripe-products.sh --dry-run
+crates/apassy-relay/scripts/stripe-products.sh
+# live, only with the owner's confirmation, after the sandbox run was reviewed:
+APASSY_STRIPE_OLD_PERSONAL_PRODUCT=prod_… APASSY_STRIPE_OLD_TEAM_PRODUCT=prod_… \
+  CONFIRM_LIVE=yes crates/apassy-relay/scripts/stripe-products.sh --live --dry-run
+```
+
+The amounts are environment settings of the script (defaults: the owner's prices of
+2026-11-03). `APASSY_CONNECT_FAMILY_EXTRA_CENTS` and `_YEAR_CENTS` must be the same for the
+script and the relay: the relay refuses Family checkouts (`503 busy`, logged) while tier 2
+differs. The relay reads new prices within an hour, or at a restart. `CONNECT_TAX_CODE`
+sets the product tax code of new products; otherwise set it in the dashboard (owner step 1
+of the plan).
+
+### 27.5 The sandbox job
+
+`.github/workflows/connect-sandbox.yml` runs `tests/connect_billing_sandbox.rs` against the
+Stripe sandbox on a test clock (renewal, failed payment, cancellation). Manual only
+(`workflow_dispatch`). It needs the repository secret `STRIPE_SANDBOX_KEY` (a test-mode key)
+and the sandbox prices of 27.4. Record each run in the pull request as "run on <date>", or
+"not run".
+
+### 27.6 Settings
+
+`APASSY_CONNECT_SITE_URL`, `APASSY_CONNECT_FAMILY_EXTRA_CENTS`,
+`APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS`, `APASSY_CONNECT_GRACE_DAYS` (14),
+`APASSY_CONNECT_READ_ONLY_DAYS` (30), `APASSY_CONNECT_DELETE_DAYS` (90): SPEC 34.7. A
+change takes effect at the next start; durations apply to every plan at once, including
+plans already lapsed. A bad value, or only one of the two Stripe files, stops the start
+with a message that names the setting. No setting points the relay at another Stripe API
+than `https://api.stripe.com`.
+
+### 27.7 What the relay does on its own
+
+- **At start:** it reads the six prices from Stripe on a thread of its own (a failure is
+  logged as `the Stripe prices could not be read at start` and the next `GET /v1/plans`
+  asks again); the start never waits for Stripe.
+- **Each hour** (the maintenance pass): event ids older than 30 days go; each ended plan at
+  its deletion day (end + `APASSY_CONNECT_DELETE_DAYS`) loses its vault stores and tunnel
+  nodes, those of its group's active members whose plan is over too, with one audit row
+  `plan_stores_deleted` (actor `billing`, counts only) and an I-4 `forget` for each account.
+  The accounts and their devices stay. The rows are in the relay audit of
+  `relay.db` (`audit` table); a failed pass logs `the billing maintenance pass failed`.
+- **On `DELETE /v1/account`:** the subscription is canceled at Stripe first; if Stripe
+  fails, nothing is deleted and the app can ask again.
+
+### 27.8 Groups
+
+Family and Team groups (SPEC section 36) need no setting of their own: the webhook makes a
+group for a Family or Team subscription, and the invite links use
+`APASSY_CONNECT_SITE_URL` (`/connect/join#apassy_gin_…`; the site page reads only the
+fragment, which never reaches a server). The relay keeps the SHA-256 of each invite code,
+never the code. A support question about a member: `group_member` in `relay.db` names the
+group, the role, and the state (`pending` until the owner or an admin confirms).
+
+## 28. The Connect tunnel and the ingress
+
+The broker and the ingress (docs/SPEC.md section 35) run on a relay with the account routes (`APASSY_RELAY_CONNECT_ACCOUNTS=1`, or `APASSY_RELAY_MODE=connect`). `Relay::start` makes the broker, restores this month's usage from `relay.db`, and starts each ingress listener whose address is set; without the account routes nothing of the tunnel exists and every `/v1/tunnel/...` path is 404. The routes: `POST`/`GET /v1/tunnel/nodes`, `DELETE /v1/tunnel/nodes/{node_id}`, `GET /v1/tunnel/node` and `GET /v1/tunnel/dial/{node_id}` (WebSocket upgrades), `POST`/`GET /v1/tunnel/grants`, `DELETE /v1/tunnel/grants/{grant_id}`. Every other route answers an `Upgrade` with 400 `invalid_request`. This section is the plan for the hosted Connect host; the owner does every step.
+
+### 28.1 Ports, DNS, and keys
+
+- `APASSY_CONNECT_INGRESS_LISTEN` (hosted `0.0.0.0:443`) and `APASSY_CONNECT_ACME_LISTEN` (hosted `0.0.0.0:80`): raw TCP listeners on the Connect host, not through the Cloudflare Worker (it carries HTTP only). Open both in the host firewall and publish both ports of the container. Unset, that listener is off. A port that cannot be bound stops the start ("The tunnel ingress cannot listen on …").
+- `APASSY_CONNECT_NODE_ZONE` (default and hosted `node.apassy.wyderka.cc`): a DNS-only (grey cloud) wildcard record `*.node.apassy.wyderka.cc` to the Connect host's address. A proxied record would end TLS at Cloudflare and break the ingress.
+- The limits of the contract (section 8) are keys with the contract's defaults: `APASSY_CONNECT_TUNNEL_STREAMS` (64), `_NODES` (8), `_DIALS_PER_MINUTE` (60), `_GIB_PER_MONTH` (20 for each person or member), `_PING_SECS` (30), `_IDLE_SECS` (90), `_STREAM_IDLE_SECS` (900), `_STREAM_BUFFER_KIB` (256). docs/SPEC.md section 6 has their bounds; a value out of bounds stops the start.
+- The tunnel routes stay behind the Worker. It forwards a WebSocket upgrade only on `GET /v1/tunnel/*`, unchanged, returns the relay's `101` as it is, refuses an upgrade anywhere else, and limits dials with `TUNNEL_LIMITER` (namespace 1007, 60 a minute for each address or IPv6 /64; `wrangler.jsonc`). **Not verified**: whether the Workers VPC binding (`RELAY`) carries WebSocket upgrades. Check it on a staging deploy with one dial before nodes use Connect; if it does not, the fallback is a Cloudflare Tunnel public hostname for `/v1/tunnel/*`, or the routes directly on the Connect host behind its own TLS.
+- Let's Encrypt allows 50 new certificates a week for one registered domain; every node is one. A dedicated registered domain for node names keeps the site's and the relay's certificates out of that count.
+
+### 28.2 What to watch
+
+- `IngressHandle::stats` of both listeners (once exported): `rate_limited` and `busy` rising together is one or few addresses flooding; `timeouts` and `malformed` rising is scanning; `unrecognized` is names of no online node; `limited` is accounts at their stream limit or budget.
+- `tunnel_usage` in `relay.db` (`account_id`, `month`, `dials`, `streams`, `bytes`): the counters of each account and month, written every 60 seconds and at stop. Accounts near 20 GiB for each person or member are near their budget; compare the sum with the host's own traffic allowance.
+- The relay audit: `tunnel_node_registered`, `tunnel_node_updated`, `tunnel_node_removed`, `tunnel_grant_created`, `tunnel_grant_removed`, `tunnel_grants_ended` (ids only).
+- The thread count of the relay process: each open stream uses two threads and each node WebSocket two, bounded by `max_streams` (4096) and `max_nodes` (4096).
+- Nothing in the logs names a client address or carries stream bytes. If a line ever does, it is a bug: stop and report it. The one tunnel line is "the tunnel usage cannot be written" (a `relay.db` write failed).
+
+### 28.3 Rollback
+
+- The ingress alone: unset the two listen keys and restart; nodes keep their WebSockets for devices, and cloud agents get no answer on 443 and 80.
+- The whole tunnel goes only with the account routes (`APASSY_RELAY_CONNECT_ACCOUNTS=0`); nodes reconnect with backoff and devices fall back to the tailnet.
+- The tunnel's rows (`tunnel_node`, `tunnel_grant`, `tunnel_usage`) are part of directory 1006 and stay. A restart keeps the month's budgets (the stop writes them). Deleting `tunnel_usage` rows resets budgets: do it only to correct a counting bug, with a backup first.
+- The vendored HTTP change (`GET` upgrades reach the handler) stays; `http::handle` refuses an upgrade on every route but the two tunnel routes.
