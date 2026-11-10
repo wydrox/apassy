@@ -431,12 +431,12 @@ jobs:
       - name: Test Linux vault, browser identity and synthetic WebAuthn signatures
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy --all-features
-          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/)'
+          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/) | test(/^owner::serve::/) | test(/^owner_serve::/)'
       - name: Test headless owner commands without a desktop
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy-app
           --no-default-features --features node,owner,apassy/insecure-test-kdf
-          --bin apassy-app -E 'test(/^owner::tests::/)'
+          --bin apassy-app --test owner_serve -E 'test(/^owner::tests::/) | binary(owner_serve)'
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
