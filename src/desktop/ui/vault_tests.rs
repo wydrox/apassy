@@ -226,13 +226,26 @@ fn settings_show_the_groups_of_the_selected_section_only() {
         ),
         (
             SettingsSection::Security,
-            &[
-                "Touch ID",
-                "Change passphrase…",
-                "How often to ask for Touch ID",
-                "Every time",
-            ][..],
-            &["Back up now…", "Token lifetime"][..],
+            if cfg!(target_os = "linux") {
+                &[
+                    "Passphrase",
+                    "Change passphrase…",
+                    "Owner confirmation",
+                    "Every time",
+                ][..]
+            } else {
+                &[
+                    "Touch ID",
+                    "Change passphrase…",
+                    "How often to ask for Touch ID",
+                    "Every time",
+                ][..]
+            },
+            if cfg!(target_os = "linux") {
+                &["Back up now…", "Token lifetime", "Touch ID"][..]
+            } else {
+                &["Back up now…", "Token lifetime", "Owner confirmation"][..]
+            },
         ),
         (
             SettingsSection::Devices,

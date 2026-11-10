@@ -141,18 +141,41 @@ fn cases() -> [(
         ),
         (
             SettingsSection::Security,
-            &[
-                "Unlock",
-                "Touch ID",
-                "Owner checks use",
-                "Lock after inactivity",
-                "Never",
-                "Agents can't use your credentials while the vault is locked.",
-                "How often to ask for Touch ID",
-                "Every time",
-                "Change passphrase…",
-            ],
-            &["Back up now…", "Install tools…"],
+            if cfg!(target_os = "linux") {
+                &[
+                    "Unlock",
+                    "Passphrase",
+                    "Owner checks",
+                    "Owner confirmation",
+                    "Lock after inactivity",
+                    "Never",
+                    "Agents cannot use credentials while the vault is locked.",
+                    "Every time",
+                    "Change passphrase…",
+                ]
+            } else {
+                &[
+                    "Unlock",
+                    "Touch ID",
+                    "Owner checks use",
+                    "Lock after inactivity",
+                    "Never",
+                    "Agents can't use your credentials while the vault is locked.",
+                    "How often to ask for Touch ID",
+                    "Every time",
+                    "Change passphrase…",
+                ]
+            },
+            if cfg!(target_os = "linux") {
+                &[
+                    "Back up now…",
+                    "Install tools…",
+                    "Touch ID",
+                    "Owner checks use",
+                ]
+            } else {
+                &["Back up now…", "Install tools…", "Owner confirmation"]
+            },
         ),
         (
             SettingsSection::Devices,
@@ -1944,18 +1967,42 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
     app.place = Place::Settings;
     app.ui.settings_section = SettingsSection::Security;
     let (text, _) = frames(&mut app, TALL);
-    // The 2026-11-02 owner decision covers all manual actions globally.
-    for expected in [
-        "Lock after inactivity",
-        "Never",
-        "Agents can't use your credentials while the vault is locked.",
-        "How often to ask for Touch ID",
-        "Every time",
-        "After you confirm with Touch ID or your passphrase",
-        "Apassy doesn't ask again for anything until this time is up",
-        "Mac locks or sleeps",
-    ] {
+    for expected in ["Lock after inactivity", "Never", "Every time"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    // Linux requires a fresh check for every action; macOS can reuse its owner window.
+    let expected: &[&str] = if cfg!(target_os = "linux") {
+        &[
+            "Owner confirmation",
+            "Each sensitive action requires fresh confirmation with the vault passphrase or optional system authentication.",
+            "Linux screen-lock observation and approval reuse are unavailable.",
+            "Lock the vault manually when you finish.",
+            "Automatic screen-lock and inactivity detection are unavailable on Linux.",
+            "Agents cannot use credentials while the vault is locked.",
+        ]
+    } else {
+        &[
+            "Agents can't use your credentials while the vault is locked.",
+            "How often to ask for Touch ID",
+            "After you confirm with Touch ID or your passphrase",
+            "Apassy doesn't ask again for anything until this time is up",
+            "Mac locks or sleeps",
+        ]
+    };
+    for expected in expected {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    if cfg!(target_os = "linux") {
+        for unavailable in [
+            "Touch ID",
+            "Apassy doesn't ask again for anything until this time is up",
+            "Mac locks or sleeps",
+        ] {
+            assert!(
+                !text.contains(unavailable),
+                "unexpected {unavailable}: {text}"
+            );
+        }
     }
 }
 
