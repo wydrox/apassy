@@ -1662,3 +1662,25 @@ A later start of a 1005 image moves the file to 1005 again and keeps the column.
 `relay.db` at 1005: its node does not start, and the app has no command for the way
 back. Start the app of this version again. (Releases ship all components at one
 version, so a Mac app is not downgraded on its own.)
+
+## 26. The Connect tunnel and the ingress
+
+The broker and the ingress (docs/SPEC.md section 33) are built but not started by `Relay::start` yet: the routes `GET /v1/tunnel/node`, `GET /v1/tunnel/dial/{node_id}`, the grant routes, and the configuration keys come with the account store (unit C1). This section is the plan for the hosted Connect host; the owner does every step.
+
+### 26.1 Ports and DNS
+
+- `APASSY_CONNECT_INGRESS_LISTEN` (hosted `0.0.0.0:443`) and `APASSY_CONNECT_ACME_LISTEN` (hosted `0.0.0.0:80`): raw TCP listeners on the Connect host, not through the Cloudflare Worker (it carries HTTP only). Open both in the host firewall.
+- `APASSY_CONNECT_NODE_ZONE` (hosted `node.apassy.wyderka.cc`): a DNS-only (grey cloud) wildcard record `*.node.apassy.wyderka.cc` to the Connect host's address. A proxied record would end TLS at Cloudflare and break the ingress.
+- The tunnel routes stay behind the Worker, which must pass the WebSocket upgrade on `/v1/tunnel/*` unchanged (unit C2-core). Whether the Workers VPC binding carries WebSocket upgrades is not verified; if it does not, the plan's fallback is a Cloudflare Tunnel public hostname for those routes, or the routes directly on the Connect host behind its own TLS.
+- Let's Encrypt allows 50 new certificates a week for one registered domain; every node is one. A dedicated registered domain for node names keeps the site's and the relay's certificates out of that count.
+
+### 26.2 What to watch
+
+- `IngressHandle::stats` of both listeners (once exported): `rate_limited` and `busy` rising together is one or few addresses flooding; `timeouts` and `malformed` rising is scanning; `unrecognized` is names of no online node; `limited` is accounts at their stream limit or budget.
+- `Broker::usage_all`: accounts with `tripped` (over the month's bytes), and the bytes against the host's own traffic allowance.
+- The thread count of the relay process: each open stream uses two threads and each node WebSocket two, bounded by `max_streams` (4096) and `max_nodes` (4096).
+- Nothing in the logs names a client address or carries stream bytes. If a line ever does, it is a bug: stop and report it.
+
+### 26.3 Rollback
+
+The tunnel keeps no state on disk except the stored counters (unit C1). Stopping it: unset the two listen keys and restart; nodes reconnect with backoff and devices fall back to the tailnet. The vendored HTTP change (`GET` upgrades reach the handler) stays; the routing step answers an upgrade on any other route as before.
