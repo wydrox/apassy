@@ -1662,3 +1662,97 @@ A later start of a 1005 image moves the file to 1005 again and keeps the column.
 `relay.db` at 1005: its node does not start, and the app has no command for the way
 back. Start the app of this version again. (Releases ship all components at one
 version, so a Mac app is not downgraded on its own.)
+
+## 27. Connect billing (Stripe)
+
+SPEC section 34; contract `connect-billing-v1` of the core. **Not wired yet:** until the
+wiring step after Connect accounts (C1), a relay serves no billing route and reads none of
+these settings. Nothing here changes the hosted relay without the owner's confirmation;
+the live Stripe account changes only with it.
+
+### 27.1 Keys as files
+
+Two secrets, each in its own file readable by the relay user only (`chmod 0400`), next to
+the master key and the edge secret, never in the compose file or the environment:
+
+| File | Content | Setting |
+| --- | --- | --- |
+| `stripe-key` | A **restricted** key (`rk_live_…`; in a sandbox `rk_test_…`). The relay refuses a live secret key (`sk_live_…`). | `STRIPE_SECRET_KEY_FILE` |
+| `stripe-webhook-secret` | The signing secret of the webhook endpoint (`whsec_…`) | `STRIPE_WEBHOOK_SECRET_FILE` |
+
+The restricted key needs these permissions and no other: Checkout Sessions (write),
+Customer portal (write), Customers (read), Subscriptions (write: item quantity and
+cancel), Prices and Products (read), Events (read; for support and the sandbox job). To
+rotate either secret: make the new one in the Stripe dashboard, replace the file, restart
+the relay, then revoke the old key (or roll the webhook secret with an overlap; Stripe
+signs with both while the old one lives, and the relay accepts any matching `v1`).
+
+### 27.2 The webhook endpoint
+
+In the Stripe dashboard (sandbox first, then live), Developers › Webhooks › Add endpoint:
+
+- URL: `https://apassy-relay.wyderka.cc/v1/stripe/webhook` (through the edge Worker).
+- API version: `2025-03-31.basil` (the relay's pinned `Stripe-Version`).
+- Events: `checkout.session.completed`, `customer.subscription.created`,
+  `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`,
+  `invoice.payment_failed`. Others are stored and ignored.
+
+The Worker caps this path at 256 KiB and does not rate-limit it (SPEC 34.8). The relay
+answers `400` to a bad or stale signature (the clock of the VPS must be right within 5
+minutes: check `timedatectl`), and `200` with `duplicate: true` to a repeat. Stripe's
+dashboard shows each delivery and its answer; the relay log has one line per event with its
+id, type, and effect, never an email.
+
+### 27.3 The Customer Portal
+
+Settings › Billing › Customer portal, in the sandbox and the live account:
+
+- Cancellations: on, **at the end of the billing period**; no immediate cancel.
+- Payment methods: update on. Invoices: history on.
+- Subscriptions: switch plans on, products Connect Personal and Connect Family (both
+  intervals); **quantity changes off** (people and seats change through Connect, SPEC 34.4).
+- Business information: the terms and privacy URLs of the site; the return link is set by
+  Connect (`<APASSY_CONNECT_SITE_URL>/connect/done`).
+
+Whether the portal can switch to the tiered Family price is confirmed in the sandbox (plan,
+"Not verified"). If it cannot, Personal ↔ Family goes through a new checkout.
+
+### 27.4 The products script
+
+`crates/apassy-relay/scripts/stripe-products.sh` makes the three products
+(`apassy_connect_personal`, `_family`, `_team`) and the six prices with their lookup keys,
+idempotently: a price whose lookup key exists with the same amounts is kept; other amounts
+get a new price that takes the lookup key (`transfer_lookup_key=true`) and the old one is
+archived. It needs the Stripe CLI and jq.
+
+```sh
+stripe login                                   # the sandbox account
+crates/apassy-relay/scripts/stripe-products.sh --dry-run
+crates/apassy-relay/scripts/stripe-products.sh
+# live, only with the owner's confirmation, after the sandbox run was reviewed:
+APASSY_STRIPE_OLD_PERSONAL_PRODUCT=prod_… APASSY_STRIPE_OLD_TEAM_PRODUCT=prod_… \
+  CONFIRM_LIVE=yes crates/apassy-relay/scripts/stripe-products.sh --live --dry-run
+```
+
+The amounts are environment settings of the script (defaults: the owner's prices of
+2026-11-03). `APASSY_CONNECT_FAMILY_EXTRA_CENTS` and `_YEAR_CENTS` must be the same for the
+script and the relay: the relay refuses Family checkouts (`503 busy`, logged) while tier 2
+differs. The relay reads new prices within an hour, or at a restart. `CONNECT_TAX_CODE`
+sets the product tax code of new products; otherwise set it in the dashboard (owner step 1
+of the plan).
+
+### 27.5 The sandbox job
+
+`.github/workflows/connect-sandbox.yml` runs `tests/connect_billing_sandbox.rs` against the
+Stripe sandbox on a test clock (renewal, failed payment, cancellation). Manual only
+(`workflow_dispatch`). It needs the repository secret `STRIPE_SANDBOX_KEY` (a test-mode key)
+and the sandbox prices of 27.4. Record each run in the pull request as "run on <date>", or
+"not run".
+
+### 27.6 Settings
+
+`APASSY_CONNECT_SITE_URL`, `APASSY_CONNECT_FAMILY_EXTRA_CENTS`,
+`APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS`, `APASSY_CONNECT_GRACE_DAYS` (14),
+`APASSY_CONNECT_READ_ONLY_DAYS` (30), `APASSY_CONNECT_DELETE_DAYS` (90): SPEC 34.7. A
+change takes effect at the next start; durations apply to every plan at once, including
+plans already lapsed.
