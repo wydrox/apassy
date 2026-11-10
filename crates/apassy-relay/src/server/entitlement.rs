@@ -21,6 +21,9 @@ use crate::hostkeys::{decode_b64, encode_b64};
 pub const ENTITLEMENT_DOMAIN: &str = "apassy-connect entitlement v1";
 /// The life of a token: 24 hours.
 pub const LIFETIME_SECS: u64 = 86_400;
+/// A signing key signs only after this relay published it this long (services fetch the
+/// well-known document at most this old), unless it is the relay's first key.
+pub const PUBLISH_LEAD_SECS: u64 = 3600;
 /// How far `iat` may be ahead of the clock of the checking service.
 pub const CLOCK_SKEW_SECS: u64 = 300;
 /// The features of v1, sorted: every entitled account gets all three.

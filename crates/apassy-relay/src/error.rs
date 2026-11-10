@@ -124,6 +124,9 @@ pub mod codes {
     pub const NOT_IN_GROUP: &str = "not_in_group";
     /// A count limit of the account: devices, vault stores, nodes.
     pub const ACCOUNT_LIMIT: &str = "account_limit";
+    /// A signed sign-in of a key that was a device of the account and is not any more
+    /// (revoked, or the account was deleted). Only the device's own signature gets it.
+    pub const DEVICE_REMOVED: &str = "device_removed";
     // Connect billing and groups (docs/contracts/connect-billing-v1.md).
     /// A count of people or seats outside `1 ≤ n ≤ max` of the plan, or below the
     /// active members of the group.
@@ -175,7 +178,8 @@ pub fn status_of(code: &str) -> u16 {
         | TOO_MANY_ACTIONS
         | ACCOUNT_REQUIRED
         | NOT_IN_GROUP
-        | ACCOUNT_LIMIT => 403,
+        | ACCOUNT_LIMIT
+        | DEVICE_REMOVED => 403,
         NOT_FOUND | NODE_UNKNOWN => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
@@ -276,6 +280,7 @@ mod tests {
             codes::FEED_LIMIT,
             codes::FEED_RATE,
             codes::TOO_MANY_ACTIONS,
+            codes::DEVICE_REMOVED,
         ] {
             assert_eq!(RelayError::new(code, "x").status(), 403);
         }

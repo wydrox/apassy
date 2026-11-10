@@ -80,10 +80,14 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 /// - `team` gains the kind `account` (a vault store, one relay-sync team for each vault)
 ///   and `account_id`, `vault_id`. SQLite cannot widen a CHECK in place, so the table is
 ///   rebuilt with the same rows; the index `team_legacy` is made again.
-/// - `account`, `account_device`, `account_key` (the SHA-256 of every key that was ever a
-///   device of an account: one key makes at most one account, also after a deletion),
-///   `account_link`, `account_join`, `account_store_device` (which account device is
-///   which device of which store), `brain_event` (the I-4 outbox of the bouncer brain).
+/// - `account` (with the public recovery key and the last recovery, for its retry),
+///   `account_device` (with the device statement that added it: `added_by`, `link_hash`,
+///   `statement`; none for a root), `account_key` (the SHA-256 of every key that was ever
+///   a device of an account, and that account: one key makes at most one account, also
+///   after a deletion), `account_link`, `account_join`, `account_store_device` (which
+///   account device is which device of which store), `account_store_removal` (removals
+///   from a store file that wait for its open or a retry), `brain_event` (the I-4 outbox
+///   of the bouncer brain).
 /// - `"group"`, `group_member`, `group_invite` (C3); `stripe_customer`,
 ///   `stripe_subscription`, `stripe_event` (C2); `tunnel_node`, `tunnel_grant`,
 ///   `tunnel_usage` (C4); `entitlement_key` (kids and public keys only).
@@ -107,14 +111,22 @@ CREATE UNIQUE INDEX team_legacy ON team(legacy) WHERE legacy = 1;
 CREATE UNIQUE INDEX team_vault ON team(account_id, vault_id) WHERE kind = 'account';
 CREATE TABLE account (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
-  recovery_hash TEXT NOT NULL, create_hash BLOB NOT NULL, email TEXT, group_id TEXT);
+  recovery_key BLOB NOT NULL, create_hash BLOB NOT NULL, email TEXT, group_id TEXT,
+  recover_hash BLOB, recovered_at INTEGER, recover_device TEXT, recover_deleted INTEGER);
+CREATE INDEX account_created ON account(created_at);
 CREATE TABLE account_device (
   id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
   name TEXT NOT NULL, platform TEXT NOT NULL CHECK (platform IN ('mac','iphone','linux')),
   public_key BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_seen_at INTEGER,
-  revoked_at INTEGER);
+  revoked_at INTEGER, added_by TEXT, link_hash TEXT, statement BLOB);
 CREATE INDEX account_device_account ON account_device(account_id);
-CREATE TABLE account_key (key_hash BLOB PRIMARY KEY, created_at INTEGER NOT NULL);
+CREATE TABLE account_key (
+  key_hash BLOB PRIMARY KEY, created_at INTEGER NOT NULL, account_id TEXT);
+CREATE TABLE account_store_removal (
+  team_id TEXT NOT NULL, store_device INTEGER NOT NULL, device_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL,
+  PRIMARY KEY (team_id, store_device));
+CREATE INDEX account_store_removal_next ON account_store_removal(next_at);
 CREATE TABLE account_link (
   id INTEGER PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
   device_id TEXT NOT NULL REFERENCES account_device(id) ON DELETE CASCADE,
@@ -195,6 +207,7 @@ fn schema() -> String {
 /// image of 1005 never reads them, and the next open of this version keeps them.
 const DOWNGRADE_1005: &str = "
 DELETE FROM account_store_device;
+DELETE FROM account_store_removal;
 DELETE FROM team WHERE kind = 'account';
 PRAGMA user_version = 1005;
 ";
@@ -311,11 +324,34 @@ fn migrate_1005(conn: &Connection) -> RelayResult<()> {
 /// `account_id` yet, and the version. A file that `downgrade_to_1005` took back has every
 /// table of the step already (it removed only the vault store rows): they stay.
 fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
-    if !crate::server::store::has_column(conn, "team", "account_id")? {
+    if crate::server::store::has_column(conn, "team", "account_id")? {
+        refuse_earlier_accounts_step(conn)?;
+    } else {
         conn.execute_batch(MIGRATE_ACCOUNTS).map_err(db)?;
     }
     conn.pragma_update(None, "user_version", DIRECTORY_VERSION)
         .map_err(db)
+}
+
+/// The tables of the accounts step from an earlier, unreleased build of it (no
+/// `account_device.added_by`): this build does not read them, and does not change them.
+fn refuse_earlier_accounts_step(conn: &Connection) -> RelayResult<()> {
+    if crate::server::store::has_column(conn, "account_device", "added_by")? {
+        return Ok(());
+    }
+    Err(RelayError::internal(
+        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (account_device has no added_by). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
+    ))
+}
+
+/// Opens `relay.db` as `Directory::open` does: a plain file in `connect` mode
+/// (`Store::open_plain`), else keyed with the master key. The downgrade commands use it too.
+fn open_directory_file(config: &RelayConfig) -> RelayResult<Store> {
+    if config.connect.plain_files() {
+        Store::open_plain(&config.directory_path(), config)
+    } else {
+        Store::open_at(&config.directory_path(), &config.master_key)
+    }
 }
 
 /// Removes the vault stores from `team` inside a downgrade's transaction and returns
@@ -869,13 +905,9 @@ impl Directory {
     /// in one transaction; a failure leaves the file at its version. In `connect` mode the
     /// file is plain (`Store::open_plain`).
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
-        let store = if config.connect.plain_files() {
-            Store::open_plain(&config.directory_path(), config)?
-        } else {
-            Store::open_at(&config.directory_path(), &config.master_key)?
-        };
+        let store = open_directory_file(config)?;
         match store.user_version()? {
-            DIRECTORY_VERSION => {}
+            DIRECTORY_VERSION => store.with(refuse_earlier_accounts_step)?,
             version @ (1001..=BEFORE_ACCOUNTS_VERSION) => store.tx(|tx| {
                 if version == 1001 {
                     tx.execute_batch("ALTER TABLE team ADD COLUMN limits TEXT;")
@@ -914,7 +946,7 @@ impl Directory {
     /// after.
     pub fn downgrade_to_1003(config: &RelayConfig) -> RelayResult<(i64, i64)> {
         let _lock = crate::server::hub::lock_data_dir(config)?;
-        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let store = open_directory_file(config)?;
         let from = store.user_version()?;
         let stores = match from {
             DIRECTORY_VERSION => store.tx(|tx| {
@@ -951,7 +983,7 @@ impl Directory {
     /// it. A file of version 1004 is left as it is. Returns the version before and after.
     pub fn downgrade_to_1004(config: &RelayConfig) -> RelayResult<(i64, i64)> {
         let _lock = crate::server::hub::lock_data_dir(config)?;
-        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let store = open_directory_file(config)?;
         let from = store.user_version()?;
         let stores = match from {
             DIRECTORY_VERSION => store.tx(|tx| {
@@ -984,7 +1016,7 @@ impl Directory {
     /// and the vault stores removed. The only complete way back is the backup of the deploy.
     pub fn downgrade_to_1005(config: &RelayConfig) -> RelayResult<(i64, i64, usize)> {
         let _lock = crate::server::hub::lock_data_dir(config)?;
-        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let store = open_directory_file(config)?;
         let from = store.user_version()?;
         let stores = match from {
             DIRECTORY_VERSION => store.tx(|tx| drop_vault_store_rows(tx))?,

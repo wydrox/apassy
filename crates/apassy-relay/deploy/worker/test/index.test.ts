@@ -1351,6 +1351,47 @@ describe("account rate limit", () => {
     assert.deepEqual(allowed.used, ["account:unknown"]);
   });
 
+  it("sends the client prefix and its MAC on POST /v1/account and /v1/account/recover, over any client copy", async () => {
+    // The vector of "198.51.100.0/24" under SECRET, as for POST /v1/connect.
+    const mac = "554af02c577b0770299175aff6f2a86f7082585a1abab1dcabcce44a54549490";
+    for (const path of ["/v1/account", "/v1/account/recover"]) {
+      for (const forged of [undefined, "203.0.113.0/24"]) {
+        const headers: Record<string, string> = { "cf-connecting-ip": "198.51.100.42" };
+        if (forged) {
+          headers["X-Apassy-Client-Prefix"] = forged;
+          headers["X-Apassy-Client-Prefix-Mac"] = "ffff";
+        }
+        const response = await call(path, { method: "POST", body: "{}", headers }, everyLimiter(true).env);
+        assert.equal(response.status, 201, `${path} ${forged}`);
+        assert.equal(seen.length, 1);
+        assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), ["198.51.100.0/24"], `${path} ${forged}`);
+        assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix-mac"), [mac], `${path} ${forged}`);
+      }
+    }
+    // Every other account route gets neither, also when the client sends them.
+    for (const [method, path] of [
+      ["GET", "/v1/account"],
+      ["DELETE", "/v1/account"],
+      ["POST", "/v1/account/challenge"],
+      ["POST", "/v1/account/token"],
+      ["POST", "/v1/account/devices/join"],
+      ["POST", "/v1/account/recover/"],
+    ]) {
+      const response = await call(path!, {
+        method,
+        headers: {
+          "cf-connecting-ip": "198.51.100.42",
+          "X-Apassy-Client-Prefix": "198.51.100.0/24",
+          "X-Apassy-Client-Prefix-Mac": mac,
+        },
+        ...(method === "POST" ? { body: "{}" } : {}),
+      }, everyLimiter(true).env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+      assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), [], `${method} ${path}`);
+      assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix-mac"), [], `${method} ${path}`);
+    }
+  });
+
   for (const path of [
     "/v1/account/challenge",
     "/v1/account/token",

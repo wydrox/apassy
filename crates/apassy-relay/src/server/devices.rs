@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::api::{
-    AccessGrantedRef, Challenge, ChallengeRequest, DeviceEnroll, DeviceView, Role, TokenRequest,
+    AccessGrantedRef, Challenge, ChallengeRequest, DeviceEnroll, DeviceView, Role, TeamKind,
+    TokenRequest,
 };
 use crate::device;
 use crate::error::{RelayError, RelayResult, codes};
@@ -176,7 +177,7 @@ pub fn challenge_for(
     }
     let public = device::decode_public_key(&request.public_key)
         .map_err(|_| RelayError::unauthenticated())?;
-    core.store.with(|conn| {
+    let id = core.store.with(|conn| {
         // Read-time expiry makes the answer independent of the five-second sweep.
         expire_waits(conn, now)?;
         let id = conn.query_row(
@@ -198,22 +199,63 @@ pub fn challenge_for(
             ).map_err(db)?;
             return Err(if refused { RelayError::new(codes::JOIN_REFUSED, "The device request was refused or expired.") } else { RelayError::unauthenticated() });
         };
-        let nonce = device::new_nonce().map_err(|_| RelayError::internal("The system has no random source."))?;
-        let expires_at = now.saturating_add(60);
-        let mut state = core.device_auth.0.lock().unwrap_or_else(PoisonError::into_inner);
-        state.purge(now);
-        let oldest = if state.nonces.values().filter(|(d, _)| *d == id).count() >= 4 {
-            state.nonce_order.iter().find(|n| state.nonces.get(*n).is_some_and(|(d, _)| *d == id)).cloned()
-        } else { None };
-        if state.nonces.len() >= 1000 {
-            return Err(RelayError::new(codes::BUSY, "The sign-in challenge table is full. Try again later."));
-        }
-        if let Some(oldest) = oldest { state.nonces.remove(&oldest); state.compact(); }
-        state.nonce_order.push_back(nonce.clone());
-        state.nonces.insert(nonce.clone(), (id, expires_at));
-        let origin = challenge_origin(&core.config.sign_in_origins(), host).to_string();
-        json_value(&Challenge { nonce, expires_at, origin })
+        Ok(id)
+    })?;
+    account_device_live(core, id)?;
+    let nonce = device::new_nonce()
+        .map_err(|_| RelayError::internal("The system has no random source."))?;
+    let expires_at = now.saturating_add(60);
+    let mut state = core
+        .device_auth
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    state.purge(now);
+    let oldest = if state.nonces.values().filter(|(d, _)| *d == id).count() >= 4 {
+        state
+            .nonce_order
+            .iter()
+            .find(|n| state.nonces.get(*n).is_some_and(|(d, _)| *d == id))
+            .cloned()
+    } else {
+        None
+    };
+    if state.nonces.len() >= 1000 {
+        return Err(RelayError::new(
+            codes::BUSY,
+            "The sign-in challenge table is full. Try again later.",
+        ));
+    }
+    if let Some(oldest) = oldest {
+        state.nonces.remove(&oldest);
+        state.compact();
+    }
+    state.nonce_order.push_back(nonce.clone());
+    state.nonces.insert(nonce.clone(), (id, expires_at));
+    let origin = challenge_origin(&core.config.sign_in_origins(), host).to_string();
+    json_value(&Challenge {
+        nonce,
+        expires_at,
+        origin,
     })
+}
+
+/// A device of a vault store (a team of kind `account`) signs in only while `relay.db`
+/// maps it to a live account device (`account::store_device_live`): a removal ends it
+/// there first, also before the store file has its revoke. 401 otherwise; any other team
+/// passes.
+fn account_device_live(core: &Core, id: DeviceId) -> RelayResult<()> {
+    if core.kind != TeamKind::Account {
+        return Ok(());
+    }
+    let live = core
+        .relay_store
+        .with(|conn| crate::server::account::store_device_live(conn, &core.team, id.0))?;
+    if live {
+        Ok(())
+    } else {
+        Err(RelayError::unauthenticated())
+    }
 }
 
 pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value> {
@@ -233,6 +275,7 @@ pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value
         if expiry <= now || request.team_id != core.team || core.stopping() {
             return Err(RelayError::unauthenticated());
         }
+        account_device_live(core, id)?;
         let public = device::decode_public_key(&request.public_key)
             .map_err(|_| RelayError::unauthenticated())?;
         let signature = decode_b64(&request.signature, device::MAX_SIGNATURE_BYTES)

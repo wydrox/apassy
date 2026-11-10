@@ -204,13 +204,22 @@ struct Dev {
     id: String,
 }
 
+fn recovery_key(code: &[u8; 16]) -> device::RecoveryKey {
+    device::RecoveryKey::from_code(code).unwrap()
+}
+
 fn account_body(c: &Connect, key: &DeviceKey, recovery: &[u8; 16]) -> Value {
     let public_key = key.public_key_b64();
+    let recovery_key = recovery_key(recovery).public_key_b64();
     let signature = key
-        .sign(&device::account_message(c.origin(), &public_key))
+        .sign(&device::account_message(
+            c.origin(),
+            &public_key,
+            &recovery_key,
+        ))
         .unwrap();
     json!({"name": "Rafal", "device_name": "MacBook Pro", "platform": "mac",
-           "public_key": public_key, "recovery_hash": device::account_recovery_hash(recovery),
+           "public_key": public_key, "recovery_key": recovery_key,
            "signature": encode_b64(&signature)})
 }
 
@@ -266,11 +275,34 @@ fn sign_in(c: &Connect, dev: &Dev) -> String {
     token
 }
 
-/// A link code of `account` as the device that adds a device makes it.
+/// A challenge and a signed token call of `key` for `account`: the status and the error
+/// code of the token call (`None` when it granted a token).
+fn token_call(c: &Connect, account: &str, key: &DeviceKey) -> (u16, Option<String>) {
+    let (status, answer) = challenge(c, account, key);
+    assert_eq!(status, 200, "{answer}");
+    let nonce = answer["result"]["nonce"].as_str().unwrap().to_string();
+    let message =
+        device::account_sign_in_message(c.origin(), account, &key.public_key_b64(), &nonce);
+    let (status, answer) = c.call(
+        "POST",
+        "/v1/account/token",
+        None,
+        Some(&token_body(account, key, &nonce, &message)),
+    );
+    (status, answer["error"]["code"].as_str().map(str::to_string))
+}
+
+/// A link code of `account` as the device that adds a device makes it: the account id,
+/// 64 hex of the secret, and 32 hex of the key fingerprint (synthetic here: Connect never
+/// reads the code).
 fn link_code(account: &str) -> String {
-    let mut bytes = [0u8; 32];
+    let mut bytes = [0u8; 48];
     getrandom::fill(&mut bytes).unwrap();
-    format!("apassy_alk_{account}_{}", hex(&bytes))
+    format!(
+        "apassy_alk_{account}_{}_{}",
+        hex(&bytes[..32]),
+        hex(&bytes[32..])
+    )
 }
 
 fn join_body(c: &Connect, account: &str, link_hash: &str, key: &DeviceKey, name: &str) -> Value {
@@ -285,6 +317,40 @@ fn join_body(c: &Connect, account: &str, link_hash: &str, key: &DeviceKey, name:
         .unwrap();
     json!({"account_id": account, "link_hash": link_hash, "device_name": name,
            "platform": "iphone", "public_key": public_key, "signature": encode_b64(&signature)})
+}
+
+/// The body of a confirmation by `by` of the join of `key` with the link `link_hash`: the
+/// key and the device statement.
+fn confirm_body(c: &Connect, by: &Dev, link_hash: &str, key: &DeviceKey) -> Value {
+    let statement = by
+        .key
+        .sign(&device::account_device_message(
+            c.origin(),
+            &by.account,
+            link_hash,
+            &key.public_key_b64(),
+        ))
+        .unwrap();
+    json!({"public_key": key.public_key_b64(), "statement": encode_b64(&statement)})
+}
+
+/// The body of a cancel of its join by `key`.
+fn cancel_body(c: &Connect, account: &str, link_hash: &str, key: &DeviceKey) -> Value {
+    let signature = key
+        .sign(&device::account_join_cancel_message(
+            c.origin(),
+            account,
+            link_hash,
+            &key.public_key_b64(),
+        ))
+        .unwrap();
+    json!({"account_id": account, "link_hash": link_hash, "public_key": key.public_key_b64(),
+           "signature": encode_b64(&signature)})
+}
+
+/// The body of `POST /v1/account/vaults/{team}/devices` for `dev`.
+fn store_add_body(dev: &Dev) -> Value {
+    json!({"device_id": dev.id, "public_key": dev.key.public_key_b64()})
 }
 
 /// `a` adds a new device to its account: the link, the join, the confirmation.
@@ -309,7 +375,7 @@ fn add_device(c: &Connect, a: &Dev, token: &str) -> Dev {
         "POST",
         &format!("/v1/account/devices/pending/{join_id}/confirm"),
         Some(token),
-        Some(&json!({"public_key": key.public_key_b64()})),
+        Some(&confirm_body(c, a, &hash, &key)),
     );
     Dev {
         key,
@@ -441,12 +507,14 @@ fn an_account_needs_a_valid_signature_and_one_key_makes_one_account() {
     let c = start();
     let key = DeviceKey::generate().unwrap();
     let body = account_body(&c, &key, &[1u8; 16]);
-    // Another origin, another key, another domain: 400, nothing made.
+    let recovery = body["recovery_key"].as_str().unwrap().to_string();
+    // Another origin, another key, another domain, another recovery key: 400, nothing made.
     let mut other_origin = body.clone();
     other_origin["signature"] = json!(encode_b64(
         &key.sign(&device::account_message(
             "https://connect.example.test",
-            &key.public_key_b64()
+            &key.public_key_b64(),
+            &recovery
         ))
         .unwrap()
     ));
@@ -459,10 +527,25 @@ fn an_account_needs_a_valid_signature_and_one_key_makes_one_account() {
     let mut other_key = body.clone();
     other_key["signature"] = json!(encode_b64(
         &stranger
-            .sign(&device::account_message(c.origin(), &key.public_key_b64()))
+            .sign(&device::account_message(
+                c.origin(),
+                &key.public_key_b64(),
+                &recovery
+            ))
             .unwrap()
     ));
-    for bad in [&other_origin, &other_domain, &other_key] {
+    // The signature binds the recovery key: another one in the body is refused.
+    let mut other_recovery = body.clone();
+    other_recovery["recovery_key"] = json!(recovery_key(&[2u8; 16]).public_key_b64());
+    let mut short_recovery = body.clone();
+    short_recovery["recovery_key"] = json!(encode_b64(&[1u8; 31]));
+    for bad in [
+        &other_origin,
+        &other_domain,
+        &other_key,
+        &other_recovery,
+        &short_recovery,
+    ] {
         c.fails(
             "POST",
             "/v1/account",
@@ -530,8 +613,9 @@ fn an_account_needs_a_valid_signature_and_one_key_makes_one_account() {
 }
 
 /// Sign-in: a signature for another origin, of another domain (the relay team sign-in,
-/// the bouncer brain), over a used or an unknown nonce, is the same 401. A key that is not
-/// a device gets no nonce. An account token is no team token and the reverse.
+/// the bouncer brain), over a used or an unknown nonce, is the same 401, and a refused call
+/// uses nothing. A key that is not a device gets no nonce. An account token is no team
+/// token and the reverse.
 #[test]
 fn sign_in_refuses_another_origin_another_domain_and_a_used_nonce() {
     let c = start();
@@ -585,13 +669,7 @@ fn sign_in_refuses_another_origin_another_domain_and_a_used_nonce() {
     ]
     .join("\0");
     refused(brain.as_bytes(), &n);
-    // A refused attempt used its nonce up: the right signature over it is 401 too.
-    refused(
-        &device::account_sign_in_message(c.origin(), &a.account, &public_key, &n),
-        &n,
-    );
-    // A used nonce works once.
-    let n = nonce();
+    // A refused attempt uses nothing: the right signature over the same nonce works, once.
     let message = device::account_sign_in_message(c.origin(), &a.account, &public_key, &n);
     c.ok(
         "POST",
@@ -600,14 +678,22 @@ fn sign_in_refuses_another_origin_another_domain_and_a_used_nonce() {
         Some(&token_body(&a.account, &a.key, &n, &message)),
     );
     refused(&message, &n);
-    // At most four open nonces for each key: the oldest goes.
+    // A nonce made up, or one of another account, is refused.
+    refused(
+        &device::account_sign_in_message(c.origin(), &a.account, &public_key, "bm9uY2U"),
+        "bm9uY2U",
+    );
+    // Later challenges of the same key never end an earlier one.
     let first = nonce();
-    for _ in 0..4 {
+    for _ in 0..8 {
         nonce();
     }
-    refused(
-        &device::account_sign_in_message(c.origin(), &a.account, &public_key, &first),
-        &first,
+    let message = device::account_sign_in_message(c.origin(), &a.account, &public_key, &first);
+    c.ok(
+        "POST",
+        "/v1/account/token",
+        None,
+        Some(&token_body(&a.account, &a.key, &first, &message)),
     );
     // A key that is no device of the account gets no nonce, also with the account id.
     let stranger = DeviceKey::generate().unwrap();
@@ -715,7 +801,7 @@ fn a_link_code_is_one_use_and_expires_at_ten_minutes() {
         "POST",
         &format!("/v1/account/devices/pending/{join_id}/confirm"),
         Some(&token),
-        Some(&json!({"public_key": b.public_key_b64()})),
+        Some(&confirm_body(&c, &a, &hash, &b)),
         409,
         "conflict",
     );
@@ -750,11 +836,6 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
     assert_eq!(
         device::account_link_hash(code),
         apassy::connect::link_hash(code)
-    );
-    let recovery: Vec<u8> = (16u8..32).collect();
-    assert_eq!(
-        device::account_recovery_hash(&recovery),
-        v["recovery"]["recovery_hash"].as_str().unwrap()
     );
 
     let c = start();
@@ -809,7 +890,7 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
         "POST",
         &format!("/v1/account/devices/pending/{join_id}/confirm"),
         Some(&second_token),
-        Some(&json!({"public_key": b.public_key_b64()})),
+        Some(&confirm_body(&c, &second, &hash, &b)),
         403,
         "forbidden",
     );
@@ -819,10 +900,47 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
         "POST",
         &format!("/v1/account/devices/pending/{join_id}/confirm"),
         Some(&token),
-        Some(&json!({"public_key": other.public_key_b64()})),
+        Some(&confirm_body(&c, &a, &hash, &other)),
         409,
         "conflict",
     );
+    // A statement that is not the confirming device's over this link and key: 400,
+    // nothing added. So is a confirmation without one.
+    let mut by_other_device = confirm_body(&c, &second, &hash, &b);
+    by_other_device["public_key"] = json!(b.public_key_b64());
+    let other_link = confirm_body(
+        &c,
+        &a,
+        &device::account_link_hash(&link_code(&a.account)),
+        &b,
+    );
+    let mut other_domain = confirm_body(&c, &a, &hash, &b);
+    other_domain["statement"] = json!(encode_b64(
+        &a.key
+            .sign(&device::account_join_message(
+                c.origin(),
+                &a.account,
+                &hash,
+                &b.public_key_b64()
+            ))
+            .unwrap()
+    ));
+    for bad in [
+        by_other_device,
+        other_link,
+        other_domain,
+        json!({"public_key": b.public_key_b64()}),
+        json!({"public_key": b.public_key_b64(), "statement": "not-a-signature"}),
+    ] {
+        c.fails(
+            "POST",
+            &format!("/v1/account/devices/pending/{join_id}/confirm"),
+            Some(&token),
+            Some(&bad),
+            400,
+            "invalid_request",
+        );
+    }
     assert_eq!(
         c.ok("GET", "/v1/account", Some(&token), None)["devices"]
             .as_array()
@@ -830,12 +948,26 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
             .len(),
         2
     );
-    c.ok(
+    let (status, answer) = challenge(&c, &a.account, &b);
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (403, Some("join_pending"))
+    );
+    let added = c.ok(
         "POST",
         &format!("/v1/account/devices/pending/{join_id}/confirm"),
         Some(&token),
-        Some(&json!({"public_key": b.public_key_b64()})),
+        Some(&confirm_body(&c, &a, &hash, &b)),
     );
+    // The answer carries the new device's chain: one statement, by the confirming device.
+    assert_eq!(added["chain"].as_array().unwrap().len(), 1, "{added}");
+    assert_eq!(added["chain"][0]["confirmer_key"], a.key.public_key_b64());
+    assert_eq!(added["chain"][0]["link_hash"], hash.as_str());
+    assert!(device::verify(
+        &a.key.public_key(),
+        &device::account_device_message(c.origin(), &a.account, &hash, &b.public_key_b64()),
+        &decode_b64(added["chain"][0]["statement"].as_str().unwrap(), 72).unwrap()
+    ));
     let b = Dev {
         id: String::new(),
         key: b,
@@ -885,10 +1017,44 @@ fn a_join_needs_the_confirmation_of_a_live_device_and_both_sides_show_the_same_w
         None,
         Some(&join_body(&c, &a.account, &hash, &cancelled, "Tablet")),
     );
-    c.ok("POST", "/v1/account/devices/join/cancel", None,
-        Some(&json!({"account_id": a.account, "link_hash": hash, "public_key": cancelled.public_key_b64()})));
-    let (status, _) = challenge(&c, &a.account, &cancelled);
-    assert_eq!(status, 403);
+    // Only the joining key ends its join: another key's signature, the join message, or
+    // none is 400, and the join still waits.
+    let stranger = DeviceKey::generate().unwrap();
+    let mut by_stranger = cancel_body(&c, &a.account, &hash, &stranger);
+    by_stranger["public_key"] = json!(cancelled.public_key_b64());
+    let mut join_signature = cancel_body(&c, &a.account, &hash, &cancelled);
+    join_signature["signature"] =
+        join_body(&c, &a.account, &hash, &cancelled, "Tablet")["signature"].clone();
+    for bad in [
+        by_stranger,
+        join_signature,
+        json!({"account_id": a.account, "link_hash": hash, "public_key": cancelled.public_key_b64()}),
+    ] {
+        c.fails(
+            "POST",
+            "/v1/account/devices/join/cancel",
+            None,
+            Some(&bad),
+            400,
+            "invalid_request",
+        );
+    }
+    let (status, answer) = challenge(&c, &a.account, &cancelled);
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (403, Some("join_pending"))
+    );
+    c.ok(
+        "POST",
+        "/v1/account/devices/join/cancel",
+        None,
+        Some(&cancel_body(&c, &a.account, &hash, &cancelled)),
+    );
+    let (status, answer) = challenge(&c, &a.account, &cancelled);
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (403, Some("join_refused"))
+    );
 }
 
 /// A revoked device loses its account token at once, and leaves every vault store: its
@@ -907,7 +1073,7 @@ fn a_revoked_device_loses_its_token_at_once_and_vanishes_from_every_store() {
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
         Some(&token),
-        Some(&json!({"device_id": b.id})),
+        Some(&store_add_body(&b)),
     );
     assert_eq!(added["store_device_id"], 2);
     let b_store_token = c.relay.sign_in(&team, &b.key);
@@ -955,8 +1121,11 @@ fn a_revoked_device_loses_its_token_at_once_and_vanishes_from_every_store() {
         .status,
         401
     );
-    let (status, _) = challenge(&c, &a.account, &b.key);
-    assert_eq!(status, 401);
+    // Its own signed sign-in learns that it was removed; nothing else does.
+    assert_eq!(
+        token_call(&c, &b.account, &b.key),
+        (403, Some("device_removed".to_string()))
+    );
     let (status, _) = c.call(
         "POST",
         "/v1/auth/challenge",
@@ -1039,7 +1208,7 @@ fn a_vault_store_is_a_relay_sync_team_for_the_account_device_key() {
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
         Some(&token),
-        Some(&json!({"device_id": b.id})),
+        Some(&store_add_body(&b)),
     );
 
     let a_sync = c.relay.sign_in(&team, &a.key);
@@ -1164,7 +1333,7 @@ fn a_device_of_another_account_cannot_read_or_join_a_store_without_a_group() {
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
         Some(&token),
-        Some(&json!({"device_id": other.id})),
+        Some(&store_add_body(&other)),
         403,
         "not_in_group",
     );
@@ -1173,7 +1342,7 @@ fn a_device_of_another_account_cannot_read_or_join_a_store_without_a_group() {
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
         Some(&other_token),
-        Some(&json!({"device_id": other.id})),
+        Some(&store_add_body(&other)),
         403,
         "forbidden",
     );
@@ -1204,7 +1373,7 @@ fn a_device_of_another_account_cannot_read_or_join_a_store_without_a_group() {
         (
             "POST",
             format!("/v1/account/vaults/{operator_team}/devices"),
-            Some(json!({"device_id": a.id})),
+            Some(store_add_body(&a)),
         ),
         (
             "DELETE",
@@ -1217,8 +1386,28 @@ fn a_device_of_another_account_cannot_read_or_join_a_store_without_a_group() {
     assert!(c.relay.hub().team(&operator_team).is_some());
 }
 
-/// Recovery works only with zero live devices and the right code, replaces the code,
-/// deletes every vault store, keeps the account, and has at most five tries an hour.
+/// The body of a recovery of `account` by `new_key`, signed by the recovery key of `code`,
+/// naming the recovery key of `next` as the next one.
+fn recover_body(
+    c: &Connect,
+    account: &str,
+    code: &[u8; 16],
+    new_key: &DeviceKey,
+    next: &[u8; 16],
+) -> Value {
+    let public_key = new_key.public_key_b64();
+    let next_key = recovery_key(next).public_key_b64();
+    let message = device::account_recover_message(c.origin(), account, &public_key, &next_key);
+    json!({"account_id": account, "device_name": "MacBook Air", "platform": "mac",
+           "public_key": public_key, "recovery_key": next_key,
+           "signature": encode_b64(&new_key.sign(&message).unwrap()),
+           "recovery_signature": encode_b64(&recovery_key(code).sign(&message))})
+}
+
+/// Recovery works only with zero live devices and a signature of the account's recovery
+/// key, makes the new device the account's new root, replaces the recovery key, deletes
+/// every vault store, keeps the account, answers a repeat of the same body the same, and
+/// counts only failed recovery signatures of existing accounts: five an hour.
 #[test]
 fn recover_works_only_with_zero_live_devices_and_deletes_the_stores() {
     let c = start();
@@ -1238,43 +1427,69 @@ fn recover_works_only_with_zero_live_devices_and_deletes_the_stores() {
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
     let (team, _) = make_store(&c, &token);
-    let recover = |code: &[u8], new_key: &DeviceKey, new_code: &[u8; 16]| {
-        let public_key = new_key.public_key_b64();
-        let signature = new_key
-            .sign(&device::account_recover_message(
-                c.origin(),
-                &a.account,
-                &public_key,
-            ))
-            .unwrap();
-        c.call("POST", "/v1/account/recover", None, Some(&json!({
-            "account_id": a.account, "recovery": format!("apassy_rec_{}", hex(code)),
-            "device_name": "MacBook Air", "platform": "mac", "public_key": public_key,
-            "recovery_hash": device::account_recovery_hash(new_code), "signature": encode_b64(&signature)})))
-    };
+    let recover = |body: &Value| c.call("POST", "/v1/account/recover", None, Some(body));
     let new_key = DeviceKey::generate().unwrap();
-    // With a live device: 403, the same as a wrong code.
-    let (status, answer) = recover(&code, &new_key, &[9u8; 16]);
+    // With a live device: 403, the same as a wrong recovery key, and not counted.
+    let (status, answer) = recover(&recover_body(&c, &a.account, &code, &new_key, &[9u8; 16]));
     assert_eq!(
         (status, answer["error"]["code"].as_str()),
         (403, Some("forbidden"))
     );
-    let (_, wrong) = recover(&[0u8; 16], &new_key, &[9u8; 16]);
+    for _ in 0..10 {
+        let (status, _) = recover(&recover_body(&c, &a.account, &code, &new_key, &[9u8; 16]));
+        assert_eq!(status, 403);
+    }
+    let (_, wrong) = recover(&recover_body(
+        &c, &a.account, &[0u8; 16], &new_key, &[9u8; 16],
+    ));
     assert_eq!(wrong["error"], answer["error"]);
-    // No live device: the right code recovers.
+    // An unknown account is the same 403, and is not counted.
+    let (_, unknown) = recover(&recover_body(
+        &c,
+        "acc_aaaaaaaaaa",
+        &code,
+        &new_key,
+        &[9u8; 16],
+    ));
+    assert_eq!(unknown["error"], answer["error"]);
+    // The new device key signs the request too: another signature is 400, not counted.
+    let mut unsigned = recover_body(&c, &a.account, &code, &new_key, &[9u8; 16]);
+    unsigned["signature"] = json!(encode_b64(
+        &DeviceKey::generate().unwrap().sign(b"other").unwrap()
+    ));
+    let (status, _) = recover(&unsigned);
+    assert_eq!(status, 400);
+    // The recovery signature covers the next recovery key: another one is 403.
+    let mut swapped = recover_body(&c, &a.account, &code, &new_key, &[9u8; 16]);
+    swapped["recovery_key"] = json!(recovery_key(&[6u8; 16]).public_key_b64());
+    swapped["signature"] = json!(encode_b64(
+        &new_key
+            .sign(&device::account_recover_message(
+                c.origin(),
+                &a.account,
+                &new_key.public_key_b64(),
+                &recovery_key(&[6u8; 16]).public_key_b64()
+            ))
+            .unwrap()
+    ));
+    let (status, _) = recover(&swapped);
+    assert_eq!(status, 403);
+    // No live device: the right recovery key recovers.
     c.ok(
         "DELETE",
         &format!("/v1/account/devices/{}", a.id),
         Some(&token),
         None,
     );
-    let (status, _) = recover(&[0u8; 16], &new_key, &[9u8; 16]);
-    assert_eq!(status, 403);
-    let (status, recovered) = recover(&code, &new_key, &[9u8; 16]);
+    let body = recover_body(&c, &a.account, &code, &new_key, &[9u8; 16]);
+    let (status, recovered) = recover(&body);
     assert_eq!(status, 200, "{recovered}");
     assert_eq!(recovered["result"]["account_id"], a.account.as_str());
     assert_eq!(recovered["result"]["deleted_stores"], 1);
     assert!(!c.relay.config.team_path(&team).exists());
+    // A repeat of the same body (a lost answer): the same answer, nothing new.
+    let (status, again) = recover(&body);
+    assert_eq!((status, &again), (200, &recovered));
     let b = Dev {
         key: new_key,
         account: a.account.clone(),
@@ -1285,7 +1500,13 @@ fn recover_works_only_with_zero_live_devices_and_deletes_the_stores() {
         c.ok("GET", "/v1/account/vaults", Some(&b_token), None),
         json!([])
     );
-    // The old code is gone: with no live device again, it does not work; the new one does.
+    // The recovered device is the account's new root: no statement leads to the old one.
+    let view = c.ok("GET", "/v1/account", Some(&b_token), None);
+    assert_eq!(view["devices"].as_array().unwrap().len(), 1);
+    assert_eq!(view["devices"][0]["chain"], json!([]));
+    // The old recovery key is gone: with no live device again, it does not work. Only
+    // failed recovery signatures count, five an hour for the account: two failed above,
+    // three more make five, and then even the right key waits.
     c.ok(
         "DELETE",
         &format!("/v1/account/devices/{}", b.id),
@@ -1293,11 +1514,94 @@ fn recover_works_only_with_zero_live_devices_and_deletes_the_stores() {
         None,
     );
     let third = DeviceKey::generate().unwrap();
-    let (status, _) = recover(&code, &third, &[8u8; 16]);
-    assert_eq!(status, 403);
-    // Five tries an hour for each account: this was the fifth; the sixth is 429.
-    let (status, _) = recover(&[9u8; 16], &third, &[8u8; 16]);
-    assert_eq!(status, 429);
+    for _ in 0..3 {
+        let (status, _) = recover(&recover_body(&c, &a.account, &code, &third, &[8u8; 16]));
+        assert_eq!(status, 403);
+    }
+    let (status, limited) = recover(&recover_body(
+        &c, &a.account, &[9u8; 16], &third, &[8u8; 16],
+    ));
+    assert_eq!(
+        (status, limited["error"]["code"].as_str()),
+        (429, Some("rate_limited"))
+    );
+}
+
+/// A recovery of one account counts its failures apart from another's, and the prefix
+/// that the Worker proved has its own count over all accounts.
+#[test]
+fn recovery_failures_count_for_each_account_and_each_proven_prefix() {
+    let c = start();
+    let recover_from = |prefix: &str, body: &Value| {
+        let mac = apassy_relay::server::connect::prefix_mac(EDGE_SECRET, prefix);
+        let (status, text) = relay::call_raw(
+            &c.relay.url,
+            Some(EDGE_SECRET),
+            "POST",
+            "/v1/account/recover",
+            None,
+            &[
+                ("X-Apassy-Client-Prefix", prefix),
+                ("X-Apassy-Client-Prefix-Mac", mac.as_str()),
+            ],
+            Some(body),
+        );
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        (status, value["error"]["code"].as_str().map(str::to_string))
+    };
+    // Five accounts with no live device, each failed four times from one prefix: twenty.
+    let mut accounts = Vec::new();
+    for _ in 0..6 {
+        let a = create(&c);
+        let token = sign_in(&c, &a);
+        c.ok(
+            "DELETE",
+            &format!("/v1/account/devices/{}", a.id),
+            Some(&token),
+            None,
+        );
+        accounts.push(a);
+    }
+    let key = DeviceKey::generate().unwrap();
+    for a in &accounts[..5] {
+        for _ in 0..4 {
+            let body = recover_body(&c, &a.account, &[0u8; 16], &key, &[1u8; 16]);
+            assert_eq!(
+                recover_from("198.51.100.0/24", &body),
+                (403, Some("forbidden".into()))
+            );
+        }
+    }
+    // The prefix made its twenty failures: 429 for a sixth account too, also with the
+    // right key; another prefix still recovers it.
+    let sixth = &accounts[5];
+    let body = recover_body(&c, &sixth.account, &[7u8; 16], &key, &[1u8; 16]);
+    assert_eq!(
+        recover_from("198.51.100.0/24", &body),
+        (429, Some("rate_limited".into()))
+    );
+    let (status, _) = recover_from("203.0.113.0/24", &body);
+    assert_eq!(status, 200);
+    // A prefix without the Worker's proof counts as `unknown`, not as the prefix it names.
+    let (status, text) = relay::call_raw(
+        &c.relay.url,
+        Some(EDGE_SECRET),
+        "POST",
+        "/v1/account/recover",
+        None,
+        &[
+            ("X-Apassy-Client-Prefix", "198.51.100.0/24"),
+            ("X-Apassy-Client-Prefix-Mac", "00"),
+        ],
+        Some(&recover_body(
+            &c,
+            &accounts[0].account,
+            &[7u8; 16],
+            &DeviceKey::generate().unwrap(),
+            &[1u8; 16],
+        )),
+    );
+    assert_eq!(status, 200, "{text}");
 }
 
 /// The entitlement token verifies with the published key (with this relay's check and the
@@ -1499,6 +1803,28 @@ fn open_plain_refuses_a_master_key_and_connect_mode_refuses_the_key() {
             .unwrap_or_else(|error| panic!("{} is not plain: {error}", path.display()));
         assert!(tables > 0);
     }
+    // The downgrade commands open the plain relay.db of `connect` mode as the relay does,
+    // and it stays plain.
+    let (config, dir) = {
+        let Connect { relay, .. } = c;
+        relay.stop_keep()
+    };
+    assert_eq!(
+        Directory::downgrade_to_1005(&config).unwrap(),
+        (1006, 1005, 1)
+    );
+    assert!(!config.team_path(&team).exists());
+    let conn = rusqlite::Connection::open(config.directory_path()).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 1005);
+    drop(conn);
+    assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1005, 1004));
+    let directory = Directory::open(&config).unwrap();
+    assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
+    drop(directory);
+    drop(dir);
 }
 
 /// Directory 1005 to the accounts step and back (`downgrade-directory-1005`): the vault
@@ -1568,6 +1894,882 @@ fn without_the_setting_every_account_route_is_not_found() {
             "{method} {path}"
         );
     }
+}
+
+// ---- Hardening of the account protocol. ----
+
+const WELL_KNOWN: &str = "/.well-known/apassy-connect.json";
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// A challenge never ends another challenge: anyone may ask nonces for a device's key, and
+/// the device's own nonce still signs it in. A removed device (revoked, or of a deleted
+/// account) learns it from its own signed sign-in only (403 `device_removed`); a call
+/// without its signature is the same 401 as any other.
+#[test]
+fn a_challenge_never_ends_another_and_only_the_device_learns_it_was_removed() {
+    let c = start();
+    let a = create(&c);
+    let token = sign_in(&c, &a);
+    let b = add_device(&c, &a, &token);
+    let (status, answer) = challenge(&c, &a.account, &b.key);
+    assert_eq!(status, 200);
+    let own = answer["result"]["nonce"].as_str().unwrap().to_string();
+    // Someone else asks many nonces for the same key.
+    for _ in 0..50 {
+        assert_eq!(challenge(&c, &a.account, &b.key).0, 200);
+    }
+    let message =
+        device::account_sign_in_message(c.origin(), &a.account, &b.key.public_key_b64(), &own);
+    c.ok(
+        "POST",
+        "/v1/account/token",
+        None,
+        Some(&token_body(&a.account, &b.key, &own, &message)),
+    );
+    // A key that never was a device of the account gets no nonce.
+    let stranger = DeviceKey::generate().unwrap();
+    assert_eq!(challenge(&c, &a.account, &stranger).0, 401);
+    // The device is removed: its own signed sign-in says so.
+    c.ok(
+        "DELETE",
+        &format!("/v1/account/devices/{}", b.id),
+        Some(&token),
+        None,
+    );
+    assert_eq!(
+        token_call(&c, &a.account, &b.key),
+        (403, Some("device_removed".to_string()))
+    );
+    // Without its signature: 401, one answer for every cause.
+    let (_, answer) = challenge(&c, &a.account, &b.key);
+    let nonce = answer["result"]["nonce"].as_str().unwrap().to_string();
+    let message =
+        device::account_sign_in_message(c.origin(), &a.account, &b.key.public_key_b64(), &nonce);
+    let mut by_stranger = token_body(&a.account, &stranger, &nonce, &message);
+    by_stranger["public_key"] = json!(b.key.public_key_b64());
+    let mut bad_signature = token_body(&a.account, &b.key, &nonce, &message);
+    bad_signature["signature"] = json!("AAAA");
+    let made_up = token_body(
+        &a.account,
+        &b.key,
+        "bm9uY2U",
+        &device::account_sign_in_message(
+            c.origin(),
+            &a.account,
+            &b.key.public_key_b64(),
+            "bm9uY2U",
+        ),
+    );
+    for refused in [by_stranger, bad_signature, made_up] {
+        c.fails(
+            "POST",
+            "/v1/account/token",
+            None,
+            Some(&refused),
+            401,
+            "unauthenticated",
+        );
+    }
+    // A nonce for another account than the one the key was a device of: no nonce at all.
+    let other = create(&c);
+    assert_eq!(challenge(&c, &other.account, &b.key).0, 401);
+    // The device of a deleted account learns it the same way.
+    let d = create(&c);
+    let d_token = sign_in(&c, &d);
+    c.ok("DELETE", "/v1/account", Some(&d_token), None);
+    assert_eq!(
+        token_call(&c, &d.account, &d.key),
+        (403, Some("device_removed".to_string()))
+    );
+}
+
+/// Verifies a device's chain as a client does: each entry is the statement of
+/// `confirmer_key` over the device message of its link and the key before it (the device's
+/// own key first). Answers the root key.
+fn verify_chain(c: &Connect, account: &str, device: &Value) -> String {
+    let mut key = device["public_key"].as_str().unwrap().to_string();
+    for entry in device["chain"].as_array().unwrap() {
+        let confirmer = entry["confirmer_key"].as_str().unwrap();
+        let message = device::account_device_message(
+            c.origin(),
+            account,
+            entry["link_hash"].as_str().unwrap(),
+            &key,
+        );
+        let statement = decode_b64(entry["statement"].as_str().unwrap(), 72).unwrap();
+        assert!(
+            device::verify(
+                &device::decode_public_key(confirmer).unwrap(),
+                &message,
+                &statement
+            ),
+            "{device}"
+        );
+        key = confirmer.to_string();
+    }
+    key
+}
+
+/// Every device answer carries its chain of device statements to the account's root: root
+/// A adds B, B adds C; the join of C names B with B's chain; after B is revoked, C's chain
+/// still goes through B to A, and every listed device verifies to A's key.
+#[test]
+fn chains_lead_every_device_to_the_root_and_keep_a_revoked_confirmer() {
+    let c = start();
+    let a = create(&c);
+    let a_token = sign_in(&c, &a);
+    let b = add_device(&c, &a, &a_token);
+    let b_token = sign_in(&c, &b);
+    let hash = device::account_link_hash(&link_code(&a.account));
+    c.ok(
+        "POST",
+        "/v1/account/devices/link",
+        Some(&b_token),
+        Some(&json!({"link_hash": hash})),
+    );
+    let third = DeviceKey::generate().unwrap();
+    let join = join_body(&c, &a.account, &hash, &third, "iPad");
+    let joined = c.ok("POST", "/v1/account/devices/join", None, Some(&join));
+    let confirmer = &joined["confirmer"];
+    assert_eq!(confirmer["device_id"], b.id.as_str());
+    assert_eq!(confirmer["chain"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        verify_chain(&c, &a.account, confirmer),
+        a.key.public_key_b64()
+    );
+    let join_id = joined["join_id"].as_u64().unwrap();
+    let added = c.ok(
+        "POST",
+        &format!("/v1/account/devices/pending/{join_id}/confirm"),
+        Some(&b_token),
+        Some(&confirm_body(&c, &b, &hash, &third)),
+    );
+    assert_eq!(added["chain"].as_array().unwrap().len(), 2, "{added}");
+    // The same body of the join again answers the same chain.
+    assert_eq!(
+        c.ok("POST", "/v1/account/devices/join", None, Some(&join))["confirmer"],
+        joined["confirmer"]
+    );
+    c.ok(
+        "DELETE",
+        &format!("/v1/account/devices/{}", b.id),
+        Some(&a_token),
+        None,
+    );
+    let view = c.ok("GET", "/v1/account", Some(&a_token), None);
+    let devices = view["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 2);
+    for device in devices {
+        assert_eq!(
+            verify_chain(&c, &a.account, device),
+            a.key.public_key_b64(),
+            "{device}"
+        );
+    }
+    let root = devices
+        .iter()
+        .find(|device| device["device_id"] == a.id.as_str())
+        .unwrap();
+    assert_eq!(root["chain"], json!([]));
+    let third_view = devices
+        .iter()
+        .find(|device| device["public_key"] == third.public_key_b64())
+        .unwrap();
+    let chain = third_view["chain"].as_array().unwrap();
+    assert_eq!(
+        (
+            chain[0]["confirmer_key"].as_str(),
+            chain[1]["confirmer_key"].as_str()
+        ),
+        (
+            Some(b.key.public_key_b64().as_str()),
+            Some(a.key.public_key_b64().as_str())
+        )
+    );
+    // Only the statement is stored, never a link code.
+    assert!(
+        c.directory_rows("SELECT link_hash FROM account_device WHERE link_hash IS NOT NULL")
+            .contains(&hash)
+    );
+}
+
+/// Every key that the relay takes is a point on P-256: a 0x04-prefixed key off the curve
+/// is refused on each route that names one.
+#[test]
+fn every_route_refuses_a_key_off_the_curve() {
+    let c = start();
+    let a = create(&c);
+    c.plans.set(&a.account, entitled());
+    let token = sign_in(&c, &a);
+    let (team, _) = make_store(&c, &token);
+    let off = encode_b64(&[4u8; 65]);
+    assert!(device::decode_public_key(&off).is_err());
+    let signature = encode_b64(&a.key.sign(b"anything").unwrap());
+    let hash = device::account_link_hash(&link_code(&a.account));
+    c.ok(
+        "POST",
+        "/v1/account/devices/link",
+        Some(&token),
+        Some(&json!({"link_hash": hash})),
+    );
+    let recovery = recovery_key(&[1u8; 16]).public_key_b64();
+    let edge = [
+        (
+            "/v1/account",
+            json!({"name": "Rafal", "device_name": "Mac", "platform": "mac", "public_key": off,
+                   "recovery_key": recovery, "signature": signature}),
+            400,
+        ),
+        (
+            "/v1/account/challenge",
+            json!({"account_id": a.account, "public_key": off}),
+            400,
+        ),
+        (
+            "/v1/account/token",
+            json!({"account_id": a.account, "public_key": off,
+                   "nonce": encode_b64(&[0u8; 32]), "signature": signature}),
+            401,
+        ),
+        (
+            "/v1/account/devices/join",
+            json!({"account_id": a.account, "link_hash": hash, "device_name": "iPhone",
+                   "platform": "iphone", "public_key": off, "signature": signature}),
+            400,
+        ),
+        (
+            "/v1/account/devices/join/cancel",
+            json!({"account_id": a.account, "link_hash": hash, "public_key": off,
+                   "signature": signature}),
+            400,
+        ),
+        (
+            "/v1/account/recover",
+            json!({"account_id": a.account, "device_name": "Mac", "platform": "mac",
+                   "public_key": off, "recovery_key": recovery, "signature": signature,
+                   "recovery_signature": encode_b64(&[0u8; 64])}),
+            400,
+        ),
+    ];
+    for (path, body, status) in edge {
+        let (got, answer) = c.call("POST", path, None, Some(&body));
+        assert_eq!(got, status, "{path}: {answer}");
+    }
+    let real = DeviceKey::generate().unwrap();
+    let joined = c.ok(
+        "POST",
+        "/v1/account/devices/join",
+        None,
+        Some(&join_body(&c, &a.account, &hash, &real, "iPhone")),
+    );
+    let join_id = joined["join_id"].as_u64().unwrap();
+    for (path, body) in [
+        (
+            format!("/v1/account/devices/pending/{join_id}/confirm"),
+            json!({"public_key": off, "statement": signature}),
+        ),
+        (
+            format!("/v1/account/vaults/{team}/devices"),
+            json!({"device_id": a.id, "public_key": off}),
+        ),
+    ] {
+        c.fails(
+            "POST",
+            &path,
+            Some(&token),
+            Some(&body),
+            400,
+            "invalid_request",
+        );
+    }
+    assert!(
+        c.directory_rows("SELECT id FROM account")
+            .iter()
+            .all(|id| *id == a.account)
+    );
+}
+
+/// The store-device add takes the key that the caller checked: another key is 409 and
+/// adds nothing; an unknown or revoked device is the same 403 `not_in_group` as a device
+/// of another account. A vault store is deleted only by a device in it, of its account.
+#[test]
+fn a_store_device_add_needs_the_checked_key_and_a_delete_a_device_in_the_store() {
+    let c = start();
+    let a = create(&c);
+    c.plans.set(&a.account, entitled());
+    let token = sign_in(&c, &a);
+    let b = add_device(&c, &a, &token);
+    let b_token = sign_in(&c, &b);
+    let gone = add_device(&c, &a, &token);
+    c.ok(
+        "DELETE",
+        &format!("/v1/account/devices/{}", gone.id),
+        Some(&token),
+        None,
+    );
+    let (team, _) = make_store(&c, &token);
+    let path = format!("/v1/account/vaults/{team}/devices");
+    let mut other_key = store_add_body(&b);
+    other_key["public_key"] = json!(DeviceKey::generate().unwrap().public_key_b64());
+    c.fails(
+        "POST",
+        &path,
+        Some(&token),
+        Some(&other_key),
+        409,
+        "conflict",
+    );
+    for target in [
+        json!({"device_id": "dev_aaaaaaaaaa", "public_key": b.key.public_key_b64()}),
+        store_add_body(&gone),
+    ] {
+        c.fails(
+            "POST",
+            &path,
+            Some(&token),
+            Some(&target),
+            403,
+            "not_in_group",
+        );
+    }
+    assert_eq!(
+        c.ok("GET", "/v1/account/vaults", Some(&token), None)[0]["devices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // A device of the account that is not in the store does not delete it.
+    c.fails(
+        "DELETE",
+        &format!("/v1/account/vaults/{team}"),
+        Some(&b_token),
+        None,
+        403,
+        "forbidden",
+    );
+    c.ok("POST", &path, Some(&token), Some(&store_add_body(&b)));
+    c.ok(
+        "DELETE",
+        &format!("/v1/account/vaults/{team}"),
+        Some(&b_token),
+        None,
+    );
+}
+
+/// `revoked_at` of the store device named `device` in the open vault store `team`.
+fn store_revoked(c: &Connect, team: &TeamId, device: &str) -> bool {
+    c.relay
+        .hub()
+        .team(team)
+        .unwrap()
+        .store
+        .with(|conn| {
+            conn.query_row(
+                "SELECT revoked_at IS NOT NULL FROM device WHERE name = ?1",
+                [device],
+                |row| row.get(0),
+            )
+            .map_err(apassy_relay::server::store::db)
+        })
+        .unwrap()
+}
+
+/// Turns writes of the open vault store `team` off or on (a file that refuses writes, as a
+/// full one does).
+fn store_writes(c: &Connect, team: &TeamId, on: bool) {
+    let sql = if on {
+        "PRAGMA query_only = 0;"
+    } else {
+        "PRAGMA query_only = 1;"
+    };
+    c.relay
+        .hub()
+        .team(team)
+        .unwrap()
+        .store
+        .with(|conn| {
+            conn.execute_batch(sql)
+                .map_err(apassy_relay::server::store::db)
+        })
+        .unwrap();
+}
+
+/// A device removed while its vault store is suspended, or while the store file refuses
+/// the write, is out of the store at once (its store token ends, no relay-sync sign-in),
+/// and its row in the store file is revoked when the store opens (a resume, a restart) or
+/// at the next maintenance pass.
+#[test]
+fn a_removal_that_waits_for_its_store_keeps_the_device_out_and_lands_later() {
+    let c = start();
+    let a = create(&c);
+    c.plans.set(&a.account, entitled());
+    let token = sign_in(&c, &a);
+    let devices: Vec<Dev> = (0..3).map(|_| add_device(&c, &a, &token)).collect();
+    let (team, _) = make_store(&c, &token);
+    for dev in &devices {
+        c.ok(
+            "POST",
+            &format!("/v1/account/vaults/{team}/devices"),
+            Some(&token),
+            Some(&store_add_body(dev)),
+        );
+    }
+    let pending = |c: &Connect| c.directory_rows("SELECT device_id FROM account_store_removal");
+    let store_challenge = |c: &Connect, dev: &Dev| {
+        c.call(
+            "POST",
+            "/v1/auth/challenge",
+            None,
+            Some(&json!({"team_id": team, "public_key": dev.key.public_key_b64()})),
+        )
+        .0
+    };
+    let revoke = |c: &Connect, dev: &Dev| {
+        let revoked = c.ok(
+            "DELETE",
+            &format!("/v1/account/devices/{}", dev.id),
+            Some(&token),
+            None,
+        );
+        assert_eq!(revoked["removed_from_stores"], 1, "{revoked}");
+    };
+
+    // 1. The store is suspended: the removal waits for it, and its resume applies it.
+    let first = &devices[0];
+    let hub = c.relay.hub();
+    hub.suspend(&team, now()).unwrap();
+    revoke(&c, first);
+    assert_eq!(pending(&c), std::slice::from_ref(&first.id));
+    hub.resume(&team, now()).unwrap();
+    assert!(store_revoked(&c, &team, &first.id));
+    assert!(pending(&c).is_empty());
+    assert_eq!(store_challenge(&c, first), 401);
+
+    // 2. The store refuses the write: the device is out at once, and the maintenance pass
+    // revokes its row once the file takes writes again.
+    let second = &devices[1];
+    let second_sync = c.relay.sign_in(&team, &second.key);
+    store_writes(&c, &team, false);
+    revoke(&c, second);
+    assert_eq!(
+        send(
+            &c.relay.url,
+            "GET",
+            "/v1/sync/head",
+            &second_sync,
+            &[],
+            Vec::new()
+        )
+        .status,
+        401
+    );
+    assert!(!store_revoked(&c, &team, &second.id));
+    assert_eq!(pending(&c), std::slice::from_ref(&second.id));
+    // A challenge writes to its store: with writes back on, it refuses the device while
+    // its row there may still wait.
+    store_writes(&c, &team, true);
+    assert_eq!(store_challenge(&c, second), 401);
+    apassy_relay::server::http::maintain(
+        &hub,
+        now() + apassy_relay::server::hub::STORE_REMOVAL_MAX_WAIT_SECS,
+    );
+    assert!(store_revoked(&c, &team, &second.id));
+    assert!(pending(&c).is_empty());
+
+    // 3. The same with a restart before the retry: the open of the store applies it.
+    let third = &devices[2];
+    store_writes(&c, &team, false);
+    revoke(&c, third);
+    assert_eq!(pending(&c), std::slice::from_ref(&third.id));
+    drop(hub);
+    let third_id = third.id.clone();
+    let third_key = third.key.public_key_b64();
+    let Connect { relay, plans } = c;
+    let relay = relay.restart();
+    relay.hub().set_plans(plans.clone());
+    let c = Connect { relay, plans };
+    assert!(store_revoked(&c, &team, &third_id));
+    assert!(pending(&c).is_empty());
+    let (status, _) = c.call(
+        "POST",
+        "/v1/auth/challenge",
+        None,
+        Some(&json!({"team_id": team, "public_key": third_key})),
+    );
+    assert_eq!(status, 401);
+}
+
+/// New accounts have the relay's caps (`APASSY_RELAY_CONNECT_ACCOUNTS_PER_DAY`, `_MAX`: 503
+/// `busy` with `Retry-After: 3600`) and the cap of the client prefix that the Worker
+/// proved (5 a day, 429); a retry of the same body counts nothing.
+#[test]
+fn new_accounts_have_the_relay_caps_and_a_cap_for_each_proven_prefix() {
+    let create_from = |c: &Connect, prefix: Option<&str>, body: &Value| {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build()
+            .into();
+        let mut request = agent
+            .post(format!("{}/v1/account", c.relay.url))
+            .header("X-Apassy-Edge", EDGE_SECRET)
+            .header("Content-Type", "application/json");
+        if let Some(prefix) = prefix {
+            request = request.header("X-Apassy-Client-Prefix", prefix).header(
+                "X-Apassy-Client-Prefix-Mac",
+                apassy_relay::server::connect::prefix_mac(EDGE_SECRET, prefix),
+            );
+        }
+        let mut response = request.send(serde_json::to_vec(body).unwrap()).unwrap();
+        let retry = response
+            .headers()
+            .get("Retry-After")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let value: Value =
+            serde_json::from_str(&response.body_mut().read_to_string().unwrap()).unwrap();
+        (
+            response.status().as_u16(),
+            value["error"]["code"].as_str().map(str::to_string),
+            retry,
+        )
+    };
+    let new_body = |c: &Connect| account_body(c, &DeviceKey::generate().unwrap(), &[1u8; 16]);
+    // Five a day from one proven prefix; the sixth is 429; another prefix goes on.
+    let c = start();
+    for _ in 0..5 {
+        assert_eq!(
+            create_from(&c, Some("198.51.100.0/24"), &new_body(&c)).0,
+            200
+        );
+    }
+    let (status, code, _) = create_from(&c, Some("198.51.100.0/24"), &new_body(&c));
+    assert_eq!((status, code.as_deref()), (429, Some("rate_limited")));
+    assert_eq!(
+        create_from(&c, Some("203.0.113.0/24"), &new_body(&c)).0,
+        200
+    );
+    // A retry of the same body answers the same and counts nothing.
+    let body = new_body(&c);
+    let (status, _, _) = create_from(&c, Some("192.0.2.0/24"), &body);
+    assert_eq!(status, 200);
+    for _ in 0..6 {
+        assert_eq!(create_from(&c, Some("192.0.2.0/24"), &body).0, 200);
+    }
+    assert_eq!(c.directory_rows("SELECT id FROM account").len(), 7);
+    // The day's cap of the relay: 503 busy for an hour.
+    let c = connect_with(|cfg| {
+        accounts_on(cfg);
+        cfg.connect.accounts_per_day = 2;
+    });
+    for prefix in ["198.51.100.0/24", "203.0.113.0/24"] {
+        assert_eq!(create_from(&c, Some(prefix), &new_body(&c)).0, 200);
+    }
+    let (status, code, retry) = create_from(&c, Some("192.0.2.0/24"), &new_body(&c));
+    assert_eq!(
+        (status, code.as_deref(), retry.as_deref()),
+        (503, Some("busy"), Some("3600"))
+    );
+    // The held cap, and 0: no new account.
+    let c = connect_with(|cfg| {
+        accounts_on(cfg);
+        cfg.connect.accounts_max = 1;
+    });
+    assert_eq!(create_from(&c, None, &new_body(&c)).0, 200);
+    assert_eq!(
+        create_from(&c, Some("203.0.113.0/24"), &new_body(&c)).0,
+        503
+    );
+    let c = connect_with(|cfg| {
+        accounts_on(cfg);
+        cfg.connect.accounts_per_day = 0;
+    });
+    assert_eq!(create_from(&c, None, &new_body(&c)).0, 503);
+    assert!(c.directory_rows("SELECT id FROM account").is_empty());
+}
+
+/// The maintenance pass deletes links (with their joins) a day after they ended and the
+/// relay audit rows of accounts after 90 days; newer rows stay.
+#[test]
+fn the_maintenance_pass_prunes_old_links_joins_and_account_audit_rows() {
+    let c = start();
+    let a = create(&c);
+    let token = sign_in(&c, &a);
+    let old = device::account_link_hash(&link_code(&a.account));
+    let fresh = device::account_link_hash(&link_code(&a.account));
+    for hash in [&old, &fresh] {
+        c.ok(
+            "POST",
+            "/v1/account/devices/link",
+            Some(&token),
+            Some(&json!({"link_hash": hash})),
+        );
+    }
+    c.ok(
+        "POST",
+        "/v1/account/devices/join",
+        None,
+        Some(&join_body(
+            &c,
+            &a.account,
+            &old,
+            &DeviceKey::generate().unwrap(),
+            "iPhone",
+        )),
+    );
+    let at = now();
+    c.edit_directory(&format!(
+        "UPDATE account_link SET expires_at = {} WHERE link_hash = '{old}';
+         INSERT INTO audit (at, actor, action, detail) VALUES ({}, 'account:{}', 'account_link_created', '{{}}');
+         INSERT INTO audit (at, actor, action, detail) VALUES ({}, 'operator', 'team_created', '{{}}');",
+        at - 86_401,
+        at - 91 * 86_400,
+        a.account,
+        at - 91 * 86_400,
+    ));
+    // The relay's own pass may have pruned them first: the rows decide.
+    let (links, audit) = apassy_relay::server::account::prune(&c.relay.hub(), at).unwrap();
+    assert!(links <= 1 && audit <= 1, "{links} {audit}");
+    assert_eq!(
+        c.directory_rows("SELECT link_hash FROM account_link"),
+        [fresh]
+    );
+    assert!(c.directory_rows("SELECT name FROM account_join").is_empty());
+    assert_eq!(
+        c.directory_rows(
+            "SELECT actor FROM audit WHERE actor = 'operator' AND action = 'team_created'"
+        )
+        .len(),
+        1
+    );
+    assert!(
+        c.directory_rows("SELECT actor FROM audit WHERE actor LIKE 'account:%'")
+            .len()
+            >= 2
+    );
+}
+
+/// The published keys come from the configuration only: the signing key and the keys of
+/// `APASSY_CONNECT_PUBLISHED_KEYS_FILE`. A new signing key signs one hour after this relay
+/// first published it; the first key a relay has signs at once, also after a restart.
+#[test]
+fn published_keys_come_from_the_configuration_and_a_new_key_waits_an_hour() {
+    use apassy_relay::server::entitlement::key_id;
+    let other_key = || {
+        let mut der = unhex("302e020100300506032b657004220420");
+        der.extend([5u8; 32]);
+        ConnectSigningKey::from_file_bytes(&der).unwrap()
+    };
+    let c = start();
+    let a = create(&c);
+    c.plans.set(&a.account, entitled());
+    let token = sign_in(&c, &a);
+    c.ok("GET", "/v1/account/entitlement", Some(&token), None);
+    let first_kid = c.ok("GET", WELL_KNOWN, None, None)["keys"][0]["kid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Restart with a new signing key, the old one no longer configured.
+    let Connect { relay, plans } = c;
+    let (mut config, dir) = relay.stop_keep();
+    let rows = |config: &RelayConfig, sql: &str| {
+        let conn = rusqlite::Connection::open(config.directory_path()).unwrap();
+        conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+            .unwrap();
+        conn.busy_timeout(Duration::from_secs(10)).unwrap();
+        conn.execute_batch(sql).unwrap();
+    };
+    // The first key was published a day before the new one.
+    rows(
+        &config,
+        "UPDATE entitlement_key SET created_at = created_at - 86400;",
+    );
+    config.connect.signing_key = Some(other_key());
+    let running = relay::start_on_free_port(&mut config);
+    running.hub().set_plans(plans.clone());
+    let call = |method: &str, path: &str, token: Option<&str>| {
+        call_url(&running.url(), Some(EDGE_SECRET), method, path, token, None)
+    };
+    let known = call("GET", WELL_KNOWN, None).1;
+    let kids: Vec<&str> = known["result"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key["kid"].as_str().unwrap())
+        .collect();
+    assert_eq!(kids.len(), 1, "{known}");
+    assert_ne!(kids[0], first_kid);
+    let new_kid = kids[0].to_string();
+    // The old key signed a token a moment ago, yet it is not published: its row is
+    // history only.
+    let dev = Dev {
+        key: a.key,
+        account: a.account.clone(),
+        id: a.id.clone(),
+    };
+    let base = running.url();
+    let sign_in_at = || {
+        let (_, answer) = call_url(
+            &base,
+            Some(EDGE_SECRET),
+            "POST",
+            "/v1/account/challenge",
+            None,
+            Some(&json!({"account_id": dev.account, "public_key": dev.key.public_key_b64()})),
+        );
+        let nonce = answer["result"]["nonce"].as_str().unwrap().to_string();
+        let message = device::account_sign_in_message(
+            &config.public_url,
+            &dev.account,
+            &dev.key.public_key_b64(),
+            &nonce,
+        );
+        let (_, granted) = call_url(
+            &base,
+            Some(EDGE_SECRET),
+            "POST",
+            "/v1/account/token",
+            None,
+            Some(&token_body(&dev.account, &dev.key, &nonce, &message)),
+        );
+        granted["result"]["token"].as_str().unwrap().to_string()
+    };
+    let token = sign_in_at();
+    let (status, answer) = call("GET", "/v1/account/entitlement", Some(&token));
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (503, Some("busy")),
+        "{answer}"
+    );
+    // An hour after it was first published, it signs.
+    rows(
+        &config,
+        &format!(
+            "UPDATE entitlement_key SET created_at = created_at - 3601 WHERE kid = '{new_kid}';"
+        ),
+    );
+    let (status, answer) = call("GET", "/v1/account/entitlement", Some(&token));
+    assert_eq!(status, 200, "{answer}");
+    let verified = Entitlement::verify(
+        &[PublishedKey {
+            kid: new_kid.clone(),
+            public_key: decode_b64(
+                known["result"]["keys"][0]["public_key"].as_str().unwrap(),
+                32,
+            )
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        }],
+        answer["result"]["token"].as_str().unwrap(),
+        now(),
+    )
+    .unwrap();
+    assert_eq!(verified.kid, new_kid);
+    running.stop();
+    // Back to the first key, with the second one published from the file: the first key
+    // is the relay's first and signs at once; both are published.
+    let file = dir.path().join("published.json");
+    let second = other_key();
+    let second_public: [u8; 32] = {
+        let signer =
+            apassy_relay::server::entitlement::EntitlementSigner::from_key(&second).unwrap();
+        signer.public_key()
+    };
+    std::fs::write(
+        &file,
+        format!(
+            r#"{{"keys":[{{"kid":"{}","public_key":"{}"}}]}}"#,
+            key_id(&second_public),
+            encode_b64(&second_public)
+        ),
+    )
+    .unwrap();
+    config.connect.signing_key = Some(signing_key());
+    config.connect.published_keys =
+        apassy_relay::config::published_keys_from(&std::fs::read(&file).unwrap()).unwrap();
+    let running = relay::start_on_free_port(&mut config);
+    running.hub().set_plans(plans.clone());
+    let base = running.url();
+    let (_, known) = call_url(&base, Some(EDGE_SECRET), "GET", WELL_KNOWN, None, None);
+    let kids: Vec<&str> = known["result"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key["kid"].as_str().unwrap())
+        .collect();
+    assert_eq!(kids, [first_kid.as_str(), new_kid.as_str()]);
+    let (_, answer) = call_url(
+        &base,
+        Some(EDGE_SECRET),
+        "POST",
+        "/v1/account/challenge",
+        None,
+        Some(&json!({"account_id": dev.account, "public_key": dev.key.public_key_b64()})),
+    );
+    let nonce = answer["result"]["nonce"].as_str().unwrap().to_string();
+    let message = device::account_sign_in_message(
+        &config.public_url,
+        &dev.account,
+        &dev.key.public_key_b64(),
+        &nonce,
+    );
+    let (_, granted) = call_url(
+        &base,
+        Some(EDGE_SECRET),
+        "POST",
+        "/v1/account/token",
+        None,
+        Some(&token_body(&dev.account, &dev.key, &nonce, &message)),
+    );
+    let token = granted["result"]["token"].as_str().unwrap().to_string();
+    let (status, answer) = call_url(
+        &base,
+        Some(EDGE_SECRET),
+        "GET",
+        "/v1/account/entitlement",
+        Some(&token),
+        None,
+    );
+    assert_eq!(status, 200, "{answer}");
+    running.stop();
+    drop(dir);
+}
+
+/// A 1006 file of an earlier build of the accounts step (no `account_device.added_by`) is
+/// refused at open with a message for the operator, also after a downgrade to 1005.
+#[test]
+fn a_directory_of_an_earlier_accounts_step_is_refused_at_open() {
+    let c = start();
+    create(&c);
+    let (config, dir) = {
+        let Connect { relay, .. } = c;
+        relay.stop_keep()
+    };
+    let edit = |sql: &str| {
+        let conn = rusqlite::Connection::open(config.directory_path()).unwrap();
+        conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+            .unwrap();
+        conn.execute_batch(sql).unwrap();
+    };
+    edit("ALTER TABLE account_device DROP COLUMN added_by;");
+    let refused = Directory::open(&config).err().expect("refused");
+    assert!(
+        refused.message.contains("earlier, unreleased build"),
+        "{}",
+        refused.message
+    );
+    edit("PRAGMA user_version = 1005;");
+    let refused = Directory::open(&config).err().expect("refused");
+    assert!(refused.message.contains("added_by"), "{}", refused.message);
+    drop(dir);
 }
 
 // ---- The app's client against this relay (wire compatibility). ----

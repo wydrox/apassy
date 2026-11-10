@@ -327,8 +327,15 @@ struct Dev {
 fn create(c: &Connect) -> Dev {
     let key = DeviceKey::generate().unwrap();
     let public_key = key.public_key_b64();
+    let recovery_key = device::RecoveryKey::from_code(&[7u8; 16])
+        .unwrap()
+        .public_key_b64();
     let signature = key
-        .sign(&device::account_message(c.origin(), &public_key))
+        .sign(&device::account_message(
+            c.origin(),
+            &public_key,
+            &recovery_key,
+        ))
         .unwrap();
     let made = c.ok(
         "POST",
@@ -336,8 +343,7 @@ fn create(c: &Connect) -> Dev {
         None,
         Some(
             &json!({"name": "Rafal", "device_name": "MacBook Pro", "platform": "mac",
-                     "public_key": public_key,
-                     "recovery_hash": device::account_recovery_hash(&[7u8; 16]),
+                     "public_key": public_key, "recovery_key": recovery_key,
                      "signature": encode_b64(&signature)}),
         ),
     );
@@ -411,11 +417,20 @@ fn add_device(c: &Connect, a: &Dev, token: &str, name: &str) -> Dev {
         ),
     );
     let join_id = joined["join_id"].as_u64().unwrap();
+    let statement = a
+        .key
+        .sign(&device::account_device_message(
+            c.origin(),
+            &a.account,
+            &hash,
+            &public_key,
+        ))
+        .unwrap();
     let added = c.ok(
         "POST",
         &format!("/v1/account/devices/pending/{join_id}/confirm"),
         Some(token),
-        Some(&json!({"public_key": public_key})),
+        Some(&json!({"public_key": public_key, "statement": encode_b64(&statement)})),
     );
     Dev {
         key,

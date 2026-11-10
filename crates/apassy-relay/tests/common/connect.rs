@@ -164,8 +164,15 @@ impl Connect {
     pub fn account(&self, name: &str) -> Dev {
         let key = DeviceKey::generate().unwrap();
         let public_key = key.public_key_b64();
+        let recovery_key = device::RecoveryKey::from_code(&[9u8; 16])
+            .unwrap()
+            .public_key_b64();
         let signature = key
-            .sign(&device::account_message(self.origin(), &public_key))
+            .sign(&device::account_message(
+                self.origin(),
+                &public_key,
+                &recovery_key,
+            ))
             .unwrap();
         let made = self.ok(
             "POST",
@@ -173,8 +180,7 @@ impl Connect {
             None,
             Some(
                 &json!({"name": name, "device_name": format!("{name}'s Mac"), "platform": "mac",
-                         "public_key": public_key,
-                         "recovery_hash": device::account_recovery_hash(&[9u8; 16]),
+                         "public_key": public_key, "recovery_key": recovery_key,
                          "signature": encode_b64(&signature)}),
             ),
         );
@@ -380,6 +386,11 @@ impl Connect {
             body,
         )
     }
+}
+
+/// The body of `POST /v1/account/vaults/{team}/devices` for `dev`: its id and its key.
+pub fn store_add_body(dev: &Dev) -> Value {
+    json!({"device_id": dev.id, "public_key": dev.key.public_key_b64()})
 }
 
 /// The code of an invite answer: the fragment of its URL.
