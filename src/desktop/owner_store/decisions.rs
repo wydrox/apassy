@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{OwnerSession, OwnerSummary, fail, map_err};
 use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof, StricterAnswer};
-use crate::desktop::model::ModelResult;
+use crate::owner::model::ModelResult;
 use crate::vault::agent_items::{
     Correction, CorrectionAnswer, CorrectionKind, CorrectionState, CredentialRequest,
     CredentialRequestState, RAISED_FROM_FACT, RequestOutcome,

@@ -25,7 +25,7 @@ use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof};
 use crate::broker::http::parse_destination;
 use crate::broker::profile;
 use crate::contracts::CredentialKind;
-use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
+use crate::owner::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
 use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
     AccessRequest, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, CompanionDevice,
@@ -36,12 +36,19 @@ use crate::vault::{
     VaultError, VaultErrorKind, checked_env_name, parse_placeholder_host,
 };
 
+// The file is loaded from `crate::owner` (shared with the headless owner service), so
+// its submodules name their files.
+#[path = "owner_store/add.rs"]
 mod add;
+#[path = "owner_store/browser.rs"]
 mod browser;
+#[path = "owner_store/copy.rs"]
 mod copy;
+#[path = "owner_store/decisions.rs"]
 mod decisions;
 /// Tests of the rows of the last searches ([`SearchCache`]).
 #[cfg(test)]
+#[path = "owner_store/search_tests.rs"]
 mod search_tests;
 pub use browser::{FillValues, PageCode, PageLogin, PasskeyItem, SYSTEM_FILL_ORIGIN, SystemLogin};
 pub use decisions::{ActionUse, AgentActivity, AgentOverview, ExceptionRow, RecentUse, WeekCounts};

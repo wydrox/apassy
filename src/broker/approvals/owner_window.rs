@@ -183,11 +183,9 @@ impl OwnerWindow {
     }
     /// Lock, sleep, session switch, quit or observer loss revoke issued proofs
     /// as well as the active window.
-    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn invalidate(&self) {
         self.invalidate_for("explicit_invalidation");
     }
-    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn invalidate_for(&self, event: &'static str) {
         tracing::info!(event, "owner window revoked");
         let mut s = self.state.lock().unwrap();
@@ -199,7 +197,6 @@ impl OwnerWindow {
         s.verified = None;
     }
     /// Start unlock atomically against a native check's original lifecycle fence.
-    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn begin_unlock(&self, expected: Option<u64>) -> Option<u64> {
         let mut s = self.state.lock().unwrap();
         let valid = expected.is_none_or(|g| g == s.generation);

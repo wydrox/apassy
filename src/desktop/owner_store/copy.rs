@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 use super::{OwnerSession, fail, map_err};
 use crate::broker::approvals::{OwnerAction, OwnerProof};
-use crate::desktop::model::ModelResult;
+use crate::owner::model::ModelResult;
 use crate::vault::{Vault, is_passkey_field, is_setup_key_field};
 
 /// Validate the approved snapshot again while holding the same vault lock as the read.
@@ -31,7 +31,7 @@ fn copyable(vault: &Vault, id: u64, field: &str, revision: u64) -> ModelResult<b
     Ok(!is_setup_key_field(field, value.expose()))
 }
 
-fn stale() -> crate::desktop::model::ModelError {
+fn stale() -> crate::owner::model::ModelError {
     fail(
         "stale_item",
         "The item changed or is gone. Review it and copy again. Nothing was copied.",
