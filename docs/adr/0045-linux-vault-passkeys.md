@@ -8,6 +8,8 @@ and egui owner UI. Ubuntu and Debian are the first supported distributions.
 This extends ADR 0041: Chrome stable and Chromium native messaging are enabled.
 A passphrase must remain sufficient without a session bus, screen lock, biometric
 reader, or desktop. Headless owner operations require an interactive terminal.
+`apassy owner serve` hosts the browser and agent services without a desktop, and
+approves each request only with a typed answer and the passphrase in that terminal.
 
 ## Security boundary
 

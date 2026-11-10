@@ -38,6 +38,11 @@ uses `pkcheck` and the packaged `com.wydrox.apassy.owner-presence` policy with
 `auth_self`, without cached authorization. Missing, refused or cancelled
 presence must not count as approval; passphrase confirmation stays available.
 
+Without a desktop, `apassy owner serve /path/to/vault.db` hosts the browser and
+agent services after a terminal unlock; every request waits for a typed `approve` and
+the passphrase in that terminal. Run it in tmux or screen, never from a systemd unit:
+it refuses non-interactive input, and the package ships no unit for it.
+
 The vault is a software vault. Root and compromised processes of the same user
 are outside its protection. Linux kernel peer credentials and verified process
 ancestry improve browser authentication, but do not provide macOS code signing,
