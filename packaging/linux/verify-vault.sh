@@ -13,7 +13,9 @@ while [ "$#" -gt 0 ]; do
         *) fail "unknown argument: $1" ;;
     esac
 done
-[ -n "$dist" ] && [ -n "$arch" ] || fail 'usage: verify-vault.sh --dist DIR --arch x86_64|aarch64'
+if [ -z "$dist" ] || [ -z "$arch" ]; then
+    fail 'usage: verify-vault.sh --dist DIR --arch x86_64|aarch64'
+fi
 [ "$(uname -m)" = "$arch" ] || fail 'verification must run on the selected architecture'
 case "$arch" in x86_64) deb_arch=amd64 ;; aarch64) deb_arch=arm64 ;; *) fail 'unsupported architecture' ;; esac
 dist=$(cd "$dist" && pwd)
@@ -34,7 +36,9 @@ cleanup() {
 }
 trap cleanup EXIT
 # Refuse a pre-existing installation: this verifier is only for disposable CI.
-[ ! -e /usr/bin/apassy ] && [ ! -e /usr/lib/apassy/apassy-browser-host ] || fail 'existing Apassy installation'
+if [ -e /usr/bin/apassy ] || [ -e /usr/lib/apassy/apassy-browser-host ]; then
+    fail 'existing Apassy installation'
+fi
 (cd "$dist" && sha256sum -c "SHA256SUMS-vault-$arch")
 [ "$(wc -l < "$dist/SHA256SUMS-vault-$arch")" -eq 2 ] || fail 'expected exactly two package checksums'
 [ "$(dpkg-deb --field "$deb" Package)" = apassy-vault ] || fail 'wrong package name'

@@ -15,8 +15,9 @@ while [ "$#" -gt 0 ]; do
         *) fail "unknown argument: $1" ;;
     esac
 done
-[ -n "$binary" ] && [ -n "$host" ] && [ -n "$arch" ] && [ -n "$out" ] ||
+if [ -z "$binary" ] || [ -z "$host" ] || [ -z "$arch" ] || [ -z "$out" ]; then
     fail 'usage: build-vault.sh --binary PATH --host PATH --arch x86_64|aarch64 --out DIR'
+fi
 case "$arch" in
     x86_64) deb_arch=amd64; machine='Advanced Micro Devices X86-64' ;;
     aarch64) deb_arch=arm64; machine=AArch64 ;;
@@ -29,7 +30,9 @@ version=$(awk -F '"' '/^version = / {print $2; exit}' "$root/crates/apassy-app/C
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'invalid application version'
 [ "$("$binary" --version)" = "apassy $version" ] || fail 'application version differs'
 for executable in "$binary" "$host"; do
-    [ -f "$executable" ] && [ -x "$executable" ] || fail "missing executable: $executable"
+    if [ ! -f "$executable" ] || [ ! -x "$executable" ]; then
+        fail "missing executable: $executable"
+    fi
     readelf -h "$executable" | grep -Eq "Machine:[[:space:]]+$machine\$" || fail "wrong architecture: $executable"
 done
 commit=${APASSY_RELEASE_COMMIT:-$(git -C "$root" rev-parse HEAD)}
