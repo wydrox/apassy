@@ -59,6 +59,10 @@ pub use relay::{
     RelayEnableReport, RelayMember, RelayPoll, RelaySync, RelayTransport, clean_node_name,
     clear_relay_work, encode_node_name, membership_relay_url,
 };
+pub use relay::connect::{
+    ConnectEnableReport, MoveFailure, MoveRecord, MoveStep, StoreError, StorePlan,
+    is_plan_refusal, waits_for_account,
+};
 pub use relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, WORDS, decode_b64u,
     encode_b64u, head_hash, link_code_team, safety_words, same_words, sha256_hex, sign_in_message,

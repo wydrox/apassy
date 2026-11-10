@@ -2117,3 +2117,654 @@ fn a_new_relay_copy_without_a_code_joins_the_team_that_another_mac_holds() {
             .contains("Join from another Mac")
     );
 }
+
+// ---- Sync through Apassy Connect (plan s7 unit M3, connect-account-v1 section 8). ----
+//
+// The fake Connect keeps its vault stores as teams of a fake relay
+// (`FakeConnect::with_relay`): the app signs in, pushes, and pulls at the Connect origin,
+// and the relay checks every head with `ring` against the keys of the store, which are
+// the account device keys. Each "Mac" has its own key store (the Keychain in the app)
+// and account file.
+
+mod connect_sync {
+    use super::{Mac, PASS, WRONG, item, mac, titles};
+    use crate::common::fake_connect::FakeConnect;
+    use crate::common::fake_relay::FakeRelay;
+
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use apassy::broker::SharedVault;
+    use apassy::broker::approvals::{OwnerCheck, OwnerGate};
+    use apassy::connect::{
+        ConnectAccount, ConnectClient, ConnectError, JoinPoll, JoinRequest, MemoryKeyStore,
+        account_file,
+    };
+    use apassy::sync::{
+        MoveStep, PendingJoin, RelayConfig, RelayRefusal, RelaySync, StoreError, StorePlan,
+        SyncError, is_plan_refusal,
+    };
+    use apassy::vault::Vault;
+    use ring::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    /// The fake Connect with its relay of stores.
+    struct Cloud {
+        root: TempDir,
+        relay: Arc<FakeRelay>,
+        connect: FakeConnect,
+    }
+
+    fn cloud() -> Cloud {
+        let relay = Arc::new(FakeRelay::start());
+        let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+        Cloud {
+            root: TempDir::new().expect("temp dir"),
+            relay,
+            connect,
+        }
+    }
+
+    /// A Mac with a Connect account: its relay sync for the Connect origin, its key
+    /// store, its account file.
+    struct ConnectMac {
+        mac: Mac,
+        keys: MemoryKeyStore,
+        account_path: PathBuf,
+    }
+
+    fn connect_mac(cloud: &Cloud, name: &str) -> ConnectMac {
+        let mac = mac(&cloud.root, name, &cloud.connect.url);
+        let account_path = account_file(&mac.data);
+        ConnectMac {
+            mac,
+            keys: MemoryKeyStore::new(),
+            account_path,
+        }
+    }
+
+    fn client(cloud: &Cloud) -> ConnectClient {
+        ConnectClient::new(&cloud.connect.url).expect("client")
+    }
+
+    /// A new account on `mac`, entitled when `entitled`.
+    fn new_account(cloud: &Cloud, mac: &ConnectMac, name: &str, entitled: bool) -> ConnectAccount {
+        let (account, _recovery) = ConnectAccount::create(
+            client(cloud),
+            &mac.keys,
+            &mac.account_path,
+            name,
+            "Synthetic MacBook",
+        )
+        .expect("create account");
+        if entitled {
+            cloud.connect.entitle(&account.state().account_id);
+        }
+        account
+    }
+
+    /// An unlocked vault and its owner gate, for the owner checks.
+    struct Owner {
+        _dir: TempDir,
+        shared: SharedVault,
+        gate: OwnerGate,
+    }
+
+    fn owner() -> Owner {
+        let dir = TempDir::new().expect("dir");
+        let mut vault = Vault::create(&dir.path().join("owner.db"), PASS).expect("vault");
+        vault.unlock(PASS).expect("unlock");
+        let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
+        let gate = OwnerGate::new(Arc::clone(&shared), None);
+        Owner {
+            _dir: dir,
+            shared,
+            gate,
+        }
+    }
+
+    impl Owner {
+        fn proof(
+            &self,
+            action: apassy::broker::approvals::OwnerAction,
+        ) -> (apassy::broker::approvals::OwnerProof, [u8; 32]) {
+            let proof = self
+                .gate
+                .authorize(action, OwnerCheck::passphrase(PASS))
+                .expect("owner check");
+            let epoch = self.shared.lock().unwrap().as_ref().expect("vault").epoch();
+            (proof, epoch)
+        }
+    }
+
+    /// `b` joins the account of `account` (on another Mac) with the safety words and a
+    /// fresh owner check, as Settings › Connect does.
+    fn join_account(
+        cloud: &Cloud,
+        account: &mut ConnectAccount,
+        b: &ConnectMac,
+        name: &str,
+    ) -> ConnectAccount {
+        let owner = owner();
+        let link = account.start_link().expect("link");
+        let mut request =
+            JoinRequest::start(client(cloud), &b.keys, &b.account_path, link.code(), name)
+                .expect("join");
+        assert!(matches!(request.poll().expect("poll"), JoinPoll::Waiting));
+        let pending = account.pending_joins(&link).expect("pending");
+        let (proof, epoch) = owner.proof(pending[0].owner_action(&account.state().account_id));
+        account
+            .confirm_join(&link, &pending[0], proof, &epoch)
+            .expect("confirm");
+        match request.poll().expect("poll") {
+            JoinPoll::Confirmed(joined) => *joined,
+            other => panic!("not confirmed: {other:?}"),
+        }
+    }
+
+    fn verifies(public_key: &[u8], text: &str, signature: &[u8]) -> bool {
+        UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, public_key)
+            .verify(text.as_bytes(), signature)
+            .is_ok()
+    }
+
+    /// A vault of `a` that each of `others` holds too (the same vault id and
+    /// passphrase, as a vault that synced through a folder before): all unlocked, `a`'s
+    /// first.
+    fn shared_vaults(a: &Mac, others: &[&Mac]) -> Vec<Vault> {
+        let mut vault = a.create();
+        vault.add(item("Alpha", "SYNTH-alpha")).expect("add");
+        drop(vault);
+        let open = |path: &std::path::Path| {
+            let mut vault = Vault::open(path).expect("open");
+            vault.unlock(PASS).expect("unlock");
+            vault
+        };
+        let mut vaults = vec![open(&a.vault_path)];
+        for other in others {
+            fs::copy(&a.vault_path, &other.vault_path).expect("copy");
+            vaults.push(open(&other.vault_path));
+        }
+        vaults
+    }
+
+    fn shared_vault(a: &Mac, b: &Mac) -> (Vault, Vault) {
+        let mut vaults = shared_vaults(a, &[b]);
+        let b = vaults.pop().expect("b");
+        (vaults.pop().expect("a"), b)
+    }
+
+    #[test]
+    fn enabling_on_connect_pushes_version_one_under_the_account_key() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let mut account = new_account(&cloud, &a, "Rafal", true);
+        let signer = account.signer().expect("signer");
+        let mut vault = a.mac.create();
+        vault.add(item("Alpha", "SYNTH-alpha")).expect("add");
+        let vault_id = vault.sync_identity().expect("identity").vault_id;
+
+        let report = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault, &mut account, "Personal")
+            .expect("enable on Connect");
+        assert!(report.enable.outcome.pushed);
+        let team = report.team_id.clone();
+        assert_eq!(
+            cloud
+                .connect
+                .store_of(&account.state().account_id, &vault_id)
+                .as_deref(),
+            Some(team.as_str()),
+            "POST /v1/account/vaults made the store"
+        );
+        assert_eq!(cloud.relay.version_of(&team), 1);
+        // The head of version 1 is signed with the account key, and the relay took it.
+        let heads = cloud.relay.heads_of(&team);
+        assert_eq!(heads.len(), 1);
+        let head = &heads[0];
+        assert!(verifies(signer.public_key(), &head.text, &head.signature));
+        assert!(head.text.contains(&vault_id));
+        let devices = cloud.relay.team_devices(&team);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].1, signer.public_key(), "the store device is the account key");
+        // The vault keeps an account row with no private key.
+        let row = vault.relay_device().expect("row").expect("relay sync is on");
+        assert!(row.uses_account_key());
+        assert!(row.key_pkcs8.is_empty());
+        assert_eq!(row.team_id, team);
+        assert_eq!(row.relay_url, cloud.connect.url);
+        // The relay-sync-v1 wire: the team sign-in and the push at the Connect origin.
+        let log = cloud.connect.log();
+        assert!(log.iter().any(|line| line == "POST /v1/account/vaults"));
+        assert!(log.iter().any(|line| line == "POST /v1/auth/token"));
+        assert!(log.iter().any(|line| line == "PUT /v1/sync/snapshot"));
+        // A later change goes up as version 2, signed by the same key.
+        vault.add(item("Beta", "SYNTH-beta")).expect("add");
+        assert!(a.mac.sync.sync(&mut vault).expect("sync").pushed);
+        assert_eq!(cloud.relay.version_of(&team), 2);
+        let heads = cloud.relay.heads_of(&team);
+        assert!(verifies(signer.public_key(), &heads[1].text, &heads[1].signature));
+
+        // An account without a plan gets no store, and nothing turns on.
+        let c = connect_mac(&cloud, "c");
+        let mut free = new_account(&cloud, &c, "Free", false);
+        let mut other = c.mac.create();
+        let refused = c
+            .mac
+            .sync
+            .enable_on_connect(&mut other, &mut free, "Personal")
+            .unwrap_err();
+        assert_eq!(refused, StoreError::Connect(ConnectError::PlanRequired));
+        assert!(c.mac.sync.state().expect("state").is_none());
+        assert!(other.relay_device().expect("row").is_none());
+    }
+
+    #[test]
+    fn a_second_mac_of_the_account_joins_without_a_link_code_and_merges() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let c = connect_mac(&cloud, "c");
+        let mut vaults = shared_vaults(&a.mac, &[&b.mac, &c.mac]);
+        let mut vault_c = vaults.pop().expect("c");
+        let mut vault_b = vaults.pop().expect("b");
+        let mut vault_a = vaults.pop().expect("a");
+        vault_b.add(item("Beta", "SYNTH-beta")).expect("add");
+
+        let report = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable on A");
+        assert_eq!(
+            report.registered,
+            vec!["Synthetic Mac mini".to_owned()],
+            "A registers the other Mac of the account"
+        );
+        assert!(report.not_registered.is_empty());
+        let team = report.team_id;
+        assert!(
+            cloud
+                .connect
+                .store_devices(&team)
+                .contains(&account_b.state().device_id)
+        );
+
+        // B turns on the same way: no link code, a merge, and a push.
+        let report = b
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_b, &mut account_b, "Personal")
+            .expect("enable on B");
+        assert_eq!(report.team_id, team, "the same store");
+        assert!(report.enable.outcome.merge.is_some(), "B merged A's copy");
+        assert!(report.enable.outcome.pushed, "B pushed the merged vault");
+        assert_eq!(titles(&vault_b), vec!["Alpha", "Beta"]);
+        assert_eq!(cloud.relay.version_of(&team), 2);
+        let log = cloud.connect.log();
+        assert!(
+            !log.iter().any(|line| line.starts_with("POST /v1/devices/link")),
+            "no device link: {log:?}"
+        );
+        assert!(
+            vault_b
+                .relay_device()
+                .expect("row")
+                .expect("on")
+                .uses_account_key()
+        );
+        // A pulls B's change.
+        a.mac.sync.sync(&mut vault_a).expect("sync A");
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Beta"]);
+
+        // A Mac that joined the account later is not in the store until a Mac in it adds
+        // it; then it turns on without a link code too.
+        let mut account_c = join_account(&cloud, &mut account_a, &c, "Synthetic iMac");
+        let early = c
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_c, &mut account_c, "Personal")
+            .unwrap_err();
+        assert_eq!(early, StoreError::NotInStore);
+        assert_eq!(
+            a.mac
+                .sync
+                .register_account_devices(&mut account_a)
+                .expect("register"),
+            vec!["Synthetic iMac".to_owned()]
+        );
+        c.mac
+            .sync
+            .enable_on_connect(&mut vault_c, &mut account_c, "Personal")
+            .expect("enable on C");
+        assert_eq!(titles(&vault_c), vec!["Alpha", "Beta"]);
+    }
+
+    #[test]
+    fn a_family_members_mac_joins_a_shared_vault_only_with_a_link_the_words_and_the_passphrase()
+    {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let m = connect_mac(&cloud, "m");
+        let s = connect_mac(&cloud, "s");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_m = new_account(&cloud, &m, "Ola", false);
+        let account_s = new_account(&cloud, &s, "Stranger", true);
+        let owner_id = account_a.state().account_id.clone();
+        cloud.connect.make_group(&owner_id, "family");
+        cloud
+            .connect
+            .add_member(&owner_id, &account_m.state().account_id);
+        let mut vault_a = a.mac.create();
+        vault_a.add(item("Family", "SYNTH-family")).expect("add");
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Family")
+            .expect("enable")
+            .team_id;
+
+        // Without a link the member's Mac has no way in: no store lists it.
+        assert!(account_m.vault_stores().expect("stores").is_empty());
+
+        // A stranger with a link: the words match, and Connect refuses the confirmation.
+        let code = a.mac.sync.create_link(&vault_a).expect("link");
+        let stranger = PendingJoin::request_with_account(
+            &code.link,
+            "",
+            "Stranger Mac",
+            account_s.signer().expect("signer"),
+        )
+        .expect("request");
+        let links = a.mac.sync.pending_links(&vault_a, Some(&code)).expect("links");
+        assert_eq!(links[0].safety.as_deref(), Some(stranger.safety.as_str()));
+        assert!(
+            a.mac.sync.confirm_link(&vault_a, &links[0]).is_err(),
+            "not_in_group"
+        );
+        assert!(stranger.poll().expect("poll").is_none(), "still not a device");
+        assert_eq!(cloud.relay.team_devices(&team).len(), 1);
+
+        // The member with a link: the same words on both Macs, then the confirmation.
+        let code = a.mac.sync.create_link(&vault_a).expect("link");
+        let signer_m = account_m.signer().expect("signer");
+        let pending =
+            PendingJoin::request_with_account(&code.link, "", "Ola's Mac", Arc::clone(&signer_m))
+                .expect("request");
+        let links = a.mac.sync.pending_links(&vault_a, Some(&code)).expect("links");
+        let link = links
+            .iter()
+            .find(|link| link.device_name == "Ola's Mac")
+            .expect("the member waits");
+        assert_eq!(link.safety.as_deref(), Some(pending.safety.as_str()));
+        a.mac.sync.confirm_link(&vault_a, link).expect("confirm");
+        let joined = pending.poll().expect("poll").expect("confirmed");
+        let download = joined.download(&m.mac.data.join("sync")).expect("download");
+        // The passphrase opens the copy: a wrong one makes no vault.
+        assert!(m.mac.sync.adopt(&joined, &download, WRONG).is_err());
+        assert!(!m.mac.vault_path.exists());
+        let (mut vault_m, _) = m.mac.sync.adopt(&joined, &download, PASS).expect("adopt");
+        vault_m.unlock(PASS).expect("unlock");
+        assert_eq!(titles(&vault_m), vec!["Family"]);
+        let row = vault_m.relay_device().expect("row").expect("on");
+        assert!(row.uses_account_key(), "the member signs with its account key");
+        assert_eq!(row.public_key, signer_m.public_key());
+        // The store is shared now, and both sides sync.
+        let stores = account_m.vault_stores().expect("stores");
+        assert_eq!(stores.len(), 1);
+        assert!(stores[0].shared);
+        vault_m.add(item("Ola", "SYNTH-ola")).expect("add");
+        assert!(m.mac.sync.sync(&mut vault_m).expect("sync M").pushed);
+        a.mac.sync.sync(&mut vault_a).expect("sync A");
+        assert_eq!(titles(&vault_a), vec!["Family", "Ola"]);
+    }
+
+    /// A vault of Mac A on the old (hosted) relay with a team code, and the relay sync
+    /// of the same vault for the Connect origin.
+    struct Moving {
+        cloud: Cloud,
+        old: FakeRelay,
+        a: Mac,
+        keys: MemoryKeyStore,
+        account: ConnectAccount,
+        to_connect: RelaySync,
+        vault: Vault,
+    }
+
+    fn moving() -> Moving {
+        let cloud = cloud();
+        let old = FakeRelay::start();
+        let a = mac(&cloud.root, "a", &old.url);
+        let mut vault = a.create();
+        vault.add(item("Alpha", "SYNTH-alpha")).expect("add");
+        a.sync
+            .create_team(&mut vault, "Personal", &old.team_code(), "Synthetic MacBook")
+            .expect("team");
+        assert_eq!(old.version(), 1);
+        let keys = MemoryKeyStore::new();
+        let (account, _) = ConnectAccount::create(
+            client(&cloud),
+            &keys,
+            &account_file(&a.data),
+            "Rafal",
+            "Synthetic MacBook",
+        )
+        .expect("account");
+        cloud.connect.entitle(&account.state().account_id);
+        let to_connect = RelaySync::new(RelayConfig::in_data_dir(
+            &a.data,
+            &a.vault_path,
+            &cloud.connect.url,
+            "vault.connect",
+        ));
+        Moving {
+            cloud,
+            old,
+            a,
+            keys,
+            account,
+            to_connect,
+            vault,
+        }
+    }
+
+    #[test]
+    fn moving_the_relay_copy_pushes_to_connect_first_and_deletes_the_old_copy_second() {
+        let Moving {
+            cloud,
+            old,
+            a,
+            keys: _keys,
+            mut account,
+            to_connect,
+            vault,
+        } = moving();
+        let vault_id = vault.sync_identity().expect("identity").vault_id;
+        let account_id = account.state().account_id.clone();
+        // Hold the delete of the old copy and look at both relays at that moment.
+        let hold = old.hold("DELETE /v1/sync", Duration::from_secs(20));
+        let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
+        let path = a.vault_path.clone();
+        let mover = {
+            let shared = Arc::clone(&shared);
+            let from = a.sync.clone();
+            let to = to_connect.clone();
+            std::thread::spawn(move || {
+                let canonical = fs::canonicalize(&path).expect("path");
+                let result = from.move_to_connect_shared(
+                    &to,
+                    &shared,
+                    move |vault| vault.path() == canonical,
+                    &mut account,
+                    "Personal",
+                );
+                (result, account)
+            })
+        };
+        hold.wait_entered();
+        let team = cloud
+            .connect
+            .store_of(&account_id, &vault_id)
+            .expect("the store is there before the delete");
+        assert_eq!(cloud.relay.version_of(&team), 1, "Connect has the copy first");
+        assert_eq!(old.version(), 1, "the old copy is still there");
+        assert_eq!(
+            a.sync.pending_move().map(|record| record.step),
+            Some(MoveStep::Pushed)
+        );
+        hold.release();
+        let (result, _account) = mover.join().expect("thread");
+        let report = result.expect("moved");
+        assert_eq!(report.team_id, team);
+        assert_eq!(old.version(), 0, "the old copy is deleted second");
+        assert!(a.sync.pending_move().is_none(), "the record goes");
+        assert!(a.sync.state().expect("state").is_none(), "the old sync is off");
+        assert!(to_connect.state().expect("state").is_some());
+        let guard = shared.lock().unwrap();
+        let vault = guard.as_ref().expect("vault");
+        let row = vault.relay_device().expect("row").expect("on");
+        assert!(row.uses_account_key());
+        assert_eq!(row.team_id, team);
+        assert_eq!(titles(vault), vec!["Alpha"]);
+    }
+
+    #[test]
+    fn a_failure_between_the_steps_of_a_move_leaves_both_copies_with_a_clear_state() {
+        let Moving {
+            cloud,
+            old,
+            a,
+            keys: _keys,
+            mut account,
+            to_connect,
+            mut vault,
+        } = moving();
+        let vault_id = vault.sync_identity().expect("identity").vault_id;
+        let account_id = account.state().account_id.clone();
+        old.fail_next("DELETE /v1/sync", 1, 403);
+        let failure = a
+            .sync
+            .move_to_connect(&to_connect, &mut vault, &mut account, "Personal")
+            .unwrap_err();
+        assert_eq!(failure.step, Some(MoveStep::Pushed));
+        assert!(failure.to_string().contains("Both copies are kept"));
+        let team = cloud
+            .connect
+            .store_of(&account_id, &vault_id)
+            .expect("store");
+        assert_eq!(cloud.relay.version_of(&team), 1, "the Connect copy");
+        assert_eq!(old.version(), 1, "the old copy");
+        assert_eq!(
+            a.sync.pending_move().map(|record| record.step),
+            Some(MoveStep::Pushed)
+        );
+        // The vault still syncs with the old relay, and nothing is lost.
+        assert!(
+            !vault
+                .relay_device()
+                .expect("row")
+                .expect("on")
+                .uses_account_key()
+        );
+        vault.add(item("Beta", "SYNTH-beta")).expect("add");
+        assert!(a.sync.sync(&mut vault).expect("sync").pushed);
+        assert_eq!(old.version(), 2);
+
+        // The same call again goes on: Connect gets the change, then the old copy goes.
+        let report = a
+            .sync
+            .move_to_connect(&to_connect, &mut vault, &mut account, "Personal")
+            .expect("retry");
+        assert_eq!(report.team_id, team);
+        assert_eq!(old.version(), 0);
+        assert!(a.sync.pending_move().is_none());
+        assert!(cloud.relay.version_of(&team) >= 2, "the change went to Connect");
+        assert_eq!(titles(&vault), vec!["Alpha", "Beta"]);
+
+        // Undo after a failed delete: the Connect copy goes, the relay copy stays.
+        let Moving {
+            cloud,
+            old,
+            a,
+            keys: _keys,
+            mut account,
+            to_connect,
+            mut vault,
+        } = moving();
+        old.fail_next("DELETE /v1/sync", 1, 403);
+        let failure = a
+            .sync
+            .move_to_connect(&to_connect, &mut vault, &mut account, "Personal")
+            .unwrap_err();
+        assert_eq!(failure.step, Some(MoveStep::Pushed));
+        let record = a.sync.pending_move().expect("record");
+        let owner = owner();
+        let (proof, epoch) =
+            owner.proof(ConnectAccount::delete_vault_store_action(&record.team_id));
+        a.sync
+            .undo_move(&mut account, proof, &epoch)
+            .expect("undo");
+        assert!(!cloud.relay.has_team(&record.team_id), "the Connect copy is gone");
+        assert_eq!(old.version(), 1, "the relay copy stays");
+        assert!(a.sync.pending_move().is_none());
+        assert!(a.sync.sync(&mut vault).is_ok(), "the old sync goes on");
+    }
+
+    #[test]
+    fn a_read_only_plan_shows_the_state_and_keeps_pulls() {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let b = connect_mac(&cloud, "b");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut account_b = join_account(&cloud, &mut account_a, &b, "Synthetic Mac mini");
+        let (mut vault_a, mut vault_b) = shared_vault(&a.mac, &b.mac);
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable A")
+            .team_id;
+        b.mac
+            .sync
+            .enable_on_connect(&mut vault_b, &mut account_b, "Personal")
+            .expect("enable B");
+        vault_a.add(item("Gamma", "SYNTH-gamma")).expect("add");
+        assert!(a.mac.sync.sync(&mut vault_a).expect("sync").pushed);
+        let version = cloud.relay.version_of(&team);
+
+        // The plan ends: read-only for 30 days.
+        let until = 1_900_000_000;
+        cloud.connect.set_plan(
+            &account_a.state().account_id,
+            json!({"plan": "personal", "status": "read_only", "entitled": false,
+                   "interval": "month", "quantity": 1, "renews_at": null,
+                   "ends_at": 1_897_400_000, "grace_until": null,
+                   "read_only_until": until, "delete_at": 1_905_200_000, "group_id": null}),
+        );
+        let plan = StorePlan::from_view(&account_b.plan().expect("plan"));
+        assert_eq!(plan, StorePlan::ReadOnly { until: Some(until) });
+        assert!(!plan.pushes());
+
+        // B pulls A's change, and its own change stays on B: the push is refused.
+        vault_b.add(item("Delta", "SYNTH-delta")).expect("add");
+        let refused = b.mac.sync.sync(&mut vault_b).unwrap_err();
+        assert_eq!(refused, SyncError::Relay(RelayRefusal::PlanRequired));
+        assert!(is_plan_refusal(refused));
+        assert_eq!(titles(&vault_b), vec!["Alpha", "Delta", "Gamma"]);
+        assert_eq!(cloud.relay.version_of(&team), version, "no push");
+        // The next pull still works and keeps the change.
+        assert_eq!(
+            b.mac.sync.sync(&mut vault_b).unwrap_err(),
+            SyncError::Relay(RelayRefusal::PlanRequired)
+        );
+        assert!(b.mac.sync.local_changed(&vault_b).expect("changed"));
+        assert_eq!(titles(&vault_b), vec!["Alpha", "Delta", "Gamma"]);
+    }
+}
