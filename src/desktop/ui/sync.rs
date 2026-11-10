@@ -136,6 +136,7 @@ impl UiStatus {
             Self::FolderUnavailable => ("Folder not available", Tone::Warning),
             Self::Damaged => ("Damaged copy", Tone::Warning),
             Self::Problem(_) => ("Problem", Tone::Warning),
+            Self::Connect(state) => relay::connect_tag(*state),
         }
     }
 
@@ -161,6 +162,7 @@ impl UiStatus {
             }
             Self::Damaged => "The synced copy is damaged. Apassy did not use it.".to_owned(),
             Self::Problem(text) => format!("Sync: {text}."),
+            Self::Connect(state) => relay::connect_words(*state),
         }
     }
 }
@@ -1562,6 +1564,8 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut sheet = None;
     let mut sync_now = false;
     let mut open_synced = false;
+    let mut move_to: Option<String> = None;
+    let mut undo_move: Option<String> = None;
     super::settings::rows::section(
         ui,
         Some("Sync"),
@@ -1650,6 +1654,32 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     {
                         ui.add(Label::new(super::settings::rows::note(&notice)).wrap());
                     }
+                    // A move to Apassy Connect that did not finish (plan s7 unit M3): what
+                    // happened, and the way on.
+                    let moving = app.relay_busy(&entry.id, relay::Job::Move)
+                        || app.relay_busy(&entry.id, relay::Job::UndoMove);
+                    if open_unlocked
+                        && !moving
+                        && let Some((step, text)) = app.relay_move_state(&entry.id)
+                    {
+                        kit::tone_note(ui, text, Tone::Warning);
+                        ui.horizontal_wrapped(|ui| {
+                            if kit::small_button(ui, "Try Again", Style::Prominent).clicked() {
+                                move_to = Some(entry.id.clone());
+                            }
+                            if step == crate::sync::MoveStep::Pushed
+                                && kit::small_button(ui, "Undo the Move…", Style::Bordered)
+                                    .clicked()
+                            {
+                                undo_move = Some(entry.id.clone());
+                            }
+                        });
+                    } else if moving {
+                        ui.add(
+                            Label::new(super::settings::rows::note(relay::Job::Move.progress()))
+                                .wrap(),
+                        );
+                    }
                     // The actions of a synced vault, under its state.
                     let actions = open_unlocked
                         && ((link.is_some() && !removed)
@@ -1702,6 +1732,22 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                     });
                                 }
                             }
+                            // The hosted relay copy moves to Apassy Connect (plan s7 M3).
+                            if on_relay
+                                && !removed
+                                && !moving
+                                && app.relay_move_state(&entry.id).is_none()
+                                && app.relay_can_move(&entry.id)
+                                && kit::small_button(
+                                    ui,
+                                    "Move the Relay Copy to Connect",
+                                    Style::Bordered,
+                                )
+                                .on_hover_text(relay::MOVE_WORDS)
+                                .clicked()
+                            {
+                                move_to = Some(entry.id.clone());
+                            }
                         });
                     }
                 });
@@ -1712,7 +1758,13 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         },
     );
     let ctx = ui.ctx().clone();
-    if sync_now {
+    if let Some(id) = move_to {
+        if let Err(text) = app.relay_move_to_connect(&id) {
+            app.set_err(text);
+        }
+    } else if let Some(id) = undo_move {
+        app.relay_ask_undo_move(&id, Some(&ctx));
+    } else if sync_now {
         app.sync_now();
     } else if open_synced {
         app.leave_vault_for(Step::OpenSynced, Some(&ctx));

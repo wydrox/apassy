@@ -79,6 +79,15 @@
 //! notification through the hook of the app ([`SyncWorker::set_stuck_notifier`]). A
 //! sync that works ends the streak (docs/operations/sync.md, section 7).
 //!
+//! A vault store of Apassy Connect (plan s7 unit M3) has the plan states of its account
+//! ([`ConnectState`]): "Connect: past due" while the grace lasts (sync works), and
+//! "Connect: read-only until <date>" once Connect refuses pushes with `403
+//! plan_required`. Then the pulls go on (the waiter's new versions and every
+//! [`RELAY_PULL_EVERY`]), each merge is kept, a change of this Mac stays on this Mac and
+//! does not ask the relay every few seconds, and the next sync that pushes ends the
+//! state. A store whose account is signed out on this Mac waits with "Connect: signed
+//! out" until Settings › Connect signs in.
+//!
 //! The waiter thread never takes the op lock or the schedule mutex. It takes the plan
 //! mutex for a copy, then the vault mutex alone and only to see whether the vault is
 //! unlocked. It waits on the relay with no lock held, then sets the pull flag and takes
@@ -98,7 +107,8 @@ use crate::broker::SharedVault;
 use crate::desktop::sync_health::{LogDetails, StuckNotice, SyncHealth, SyncKind};
 use crate::native::SyncStuckReason;
 use crate::sync::{
-    FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, SyncError, SyncOutcome, VaultSync,
+    FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, StorePlan, SyncError, SyncOutcome,
+    VaultSync, is_plan_refusal, waits_for_account,
 };
 use crate::vault::{Vault, VaultErrorKind};
 
@@ -165,6 +175,37 @@ pub(crate) enum UiStatus {
     Damaged,
     /// Another problem, in words.
     Problem(String),
+    /// A vault store of Apassy Connect in a plan state of its account.
+    Connect(ConnectState),
+}
+
+/// The plan state of a vault store of Apassy Connect, for its status (plan s7 unit M3,
+/// connect-billing-v1 section 8). Times are Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectState {
+    /// `past_due` within its grace: the sync works until `grace_until`. `last` is the
+    /// time of the last sync.
+    PastDue {
+        last: Option<u64>,
+        grace_until: Option<u64>,
+    },
+    /// Connect refuses pushes; pulls work until `until`.
+    ReadOnly { until: Option<u64> },
+    /// Connect refuses pulls too; the copy goes at `delete_at`.
+    Suspended { delete_at: Option<u64> },
+    /// The account of this Mac is signed out: the sync waits for "Sign In…".
+    SignedOut,
+}
+
+impl ConnectState {
+    /// The state after a refused push of a store, from the plan the window read last.
+    pub(crate) fn refused(plan: Option<StorePlan>) -> Self {
+        match plan {
+            Some(StorePlan::Suspended { delete_at }) => Self::Suspended { delete_at },
+            Some(StorePlan::ReadOnly { until }) => Self::ReadOnly { until },
+            _ => Self::ReadOnly { until: None },
+        }
+    }
 }
 
 impl UiStatus {
@@ -233,6 +274,9 @@ struct Schedule {
     /// Relay syncs that failed in a row, and when the next one may run.
     relay_failures: u32,
     relay_retry_at: Option<Instant>,
+    /// Connect refuses the pushes of the open vault store (read-only): a change of this
+    /// Mac waits for a pull, which tries the push once more, instead of its own sync.
+    read_only: bool,
 }
 
 /// What the window reads.
@@ -478,6 +522,7 @@ impl Shared {
         if settled
             && unlocked
             && relay_due
+            && !schedule.read_only
             && let (Some((id, sync)), Some(vault)) = (&open, &vault)
         {
             self.sync_open(now, &mut schedule, id, sync, vault);
@@ -608,11 +653,30 @@ impl Shared {
                 sync.sync_shared(vault, |open| same_vault(sync, open))
             }
         };
+        if let (Err(err), Some(relay)) = (&result, sync.as_relay())
+            && waits_for_account(relay, *err)
+        {
+            // A vault store whose account is signed out on this Mac: it waits for
+            // "Sign In…" in Settings › Connect, and says so once.
+            schedule.next_relay_pull = Some(now + RELAY_PULL_EVERY);
+            let status = UiStatus::Connect(ConnectState::SignedOut);
+            let changed = lock(&self.out)
+                .statuses
+                .insert(id.to_owned(), status.clone())
+                != Some(status);
+            if changed {
+                self.repaint();
+            }
+            return;
+        }
         if result == Err(SyncError::Vault(VaultErrorKind::Locked)) {
             // The vault locked or changed: nothing to tell.
             return;
         }
         let relay = sync.as_relay().is_some();
+        let store = sync.as_relay().filter(|relay| relay.uses_account_key());
+        let read_only = matches!(result, Err(err) if is_plan_refusal(err)) && store.is_some();
+        schedule.read_only = read_only;
         if relay {
             match result {
                 Ok(_) => {
@@ -620,6 +684,14 @@ impl Shared {
                     schedule.relay_retry_at = None;
                     schedule.next_relay_pull = Some(now + RELAY_PULL_EVERY);
                     self.relay_backoff.store(false, Ordering::SeqCst);
+                }
+                Err(_) if read_only => {
+                    // Read-only: the pulls keep their times, and the step before a lock
+                    // does not push. Nothing waits for a back-off.
+                    self.relay_backoff.store(true, Ordering::SeqCst);
+                    schedule.relay_failures = 0;
+                    schedule.relay_retry_at = None;
+                    schedule.next_relay_pull = Some(now + RELAY_PULL_EVERY);
                 }
                 Err(SyncError::RemovedFromRelay)
                     if sync.as_relay().is_some_and(RelaySync::is_removed) =>
@@ -651,16 +723,38 @@ impl Shared {
                 .flatten()
                 .and_then(|state| state.last_sync_at)
         });
-        self.record(now, id, sync, &result);
+        if !read_only {
+            // A read-only plan is a state of the account, not a sync that is stuck.
+            self.record(now, id, sync, &result);
+        }
         let id = id.to_owned();
         {
             let mut out = lock(&self.out);
             out.change_waits = false;
             match result {
                 Ok(outcome) => {
-                    out.statuses
-                        .insert(id.clone(), UiStatus::UpToDate(last.flatten()));
+                    let status = match store.and_then(RelaySync::store_plan) {
+                        Some(StorePlan::PastDue { grace_until }) => {
+                            UiStatus::Connect(ConnectState::PastDue {
+                                last: last.flatten(),
+                                grace_until,
+                            })
+                        }
+                        _ => UiStatus::UpToDate(last.flatten()),
+                    };
+                    out.statuses.insert(id.clone(), status);
                     out.push(SyncEvent::Synced { id, outcome });
+                }
+                Err(_) if read_only => {
+                    let plan = store.and_then(RelaySync::store_plan);
+                    let status = UiStatus::Connect(ConnectState::refused(plan));
+                    let before = out.statuses.insert(id.clone(), status.clone());
+                    if before.as_ref() != Some(&status) {
+                        out.push(SyncEvent::Failure {
+                            id,
+                            text: "Sync: Apassy Connect takes no changes from this account now. Apassy still downloads the changes of your other devices, and keeps the changes of this Mac here until the plan is active again.".to_owned(),
+                        });
+                    }
                 }
                 Err(err) => {
                     let status = UiStatus::from_error(err);
@@ -767,7 +861,10 @@ impl Shared {
             let kept = previous.get(&id).filter(|status| {
                 matches!(
                     status,
-                    UiStatus::NeedsPassphrase | UiStatus::Damaged | UiStatus::Problem(_)
+                    UiStatus::NeedsPassphrase
+                        | UiStatus::Damaged
+                        | UiStatus::Problem(_)
+                        | UiStatus::Connect(_)
                 )
             });
             let status = match &sync {
