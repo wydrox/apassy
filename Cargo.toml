@@ -40,7 +40,7 @@ eframe = { version = "=0.36.2", optional = true, default-features = false, featu
 arboard = { version = "=3.6.1", optional = true, default-features = false }
 # Native open/save panels. The async API keeps the desktop event loop free.
 rfd = { version = "=0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }
-rusqlite = { version = "=0.40.2", optional = true, default-features = false, features = ["bundled-sqlcipher"] }
+rusqlite = { version = "=0.41.1", optional = true, default-features = false, features = ["bundled-sqlcipher"] }
 tempfile = { version = "=3.27.0", optional = true }
 getrandom = { version = "=0.4.3", optional = true }
 # ADR 0005: TLS for connector destinations. ring backend, macOS trust store.
