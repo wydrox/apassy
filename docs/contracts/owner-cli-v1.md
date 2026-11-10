@@ -55,11 +55,17 @@ apassy owner serve VAULT [--idle-minutes N] [--keyring]
   `update`, `save`, `create`, `fill_code`, `passkey_get`, `passkey_create`. Agent fills
   of the browser and browser-debugging permission answer `unsupported`. Access request
   grants use mode `ask`; "approve and remember" and project answers need the window.
-- It locks the vault and stops on `lock`, `quit`, the end of the terminal, N idle
-  minutes without a typed line (default 15), and the lock hook of the session
-  (`owner::serve::lock_observer`). SIGTERM, SIGHUP and SIGINT end the process at once;
-  the kernel frees the key memory, closes the sockets and frees `owner.lock`, and the
-  next start removes the stale socket files.
+- It locks the vault and stops on `lock`, `quit`, the end of the terminal, and the
+  inactivity time: `--idle-minutes N` (1 to 1440), else the "Lock after inactivity"
+  time of `device-policy.json` (15 minutes, 1 hour, 4 hours), else 15 minutes
+  (`owner::serve::lock::lock_settings`). Only a typed line is owner input; the time
+  counts on the sleep-inclusive clock, and an active desktop idle hint postpones it.
+  With the policy "When the screen locks or the computer sleeps" it also stops at a
+  screen lock, sleep, user switch or session end (`owner::serve::lock_observer`: D-Bus
+  with the `session-bus` feature, else the clock gap after a sleep). A damaged policy
+  file gives the default time and the session rule. SIGTERM, SIGHUP and SIGINT end
+  the process at once; the kernel frees the key memory, closes the sockets and frees
+  `owner.lock`, and the next start removes the stale socket files.
 
 ## 1. Transport
 

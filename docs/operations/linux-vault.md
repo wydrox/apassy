@@ -78,10 +78,10 @@ path is required to unlock the vault.
 `apassy owner serve /path/to/vault.db` unlocks the vault in the terminal and then
 serves the browser native host (passkey create and sign-in, fill, save) and agents
 (runs with secrets, access requests, bouncer questions) until `lock` or `quit`, the
-end of the terminal, or 15 idle minutes (`--idle-minutes N`). Each request shows its
-facts in the terminal and needs a typed `approve` and the vault passphrase (or
-`approve polkit`); `deny` refuses. It refuses to start without a terminal on stdin and
-stdout, and while the desktop app or another `owner serve` runs for the same data
+end of the terminal, or the inactivity time. Each request shows its facts in the
+terminal and needs a typed `approve` and the vault passphrase (or `approve polkit`);
+`deny` refuses. No check is reused for a second request. It refuses to start
+without a terminal on stdin and stdout, and while the desktop app or another `owner serve` runs for the same data
 directory. Do not run it from a systemd unit, cron or a pipe. To keep it running over
 SSH, start it in tmux or screen and attach to approve:
 
@@ -92,12 +92,38 @@ screen -S apassy apassy owner serve /path/to/vault.db        # or with screen
 ```
 
 While it waits detached, a request times out after 215 s (browser) or 5 minutes
-(agents) unless you attach and answer. SIGTERM or a closed terminal ends it at once
-and leaves the vault locked. Headless, these do not work: agent fills of the browser,
-browser debugging permission, "approve and remember" and project answers, the owner
-command line of `owner.sock` (`apassy items …`), iPhone approvals, sync and the node
-of the desktop. A desktop session lock does not lock the service unless the session
-lock hook is available.
+(agents) unless you attach and answer. Headless, these do not work: agent fills of the
+browser, browser debugging permission, "approve and remember" and project answers, the
+owner command line of `owner.sock` (`apassy items …`), iPhone approvals, sync and the
+node of the desktop.
+
+When it locks by itself:
+
+- The inactivity time: `--idle-minutes N` (1 to 1440) when given, else "Lock after
+  inactivity" of the device settings when it names a time (15 minutes, 1 hour,
+  4 hours), else 15 minutes. "Never" and "When the screen locks or the computer
+  sleeps" keep the 15 minutes. Only a line typed in this terminal resets it; agent
+  and browser requests do not. The time counts on the sleep-inclusive clock, so the
+  time that the computer slept counts. While the desktop's logind idle hint says the
+  session is active (you work in another app of that session), it does not lock.
+- With "When the screen locks or the computer sleeps": also at a screen lock, a
+  sleep, a user switch and the end of the login session. The desktop package reads
+  them over D-Bus, as the desktop does (below). A build without D-Bus (the headless
+  test build `--no-default-features --features node,owner`) sees a sleep only after
+  the wake, from the clocks, and sees no screen lock.
+- A damaged, foreign or too open `device-policy.json` gives 15 minutes (or
+  `--idle-minutes`) and the screen-lock rule, and the service says so at the start.
+
+The service locks the vault, stops both sockets, ends each waiting run and cancels
+each waiting browser request, and prints why.
+
+SIGTERM, SIGHUP and SIGINT (Ctrl-C) end the process at once with their default
+action; the service installs no signal handler (the crate forbids `unsafe`). The
+vault key exists only in the process memory, so it leaves with the process (no core
+file); the vault file needs no lock step. The kernel closes the sockets and frees
+`owner.lock`; waiting agent runs and browser requests fail with a closed connection,
+and the next start removes the stale socket files. A signal at a passphrase prompt
+leaves the terminal echo off: type `stty echo` (or `reset`).
 
 ## Desktop and browser
 
@@ -113,12 +139,15 @@ vault switch and quit, it replaces only its own copy with an empty one: GNOME's
 Mutter keeps and restores the last text clipboard and ignores the hint, so a
 plain release would bring the value back. The session decides the mechanism:
 Wayland uses ext-data-control-v1 or wlr-data-control (wlroots compositors, KWin);
-a compositor without them (GNOME) uses X11 through XWayland; an X11 session uses
-X11. With no display, or Wayland without data-control and without XWayland,
+a compositor without them (GNOME on Wayland) uses the X11 clipboard through
+XWayland, which Mutter bridges to Wayland apps; an X11 session uses X11. With no
+display, or Wayland without data-control and without XWayland,
 Copy stays disabled, its hover names the reason, and Show and browser fill
 remain. Every client of the session can read the clipboard while Apassy owns it,
 and a clipboard manager that ignores the hint can keep the value. Values above
-64 KiB are refused. Headless owner commands never write the clipboard. The package installs the desktop entry and the browser extension assets.
+64 KiB are refused. Headless owner commands never write the clipboard.
+
+The package installs the desktop entry and the browser extension assets.
 Use Apassy's browser extension installation flow from the desktop account.
 Chrome stable and Chromium native manifests point to the trusted root-owned
 `/usr/lib/apassy/apassy-browser-host`, with extension assets under
@@ -143,7 +172,15 @@ provide the macOS code-signing, Secure Enclave or Touch ID boundary.
 The desktop observes the session over D-Bus (zbus, the client that the desktop
 already links) and applies the macOS rules: "Lock after inactivity" locks the
 vault, and the "How often to ask" window ends, at screen lock, sleep, user switch
-and session end. Sources:
+and session end.
+
+"How often to ask" works as on macOS: after the passphrase or system authentication
+(polkit), Apassy does not ask again for the owner's own manual actions until the time
+is up; the actions that always ask on macOS ask again here too. The window opens only
+while Apassy observes the screen lock (a logind session or a screen saver service).
+Every approval of an agent run or a browser request still names that one pending
+operation, and its proof works for it only. `apassy owner serve` never reuses a check.
+Sources:
 
 - systemd-logind on the system bus. The session is found by `XDG_SESSION_ID`,
   else logind's `auto` session, and must belong to this user. Its `Lock` and
@@ -171,10 +208,12 @@ inactivity time and the clock's sleep detection still apply. Each reuse also rea
 the lock state again; any error, timeout or lost stream ends the window and keeps
 reuse off until Apassy restarts. "How often to ask" and "Lock after inactivity" are
 stored per device in `device-policy.json` in the data directory (mode 0600, this
-user, no symlink); a damaged or too open file means "Every time" and "Never".
-Headless owner commands can use the same rule without the desktop
-(`apassy::native::session_lock::SessionLock`, and with the `session-bus` feature
-`apassy::native::linux::session_bus::SessionObserver`).
+user, no symlink); a damaged or too open file means "Every time" and "Never" in the
+desktop. The file is a plain file of your user: another process of the same user can
+change it, for example to a longer window. That is outside the Linux boundary (ADR
+0045: same-user processes are not protected), unlike the macOS keychain item.
+`apassy owner serve` uses the same rule (`apassy::native::session_lock::SessionLock`,
+and in the desktop package `apassy::native::linux::session_bus::SessionObserver`).
 
 ## Verification evidence
 
@@ -182,7 +221,13 @@ The Linux vault CI matrix builds x86_64 and aarch64 app/host binaries, exercises
 Linux browser identity refusal cases and the shared synthetic WebAuthn
 registration/assertion test with signature verification, independently verifies real vault create/get and persistence with the synthetic RP,
 then builds and checks
-the deb and tar packages and the installer. It uses no real accounts.
+the deb and tar packages and the installer. It uses no real accounts. The same job
+runs the clipboard ownership against a real X server (Xvfb) and a headless wlroots
+compositor (sway, wlr-data-control) with wl-clipboard as the other client, the
+screen lock and sleep observer against private dbus-daemons with fake
+systemd-logind and screen saver services, and `apassy owner serve` on a
+pseudo-terminal in the build without the window. These are synthetic servers: they
+do not prove GNOME, KDE or a real logind.
 
 A passing synthetic test proves the tested wire and cryptographic cases only.
 Package installation does not prove rendered desktop operation, keyring/polkit
