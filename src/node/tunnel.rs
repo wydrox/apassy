@@ -32,7 +32,8 @@
 //! 1 s, doubling, at most 60 s ([`Backoff`]); an account without the tunnel waits longer.
 //! An end of the WebSocket resets every open stream: the front ends its connections to
 //! the relay, so no stream survives. [`TunnelHandle::stop`] (a lock, a quit, a node stop)
-//! closes the WebSocket with 1000 and joins every thread it started.
+//! closes the WebSocket with 1000, ends every stream at once, and joins its threads (at
+//! most [`STOP_WAIT`] for one inside a request with its own deadline).
 //!
 //! Limits of the node: at most [`MAX_STREAMS`] open streams (a stream over it is reset),
 //! at most [`STREAM_BUFFER`] bytes buffered toward the front for one stream (over it, a
@@ -101,6 +102,8 @@ const CHUNK: usize = 16 * 1024;
 const NODE_FILE: &str = "node.json";
 /// A small wait step of the threads that look at the stop flag.
 const STEP: Duration = Duration::from_millis(25);
+/// How long a stop waits for the threads of the tunnel.
+pub const STOP_WAIT: Duration = Duration::from_secs(2);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -257,6 +260,8 @@ pub struct AccountAuth {
     store: Arc<dyn DeviceKeyStore>,
     path: PathBuf,
     account: Mutex<Option<ConnectAccount>>,
+    /// A sign-out came while a call held the account: the call drops it when it ends.
+    signed_out: AtomicBool,
 }
 
 impl std::fmt::Debug for AccountAuth {
@@ -275,6 +280,7 @@ impl AccountAuth {
             store,
             path,
             account: Mutex::new(None),
+            signed_out: AtomicBool::new(false),
         }
     }
 
@@ -309,8 +315,15 @@ impl AccountAuth {
                 .ok_or(Failure::NoAccount)?;
             *guard = Some(opened);
         }
+        self.signed_out.store(false, Ordering::SeqCst);
         let account = guard.as_mut().ok_or(Failure::NoAccount)?;
-        work(account)
+        let result = work(account);
+        if self.signed_out.load(Ordering::SeqCst)
+            && let Some(mut account) = guard.take()
+        {
+            account.sign_out();
+        }
+        result
     }
 }
 
@@ -355,11 +368,20 @@ impl TunnelAuth for AccountAuth {
         self.state().map(|state| state.device_id)
     }
 
+    /// It never waits for a call on its way (a lock runs it on the UI thread): that call
+    /// drops the account when it ends.
     fn sign_out(&self) {
-        if let Some(account) = lock(&self.account).as_mut() {
+        self.signed_out.store(true, Ordering::SeqCst);
+        let guard = match self.account.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut guard) = guard
+            && let Some(mut account) = guard.take()
+        {
             account.sign_out();
         }
-        lock(&self.account).take();
     }
 }
 
@@ -582,6 +604,9 @@ pub fn open_socket(
     match destination {
         DestinationUrl::Loopback { addr, .. } => {
             let stream = tcp_to(&[*addr], deadline)?;
+            stream
+                .set_write_timeout(Some(CONNECT_DEADLINE))
+                .map_err(offline)?;
             let reader = stream.try_clone().map_err(offline)?;
             let closer = stream.try_clone().map_err(offline)?;
             Ok(Socket {
@@ -743,11 +768,18 @@ impl Link {
         self.send(ws::OP_BINARY, &frame::encode(stream, kind, flags, payload))
     }
 
-    /// Send a close with `code` (best effort) and end the transport.
+    /// Send a close with `code` (best effort: not while a write is stuck) and end the
+    /// transport.
     fn close(&self, code: u16) {
         if !self.closed.load(Ordering::SeqCst) {
-            let mut writer = lock(&self.writer);
-            let _ = client::send(&mut **writer, ws::OP_CLOSE, &ws::close_payload(code));
+            let writer = match self.writer.try_lock() {
+                Ok(writer) => Some(writer),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some(mut writer) = writer {
+                let _ = client::send(&mut **writer, ws::OP_CLOSE, &ws::close_payload(code));
+            }
         }
         self.end();
     }
@@ -1298,6 +1330,9 @@ struct Shared {
     stop: Arc<AtomicBool>,
     status: Mutex<TunnelStatus>,
     link: Mutex<Option<Arc<Link>>>,
+    /// The shutdown of a connection on its way (before its WebSocket opened), so a stop
+    /// does not wait for its deadline.
+    connecting: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     picker: Mutex<Option<Arc<CertPicker>>>,
     challenges: Arc<Challenges>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -1347,6 +1382,7 @@ impl Tunnel {
             stop: Arc::new(AtomicBool::new(false)),
             status: Mutex::new(TunnelStatus::new()),
             link: Mutex::new(None),
+            connecting: Mutex::new(None),
             picker: Mutex::new(None),
             challenges: Arc::new(Challenges::default()),
             workers: Mutex::new(Vec::new()),
@@ -1413,24 +1449,31 @@ impl TunnelHandle {
         lock(&self.shared.picker).clone()
     }
 
-    /// Stop: the WebSocket closes with 1000, every stream ends, the account leaves
-    /// memory, and every thread of the tunnel is joined. Nothing of the tunnel runs
-    /// after it returns.
+    /// Stop: the WebSocket closes with 1000 (a connection on its way is cut), every
+    /// stream ends at once, the account leaves memory, and the threads of the tunnel are
+    /// joined. A lock calls it on the UI thread, so it waits at most [`STOP_WAIT`] for a
+    /// thread that is inside a request with its own deadline (a registration, an ACME
+    /// request): such a thread sees the stop when the request ends and opens nothing.
     pub fn stop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+        if let Some(cut) = lock(&self.shared.connecting).take() {
+            cut();
+        }
         if let Some(link) = lock(&self.shared.link).take() {
             link.close(close::NORMAL);
             link.drain();
         }
-        if let Some(main) = self.main.take() {
-            let _ = main.join();
-        }
-        if let Some(acme) = self.acme.take() {
-            let _ = acme.join();
-        }
-        let workers: Vec<_> = lock(&self.shared.workers).drain(..).collect();
-        for worker in workers {
-            let _ = worker.join();
+        let until = Instant::now() + STOP_WAIT;
+        let mut threads: Vec<JoinHandle<()>> = self.main.take().into_iter().collect();
+        threads.extend(self.acme.take());
+        threads.extend(lock(&self.shared.workers).drain(..));
+        for handle in threads {
+            while !handle.is_finished() && Instant::now() < until {
+                thread::sleep(STEP);
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
         }
         self.shared.challenges.clear();
         self.auth.sign_out();
@@ -1533,7 +1576,13 @@ fn run(
             let mut opened: Option<Socket> = None;
             auth.with_token(&mut |token| {
                 let mut socket = open_socket(&destination, &tls, deadline)?;
-                if let Err(failure) = handshake(&mut socket, &host, token, deadline) {
+                *lock(&shared.connecting) = Some(Arc::clone(&socket.shutdown));
+                if stop.load(Ordering::SeqCst) {
+                    (socket.shutdown)();
+                }
+                let shook = handshake(&mut socket, &host, token, deadline);
+                lock(&shared.connecting).take();
+                if let Err(failure) = shook {
                     (socket.shutdown)();
                     return Err(failure);
                 }
