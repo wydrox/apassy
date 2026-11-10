@@ -68,7 +68,9 @@ mark wrong
 line "apassy owner list $V"
 wait_for "Vault passphrase:"; line "not-the-passphrase"
 wait_for "apassy owner:"
-if section | grep -q "L4 headless item"; then result FAIL wrong-passphrase-refused; else check wrong-passphrase-refused "the key is wrong"; fi
+if section | grep -q "L4 headless item"; then result FAIL wrong-passphrase-refused; else check wrong-passphrase-refused "The passphrase is wrong, or the vault file is damaged."; fi
+# One clear line: no SQLCipher log lines (R5 of the first run).
+if section | grep -qiE "sqlcipher|hmac|ERROR CORE"; then result FAIL wrong-passphrase-one-line; else result PASS wrong-passphrase-one-line; fi
 
 mark pipe
 line "echo piped-input | apassy owner list $V; echo exit=\$?"
@@ -85,12 +87,17 @@ line "stat -c '%a %n' /home/$H/l4/backup.db $V"
 sleep 1; 
 mark change
 line "apassy owner change-passphrase $V"
-wait_for "Vault passphrase:"; line "$pass"
 wait_for "Current passphrase:"; line "$pass"
 wait_for "New passphrase:"; line "$new_pass"
 wait_for "Repeat new passphrase:"; line "$new_pass"
 wait_for "Vault locked."
 check change-passphrase "Passphrase changed."
+# One passphrase prompt (R6 of the first run), and no "Vault passphrase:" before it.
+if [ "$(section | grep -c "passphrase:")" = 3 ] && ! section | grep -q "Vault passphrase:"; then
+    result PASS change-passphrase-asks-once
+else
+    result FAIL change-passphrase-asks-once
+fi
 
 mark shell
 line "apassy owner shell $V"
