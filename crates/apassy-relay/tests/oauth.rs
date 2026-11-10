@@ -22,7 +22,7 @@ use apassy_relay::config::{EmbeddedOptions, OAuthConfig, RelayConfig, UpstreamOp
 use apassy_relay::embedded::EmbeddedNode;
 use apassy_relay::hostkeys;
 use apassy_relay::secret::SecretString;
-use apassy_relay::server::directory::Directory;
+use apassy_relay::server::directory::{DIRECTORY_VERSION, Directory};
 use apassy_relay::server::oauth::{decode_form, percent_encode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1507,16 +1507,16 @@ fn the_directory_goes_back_to_1003_and_up_to_1004_again() {
         conn.query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap()
     };
-    assert_eq!(version(&node.config.directory_path()), 1005);
+    assert_eq!(version(&node.config.directory_path()), DIRECTORY_VERSION);
     assert_eq!(
         Directory::downgrade_to_1003(&node.config).unwrap(),
-        (1005, 1003)
+        (DIRECTORY_VERSION, 1003)
     );
     assert_eq!(version(&node.config.directory_path()), 1003);
-    // The image of 1005 moves it up again; the OAuth state is gone.
+    // The current image moves it up again; the OAuth state is gone.
     let started = EmbeddedNode::start(node.config.clone()).unwrap();
     node.node = Some(started);
-    assert_eq!(version(&node.config.directory_path()), 1005);
+    assert_eq!(version(&node.config.directory_path()), DIRECTORY_VERSION);
     assert!(node.node().has_team(&node.team));
     let answer = node.token_refresh(&connected.client_id, &connected.refresh);
     assert_eq!(answer.json()["error"], "invalid_grant");

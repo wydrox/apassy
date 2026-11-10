@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use apassy_relay::config::UpstreamOptions;
 use apassy_relay::ids::TeamId;
 use apassy_relay::server::Relay;
-use apassy_relay::server::directory::{Directory, TeamLimits, TeamLimitsUpdate};
+use apassy_relay::server::directory::{DIRECTORY_VERSION, Directory, TeamLimits, TeamLimitsUpdate};
 use apassy_relay::server::operator::Command;
 use relay::{CANARY, TestRelay, item_request, seal, start, start_with, team_of};
 use serde_json::{Value, json};
@@ -555,7 +555,7 @@ fn directory_connection(config: &apassy_relay::config::RelayConfig) -> rusqlite:
 }
 
 #[test]
-fn directory_1001_migrates_to_1005_without_losing_teams_codes_or_audit() {
+fn directory_1001_migrates_to_the_current_version_without_losing_teams_codes_or_audit() {
     let mut relay = start(UpstreamOptions::default());
     let a = relay.owner_token.clone();
     let a_id = relay.team_id.clone();
@@ -569,13 +569,29 @@ fn directory_1001_migrates_to_1005_without_losing_teams_codes_or_audit() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1005
+        DIRECTORY_VERSION
     );
-    // Back to the directory of version 1001: no limits, no kinds, no Connect keys.
+    // Back to the directory of version 1001: no accounts (1006), no limits, no kinds, no
+    // Connect keys. The team table of 1001 has none of the later columns, and the accounts
+    // step rebuilt it with a CHECK on `kind`, so it is made again in the form of 1001.
     conn.execute_batch(
-        "BEGIN IMMEDIATE; ALTER TABLE team DROP COLUMN limits; ALTER TABLE team DROP COLUMN kind;
+        "BEGIN IMMEDIATE;
+         DROP TABLE account_join; DROP TABLE account_link; DROP TABLE account_store_device;
+         DROP TABLE account_device; DROP TABLE account; DROP TABLE account_key;
+         DROP TABLE brain_event; DROP TABLE \"group\"; DROP TABLE group_member;
+         DROP TABLE group_invite; DROP TABLE stripe_customer; DROP TABLE stripe_subscription;
+         DROP TABLE stripe_event; DROP TABLE tunnel_node; DROP TABLE tunnel_grant;
+         DROP TABLE tunnel_usage; DROP TABLE entitlement_key;
+         CREATE TABLE team_1001 (
+           id TEXT PRIMARY KEY, name TEXT NOT NULL, file_key TEXT NOT NULL,
+           state TEXT NOT NULL CHECK (state IN ('active','suspended')),
+           legacy INTEGER NOT NULL DEFAULT 0 CHECK (legacy IN (0, 1)),
+           created_at INTEGER NOT NULL, suspended_at INTEGER);
+         INSERT INTO team_1001 SELECT id, name, file_key, state, legacy, created_at, suspended_at FROM team;
+         DROP TABLE team; ALTER TABLE team_1001 RENAME TO team;
+         CREATE UNIQUE INDEX team_legacy ON team(legacy) WHERE legacy = 1;
          ALTER TABLE team_code DROP COLUMN kind;
-         ALTER TABLE team DROP COLUMN suspend_reason; DROP INDEX connect_key_created;
+         DROP INDEX connect_key_created;
          DROP TABLE connect_key; DROP TABLE oauth_refresh; DROP TABLE connect_request;
          DROP TABLE oauth_client; PRAGMA user_version = 1001; COMMIT;",
     )
@@ -625,7 +641,7 @@ fn directory_1001_migrates_to_1005_without_losing_teams_codes_or_audit() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1005
+        DIRECTORY_VERSION
     );
     let migrated_codes: Vec<CodeSnapshot> = conn
         .prepare("SELECT id,code_hash,used_at,team_id FROM team_code ORDER BY id")
@@ -665,9 +681,9 @@ fn directory_1001_migrates_to_1005_without_losing_teams_codes_or_audit() {
 fn unknown_directory_versions_are_refused_without_changes() {
     let relay = start(UpstreamOptions::default());
     let (config, _dir) = relay.stop_keep();
-    // 1005 (node pairing codes, docs/SPEC.md section 32.6) is the current version: 1006 is
-    // the next unknown one.
-    for version in [0, 1000, 1006, 2000] {
+    // `DIRECTORY_VERSION` (the Connect accounts, docs/SPEC.md section 33) is the current
+    // version: the one after it is the next unknown one.
+    for version in [0, 1000, DIRECTORY_VERSION + 1, 2000] {
         let conn = directory_connection(&config);
         conn.execute_batch(&format!("PRAGMA user_version = {version}"))
             .unwrap();

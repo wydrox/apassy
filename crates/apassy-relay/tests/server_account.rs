@@ -1337,7 +1337,7 @@ fn the_entitlement_token_verifies_with_the_published_key_and_fails_after_exp_or_
         apassy::connect::EntitlementKey::from_published(kid, "Ed25519", &vector_public).unwrap();
     apassy::connect::entitlement::verify(
         entitlement,
-        &[app_key.clone()],
+        std::slice::from_ref(&app_key),
         apassy::connect::Feature::Brain,
         &a.account,
         now,
