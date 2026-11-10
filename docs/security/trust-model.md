@@ -148,10 +148,10 @@ the contracts allow, and it becomes true when units C1 to C5 ship. The security 
 
 | Part | Holds | Sees | Cannot see or do |
 | --- | --- | --- | --- |
-| Account directory (`relay.db`) | Account ids, person names, device names, platforms, device public keys, the hashes of link and recovery codes, the last-seen hour of each device, groups and roles, vault store ids and vault names, nodes (names, certificate pins, public names), tunnel grants, the public keys of the entitlement signing key | — | Private keys, link codes, recovery codes, tokens (memory only), passphrases, vault keys |
+| Account directory (`relay.db`) | Account ids, person names, device names, platforms, device public keys, each device's statement (the signature of the device that confirmed it), the hashes of link codes, the public recovery key of each account, the last-seen hour of each device, groups and roles, vault store ids and vault names, nodes (names, certificate pins, public names), tunnel grants, the public keys of the entitlement signing key | — | Private keys, link codes, recovery codes, tokens (memory only), passphrases, vault keys |
 | Plain files at rest | In `APASSY_RELAY_MODE=connect` there is no master key: `relay.db` and the vault store files are plain SQLite. They hold the directory above and, in the stores, SQLCipher snapshots under the user's passphrase, signed heads, and receipts | — | Nothing in them opens a vault. Disk encryption of the host is the owner's choice; backups go through the encrypted pull of today |
 | Vault stores (blind sync store) | One relay-sync-v1 team for each vault: the current and the previous snapshot | Ciphertext, sizes, times, which device pushed | Vault contents. The passphrase never reaches Connect |
-| Account sign-in and the safety words | Public keys and signed challenges; a 15-minute account token in memory | Which device signs in, and when | It cannot add a device: a new device needs the confirmation of a live device with six safety words and an owner check. Connect never sees the link code, so it cannot compute the words or make a key that matches them |
+| Account sign-in, the device list, and the safety words | Public keys, signed challenges, and the device statements; a 15-minute account token in memory | Which device signs in, and when | It cannot add a device for an Apassy client: every device carries a statement signed by the device that confirmed it, back to the account's first device, whose key each client pinned when it made or joined the account. A row that Connect adds, a key it swaps, or a removed device it lists again does not verify on a client that saw it removed: the client shows it as "Not verified" and never uses it as an account device (no store, no sync head, no later confirmation). A new device needs the confirmation of a verified device with six safety words and an owner check; the link code names the confirming device's key and the account's first key, and Connect never sees the code, so it can neither compute the words nor answer with other keys. Connect can refuse a sign-in, but a refusal never removes a device: the device forgets its key only when its owner confirms on it |
 | The email | A copy of the Stripe customer's email, for the devices list and support | — | Connect sends no mail in stage 7. Account deletion deletes the copy |
 | Stripe (payment processor) | The customer: email, billing address, payment method, tax id; subscriptions and invoices (kept for legal retention) | The checkout and portal sessions, and the account id in `client_reference_id` and metadata | A device key, a token, a vault id, a device name, a value. Connect never sees card data or the address |
 | The webhook | Event ids for 30 days | Stripe events, checked with the endpoint secret | A forged or replayed event changes nothing: signature, 300 s tolerance, idempotency by event id |
@@ -167,14 +167,26 @@ The iPhone shows the plan only; it has no purchase, link, or price (connect-bill
 
 **The account device key** (connect-account-v1 section 5) is a software P-256 key in the Keychain of
 each device (this device only, not synchronizable, behind Touch ID), not a Secure Enclave key yet.
-Apassy reads it into memory only to sign the seven messages of section 5, and drops it from memory
+Apassy reads it into memory only to sign the nine messages of section 5, and drops it from memory
 when the vault locks and at a sign-out. A change of the Touch ID fingerprints deletes it: the device
 is then no longer a device of its account, and the owner adds it again from another device or
-recovers the account with the recovery code. The vault rows that sign with it go only after the
-device forgot the account (a revoke of it, a deletion, "Forget this device") or Connect answered
-`401` to a fresh sign-in; a missing or unreadable account file removes nothing. Adding a device to a
-vault store and deleting a vault store need a fresh owner check on this Mac, as adding or revoking
-an account device does.
+recovers the account with the recovery code. The key and the vault rows that sign with it go only
+when the owner confirms "Forget This Mac" (or iPhone) on that device, after a revoke of it, a
+deletion, or Connect's signed-in answer that the device was removed. A refused sign-in, a missing
+answer, or a missing or unreadable account file removes nothing. Adding a device to a vault store
+and deleting a vault store need a fresh owner check on this Mac, as adding or revoking an account
+device does, and only a verified device can be added to a store.
+
+**The device list** (connect-account-v1 section 7.5) has a cryptographic root: the first device of
+the account (after a recovery, the recovering device). Each client keeps that root key, the keys it
+verified, and the keys it saw removed, in its account file. What a client cannot detect: a removal
+that Connect hides from a client that never saw the removed device listed, while the removed
+device's key is also in someone else's hands. A recovery starts a new root; a device of the old
+root learns it only by joining again with a link from the recovered device, never from Connect.
+
+**The recovery code** is the seed of an Ed25519 key pair. Connect stores only the public key; a
+recovery is a signature by that key over the new device key and the next recovery key, so the code
+never leaves the device where it is typed.
 
 **Relay copies without a code (plan s7 S0).** The hosted relay gets the team name `Vault` and the
 device name `Mac` (or `iPhone`) of a codeless relay copy, never the names that the owner gave them;
