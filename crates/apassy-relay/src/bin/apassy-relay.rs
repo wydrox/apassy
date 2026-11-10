@@ -46,6 +46,7 @@ const USAGE: &str = "Usage:
   apassy-relay admin delete <team id> [--free-connect-key]
   apassy-relay admin backup
   apassy-relay admin connect-sweep [--idle-days <n>] [--delete-days <n>] [--dry-run | --apply]
+  apassy-relay admin billing [--resume-deletions] [--resolve <problem id>]
 
 The configuration is read from the environment:
   APASSY_RELAY_DATA, APASSY_RELAY_LISTEN, APASSY_RELAY_PUBLIC_URL,
@@ -149,6 +150,28 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
             Ok(Operator::NodeCode { minutes })
         }
         "teams" if rest.is_empty() => Ok(Operator::Teams),
+        "billing" => {
+            let mut resume_deletions = false;
+            let mut resolve = None;
+            let mut args = rest.iter();
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--resume-deletions" => resume_deletions = true,
+                    "--resolve" => {
+                        let id = args
+                            .next()
+                            .and_then(|text| text.parse::<u64>().ok())
+                            .ok_or_else(|| "--resolve needs a problem id.".to_string())?;
+                        resolve = Some(id);
+                    }
+                    other => return Err(format!("Unknown billing option: {other}")),
+                }
+            }
+            Ok(Operator::Billing {
+                resume_deletions,
+                resolve,
+            })
+        }
         "readiness" if rest.is_empty() => Ok(Operator::Readiness),
         "limits" => {
             let Some(id) = rest.first() else {

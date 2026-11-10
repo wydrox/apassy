@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use apassy_relay::error::codes;
 use apassy_relay::secret::SecretString;
 use apassy_relay::server::billing::{
-    Billing, BillingConfig, BillingStore, Capability, Durations, GroupRole, MemberState,
-    MemoryBillingStore, Plan, PlanInput, PlanStatus, PlansView, StripeStatus, WebhookEffect,
-    plan_state, total_cents,
+    Billing, BillingConfig, BillingStore, Capability, CustomerRow, DeletionGate, Durations,
+    GroupRole, Interval, MemberState, MemoryBillingStore, Plan, PlanInput, PlanStatus, PlansView,
+    StripeCheck, StripeStatus, WebhookEffect, plan_state, total_cents,
 };
 use apassy_relay::server::stripe::{
     API_VERSION, MAX_WEBHOOK_BODY, StripeClient, StripeConfig, signature_header,
@@ -122,6 +122,19 @@ impl Setup {
 
     fn plan(&self, account: &str, now: u64) -> apassy_relay::server::billing::PlanView {
         self.billing.plan_view(account, now).unwrap()
+    }
+
+    /// Binds `customer` to `account` as Connect does before a first checkout.
+    fn bind_customer(&self, account: &str, customer: &str) {
+        self.store()
+            .transaction(|tx| {
+                tx.put_customer(&CustomerRow {
+                    account: account.to_owned(),
+                    customer: customer.to_owned(),
+                    email: None,
+                })
+            })
+            .unwrap();
     }
 }
 
@@ -487,14 +500,15 @@ fn a_subscription_event_for_an_unknown_account_or_another_customer_is_ignored() 
 }
 
 #[test]
-fn an_unknown_lookup_key_and_another_event_type_change_nothing() {
+fn an_unknown_price_gives_no_plan_and_another_event_type_changes_nothing() {
     let setup = Setup::new();
     setup.deliver_fixture("checkout-session-completed.json");
-    let before = setup.store().subscription(SUBSCRIPTION).unwrap();
     let foreign = Sub {
         lookup: "someone_else_price",
         ..Sub::default()
     };
+    // The status of a bound subscription always applies; a price that is not one of
+    // Connect's gives no plan, and the charging subscription is recorded for the operator.
     let effect = setup.deliver(
         &event(
             "evt_Foreign01",
@@ -504,7 +518,23 @@ fn an_unknown_lookup_key_and_another_event_type_change_nothing() {
         ),
         START + 1,
     );
-    assert_eq!(effect, WebhookEffect::Ignored);
+    assert!(
+        matches!(effect, WebhookEffect::Applied { .. }),
+        "{effect:?}"
+    );
+    let row = setup.store().subscription(SUBSCRIPTION).unwrap();
+    assert_eq!((row.status, row.plan), (StripeStatus::Active, None));
+    assert_eq!(
+        setup.plan(ACCOUNT, START + 2),
+        apassy_relay::server::billing::PlanView::none()
+    );
+    let problems = setup.store().problems();
+    assert_eq!(problems.len(), 1);
+    assert_eq!(
+        (problems[0].object.as_str(), problems[0].reason.as_str()),
+        (SUBSCRIPTION, "unknown_price")
+    );
+    let before = setup.store().subscription(SUBSCRIPTION).unwrap();
     let effect = setup.deliver(
         &event("evt_Other00001", "customer.created", START + 2, json!({})),
         START + 2,
@@ -929,7 +959,8 @@ fn the_totals_follow_the_formula_and_a_year_is_ten_months() {
 #[test]
 fn a_family_checkout_of_6_sends_the_contract_form() {
     let setup = Setup::new();
-    let before = setup.store().snapshot();
+    setup.bind_customer(ACCOUNT, CUSTOMER);
+    let before = setup.store().subscriptions();
     let answer = setup
         .billing
         .checkout(
@@ -967,8 +998,9 @@ fn a_family_checkout_of_6_sends_the_contract_form() {
         calls[0].header("Content-Type"),
         Some("application/x-www-form-urlencoded")
     );
-    // The checkout changes nothing here: the webhook binds the subscription.
-    assert_eq!(setup.store().snapshot(), before);
+    // The checkout binds no subscription: the webhook does.
+    assert_eq!(setup.store().subscriptions(), before);
+    assert!(setup.store().groups().is_empty());
 }
 
 #[test]
@@ -1130,44 +1162,108 @@ fn a_family_extra_that_differs_from_stripe_refuses_family_checkouts() {
 }
 
 #[test]
-fn a_repeated_checkout_reuses_its_idempotency_key_and_a_retry_does_too() {
+fn a_repeated_checkout_gets_the_open_session_and_a_retry_reuses_its_key() {
     let setup = Setup::new();
     let body = br#"{"plan":"personal","interval":"year"}"#;
     setup.billing.plans(START).unwrap();
-    setup.stripe.fail_next(500, 1);
+    setup.stripe.fail_path("/v1/checkout/sessions", 500, 1);
     let first = setup.billing.checkout(ACCOUNT, body, START).unwrap();
     let second = setup.billing.checkout(ACCOUNT, body, START + 60).unwrap();
     assert_eq!(
-        first.session_id, second.session_id,
+        (first.session_id.as_str(), first.url.as_str()),
+        (second.session_id.as_str(), second.url.as_str()),
         "one click, one session"
     );
+    // The retry of the failed call kept its key; the repeat read the open session back.
     let calls = setup.stripe.calls_to("POST", "/v1/checkout/sessions");
-    assert_eq!(calls.len(), 3);
-    let keys: Vec<&str> = calls
-        .iter()
-        .map(|c| c.header("Idempotency-Key").unwrap())
-        .collect();
-    assert!(keys.iter().all(|k| *k == keys[0]), "{keys:?}");
-    // Another plan is another key.
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].header("Idempotency-Key"),
+        calls[1].header("Idempotency-Key")
+    );
+    assert_eq!(
+        setup
+            .stripe
+            .calls_to(
+                "GET",
+                &format!("/v1/checkout/sessions/{}", first.session_id)
+            )
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_new_attempt_after_a_finished_session_or_with_another_price_is_a_new_session() {
+    let setup = Setup::new();
+    let body = br#"{"plan":"personal","interval":"month"}"#;
+    let first = setup.billing.checkout(ACCOUNT, body, START).unwrap();
+    // The payment failed after the session completed: a new attempt is a new session.
     setup
-        .billing
-        .checkout(
-            ACCOUNT,
-            br#"{"plan":"personal","interval":"month"}"#,
-            START + 61,
-        )
-        .unwrap();
+        .stripe
+        .set_session_status(&first.session_id, "complete");
+    let second = setup.billing.checkout(ACCOUNT, body, START + 60).unwrap();
+    assert_ne!(second.session_id, first.session_id);
+    // An expired session too.
+    setup
+        .stripe
+        .set_session_status(&second.session_id, "expired");
+    let third = setup.billing.checkout(ACCOUNT, body, START + 120).unwrap();
+    assert_ne!(third.session_id, second.session_id);
+    let keys: Vec<String> = setup
+        .stripe
+        .calls_to("POST", "/v1/checkout/sessions")
+        .iter()
+        .map(|c| c.header("Idempotency-Key").unwrap().to_owned())
+        .collect();
+    assert_eq!(keys.len(), 3);
+    assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2]);
+    // A price change within the hour: the new price, a new key, and the open session of
+    // the old price ends first.
+    let mut prices = fake_stripe::default_prices();
+    prices[0]["id"] = json!("price_SynthPersonalMonthNew");
+    setup.stripe.set_prices(prices);
+    setup.billing.stripe.forget_prices();
+    let fourth = setup.billing.checkout(ACCOUNT, body, START + 180).unwrap();
+    assert_ne!(fourth.session_id, third.session_id);
     let last = setup
         .stripe
         .calls_to("POST", "/v1/checkout/sessions")
         .pop()
         .unwrap();
-    assert_ne!(last.header("Idempotency-Key").unwrap(), keys[0]);
+    assert_eq!(
+        last.field("line_items[0][price]"),
+        Some("price_SynthPersonalMonthNew")
+    );
+    assert!(!keys.contains(&last.header("Idempotency-Key").unwrap().to_owned()));
+    assert_eq!(
+        setup.stripe.session_status(&third.session_id).as_deref(),
+        Some("expired")
+    );
+    // Another plan is another key too.
+    setup
+        .billing
+        .checkout(
+            ACCOUNT,
+            br#"{"plan":"personal","interval":"year"}"#,
+            START + 240,
+        )
+        .unwrap();
+    let other = setup
+        .stripe
+        .calls_to("POST", "/v1/checkout/sessions")
+        .pop()
+        .unwrap();
+    assert_ne!(
+        other.header("Idempotency-Key"),
+        last.header("Idempotency-Key")
+    );
 }
 
 #[test]
 fn stripe_refusals_and_outages_are_errors_without_a_change() {
     let setup = Setup::new();
+    setup.bind_customer(ACCOUNT, CUSTOMER);
     let body = br#"{"plan":"personal","interval":"month"}"#;
     setup.billing.plans(START).unwrap();
     setup.stripe.fail_next(400, 1);
@@ -1446,7 +1542,14 @@ fn no_stripe_call_carries_an_account_secret_and_state_changes_only_by_webhook() 
         .unwrap();
     assert!(setup.billing.cancel_for_account_deletion(ACCOUNT).unwrap());
     let calls = setup.stripe.calls();
-    assert_eq!(calls.len(), 5, "{calls:?}");
+    // The prices, the portal, the seats, THIRD's customer and its session, the cancel.
+    assert_eq!(calls.len(), 6, "{calls:?}");
+    let made = setup.stripe.calls_to("POST", "/v1/customers");
+    assert_eq!(made.len(), 1);
+    assert_eq!(
+        made[0].form,
+        [("metadata[account_id]".to_owned(), THIRD.to_owned())]
+    );
     // Only the headers of the client and of HTTP itself.
     let allowed_headers = [
         "authorization",
@@ -1586,4 +1689,782 @@ fn a_cancel_at_period_end_shows_the_end_and_stays_entitled() {
     let plan = setup.plan(ACCOUNT, START + 200);
     assert_eq!((plan.status, plan.entitled), (PlanStatus::Active, true));
     assert_eq!((plan.renews_at, plan.ends_at), (None, Some(PERIOD_END)));
+}
+
+// ---------------------------------------------------------------------------------------
+// The review of billing and groups: paid seats, Stripe's word, and the deletion pass.
+
+/// A `customer.subscription.<kind>` event of the default subscription.
+fn sub_event(id: &str, kind: &str, created: u64, sub: &Sub<'_>) -> Value {
+    event(
+        id,
+        &format!("customer.subscription.{kind}"),
+        created,
+        subscription(sub),
+    )
+}
+
+#[test]
+fn an_owner_with_members_buys_again_for_at_least_its_members() {
+    let setup = Setup::new();
+    let group = family(&setup, 4);
+    for account in [OTHER, THIRD] {
+        setup
+            .store()
+            .add_member(&group, account, GroupRole::Member, MemberState::Active);
+    }
+    setup.deliver(
+        &sub_event(
+            "evt_FamEnded01",
+            "deleted",
+            ENDED,
+            &Sub {
+                lookup: "connect_family_month",
+                quantity: 4,
+                status: "canceled",
+                ended_at: Some(ENDED),
+                ..Sub::default()
+            },
+        ),
+        ENDED,
+    );
+    let refuse = |body: &str| {
+        setup
+            .billing
+            .checkout(ACCOUNT, body.as_bytes(), ENDED + DAY)
+            .unwrap_err()
+    };
+    // Three people are in the family: two cannot be bought for them.
+    let error = refuse(r#"{"plan":"family","interval":"month","people":2}"#);
+    assert_eq!((error.code, error.status()), (codes::SEAT_LIMIT, 409));
+    assert_eq!(error.message, "The family has 3 people; choose at least 3.");
+    // Nor another plan that would leave them without one.
+    for body in [
+        r#"{"plan":"personal","interval":"month"}"#,
+        r#"{"plan":"team","interval":"month","seats":5}"#,
+    ] {
+        assert_eq!(refuse(body).code, codes::CONFLICT, "{body}");
+    }
+    assert!(
+        setup
+            .stripe
+            .calls_to("POST", "/v1/checkout/sessions")
+            .is_empty()
+    );
+    setup
+        .billing
+        .checkout(
+            ACCOUNT,
+            br#"{"plan":"family","interval":"month","people":3}"#,
+            ENDED + DAY,
+        )
+        .unwrap();
+}
+
+#[test]
+fn members_beyond_the_paid_seats_are_read_only_until_the_quantity_is_raised() {
+    let setup = Setup::new();
+    setup.deliver(
+        &event(
+            "evt_TeamCheckout",
+            "checkout.session.completed",
+            START,
+            checkout_session(ACCOUNT, ACCOUNT, CUSTOMER, SUBSCRIPTION),
+        ),
+        START,
+    );
+    let team = Sub {
+        lookup: "connect_team_month",
+        quantity: 2,
+        ..Sub::default()
+    };
+    setup.deliver(
+        &sub_event("evt_TeamMade01", "created", START + 1, &team),
+        START + 1,
+    );
+    let group = setup.plan(ACCOUNT, START + 2).group_id.unwrap();
+    // The owner is the first seat, OTHER (confirmed first) the second; THIRD is beyond.
+    for account in [OTHER, THIRD] {
+        setup
+            .store()
+            .add_member(&group, account, GroupRole::Member, MemberState::Active);
+    }
+    assert!(setup.plan(ACCOUNT, START + 3).entitled);
+    assert!(setup.plan(OTHER, START + 3).entitled);
+    let beyond = setup.plan(THIRD, START + 3);
+    assert_eq!(
+        (beyond.status, beyond.entitled, beyond.delete_at),
+        (PlanStatus::ReadOnly, false, None)
+    );
+    assert!(!beyond.state().allows(Capability::Push));
+    // Stripe's quantity 3 covers THIRD.
+    setup.deliver(
+        &sub_event(
+            "evt_TeamThree1",
+            "updated",
+            START + 10,
+            &Sub {
+                quantity: 3,
+                ..team
+            },
+        ),
+        START + 10,
+    );
+    assert!(setup.plan(THIRD, START + 11).entitled);
+    // A Family pays for at least 4 people: a quantity of 2 covers four.
+    let setup = Setup::new();
+    let group = family(&setup, 2);
+    for account in [OTHER, THIRD, "acc_a2b3c4d5ef", "acc_b2c3d4e5fg"] {
+        setup
+            .store()
+            .add_member(&group, account, GroupRole::Member, MemberState::Active);
+    }
+    for account in [OTHER, THIRD, "acc_a2b3c4d5ef"] {
+        assert!(setup.plan(account, START + 3).entitled, "{account}");
+    }
+    assert!(!setup.plan("acc_b2c3d4e5fg", START + 3).entitled);
+}
+
+#[test]
+fn the_maintenance_pass_raises_the_quantity_to_the_members() {
+    let setup = Setup::new();
+    setup.deliver(
+        &event(
+            "evt_TeamCheckout",
+            "checkout.session.completed",
+            START,
+            checkout_session(ACCOUNT, ACCOUNT, CUSTOMER, SUBSCRIPTION),
+        ),
+        START,
+    );
+    let team = Sub {
+        lookup: "connect_team_month",
+        quantity: 1,
+        ..Sub::default()
+    };
+    setup.deliver(
+        &sub_event("evt_TeamMade01", "created", START + 1, &team),
+        START + 1,
+    );
+    let group = setup.plan(ACCOUNT, START + 2).group_id.unwrap();
+    for account in [OTHER, THIRD] {
+        setup
+            .store()
+            .add_member(&group, account, GroupRole::Member, MemberState::Active);
+    }
+    assert!(!setup.plan(THIRD, START + 3).entitled);
+    let report = setup.billing.reconcile(START + 3).unwrap();
+    assert_eq!(report.raised, [(group.clone(), 3)]);
+    let calls = setup.stripe.calls_to("POST", "/v1/subscription_items/");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].field("quantity"), Some("3"));
+    assert_eq!(
+        calls[0].field("proration_behavior"),
+        Some("create_prorations")
+    );
+    // Stripe accepted it: the members are paid for before the webhook arrives.
+    assert!(setup.plan(THIRD, START + 4).entitled);
+    // The next pass asks nothing again.
+    assert!(
+        setup
+            .billing
+            .reconcile(START + 5)
+            .unwrap()
+            .raised
+            .is_empty()
+    );
+    assert_eq!(
+        setup
+            .stripe
+            .calls_to("POST", "/v1/subscription_items/")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_price_without_its_lookup_key_keeps_the_stored_plan_and_applies_every_status() {
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    setup.deliver_fixture("customer-subscription-created.json");
+    assert!(setup.plan(ACCOUNT, START + 10).entitled);
+    // The products script moved the lookup key to a new price: the old price of this
+    // subscription has none in its events.
+    let keyless = |id: &str, status: &str, created: u64, ended_at: Option<u64>| {
+        let mut object = subscription(&Sub {
+            status,
+            ended_at,
+            ..Sub::default()
+        });
+        object["items"]["data"][0]["price"]["lookup_key"] = Value::Null;
+        event(id, "customer.subscription.updated", created, object)
+    };
+    for (id, status, created) in [
+        ("evt_Keyless01", "past_due", FAILED),
+        ("evt_Keyless02", "unpaid", FAILED + DAY),
+    ] {
+        let effect = setup.deliver(&keyless(id, status, created, None), created);
+        assert!(matches!(effect, WebhookEffect::Applied { .. }), "{status}");
+        let row = setup.store().subscription(SUBSCRIPTION).unwrap();
+        assert_eq!(row.status.as_str(), status);
+        assert_eq!(
+            (row.plan, row.interval),
+            (Some(Plan::Personal), Some(Interval::Month))
+        );
+    }
+    let mut deleted = keyless("evt_Keyless03", "canceled", ENDED, Some(ENDED));
+    deleted["type"] = json!("customer.subscription.deleted");
+    setup.deliver(&deleted, ENDED);
+    let row = setup.store().subscription(SUBSCRIPTION).unwrap();
+    assert_eq!(
+        (row.status, row.ended_at),
+        (StripeStatus::Canceled, Some(ENDED))
+    );
+    assert_eq!(setup.plan(ACCOUNT, ENDED + 1).status, PlanStatus::ReadOnly);
+    assert!(setup.store().problems().is_empty());
+    // A new subscription on a price that lost its key maps by the price's metadata.
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    let mut object = subscription(&Sub {
+        lookup: "connect_family_year",
+        quantity: 5,
+        ..Sub::default()
+    });
+    object["items"]["data"][0]["price"] = json!({
+        "id": "price_SynthOldFamilyYear", "object": "price", "lookup_key": null,
+        "metadata": {"apassy_plan": "family"},
+        "recurring": {"interval": "year", "interval_count": 1}
+    });
+    setup.deliver(
+        &event(
+            "evt_OldPrice01",
+            "customer.subscription.created",
+            START + 1,
+            object,
+        ),
+        START + 1,
+    );
+    let plan = setup.plan(ACCOUNT, START + 2);
+    assert_eq!(
+        (plan.plan, plan.interval, plan.quantity),
+        (Some(Plan::Family), Some(Interval::Year), Some(5))
+    );
+}
+
+#[test]
+fn canceled_and_incomplete_expired_are_final() {
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    setup.deliver_fixture("customer-subscription-created.json");
+    let canceled = Sub {
+        status: "canceled",
+        ended_at: Some(ENDED),
+        ..Sub::default()
+    };
+    setup.deliver(
+        &sub_event("evt_Final00001", "deleted", ENDED, &canceled),
+        ENDED,
+    );
+    // `active` with the same `created` second, and later, changes nothing.
+    for (id, created) in [("evt_Final00002", ENDED), ("evt_Final00003", ENDED + 60)] {
+        assert_eq!(
+            setup.deliver(&sub_event(id, "updated", created, &Sub::default()), created),
+            WebhookEffect::Ignored
+        );
+    }
+    assert_eq!(
+        setup.store().subscription(SUBSCRIPTION).unwrap().status,
+        StripeStatus::Canceled
+    );
+    assert!(!setup.plan(ACCOUNT, ENDED + 100).entitled);
+    // incomplete_expired too.
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    let expired = Sub {
+        status: "incomplete_expired",
+        ..Sub::default()
+    };
+    setup.deliver(
+        &sub_event("evt_Expired001", "updated", START + 5, &expired),
+        START + 5,
+    );
+    setup.deliver(
+        &sub_event("evt_Expired002", "updated", START + 9, &Sub::default()),
+        START + 9,
+    );
+    assert_eq!(
+        setup.store().subscription(SUBSCRIPTION).unwrap().status,
+        StripeStatus::IncompleteExpired
+    );
+}
+
+#[test]
+fn members_take_the_paid_subscription_of_the_group_over_a_late_event_of_an_old_one() {
+    let setup = Setup::new();
+    let group = family(&setup, 4);
+    setup
+        .store()
+        .add_member(&group, OTHER, GroupRole::Member, MemberState::Active);
+    let old = Sub {
+        lookup: "connect_family_month",
+        quantity: 4,
+        status: "canceled",
+        ended_at: Some(ENDED),
+        ..Sub::default()
+    };
+    setup.deliver(&sub_event("evt_OldEnded01", "deleted", ENDED, &old), ENDED);
+    // The owner buys again: a new subscription of the same customer keeps the group.
+    let new_id = "sub_SynthAcc0002";
+    setup.deliver(
+        &event(
+            "evt_NewCheckout",
+            "checkout.session.completed",
+            ENDED + 100,
+            checkout_session(ACCOUNT, ACCOUNT, CUSTOMER, new_id),
+        ),
+        ENDED + 100,
+    );
+    let new = Sub {
+        id: new_id,
+        lookup: "connect_family_month",
+        quantity: 4,
+        ..Sub::default()
+    };
+    setup.deliver(
+        &sub_event("evt_NewMade001", "created", ENDED + 101, &new),
+        ENDED + 101,
+    );
+    assert_eq!(
+        setup.plan(OTHER, ENDED + 102).group_id.as_deref(),
+        Some(group.as_str())
+    );
+    // A late event of the old subscription, newer than the new one's, hides nothing.
+    setup.deliver(
+        &sub_event("evt_OldLate001", "updated", ENDED + 500, &old),
+        ENDED + 500,
+    );
+    let member = setup.plan(OTHER, ENDED + 501);
+    assert_eq!(
+        (member.status, member.entitled, member.group_id.as_deref()),
+        (PlanStatus::Active, true, Some(group.as_str()))
+    );
+    // At the old plan's deletion day the members keep their stores: the group is paid.
+    let day = ENDED + 91 * DAY;
+    let due = setup.billing.maintenance(day).unwrap().due;
+    assert!(
+        due.iter().any(|d| d.subscription == SUBSCRIPTION),
+        "{due:?}"
+    );
+    assert!(!setup.billing.deletes_members(SUBSCRIPTION, day).unwrap());
+    assert!(setup.plan(OTHER, day).entitled);
+}
+
+#[test]
+fn a_switch_to_personal_gives_the_members_the_read_only_window_and_never_their_deletion() {
+    let setup = Setup::new();
+    let group = family(&setup, 4);
+    setup
+        .store()
+        .add_member(&group, OTHER, GroupRole::Member, MemberState::Active);
+    // The owner switches to Personal in the portal: the subscription keeps its group.
+    let switched = START + 100;
+    setup.deliver(
+        &sub_event("evt_ToPersonal", "updated", switched, &Sub::default()),
+        switched,
+    );
+    let owner = setup.plan(ACCOUNT, switched + 1);
+    assert_eq!(
+        (owner.plan, owner.entitled, owner.group_id),
+        (Some(Plan::Personal), true, None)
+    );
+    let member = setup.plan(OTHER, switched + 1);
+    assert_eq!(
+        (member.status, member.entitled),
+        (PlanStatus::ReadOnly, false)
+    );
+    assert_eq!(member.read_only_until, Some(switched + 30 * DAY));
+    assert_eq!(member.delete_at, None);
+    assert!(member.state().allows(Capability::Pull));
+    // The family has no plan of its own: no invite, no confirm, no seats.
+    assert!(
+        setup
+            .billing
+            .group_plan(&group, switched + 1)
+            .unwrap()
+            .is_none()
+    );
+    let error = setup
+        .billing
+        .change_seats(ACCOUNT, br#"{"quantity":5}"#, switched + 1)
+        .unwrap_err();
+    assert_eq!(error.code, codes::PLAN_REQUIRED);
+    // The owner's Personal plan ends later; at its deletion day the members keep theirs.
+    setup.deliver(
+        &sub_event(
+            "evt_PersonalEnd",
+            "deleted",
+            ENDED,
+            &Sub {
+                status: "canceled",
+                ended_at: Some(ENDED),
+                ..Sub::default()
+            },
+        ),
+        ENDED,
+    );
+    let day = ENDED + 91 * DAY;
+    assert!(
+        setup
+            .billing
+            .maintenance(day)
+            .unwrap()
+            .due
+            .iter()
+            .any(|d| d.subscription == SUBSCRIPTION)
+    );
+    assert!(!setup.billing.deletes_members(SUBSCRIPTION, day).unwrap());
+    // Back to Family before that: the members are entitled again.
+    let setup = Setup::new();
+    let group = family(&setup, 4);
+    setup
+        .store()
+        .add_member(&group, OTHER, GroupRole::Member, MemberState::Active);
+    setup.deliver(
+        &sub_event("evt_ToPersonal", "updated", START + 100, &Sub::default()),
+        START + 100,
+    );
+    setup.deliver(
+        &sub_event(
+            "evt_BackFamily",
+            "updated",
+            START + 200,
+            &Sub {
+                lookup: "connect_family_month",
+                quantity: 4,
+                ..Sub::default()
+            },
+        ),
+        START + 200,
+    );
+    assert!(setup.plan(OTHER, START + 201).entitled);
+}
+
+#[test]
+fn a_first_checkout_makes_the_customer_and_every_session_names_it() {
+    let setup = Setup::new();
+    // Two first checkouts at once make one customer.
+    std::thread::scope(|scope| {
+        for body in [
+            br#"{"plan":"personal","interval":"month"}"#.as_slice(),
+            br#"{"plan":"personal","interval":"year"}"#.as_slice(),
+        ] {
+            let billing = &setup.billing;
+            scope.spawn(move || billing.checkout(ACCOUNT, body, START).unwrap());
+        }
+    });
+    let customers = setup.store().customers();
+    assert_eq!(customers.len(), 1, "{customers:?}");
+    let customer = customers[0].customer.clone();
+    assert_eq!(customers[0].account, ACCOUNT);
+    let made = setup.stripe.calls_to("POST", "/v1/customers");
+    assert!(!made.is_empty());
+    assert!(
+        made.iter()
+            .all(|call| call.header("Idempotency-Key") == made[0].header("Idempotency-Key"))
+    );
+    let sessions = setup.stripe.calls_to("POST", "/v1/checkout/sessions");
+    assert!(!sessions.is_empty());
+    for call in &sessions {
+        assert_eq!(call.field("customer"), Some(customer.as_str()));
+        assert_eq!(call.field("customer_update[address]"), Some("auto"));
+    }
+    // The later session binds as usual: Stripe made it for the same customer.
+    setup.deliver(
+        &event(
+            "evt_MadeCustomer",
+            "checkout.session.completed",
+            START + 5,
+            checkout_session(ACCOUNT, ACCOUNT, &customer, SUBSCRIPTION),
+        ),
+        START + 5,
+    );
+    assert!(setup.store().problems().is_empty());
+    assert_eq!(
+        setup.store().subscription(SUBSCRIPTION).unwrap().customer,
+        customer
+    );
+}
+
+#[test]
+fn a_paid_subscription_connect_cannot_bind_is_recorded_for_the_operator() {
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    // A second customer of the same account (an old session): acknowledged, not applied,
+    // and recorded with its ids.
+    let other = ("cus_SynthOther01", "sub_SynthOther01");
+    let effect = setup.deliver(
+        &event(
+            "evt_Elsewhere01",
+            "checkout.session.completed",
+            START + 5,
+            checkout_session(ACCOUNT, ACCOUNT, other.0, other.1),
+        ),
+        START + 5,
+    );
+    assert_eq!(effect, WebhookEffect::Ignored);
+    let effect = setup.deliver(
+        &sub_event(
+            "evt_Elsewhere02",
+            "created",
+            START + 6,
+            &Sub {
+                id: other.1,
+                customer: other.0,
+                ..Sub::default()
+            },
+        ),
+        START + 6,
+    );
+    assert_eq!(effect, WebhookEffect::Ignored);
+    let problems = setup.store().problems();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(
+        (
+            problems[0].object.as_str(),
+            problems[0].account_id.as_deref(),
+            problems[0].customer_id.as_deref(),
+            problems[0].reason.as_str(),
+            problems[0].events
+        ),
+        (other.1, Some(ACCOUNT), Some(other.0), "bound_elsewhere", 2)
+    );
+    assert_eq!(setup.billing.status().unwrap().open_problems, 1);
+    assert!(
+        setup
+            .logs()
+            .iter()
+            .any(|l| l.contains("recorded for the operator"))
+    );
+    setup
+        .billing
+        .resolve_problem(problems[0].id, START + 7)
+        .unwrap();
+    assert_eq!(setup.billing.status().unwrap().open_problems, 0);
+    // A canceled one charges nothing: it is not recorded.
+    setup.deliver(
+        &sub_event(
+            "evt_Elsewhere03",
+            "deleted",
+            START + 8,
+            &Sub {
+                id: "sub_SynthOther02",
+                customer: "cus_SynthOther02",
+                status: "canceled",
+                ended_at: Some(START + 8),
+                ..Sub::default()
+            },
+        ),
+        START + 8,
+    );
+    assert_eq!(setup.billing.status().unwrap().open_problems, 0);
+}
+
+#[test]
+fn the_deletion_asks_stripe_first_and_applies_what_stripe_shows() {
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    setup.deliver_fixture("customer-subscription-created.json");
+    let canceled = Sub {
+        status: "canceled",
+        ended_at: Some(ENDED),
+        ..Sub::default()
+    };
+    setup.deliver(
+        &sub_event("evt_Ended00001", "deleted", ENDED, &canceled),
+        ENDED,
+    );
+    let day = ENDED + 91 * DAY;
+    setup.stripe.set_date(Some(day));
+    // Stripe shows it canceled too: the stores may go.
+    setup.stripe.put_subscription(subscription(&canceled));
+    assert_eq!(
+        setup.billing.verify_ended(SUBSCRIPTION, day).unwrap(),
+        StripeCheck::Ended
+    );
+    // Stripe cannot be reached: an error, nothing changes, the next pass asks again.
+    setup.stripe.fail_path("/v1/subscriptions/", 503, 2);
+    assert_eq!(
+        setup
+            .billing
+            .verify_ended(SUBSCRIPTION, day)
+            .unwrap_err()
+            .code,
+        codes::BUSY
+    );
+    // Stripe's clock is a week behind the relay's: nothing is deleted.
+    setup.stripe.set_date(Some(day - 7 * DAY));
+    let setup_clock = Setup::new();
+    setup_clock.deliver_fixture("checkout-session-completed.json");
+    setup_clock.deliver(
+        &sub_event("evt_Ended00001", "deleted", ENDED, &canceled),
+        ENDED,
+    );
+    setup_clock.stripe.put_subscription(subscription(&canceled));
+    setup_clock.stripe.set_date(Some(day - 7 * DAY));
+    assert_eq!(
+        setup_clock.billing.verify_ended(SUBSCRIPTION, day).unwrap(),
+        StripeCheck::ClockAhead
+    );
+    // A lost renewal: the local row ended, Stripe shows it active. Its state applies and
+    // the plan is entitled again.
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    setup.deliver(
+        &sub_event(
+            "evt_Ended00001",
+            "updated",
+            ENDED,
+            &Sub {
+                status: "unpaid",
+                ..Sub::default()
+            },
+        ),
+        ENDED,
+    );
+    setup.stripe.set_date(Some(day));
+    setup.stripe.put_subscription(subscription(&Sub::default()));
+    assert_eq!(
+        setup.billing.verify_ended(SUBSCRIPTION, day).unwrap(),
+        StripeCheck::Live
+    );
+    assert!(setup.plan(ACCOUNT, day).entitled);
+    assert!(setup.billing.maintenance(day).unwrap().due.is_empty());
+}
+
+#[test]
+fn a_live_row_whose_period_ended_long_ago_is_read_from_stripe() {
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    setup.deliver_fixture("customer-subscription-created.json");
+    // The cancellation's event was lost; Stripe shows the subscription canceled.
+    let canceled = Sub {
+        status: "canceled",
+        ended_at: Some(PERIOD_END),
+        ..Sub::default()
+    };
+    setup.stripe.put_subscription(subscription(&canceled));
+    let soon = PERIOD_END + DAY;
+    assert!(setup.billing.reconcile(soon).unwrap().read.is_empty());
+    let later = PERIOD_END + 3 * DAY;
+    let report = setup.billing.reconcile(later).unwrap();
+    assert_eq!(report.read, [(SUBSCRIPTION.to_owned(), ACCOUNT.to_owned())]);
+    let plan = setup.plan(ACCOUNT, later);
+    assert_eq!((plan.status, plan.entitled), (PlanStatus::ReadOnly, false));
+    assert_eq!(plan.read_only_until, Some(PERIOD_END + 30 * DAY));
+    // A row Stripe shows live is asked at most once a day.
+    let setup = Setup::new();
+    setup.deliver_fixture("checkout-session-completed.json");
+    setup.deliver_fixture("customer-subscription-created.json");
+    setup.stripe.put_subscription(subscription(&Sub::default()));
+    assert_eq!(setup.billing.reconcile(later).unwrap().read.len(), 1);
+    assert!(
+        setup
+            .billing
+            .reconcile(later + 3600)
+            .unwrap()
+            .read
+            .is_empty()
+    );
+    assert_eq!(
+        setup.billing.reconcile(later + DAY + 1).unwrap().read.len(),
+        1
+    );
+    assert_eq!(setup.stripe.calls_to("GET", "/v1/subscriptions/").len(), 2);
+}
+
+#[test]
+fn a_gap_between_passes_holds_deletions_until_the_operator_resumes_them() {
+    let setup = Setup::new();
+    assert_eq!(
+        setup.billing.deletion_gate(START).unwrap(),
+        DeletionGate::Open
+    );
+    assert_eq!(
+        setup.billing.deletion_gate(START + 3600).unwrap(),
+        DeletionGate::Open
+    );
+    // The clock jumps three days ahead.
+    let jumped = START + 3600 + 3 * DAY;
+    assert_eq!(
+        setup.billing.deletion_gate(jumped).unwrap(),
+        DeletionGate::Held { since: jumped }
+    );
+    // It stays held at the next passes.
+    assert_eq!(
+        setup.billing.deletion_gate(jumped + 3600).unwrap(),
+        DeletionGate::Held { since: jumped }
+    );
+    assert_eq!(
+        setup.billing.status().unwrap().deletions_held_since,
+        Some(jumped)
+    );
+    // The operator checked the clock.
+    setup.billing.resume_deletions(jumped + 7200).unwrap();
+    assert_eq!(
+        setup.billing.deletion_gate(jumped + 10_800).unwrap(),
+        DeletionGate::Open
+    );
+}
+
+#[test]
+fn a_failed_price_lookup_waits_before_the_next_one() {
+    let setup = Setup::new();
+    setup.stripe.fail_next(503, 20);
+    assert_eq!(setup.billing.plans(START).unwrap_err().code, codes::BUSY);
+    let after_first = setup.stripe.calls_to("GET", "/v1/prices").len();
+    assert_eq!(after_first, 2, "the call and its retry");
+    // Requests within the minute ask Stripe nothing.
+    for t in [START + 1, START + 30, START + 59] {
+        assert_eq!(setup.billing.plans(t).unwrap_err().code, codes::BUSY);
+    }
+    assert_eq!(
+        setup.stripe.calls_to("GET", "/v1/prices").len(),
+        after_first
+    );
+    assert_eq!(
+        setup.billing.plans(START + 60).unwrap_err().code,
+        codes::BUSY
+    );
+    assert_eq!(
+        setup.stripe.calls_to("GET", "/v1/prices").len(),
+        after_first + 2
+    );
+    // With cached prices, a failure answers them and waits too.
+    let setup = Setup::new();
+    setup.billing.plans(START).unwrap();
+    setup.stripe.fail_next(503, 20);
+    let stale = START + 3601;
+    assert!(setup.billing.plans(stale).is_ok());
+    assert!(setup.billing.plans(stale + 10).is_ok());
+    assert_eq!(setup.stripe.calls_to("GET", "/v1/prices").len(), 3);
+}
+
+#[test]
+fn a_session_or_portal_on_another_origin_is_refused() {
+    let setup = Setup::new();
+    setup.bind_customer(ACCOUNT, CUSTOMER);
+    setup
+        .stripe
+        .set_checkout_origin("https://checkout.stripe.com.example.test/");
+    let error = setup
+        .billing
+        .checkout(ACCOUNT, br#"{"plan":"personal","interval":"month"}"#, START)
+        .unwrap_err();
+    assert_eq!((error.code, error.status()), (codes::UPSTREAM_FAILED, 502));
+    let answer = setup.billing.portal(ACCOUNT, b"{}").unwrap();
+    assert!(
+        answer
+            .url
+            .starts_with("https://billing.stripe.com/p/session/")
+    );
 }

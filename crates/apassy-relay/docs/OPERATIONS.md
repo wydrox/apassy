@@ -1771,9 +1771,12 @@ the master key and the edge secret, never in the compose file or the environment
 | `stripe-key` | A **restricted** key (`rk_live_…`; in a sandbox `rk_test_…`). The relay refuses a live secret key (`sk_live_…`). | `STRIPE_SECRET_KEY_FILE` |
 | `stripe-webhook-secret` | The signing secret of the webhook endpoint (`whsec_…`) | `STRIPE_WEBHOOK_SECRET_FILE` |
 
-The restricted key needs these permissions and no other: Checkout Sessions (write),
-Customer portal (write), Customers (read), Subscriptions (write: item quantity and
-cancel), Prices and Products (read), Events (read; for support and the sandbox job). To
+The restricted key needs these permissions and no other: Checkout Sessions (write: make,
+read back, and expire a session), Customer portal (write), Customers (write: the relay
+makes each account's customer before its first checkout), Subscriptions (write: item
+quantity and cancel; read: the maintenance pass reads a subscription before it deletes
+stores, and one whose period ended without an event), Prices and Products (read), Events
+(read; for support and the sandbox job). To
 rotate either secret: make the new one in the Stripe dashboard, replace the file, restart
 the relay, then revoke the old key (or roll the webhook secret with an overlap; Stripe
 signs with both while the old one lives, and the relay accepts any matching `v1`).
@@ -1802,6 +1805,13 @@ Settings › Billing › Customer portal, in the sandbox and the live account:
 - Payment methods: update on. Invoices: history on.
 - Subscriptions: switch plans on, products Connect Personal and Connect Family (both
   intervals); **quantity changes off** (people and seats change through Connect, SPEC 34.4).
+  A switch from Family to Personal ends the family's plan for its members (read-only, then
+  suspended; their stores are never deleted for it); the owner pays Personal from the
+  switch. A switch back to Family restores the family.
+- Settings › Billing › Subscriptions and emails › Manage failed payments: after the last
+  retry, **cancel the subscription** or **mark it as unpaid**. A subscription that Stripe
+  leaves `past_due` keeps its stores: the relay deletes stores only when Stripe also shows
+  the subscription ended.
 - Business information: the terms and privacy URLs of the site; the return link is set by
   Connect (`<APASSY_CONNECT_SITE_URL>/connect/done`).
 
@@ -1814,7 +1824,15 @@ Whether the portal can switch to the tiered Family price is confirmed in the san
 (`apassy_connect_personal`, `_family`, `_team`) and the six prices with their lookup keys,
 idempotently: a price whose lookup key exists with the same amounts is kept; other amounts
 get a new price that takes the lookup key (`transfer_lookup_key=true`) and the old one is
-archived. It needs the Stripe CLI and jq.
+archived. Every price carries `metadata[apassy_plan]` (`personal`, `family`, `team`); a
+price of an earlier run gets it. It needs the Stripe CLI and jq.
+
+A price change moves only new checkouts to the new price. Existing subscriptions keep the
+old price until they change plan in the portal; their events then carry no lookup key. The
+relay reads their plan from `metadata[apassy_plan]` and the price's interval, or keeps the
+plan and interval it stored, and always applies their status: a cancellation, a failed
+payment, and an `unpaid` end apply as before. Run the script with `--dry-run` first and
+check that it names every replaced price with its metadata.
 
 ```sh
 stripe login                                   # the sandbox account
@@ -1855,16 +1873,46 @@ than `https://api.stripe.com`.
 - **At start:** it reads the six prices from Stripe on a thread of its own (a failure is
   logged as `the Stripe prices could not be read at start` and the next `GET /v1/plans`
   asks again); the start never waits for Stripe.
-- **Each hour** (the maintenance pass): event ids older than 30 days go; each ended plan at
-  its deletion day (end + `APASSY_CONNECT_DELETE_DAYS`) loses its vault stores and tunnel
-  nodes, those of its group's active members whose plan is over too, with one audit row
-  `plan_stores_deleted` (actor `billing`, counts only) and an I-4 `forget` for each account.
-  The accounts and their devices stay. The rows are in the relay audit of
-  `relay.db` (`audit` table); a failed pass logs `the billing maintenance pass failed`.
+- **Each hour** (the maintenance pass): event ids older than 30 days go. A live
+  subscription whose period ended more than two days ago without an event is read from
+  Stripe (once a day at most) and Stripe's state applies. A group with more active members
+  than its quantity at Stripe gets the quantity raised to them, with prorations (members
+  beyond the paid people or seats are read-only until then). Each ended plan at its
+  deletion day (end + `APASSY_CONNECT_DELETE_DAYS`) is read from Stripe first: only when
+  Stripe shows it ended, and the relay's clock is within a day of Stripe's, it loses its
+  vault stores and tunnel nodes, with those of its group's active members whose plan is
+  over too (never for a plan that is not the group's own, and never while another
+  subscription of the group gives a plan), one audit row `plan_stores_deleted` (actor
+  `billing`, counts only, `failed` for accounts that could not be deleted) and an I-4
+  `forget` for each account. Stripe out of reach, or one failed account, is logged and
+  tried again at the next pass; the pass goes on with the other plans. The accounts and
+  their devices stay. The rows are in the relay audit of `relay.db` (`audit` table); a
+  failed pass logs `the billing maintenance pass failed`.
+- **After a gap:** when a pass runs more than two days after the last one (the relay was
+  down, or the clock jumped), no store is deleted until the operator checks the clock
+  (`timedatectl`) and runs `apassy-relay admin billing --resume-deletions` (audit row
+  `billing_deletions_resumed`). `apassy-relay admin readiness` shows
+  `billing.deletions_held_since` meanwhile.
 - **On `DELETE /v1/account`:** the subscription is canceled at Stripe first; if Stripe
   fails, nothing is deleted and the app can ask again.
 
-### 27.8 Groups
+### 27.8 Problems for the operator
+
+When Stripe reports a subscription that charges, or a completed checkout, that the relay
+cannot apply for a known account or customer (an account bound to another customer, an
+account that was deleted, a price that is not Connect's), the relay answers Stripe 200 and
+records it: one row in `billing_problem`, the audit row `billing_problem_recorded` (ids
+only), and the count `billing.open_problems` in `apassy-relay admin readiness`.
+
+```sh
+apassy-relay admin billing                    # the open problems and the deletion clock
+apassy-relay admin billing --resolve <id>     # after the cancel or refund in the dashboard
+```
+
+Look the subscription up in the Stripe dashboard by its id, cancel it (and refund if it
+charged), then resolve the row. A later event of the same subscription reopens it.
+
+### 27.9 Groups
 
 Family and Team groups (SPEC section 36) need no setting of their own: the webhook makes a
 group for a Family or Team subscription, and the invite links use

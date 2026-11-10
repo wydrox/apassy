@@ -1217,7 +1217,8 @@ function everyLimiter(success: boolean) {
 
 describe("stripe webhook", () => {
   const PATH = "/v1/stripe/webhook";
-  const SIGNATURE = "t=1790000000,v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336";
+  // The edge checks the form and the time of the header; the relay checks the HMAC.
+  const SIGNATURE = `t=${Math.floor(Date.now() / 1000)},v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336`;
 
   it("has the 256 KiB cap of the contract", () => {
     assert.equal(MAX_STRIPE_WEBHOOK_LENGTH, 262144);
@@ -1289,6 +1290,37 @@ describe("stripe webhook", () => {
       assert.equal((await envelope(response)).error.code, "invalid_request", label);
     }
     assert.deepEqual(forwarded, []);
+  });
+
+  it("refuses a missing, malformed, or stale signature header before the relay", async () => {
+    const { forwarded, relay } = recordingRelay();
+    const now = Math.floor(Date.now() / 1000);
+    for (const signature of [
+      undefined,
+      "",
+      "v1=00",
+      `t=${now}`,
+      `t=${now},t=${now},v1=00`,
+      `t=abc,v1=00`,
+      `t=${now - 301},v1=00`,
+      `t=${now + 301},v1=00`,
+      `t=${now},v1=${"0".repeat(4100)}`,
+    ]) {
+      const headers: Record<string, string> = { "content-length": "2" };
+      if (signature !== undefined) headers["stripe-signature"] = signature;
+      const response = await call(PATH, { method: "POST", body: "{}", headers }, { RELAY: relay });
+      assert.equal(response.status, 400, String(signature));
+      assert.equal((await envelope(response)).error.code, "invalid_request", String(signature));
+    }
+    assert.deepEqual(forwarded, []);
+    // A `t` within 300 s and any `v1` go on to the relay, which checks the HMAC.
+    const response = await call(
+      PATH,
+      { method: "POST", body: "{}", headers: { "content-length": "2", "stripe-signature": `t=${now - 299},v0=1,v1=00` } },
+      { RELAY: relay },
+    );
+    assert.notEqual(response.status, 400);
+    assert.equal(forwarded.length, 1);
   });
 
   it("keeps the 64 KiB cap on every other path and method near the webhook", async () => {

@@ -17,8 +17,10 @@ use std::time::{Duration, Instant};
 
 use apassy_relay::config::{ConnectConfig, RelayConfig};
 use apassy_relay::secret::SecretString;
+use apassy_relay::server::billing_store::maintain;
+use apassy_relay::server::operator::{Command, run};
 use apassy_relay::server::stripe::signature_header;
-use connect::{Pusher, WEBHOOK_SECRET, now, start, start_with_config};
+use connect::{Connect, Dev, Pusher, WEBHOOK_SECRET, now, start, start_with_config};
 use serde_json::{Value, json};
 
 const PLANS: &str = include_str!("../../../tests/fixtures/connect-billing-v1/plans.json");
@@ -202,11 +204,11 @@ fn a_checkout_over_http_sends_the_contract_form_and_changes_nothing() {
             .unwrap()
             .starts_with("https://billing.stripe.com/")
     );
+    // The customer Connect made before the first session is the account's.
     let call = &c.stripe.calls_to("POST", "/v1/billing_portal/sessions")[0];
-    assert_eq!(
-        call.field("customer"),
-        Some(format!("cus_{}", &a.account[4..]).as_str())
-    );
+    let made = &c.stripe.calls_to("POST", "/v1/checkout/sessions")[0];
+    assert_eq!(call.field("customer"), made.field("customer"));
+    assert_eq!(call.field("customer"), Some(c.customer_of(&a).as_str()));
     assert_eq!(
         call.field("return_url"),
         Some("https://apassy.wyderka.cc/connect/done")
@@ -397,8 +399,8 @@ fn the_plan_state_gates_new_stores_pushes_pulls_downloads_and_the_entitlement_to
         assert!(!text.contains(word), "{text}");
     }
 
-    // Canceled 31 days ago: suspended, pulls and downloads stop too.
-    c.update(&a, "connect_personal_month", 1, "canceled");
+    // Unpaid since 31 days: suspended, pulls and downloads stop too.
+    c.update(&a, "connect_personal_month", 1, "unpaid");
     c.edit_directory(&format!(
         "UPDATE stripe_subscription SET ended_at = {}",
         now() - 31 * DAY
@@ -406,11 +408,20 @@ fn the_plan_state_gates_new_stores_pushes_pulls_downloads_and_the_entitlement_to
     let plan = c.plan(&a);
     assert_eq!(plan["status"], "suspended");
     assert_eq!(c.pull(&token, pusher.version), (403, 403));
-    // A renewal before the deletion day brings the store back as it was.
+    // A payment before the deletion day brings the store back as it was.
     c.update(&a, "connect_personal_month", 1, "active");
     assert_eq!(c.pull(&token, pusher.version), (200, 200));
     let answer = c.try_push(&pusher, &token, device, &a, b"version three");
     assert_eq!(answer.status, 200, "{}", answer.body);
+    // Canceled is final at Stripe: a later event of the same subscription that says
+    // otherwise changes nothing. A renewal after a cancel is a new subscription.
+    c.update(&a, "connect_personal_month", 1, "canceled");
+    c.update(&a, "connect_personal_month", 1, "active");
+    let plan = c.plan(&a);
+    assert_eq!(
+        (plan["status"].as_str(), plan["entitled"].as_bool()),
+        (Some("read_only"), Some(false))
+    );
 }
 
 #[test]
@@ -430,11 +441,7 @@ fn the_maintenance_pass_deletes_the_stores_at_the_configured_day_with_an_audit_r
     let hub = c.relay.hub();
     let billing = hub.billing().expect("billing").clone();
     // Day 39 after the end: suspended, the store stays.
-    c.edit_directory(&format!(
-        "UPDATE stripe_subscription SET ended_at = {} WHERE account_id = '{}'",
-        now() - 39 * DAY,
-        a.account
-    ));
+    ended_days_ago(&c, &a, 39);
     assert_eq!(c.plan(&a)["status"], "suspended");
     assert_eq!(
         apassy_relay::server::billing_store::maintain(&hub, &billing, now()).unwrap(),
@@ -446,11 +453,7 @@ fn the_maintenance_pass_deletes_the_stores_at_the_configured_day_with_an_audit_r
     );
     // Day 41: the store of the ended plan goes, with an audit row and I-4 forget; the
     // account stays and its plan is none.
-    c.edit_directory(&format!(
-        "UPDATE stripe_subscription SET ended_at = {} WHERE account_id = '{}'",
-        now() - 41 * DAY,
-        a.account
-    ));
+    ended_days_ago(&c, &a, 41);
     assert_eq!(
         apassy_relay::server::billing_store::maintain(&hub, &billing, now()).unwrap(),
         1
@@ -640,4 +643,240 @@ fn the_settings_need_both_stripe_files_and_take_the_api_base_from_code_only() {
     cfg.connect.billing = Some(settings);
     apassy_relay::server::Relay::init(&cfg, "Test Team", "owner").unwrap();
     assert!(apassy_relay::server::Relay::start(cfg).is_err());
+}
+
+// ---------------------------------------------------------------------------------------
+// The deletion pass asks Stripe, goes on past a failure, and holds on a clock gap.
+
+/// Moves the end of `dev`'s subscription `days` into the past, here and at Stripe.
+fn ended_days_ago(c: &Connect, dev: &Dev, days: u64) {
+    c.end_subscription_at(&format!("sub_{}", &dev.account[4..]), now() - days * DAY);
+}
+
+fn store_count(c: &Connect, dev: &Dev) -> usize {
+    c.rows(&format!(
+        "SELECT id FROM team WHERE kind = 'account' AND account_id = '{}'",
+        dev.account
+    ))
+    .len()
+}
+
+#[test]
+fn the_deletion_keeps_what_stripe_shows_live_and_waits_for_an_unreachable_stripe() {
+    let c = start();
+    let a = c.account("Rafal");
+    let b = c.account("Bob");
+    c.subscribe(&a, "connect_personal_month", 1);
+    c.subscribe(&b, "connect_personal_month", 1);
+    c.store(&a, VAULT);
+    c.store(&b, VAULT);
+    // A's plan ended here (unpaid), but its payment went through at Stripe and the event
+    // was lost: Stripe shows it active.
+    c.update(&a, "connect_personal_month", 1, "unpaid");
+    let mut paid = c
+        .stripe
+        .subscription(&format!("sub_{}", &a.account[4..]))
+        .unwrap();
+    paid["status"] = json!("active");
+    c.stripe.put_subscription(paid);
+    c.update(&b, "connect_personal_month", 1, "canceled");
+    ended_days_ago(&c, &a, 91);
+    ended_days_ago(&c, &b, 91);
+    // Stripe cannot be reached for B: the pass skips it.
+    c.stripe.fail_path(
+        &format!("/v1/subscriptions/sub_{}", &b.account[4..]),
+        503,
+        2,
+    );
+    let hub = c.relay.hub();
+    let billing = hub.billing().expect("billing").clone();
+    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 0);
+    assert_eq!((store_count(&c, &a), store_count(&c, &b)), (1, 1));
+    // A took Stripe's state: entitled again, with its store.
+    let plan = c.plan(&a);
+    assert_eq!(
+        (plan["status"].as_str(), plan["entitled"].as_bool()),
+        (Some("active"), Some(true))
+    );
+    // The next pass reaches Stripe, which shows B canceled: B's store goes.
+    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 1);
+    assert_eq!((store_count(&c, &a), store_count(&c, &b)), (1, 0));
+}
+
+#[test]
+fn one_failed_deletion_does_not_stop_the_pass() {
+    let c = start();
+    let a = c.account("Rafal");
+    let b = c.account("Bob");
+    let mut teams = Vec::new();
+    for dev in [&a, &b] {
+        c.subscribe(dev, "connect_personal_month", 1);
+        teams.push(c.store(dev, VAULT).0);
+        c.update(dev, "connect_personal_month", 1, "canceled");
+        ended_days_ago(&c, dev, 91);
+    }
+    // The pass takes the plans in the order of their subscription ids: the first one's
+    // store file cannot be removed.
+    let (first, second) = if a.account < b.account {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let devs = [&a, &b];
+    let team = apassy_relay::ids::TeamId::parse(&teams[first]).unwrap();
+    let mut blocker = c.relay.config.team_path(&team).into_os_string();
+    blocker.push(".pre-v3");
+    std::fs::create_dir_all(&blocker).unwrap();
+    std::fs::write(std::path::Path::new(&blocker).join("keep"), b"x").unwrap();
+    let hub = c.relay.hub();
+    let billing = hub.billing().expect("billing").clone();
+    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 1);
+    assert_eq!(store_count(&c, devs[second]), 0);
+    let audit = c.rows("SELECT detail FROM audit WHERE action = 'plan_stores_deleted' ORDER BY id");
+    assert_eq!(audit.len(), 2, "{audit:?}");
+    let failed: Vec<Value> = audit
+        .iter()
+        .map(|row| serde_json::from_str::<Value>(row).unwrap())
+        .filter(|row| row["failed"] == 1)
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["account_id"], devs[first].account.as_str());
+    // Once the file can go, the next pass finishes the first plan.
+    std::fs::remove_dir_all(&blocker).unwrap();
+    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 1);
+    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 0);
+}
+
+#[test]
+fn a_clock_gap_holds_deletions_until_the_operator_resumes_them() {
+    let c = start();
+    let a = c.account("Rafal");
+    c.subscribe(&a, "connect_personal_month", 1);
+    c.store(&a, VAULT);
+    c.update(&a, "connect_personal_month", 1, "canceled");
+    ended_days_ago(&c, &a, 91);
+    let hub = c.relay.hub();
+    let billing = hub.billing().expect("billing").clone();
+    // The last pass ran three days ago (the relay was down, or the clock jumped).
+    c.edit_directory(&format!(
+        "INSERT INTO billing_clock (id, last_pass_at) VALUES (1, {}) \
+         ON CONFLICT(id) DO UPDATE SET last_pass_at = excluded.last_pass_at, held_since = NULL",
+        now() - 3 * DAY
+    ));
+    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 0);
+    assert_eq!(store_count(&c, &a), 1);
+    let ready = run(&hub, &Command::Readiness, now()).unwrap();
+    assert!(
+        ready["billing"]["deletions_held_since"].as_u64().is_some(),
+        "{ready}"
+    );
+    assert_eq!(maintain(&hub, &billing, now() + 3600).unwrap(), 0);
+    // The operator checked the clock and resumes.
+    let resumed = run(
+        &hub,
+        &Command::Billing {
+            resume_deletions: true,
+            resolve: None,
+        },
+        now(),
+    )
+    .unwrap();
+    assert!(
+        resumed["status"]["deletions_held_since"].is_null(),
+        "{resumed}"
+    );
+    assert_eq!(maintain(&hub, &billing, now()).unwrap(), 1);
+    assert_eq!(store_count(&c, &a), 0);
+    assert_eq!(
+        c.rows("SELECT action FROM audit WHERE action = 'billing_deletions_resumed'")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_webhook_without_a_usable_signature_is_refused_before_its_body_is_read() {
+    use std::io::{Read, Write};
+    let c = start();
+    let address = c.relay.url.trim_start_matches("http://").to_string();
+    for signature in [None, Some("t=1000,v1=00"), Some("v1=00")] {
+        let mut stream = std::net::TcpStream::connect(&address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut head = format!(
+            "POST /v1/stripe/webhook HTTP/1.1\r\nHost: relay.test\r\nX-Apassy-Edge: {}\r\n\
+             Content-Type: application/json\r\nContent-Length: 200000\r\n",
+            relay::EDGE_SECRET
+        );
+        if let Some(signature) = signature {
+            head.push_str(&format!("Stripe-Signature: {signature}\r\n"));
+        }
+        head.push_str("\r\n");
+        // The head only: the relay answers without waiting for a byte of the body.
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut answer = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !answer.windows(4).any(|w| w == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).expect("an answer before the body");
+            assert!(read > 0, "the relay closed without an answer");
+            answer.extend_from_slice(&buffer[..read]);
+        }
+        let text = String::from_utf8_lossy(&answer);
+        assert!(text.starts_with("HTTP/1.1 400"), "{signature:?}: {text}");
+    }
+    // A signed webhook still works after the refusals.
+    let a = c.account("Rafal");
+    c.subscribe(&a, "connect_personal_month", 1);
+    assert_eq!(c.plan(&a)["status"], "active");
+}
+
+#[test]
+fn a_paid_subscription_connect_cannot_bind_is_shown_to_the_operator() {
+    let c = start();
+    let a = c.account("Rafal");
+    c.ok(
+        "POST",
+        "/v1/account/checkout",
+        Some(&a.token),
+        Some(&json!({"plan": "personal", "interval": "month"})),
+    );
+    let made = c.customer_of(&a);
+    assert!(made.starts_with("cus_SynthMade"), "{made}");
+    // A session of another customer for the same account: received, not applied.
+    let (status, answer) =
+        c.deliver(&c.checkout_completed(&a.account, "cus_SynthStray01", "sub_SynthStray01"));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(c.plan(&a)["status"], "none");
+    let hub = c.relay.hub();
+    let ready = run(&hub, &Command::Readiness, now()).unwrap();
+    assert_eq!(ready["billing"]["open_problems"], 1, "{ready}");
+    let audit = c.rows("SELECT detail FROM audit WHERE action = 'billing_problem_recorded'");
+    assert_eq!(audit.len(), 1);
+    let detail: Value = serde_json::from_str(&audit[0]).unwrap();
+    assert_eq!(
+        (detail["object"].as_str(), detail["account_id"].as_str()),
+        (Some("sub_SynthStray01"), Some(a.account.as_str()))
+    );
+    assert!(!audit[0].contains('@'), "no email in the audit");
+    let listed = run(
+        &hub,
+        &Command::Billing {
+            resume_deletions: false,
+            resolve: None,
+        },
+        now(),
+    )
+    .unwrap();
+    let id = listed["problems"][0]["id"].as_u64().unwrap();
+    let resolved = run(
+        &hub,
+        &Command::Billing {
+            resume_deletions: false,
+            resolve: Some(id),
+        },
+        now(),
+    )
+    .unwrap();
+    assert_eq!(resolved["status"]["open_problems"], 0, "{resolved}");
 }

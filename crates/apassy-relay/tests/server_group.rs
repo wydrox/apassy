@@ -590,3 +590,243 @@ fn an_owner_with_confirmed_members_cannot_delete_the_account() {
     assert!(c.rows("SELECT id FROM \"group\"").is_empty());
     assert!(c.rows("SELECT account_id FROM group_member").is_empty());
 }
+
+// ---- Paid seats under one lock of the group (the review of billing and groups). ----
+
+/// `who` joins the group of `owner` and stays pending.
+fn pending(c: &Connect, owner: &Dev, name: &str) -> Dev {
+    let who = c.account(name);
+    let code = invite_code(&invite(c, owner, "member"));
+    assert_eq!(join(c, &who, &code).0, 200);
+    who
+}
+
+/// Confirms each of `who` at once, one thread each; answers the statuses.
+fn confirm_all(c: &Connect, owner: &Dev, who: &[Dev]) -> Vec<(u16, Option<String>)> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = who
+            .iter()
+            .map(|dev| {
+                let url = c.relay.url.clone();
+                let token = owner.token.clone();
+                let path = format!("/v1/account/group/members/{}/confirm", dev.account);
+                scope.spawn(move || {
+                    let (status, value) = relay::call_url(
+                        &url,
+                        Some(relay::EDGE_SECRET),
+                        "POST",
+                        &path,
+                        Some(&token),
+                        Some(&json!({})),
+                    );
+                    (status, value["error"]["code"].as_str().map(str::to_string))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+fn active_members(c: &Connect, owner: &Dev) -> usize {
+    c.ok("GET", "/v1/account/group", Some(&owner.token), None)["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["state"] == "active")
+        .count()
+}
+
+/// The quantities billing asked Stripe for, in order.
+fn asked(c: &Connect, owner: &Dev) -> Vec<u32> {
+    c.stripe
+        .calls_to(
+            "POST",
+            &format!("/v1/subscription_items/si_{}", &owner.account[4..]),
+        )
+        .iter()
+        .map(|call| call.field("quantity").unwrap().parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn confirms_at_once_never_pass_the_plans_maximum() {
+    let c = start();
+    let owner = family(&c, 10);
+    for n in 0..7 {
+        let person = c.account(&format!("Person {n}"));
+        c.add_member(&owner, &person);
+    }
+    let waiting: Vec<Dev> = (0..4)
+        .map(|n| pending(&c, &owner, &format!("Late {n}")))
+        .collect();
+    let answers = confirm_all(&c, &owner, &waiting);
+    let ok = answers.iter().filter(|(status, _)| *status == 200).count();
+    let full = answers
+        .iter()
+        .filter(|(status, code)| *status == 409 && code.as_deref() == Some("seat_limit"))
+        .count();
+    assert_eq!((ok, full), (2, 2), "{answers:?}");
+    assert_eq!(active_members(&c, &owner), 10);
+}
+
+#[test]
+fn confirms_at_once_each_raise_the_seats_they_need() {
+    let c = start();
+    let owner = team(&c, 1);
+    let waiting: Vec<Dev> = (0..5)
+        .map(|n| pending(&c, &owner, &format!("Worker {n}")))
+        .collect();
+    let answers = confirm_all(&c, &owner, &waiting);
+    assert!(
+        answers.iter().all(|(status, _)| *status == 200),
+        "{answers:?}"
+    );
+    assert_eq!(active_members(&c, &owner), 6);
+    // Each confirm counted the one before it: the asks rise to the six members.
+    assert_eq!(asked(&c, &owner), [2, 3, 4, 5, 6]);
+    for dev in &waiting {
+        assert_eq!(c.plan(dev)["entitled"], true, "{}", dev.account);
+    }
+}
+
+#[test]
+fn a_confirm_waits_for_a_seats_change_of_the_same_group() {
+    let c = start();
+    let owner = team(&c, 3);
+    let member = c.account("Member");
+    c.add_member(&owner, &member);
+    let late = pending(&c, &owner, "Late");
+    // The owner lowers the seats to the two members; Stripe takes a second to answer.
+    c.stripe.delay_next("/v1/subscription_items/", 1000);
+    let (url, token) = (c.relay.url.clone(), owner.token.clone());
+    std::thread::scope(|scope| {
+        let lower = scope.spawn(move || {
+            relay::call_url(
+                &url,
+                Some(relay::EDGE_SECRET),
+                "POST",
+                "/v1/account/group/seats",
+                Some(&token),
+                Some(&json!({"quantity": 2})),
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let confirmed = confirm(&c, &owner, &late);
+        assert_eq!(confirmed.0, 200, "{}", confirmed.1);
+        assert_eq!(lower.join().unwrap().0, 200);
+    });
+    // The confirm counted after the change: Stripe's last word covers the three members.
+    assert_eq!(asked(&c, &owner), [2, 3]);
+    assert_eq!(active_members(&c, &owner), 3);
+    assert_eq!(c.plan(&late)["entitled"], true);
+}
+
+#[test]
+fn a_confirm_that_stripe_refuses_leaves_the_member_pending() {
+    let c = start();
+    let owner = team(&c, 1);
+    let late = pending(&c, &owner, "Late");
+    c.stripe.fail_path("/v1/subscription_items/", 400, 1);
+    assert_eq!(
+        code_of(&confirm(&c, &owner, &late)),
+        (502, Some("upstream_failed"))
+    );
+    assert_eq!(active_members(&c, &owner), 1);
+    assert_eq!(c.plan(&late)["status"], "none");
+    assert_eq!(
+        c.rows("SELECT action FROM audit WHERE action = 'group_member_confirm_undone'")
+            .len(),
+        1
+    );
+    // Asked again, it works.
+    assert_eq!(confirm(&c, &owner, &late).0, 200);
+    assert_eq!(active_members(&c, &owner), 2);
+}
+
+#[test]
+fn after_a_switch_to_personal_the_family_has_no_plan_and_its_members_read_only() {
+    let c = start();
+    let owner = family(&c, 4);
+    let member = c.account("Ola");
+    c.add_member(&owner, &member);
+    c.store(&member, VAULT);
+    // The owner switches to Personal in the portal.
+    c.update(&owner, "connect_personal_month", 1, "active");
+    let mine = c.plan(&owner);
+    assert_eq!(
+        (mine["plan"].as_str(), mine["entitled"].as_bool()),
+        (Some("personal"), Some(true))
+    );
+    let theirs = c.plan(&member);
+    assert_eq!(
+        (theirs["status"].as_str(), theirs["entitled"].as_bool()),
+        (Some("read_only"), Some(false))
+    );
+    assert!(theirs["delete_at"].is_null(), "{theirs}");
+    c.fails(
+        "POST",
+        "/v1/account/group/invites",
+        Some(&owner.token),
+        Some(&json!({"role": "member"})),
+        403,
+        "plan_required",
+    );
+    // The view keeps a number for the app: the quantity of the group's last subscription.
+    assert_eq!(
+        c.ok("GET", "/v1/account/group", Some(&owner.token), None)["quantity"],
+        1
+    );
+}
+
+#[test]
+fn a_late_event_of_an_old_plan_never_deletes_the_stores_of_a_paid_group() {
+    let c = start();
+    let owner = family(&c, 4);
+    let member = c.account("Ola");
+    c.add_member(&owner, &member);
+    let (team, _) = c.store(&member, VAULT);
+    let customer = c.customer_of(&owner);
+    let old = format!("sub_{}", &owner.account[4..]);
+    c.update(&owner, "connect_family_month", 4, "canceled");
+    // The owner buys again: a new subscription keeps the group.
+    let new = format!("{old}2");
+    c.deliver_ok(&c.checkout_completed(&owner.account, &customer, &new));
+    c.deliver_ok(&c.subscription_event(
+        "created",
+        &owner.account,
+        &customer,
+        &new,
+        "connect_family_month",
+        4,
+        "active",
+    ));
+    // A late event of the old subscription, the newest of all.
+    c.deliver_ok(&c.subscription_event(
+        "updated",
+        &owner.account,
+        &customer,
+        &old,
+        "connect_family_month",
+        4,
+        "canceled",
+    ));
+    assert_eq!(c.plan(&member)["entitled"], true);
+    // The old plan's deletion day: the members keep their stores.
+    c.end_subscription_at(&old, connect::now() - 91 * 86_400);
+    let hub = c.relay.hub();
+    let billing = hub.billing().expect("billing").clone();
+    // The pass handled the old plan: Stripe shows it ended, and only the owner, whose new
+    // plan is paid, was a candidate.
+    assert_eq!(
+        apassy_relay::server::billing_store::maintain(&hub, &billing, connect::now()).unwrap(),
+        1
+    );
+    let audit = c.rows("SELECT detail FROM audit WHERE action = 'plan_stores_deleted'");
+    let detail: Value = serde_json::from_str(&audit[0]).unwrap();
+    assert_eq!(
+        (detail["subscription"].as_str(), detail["accounts"].as_u64()),
+        (Some(old.as_str()), Some(0))
+    );
+    assert!(c.rows("SELECT id FROM team").contains(&team));
+    assert_eq!(c.plan(&member)["entitled"], true);
+}

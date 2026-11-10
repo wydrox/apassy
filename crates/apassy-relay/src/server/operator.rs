@@ -73,6 +73,15 @@ pub enum Command {
         delete_days: u64,
         dry_run: bool,
     },
+    /// Connect billing (SPEC 34.6): the open problems and the clock of the deletion pass;
+    /// `resume_deletions` takes the current clock as right after a held pass; `resolve`
+    /// marks one problem handled in the Stripe dashboard.
+    Billing {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resume_deletions: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolve: Option<u64>,
+    },
 }
 
 /// Runs one command.
@@ -118,6 +127,10 @@ pub fn run(hub: &Hub, command: &Command, now: u64) -> RelayResult<Value> {
             dry_run,
         } => serde_json::to_value(hub.connect_sweep(*idle_days, *delete_days, *dry_run, now)?)
             .map_err(|_| RelayError::internal("A result cannot be written.")),
+        Command::Billing {
+            resume_deletions,
+            resolve,
+        } => crate::server::billing_store::operator(hub, *resume_deletions, *resolve, now),
     }
 }
 
