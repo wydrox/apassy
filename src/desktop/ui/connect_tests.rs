@@ -19,8 +19,9 @@ use tempfile::TempDir;
 
 use super::connect::live::{self, Guarded};
 use super::connect::{
-    Account, Action, CONTINUE_BROWSER, ConnectView, DELETE_TITLE, MANAGE_BILLING, NOT_ON_CONNECT,
-    Plan, Plans, SELF_HOST, Sheet, SheetChoice, Shown, TEXTS, fallback_name, money, plan_note,
+    Account, Action, CONTINUE_BROWSER, ConnectView, DELETE_TITLE, FORGET_THIS_MAC, MANAGE_BILLING,
+    NOT_ON_CONNECT, NOT_VERIFIED, Plan, Plans, REMOVED, SELF_HOST, Sheet, SheetChoice, Shown,
+    TEXTS, fallback_name, money, plan_note,
 };
 use super::owner_tests::{PASS, collect, confirm_with, input, unlocked_app_with_item};
 use crate::connect::{
@@ -591,6 +592,91 @@ fn add_a_device_with_the_words_and_forget_this_mac() {
     });
     assert_eq!(connect.live_devices(&account_id).len(), 1);
     assert!(!dir.path().join("data/connect/account.json").exists());
+}
+
+/// Whether the key store of the section holds a key.
+fn has_key(app: &DesktopApp) -> bool {
+    app.ui
+        .connect
+        .live
+        .store
+        .as_ref()
+        .is_some_and(|store| matches!(store.read(), Ok(Some(_))))
+}
+
+/// When Connect says this Mac was removed, the section shows it and deletes nothing;
+/// only "Forget This Mac…" and its confirmation delete the key and the account file.
+#[test]
+fn a_removed_mac_keeps_its_key_until_the_owner_confirms_the_forget() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    create_account(&ctx, &mut app, "Rafal");
+    let file = dir.path().join("data/connect/account.json");
+    let this = shown(&app).expect("account").devices[0].clone();
+    assert!(this.this && this.verified);
+
+    connect.revoke(&this.id);
+    act(&ctx, &mut app, Action::SignIn);
+    until(&ctx, &mut app, "the removed state", |app| {
+        matches!(live::view(app).shown, Shown::Removed { .. })
+    });
+    assert!(has_key(&app));
+    assert!(file.exists());
+    assert_eq!(live::view(&app).status_line(), REMOVED);
+    let painted = text(&ctx, &mut app);
+    assert!(painted.contains(REMOVED), "{painted}");
+    assert!(painted.contains(FORGET_THIS_MAC), "{painted}");
+
+    // Cancel changes nothing.
+    act(&ctx, &mut app, Action::ForgetRemoved);
+    assert!(matches!(app.ui.connect.sheet, Some(Sheet::ForgetRemoved)));
+    choose(&ctx, &mut app, SheetChoice::Cancel);
+    settle(&ctx, &mut app);
+    assert!(app.ui.connect.sheet.is_none());
+    assert!(has_key(&app) && file.exists());
+    assert!(matches!(live::view(&app).shown, Shown::Removed { .. }));
+
+    // The confirmed forget deletes the key and the account file.
+    act(&ctx, &mut app, Action::ForgetRemoved);
+    choose(&ctx, &mut app, SheetChoice::Go);
+    until(&ctx, &mut app, "this Mac forgotten", |app| {
+        matches!(live::view(app).shown, Shown::None)
+    });
+    assert!(!has_key(&app));
+    assert!(!file.exists());
+}
+
+/// A device that this Mac cannot verify shows "Not verified" in its row.
+#[test]
+fn a_device_that_is_not_verified_says_so() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    let stranger = crate::sync::DeviceKey::generate().expect("key");
+    let inserted = connect.insert_device(&account_id, "Mac Studio", stranger.public_key());
+    act(&ctx, &mut app, Action::SignIn);
+    until(&ctx, &mut app, "two devices", |app| {
+        shown(app).is_some_and(|account| account.devices.len() == 2)
+    });
+    let account = shown(&app).expect("account");
+    let row = account
+        .devices
+        .iter()
+        .find(|device| device.id == inserted)
+        .expect("the inserted row");
+    assert!(!row.verified);
+    assert!(
+        account
+            .devices
+            .iter()
+            .any(|device| device.this && device.verified)
+    );
+    let painted = text(&ctx, &mut app);
+    assert!(painted.contains(NOT_VERIFIED), "{painted}");
 }
 
 // ---- Families and teams. ----

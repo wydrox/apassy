@@ -127,6 +127,7 @@ fn devices() -> Vec<Device> {
             created_at: added,
             last_seen_at: seen,
             this,
+            verified: true,
         };
     vec![
         device(
