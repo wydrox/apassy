@@ -24,6 +24,17 @@
 //! | `APASSY_RELAY_MODE` | `relay` (every route of the relay), or `connect`: Apassy Connect only (ADR 0037 stage 7). In `connect` mode the master key is refused (`APASSY_RELAY_KEY` and `_FILE` must not be set), `relay.db` and the vault stores are plain SQLite files (`Store::open_plain`), shared team vaults are off, and the account routes are on | `relay` |
 //! | `APASSY_CONNECT_SIGNING_KEY_FILE` | The Ed25519 signing key of the entitlement token: a PKCS#8 file (DER or PEM). Without it `GET /v1/account/entitlement` is 503 `busy` for an entitled account and the well-known document lists no key | none |
 //! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
+//! | `APASSY_CONNECT_INGRESS_LISTEN` | With the account routes: the address of the SNI ingress of the tunnel (connect-tunnel-v1 section 7.1; hosted `0.0.0.0:443`) | none: no ingress |
+//! | `APASSY_CONNECT_ACME_LISTEN` | With the account routes: the address of the ACME HTTP-01 listener of the tunnel (section 7.2; hosted `0.0.0.0:80`) | none: no ACME listener |
+//! | `APASSY_CONNECT_NODE_ZONE` | The DNS zone of the nodes' public names (`<10 characters>.<zone>`) | `node.apassy.wyderka.cc` |
+//! | `APASSY_CONNECT_TUNNEL_STREAMS` | Open tunnel streams of one account, 1 to 4096 | `64` |
+//! | `APASSY_CONNECT_TUNNEL_NODES` | Nodes of one account, 1 to 64 | `8` |
+//! | `APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE` | Dials of one account in one minute, 1 to 6000 | `60` |
+//! | `APASSY_CONNECT_TUNNEL_GIB_PER_MONTH` | Tunnel GiB of one account in one UTC month for each person (Family) or member (Team), 1 to 10240 | `20` |
+//! | `APASSY_CONNECT_TUNNEL_PING_SECS` | Connect pings each node WebSocket this often, 5 to 300 seconds | `30` |
+//! | `APASSY_CONNECT_TUNNEL_IDLE_SECS` | A tunnel WebSocket with no message for this long closes, 10 to 3600 seconds and above the ping interval | `90` |
+//! | `APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS` | A stream with no byte for this long is reset, 60 to 86400 seconds | `900` |
+//! | `APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB` | KiB buffered toward one client of a stream; over it the stream is reset, 64 to 16384 | `256` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
@@ -85,6 +96,8 @@ pub const DEFAULT_CONNECT_FEED_LONG_POLLS: usize = 48;
 /// The site of Apassy Connect (`APASSY_CONNECT_SITE_URL`): the Stripe return pages and the
 /// group invites.
 pub const DEFAULT_CONNECT_SITE_URL: &str = "https://apassy.wyderka.cc";
+/// The zone of the nodes' public names (`APASSY_CONNECT_NODE_ZONE`, connect-tunnel-v1 section 2).
+pub const DEFAULT_CONNECT_NODE_ZONE: &str = "node.apassy.wyderka.cc";
 /// The largest signing key file of `APASSY_CONNECT_SIGNING_KEY_FILE`.
 const MAX_SIGNING_KEY_FILE_BYTES: u64 = 4096;
 /// The directory of the relay in the data directory: the teams and their keys.
@@ -343,6 +356,8 @@ pub struct ConnectConfig {
     pub signing_key: Option<ConnectSigningKey>,
     /// The site origin (`APASSY_CONNECT_SITE_URL`), for billing and groups.
     pub site_url: String,
+    /// The tunnel and its ingress (connect-tunnel-v1), used only with the account routes.
+    pub tunnel: TunnelSettings,
 }
 
 impl Default for ConnectConfig {
@@ -353,6 +368,7 @@ impl Default for ConnectConfig {
             accounts: false,
             signing_key: None,
             site_url: DEFAULT_CONNECT_SITE_URL.to_string(),
+            tunnel: TunnelSettings::default(),
         }
     }
 }
@@ -439,11 +455,144 @@ fn connect_from(
             url
         }
     };
+    let tunnel = tunnel_from(lookup)?;
     Ok(ConnectConfig {
         mode,
         accounts,
         signing_key,
         site_url,
+        tunnel,
+    })
+}
+
+/// The settings of the Connect tunnel (connect-tunnel-v1 sections 7 and 8). Only a relay
+/// with the account routes uses them: `Relay::start` makes the broker then, and each
+/// ingress listener only when its address is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelSettings {
+    /// The SNI ingress (`APASSY_CONNECT_INGRESS_LISTEN`), or none.
+    pub ingress_listen: Option<SocketAddr>,
+    /// The ACME HTTP-01 listener (`APASSY_CONNECT_ACME_LISTEN`), or none.
+    pub acme_listen: Option<SocketAddr>,
+    /// The zone of the public names, lowercase, without a trailing dot.
+    pub node_zone: String,
+    /// Open streams of one account (its nodes, all kinds).
+    pub streams_per_account: usize,
+    /// Nodes of one account (registered, and online at once).
+    pub nodes_per_account: usize,
+    /// Dials of one account in one minute.
+    pub dials_per_minute: u32,
+    /// Bytes of one account in one UTC month for each person (Family) or member (Team).
+    pub bytes_per_month: u64,
+    /// Connect pings each tunnel WebSocket this often.
+    pub ping_interval: Duration,
+    /// A tunnel WebSocket with no message for this long closes.
+    pub idle_timeout: Duration,
+    /// A stream with no byte for this long is reset.
+    pub stream_idle: Duration,
+    /// Bytes buffered toward one client of a stream.
+    pub stream_buffer: usize,
+}
+
+impl Default for TunnelSettings {
+    /// The contract's defaults (section 8), no ingress listener.
+    fn default() -> Self {
+        Self {
+            ingress_listen: None,
+            acme_listen: None,
+            node_zone: DEFAULT_CONNECT_NODE_ZONE.to_string(),
+            streams_per_account: 64,
+            nodes_per_account: 8,
+            dials_per_minute: 60,
+            bytes_per_month: 20 * 1024 * 1024 * 1024,
+            ping_interval: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(90),
+            stream_idle: Duration::from_secs(15 * 60),
+            stream_buffer: 256 * 1024,
+        }
+    }
+}
+
+/// A DNS zone for public names: labels of `a-z`, `0-9`, and `-` (1 to 63 characters, no
+/// `-` at either end), at least two labels, and room for the 11 characters of a node's
+/// label and its dot within 253. Lowercased, without a trailing dot.
+fn checked_zone(text: &str) -> Option<String> {
+    let zone = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<&str> = zone.split('.').collect();
+    let label_ok = |label: &&str| {
+        (1..=63).contains(&label.len())
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    };
+    (labels.len() >= 2 && zone.len() <= 242 && labels.iter().all(label_ok)).then_some(zone)
+}
+
+/// The tunnel settings from the environment: none of the keys set is the default.
+fn tunnel_from(lookup: &impl Fn(&str) -> Option<String>) -> RelayResult<TunnelSettings> {
+    let address = |name: &str| -> RelayResult<Option<SocketAddr>> {
+        lookup(name)
+            .map(|text| {
+                text.trim().parse::<SocketAddr>().map_err(|_| {
+                    RelayError::invalid(format!("{name} is an address such as 0.0.0.0:443."))
+                })
+            })
+            .transpose()
+    };
+    let ingress_listen = address("APASSY_CONNECT_INGRESS_LISTEN")?;
+    let acme_listen = address("APASSY_CONNECT_ACME_LISTEN")?;
+    let node_zone = match lookup("APASSY_CONNECT_NODE_ZONE") {
+        None => DEFAULT_CONNECT_NODE_ZONE.to_string(),
+        Some(text) => checked_zone(&text).ok_or_else(|| {
+            RelayError::invalid("APASSY_CONNECT_NODE_ZONE is a DNS name such as node.example.com.")
+        })?,
+    };
+    let streams_per_account =
+        number(lookup, "APASSY_CONNECT_TUNNEL_STREAMS", 64, 1, 4096)? as usize;
+    let nodes_per_account = number(lookup, "APASSY_CONNECT_TUNNEL_NODES", 8, 1, 64)? as usize;
+    let dials_per_minute = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE",
+        60,
+        1,
+        6000,
+    )? as u32;
+    let gib = number(lookup, "APASSY_CONNECT_TUNNEL_GIB_PER_MONTH", 20, 1, 10_240)?;
+    let ping = number(lookup, "APASSY_CONNECT_TUNNEL_PING_SECS", 30, 5, 300)?;
+    let idle = number(lookup, "APASSY_CONNECT_TUNNEL_IDLE_SECS", 90, 10, 3600)?;
+    if idle <= ping {
+        return Err(RelayError::invalid(
+            "APASSY_CONNECT_TUNNEL_IDLE_SECS is above APASSY_CONNECT_TUNNEL_PING_SECS.",
+        ));
+    }
+    let stream_idle = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS",
+        900,
+        60,
+        86_400,
+    )?;
+    let buffer_kib = number(
+        lookup,
+        "APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB",
+        256,
+        64,
+        16_384,
+    )?;
+    Ok(TunnelSettings {
+        ingress_listen,
+        acme_listen,
+        node_zone,
+        streams_per_account,
+        nodes_per_account,
+        dials_per_minute,
+        bytes_per_month: gib * 1024 * 1024 * 1024,
+        ping_interval: Duration::from_secs(ping),
+        idle_timeout: Duration::from_secs(idle),
+        stream_idle: Duration::from_secs(stream_idle),
+        stream_buffer: buffer_kib as usize * 1024,
     })
 }
 
@@ -1655,5 +1804,85 @@ mod tests {
             ..embedded_options(None)
         });
         assert!(short.is_err());
+    }
+    #[test]
+    fn the_tunnel_keys_have_the_contract_defaults_and_bounds() {
+        let base = [
+            ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+            ("APASSY_RELAY_EDGE_SECRET", EDGE),
+            ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+        ];
+        let with = |extra: &[(&str, &str)]| {
+            let mut pairs = base.to_vec();
+            pairs.extend_from_slice(extra);
+            RelayConfig::from_lookup(lookup(&pairs)).map(|config| config.connect.tunnel)
+        };
+        let none = with(&[]).unwrap();
+        assert_eq!(none, TunnelSettings::default());
+        assert_eq!(none.ingress_listen, None);
+        assert_eq!(none.acme_listen, None);
+        assert_eq!(none.node_zone, "node.apassy.wyderka.cc");
+        assert_eq!(
+            (
+                none.streams_per_account,
+                none.nodes_per_account,
+                none.dials_per_minute
+            ),
+            (64, 8, 60)
+        );
+        assert_eq!(none.bytes_per_month, 20 * 1024 * 1024 * 1024);
+        assert_eq!(none.stream_buffer, 256 * 1024);
+        let set = with(&[
+            ("APASSY_CONNECT_INGRESS_LISTEN", "0.0.0.0:443"),
+            ("APASSY_CONNECT_ACME_LISTEN", "[::]:80"),
+            ("APASSY_CONNECT_NODE_ZONE", "Node.Example.TEST."),
+            ("APASSY_CONNECT_TUNNEL_STREAMS", "16"),
+            ("APASSY_CONNECT_TUNNEL_NODES", "2"),
+            ("APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE", "5"),
+            ("APASSY_CONNECT_TUNNEL_GIB_PER_MONTH", "1"),
+            ("APASSY_CONNECT_TUNNEL_PING_SECS", "10"),
+            ("APASSY_CONNECT_TUNNEL_IDLE_SECS", "40"),
+            ("APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS", "120"),
+            ("APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB", "64"),
+        ])
+        .unwrap();
+        assert_eq!(set.ingress_listen, Some("0.0.0.0:443".parse().unwrap()));
+        assert_eq!(set.acme_listen, Some("[::]:80".parse().unwrap()));
+        assert_eq!(set.node_zone, "node.example.test");
+        assert_eq!(
+            (
+                set.streams_per_account,
+                set.nodes_per_account,
+                set.dials_per_minute
+            ),
+            (16, 2, 5)
+        );
+        assert_eq!(set.bytes_per_month, 1024 * 1024 * 1024);
+        assert_eq!(set.ping_interval, Duration::from_secs(10));
+        assert_eq!(set.idle_timeout, Duration::from_secs(40));
+        assert_eq!(set.stream_idle, Duration::from_secs(120));
+        assert_eq!(set.stream_buffer, 64 * 1024);
+        for bad in [
+            ("APASSY_CONNECT_INGRESS_LISTEN", "443"),
+            ("APASSY_CONNECT_ACME_LISTEN", "localhost:80"),
+            ("APASSY_CONNECT_NODE_ZONE", "localhost"),
+            ("APASSY_CONNECT_NODE_ZONE", "-bad.example.com"),
+            ("APASSY_CONNECT_NODE_ZONE", "under_score.example.com"),
+            ("APASSY_CONNECT_NODE_ZONE", "a..example.com"),
+            ("APASSY_CONNECT_TUNNEL_STREAMS", "0"),
+            ("APASSY_CONNECT_TUNNEL_STREAMS", "4097"),
+            ("APASSY_CONNECT_TUNNEL_NODES", "65"),
+            ("APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE", "0"),
+            ("APASSY_CONNECT_TUNNEL_GIB_PER_MONTH", "0"),
+            ("APASSY_CONNECT_TUNNEL_PING_SECS", "4"),
+            ("APASSY_CONNECT_TUNNEL_IDLE_SECS", "30"),
+            ("APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS", "59"),
+            ("APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB", "16385"),
+        ] {
+            assert!(with(&[bad]).is_err(), "{bad:?}");
+        }
+        let label = "a".repeat(63);
+        let long = format!("{label}.{label}.{label}.{label}.example.com");
+        assert!(with(&[("APASSY_CONNECT_NODE_ZONE", long.as_str())]).is_err());
     }
 }
