@@ -22,7 +22,9 @@ use std::os::unix::net::UnixStream;
 
 #[cfg(target_os = "linux")]
 pub(in crate::browser) const HOST: &str = "/usr/lib/apassy/apassy-browser-host";
-const BROWSERS: &[&str] = &[
+/// The packaged browser executables that the check accepts. `install` names the same
+/// paths when it tells a supported browser from a snap or Flatpak.
+pub(in crate::browser) const BROWSERS: &[&str] = &[
     "/opt/google/chrome/chrome",
     "/usr/lib/chromium/chromium",
     "/usr/lib/chromium-browser/chromium-browser",
@@ -201,13 +203,16 @@ fn system_extensions(value: &[u8], trust: Trust<'_>) -> bool {
     // is included: directories of the trusted owner, not writable by group or others.
     let owned = |path: &Path| {
         path.starts_with(&root)
-            && path.ancestors().take_while(|p| p.starts_with(&root)).all(|p| {
-                fs::symlink_metadata(p).is_ok_and(|metadata| {
-                    metadata.is_dir()
-                        && metadata.uid() == trust.owner
-                        && metadata.mode() & 0o022 == 0
+            && path
+                .ancestors()
+                .take_while(|p| p.starts_with(&root))
+                .all(|p| {
+                    fs::symlink_metadata(p).is_ok_and(|metadata| {
+                        metadata.is_dir()
+                            && metadata.uid() == trust.owner
+                            && metadata.mode() & 0o022 == 0
+                    })
                 })
-            })
     };
     let Ok(folder) = fs::canonicalize(root.join(SYSTEM_EXTENSIONS)) else {
         return false;
@@ -586,8 +591,11 @@ mod tests {
             root.trust()
         ));
         // A symlink in the folder that resolves to another extension in it.
-        std::os::unix::fs::symlink(root.path(&A[1..]), root.path("usr/share/chromium/extensions/c"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            root.path(&A[1..]),
+            root.path("usr/share/chromium/extensions/c"),
+        )
+        .unwrap();
         assert!(root.accepts(&format!(
             "{DEBIAN} --load-extension=/usr/share/chromium/extensions/c"
         )));
@@ -617,8 +625,7 @@ mod tests {
             "--load-extension=/usr/share/chromium/extensions/file".to_owned(),
             "--load-extension=/usr/share/chromium/extensions".to_owned(),
             "--load-extension=/usr/share/chromium/extensions/".to_owned(),
-            "--load-extension=/usr/share/chromium/extensions/../../../../home/user/evil"
-                .to_owned(),
+            "--load-extension=/usr/share/chromium/extensions/../../../../home/user/evil".to_owned(),
             "--load-extension=/usr/share/chromium/extensions/link-out".to_owned(),
             "--load-extension=/usr/share/chromium/extensions-x".to_owned(),
             "--load-extension=//home/user/evil".to_owned(),

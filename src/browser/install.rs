@@ -238,6 +238,117 @@ pub enum State {
     Connected,
     /// The manifest names another program, for example another copy of Apassy.app.
     Other(String),
+    /// Linux: the browser is on this computer, but it cannot reach the native host or
+    /// the browser check refuses it, so a manifest would not make it work.
+    Unsupported(Unsupported),
+}
+
+/// Why a browser cannot use Apassy (Linux).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsupported {
+    /// A snap. Its confinement hides `/usr/lib/apassy` and `/usr/share/apassy`, it
+    /// reads its manifests from `~/snap`, and it runs from a `/snap` path.
+    Snap,
+    /// A Flatpak. Its sandbox cannot start a program of the host system.
+    Flatpak,
+    /// A profile folder without the packaged executable that the browser check knows:
+    /// another build, or a browser that was removed.
+    UnknownBuild,
+}
+
+/// What to use instead of a browser that is not supported.
+pub const UNSUPPORTED_ALTERNATIVE: &str = "Use Google Chrome, or Chromium from a .deb.";
+
+impl Unsupported {
+    /// One sentence: why `browser` does not work with Apassy.
+    pub fn reason(self, browser: &Browser) -> String {
+        match self {
+            Self::Snap => format!(
+                "The {} snap cannot start Apassy's browser host: its confinement hides /usr/lib/apassy.",
+                browser.name
+            ),
+            Self::Flatpak => format!(
+                "The Flatpak of {} cannot start Apassy's browser host: its sandbox hides the programs of this computer.",
+                browser.name
+            ),
+            Self::UnknownBuild => format!(
+                "Apassy finds no packaged {} that its browser check can verify.",
+                browser.name
+            ),
+        }
+    }
+
+    /// The reason and the alternative, for a row or a line of `apassy setup browser`.
+    pub fn explain(self, browser: &Browser) -> String {
+        format!("{} {UNSUPPORTED_ALTERNATIVE}", self.reason(browser))
+    }
+
+    /// The JSON name of the reason.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Snap => "snap",
+            Self::Flatpak => "flatpak",
+            Self::UnknownBuild => "unknown_build",
+        }
+    }
+}
+
+/// Linux: the packaged executables of `browser` that the browser check accepts, its
+/// snap name and its Flatpak application ID.
+#[cfg(target_os = "linux")]
+fn linux_package(
+    browser: &Browser,
+) -> (&'static [&'static str], Option<&'static str>, &'static str) {
+    match browser.id {
+        "chrome" => (
+            &super::caller::linux::BROWSERS[..1],
+            None,
+            "com.google.Chrome",
+        ),
+        _ => (
+            &super::caller::linux::BROWSERS[1..],
+            Some("chromium"),
+            "org.chromium.Chromium",
+        ),
+    }
+}
+
+/// Linux: is `browser` installed as a package that Apassy supports, as a snap or
+/// Flatpak, or not at all? System paths are under `root` (`/`; a folder in tests).
+/// `None` when the packaged executable is there: then the manifest decides.
+#[cfg(target_os = "linux")]
+fn linux_presence(root: &Path, home: &Path, browser: &Browser) -> Option<State> {
+    let (executables, snap, flatpak) = linux_package(browser);
+    let system = |path: &str| root.join(path.trim_start_matches('/'));
+    if executables.iter().any(|path| system(path).is_file()) {
+        return None;
+    }
+    if let Some(name) = snap
+        && [
+            system("/snap").join(name),
+            system("/var/lib/snapd/snap").join(name),
+            home.join("snap").join(name),
+        ]
+        .iter()
+        .any(|path| path.exists())
+    {
+        return Some(State::Unsupported(Unsupported::Snap));
+    }
+    if [
+        system("/var/lib/flatpak/app").join(flatpak),
+        home.join(".local/share/flatpak/app").join(flatpak),
+        home.join(".var/app").join(flatpak),
+    ]
+    .iter()
+    .any(|path| path.exists())
+    {
+        return Some(State::Unsupported(Unsupported::Flatpak));
+    }
+    Some(if support(home).join(browser.dir).is_dir() {
+        State::Unsupported(Unsupported::UnknownBuild)
+    } else {
+        State::Missing
+    })
 }
 
 fn support(home: &Path) -> PathBuf {
@@ -265,8 +376,24 @@ pub fn manifest_path(home: &Path, browser: &Browser) -> PathBuf {
         .join(manifest_name())
 }
 
-/// How `browser` is connected to the host at `host`.
+/// How `browser` is connected to the host at `host`. On Linux a snap, a Flatpak or an
+/// unknown build is [`State::Unsupported`] whatever its manifest says.
 pub fn state(home: &Path, browser: &Browser, host: &Path) -> State {
+    #[cfg(target_os = "linux")]
+    if let Some(state) = linux_presence(Path::new("/"), home, browser) {
+        return state;
+    }
+    manifest_state(home, browser, host)
+}
+
+/// [`state`] with the system paths of Linux under `root`.
+#[cfg(all(test, target_os = "linux"))]
+fn state_at(root: &Path, home: &Path, browser: &Browser, host: &Path) -> State {
+    linux_presence(root, home, browser).unwrap_or_else(|| manifest_state(home, browser, host))
+}
+
+/// The state that the manifest file of `browser` gives.
+fn manifest_state(home: &Path, browser: &Browser, host: &Path) -> State {
     let file = manifest_path(home, browser);
     match fs::read_to_string(&file) {
         Ok(text) => {
@@ -295,6 +422,10 @@ pub fn connect(home: &Path, browser: &Browser, host: &Path) -> io::Result<PathBu
     }
     #[cfg(target_os = "linux")]
     super::caller::linux::trusted_binary(host)?;
+    #[cfg(target_os = "linux")]
+    if let Some(State::Unsupported(kind)) = linux_presence(Path::new("/"), home, browser) {
+        return Err(io::Error::other(kind.explain(browser)));
+    }
     write_manifest(home, browser, host)
 }
 
@@ -466,13 +597,19 @@ mod tests {
             home.path()
                 .join(".config/chromium/NativeMessagingHosts/com.wydrox.apassy.json")
         );
-        assert_eq!(state(home.path(), chrome, host), State::Missing);
+        // The state does not depend on the browsers of the test machine: the system
+        // paths are under a private root with a packaged Chrome.
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("opt/google/chrome")).unwrap();
+        fs::write(root.path().join("opt/google/chrome/chrome"), b"").unwrap();
+        let at = |browser| state_at(root.path(), home.path(), browser, host);
+        assert_eq!(at(chrome), State::Missing);
         fs::create_dir_all(support(home.path()).join(chrome.dir)).unwrap();
-        assert_eq!(state(home.path(), chrome, host), State::NotConnected);
+        assert_eq!(at(chrome), State::NotConnected);
         // Exercise file registration separately from installed-image validation;
         // this test does not install or pretend to own a root-owned executable.
         write_manifest(home.path(), chrome, host).unwrap();
-        assert_eq!(state(home.path(), chrome, host), State::Connected);
+        assert_eq!(at(chrome), State::Connected);
         assert!(connect(home.path(), chrome, Path::new("/tmp/apassy-browser-host")).is_err());
         assert!(disconnect(home.path(), chrome).unwrap());
         assert!(!disconnect(home.path(), chrome).unwrap());
@@ -483,5 +620,80 @@ mod tests {
         );
         assert!(linux_program_dir(Path::new("/usr/lib/apassy")));
         assert!(!linux_program_dir(Path::new("/usr/local/bin")));
+    }
+
+    /// Ubuntu's Chromium is a snap and a Flatpak browser runs in its sandbox: neither
+    /// can start the host, so neither is shown as connected or offered Connect, also
+    /// with a manifest in `~/.config` (found in the Linux acceptance, 2026-11-10).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_snaps_flatpaks_and_unknown_builds_are_not_supported() {
+        let host = Path::new(super::super::caller::linux::HOST);
+        let chrome = find("chrome").unwrap();
+        let chromium = find("chromium").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let at = |browser| state_at(root.path(), home.path(), browser, host);
+        assert_eq!(at(chromium), State::Missing);
+        assert_eq!(at(chrome), State::Missing);
+        // Ubuntu 24.04: /snap/chromium, with the manifest that setup wrote in ~/.config.
+        fs::create_dir_all(root.path().join("snap/chromium/3590")).unwrap();
+        write_manifest(home.path(), chromium, host).unwrap();
+        assert_eq!(at(chromium), State::Unsupported(Unsupported::Snap));
+        // A Chromium .deb next to it is the browser that connects.
+        fs::create_dir_all(root.path().join("usr/lib/chromium")).unwrap();
+        fs::write(root.path().join("usr/lib/chromium/chromium"), b"").unwrap();
+        assert_eq!(at(chromium), State::Connected);
+        fs::remove_file(root.path().join("usr/lib/chromium/chromium")).unwrap();
+        fs::remove_dir_all(root.path().join("snap")).unwrap();
+        // The snap's own data folder alone also tells.
+        fs::create_dir_all(home.path().join("snap/chromium/common")).unwrap();
+        assert_eq!(at(chromium), State::Unsupported(Unsupported::Snap));
+        fs::remove_dir_all(home.path().join("snap")).unwrap();
+        // A profile without a packaged executable: another build, or a removed one.
+        assert_eq!(at(chromium), State::Unsupported(Unsupported::UnknownBuild));
+        // Flatpak, system-wide or per user, or only its data folder.
+        for flatpak in [
+            root.path().join("var/lib/flatpak/app/com.google.Chrome"),
+            home.path()
+                .join(".local/share/flatpak/app/com.google.Chrome"),
+            home.path().join(".var/app/com.google.Chrome"),
+        ] {
+            fs::create_dir_all(&flatpak).unwrap();
+            assert_eq!(at(chrome), State::Unsupported(Unsupported::Flatpak));
+            fs::remove_dir_all(&flatpak).unwrap();
+        }
+        fs::create_dir_all(home.path().join(".var/app/org.chromium.Chromium")).unwrap();
+        assert_eq!(at(chromium), State::Unsupported(Unsupported::Flatpak));
+        // The text names the reason and the alternative.
+        for kind in [
+            Unsupported::Snap,
+            Unsupported::Flatpak,
+            Unsupported::UnknownBuild,
+        ] {
+            let text = kind.explain(chromium);
+            assert!(text.contains("Chromium"), "{text}");
+            assert!(
+                text.ends_with("Use Google Chrome, or Chromium from a .deb."),
+                "{text}"
+            );
+        }
+        assert!(Unsupported::Snap.reason(chromium).contains("snap"));
+        assert!(Unsupported::Flatpak.reason(chrome).contains("Flatpak"));
+    }
+
+    /// The executables that tell a supported package are the ones that the browser
+    /// check accepts.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supported_packages_are_the_executables_of_the_browser_check() {
+        let mut named: Vec<&str> = BROWSERS
+            .iter()
+            .flat_map(|browser| linux_package(browser).0.iter().copied())
+            .collect();
+        named.sort_unstable();
+        let mut checked = super::super::caller::linux::BROWSERS.to_vec();
+        checked.sort_unstable();
+        assert_eq!(named, checked);
     }
 }
