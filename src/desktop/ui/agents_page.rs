@@ -236,9 +236,19 @@ impl AccessView {
 
 /// The ⓘ of the Apassy Connect route.
 const CONNECT_HELP: [&str; 4] = [
-    "Apassy Connect relays encrypted bytes between this Mac and your devices or cloud agents. TLS ends on this Mac.",
-    "Your devices reach this Mac without Tailscale. Cloud agents use the address below while remote access is on.",
-    "Credential values stay on this Mac.",
+    concat!(
+        "Apassy Connect relays encrypted bytes between this ",
+        crate::computer!(),
+        " and your devices or cloud agents. TLS ends on this ",
+        crate::computer!(),
+        "."
+    ),
+    concat!(
+        "Your devices reach this ",
+        crate::computer!(),
+        " without Tailscale. Cloud agents use the address below while remote access is on."
+    ),
+    concat!("Credential values stay on this ", crate::computer!(), "."),
     "It is part of Connect Personal, Connect Family, and Connect Team.",
 ];
 

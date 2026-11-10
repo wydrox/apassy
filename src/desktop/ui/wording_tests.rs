@@ -148,6 +148,12 @@ fn screens() -> Vec<Screen> {
     app.ui.sheet = None;
     app.selected_item_id = None;
     for section in SettingsSection::ALL {
+        // Apassy Connect keeps its account key in the Mac's Keychain and has no Linux
+        // key store yet (plan s7, the Linux part of unit M1); its texts say so. The
+        // guard takes the section when the Linux store and its wording land.
+        if section == SettingsSection::Connect {
+            continue;
+        }
         super::open_settings(&mut app, section);
         screens.push(render(
             &format!("Settings > {}", section.label()),
