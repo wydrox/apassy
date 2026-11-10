@@ -19,8 +19,9 @@ use tempfile::TempDir;
 
 use super::connect::live::{self, Guarded};
 use super::connect::{
-    Account, Action, CONTINUE_BROWSER, ConnectView, DELETE_TITLE, MANAGE_BILLING, NOT_ON_CONNECT,
-    Plan, Plans, SELF_HOST, Sheet, SheetChoice, Shown, TEXTS, fallback_name, money, plan_note,
+    Account, Action, CONTINUE_BROWSER, ConnectView, DELETE_TITLE, LOADING_PRICES, MANAGE_BILLING,
+    NOT_ON_CONNECT, PRICES_FAILED, Plan, Plans, SELF_HOST, Sheet, SheetChoice, Shown, TEXTS,
+    TRY_AGAIN, fallback_name, money, plan_note,
 };
 use super::owner_tests::{PASS, collect, confirm_with, input, unlocked_app_with_item};
 use crate::connect::{
@@ -293,6 +294,57 @@ fn the_picker_shows_the_total_of_the_plans() {
     let text = draw(&mut loading, None);
     assert!(text.contains("Loading prices…"), "{text}");
     assert!(!text.contains('€'), "no price without the plans: {text}");
+}
+
+/// When `GET /v1/plans` fails, the picker says so with the error and offers "Try
+/// Again", which asks Connect again; then the prices show. Before the answer it shows no
+/// price, and Continue stays off.
+#[test]
+fn a_failed_price_load_offers_try_again_and_asks_again() {
+    let dir = TempDir::new().expect("dir");
+    let connect = FakeConnect::start();
+    let ctx = egui::Context::default();
+    let mut app = connect_app(&dir, &connect);
+    // The refresh after the creation loses the answer (it shows no error), then the
+    // picker loses it too.
+    connect.lose_next_answers("GET /v1/plans", 1);
+    create_account(&ctx, &mut app, "Rafal");
+    settle(&ctx, &mut app);
+    assert!(live::view(&app).plans.is_none());
+    connect.lose_next_answers("GET /v1/plans", 1);
+    act(&ctx, &mut app, Action::ChoosePlan);
+    settle(&ctx, &mut app);
+    let view = live::view(&app);
+    assert!(view.plans.is_none(), "no prices");
+    // The sheet shows the error of the step under its buttons.
+    let shown = text(&ctx, &mut app);
+    let failure = crate::connect::ConnectError::Broken.to_string();
+    let offline = crate::connect::ConnectError::Offline.to_string();
+    assert!(
+        shown.contains(&failure) || shown.contains(&offline),
+        "the error shows: {shown}"
+    );
+    assert!(shown.contains(PRICES_FAILED), "{shown}");
+    assert!(shown.contains(TRY_AGAIN), "{shown}");
+    assert!(!shown.contains(LOADING_PRICES), "{shown}");
+    assert!(!shown.contains('€'), "no price: {shown}");
+    let asked = connect.count("GET /v1/plans");
+    choose(&ctx, &mut app, SheetChoice::TryAgain);
+    until(&ctx, &mut app, "the plans", |app| {
+        live::view(app).plans.is_some()
+    });
+    assert!(
+        connect.count("GET /v1/plans") > asked,
+        "Try Again asked again"
+    );
+    assert!(matches!(app.ui.connect.sheet, Some(Sheet::Picker { .. })));
+    let shown = text(&ctx, &mut app);
+    assert!(
+        !shown.contains(&failure) && !shown.contains(&offline),
+        "{shown}"
+    );
+    assert!(shown.contains("Connect Personal"), "{shown}");
+    assert!(!shown.contains(TRY_AGAIN), "{shown}");
 }
 
 /// The relay sheet offers "Apassy Connect" only while this Mac's account is signed in

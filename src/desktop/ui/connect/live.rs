@@ -1235,6 +1235,11 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
             ctx.open_url(egui::OpenUrl::new_tab(url.clone()));
             app.ui.connect.sheet = Some(Sheet::Waiting { url, stopped });
         }
+        (sheet @ Sheet::Picker { .. }, SheetChoice::TryAgain) => {
+            app.ui.connect.sheet = Some(sheet);
+            app.ui.connect.live.error = None;
+            load_plans(app, ctx);
+        }
         (Sheet::Waiting { url, .. }, SheetChoice::CheckAgain) => {
             app.ui.connect.live.waiting = Some(Waiting {
                 started: Instant::now(),
