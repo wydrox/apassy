@@ -135,6 +135,17 @@ From `src/config.rs` (`RelayConfig::from_env`):
 | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once, active or suspended (section 26), 0 to 1000000; `0` turns `POST /v1/connect` off | 100 |
 | `APASSY_RELAY_CONNECT_SYNC_BYTES` | `sync_bytes` of a new Connect team (`RelayConfig::connect_sync_bytes`, section 26.4): 0 (no relay sync, 403 `plan_required`) or 1048576 to 67108864; the hosted relay sets 67108864 until Apassy Connect starts | 0 |
 | `APASSY_RELAY_CONNECT_LONG_POLLS` | long polls of all Connect teams together (`Limits::connect_long_polls`, section 26.4), 0 to 1024; `0`: every Connect poll answers at once | 96 |
+| `APASSY_CONNECT_INGRESS_LISTEN` | with the account routes: the SNI ingress of the tunnel (section 35.7, 35.11; hosted `0.0.0.0:443`) | none: off |
+| `APASSY_CONNECT_ACME_LISTEN` | with the account routes: the ACME HTTP-01 listener of the tunnel (hosted `0.0.0.0:80`) | none: off |
+| `APASSY_CONNECT_NODE_ZONE` | the DNS zone of the nodes' public names | `node.apassy.wyderka.cc` |
+| `APASSY_CONNECT_TUNNEL_STREAMS` | open tunnel streams of one account, 1 to 4096 | 64 |
+| `APASSY_CONNECT_TUNNEL_NODES` | nodes of one account, 1 to 64 | 8 |
+| `APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE` | dials of one account in one minute, 1 to 6000 | 60 |
+| `APASSY_CONNECT_TUNNEL_GIB_PER_MONTH` | tunnel GiB of one account in one UTC month for each person or member, 1 to 10240 | 20 |
+| `APASSY_CONNECT_TUNNEL_PING_SECS` | ping interval of a tunnel WebSocket, 5 to 300 s | 30 |
+| `APASSY_CONNECT_TUNNEL_IDLE_SECS` | a tunnel WebSocket without a message closes, 10 to 3600 s, above the ping | 90 |
+| `APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS` | a stream without a byte is reset, 60 to 86400 s | 900 |
+| `APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB` | KiB buffered toward one client of a stream, 64 to 16384 | 256 |
 
 `UpstreamOptions` (extra roots, fixed addresses) is not read from the environment. Tests set it in code.
 
@@ -2288,7 +2299,7 @@ An event that does not apply is logged and answered `200` with its id stored, so
 
 ## 35. Tunnel and ingress
 
-ADR 0037 stage 7, unit C4; the wire is docs/contracts/connect-tunnel-v1.md (the contract wins where this section is shorter). Code: `src/server/tunnel.rs` (the broker), `src/server/tunnel/frame.rs` (the frame and the stream rules), `src/server/tunnel/ws.rs` (WebSocket), `src/server/ingress.rs` (ports 443 and 80). The HTTP routes and the configuration keys join in a later step, after the account store (unit C1); until then nothing in `Relay::start` starts the broker or the ingress.
+ADR 0037 stage 7, unit C4; the wire is docs/contracts/connect-tunnel-v1.md (the contract wins where this section is shorter). Code: `src/server/tunnel.rs` (the broker), `src/server/tunnel/frame.rs` (the frame and the stream rules), `src/server/tunnel/ws.rs` (WebSocket), `src/server/ingress.rs` (ports 443 and 80), and `src/server/tunnel_routes.rs` (unit CW: the broker on the account store, the routes, the start, the usage in `relay.db`, and the hooks of the other units). The tunnel exists only with the account routes (`APASSY_RELAY_CONNECT_ACCOUNTS=1` or `APASSY_RELAY_MODE=connect`, section 33): without them `Relay::start` makes no broker and no ingress, and every `/v1/tunnel/...` path is 404 `not_found` (35.10 to 35.13).
 
 ### 35.1 What the broker does
 
@@ -2322,7 +2333,7 @@ Every queue has a cap. Toward a node: data waits for room (backpressure to the c
 
 ### 35.6 The vendored HTTP server
 
-The relay's deadline transport refused every upgrade (`vendor/tiny_http/APASSY-PATCH.md`). It now passes a `GET` upgrade without `Content-Length` or `Transfer-Encoding` to the handler (anything else is still refused, and a connection still serves one request). `Request::upgrade_split` ends the request's header, body, and handle deadlines, sets read and write timeouts of `Limits::idle_timeout`, makes the reaper forget the transport, and returns the read half, the write half, and a shutdown function. The read half is the buffered reader that read the head, so a first WebSocket frame in the same TCP segment as the handshake is kept (`tests/server_tunnel.rs`, `upgrade_keeps_bytes_sent_with_the_head`). The routing step must answer an `Upgrade` on every other route as before (the proxy already answers 501 `not_supported`).
+The relay's deadline transport refused every upgrade (`vendor/tiny_http/APASSY-PATCH.md`). It now passes a `GET` upgrade without `Content-Length` or `Transfer-Encoding` to the handler (anything else is still refused, and a connection still serves one request). `Request::upgrade_split` ends the request's header, body, and handle deadlines, sets read and write timeouts of `Limits::idle_timeout`, makes the reaper forget the transport, and returns the read half, the write half, and a shutdown function. The read half is the buffered reader that read the head, so a first WebSocket frame in the same TCP segment as the handshake is kept (`tests/server_tunnel.rs`, `upgrade_keeps_bytes_sent_with_the_head`). Only the two tunnel routes take an upgrade: `http::handle` answers a request with an `Upgrade` header, or a `Connection` header with the token `upgrade`, on any other method and path with 400 `invalid_request` and `Connection: close`, before any other check (also before `/healthz`, the OAuth flow, the edge secret, and the proxy), before a handler sees it, and without reading a body. This holds on every listener (`Scope::Node`, `Scope::Public` with `/mcp` and `/p/`, `Scope::Tailnet` and the local route) and for the tunnel routes too on a relay without the account routes or on a listener other than the node listener. The transport itself still answers an upgrade with a body or of another method than `GET` with the same 400.
 
 ### 35.7 The ingress
 
@@ -2336,8 +2347,50 @@ Both keep each client address only in memory, for 30 new connections a minute pe
 
 `tests/server_tunnel.rs`, on free loopback ports through the relay's own deadline transport: the contract vectors (frames, invalid frames, sequences); the sequencer under random interleaving; 404 for an unknown node, 503 for an offline one, the order of 401, 403 `account_required`, 400, and 403 `plan_required`; another account without a grant (403), with one, and after `revoke_grant` (4003); the eighth-node limit; the first frame in the handshake's segment; a tunnel that outlives the request deadlines; streams of eight concurrent devices with random sizes and a node that echoes in random pieces; slot release on close; the 65th stream (429, and the ingress refused); the dial rate; the byte budget trip and its reset on the first of the month with a fake clock; node replacement (4005 and 4001); node close and reset; a broken stream rule, a malformed frame, text, and an oversized dial message; a client that does not read; a rustls ClientHello forwarded unchanged both ways; unknown, offline, foreign, and not-entitled names; truncated, malformed, slow, and silent hellos; the per-address limit; the ACME path filter; node removal and a plan's end; usage and its restore. Unit tests: `tunnel::frame`, `tunnel::ws`, `tunnel` (months, names), `ingress` (every truncation of a hello, malformed hellos, ACME heads, the address table).
 
+`tests/server_tunnel_routes.rs` runs the wired tunnel on a relay with the account routes, with real account devices on free loopback ports: a node registered and dialed through the routes with an echoing fake node; strict bodies and 401, 403 `account_required`, 404, 405 on the JSON routes; the dial checks in the contract's order (400, 401, 403 `account_required`, 404 `node_unknown`, 403 `not_in_group`, 403 `plan_required`, 429 `tunnel_limit`, 503 `tunnel_offline`); a grant through the routes, its deletion (4003), a grant that holds only while the accounts share a group, `grants_end_between` and `plan_ended` (4003); a revoked node device (node closed 4003, dials 4001, row deleted), a revoked dialer (4003), `DELETE /v1/tunnel/nodes/{id}`, and an account deletion; the ninth node (403 `account_limit`); a byte budget that still holds after a restart on the same data directory; the ingress and the ACME listener started from the configuration; nothing of the tunnel without the account routes; the walk of every route of the relay with an `Upgrade` on every listener (35.6) and the two tunnel routes answering `101`; and every example of `examples.json` with the relay's strict types.
+
 ### 35.9 What this does not protect
 
 - Connect sees the sizes and times of the TLS records of every stream, the server names of the ingress, and the client addresses of the ingress (in memory).
 - A node can hold the slots of its own account's streams (up to 64) until the idle reset; it cannot reach another account's streams.
 - The ingress is a raw TCP port on the Connect host: the per-address limit and the pending cap bound the work of one address, not of many.
+
+### 35.10 The routes on the account store
+
+`tunnel_routes::AccountDirectory` is the `TunnelDirectory` of the broker on `relay.db`. It holds the hub weakly (the hub holds the broker) and caches nothing beyond one call:
+
+- `caller`: `account::authenticate`, so each request reads the device in `relay.db` again: a revoked device's token is 401 `unauthenticated` at once, a relay-sync team token is 403 `account_required`.
+- `device_node` and `node`: the rows of `tunnel_node` (`id`, `account_id`, `device_id`, `name`, `pin`, `created_at`).
+- `has_grant`: a row of `tunnel_grant` for the node and the grantee account, and the node's account and the grantee share a group now (`Groups::share_group`). A row of accounts that no longer share a group grants nothing.
+- `entitled`: `Plans::plan(...).entitled` of the account now. `budget_units`: `Plans::people` (at least 1).
+
+The routes (connect-tunnel-v1 sections 3 and 6; the contract wins), each with an account token, strict bodies (`deny_unknown_fields`, 400), and the errors of connect-account-v1 section 4 (`node_unknown` 404, `tunnel_limit` 429, and `tunnel_offline` 503 are codes of `error::codes`):
+
+| Route | Answer |
+| --- | --- |
+| `POST /v1/tunnel/nodes` `{"name","pin"}` | The `NodeView` of the calling device's node: new (id `node_` and 10 of `a-z2-7`), or the same node with the new name and pin. The name is 1 to 64 bytes without a control character, trimmed; the pin is 43 characters of base64url of 32 bytes. A new node over `nodes_per_account` (8) of the account: 403 `account_limit`. |
+| `GET /v1/tunnel/nodes` | The nodes of the account, and those of accounts whose grant to it holds, as `NodeView`s (`online`: the broker has its WebSocket; `public_name`: the label, `.`, and `APASSY_CONNECT_NODE_ZONE`). |
+| `DELETE /v1/tunnel/nodes/{node_id}` | From a device of the node's account (else 404 `node_unknown`): the node and its grants go, its WebSocket closes (4003), its streams end (4001). `{"node_id"}`. |
+| `GET /v1/tunnel/node` | `Broker::serve_node` (35.2). |
+| `GET /v1/tunnel/dial/{node_id}` | `Broker::serve_dial` (35.2), the checks of contract 3.3 in order. |
+| `POST /v1/tunnel/grants` `{"node_id","account_id"}` | From a device of the node's account (another account: 403 `forbidden`; no such node: 404 `node_unknown`; the own account: 400): the grantee must share a group with the account (403 `not_in_group`). The `GrantView` (id `tgr_` and 10 of `a-z2-7`); the same grant again answers the existing one. |
+| `GET /v1/tunnel/grants` | The grants that the account made and those made to it. |
+| `DELETE /v1/tunnel/grants/{grant_id}` | From either account (else 404 `not_found`): the grant goes and the grantee's open streams to the node reset at once (4003). `{"grant_id","closed_streams"}`. |
+
+The JSON routes read the caller, the body, and the caller again (as the account routes); a bad token counts against the listener's failed-auth limit. The audit of the relay gets `tunnel_node_registered`, `tunnel_node_updated`, `tunnel_node_removed`, `tunnel_grant_created`, `tunnel_grant_removed`, and `tunnel_grants_ended`, with ids only.
+
+Hooks: `account::revoke` deletes the device's node row and the node's grants, then `tunnel_routes::device_revoked` (`Broker::revoke_device`: the node closes with 4003, the device's dials end with 4003). `account::delete_account` deletes the account's nodes and the grants both ways, then `tunnel_routes::account_deleted` (`Broker::end_account`). For billing, `tunnel_routes::plan_ended(hub, account)` ends the open streams of the account's nodes with 4003 (`Broker::end_plan`; the node WebSockets stay, new dials and ingress streams are refused by `entitled`). For groups, `tunnel_routes::grants_end_between(hub, account, others, now)` deletes the grants between `account` and each of `others`, both ways, resets the streams they carried at once (4003), and returns how many grants it deleted.
+
+### 35.11 Configuration and start
+
+`ConnectConfig::tunnel` (`config::TunnelSettings`, from `tunnel_from` in `connect_from`; section 6): `APASSY_CONNECT_INGRESS_LISTEN` and `APASSY_CONNECT_ACME_LISTEN` (socket addresses; unset: that listener is off), `APASSY_CONNECT_NODE_ZONE` (a DNS name, default `node.apassy.wyderka.cc`), and the limits of contract section 8: `APASSY_CONNECT_TUNNEL_STREAMS` (64, 1 to 4096), `APASSY_CONNECT_TUNNEL_NODES` (8, 1 to 64), `APASSY_CONNECT_TUNNEL_DIALS_PER_MINUTE` (60, 1 to 6000), `APASSY_CONNECT_TUNNEL_GIB_PER_MONTH` (20 for each person or member, 1 to 10240), `APASSY_CONNECT_TUNNEL_PING_SECS` (30, 5 to 300), `APASSY_CONNECT_TUNNEL_IDLE_SECS` (90, 10 to 3600, above the ping), `APASSY_CONNECT_TUNNEL_STREAM_IDLE_SECS` (900, 60 to 86400), `APASSY_CONNECT_TUNNEL_STREAM_BUFFER_KIB` (256, 64 to 16384). None of them set is the contract's default; they change nothing without the account routes.
+
+`Relay::start` calls `tunnel_routes::start` after the hub opens: with the account routes it makes the broker (`Hub::tunnel`), restores this month's usage, binds each ingress listener whose address is set (a bind failure stops the start), and starts the usage writer. `RunningRelay::stop` stops the ingress, closes every tunnel WebSocket (1000; streams 4001), and writes the usage once more before the data directory unlocks. `RunningRelay::tunnel_ingress_addr` and `tunnel_acme_addr` give the bound addresses.
+
+### 35.12 Usage in `relay.db`
+
+`tunnel_usage` (`account_id`, `month` as `yyyymm` UTC text, `dials`, `streams`, `bytes`) keeps the counters of section 35.1. The writer thread writes the counters that changed every `USAGE_FLUSH_SECS` (60 seconds) and once at stop; a write keeps the larger of the stored and the counted value, so it never lowers a count. At start the rows of the current month go back into the broker (`Broker::restore_usage`), so a restart does not reset a budget: an account over its bytes stays at 429 `tunnel_limit` until the first day of the next month. A crash loses at most the last minute of counts. Rows of earlier months stay as the audit's counts for each account and month (contract section 9).
+
+### 35.13 The edge Worker
+
+The Worker forwards a WebSocket upgrade only on `GET /v1/tunnel/*` (raw and parsed path equal), with its headers unchanged and the edge secret set, and returns the relay's `101` response as it is. An upgrade on any other path or method gets 400 `invalid_request` at the edge, and the relay refuses it again (35.6). `GET /v1/tunnel/dial/*` has `TUNNEL_LIMITER` (namespace 1007, 60 a minute for each IPv4 address or IPv6 /64, the key of `ACCOUNT_LIMITER`); over it 429 `rate_limited` with `Retry-After: 60`. Whether the Workers VPC binding carries a WebSocket upgrade is not verified (docs/OPERATIONS.md section 28.1).

@@ -1849,22 +1849,27 @@ plans already lapsed.
 
 ## 28. The Connect tunnel and the ingress
 
-The broker and the ingress (docs/SPEC.md section 35) are built but not started by `Relay::start` yet: the routes `GET /v1/tunnel/node`, `GET /v1/tunnel/dial/{node_id}`, the grant routes, and the configuration keys come with the account store (unit C1). This section is the plan for the hosted Connect host; the owner does every step.
+The broker and the ingress (docs/SPEC.md section 35) run on a relay with the account routes (`APASSY_RELAY_CONNECT_ACCOUNTS=1`, or `APASSY_RELAY_MODE=connect`). `Relay::start` makes the broker, restores this month's usage from `relay.db`, and starts each ingress listener whose address is set; without the account routes nothing of the tunnel exists and every `/v1/tunnel/...` path is 404. The routes: `POST`/`GET /v1/tunnel/nodes`, `DELETE /v1/tunnel/nodes/{node_id}`, `GET /v1/tunnel/node` and `GET /v1/tunnel/dial/{node_id}` (WebSocket upgrades), `POST`/`GET /v1/tunnel/grants`, `DELETE /v1/tunnel/grants/{grant_id}`. Every other route answers an `Upgrade` with 400 `invalid_request`. This section is the plan for the hosted Connect host; the owner does every step.
 
-### 28.1 Ports and DNS
+### 28.1 Ports, DNS, and keys
 
-- `APASSY_CONNECT_INGRESS_LISTEN` (hosted `0.0.0.0:443`) and `APASSY_CONNECT_ACME_LISTEN` (hosted `0.0.0.0:80`): raw TCP listeners on the Connect host, not through the Cloudflare Worker (it carries HTTP only). Open both in the host firewall.
-- `APASSY_CONNECT_NODE_ZONE` (hosted `node.apassy.wyderka.cc`): a DNS-only (grey cloud) wildcard record `*.node.apassy.wyderka.cc` to the Connect host's address. A proxied record would end TLS at Cloudflare and break the ingress.
-- The tunnel routes stay behind the Worker, which must pass the WebSocket upgrade on `/v1/tunnel/*` unchanged (unit C2-core). Whether the Workers VPC binding carries WebSocket upgrades is not verified; if it does not, the plan's fallback is a Cloudflare Tunnel public hostname for those routes, or the routes directly on the Connect host behind its own TLS.
+- `APASSY_CONNECT_INGRESS_LISTEN` (hosted `0.0.0.0:443`) and `APASSY_CONNECT_ACME_LISTEN` (hosted `0.0.0.0:80`): raw TCP listeners on the Connect host, not through the Cloudflare Worker (it carries HTTP only). Open both in the host firewall and publish both ports of the container. Unset, that listener is off. A port that cannot be bound stops the start ("The tunnel ingress cannot listen on …").
+- `APASSY_CONNECT_NODE_ZONE` (default and hosted `node.apassy.wyderka.cc`): a DNS-only (grey cloud) wildcard record `*.node.apassy.wyderka.cc` to the Connect host's address. A proxied record would end TLS at Cloudflare and break the ingress.
+- The limits of the contract (section 8) are keys with the contract's defaults: `APASSY_CONNECT_TUNNEL_STREAMS` (64), `_NODES` (8), `_DIALS_PER_MINUTE` (60), `_GIB_PER_MONTH` (20 for each person or member), `_PING_SECS` (30), `_IDLE_SECS` (90), `_STREAM_IDLE_SECS` (900), `_STREAM_BUFFER_KIB` (256). docs/SPEC.md section 6 has their bounds; a value out of bounds stops the start.
+- The tunnel routes stay behind the Worker. It forwards a WebSocket upgrade only on `GET /v1/tunnel/*`, unchanged, returns the relay's `101` as it is, refuses an upgrade anywhere else, and limits dials with `TUNNEL_LIMITER` (namespace 1007, 60 a minute for each address or IPv6 /64; `wrangler.jsonc`). **Not verified**: whether the Workers VPC binding (`RELAY`) carries WebSocket upgrades. Check it on a staging deploy with one dial before nodes use Connect; if it does not, the fallback is a Cloudflare Tunnel public hostname for `/v1/tunnel/*`, or the routes directly on the Connect host behind its own TLS.
 - Let's Encrypt allows 50 new certificates a week for one registered domain; every node is one. A dedicated registered domain for node names keeps the site's and the relay's certificates out of that count.
 
 ### 28.2 What to watch
 
 - `IngressHandle::stats` of both listeners (once exported): `rate_limited` and `busy` rising together is one or few addresses flooding; `timeouts` and `malformed` rising is scanning; `unrecognized` is names of no online node; `limited` is accounts at their stream limit or budget.
-- `Broker::usage_all`: accounts with `tripped` (over the month's bytes), and the bytes against the host's own traffic allowance.
+- `tunnel_usage` in `relay.db` (`account_id`, `month`, `dials`, `streams`, `bytes`): the counters of each account and month, written every 60 seconds and at stop. Accounts near 20 GiB for each person or member are near their budget; compare the sum with the host's own traffic allowance.
+- The relay audit: `tunnel_node_registered`, `tunnel_node_updated`, `tunnel_node_removed`, `tunnel_grant_created`, `tunnel_grant_removed`, `tunnel_grants_ended` (ids only).
 - The thread count of the relay process: each open stream uses two threads and each node WebSocket two, bounded by `max_streams` (4096) and `max_nodes` (4096).
-- Nothing in the logs names a client address or carries stream bytes. If a line ever does, it is a bug: stop and report it.
+- Nothing in the logs names a client address or carries stream bytes. If a line ever does, it is a bug: stop and report it. The one tunnel line is "the tunnel usage cannot be written" (a `relay.db` write failed).
 
 ### 28.3 Rollback
 
-The tunnel keeps no state on disk except the stored counters (unit C1). Stopping it: unset the two listen keys and restart; nodes reconnect with backoff and devices fall back to the tailnet. The vendored HTTP change (`GET` upgrades reach the handler) stays; the routing step answers an upgrade on any other route as before.
+- The ingress alone: unset the two listen keys and restart; nodes keep their WebSockets for devices, and cloud agents get no answer on 443 and 80.
+- The whole tunnel goes only with the account routes (`APASSY_RELAY_CONNECT_ACCOUNTS=0`); nodes reconnect with backoff and devices fall back to the tailnet.
+- The tunnel's rows (`tunnel_node`, `tunnel_grant`, `tunnel_usage`) are part of directory 1006 and stay. A restart keeps the month's budgets (the stop writes them). Deleting `tunnel_usage` rows resets budgets: do it only to correct a counting bug, with a backup first.
+- The vendored HTTP change (`GET` upgrades reach the handler) stays; `http::handle` refuses an upgrade on every route but the two tunnel routes.
