@@ -388,6 +388,9 @@ pub struct Hub {
     /// Apassy Connect accounts: the sign-in state in memory, the plan and group seams,
     /// and the entitlement signer (`server::account`).
     pub(crate) accounts: crate::server::account::Accounts,
+    /// The Connect tunnel broker (`server::tunnel_routes`): set once by `Relay::start`
+    /// when the account routes are on, else never.
+    pub(crate) tunnel: std::sync::OnceLock<crate::server::tunnel::Broker>,
 }
 
 impl Hub {
@@ -434,6 +437,7 @@ impl Hub {
             connect_polls: Arc::new(AtomicUsize::new(0)),
             connect_feed_polls: Arc::new(AtomicUsize::new(0)),
             oauth_failures: crate::server::oauth::ClientFailures::default(),
+            tunnel: std::sync::OnceLock::new(),
         });
         if hub.config.connect.accounts {
             crate::server::account::record_signing_key(&hub, crate::now_unix())?;
@@ -606,6 +610,11 @@ impl Hub {
             }
             None => None,
         }
+    }
+
+    /// The Connect tunnel broker, on a started relay with the account routes.
+    pub fn tunnel(&self) -> Option<&crate::server::tunnel::Broker> {
+        self.tunnel.get()
     }
 
     /// Installs the plans of billing (C2): until then every account has none.

@@ -50,6 +50,7 @@ use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{
     Core, account, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, push, sync,
+    tunnel_routes,
 };
 use crate::session::SessionSource;
 
@@ -1357,6 +1358,20 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (url.clone(), String::new()),
     };
+    // Only the two tunnel routes take an `Upgrade` (docs/SPEC.md section 35.6). Every
+    // other request that asks for one is 400 before any handler sees it or a body is read,
+    // on every listener. (The transport refuses an upgrade with a body or of another
+    // method itself.)
+    if wants_upgrade(&request) && !upgrade_allowed(hub, listener.scope, &method, &path) {
+        request.abort_input();
+        respond_json(
+            request,
+            400,
+            &RelayError::invalid("This route does not upgrade the connection.").to_envelope(),
+            true,
+        );
+        return;
+    }
     // The MCP authorization flow, on a relay that has it (an embedded node), and never on
     // its tailnet listener.
     let oauth_route = hub
@@ -1423,6 +1438,11 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
     // the paths fall through to the route table and are 404.
     if hub.config.connect.accounts && account::is_account_path(&path) {
         respond_account(hub, listener, counted, request, &method, &path, now);
+        return;
+    }
+    // The Connect tunnel (connect-tunnel-v1): with the account routes only, as they.
+    if hub.config.connect.accounts && tunnel_routes::is_tunnel_path(&path) {
+        respond_tunnel(hub, listener, counted, request, &method, &path, now);
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
@@ -1865,6 +1885,103 @@ fn respond_account(
         }
     };
     match account::dispatch(hub, &caller, &endpoint, &body, now) {
+        Ok(result) => respond_ok(request, result),
+        Err(error) => respond_error(request, &error),
+    }
+}
+
+/// A request that asks to upgrade its connection: an `Upgrade` header, or a `Connection`
+/// header with the token `upgrade`.
+fn wants_upgrade(request: &Request) -> bool {
+    request.headers().iter().any(|header| {
+        header.field.equiv("Upgrade")
+            || (header.field.equiv("Connection")
+                && header
+                    .value
+                    .as_str()
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade")))
+    })
+}
+
+/// An upgrade may go on: one of the two tunnel routes, on the node listener of a relay
+/// with the account routes.
+fn upgrade_allowed(hub: &Hub, scope: Scope, method: &str, path: &str) -> bool {
+    hub.config.connect.accounts
+        && scope == Scope::Node
+        && tunnel_routes::is_upgrade_route(method, path)
+}
+
+/// The tunnel routes (connect-tunnel-v1 sections 3 and 6). The two WebSocket routes go to
+/// the broker, which checks them in the contract's order and answers `101` or an error;
+/// the JSON routes read the caller, the body, and the caller again, as the account routes.
+fn respond_tunnel(
+    hub: &Hub,
+    listener: &Listener,
+    counted: Counted,
+    mut request: Request,
+    method: &str,
+    path: &str,
+    now: u64,
+) {
+    let endpoint = match tunnel_routes::route(method, path) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    let Some(broker) = hub.tunnel() else {
+        respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
+        return;
+    };
+    match &endpoint {
+        tunnel_routes::TunnelEndpoint::NodeSocket => {
+            broker.serve_node(request);
+            return;
+        }
+        tunnel_routes::TunnelEndpoint::Dial(node_id) => {
+            broker.serve_dial(request, node_id);
+            return;
+        }
+        _ => {}
+    }
+    let body_method = if method == "DELETE" { "POST" } else { method };
+    let authorization = header_value(&request, "Authorization");
+    let token = auth::bearer(authorization.as_deref());
+    let refused = |error: &RelayError| {
+        if error.code == codes::UNAUTHENTICATED {
+            listener.record_failure(counted, now);
+            hub.refusal(
+                now,
+                "account_token",
+                "auth_failed",
+                &json!({"code": error.code, "path_kind": "tunnel"}),
+            );
+        }
+    };
+    if let Err(error) = account::authenticate(hub, token, now) {
+        refused(&error);
+        respond_error(request, &error);
+        return;
+    }
+    let body = match read_body(&mut request, body_method) {
+        Ok(body) => body,
+        Err(error) => {
+            respond_error(request, &error);
+            return;
+        }
+    };
+    let now = now_unix();
+    let caller = match account::authenticate(hub, token, now) {
+        Ok(caller) => caller,
+        Err(error) => {
+            refused(&error);
+            respond_error(request, &error);
+            return;
+        }
+    };
+    match tunnel_routes::dispatch(hub, broker, &caller, &endpoint, &body, now) {
         Ok(result) => respond_ok(request, result),
         Err(error) => respond_error(request, &error),
     }

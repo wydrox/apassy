@@ -39,6 +39,7 @@ pub mod store;
 pub mod stripe;
 pub mod sync;
 pub mod tunnel;
+pub mod tunnel_routes;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -376,6 +377,9 @@ pub struct RunningRelay {
     tailnet_handle: Option<JoinHandle<RelayResult<()>>>,
     tailnet_local_handle: Option<JoinHandle<RelayResult<()>>>,
     operator: Option<JoinHandle<()>>,
+    /// The Connect tunnel (with the account routes only): the broker, the ingress, and
+    /// the usage writer.
+    tunnel: Option<tunnel_routes::TunnelRuntime>,
 }
 
 impl RunningRelay {
@@ -397,6 +401,18 @@ impl RunningRelay {
     /// The live sessions of every team, as the proxy reads them.
     pub fn sessions(&self) -> Arc<dyn SessionSource> {
         self.hub.clone()
+    }
+
+    /// The bound address of the tunnel's SNI ingress (`APASSY_CONNECT_INGRESS_LISTEN`).
+    pub fn tunnel_ingress_addr(&self) -> Option<SocketAddr> {
+        self.tunnel
+            .as_ref()
+            .and_then(|tunnel| tunnel.ingress_addr())
+    }
+
+    /// The bound address of the tunnel's ACME listener (`APASSY_CONNECT_ACME_LISTEN`).
+    pub fn tunnel_acme_addr(&self) -> Option<SocketAddr> {
+        self.tunnel.as_ref().and_then(|tunnel| tunnel.acme_addr())
     }
 
     /// The teams of this relay.
@@ -435,6 +451,10 @@ impl RunningRelay {
         }
         if let Some(handle) = self.operator.take() {
             let _ = handle.join();
+        }
+        // The usage of the month reaches `relay.db` before the data directory unlocks.
+        if let Some(tunnel) = self.tunnel.take() {
+            tunnel.stop();
         }
         self.hub.close_all();
     }
@@ -674,6 +694,19 @@ impl Relay {
             let _ = operator::remove_stale(&hub.config.admin_socket_path());
             None
         };
+        // The tunnel exists only with the account routes; dropped on any error below, it
+        // stops again.
+        let tunnel = match tunnel_routes::start(&hub) {
+            Ok(tunnel) => tunnel,
+            Err(error) => {
+                stop.store(true, Ordering::Relaxed);
+                if let Some(operator) = operator {
+                    let _ = operator.join();
+                }
+                hub.close_all();
+                return Err(error);
+            }
+        };
         let serving = http::Serving {
             hub: hub.clone(),
             proxy: proxy.clone(),
@@ -803,6 +836,7 @@ impl Relay {
             tailnet_handle,
             tailnet_local_handle,
             operator,
+            tunnel,
         })
     }
 }
