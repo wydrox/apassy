@@ -66,8 +66,9 @@ pub use relay_crypto::{
 };
 pub use relay_http::{
     Cancel, DEFAULT_RELAY_URL, ExternalAnswer, ExternalRequest, HttpError, HttpTransport,
-    MAX_ALTERNATIVES, RelayUrl, TlsTrust, clear_local_route, post_json, set_http_transport,
-    set_local_route,
+    MAX_ALTERNATIVES, NodeRoute, RelayUrl, TUNNEL_DIAL_PATH, TlsTrust, TunnelDialer, TunnelPipe,
+    TunnelRoute, clear_local_route, post_json, probe_direct, set_http_transport, set_local_route,
+    valid_node_id,
 };
 pub use state::{SyncState, TransportKind};
 pub use transport::{FolderTransport, Precondition, Remote, RemoteHead, SyncTransport, Transport};

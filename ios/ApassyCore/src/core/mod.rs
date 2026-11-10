@@ -12,6 +12,10 @@
 //! `suspend`, and `remove_vault` drop them all. The agent feeds of the Macs (section
 //! 5.12, `feed.rs`) live in the same contexts.
 //!
+//! Every relay call of the questions, the feed, the access requests, the joins, and relay
+//! sync goes through one transport (`transport.rs`, section 5.15): the tailnet route of a
+//! pinned node first, and its Apassy Connect dial second, with the same pinned TLS.
+//!
 //! The Apple Watch runs this core with the role `watch` (ADR 0039, section 5.13): it holds
 //! one questions-only replica vault, answers access requests only, and refuses every
 //! other call ([`WATCH_OPS`]).
@@ -38,13 +42,14 @@ mod passkey;
 mod questions;
 mod request_history;
 mod sync;
+mod transport;
 mod watchtower;
 mod wire;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +61,7 @@ use apassy::vault::Vault;
 use config::{Paths, PhoneList, VaultEntry};
 pub use errors::{CoreError, CoreResult};
 pub use request_history::{HistoryKeyError, HistoryKeyProvider};
+pub use transport::{DialState, Timing as DialTiming};
 use wire::{Empty, Secret, ok, params};
 
 /// The vault schema of this core. A copy of another schema is refused.
@@ -158,13 +164,12 @@ pub struct Core {
     /// The pause of the feed reads after a `403 feed_rate`: a minute
     /// ([`Core::with_feed_rate_pause`] shortens it for tests).
     feed_rate_pause: Duration,
-    /// The Apassy Connect account of this iPhone (section 5.14, `connect.rs`).
-    connect: Mutex<connect::State>,
-    /// The Keychain store of the account device key, from the app
-    /// (`apassy_core_set_account_key_store`).
-    connect_keys: OnceLock<Arc<dyn apassy::connect::DeviceKeyStore>>,
-    /// The Connect origin, without a trailing slash.
-    connect_origin: String,
+    /// The Apassy Connect account of this iPhone (section 5.14, `connect.rs`): its state,
+    /// the Keychain store of its key, its file, and the Connect origin.
+    connect: Arc<connect::Accounts>,
+    /// The routes of the relay calls (section 5.15, `transport.rs`): the tailnet, then
+    /// the Connect dial with the account token.
+    transport: transport::Transport,
 }
 
 /// What a close of the vault ends.
@@ -319,6 +324,15 @@ impl Core {
                 .map(|client| client.origin().to_owned())
                 .map_err(|_| CoreError::invalid("The Apassy Connect address is not valid."))?,
         };
+        // The pairing codes that this process reads may name this Connect host only
+        // (node-pairing-v1 section 7a).
+        apassy::connect::set_configured_origin(&connect_origin);
+        let connect = Arc::new(connect::Accounts::new(
+            apassy::connect::account_file(&paths.data_dir),
+            connect_origin,
+        ));
+        // Only the app dials through Connect: not the AutoFill extension, not the watch.
+        let transport = transport::Transport::new(Arc::clone(&connect), role == Role::App);
         let list = PhoneList::load(&paths.data_dir)?;
         let questions = questions::State::load(&paths.data_dir);
         let core = Self {
@@ -344,9 +358,8 @@ impl Core {
             questions: Mutex::new(questions),
             opening: Mutex::new(()),
             feed_rate_pause: feed::FEED_RATE_PAUSE,
-            connect: Mutex::new(connect::State::default()),
-            connect_keys: OnceLock::new(),
-            connect_origin,
+            connect,
+            transport,
         };
         if core.role != Role::Autofill {
             core.clear_unfinished_joins();
@@ -365,6 +378,20 @@ impl Core {
     pub fn with_feed_rate_pause(mut self, pause: Duration) -> Self {
         self.feed_rate_pause = pause;
         self
+    }
+
+    /// Other times of the Connect dial (pings, idle limit, the waits of its states),
+    /// for tests that cannot wait 90 s or 15 minutes. The JSON config has no such
+    /// setting. A dial that is open keeps its times.
+    #[doc(hidden)]
+    pub fn set_dial_timing(&self, timing: DialTiming) {
+        self.transport.set_timing(timing);
+    }
+
+    /// The dials of this core that reached Connect, for tests (no retry storm).
+    #[doc(hidden)]
+    pub fn dials_for_test(&self) -> u64 {
+        self.transport.dials()
     }
 
     /// One call (contract section 4): the answer as JSON.
@@ -815,11 +842,12 @@ impl Core {
     /// The relay sync of the selected vault, made again after a selection.
     fn select_relay(&self) -> CoreResult<()> {
         let entry = guard(&self.list).selected_entry().cloned();
-        // A node relay keeps its pin and its alternatives (node-pairing-v1 section 9).
+        // A node relay keeps its pin, its alternatives, and its Connect route
+        // (node-pairing-v1 sections 7a and 9), dialled by the transport of this core.
         let relay = match entry {
             Some(entry) => entry
                 .relay_config(&self.paths.data_dir, &self.paths.vault_file(&entry.id))?
-                .map(RelaySync::new),
+                .map(|config| RelaySync::new(self.transport.config(config))),
             None => None,
         };
         *guard(&self.relay) = relay;

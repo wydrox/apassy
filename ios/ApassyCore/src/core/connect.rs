@@ -30,17 +30,19 @@
 //! directory (mode 0600): the origin, the ids, the names, and the public key. No key, no
 //! token, no email, no code, no plan.
 //!
-//! The account token stays inside the core: [`Core::connect_with_token`] gives it to a
-//! call of the Connect client of the account's origin only (unit I2 dials with it).
+//! The account token stays inside the core: [`Accounts::with_token`] gives it to a call
+//! of the Connect client of the account's origin only. The dials of `transport.rs` (unit
+//! I2) take it there, for the `Authorization` of `GET /v1/tunnel/dial/{node}` to the same
+//! origin. The account lives in [`Accounts`], which the core and its transport share.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 use apassy::connect::{
     AccountState, ConnectAccount, ConnectClient, ConnectError, DeviceKeyStore, JoinPoll,
-    JoinRequest, LinkCode, PlanView, account_file, forget_this_device,
+    JoinRequest, LinkCode, PlanView, forget_this_device,
 };
 
 use super::errors::{CoreError, CoreResult};
@@ -129,9 +131,14 @@ pub struct StatusOut {
     /// True when Connect did not answer: `plan` is the last answer of this process.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
-    /// True when this iPhone reaches its Mac through Apassy Connect (the dial of unit
-    /// I2). Always false until then.
+    /// True when this iPhone reaches its Mac through Apassy Connect now: the last
+    /// connection to a node of its vaults went through the dial (unit I2,
+    /// `transport.rs`). False after a lock, and while the tailnet reaches the Mac.
     pub dial_route: bool,
+    /// The state of the dial (`transport::DialState`): `unused`, `connected`,
+    /// `not_on_connect`, `mac_offline`, `limit`, `unreachable`, or `refused`. Quiet
+    /// states for the app: none is an error, none is a purchase hint.
+    pub dial_state: &'static str,
     /// A waiting join, as `connect_join` answered it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join: Option<JoinOut>,
@@ -211,6 +218,24 @@ fn status_plan(view: &PlanView, group: Option<StatusGroup>, people: Option<Peopl
     }
 }
 
+impl StatusPlan {
+    /// "Not on Connect": no plan, not entitled, no times.
+    fn not_on_connect() -> Self {
+        Self {
+            plan: None,
+            status: "none".to_owned(),
+            entitled: false,
+            renews_at: None,
+            ends_at: None,
+            grace_until: None,
+            read_only_until: None,
+            delete_at: None,
+            group: None,
+            people: None,
+        }
+    }
+}
+
 /// The view of a join.
 fn join_out(join: &JoinRequest, state: &'static str) -> JoinOut {
     JoinOut {
@@ -228,26 +253,130 @@ fn link_code(text: &str) -> Option<LinkCode> {
     LinkCode::parse(text.trim())
 }
 
+/// The Apassy Connect account of one process: the [`State`], the Keychain store of the
+/// account device key, the account file, and the Connect origin. The core's calls and
+/// the dials of its transport (`transport.rs`) share it.
+pub struct Accounts {
+    state: Mutex<State>,
+    /// The Keychain store of the account device key, from the app
+    /// (`apassy_core_set_account_key_store`).
+    keys: OnceLock<Arc<dyn DeviceKeyStore>>,
+    /// The account file.
+    path: PathBuf,
+    /// The Connect origin, without a trailing slash.
+    origin: String,
+}
+
+impl Accounts {
+    pub(super) fn new(path: PathBuf, origin: String) -> Self {
+        Self {
+            state: Mutex::new(State::default()),
+            keys: OnceLock::new(),
+            path,
+            origin,
+        }
+    }
+
+    fn keys(&self) -> Result<Arc<dyn DeviceKeyStore>, ConnectError> {
+        self.keys
+            .get()
+            .cloned()
+            .ok_or(ConnectError::KeychainUnavailable)
+    }
+
+    /// Run `call` with the account of this iPhone, opened from the state file and the
+    /// Keychain when it is not in memory. `None` without an account. The account is put
+    /// back after the call unless a forget or a join came in between. A confirmed revoke
+    /// forgets the account on this iPhone (the key and the state file): `Revoked`.
+    fn with_account<T>(
+        &self,
+        call: impl FnOnce(&mut ConnectAccount) -> Result<T, ConnectError>,
+    ) -> Result<Option<T>, ConnectError> {
+        let (account, generation) = {
+            let mut state = guard(&self.state);
+            (state.account.take(), state.generation)
+        };
+        let mut account = match account {
+            Some(account) => account,
+            None => {
+                let store = self.keys()?;
+                match ConnectAccount::open(store.as_ref(), &self.path) {
+                    Ok(Some(account)) => account,
+                    Ok(None) => return Ok(None),
+                    // The state file names a key that the Keychain does not hold: the
+                    // account cannot be used on this iPhone any more.
+                    Err(ConnectError::KeyLost) => {
+                        self.forget_locally()?;
+                        return Err(ConnectError::Revoked);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        let result = call(&mut account);
+        if matches!(result, Err(ConnectError::Revoked)) {
+            drop(account);
+            self.forget_locally()?;
+            return Err(ConnectError::Revoked);
+        }
+        {
+            let mut state = guard(&self.state);
+            if state.generation == generation && state.account.is_none() {
+                state.account = Some(account);
+            }
+        }
+        result.map(Some)
+    }
+
+    /// The account token for a call of the Connect client of the account's origin, and
+    /// only there (contract section 3, plan 0035 I-2): the dials of unit I2 take it. A
+    /// `401` signs in again once. `None` without an account.
+    pub(super) fn with_token<T>(
+        &self,
+        mut call: impl FnMut(&ConnectClient, &str) -> Result<T, ConnectError>,
+    ) -> Result<Option<T>, ConnectError> {
+        self.with_account(|account| account.with_token(&mut call))
+    }
+
+    fn forget_locally(&self) -> Result<(), ConnectError> {
+        {
+            let mut state = guard(&self.state);
+            state.generation += 1;
+            state.account = None;
+            state.last = None;
+        }
+        let store = self.keys()?;
+        forget_this_device(store.as_ref(), &self.path).map(|_| ())
+    }
+
+    /// The account token and the account device key leave memory.
+    fn sign_out(&self) {
+        let account = {
+            let mut state = guard(&self.state);
+            state.generation += 1;
+            state.account.take()
+        };
+        drop(account);
+    }
+}
+
 impl Core {
     /// The Keychain store of the account device key (`apassy_core_set_account_key_store`).
     /// Once per core; a second store is refused (false).
     pub fn set_account_key_store(&self, store: Arc<dyn DeviceKeyStore>) -> bool {
-        self.connect_keys.set(store).is_ok()
+        self.connect.keys.set(store).is_ok()
     }
 
     fn account_keys(&self) -> CoreResult<Arc<dyn DeviceKeyStore>> {
-        self.connect_keys
-            .get()
-            .cloned()
-            .ok_or_else(|| core_error(ConnectError::KeychainUnavailable))
+        self.connect.keys().map_err(core_error)
     }
 
     fn account_path(&self) -> PathBuf {
-        account_file(&self.paths.data_dir)
+        self.connect.path.clone()
     }
 
     fn connect_client(&self) -> CoreResult<ConnectClient> {
-        ConnectClient::new(&self.connect_origin).map_err(core_error)
+        ConnectClient::new(&self.connect.origin).map_err(core_error)
     }
 
     pub(super) fn connect_call(&self, op: &str, request: &str) -> CoreResult<String> {
@@ -283,7 +412,7 @@ impl Core {
         if AccountState::load(&path).map_err(core_error)?.is_some() {
             return Err(core_error(ConnectError::AccountExists));
         }
-        let generation = guard(&self.connect).generation;
+        let generation = guard(&self.connect.state).generation;
         let join = JoinRequest::start_on(
             self.connect_client()?,
             store.as_ref(),
@@ -294,7 +423,7 @@ impl Core {
         )
         .map_err(core_error)?;
         let view = join_out(&join, "waiting");
-        let mut state = guard(&self.connect);
+        let mut state = guard(&self.connect.state);
         if state.generation == generation && state.join.is_none() {
             state.join = Some(join);
         } else {
@@ -307,7 +436,7 @@ impl Core {
     /// Ask whether the Mac confirmed. A refusal or an expired code ends the join.
     fn connect_join_poll(&self) -> CoreResult<JoinOut> {
         let (join, generation) = {
-            let mut state = guard(&self.connect);
+            let mut state = guard(&self.connect.state);
             (state.join.take(), state.generation)
         };
         let mut join = join
@@ -315,7 +444,7 @@ impl Core {
         match join.poll() {
             Ok(JoinPoll::Waiting) => {
                 let view = join_out(&join, "waiting");
-                let mut state = guard(&self.connect);
+                let mut state = guard(&self.connect.state);
                 if state.generation == generation && state.join.is_none() {
                     state.join = Some(join);
                 } else {
@@ -325,12 +454,12 @@ impl Core {
                 Ok(view)
             }
             Ok(JoinPoll::Refused) => {
-                guard(&self.connect).generation += 1;
+                guard(&self.connect.state).generation += 1;
                 Err(core_error(ConnectError::JoinRefused))
             }
             Ok(JoinPoll::Confirmed(account)) => {
                 let view = join_out(&join, "confirmed");
-                let mut state = guard(&self.connect);
+                let mut state = guard(&self.connect.state);
                 state.generation += 1;
                 state.account = Some(*account);
                 state.last = None;
@@ -342,12 +471,12 @@ impl Core {
                     error,
                     ConnectError::Offline | ConnectError::Broken | ConnectError::RateLimited(_)
                 ) {
-                    let mut state = guard(&self.connect);
+                    let mut state = guard(&self.connect.state);
                     if state.generation == generation && state.join.is_none() {
                         state.join = Some(join);
                     }
                 } else {
-                    guard(&self.connect).generation += 1;
+                    guard(&self.connect.state).generation += 1;
                 }
                 Err(core_error(error))
             }
@@ -357,7 +486,7 @@ impl Core {
     /// Give up a join that waits (best effort: Connect ends a link after 10 minutes).
     pub(super) fn connect_join_cancel(&self) {
         let join = {
-            let mut state = guard(&self.connect);
+            let mut state = guard(&self.connect.state);
             state.generation += 1;
             state.join.take()
         };
@@ -366,67 +495,21 @@ impl Core {
         }
     }
 
-    /// Run `call` with the account of this iPhone, opened from the state file and the
-    /// Keychain when it is not in memory. `None` without an account. The account is put
-    /// back after the call unless a forget or a join came in between. A confirmed revoke
-    /// forgets the account on this iPhone (the key and the state file).
+    /// [`Accounts::with_account`] with the errors of the core.
     fn with_account<T>(
         &self,
         call: impl FnOnce(&mut ConnectAccount) -> Result<T, ConnectError>,
     ) -> CoreResult<Option<T>> {
-        let (account, generation) = {
-            let mut state = guard(&self.connect);
-            (state.account.take(), state.generation)
-        };
-        let mut account = match account {
-            Some(account) => account,
-            None => {
-                let store = self.account_keys()?;
-                match ConnectAccount::open(store.as_ref(), &self.account_path()) {
-                    Ok(Some(account)) => account,
-                    Ok(None) => return Ok(None),
-                    // The state file names a key that the Keychain does not hold: the
-                    // account cannot be used on this iPhone any more.
-                    Err(ConnectError::KeyLost) => {
-                        self.forget_locally()?;
-                        return Err(core_error(ConnectError::Revoked));
-                    }
-                    Err(error) => return Err(core_error(error)),
-                }
-            }
-        };
-        let result = call(&mut account);
-        if matches!(result, Err(ConnectError::Revoked)) {
-            drop(account);
-            self.forget_locally()?;
-            return Err(core_error(ConnectError::Revoked));
-        }
-        {
-            let mut state = guard(&self.connect);
-            if state.generation == generation && state.account.is_none() {
-                state.account = Some(account);
-            }
-        }
-        result.map(Some).map_err(core_error)
-    }
-
-    /// The account token for a call of the Connect client of the account's origin, and
-    /// only there (contract section 3, plan 0035 I-2): unit I2 dials the Mac with it. A
-    /// `401` signs in again once. `None` without an account.
-    #[allow(dead_code)]
-    pub(super) fn connect_with_token<T>(
-        &self,
-        mut call: impl FnMut(&ConnectClient, &str) -> Result<T, ConnectError>,
-    ) -> CoreResult<Option<T>> {
-        self.with_account(|account| account.with_token(&mut call))
+        self.connect.with_account(call).map_err(core_error)
     }
 
     /// The plan of the account of this iPhone, as the app shows it.
     fn connect_status(&self) -> CoreResult<StatusOut> {
-        let join = guard(&self.connect)
+        let join = guard(&self.connect.state)
             .join
             .as_ref()
             .map(|join| join_out(join, "waiting"));
+        let dial_state = self.transport.dial_state();
         let none = |removed: bool, join: Option<JoinOut>| StatusOut {
             state: "none",
             removed,
@@ -435,6 +518,7 @@ impl Core {
             plan: None,
             stale: false,
             dial_route: false,
+            dial_state: dial_state.text(),
             join,
         };
         let answer = self.with_account(|account| {
@@ -478,7 +562,13 @@ impl Core {
                 let Ok(Some(state)) = AccountState::load(&self.account_path()) else {
                     return Err(error);
                 };
-                let last = guard(&self.connect).last.clone();
+                // A dial that Connect refused with `plan_required` is newer than the last
+                // plan of this process: "Not on Connect".
+                let last = if dial_state == super::DialState::NotOnConnect {
+                    Some(StatusPlan::not_on_connect())
+                } else {
+                    guard(&self.connect.state).last.clone()
+                };
                 return Ok(StatusOut {
                     state: "account",
                     removed: false,
@@ -486,13 +576,14 @@ impl Core {
                     device_name: Some(state.device_name),
                     plan: last,
                     stale: true,
-                    dial_route: false,
+                    dial_route: self.transport.dial_route(),
+                    dial_state: dial_state.text(),
                     join,
                 });
             }
             Err(error) => return Err(error),
         };
-        guard(&self.connect).last = Some(plan.clone());
+        guard(&self.connect.state).last = Some(plan.clone());
         Ok(StatusOut {
             state: "account",
             removed: false,
@@ -500,7 +591,8 @@ impl Core {
             device_name: Some(device_name),
             plan: Some(plan),
             stale: false,
-            dial_route: false,
+            dial_route: self.transport.dial_route(),
+            dial_state: dial_state.text(),
             join,
         })
     }
@@ -512,7 +604,8 @@ impl Core {
         self.connect_join_cancel();
         let had_state = self.account_path().exists();
         let had_key = self
-            .connect_keys
+            .connect
+            .keys
             .get()
             .is_some_and(|store| matches!(store.read(), Ok(Some(_))));
         self.forget_locally()?;
@@ -520,26 +613,14 @@ impl Core {
     }
 
     fn forget_locally(&self) -> CoreResult<()> {
-        {
-            let mut state = guard(&self.connect);
-            state.generation += 1;
-            state.account = None;
-            state.last = None;
-        }
-        let store = self.account_keys()?;
-        forget_this_device(store.as_ref(), &self.account_path())
-            .map(|_| ())
-            .map_err(core_error)
+        self.connect.forget_locally().map_err(core_error)
     }
 
-    /// `lock` and `suspend`: the account token and the account device key leave memory.
-    /// The next Connect call reads the key again from the Keychain.
+    /// `lock` and `suspend`: the account token and the account device key leave memory,
+    /// and every dial through Connect ends (`transport.rs`). The next Connect call reads
+    /// the key again from the Keychain.
     pub(super) fn connect_sign_out(&self) {
-        let account = {
-            let mut state = guard(&self.connect);
-            state.generation += 1;
-            state.account.take()
-        };
-        drop(account);
+        self.transport.close();
+        self.connect.sign_out();
     }
 }

@@ -1305,8 +1305,12 @@ pub struct RelayConfig {
     /// How the client checks the relay's certificate: pinned for a node
     /// (node-pairing-v1). [`TlsTrust::System`] from [`Self::in_data_dir`].
     pub trust: TlsTrust,
-    /// The alternative destinations of a pinned relay, `host:port` each, in order.
+    /// The alternative destinations of a pinned relay, `host:port` each, in order, and
+    /// its Connect route last (node-pairing-v1 section 7a).
     pub alt: Vec<String>,
+    /// What dials the Connect route of a pinned relay ([`Self::with_dialer`], the iPhone
+    /// core). None: the route is kept and never dialled.
+    dialer: Option<super::relay_http::DialerRef>,
 }
 
 impl RelayConfig {
@@ -1322,6 +1326,7 @@ impl RelayConfig {
             work_dir: dir,
             trust: TlsTrust::System,
             alt: Vec::new(),
+            dialer: None,
         }
     }
 
@@ -1355,9 +1360,21 @@ impl RelayConfig {
         self.with_trust(url.trust(), &url.alternative_list())
     }
 
-    /// The relay address with its trust and alternatives.
+    /// The same layout whose relay address dials its Connect route with `dialer`.
+    #[must_use]
+    pub fn with_dialer(mut self, dialer: Arc<dyn super::relay_http::TunnelDialer>) -> Self {
+        self.dialer = Some(super::relay_http::DialerRef(dialer));
+        self
+    }
+
+    /// The relay address with its trust and alternatives (and the dialer of its Connect
+    /// route, when the layout has one).
     pub fn relay_url(&self) -> Result<RelayUrl, SyncError> {
-        RelayUrl::parse_with_trust(&self.url, self.trust)?.alternatives(&self.alt)
+        let url = RelayUrl::parse_with_trust(&self.url, self.trust)?.alternatives(&self.alt)?;
+        Ok(match &self.dialer {
+            Some(dialer) => url.with_dialer(Arc::clone(&dialer.0)),
+            None => url,
+        })
     }
 }
 
@@ -2743,6 +2760,7 @@ impl PendingJoin {
                 code: Zeroizing::new(trimmed.to_owned()),
                 pin: None,
                 alt: Vec::new(),
+                tunnel: None,
                 name: None,
                 handoff: None,
                 without_handoff: Zeroizing::new(format!("{}/link#{trimmed}", url.as_str())),
@@ -2770,7 +2788,25 @@ impl PendingJoin {
         device: &str,
         key: DeviceKey,
     ) -> Result<Self, SyncError> {
+        Self::request_via(text, relay_url, device, key, None)
+    }
+
+    /// [`Self::request_with_key`] whose address dials the Connect route of a pinned link
+    /// with `dialer` (the iPhone core, node-pairing-v1 section 7a): the join and every
+    /// later call of its session reach the node through the dial when the tailnet does
+    /// not. The requests and their bodies are the same.
+    pub fn request_via(
+        text: &str,
+        relay_url: &str,
+        device: &str,
+        key: DeviceKey,
+        dialer: Option<Arc<dyn super::relay_http::TunnelDialer>>,
+    ) -> Result<Self, SyncError> {
         let (url, code) = Self::parse_link(text, relay_url)?;
+        let url = match dialer {
+            Some(dialer) => url.with_dialer(dialer),
+            None => url,
+        };
         let team_id = link_code_team(&code).unwrap_or_default().to_owned();
         let answer: LinkAnswer = call(
             &url,
