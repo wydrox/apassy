@@ -802,8 +802,9 @@ fn a_webhook_without_a_usable_signature_is_refused_before_its_body_is_read() {
     for signature in [None, Some("t=1000,v1=00"), Some("v1=00")] {
         let mut stream = std::net::TcpStream::connect(&address).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+        let sent = Instant::now();
         let mut head = format!(
             "POST /v1/stripe/webhook HTTP/1.1\r\nHost: relay.test\r\nX-Apassy-Edge: {}\r\n\
              Content-Type: application/json\r\nContent-Length: 200000\r\n",
@@ -822,8 +823,21 @@ fn a_webhook_without_a_usable_signature_is_refused_before_its_body_is_read() {
             assert!(read > 0, "the relay closed without an answer");
             answer.extend_from_slice(&buffer[..read]);
         }
+        assert!(sent.elapsed() < Duration::from_secs(2), "{signature:?}");
+        // The rest of the answer: the error names the signature, not the body.
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        while let Ok(read) = stream.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            answer.extend_from_slice(&buffer[..read]);
+        }
         let text = String::from_utf8_lossy(&answer);
         assert!(text.starts_with("HTTP/1.1 400"), "{signature:?}: {text}");
+        assert!(
+            text.contains("The Stripe signature does not verify."),
+            "{signature:?}: {text}"
+        );
     }
     // A signed webhook still works after the refusals.
     let a = c.account("Rafal");

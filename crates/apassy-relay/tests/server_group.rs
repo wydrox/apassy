@@ -651,7 +651,7 @@ fn asked(c: &Connect, owner: &Dev) -> Vec<u32> {
 #[test]
 fn confirms_at_once_never_pass_the_plans_maximum() {
     let c = start();
-    let owner = family(&c, 10);
+    let owner = family(&c, 8);
     for n in 0..7 {
         let person = c.account(&format!("Person {n}"));
         c.add_member(&owner, &person);
@@ -659,6 +659,9 @@ fn confirms_at_once_never_pass_the_plans_maximum() {
     let waiting: Vec<Dev> = (0..4)
         .map(|n| pending(&c, &owner, &format!("Late {n}")))
         .collect();
+    // Eight people are paid for; each confirm asks Stripe for one more, and Stripe takes
+    // its time with the first answer.
+    c.stripe.delay_next("/v1/subscription_items/", 500);
     let answers = confirm_all(&c, &owner, &waiting);
     let ok = answers.iter().filter(|(status, _)| *status == 200).count();
     let full = answers
@@ -667,6 +670,7 @@ fn confirms_at_once_never_pass_the_plans_maximum() {
         .count();
     assert_eq!((ok, full), (2, 2), "{answers:?}");
     assert_eq!(active_members(&c, &owner), 10);
+    assert_eq!(asked(&c, &owner), [9, 10]);
 }
 
 #[test]
