@@ -24,7 +24,10 @@
     // New Connect accounts (POST /v1/account, connect-account-v1), per IPv4 address or IPv6 /64.
     // The Stripe webhook (POST /v1/stripe/webhook) has no limiter: Stripe sends from its own
     // addresses, and the relay checks each event's signature.
-    { "name": "ACCOUNT_LIMITER", "namespace_id": "1006", "simple": { "limit": 5, "period": 60 } }
+    { "name": "ACCOUNT_LIMITER", "namespace_id": "1006", "simple": { "limit": 5, "period": 60 } },
+    // Tunnel dials (GET /v1/tunnel/dial/*, connect-tunnel-v1 section 8), per IPv4 address or
+    // IPv6 /64. The relay also limits the dials of each account (60 a minute).
+    { "name": "TUNNEL_LIMITER", "namespace_id": "1007", "simple": { "limit": 60, "period": 60 } }
   ],
   // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },

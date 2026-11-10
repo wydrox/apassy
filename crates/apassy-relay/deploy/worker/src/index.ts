@@ -6,6 +6,9 @@
 // sender, apns.ts) are handled here and never forwarded. The Stripe webhook
 // (connect-billing-v1 section 7) has its own 256 KiB cap and no per-address limiter:
 // Stripe sends from its own addresses, and the relay checks the signature.
+// A WebSocket upgrade goes to the relay only on `GET /v1/tunnel/*` (connect-tunnel-v1),
+// unchanged, and the relay's `101` comes back as it is; an upgrade anywhere else is
+// refused here. Dials (`GET /v1/tunnel/dial/*`) have their own per-address limiter.
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
 // Node can run it with type stripping in the tests.
 // workerd accepts only handlers as exports of this main module, so values such as
@@ -46,6 +49,8 @@ export interface Env extends PushEnv {
   CONNECT_PREFIX_LIMITER?: CreateLimiter;
   /** Connect accounts (`POST /v1/account`, connect-account-v1), per IPv4 address or IPv6 /64. */
   ACCOUNT_LIMITER?: CreateLimiter;
+  /** Tunnel dials (`GET /v1/tunnel/dial/*`, connect-tunnel-v1), per IPv4 address or IPv6 /64. */
+  TUNNEL_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
 }
@@ -72,6 +77,18 @@ const PROXY_PREFIX = "/p/";
 const STRIPE_WEBHOOK_PATH = "/v1/stripe/webhook";
 /** A new Connect account (connect-account-v1): free, unauthenticated, so limited per client. */
 const ACCOUNT_PATH = "/v1/account";
+/** The tunnel routes (connect-tunnel-v1): the only ones whose WebSocket upgrade is forwarded. */
+const TUNNEL_PREFIX = "/v1/tunnel/";
+/** The dial of a node (connect-tunnel-v1 section 3.3), limited per client. */
+const DIAL_PREFIX = "/v1/tunnel/dial/";
+
+// A request that asks to upgrade its connection: an `Upgrade` header, or a `Connection`
+// header with the token `upgrade`.
+function wantsUpgrade(request: Request): boolean {
+  if (request.headers.has("upgrade")) return true;
+  const connection = request.headers.get("connection") ?? "";
+  return connection.split(",").some((token) => token.trim().toLowerCase() === "upgrade");
+}
 
 function text(status: number, body: string): Response {
   return new Response(body, {
@@ -247,6 +264,11 @@ export default {
     for (const path of [rawPath, url.pathname]) {
       if (path === "/internal" || path.startsWith("/internal/")) return handleInternal(request, env);
     }
+    // The relay refuses an upgrade on every other route too; it never reaches it from here.
+    if (wantsUpgrade(request)) {
+      const tunnel = request.method === "GET" && rawPath === url.pathname && url.pathname.startsWith(TUNNEL_PREFIX);
+      if (!tunnel) return jsonError(400, "invalid_request", "This route does not upgrade the connection.");
+    }
     if (rawPath.startsWith("/dl/") && unsafeDownloadPath(rawPath)) {
       return staticResponse(text(404, "not found"), false);
     }
@@ -279,8 +301,10 @@ export default {
     const isConnect = request.method === "POST" && url.pathname === CONNECT_PATH;
     // A new account is keyed like Connect's first guard: one client usually holds a whole /64.
     const isAccount = request.method === "POST" && url.pathname === ACCOUNT_PATH;
+    // A dial is keyed the same way.
+    const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
     const limiter = limiterFor(request.method, url.pathname, env);
-    if (limiter || isConnect || isAccount) {
+    if (limiter || isConnect || isAccount || isDial) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
       // For Connect the relay also caps the teams of a day for everyone.
@@ -289,7 +313,9 @@ export default {
         ? [[env.CONNECT_LIMITER, connectKey(address)], [env.CONNECT_PREFIX_LIMITER, connectPrefix(address)]]
         : isAccount
           ? [[env.ACCOUNT_LIMITER, connectKey(address)]]
-          : [[limiter, address]];
+          : isDial
+            ? [[env.TUNNEL_LIMITER, connectKey(address)]]
+            : [[limiter, address]];
       for (const [guard, key] of guards) {
         if (!guard) continue;
         try {
@@ -345,7 +371,8 @@ export default {
     };
     try {
       // The body and the answer stream. Nothing is buffered, and no URL is logged:
-      // the path holds session keys.
+      // the path holds session keys. A tunnel upgrade keeps its headers, and the relay's
+      // `101` (with its WebSocket) is returned as it is.
       return await (env.RELAY ? env.RELAY.fetch(target, init) : fetch(target, init));
     } catch {
       return text(502, "relay unreachable");

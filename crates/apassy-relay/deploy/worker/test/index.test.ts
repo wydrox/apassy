@@ -1210,6 +1210,7 @@ function everyLimiter(success: boolean) {
       CONNECT_LIMITER: limiter("connect"),
       CONNECT_PREFIX_LIMITER: limiter("prefix"),
       ACCOUNT_LIMITER: limiter("account"),
+      TUNNEL_LIMITER: limiter("tunnel"),
     },
   };
 }
@@ -1354,5 +1355,125 @@ describe("account rate limit", () => {
       assert.equal(response.status, 201, `${method} ${path}`);
     }
     assert.deepEqual(refused.used, []);
+  });
+});
+
+describe("tunnel", () => {
+  const UPGRADE = {
+    connection: "Upgrade",
+    upgrade: "websocket",
+    "sec-websocket-version": "13",
+    "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+    "sec-websocket-protocol": "apassy-tunnel-v1",
+    authorization: "Bearer apassy_act_acc_k7m2q4x3ca_00",
+  };
+
+  /** A relay that answers the upgrade: one response object, to check it comes back as it is. */
+  function upgradingRelay() {
+    const forwarded: { target: string; method: string; headers: Headers; body: unknown }[] = [];
+    const answer = new Response(null, { status: 200, headers: { "x-switching": "yes" } });
+    const relay: RelayService = {
+      async fetch(input, init) {
+        forwarded.push({ target: input, method: init?.method ?? "", headers: new Headers(init?.headers), body: init?.body });
+        return answer;
+      },
+    };
+    return { forwarded, relay, answer };
+  }
+
+  it("passes a WebSocket upgrade on the two tunnel routes to the relay unchanged and returns its answer", async () => {
+    for (const path of ["/v1/tunnel/node", "/v1/tunnel/dial/node_k7m2q4x3ca"]) {
+      const { forwarded, relay, answer } = upgradingRelay();
+      const response = await call(path, { headers: { ...UPGRADE, "x-apassy-edge": "attacker", "cf-connecting-ip": "198.51.100.7" } }, { RELAY: relay });
+      assert.equal(response, answer, `${path}: the relay's answer is returned as it is`);
+      assert.equal(forwarded.length, 1, path);
+      assert.equal(forwarded[0]!.target, "http://relay" + path);
+      assert.equal(forwarded[0]!.method, "GET");
+      assert.equal(forwarded[0]!.body, undefined);
+      const headers = forwarded[0]!.headers;
+      for (const [name, value] of Object.entries(UPGRADE)) {
+        assert.equal(headers.get(name), value, `${path}: ${name}`);
+      }
+      assert.equal(headers.get("x-apassy-edge"), SECRET);
+      assert.equal(headers.get("content-length"), null);
+    }
+  });
+
+  it("refuses an upgrade on every other path or method before the relay", async () => {
+    const { forwarded, relay } = upgradingRelay();
+    const cases: [string, string][] = [
+      ["GET", "/v1/me"],
+      ["GET", "/mcp"],
+      ["POST", "/mcp"],
+      ["GET", "/p/apassy_ses_x/api.example.com/socket"],
+      ["GET", "/v1/account"],
+      ["GET", "/v1/questions"],
+      ["GET", "/v1/feed"],
+      ["GET", "/v1/tunnel"],
+      ["POST", "/v1/tunnel/nodes"],
+      ["DELETE", "/v1/tunnel/nodes/node_k7m2q4x3ca"],
+      ["GET", "/v1/tunnel/../me"],
+      ["GET", "/install.sh"],
+      ["GET", "/dl/apassy-team"],
+      ["GET", "/"],
+    ];
+    for (const headers of [UPGRADE, { upgrade: "h2c" }, { connection: "keep-alive, Upgrade" }] as Record<string, string>[]) {
+      for (const [method, path] of cases) {
+        const label = `${method} ${path} ${JSON.stringify(headers)}`;
+        const response = await call(path, { method, headers, ...(method === "POST" ? { body: "{}" } : {}) }, { RELAY: relay, ASSETS: { async fetch() { return new Response("asset"); } } });
+        assert.equal(response.status, 400, label);
+        assert.equal((await envelope(response)).error.code, "invalid_request", label);
+      }
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("forwards the JSON tunnel routes as any other route", async () => {
+    const response = await call("/v1/tunnel/nodes", { method: "POST", body: '{"name":"Mac"}' });
+    assert.equal(response.status, 201);
+    assert.equal(await response.text(), 'echo:{"name":"Mac"}');
+    assert.equal(seen[0]!.url, "/v1/tunnel/nodes");
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+  });
+
+  it("uses TUNNEL_LIMITER, and no other, for GET /v1/tunnel/dial/*, keyed by the address or the /64", async () => {
+    for (const [address, key] of [
+      ["198.51.100.7", "198.51.100.7"],
+      ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+    ]) {
+      const refused = everyLimiter(false);
+      const { forwarded, relay } = upgradingRelay();
+      const response = await call("/v1/tunnel/dial/node_k7m2q4x3ca", { headers: { ...UPGRADE, "cf-connecting-ip": address! } }, { ...refused.env, RELAY: relay });
+      assert.equal(response.status, 429, address);
+      assert.equal(response.headers.get("retry-after"), "60");
+      assert.equal((await envelope(response)).error.code, "rate_limited");
+      assert.deepEqual(refused.used, [`tunnel:${key}`], address);
+      assert.deepEqual(forwarded, []);
+    }
+    const allowed = everyLimiter(true);
+    const passed = await call("/v1/tunnel/dial/node_k7m2q4x3ca", {}, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.deepEqual(allowed.used, ["tunnel:unknown"]);
+  });
+
+  it("does not limit the other tunnel routes, and passes a dial when the limiter is missing or fails", async () => {
+    const refused = everyLimiter(false);
+    for (const [method, path] of [
+      ["GET", "/v1/tunnel/node"],
+      ["GET", "/v1/tunnel/nodes"],
+      ["POST", "/v1/tunnel/nodes"],
+      ["POST", "/v1/tunnel/grants"],
+      ["GET", "/v1/tunnel/grants"],
+      ["DELETE", "/v1/tunnel/grants/tgr_w2x4y6z3ab"],
+      ["POST", "/v1/tunnel/dial/node_k7m2q4x3ca"],
+    ]) {
+      const response = await call(path!, { method, ...(method === "POST" ? { body: "{}" } : {}) }, refused.env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+    }
+    assert.deepEqual(refused.used, []);
+    for (const TUNNEL_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+      const response = await call("/v1/tunnel/dial/node_k7m2q4x3ca", {}, { TUNNEL_LIMITER });
+      assert.equal(response.status, 201);
+    }
   });
 });
