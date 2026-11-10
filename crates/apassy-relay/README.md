@@ -32,9 +32,10 @@ The same binary runs in one of two modes (`APASSY_RELAY_MODE`, SPEC section 37):
 
 A relay moves from `relay` to `connect` once, with the relay stopped:
 `apassy-relay backup` (a byte-for-byte copy of the stopped data directory), then
-`apassy-relay connect-cutover` (a dry run that checks that backup and prints the plan), then
-`apassy-relay connect-cutover --confirm-delete-teams` (keeps the vault stores of the accounts
-as plain files and deletes every other team with its files and keys). Before it, the
+`apassy-relay connect-cutover` (a dry run that checks that backup and prints the plan and its
+`plan_sha256`), then `apassy-relay connect-cutover --confirm-delete-teams <plan_sha256>` (keeps
+the vault stores of the accounts as plain files and deletes every other team with its files and
+keys, only if the plan is still the one of the dry run). Before it, the
 transition switch `APASSY_RELAY_FREE_CONNECT=0` ends the free questions-only Connect path.
 The owner's runbook is [docs/operations/connect.md](../../docs/operations/connect.md); the
 operator reference is section 29 of [docs/OPERATIONS.md](docs/OPERATIONS.md).

@@ -9,7 +9,7 @@ The relay is the crate `crates/apassy-relay` of this repository (Apache-2.0, ADR
 
 ## What runs
 
-- **The edge Worker** at `https://apassy-relay.wyderka.cc` (`crates/apassy-relay/deploy/worker`): TLS ends here for the API; it adds the edge secret, bounds every body, limits the creation and dial routes per client, and serves the downloads (`/dl/`), the guide, and `install.sh` from its own assets. Its var `RELAY_MODE` is `connect` after the cutover: no APNs route, no guards of the free Connect teams.
+- **The edge Worker** at `https://apassy-relay.wyderka.cc` (`crates/apassy-relay/deploy/worker`): TLS ends here for the API; it adds the edge secret, bounds every body, limits the creation and dial routes per client, and serves the downloads (`/dl/`), the guide, and `install.sh` from its own assets. Its var `RELAY_MODE` is `connect` after the cutover: no APNs route, and `/v1/connect` answers 410 `hosted_retired` at the edge. A deploy refuses a `RELAY_MODE` that is not the mode the relay reports on `/healthz`.
 - **The relay** in `APASSY_RELAY_MODE=connect`, behind the Worker through a Workers VPC binding and a named tunnel, with no public port for the API. It serves accounts and their devices, vault stores (one relay-sync-v1 team for each vault), billing through Stripe Checkout and the Customer Portal, Family and Team groups, and the tunnel between devices and nodes. Every other route of the relay answers 410 `hosted_retired`. It builds no proxy, sends no push, and has no master key.
 - **The ingress** on ports 443 and 80 of the Connect host (`*.node.apassy.wyderka.cc`, DNS-only): it reads only the server name of a cloud agent's TLS and forwards the raw stream to the node through its tunnel. TLS for cloud agents ends on the user's node.
 - **Push** is not Connect: the nodes push through the free push gateway `push.apassy.wyderka.cc` (D7, [push-gateway.md](push-gateway.md)).
@@ -31,7 +31,7 @@ A master key or the key of any file; a vault passphrase or vault key; an item va
 ## Inspect
 
 ```sh
-curl -sI https://apassy-relay.wyderka.cc/healthz        # x-apassy-relay-version, -commit, -mode
+curl -s -D - -o /dev/null https://apassy-relay.wyderka.cc/healthz   # x-apassy-relay-version, -commit, -mode (GET: no HEAD)
 curl -s https://apassy-relay.wyderka.cc/.well-known/apassy-connect.json
 ```
 

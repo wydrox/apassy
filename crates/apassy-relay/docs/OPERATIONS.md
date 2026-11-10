@@ -49,7 +49,9 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    run `npm ci --no-audit --no-fund`, `npm test`, `npm run typecheck`, and
    `npm run preflight`. The Wrangler build hook repeats the preflight even for a
    direct `npx wrangler deploy`; do not bypass it with `--no-bundle` or an alternate
-   config. A fresh checkout with missing downloads must fail.
+   config. A fresh checkout with missing downloads must fail. The preflight also refuses a
+   `RELAY_MODE` in `wrangler.jsonc` that is not the mode the relay reports on `GET /healthz`
+   (`x-apassy-relay-mode`, section 29; `scripts/check-relay-mode.mjs`).
 4. With the owner's explicit deployment approval, verify account/bindings/secrets
    and deploy the Worker with `npm run deploy`. Preserve routing, limits and secrets.
    Read back its deployment ID, both public download hashes, `SHA256SUMS`,
@@ -1939,9 +1941,12 @@ the version and the commit. `admin team-code`, `admin node-code`, `init --team`,
 `rollback-check`, and every `downgrade-*` command are refused with a message; the way back is
 29.6.
 
-A plain `relay.db` with a team that is not a vault store (a cutover that did not finish) starts,
-logs `team <id> is not a vault store and is not served in connect mode`, and does not serve that
-team: run the cutover again (29.4) with the configuration before it.
+The relay does not start on a cutover that is not finished, in either mode, and changes no file
+then: a plain `relay.db` beside `relay.db.keyed` is refused in both modes; `connect` mode also
+refuses an encrypted `relay.db` and a `cutover.json` whose `state` is not `done`. The message
+says to run the cutover again (29.5) with the configuration before it. A vault store that does
+not open at start is logged as out of service with the advice to keep its file and restore it
+from a backup, never to delete it.
 
 ### 29.3 Backups
 
@@ -1949,9 +1954,11 @@ team: run the cutover again (29.4) with the configuration before it.
   `MANIFEST.json` says `"mode": "connect"`. `snapshot-check` reads plain files there.
 - `apassy-relay backup` is the backup of a **stopped** relay (it takes `relay.lock`): a
   byte-for-byte copy of `relay.db`, `teams/` with the snapshots and `.pre-v*` copies,
-  `team.db`, `team.db.pre-teams`, and `audit-archive/`, with `MANIFEST.json`
-  (`"stopped": true`, sizes and SHA-256). It refuses while the relay runs, while a write
-  journal remains (start and stop the relay once), and during a cutover.
+  `team.db`, `team.db.pre-teams`, `relay.db.migrating` and its journal, and `audit-archive/`,
+  with `MANIFEST.json` (`"stopped": true`, sizes and SHA-256). It refuses while the relay runs,
+  while a write journal remains (start and stop the relay once), and on a committed cutover
+  (`relay.db` plain beside `relay.db.keyed`). A `relay.db.keyed` beside a keyed `relay.db` (a
+  cutover that stopped before its commit point) is left out of it.
 
 ```sh
 docker compose stop relay
@@ -1967,36 +1974,52 @@ a stopped backup, its other files) into an empty data volume (owner 10001, mode 
 ### 29.4 `apassy-relay connect-cutover`
 
 ```sh
-docker compose run --rm --no-deps -T relay connect-cutover            # the dry run
-docker compose run --rm --no-deps -T relay connect-cutover --confirm-delete-teams
+docker compose run --rm --no-deps -T relay connect-cutover > cutover-plan.json   # the dry run
+docker compose run --rm --no-deps -T relay connect-cutover \
+  --confirm-delete-teams "$(jq -r .plan_sha256 cutover-plan.json)"
 ```
 
 It runs with the configuration **before** the cutover (the master key set, `APASSY_RELAY_MODE`
 unset) and the relay stopped. The dry run (the default) checks everything and prints the plan
 as JSON (the stores that stay, the teams that go, the files with their hashes, the backup it
-checked); it writes nothing. `--confirm-delete-teams` keeps `relay.db` and the vault stores of
-the accounts as plain files, deletes every other team with its file, snapshots, `.pre-v*`
-copies, and key, and writes `cutover.json` in the data directory. `--backup <folder>` names the
+checked, and `plan_sha256`, the SHA-256 of that plan); it writes nothing.
+`--confirm-delete-teams <plan_sha256>` goes on only if the plan is still that one (a newer
+backup or a changed file refuses it: run the dry run again and read it). It keeps `relay.db`
+and the vault stores of the accounts as plain files (a keyed `.pre-v*` copy of a store too),
+deletes every other team with its file, snapshots, `.pre-v*` copies, and key, and writes
+`cutover.json` in the data directory. It edits and vacuums a keyed working copy of `relay.db`
+(`relay.db.work`) and exports only the result: no team key reaches the disk in plain. An error
+before the commit point removes the side files it wrote. `--backup <folder>` names the
 stopped backup to check; otherwise the newest one is checked. Exit 0 with the JSON on stdout,
 or exit 1 with the reason on stderr.
 
 **The backup check:** the stopped backup holds a byte-identical copy (size and SHA-256) of
 every file that the cutover keeps or deletes, and its own files still match its
 `MANIFEST.json`. Any write to the data directory after the backup (a start of the relay
-included) fails it: make the stopped backup right before the cutover.
+included) fails it: make the stopped backup right before the cutover. The confirmed run checks
+the backup again before each step that deletes (also when it finishes a stopped run): keep the
+backup folder in place, unchanged, until the cutover is done.
 
-`cutover.json` holds `state` (`committing` or `done`), the stores kept, the teams deleted,
-the counts and the file list with SHA-256 before and after, the rows deleted from `relay.db`,
-the files deleted, the entries left, and the backup checked with the SHA-256 of its manifest.
-Keep a copy with the backup.
+`cutover.json` holds `state` (`committing` or `done`), the stores kept, the files made plain,
+the teams deleted, the counts and the file list with SHA-256 before and after, the rows deleted
+from `relay.db`, the files deleted (every file of the list before that is gone), the entries
+left, `plan_sha256`, and the backup checked with the SHA-256 of its manifest. Keep a copy with
+the backup.
+
+Deleted files are freed blocks, not overwritten ones. What the cutover deletes is SQLCipher or
+snapshot ciphertext, and it writes no key in plain, so those blocks open only with the master
+key; to leave none at all, restore a stopped backup of Connect into a new volume and destroy
+the old one (docs/operations/connect.md, section 9.6).
 
 ### 29.5 A cutover that stopped
 
-Run it again with `--confirm-delete-teams`: before its commit point (the plain `relay.db` in
-place) it starts over; after it, it finishes. `relay.db.keyed` exists from the commit point to
-the end; it is the keyed directory with the team keys, and the second run needs it. A dry run
-says which case it is (`pending`). The stopped backup restores the relay as it was at any
-point (29.3).
+Run it again with `--confirm-delete-teams <plan_sha256>`: before its commit point (the plain
+`relay.db` in place) it starts over; after it, it finishes, with the `plan_sha256` of
+`cutover.json`. `relay.db.keyed` exists from the commit point to the end; it is the keyed
+directory with the team keys, the second run needs it, and it is deleted only when it is, byte
+for byte, the `relay.db` of the inventory. A dry run says which case it is (`state`, `pending`)
+and names the plan. The relay does not start in either mode until the run ends with
+`"state": "done"` (29.2). The stopped backup restores the relay as it was at any point (29.3).
 
 ### 29.6 Rollback from Connect
 
