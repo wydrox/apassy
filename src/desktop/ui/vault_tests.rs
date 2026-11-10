@@ -250,14 +250,14 @@ fn settings_show_the_groups_of_the_selected_section_only() {
         (
             SettingsSection::Devices,
             &[
-                "This Mac",
+                concat!("This ", crate::computer!()),
                 "Reachable on Your Tailnet",
-                "Add an iPhone or a Mac…",
+                concat!("Add an iPhone or a ", crate::computer!(), "…"),
             ][..],
             &[
                 "Back up now…",
                 "Change passphrase…",
-                "Other Macs",
+                concat!("Other ", crate::computers!()),
                 "Pair an iPhone",
             ][..],
         ),
@@ -268,7 +268,13 @@ fn settings_show_the_groups_of_the_selected_section_only() {
         ),
         (
             SettingsSection::Tools,
-            &["Command line", "Install tools…", "Browser extension"][..],
+            &[
+                "Command line",
+                // The Linux package brings the command: Settings offers no install there.
+                #[cfg(not(target_os = "linux"))]
+                "Install tools…",
+                "Browser extension",
+            ][..],
             &["Back up now…", "Socket", "Sessions"][..],
         ),
         (
@@ -1568,7 +1574,13 @@ fn the_credential_page_lists_rules_and_removing_an_exception_asks_for_the_owner(
                 key: "/synthetic/apassy".to_owned(),
                 label: "apassy".to_owned(),
             };
-            vault.remember_answer(id, &project, ActionKind::Change, "this Mac", &[])?;
+            vault.remember_answer(
+                id,
+                &project,
+                ActionKind::Change,
+                concat!("this ", crate::computer!()),
+                &[],
+            )?;
             Ok(())
         })
         .expect("open")
@@ -1894,7 +1906,13 @@ fn every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes() {
                 key: "/synthetic/a-very-long-project-name-for-the-narrow-window".to_owned(),
                 label: "a-very-long-project-name-for-the-narrow-window".to_owned(),
             };
-            vault.remember_answer(ruled, &project, ActionKind::Deploy, "this Mac", &[])?;
+            vault.remember_answer(
+                ruled,
+                &project,
+                ActionKind::Deploy,
+                concat!("this ", crate::computer!()),
+                &[],
+            )?;
             vault.set_always_ask(ruled, true)?;
             Ok(())
         })
@@ -1962,7 +1980,10 @@ fn the_vault_place_reads_in_short_words() {
     let home = Path::new("/Users/synthetic");
     let data = home.join("Library/Application Support/Apassy");
     let place = |path: &Path| short_location(path, Some(home), &data);
-    assert_eq!(place(&data.join("vault.db")), "On this Mac");
+    assert_eq!(
+        place(&data.join("vault.db")),
+        concat!("On this ", crate::computer!())
+    );
     assert_eq!(
         place(&home.join("Library/Mobile Documents/com~apple~CloudDocs/Apassy/vault.db")),
         "iCloud Drive › Apassy"

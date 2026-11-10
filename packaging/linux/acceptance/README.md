@@ -5,7 +5,8 @@ browsers: install, headless owner commands, desktop window, Secret Service, polk
 native messaging refusals, passkey create and sign-in, and password save and fill.
 The record of the first run is `docs/reviews/linux-acceptance-2026-11.md`.
 
-Use disposable machines only (the devboxes). The scripts install system packages,
+Use disposable machines only (the devboxes). A second run keeps its files apart with
+`L4_RUN=l5 L4_WORK=$HOME/work/l5 L4_USER=l5owner L4_HEADLESS_USER=l5headless`. The scripts install system packages,
 add Google's apt repository, create synthetic accounts (`l4owner`, `l4headless`),
 add an automatic login on virtual terminal 3 and change files under `/opt`. All
 accounts, passphrases and websites are synthetic. Never use a real account or a
@@ -23,10 +24,12 @@ real relying party.
 | `headless-owner.sh` | `apassy owner` commands in a real terminal of an account without session bus, display or logind session |
 | `keyring-polkit.sh` | Secret Service opt-in, refusal, unlock, no bus, locked keyring, disable; polkit agent for the window |
 | `refusals.sh` | Caller-check refusals: `api` (wrong parents, root, other user, other origin) and `browser` (remote-debugging switch, copied Chrome, writable Chrome) |
-| `rp/` | Local relying party on `http://localhost:4174`, verified with `@simplewebauthn/server` 14.0.3; ES256 only, user verification required, discoverable sign-in, and a wrong origin, wrong RP ID and damaged signature that must be refused for each accepted response; `passkey.html` (keys `c`, `g`, `w`, `x`) and `login.html` |
+| `rp/` | Local relying party on `http://localhost:4174` (also `otp.html`: a one-time code checked against the synthetic seed `L4_TOTP_SEED`), verified with `@simplewebauthn/server` 14.0.3; ES256 only, user verification required, discoverable sign-in, and a wrong origin, wrong RP ID and damaged signature that must be refused for each accepted response; `passkey.html` (keys `c`, `g`, `w`, `x`) and `login.html` |
 | `lib/l4.sh` | Session plumbing: the seat session, Xvfb, screenshots, xdotool input, the RP |
 | `lib/flows.sh` | Window and browser steps by real X input, at 1600x1000 |
 | `lib/native_frame.py` | Send one synthetic `passkey_get` to the host or the app socket; prints only the answer code |
+| `lib/wayland.sh`, `lib/sway.conf` | A headless sway in the owner's session (no `DISPLAY`): `l4_wayland_up`, `l4_wl_spawn`, `l4_wl_shot` (grim), `l4_wl_type`/`l4_wl_key` (wtype). Each `wlrctl` call makes a new virtual pointer, so clicks do not reach the window; drive it by keyboard |
+| `cleanup-host.sh` | Undo host mode: the automatic login, the synthetic accounts, the copied Chrome; `--packages` also removes the Wayland test tools |
 
 ## Run
 

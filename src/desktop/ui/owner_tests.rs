@@ -517,7 +517,7 @@ fn open_settings_from_decisions_shows_the_notifications_tab() {
     assert_eq!(app.ui.settings_section, super::SettingsSection::Devices);
     let text = app_frame(&egui::Context::default(), &mut app);
     assert!(
-        text.contains("This Mac") && text.contains("Notifications"),
+        text.contains(concat!("This ", crate::computer!())) && text.contains("Notifications"),
         "{text}"
     );
     assert!(!text.contains("Keyboard shortcuts"), "{text}");

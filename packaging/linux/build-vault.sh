@@ -45,7 +45,11 @@ for executable in "$binary" "$host"; do
 done
 commit=${APASSY_RELEASE_COMMIT:-$(git -C "$root" rev-parse HEAD)}
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail 'invalid source commit'
-SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct "$commit")}
+# The tree that was compiled. On a pull request CI compiles the synthetic merge of
+# the head ($commit) into the base; elsewhere it is $commit itself.
+built=${APASSY_BUILT_COMMIT:-$commit}
+[[ "$built" =~ ^[0-9a-f]{40}$ ]] || fail 'invalid built commit'
+SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct "$built")}
 export SOURCE_DATE_EPOCH
 # The newest GLIBC symbol version of either executable; release builds cap it.
 glibc_max=$({ readelf --version-info "$binary"; readelf --version-info "$host"; } |
@@ -139,11 +143,11 @@ for field in Package:apassy-vault "Version:$version" "Architecture:$deb_arch" "D
     [ "$(dpkg-deb --field "$out/$deb" "$key")" = "$want" ] || fail "$deb has another $key than $want"
 done
 (cd "$out" && sha256sum "$name.tar.gz" "$deb") > "$out/SHA256SUMS-vault-$arch"
-python3 -I - "$out" "$arch" "$version" "$commit" "$glibc_max" "$depends" "$suggests" "$name.tar.gz" "$deb" <<'PY'
+python3 -I - "$out" "$arch" "$version" "$commit" "$built" "$glibc_max" "$depends" "$suggests" "$name.tar.gz" "$deb" <<'PY'
 import hashlib, json, pathlib, sys
-out, arch, version, commit, glibc, depends, suggests, *names = sys.argv[1:]
+out, arch, version, commit, built, glibc, depends, suggests, *names = sys.argv[1:]
 out = pathlib.Path(out)
-record = {"version": version, "commit": commit, "component": "linux-vault",
+record = {"version": version, "commit": commit, "built_from": built, "component": "linux-vault",
           "platform": f"linux-{arch}", "glibc_max": glibc, "depends": depends,
           "suggests": suggests,
           "files": [{"filename": name, "sha256": hashlib.sha256((out/name).read_bytes()).hexdigest(),

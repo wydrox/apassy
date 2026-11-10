@@ -39,11 +39,11 @@ if [ "$target" = ubuntu ]; then
     l4_display_up
     l4_rp_up
 elif [ "$target" = debian13 ]; then
-    name=l4-debian13
+    name=${L4_RUN:-l4}-debian13
     bash "$here/container.sh" up debian:trixie "$name"
     docker cp "$dist/." "$name:/tmp/l4-dist/"
     docker exec -w /tmp/l4-dist "$name" bash -c "$(install_cmds) && apassy --version"
-    export L4_CONTAINER=$name L4_OUT=$HOME/work/l4/out-$name
+    export L4_CONTAINER=$name L4_OUT=${L4_WORK:-$HOME/work/l4}/out-$name
     . "$here/lib/l4.sh"
     l4_make_secrets
     bash "$here/headless-owner.sh"
@@ -54,6 +54,10 @@ else
 fi
 . "$here/lib/flows.sh"
 flow_apassy_first_run "$target"
-l4_as bash -c 'cd ~ && apassy setup browser --browser chrome && apassy setup browser --browser chromium'
+l4_as bash -c 'cd ~ && apassy setup browser --browser chrome'
+# Ubuntu's Chromium is a snap: setup must refuse it with the reason, write nothing
+# and exit 1. Debian's Chromium deb is supported.
+l4_as bash -c 'cd ~ && apassy setup browser --browser chromium; echo "exit=$?"' 2>&1 | tee "$L4_OUT/logs/setup-chromium.txt"
+l4_as bash -c 'cd ~ && apassy --json setup browser' 2>&1 | tee "$L4_OUT/logs/setup-browser.json" || true
 [ -n "${L4_CONTAINER:-}" ] || bash "$here/refusals.sh" api
 echo "Scripted checks done. Continue with README.md, step Browser. Screenshots: $L4_OUT/shots"

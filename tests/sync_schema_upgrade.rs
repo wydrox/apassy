@@ -964,7 +964,7 @@ fn a_pushed_copy_has_no_bouncer_host_row_and_a_later_copy_is_refused() {
     let kept = a
         .bouncer_host(apassy::vault::BouncerHostRole::Hosting)
         .unwrap()
-        .expect("the host of this Mac stays");
+        .expect(concat!("the host of this ", apassy::computer!(), " stays"));
     assert_eq!(kept.url, "https://brain.synthetic.ts.net");
     assert_eq!(
         a.bouncer_host_bearer(apassy::vault::BouncerHostRole::Hosting)

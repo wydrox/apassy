@@ -33,7 +33,13 @@ account, using Apassy's extension installation flow. Browser manifests point to
 `/usr/lib/apassy/apassy-browser-host`; extension assets live in
 `/usr/share/apassy/browser-extension`. Native manifest templates for both browsers
 are in `/usr/share/apassy/native-messaging-hosts/`. Chrome stable and Chromium use their own
-`NativeMessagingHosts/com.wydrox.apassy.json` under `~/.config`.
+`NativeMessagingHosts/com.wydrox.apassy.json` under `~/.config`. Snap and Flatpak
+browsers (Ubuntu's Chromium) cannot start the host: Apassy lists them as not
+supported and writes no manifest for them; use Google Chrome, or Chromium from a
+.deb. Debian's Chromium works when at least one Debian `webext-*-chromium` package
+is installed: Apassy accepts its wrapper's `--load-extension` only for those
+root-owned folders in `/usr/share/chromium/extensions`, and refuses the empty value
+that the wrapper passes without one.
 
 Passphrase unlock remains the default. Headless owner commands require a real
 interactive terminal, and do not require a session bus, desktop, screen lock,

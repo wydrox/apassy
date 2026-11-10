@@ -3013,7 +3013,11 @@ fn a_second_mac_joins_the_questions_team_of_the_vault() {
             team_id: team.clone()
         }
     );
-    assert_eq!(client_a.devices().unwrap().len(), 2, "one team, two Macs");
+    assert_eq!(
+        client_a.devices().unwrap().len(),
+        2,
+        concat!("one team, two ", apassy::computers!())
+    );
 }
 
 /// The JSON `body` without its string values that are long base64url text (random

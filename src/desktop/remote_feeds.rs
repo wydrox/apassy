@@ -215,7 +215,7 @@ fn environment_of(mac: &RemoteMac) -> Environment {
 fn shown_name(row: &str, feed: Option<&Feed>) -> String {
     match (row.trim(), feed) {
         ("", Some(feed)) if !feed.mac.name.trim().is_empty() => bouncer::clip(&feed.mac.name),
-        ("", _) => "Another Mac".to_owned(),
+        ("", _) => concat!("Another ", crate::computer!()).to_owned(),
         (name, _) => bouncer::clip(name),
     }
 }
@@ -394,7 +394,10 @@ mod tests {
         let now = feed().generated_at + 60;
         assert!(envs[2].dimmed(now), "never reported is dimmed");
         assert!(!envs[1].dimmed(now));
-        assert_eq!(envs[0].menu_detail(now, 0), "This Mac");
+        assert_eq!(
+            envs[0].menu_detail(now, 0),
+            concat!("This ", crate::computer!())
+        );
         assert_eq!(envs[2].menu_detail(now, 0), "Never reported");
         assert_eq!(envs[1].menu_detail(now, 0), "1 min ago");
         // A feed older than 24 hours is dimmed everywhere.
@@ -408,7 +411,7 @@ mod tests {
     fn one_mac_is_one_environment() {
         let envs = environments("", &BTreeSet::new(), &[], &[]);
         assert_eq!(envs.len(), 1);
-        assert_eq!(envs[0].name, "This Mac");
+        assert_eq!(envs[0].name, concat!("This ", crate::computer!()));
         assert!(envs[0].is_this_mac());
     }
 

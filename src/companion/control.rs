@@ -69,12 +69,17 @@ impl OpenPairingError {
     /// Text for the owner.
     pub fn message(self) -> String {
         match self {
-            Self::Stopped => {
-                "The iPhone listener is not running. Nothing was paired.".to_owned()
-            }
+            Self::Stopped => "The iPhone listener is not running. Nothing was paired.".to_owned(),
             Self::VaultLocked => "The vault is locked. Nothing was paired.".to_owned(),
             Self::Window(error) => error.message().to_owned(),
-            Self::NoHost => "Apassy found no network address for this Mac. Connect the Mac to Wi-Fi or Ethernet. Nothing was paired.".to_owned(),
+            Self::NoHost => concat!(
+                "Apassy found no network address for this ",
+                crate::computer!(),
+                ". Connect the ",
+                crate::computer!(),
+                " to Wi-Fi or Ethernet. Nothing was paired."
+            )
+            .to_owned(),
             Self::Link(_) => {
                 "Apassy could not make the pairing link. Nothing was paired.".to_owned()
             }

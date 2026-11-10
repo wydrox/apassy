@@ -3360,11 +3360,11 @@ mod tests {
             SyncError::Relay(RelayRefusal::JoinPending)
         );
         assert_eq!(sync_error(ApiError::Broken), SyncError::RelayUnreachable);
-        assert!(
-            SyncError::ForkedCopy
-                .to_string()
-                .contains("does not include this Mac's last change")
-        );
+        assert!(SyncError::ForkedCopy.to_string().contains(concat!(
+            "does not include this ",
+            crate::computer!(),
+            "'s last change"
+        )));
         assert!(SyncError::TooLarge.to_string().contains("64 MiB"));
     }
 

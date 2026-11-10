@@ -34,6 +34,23 @@ and compromised same-user processes remain outside this boundary. Reject unknown
 browsers, stale processes, mismatched users and writable browser binaries.
 This is defense in depth, not an equivalent to macOS signing. Preserve origin,
 RP ID, challenge, approval and user-verification checks in the shared flow.
+
+Unsafe browser switches are refused: `--remote-debugging-*`,
+`--disable-extensions-except`, `--type` and `--load-extension`, read from every word
+of the browser's rewritten process title. One exception, added 2026-11-10 after the
+acceptance run: Debian's `chromium` package starts every browser with
+`--load-extension=` and the folders in `/usr/share/chromium/extensions` that its
+`webext-*` packages install (`/etc/chromium.d/extensions`). That switch is accepted
+when its one value lists only absolute paths that, after resolving symlinks, are
+directories strictly inside that folder, and that folder, each listed directory and
+every folder up to `/` are owned by root and not writable by group or others. Then
+only root chose what the switch loads, from the same root-owned tree as the browser
+executable that this check already trusts; a user process cannot add an extension
+there. Everything else stays refused: a path elsewhere, a relative, missing or empty
+path, an empty value (Debian's default when no system extension is installed), a
+second `--load-extension` with another value, and, because the title hides where an
+argument ends, a comma in any other word while the switch is present.
+
 Secret and code Copy is offered only where Apassy itself owns the X11 or Wayland
 (ext/wlr data-control) clipboard, learns of foreign replacement, and clears only
 its own copy by replacing it with an empty one; other sessions have no Copy.

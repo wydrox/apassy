@@ -58,8 +58,9 @@ struct AccountChoice {
     rp_id: String,
     /// The origin of the page, or `None` for the macOS passkey sheet.
     origin: Option<String>,
-    /// The login name and the user of each account, as the dialog shows them.
-    rows: Vec<(String, String)>,
+    /// The login name, the user, and when the login was added ("Added …", empty when
+    /// unknown) of each account, as the dialog shows them, the newest first.
+    rows: Vec<(String, String, String)>,
     /// The index of the account that the owner chose, if they chose one.
     chosen: Option<usize>,
 }
@@ -89,7 +90,11 @@ impl AccountChoice {
                     (true, false) => display,
                     (false, false) => format!("{name} ({display})"),
                 };
-                (page_text(&account.item_name), who)
+                (
+                    page_text(&account.item_name),
+                    who,
+                    account.added.map(added_text).unwrap_or_default(),
+                )
             })
             .collect();
         Some(Self {
@@ -325,6 +330,12 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
 
 /// The site, the caller, and one button for each account. Returns the account that the
 /// owner clicked. The owner can click again to choose another account.
+/// "Added 2026-11-10 14:03:05 UTC": the time of an account in the chooser, to the
+/// second, so two passkeys made minutes apart differ.
+fn added_text(at: u64) -> String {
+    format!("Added {}", crate::vault::format_utc(at))
+}
+
 fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
     let mut picked = None;
     kit::section(ui, None, None, |s| {
@@ -352,9 +363,9 @@ fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
         .auto_shrink([false, true])
         .show(ui, |ui| {
             kit::section(ui, None, None, |s| {
-                for (index, (login, who)) in choice.rows.iter().enumerate() {
+                for (index, (login, who, added)) in choice.rows.iter().enumerate() {
                     let selected = choice.chosen == Some(index);
-                    let name = format!("Use the account {who} of the login {login}");
+                    let name = format!("Use the account {who} of the login {login} {added}");
                     let response = s.clickable_row(&name, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
@@ -362,6 +373,12 @@ fn account_list(ui: &mut egui::Ui, choice: &AccountChoice) -> Option<usize> {
                                 if !who.is_empty() {
                                     ui.label(
                                         kit::text(who, Font::Callout)
+                                            .color(kit::palette().secondary),
+                                    );
+                                }
+                                if !added.is_empty() {
+                                    ui.label(
+                                        kit::text(added, Font::Callout)
                                             .color(kit::palette().secondary),
                                     );
                                 }
@@ -527,6 +544,7 @@ mod tests {
             user_name: user.to_owned(),
             user_display_name: display.to_owned(),
             credential_id: vec![id; 16],
+            added: None,
         }
     }
 
@@ -610,6 +628,50 @@ mod tests {
         assert!(!window.has("Selected"), "{screen}");
         assert_eq!(chosen(&app), NO_ACCOUNT);
         assert_eq!(running(&app), None);
+    }
+
+    /// Two passkeys of one site and one account looked the same, and the older one was
+    /// once selected (Linux acceptance, 2026-11-10). The vault lists the newest first,
+    /// the browser request selects it, and each row shows when its login was added.
+    #[test]
+    fn same_account_passkeys_differ_by_their_time_and_the_newest_is_selected() {
+        let dir = TempDir::new().unwrap();
+        let mut newer = account("localhost", "l4@example.test", "L4 Owner", 2);
+        newer.added = Some(1_762_783_385); // 2025-11-10 14:03:05 UTC
+        let mut older = account("localhost", "l4@example.test", "L4 Owner", 1);
+        older.added = Some(1_762_779_600); // 2025-11-10 13:00:00 UTC
+        let mut request = sign(vec![newer, older], Some(ORIGIN));
+        if let OwnerRequest::SignPasskey { chosen, .. } = &mut request {
+            *chosen = 0;
+        }
+        let (app, window) = open(&dir, request);
+        let screen = window.screen();
+        for text in [
+            "2 accounts",
+            "Added 2025-11-10 14:03:05 UTC",
+            "Added 2025-11-10 13:00:00 UTC",
+            "Selected",
+        ] {
+            assert!(window.has(text), "\"{text}\" is missing: {screen}");
+        }
+        assert!(!window.has("Choose an account to continue."), "{screen}");
+        assert_eq!(chosen(&app), 0);
+        assert_eq!(named_credential(&app), vec![2; 16], "the newest is named");
+        // The selected tag is on the row of the newest passkey: above the older one.
+        let y = |text: &str| {
+            window
+                .texts
+                .iter()
+                .find(|(painted, _)| painted == text)
+                .map(|(_, pos)| pos.y)
+                .unwrap()
+        };
+        let (newest, oldest) = (
+            y("Added 2025-11-10 14:03:05 UTC"),
+            y("Added 2025-11-10 13:00:00 UTC"),
+        );
+        assert!(newest < oldest, "the newest row comes first");
+        assert!((y("Selected") - newest).abs() < (y("Selected") - oldest).abs());
     }
 
     #[test]

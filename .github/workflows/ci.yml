@@ -437,7 +437,7 @@ jobs:
           APASSY_REQUIRE_DBUS: "1"
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy --all-features
-          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/) | test(/^desktop::clipboard::/) | test(/^owner::serve::/) | test(/^owner_serve::/)'
+          --lib --test it -E 'test(/^browser::/) | test(/^browser_passkeys::/) | test(/^passkeys::/) | test(/^native::linux::/) | test(/^desktop::clipboard::/) | test(/^owner::serve::/) | test(/^owner_serve::/) | test(/^cli::browser::/) | test(/^desktop::ui::cli_tools::/) | test(/^desktop::ui::browser_settings::/) | test(/^vault::passkey::tests::passkeys_of_a_site/) | test(=vault::tests::a_wrong_passphrase_prints_no_sqlcipher_lines)'
       - name: Test headless owner commands without a desktop
         run: >-
           cargo nextest run --profile ci --offline --locked -p apassy-app

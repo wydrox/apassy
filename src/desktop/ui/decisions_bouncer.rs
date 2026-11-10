@@ -26,7 +26,11 @@ use super::kit::{self, Font, Icon, Style, Tone};
 use crate::questions::envelope::LOCAL_CONNECT_WARNING;
 /// `questions::envelope::LOCAL_CONNECT_WARNING` for the demo build, which has no vault.
 #[cfg(not(feature = "vault"))]
-const LOCAL_CONNECT_WARNING: &str = "A program on this Mac can start this request.";
+const LOCAL_CONNECT_WARNING: &str = concat!(
+    "A program on this ",
+    crate::computer!(),
+    " can start this request."
+);
 
 /// The rows of History at most.
 pub(crate) const HISTORY_ROWS: usize = 200;

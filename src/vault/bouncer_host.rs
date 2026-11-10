@@ -93,7 +93,7 @@ impl BouncerHostKind {
     /// The label in Settings.
     pub fn label(self) -> &'static str {
         match self {
-            Self::ThisMac => "This Mac",
+            Self::ThisMac => concat!("This ", crate::computer!()),
             Self::OwnServer => "My server",
             Self::Connect => "Apassy Connect",
         }
@@ -238,7 +238,7 @@ fn activity_text(role: BouncerHostRole, change: &BouncerHostChange) -> (&'static
         BouncerHostRole::Training => "change bouncer brain trainer",
     };
     let mut reason = match change.kind {
-        BouncerHostKind::ThisMac => "This Mac.".to_owned(),
+        BouncerHostKind::ThisMac => concat!("This ", crate::computer!(), ".").to_owned(),
         BouncerHostKind::OwnServer => format!("My server at {}.", change.normalized_url()),
         BouncerHostKind::Connect => format!("Apassy Connect at {}.", change.normalized_url()),
     };
@@ -592,7 +592,7 @@ mod tests {
                 ),
                 (
                     "change bouncer brain host".to_owned(),
-                    "This Mac.".to_owned()
+                    concat!("This ", crate::computer!(), ".").to_owned()
                 ),
             ]
         );

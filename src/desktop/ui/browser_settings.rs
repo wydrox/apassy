@@ -15,12 +15,75 @@ use crate::desktop::DesktopApp;
 /// The note of a source build. Tests read it.
 pub(super) const SOURCE_BUILD_NOTE: &str =
     "A source build is not protected from agents, so it connects no browser.";
+/// The status of a browser that cannot reach the host (Linux snap, Flatpak, unknown
+/// build). Its row gives the reason and the alternative, and offers no Connect.
+pub(super) const UNSUPPORTED_STATUS: &str = "Not supported";
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Connect,
     Disconnect,
     OpenStore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowTone {
+    Accent,
+    Warning,
+    Secondary,
+}
+
+/// What the row of one browser shows: its status, a note under it, and its buttons.
+#[derive(Debug, PartialEq, Eq)]
+struct RowView {
+    status: &'static str,
+    tone: RowTone,
+    note: Option<String>,
+    buttons: Vec<Action>,
+}
+
+/// The row of `browser` in `state`, or `None` when the browser is not here. `stale`
+/// says that a manifest file exists. A browser that cannot reach the host (a Linux
+/// snap, Flatpak or unknown build) is never shown as connected and offers no Connect:
+/// its note gives the reason and the alternative, and a stale manifest can go.
+fn row_view(browser: &Browser, state: &State, stale: bool) -> Option<RowView> {
+    let (status, tone, note, buttons) = match state {
+        State::Missing => return None,
+        State::Unsupported(kind) => (
+            UNSUPPORTED_STATUS,
+            RowTone::Warning,
+            Some(kind.explain(browser)),
+            if stale {
+                vec![Action::Disconnect]
+            } else {
+                vec![]
+            },
+        ),
+        State::Connected => (
+            "Connected",
+            RowTone::Accent,
+            None,
+            vec![Action::Disconnect, Action::OpenStore],
+        ),
+        State::Other(_) => (
+            "Connected to another Apassy",
+            RowTone::Warning,
+            None,
+            vec![Action::Connect],
+        ),
+        State::NotConnected => (
+            "Not connected",
+            RowTone::Secondary,
+            None,
+            vec![Action::Connect],
+        ),
+    };
+    Some(RowView {
+        status,
+        tone,
+        note,
+        buttons,
+    })
 }
 
 /// When the extension last talked to the app.
@@ -109,35 +172,43 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             let mut found = 0;
             for browser in BROWSERS {
                 let state = install::state(home, browser, &host);
-                if state == State::Missing {
+                let stale = install::manifest_path(home, browser).is_file();
+                let Some(row) = row_view(browser, &state, stale) else {
                     continue;
-                }
-                found += 1;
-                let (status, tone) = match &state {
-                    State::Connected => ("Connected", kit::palette().accent_text),
-                    State::Other(_) => ("Connected to another Apassy", Tone::Warning.text()),
-                    _ => ("Not connected", kit::palette().secondary),
                 };
-                g.line(
+                found += 1;
+                let tone = match row.tone {
+                    RowTone::Accent => kit::palette().accent_text,
+                    RowTone::Warning => Tone::Warning.text(),
+                    RowTone::Secondary => kit::palette().secondary,
+                };
+                g.line_note(
                     browser.name,
-                    Some(kit::text(status, Font::Body).color(tone)),
+                    Some(kit::text(row.status, Font::Body).color(tone)),
+                    row.note.as_deref().map(rows::note),
                     |ui| {
-                        if state == State::Connected {
-                            if kit::small_button(ui, "Disconnect", Style::Bordered).clicked() {
-                                action = Some((Action::Disconnect, browser));
+                        for button in &row.buttons {
+                            let (label, style, hover) = match button {
+                                Action::Connect => (
+                                    "Connect",
+                                    Style::Prominent,
+                                    Some("Connect opens the Apassy page of the Chrome Web Store in the browser. Click Add to Chrome there. Do it once for each browser."),
+                                ),
+                                Action::Disconnect if row.status == UNSUPPORTED_STATUS => (
+                                    "Remove manifest",
+                                    Style::Bordered,
+                                    Some("This browser cannot use the manifest. Remove it."),
+                                ),
+                                Action::Disconnect => ("Disconnect", Style::Bordered, None),
+                                Action::OpenStore => ("Get the extension", Style::Bordered, None),
+                            };
+                            let mut response = kit::small_button(ui, label, style);
+                            if let Some(hover) = hover {
+                                response = response.on_hover_text(hover);
                             }
-                            if kit::small_button(ui, "Get the extension", Style::Bordered)
-                                .clicked()
-                            {
-                                action = Some((Action::OpenStore, browser));
+                            if response.clicked() {
+                                action = Some((*button, browser));
                             }
-                        } else if kit::small_button(ui, "Connect", Style::Prominent)
-                            .on_hover_text(
-                                "Connect opens the Apassy page of the Chrome Web Store in the browser. Click Add to Chrome there. Do it once for each browser.",
-                            )
-                            .clicked()
-                        {
-                            action = Some((Action::Connect, browser));
                         }
                     },
                 );
@@ -205,6 +276,45 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browsers_that_cannot_reach_the_host_are_never_connected_or_offered_connect() {
+        use crate::browser::install::Unsupported;
+        let browser = &BROWSERS[BROWSERS.len() - 1];
+        for kind in [
+            Unsupported::Snap,
+            Unsupported::Flatpak,
+            Unsupported::UnknownBuild,
+        ] {
+            for stale in [false, true] {
+                let row = row_view(browser, &State::Unsupported(kind), stale).unwrap();
+                assert_eq!(row.status, UNSUPPORTED_STATUS);
+                assert_eq!(row.tone, RowTone::Warning);
+                assert!(!row.buttons.contains(&Action::Connect));
+                assert!(!row.buttons.contains(&Action::OpenStore));
+                assert_eq!(row.buttons.contains(&Action::Disconnect), stale);
+                let note = row.note.unwrap();
+                assert!(note.starts_with(&kind.reason(browser)), "{note}");
+                assert!(
+                    note.ends_with("Use Google Chrome, or Chromium from a .deb."),
+                    "{note}"
+                );
+            }
+        }
+        assert_eq!(row_view(browser, &State::Missing, true), None);
+        let connected = row_view(browser, &State::Connected, true).unwrap();
+        assert_eq!(connected.status, "Connected");
+        assert_eq!(
+            connected.buttons,
+            vec![Action::Disconnect, Action::OpenStore]
+        );
+        assert_eq!(
+            row_view(browser, &State::NotConnected, false)
+                .unwrap()
+                .buttons,
+            vec![Action::Connect]
+        );
+    }
 
     #[test]
     fn the_last_request_reads_as_a_time() {

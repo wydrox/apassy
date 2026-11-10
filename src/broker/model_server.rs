@@ -2643,7 +2643,10 @@ mod tests {
         assert_eq!(server.ensure_running(Duration::from_secs(2)), Ok(()));
         assert_eq!(server.before_model(), Ok(()));
         thread::sleep(Duration::from_millis(500));
-        assert!(!pids.is_file(), "no server process on this Mac");
+        assert!(
+            !pids.is_file(),
+            concat!("no server process on this ", crate::computer!())
+        );
         assert!(!server.status().owned);
 
         // A remote host that is down: the run is unavailable at once, and still no
@@ -2668,7 +2671,10 @@ mod tests {
             "no wait, no retry"
         );
         thread::sleep(Duration::from_millis(300));
-        assert!(!pids.is_file(), "no server process on this Mac");
+        assert!(
+            !pids.is_file(),
+            concat!("no server process on this ", crate::computer!())
+        );
 
         // Back on this Mac: the run starts the local server again.
         server.set_remote(None);
@@ -3085,7 +3091,7 @@ mod tests {
     #[ignore = "needs the Laya environment and loads the model"]
     fn live_start_answer_and_stop() {
         let layout = Layout::discover();
-        preflight(&layout).expect("the Laya environment of this Mac");
+        preflight(&layout).expect(concat!("the Laya environment of this ", crate::computer!()));
         let server = ModelServer::start_with(
             None,
             BouncerSettings {
@@ -4593,7 +4599,7 @@ mod tests {
         .into_iter()
         .map(Path::new)
         .find(|path| path.is_file()) else {
-            eprintln!("skipped: no python3 on this Mac");
+            eprintln!(concat!("skipped: no python3 on this ", crate::computer!()));
             return;
         };
         let run = |args: &[&OsStr], home: &Path, pythonpath: &Path| {

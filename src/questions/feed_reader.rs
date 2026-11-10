@@ -622,7 +622,12 @@ mod tests {
 
     fn devices() -> Vec<TrustedDevice> {
         vec![
-            row(ME, "This Mac", TrustedDeviceKind::Mac, Some(ME_ID)),
+            row(
+                ME,
+                concat!("This ", crate::computer!()),
+                TrustedDeviceKind::Mac,
+                Some(ME_ID),
+            ),
             row(OTHER, "Studio Mac", TrustedDeviceKind::Mac, Some(OTHER_ID)),
             row(
                 PHONE,

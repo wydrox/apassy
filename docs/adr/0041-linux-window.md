@@ -81,9 +81,9 @@ Plan: [implementation plan, stage 8](../design/implementation-plan-s8.md), track
 
 | Check | What it is | What can fake it | Use |
 | --- | --- | --- | --- |
-| polkit, `auth_self` | Apassy asks polkitd (system bus) about the action `com.wydrox.apassy.owner-check` for its own bus name. The desktop's polkit agent asks for the login password, or for a finger when the system has fingerprint login (PAM with pam_fprintd) | A program of the user cannot answer polkitd without the password or the finger. On X11 it can read the typed password | The default, when the action is installed and a polkit agent runs |
+| polkit, `auth_self` | Apassy asks polkitd (system bus) about the action `com.wydrox.apassy.owner-presence` for its own process. The desktop's polkit agent asks for the login password, or for a finger when the system has fingerprint login (PAM with pam_fprintd) | A program of the user cannot answer polkitd without the password or the finger. On X11 it can read the typed password | Offered in each check ("Use system authentication"), when the owner chooses it. Amended 2026-11-10: not the default (ADR 0045) |
 | fprintd directly | Apassy claims the reader and asks `net.reactivated.Fprint` for a match | It gives only a match signal inside Apassy. Another program can hold the reader. There is no system dialog | Not used: polkit already uses fprintd through PAM |
-| The vault passphrase | Typed in Apassy's window | Knowledge of the vault passphrase | Always available. The only check without polkit (tarball without the action, no polkit agent) |
+| The vault passphrase | Typed in Apassy's window | Knowledge of the vault passphrase | The default, always available. The only check without polkit (tarball without the action, no polkit agent) |
 
 - The polkit action has `allow_active` = `auth_self`, `allow_inactive` = `no`, and `allow_any` = `no`.
   It has no `auth_self_keep`, so polkit keeps no answer of its own. ADR 0030's global "How often to
@@ -93,7 +93,12 @@ Plan: [implementation plan, stage 8](../design/implementation-plan-s8.md), track
 - The polkit dialog shows the fixed message of the action. Apassy's window shows the purpose next
   to it, from fixed Rust templates (as in ADR 0038). No agent or website text goes to polkit.
 - Cancel in Apassy cancels the polkit request (`CancelCheckAuthorization`).
-- Settings › Security › "Check with": "Linux login" (the default) or "Passphrase only".
+- Amended 2026-11-10 (ADR 0045, Linux acceptance): there is no "Check with" setting. Every
+  owner check in the window shows the passphrase field, which is the default, and the link "Use
+  system authentication", which starts the polkit check for that one request; the owner chooses
+  in each check. A polkit check that fails, is cancelled or is not installed approves nothing,
+  and the passphrase stays available. `apassy owner serve` offers the same choice as `approve`
+  (passphrase) or `approve polkit`.
 - On Linux the owner-check window and the idle time use `CLOCK_BOOTTIME`, so a suspend counts as
   time, as on the Mac.
 
@@ -191,7 +196,7 @@ The recommendation of each row is what the plan builds unless the owner changes 
 | --- | --- | --- |
 | D1 | Toolkit | The same egui/eframe code (option A). |
 | D2 | Process model | The window is the node, with a handover to and from the user service. |
-| D3 | Owner check | polkit `auth_self`, with the passphrase as the fallback. No direct fprintd. |
+| D3 | Owner check | The passphrase by default; polkit `auth_self` on request in each check (amended 2026-11-10, ADR 0045). No direct fprintd. |
 | D4 | Keep the passphrase | Not now. The login keyring only after s5 keeps agents off the session bus. |
 | D5 | Packages | `.deb` (two packages) and `.tar.gz`. No Flatpak. |
 | D6 | Tray | None now. |

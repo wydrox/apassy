@@ -42,7 +42,11 @@ pub const UNLOCK_REASON: &str = "unlock the Apassy vault";
 pub const KEYCHAIN_UNAVAILABLE_NOTE: &str = "Touch ID can confirm actions, but cannot unlock the vault until the app has a provisioning profile. Unlock with the passphrase.";
 
 /// The owner text after a fingerprint change.
-pub const BIOMETRY_CHANGED_NOTE: &str = "The fingerprints on this Mac changed after you turned on Touch ID unlock. Apassy removed the old unlock key. Unlock with the passphrase, then turn on Touch ID unlock again.";
+pub const BIOMETRY_CHANGED_NOTE: &str = concat!(
+    "The fingerprints on this ",
+    crate::computer!(),
+    " changed after you turned on Touch ID unlock. Apassy removed the old unlock key. Unlock with the passphrase, then turn on Touch ID unlock again."
+);
 
 /// The owner text when this build has no keychain helper.
 pub const HELPER_MISSING_NOTE: &str = "Touch ID unlock works only in Apassy.app. This build has no keychain helper. Unlock with the passphrase.";

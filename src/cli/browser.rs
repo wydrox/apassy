@@ -52,6 +52,9 @@ enum Change {
     Missing,
     /// `--remove` found no manifest.
     Absent,
+    /// Linux: a snap, a Flatpak or an unknown build. Nothing was written. The text
+    /// gives the reason and the alternative; the code names the reason for JSON.
+    Unsupported(String, &'static str),
 }
 
 /// Write or remove the manifest in each selected browser under `home`.
@@ -60,6 +63,19 @@ fn apply(
     host: &Path,
     only: Option<&Browser>,
     remove: bool,
+) -> Result<Vec<(&'static str, Change)>, Failure> {
+    apply_with(home, host, only, remove, |browser| {
+        install::state(home, browser, host)
+    })
+}
+
+/// [`apply`] with the state of each browser from `state`.
+fn apply_with(
+    home: &Path,
+    host: &Path,
+    only: Option<&Browser>,
+    remove: bool,
+    state: impl Fn(&Browser) -> State,
 ) -> Result<Vec<(&'static str, Change)>, Failure> {
     let mut changes = Vec::new();
     for browser in BROWSERS
@@ -76,9 +92,19 @@ fn apply(
             changes.push((browser.name, change));
             continue;
         }
-        if only.is_none() && install::state(home, browser, host) == State::Missing {
-            changes.push((browser.name, Change::Missing));
-            continue;
+        match state(browser) {
+            State::Missing if only.is_none() => {
+                changes.push((browser.name, Change::Missing));
+                continue;
+            }
+            State::Unsupported(kind) => {
+                changes.push((
+                    browser.name,
+                    Change::Unsupported(kind.explain(browser), kind.code()),
+                ));
+                continue;
+            }
+            _ => {}
         }
         let file = install::connect(home, browser, host)?;
         changes.push((browser.name, Change::Wrote(file)));
@@ -95,6 +121,9 @@ fn changes_json(changes: &[(&str, Change)]) -> Vec<serde_json::Value> {
                 Change::Removed(path) => ("removed", Some(path)),
                 Change::Missing => ("browser_missing", None),
                 Change::Absent => ("manifest_absent", None),
+                Change::Unsupported(message, reason) => {
+                    return serde_json::json!({"browser": name, "state": "unsupported", "reason": reason, "message": message});
+                }
             };
             serde_json::json!({"browser": name, "state": state, "path": path})
         })
@@ -173,6 +202,7 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
         apply(&home, &app.host(), only, remove)?
     };
     let mut wrote = false;
+    let mut unsupported = false;
     for (name, change) in &changes {
         match change {
             Change::Wrote(file) => {
@@ -182,6 +212,10 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
             Change::Removed(file) => println!("{name}: removed {}", file.display()),
             Change::Missing => println!("{name}: no browser profile found"),
             Change::Absent => println!("{name}: no manifest"),
+            Change::Unsupported(message, _) => {
+                unsupported = true;
+                println!("{name}: not supported. {message}");
+            }
         }
     }
     if remove {
@@ -189,9 +223,14 @@ pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
         return Ok(());
     }
     if !wrote {
-        return Err(Failure::Other(
-            "No browser was found. Use --browser NAME to select one.".to_owned(),
-        ));
+        return Err(Failure::Other(if unsupported {
+            format!(
+                "No supported browser was found. {}",
+                install::UNSUPPORTED_ALTERNATIVE
+            )
+        } else {
+            "No browser was found. Use --browser NAME to select one.".to_owned()
+        }));
     }
     let extension = app.extension_dir();
     if extension.join("manifest.json").is_file() {
@@ -260,5 +299,41 @@ mod tests {
         let changes = apply(home.path(), host, Some(chrome), true).unwrap();
         assert_eq!(changes, vec![(chrome.name, Change::Removed(file.clone()))]);
         assert!(!file.exists());
+    }
+
+    /// A snap or Flatpak browser is reported with its reason and the alternative, and
+    /// gets no manifest, also when `--browser` names it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn setup_reports_unsupported_browsers_and_writes_nothing_for_them() {
+        use crate::browser::install::Unsupported;
+        let home = tempfile::tempdir().unwrap();
+        let chromium = install::find("chromium").unwrap();
+        let host = Path::new("/usr/lib/apassy/apassy-browser-host");
+        let snap = |_: &Browser| State::Unsupported(Unsupported::Snap);
+        for only in [None, Some(chromium)] {
+            let changes = apply_with(home.path(), host, only, false, snap).unwrap();
+            assert!(changes.iter().all(|(_, change)| matches!(
+                change,
+                Change::Unsupported(message, "snap")
+                    if message.ends_with("Use Google Chrome, or Chromium from a .deb.")
+            )));
+        }
+        assert!(!install::manifest_path(home.path(), chromium).exists());
+        let json = changes_json(&[(
+            chromium.name,
+            Change::Unsupported(Unsupported::Flatpak.explain(chromium), "flatpak"),
+        )]);
+        assert_eq!(json[0]["state"], "unsupported");
+        assert_eq!(json[0]["reason"], "flatpak");
+        // --remove still deletes a stale manifest of an unsupported browser.
+        let file = install::manifest_path(home.path(), chromium);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, install::manifest(host)).unwrap();
+        let changes = apply_with(home.path(), host, Some(chromium), true, snap).unwrap();
+        assert_eq!(
+            changes,
+            vec![(chromium.name, Change::Removed(file.clone()))]
+        );
     }
 }
