@@ -102,7 +102,7 @@ test("the New password view sends the length and symbols and shows the result", 
   await expect(popup.locator("#length")).toHaveValue("20");
   await expect(popup.locator("#symbols")).toBeChecked();
   await expect(popup.locator("#create")).toBeEnabled();
-  await expect(popup.locator("#new-form")).toContainText("Approve on your Mac. Apassy saves the password before filling this page.");
+  await expect(popup.locator("#new-form")).toContainText("Approve in Apassy. Apassy saves the password before filling this page.");
   await popup.locator("#username").fill("new@example.com");
   await popup.locator("#length").fill("32");
   await popup.locator("#symbols").uncheck();

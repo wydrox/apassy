@@ -28,7 +28,7 @@
     const context = el("div");
     context.append(el("strong", offer.mode === "update" ? "Update the password in Apassy?" : "Save this login in Apassy?"), el("small", `${offer.site} · ${offer.username}`));
     identity.append(icon, context);
-    const status = el("p", "Saving needs your approval on your Mac."); status.setAttribute("role", "status");
+    const status = el("p", "Saving needs your approval in Apassy."); status.setAttribute("role", "status");
     const actions = el("div"); actions.className = "actions";
     let busy = false, visibleSince = null, press;
     // A closed shadow alone does not prevent transparent-host clickjacking.
@@ -66,7 +66,7 @@
         busy = true;
         if (name === "dismiss") removeBanner();
         else if (name === "never") { root.querySelectorAll("button").forEach((button) => { button.disabled = true; }); status.textContent = "Turning off login offers for this site…"; }
-        else { root.querySelectorAll("button").forEach((button) => { button.disabled = true; }); status.textContent = "Check Touch ID on your Mac. Approve in Apassy, or use your vault passphrase if asked."; }
+        else { root.querySelectorAll("button").forEach((button) => { button.disabled = true; }); status.textContent = "Confirm in Apassy with your vault passphrase or the available system authentication."; }
         const reply = await send({ type: "login_save_action", id: offer.id, action: name, trustedGesture: true });
         if (name === "never" && banner === visibleBanner) {
           if (reply.ok) removeBanner();

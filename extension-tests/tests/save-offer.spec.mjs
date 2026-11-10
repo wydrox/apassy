@@ -3,7 +3,7 @@ import { shadowText, shadowButton } from "../cdp/closed-shadow.mjs";
 test.use({ loginSiteAccess: true });
 const banner = "data-apassy-save-offer";
 // The first status of an offer, until it takes a press.
-const OFFER_WAITS = "Saving needs your approval on your Mac.";
+const OFFER_WAITS = "Saving needs your approval in Apassy.";
 // A save starts two mock hosts (status, then save): slow on a busy macOS runner.
 const HOST_WAIT = { timeout: 20_000 };
 async function setup(h, path, existing = false) {

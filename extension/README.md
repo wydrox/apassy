@@ -1,15 +1,19 @@
 # Apassy for Chromium browsers
 
-This extension fills a login or a one-time code on a website from your Apassy vault, and can answer passkey requests with the passkeys in Apassy. You choose the login in the toolbar popup or in the field suggestions. Apassy asks for Touch ID or your passphrase before each fill. Agents never get a password through it.
+This extension fills a login or a one-time code on a website from your Apassy vault, and can answer passkey requests with the passkeys in Apassy. You choose the login in the toolbar popup or in the field suggestions. Apassy asks for confirmation before each fill: Touch ID or your passphrase on macOS, and your passphrase on Linux by default. Agents never get a password through it.
 
 Toolbar actions fill the top frame. Field suggestions also support independently bound same-origin frames. For a cross-origin embedded sign-in, open that sign-in page in its own tab and enable its own site access. Passkeys and one-time codes remain top-frame only.
 
 | Feature | Browsers |
 | --- | --- |
-| Fill, save, and create logins | Helium, Google Chrome, Chromium, Brave, Microsoft Edge, Arc, Vivaldi |
-| Passkeys and one-time codes | Helium (`net.imput.helium`, team S4Q33XPHB4) and Google Chrome stable (`com.google.Chrome`, team EQHXZ8M8AV), from the official signed download, started normally |
+| Fill, save, and create logins on macOS | Helium, Google Chrome, Chromium, Brave, Microsoft Edge, Arc, Vivaldi |
+| Passkeys and one-time codes on macOS | Helium (`net.imput.helium`, team S4Q33XPHB4) and Google Chrome stable (`com.google.Chrome`, team EQHXZ8M8AV), from the official signed download, started normally |
 
-For passkeys and codes, Apassy checks that the browser is the signed Helium or Google Chrome and that it was not started with `--load-extension`, `--disable-extensions-except`, or a `--remote-debugging-*` switch (docs/contracts/browser-v1.md, section 9.4). In another browser, or in Helium or Chrome that an automation tool or a debugger started, Apassy answers that it cannot verify the browser: the browser then does a passkey request itself, and "Fill code" fills nothing and shows that message. Chrome Beta, Dev, and Canary are not accepted. The positive passkey ceremony in Chrome has not been run by an automated test. This check does not prove the extension itself, so Apassy asks for Touch ID or your passphrase before each passkey and each code in every browser.
+| Logins, passkeys and one-time codes on Linux | Google Chrome stable and packaged Chromium on Ubuntu/Debian, started normally; runtime qualification is still required |
+
+On Linux, install the desktop vault package and run `apassy setup browser --browser chrome` or `--browser chromium`. Native messaging manifests use `$XDG_CONFIG_HOME` (default `~/.config`) under `google-chrome/NativeMessagingHosts` or `chromium/NativeMessagingHosts`. The root-owned host is `/usr/lib/apassy/apassy-browser-host`; the extension folder is `/usr/share/apassy/browser-extension`. Chrome Beta/Dev/Canary, Snap/Flatpak browser packages and arbitrary source builds are not supported. Linux checks kernel peer credentials, the direct browser parent, its root-owned executable and unsafe switches. A hardened peer's executable cannot be independently authenticated by the app; compromised same-user processes remain outside this defense-in-depth boundary (ADR 0045). Linux has no signed macOS browser-instance bypass. These source and synthetic checks do not establish a live browser ceremony.
+
+On macOS, for passkeys and codes, Apassy checks that the browser is the signed Helium or Google Chrome and that it was not started with `--load-extension`, `--disable-extensions-except`, or a `--remote-debugging-*` switch (docs/contracts/browser-v1.md, section 9.4). In another browser, or in Helium or Chrome that an automation tool or a debugger started, Apassy answers that it cannot verify the browser: the browser then does a passkey request itself, and "Fill code" fills nothing and shows that message. Chrome Beta, Dev, and Canary are not accepted. The positive passkey ceremony in Chrome has not been run by an automated test. This check does not prove the extension itself, so Apassy asks for confirmation in Apassy before each passkey and each code in every browser.
 
 ## Load it
 
@@ -18,7 +22,7 @@ For passkeys and codes, Apassy checks that the browser is the signed Helium or G
 
 Without the store: turn on Developer mode on the extensions page of the browser, and drag this folder (`/Applications/Apassy.app/Contents/Resources/browser-extension`) onto the page. An update of Apassy updates the folder. The browser loads the new version at its next start. Logins work this way; passkeys and codes need Helium or Chrome (see above).
 
-To fill a login, focus its username or password field, then click the Apassy button in the toolbar, or press Command-Shift-L. Choose a login, then confirm with Touch ID or your passphrase in Apassy. When a page has several forms, the focused field determines the form. A navigation or a replaced form cancels delivery. Apassy never submits the website form.
+To fill a login, focus its username or password field, then click the Apassy button in the toolbar, or press Command-Shift-L on macOS or Ctrl-Shift-L on Linux. Choose a login, then confirm in Apassy. When a page has several forms, the focused field determines the form. A navigation or a replaced form cancels delivery. Apassy never submits the website form.
 
 Suggestions are on by default on all granted HTTPS sites and localhost. Broad access previously granted for passkeys also enables suggestions after updating. Without broad access, the popup offers **Allow suggestions on all sites** once. Open **Settings** for the **Suggest logins on all sites** switch, **Not on this site** exclusion and passkeys. Exclusions stay in extension local storage by hostname. Turning off suggestions does not revoke passkey access.
 
@@ -37,7 +41,7 @@ To fill a one-time code, open the account’s Details and click "Fill code" for 
 
 In popup Settings, turn on "Use Apassy passkeys in this browser". The browser asks you to let Apassy read and change data on https sites (and on `localhost`, for a local test site). Turn it off there, or remove the site access in the browser, to stop.
 
-When it is on, a site that asks for a passkey asks Apassy. Apassy shows the address of the site and asks for Touch ID or your passphrase for each sign-in and each new passkey. The browser does the request itself when Apassy cannot serve it before that check: Apassy does not run, the vault is locked, Apassy cannot verify the browser (see the table above), Apassy has no passkey for the site, or the site asks for something that Apassy does not do (a security key, a passkey in the address bar list, a "prf" or "largeBlob" extension for a new passkey, an algorithm other than ES256 for a new passkey, enterprise attestation). A sign-in can use the "prf" extension (inputs of 0 to 1024 bytes, at most 256 credentials in `evalByCredential`) and the "largeBlob" extension (a read, or a write of up to 64 KiB; a write that does not fit the 64 KiB request of the app goes to the browser, and an empty write gets `written: false`). A read of a passkey without a blob gives `largeBlob: {}`. The site gets the other results only when Apassy sends them. After you cancel the check, the site gets an error and the browser does not ask again.
+When it is on, a site that asks for a passkey asks Apassy. Apassy shows the address of the site and asks for confirmation in Apassy for each sign-in and each new passkey. The browser does the request itself when Apassy cannot serve it before that check: Apassy does not run, the vault is locked, Apassy cannot verify the browser (see the table above), Apassy has no passkey for the site, or the site asks for something that Apassy does not do (a security key, a passkey in the address bar list, a "prf" or "largeBlob" extension for a new passkey, an algorithm other than ES256 for a new passkey, enterprise attestation). A sign-in can use the "prf" extension (inputs of 0 to 1024 bytes, at most 256 credentials in `evalByCredential`) and the "largeBlob" extension (a read, or a write of up to 64 KiB; a write that does not fit the 64 KiB request of the app goes to the browser, and an empty write gets `written: false`). A read of a passkey without a blob gives `largeBlob: {}`. The site gets the other results only when Apassy sends them. After you cancel the check, the site gets an error and the browser does not ask again.
 
 How it works:
 
@@ -51,7 +55,7 @@ The extension does not use the browser's `webAuthenticationProxy`, keeps no pass
 
 | Permission | Why |
 | --- | --- |
-| `nativeMessaging` | To talk to the Apassy app on this Mac. |
+| `nativeMessaging` | To talk to the Apassy app on this computer. |
 | `activeTab` | To read the address of the page and fill it, only after you click the Apassy button. |
 | `storage` | To retain a short-lived nonsecret action result in extension-only browser session storage. No password, account label or page query is stored. |
 | `scripting` | To put the username, the password, or a one-time code into the fields of that page, and to run the passkey scripts. |

@@ -15,9 +15,14 @@ Linux has no macOS code-signing identity, Secure Enclave or Touch ID boundary.
 Root and compromised same-user processes are outside the protection offered by
 this software vault. Harden secret-bearing processes against dumps and ptrace;
 keep sockets and files private. X11 permits input interception; prefer Wayland.
-Browser identity uses kernel peer credentials and verified process ancestry,
+Browser identity uses kernel peer credentials and a verified direct browser parent,
 with root-owned executable paths, never process names or caller-supplied PIDs.
-Reject unknown browsers, stale processes, mismatched users and writable binaries.
+The host verifies its own installed executable. The app verifies that host image
+when readable; Linux hides a non-dumpable peer's executable, so only that kernel
+permission refusal uses peer credentials and browser ancestry instead. This does
+not authenticate a hardened host executable to the app. Injected browser children
+and compromised same-user processes remain outside this boundary. Reject unknown
+browsers, stale processes, mismatched users and writable browser binaries.
 This is defense in depth, not an equivalent to macOS signing. Preserve origin,
 RP ID, challenge, approval and user-verification checks in the shared flow.
 

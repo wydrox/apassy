@@ -7,7 +7,8 @@
 //! Browser extension in the app and `apassy setup browser` write it. The manifest names
 //! `apassy-browser-host` of the running Apassy.app and allows only the Apassy extension.
 //!
-//! Only an app bundle can connect a browser: the agent profile protects the bundle, not a
+//! On Linux the root-owned installed host is required. On macOS only an app bundle
+//! can connect a browser: the agent profile protects the bundle, not a
 //! source tree. From a source build the manifest would name `target/debug`, which an
 //! agent can rebuild, and the browser would run it outside the sandbox.
 
@@ -15,6 +16,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 
 use super::wire::{EXTENSION_ORIGIN, HOST_NAME};
 
@@ -29,6 +32,7 @@ pub struct Browser {
     pub bundle_id: &'static str,
 }
 
+#[cfg(not(target_os = "linux"))]
 pub const BROWSERS: &[Browser] = &[
     Browser {
         id: "helium",
@@ -71,6 +75,23 @@ pub const BROWSERS: &[Browser] = &[
         name: "Vivaldi",
         dir: "Vivaldi",
         bundle_id: "com.vivaldi.Vivaldi",
+    },
+];
+
+/// Linux desktop support starts with packaged Google Chrome stable and Chromium.
+#[cfg(target_os = "linux")]
+pub const BROWSERS: &[Browser] = &[
+    Browser {
+        id: "chrome",
+        name: "Google Chrome",
+        dir: "google-chrome",
+        bundle_id: "com.google.Chrome",
+    },
+    Browser {
+        id: "chromium",
+        name: "Chromium",
+        dir: "chromium",
+        bundle_id: "org.chromium.Chromium",
     },
 ];
 
@@ -123,7 +144,7 @@ pub fn bundle_contents(program_dir: &Path) -> Option<PathBuf> {
     (bundle.extension().is_some_and(|ext| ext == "app")).then(|| contents.to_path_buf())
 }
 
-/// The Apassy.app that connects the browsers.
+/// The installed Apassy package that connects the browsers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Install {
     contents: PathBuf,
@@ -132,29 +153,79 @@ pub struct Install {
 impl Install {
     /// The app bundle of the running program. `None` for a source build.
     pub fn current() -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let executable = fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+            if ![
+                Path::new("/usr/bin/apassy"),
+                Path::new(super::caller::linux::HOST),
+            ]
+            .contains(&executable.as_path())
+            {
+                return None;
+            }
+            super::caller::linux::trusted_binary(&executable).ok()?;
+        }
         Self::at(&program_dir()?)
     }
 
     /// The app bundle of the programs in `program_dir`.
     pub fn at(program_dir: &Path) -> Option<Self> {
-        bundle_contents(program_dir).map(|contents| Self { contents })
+        #[cfg(target_os = "linux")]
+        {
+            let host = Path::new(super::caller::linux::HOST);
+            (linux_program_dir(program_dir) && super::caller::linux::trusted_binary(host).is_ok())
+                .then(|| Self {
+                    contents: PathBuf::from("/usr/lib/apassy"),
+                })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            bundle_contents(program_dir).map(|contents| Self { contents })
+        }
     }
 
     /// The native messaging host of this app.
     pub fn host(&self) -> PathBuf {
-        self.contents.join("MacOS").join("apassy-browser-host")
+        #[cfg(target_os = "linux")]
+        {
+            self.contents.join("apassy-browser-host")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.contents.join("MacOS").join("apassy-browser-host")
+        }
     }
 
     /// The folder of the extension, for "Load unpacked".
     pub fn extension_dir(&self) -> PathBuf {
-        self.contents.join("Resources").join("browser-extension")
+        #[cfg(target_os = "linux")]
+        {
+            PathBuf::from("/usr/share/apassy/browser-extension")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.contents.join("Resources").join("browser-extension")
+        }
     }
 
     /// True when this app is `/Applications/Apassy.app`, which the agent profile always
     /// protects.
     pub fn is_installed_app(&self) -> bool {
-        self.contents == Path::new("/Applications/Apassy.app/Contents")
+        #[cfg(target_os = "linux")]
+        {
+            self.contents == Path::new("/usr/lib/apassy")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.contents == Path::new("/Applications/Apassy.app/Contents")
+        }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_program_dir(dir: &Path) -> bool {
+    matches!(dir.to_str(), Some("/usr/bin" | "/usr/lib/apassy"))
 }
 
 /// How one browser is connected.
@@ -170,7 +241,20 @@ pub enum State {
 }
 
 fn support(home: &Path) -> PathBuf {
-    home.join("Library").join("Application Support")
+    #[cfg(target_os = "linux")]
+    {
+        if self::home().as_deref() == Some(home)
+            && let Some(config) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+            && config.is_absolute()
+        {
+            return config;
+        }
+        home.join(".config")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        home.join("Library").join("Application Support")
+    }
 }
 
 /// The manifest file of `browser` under `home`.
@@ -203,6 +287,18 @@ pub fn state(home: &Path, browser: &Browser, host: &Path) -> State {
 
 /// Write the manifest of `browser` for the host at `host`. The write is atomic.
 pub fn connect(home: &Path, browser: &Browser, host: &Path) -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if host != Path::new(super::caller::linux::HOST) {
+        return Err(io::Error::other(
+            "Linux browser integration requires the installed Apassy host",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    super::caller::linux::trusted_binary(host)?;
+    write_manifest(home, browser, host)
+}
+
+fn write_manifest(home: &Path, browser: &Browser, host: &Path) -> io::Result<PathBuf> {
     let file = manifest_path(home, browser);
     let folder = file
         .parent()
@@ -237,9 +333,34 @@ pub const STORE_URL: &str =
 /// Open the page of the extension in the Chrome Web Store in `browser`, for "Add to
 /// Chrome". The browser starts when it does not run.
 pub fn open_store_page(browser: &Browser) -> io::Result<()> {
-    run_open(&["-b", browser.bundle_id, STORE_URL])
+    #[cfg(target_os = "linux")]
+    {
+        let executable = match browser.id {
+            "chrome" => "/usr/bin/google-chrome-stable",
+            "chromium" => "/usr/bin/chromium",
+            _ => return Err(io::Error::other("Unsupported Linux browser")),
+        };
+        let mut child = Command::new(executable)
+            .arg(STORE_URL)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        // A first browser launch can live for hours. Reap it off the UI thread.
+        std::thread::Builder::new()
+            .name("apassy-browser-launch".into())
+            .spawn(move || {
+                let _ = child.wait();
+            })?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        run_open(&["-b", browser.bundle_id, STORE_URL])
+    }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn run_open(args: &[&str]) -> io::Result<()> {
     let status = Command::new("/usr/bin/open").args(args).status()?;
     if status.success() {
@@ -254,6 +375,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn only_an_app_bundle_can_connect() {
         let installed = Install::at(Path::new("/Applications/Apassy.app/Contents/MacOS")).unwrap();
         assert!(installed.is_installed_app());
@@ -303,6 +425,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn connect_and_disconnect_follow_the_state() {
         let home = tempfile::tempdir().unwrap();
         let helium = find("helium").unwrap();
@@ -324,5 +447,41 @@ mod tests {
         assert!(disconnect(home.path(), helium).unwrap());
         assert!(!disconnect(home.path(), helium).unwrap());
         assert_eq!(state(home.path(), helium, host), State::NotConnected);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_registration_uses_only_packaged_hosts_and_supported_profiles() {
+        let home = tempfile::tempdir().unwrap();
+        let chrome = find("chrome").unwrap();
+        let chromium = find("chromium").unwrap();
+        assert!(find("helium").is_none());
+        let host = Path::new(super::super::caller::linux::HOST);
+        assert_eq!(
+            manifest_path(home.path(), chrome),
+            home.path()
+                .join(".config/google-chrome/NativeMessagingHosts/com.wydrox.apassy.json")
+        );
+        assert_eq!(
+            manifest_path(home.path(), chromium),
+            home.path()
+                .join(".config/chromium/NativeMessagingHosts/com.wydrox.apassy.json")
+        );
+        assert_eq!(state(home.path(), chrome, host), State::Missing);
+        fs::create_dir_all(support(home.path()).join(chrome.dir)).unwrap();
+        assert_eq!(state(home.path(), chrome, host), State::NotConnected);
+        // Exercise file registration separately from installed-image validation;
+        // this test does not install or pretend to own a root-owned executable.
+        write_manifest(home.path(), chrome, host).unwrap();
+        assert_eq!(state(home.path(), chrome, host), State::Connected);
+        assert!(connect(home.path(), chrome, Path::new("/tmp/apassy-browser-host")).is_err());
+        assert!(disconnect(home.path(), chrome).unwrap());
+        assert!(!disconnect(home.path(), chrome).unwrap());
+        assert_eq!(Install::at(Path::new("/tmp/apassy")), None);
+        assert!(
+            linux_program_dir(Path::new("/usr/bin")),
+            "the desktop package installs /usr/bin/apassy"
+        );
+        assert!(linux_program_dir(Path::new("/usr/lib/apassy")));
+        assert!(!linux_program_dir(Path::new("/usr/local/bin")));
     }
 }

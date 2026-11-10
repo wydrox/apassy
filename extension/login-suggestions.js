@@ -273,7 +273,7 @@
           if (e.isTrusted) load(true);
         }),
       );
-    else footer.append(node("span", "Waiting on your Mac"));
+    else footer.append(node("span", "Waiting in Apassy"));
     footer.append(button("Dismiss · Esc", dismiss));
     section.append(footer);
     section.addEventListener("keydown", (e) => {
@@ -328,7 +328,7 @@
     if (reply.ok)
       draw(
         reply.logins.length
-          ? "Choose an account, then approve on your Mac."
+          ? "Choose an account, then approve in Apassy."
           : reply.emptyReason === "username"
             ? "No login matches this username. Show all accounts to choose another."
             : "No logins for this site",
@@ -353,7 +353,7 @@
     busy = true;
     selected = login;
     const mine = generation;
-    draw("Check Touch ID on your Mac", [], "waiting");
+    draw("Confirm in Apassy", [], "waiting");
     const reply = await send({
       type: "login_fill",
       trustedGesture: true,
