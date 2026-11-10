@@ -621,7 +621,7 @@ svg{display:block}
       <div class="sbar"><span class="btn left">Check Again</span><span class="btn pri">Close</span></div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>Polling</b>: <code>GET /v1/account</code> every 3 s while the sheet is open; it stops on an entitled plan (5b), on Cancel, or after 30 minutes (5c). The browser's return never changes the plan: only the webhook does.</li><li><b>Open the Page Again</b> opens the same Checkout URL again. Cancel closes the sheet; a payment that the owner still finishes in the browser shows on the next refresh of the section.</li><li><b>apassy://connect/done</b>: the app bundle has no URL scheme yet, and eframe gives no open-URL event; polling is the only path (the plan allows it). The done page's link does nothing until a later unit registers the scheme.</li></ul>
+  <ul class="fnotes"><li><b>Polling</b>: <code>GET /v1/account</code> every 3 s while the sheet is open; it stops on an entitled plan (5b), on Cancel, or after 30 minutes (5c). The browser's return never changes the plan: only the webhook does.</li><li><b>Open the Page Again</b> opens the same Checkout URL again. Cancel closes the sheet; a payment that the owner still finishes in the browser shows on the next refresh of the section.</li><li><b>No link back to the app</b>: the app bundle registers no URL scheme, and eframe gives no open-URL event; polling is the only path (the plan allows it). The done page says "Apassy on your Mac shows your plan in a moment. You can close this page." as text, with no link.</li></ul>
 </section>
 <!-- ============================================================ 6 -->
 <section class="frame" id="f6">

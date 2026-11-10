@@ -1,16 +1,16 @@
 ---
-// The cancel page of a Connect checkout (implementation plan s7, decision 3).
+// The cancel page of a Connect checkout (implementation plan s7, decision 3). The
+// Mac app registers no URL scheme, so there is no link back to it.
 import Notice from "../../components/connect/Notice.astro";
 ---
 <Notice
   title="Checkout canceled · Apassy Connect"
-  description="Nothing was charged. Return to Apassy on your Mac."
+  description="Nothing was charged. You can close this page."
   heading="Checkout canceled."
 >
-  <p>Nothing was charged, and your plan did not change. You can start again in Apassy on your Mac at any time.</p>
-  <a class="btn btn-primary" href="apassy://connect/cancel">Return to Apassy</a>
+  <p>Nothing was charged, and your plan did not change. You can close this page.</p>
   <p class="small">
-    If Apassy does not open, open it yourself: <kbd>Settings</kbd> › <kbd>Connect</kbd>. Everything that you host
+    To start again, open Apassy on your Mac: <kbd>Settings</kbd> › <kbd>Connect</kbd>. Everything that you host
     yourself stays free. <a href="/pricing">Pricing</a>
   </p>
 </Notice>
