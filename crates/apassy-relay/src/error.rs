@@ -115,6 +115,19 @@ pub mod codes {
     /// agent on a relay with `APASSY_RELAY_TEAM_VAULTS=0`. 410: the feature is gone here,
     /// and a retry does not help.
     pub const TEAM_VAULTS_RETIRED: &str = "team_vaults_retired";
+    // Apassy Connect accounts (connect-account-v1 section 4, docs/SPEC.md "Connect accounts").
+    /// A Connect route that needs a live account device, called with a relay-sync team
+    /// token, or for a store that is not a vault store.
+    pub const ACCOUNT_REQUIRED: &str = "account_required";
+    /// A device of another account, and the two accounts share no group; a group route
+    /// or call by an account that is not in the group.
+    pub const NOT_IN_GROUP: &str = "not_in_group";
+    /// A count limit of the account: devices, vault stores, nodes.
+    pub const ACCOUNT_LIMIT: &str = "account_limit";
+    // Connect billing and groups (docs/contracts/connect-billing-v1.md).
+    /// A count of people or seats outside `1 ≤ n ≤ max` of the plan, or below the
+    /// active members of the group.
+    pub const SEAT_LIMIT: &str = "seat_limit";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -152,12 +165,15 @@ pub fn status_of(code: &str) -> u16 {
         | PLAN_REQUIRED
         | FEED_LIMIT
         | FEED_RATE
-        | TOO_MANY_ACTIONS => 403,
+        | TOO_MANY_ACTIONS
+        | ACCOUNT_REQUIRED
+        | NOT_IN_GROUP
+        | ACCOUNT_LIMIT => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
         | PUSH_GATEWAY_REFUSED | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED
-        | ACTION_EXPIRED => 409,
+        | ACTION_EXPIRED | SEAT_LIMIT => 409,
         TEAM_VAULTS_RETIRED => 410,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,

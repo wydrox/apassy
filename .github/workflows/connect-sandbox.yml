@@ -1,0 +1,63 @@
+name: Connect billing sandbox
+
+# The Stripe sandbox job of Connect billing (unit C2 of
+# docs/design/implementation-plan-s7-connect.md): crates/apassy-relay/tests/connect_billing_sandbox.rs
+# against Stripe's test mode, on a test clock. Manual only: never on a push, a pull request,
+# or a schedule without the owner. It needs the repository secret STRIPE_SANDBOX_KEY (a
+# test-mode key, rk_test_… or sk_test_…) and the sandbox prices of
+# crates/apassy-relay/scripts/stripe-products.sh. Test mode charges nothing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-sandbox
+  cancel-in-progress: false
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-relay
+          cache-bin: false
+          save-if: false
+      - name: Fetch Cargo dependencies
+        run: cargo fetch --locked
+      - name: Install cargo-nextest 0.9.150
+        run: bash scripts/ci-install-nextest.sh
+      - name: Write the sandbox key to a file
+        env:
+          STRIPE_SANDBOX_KEY: ${{ secrets.STRIPE_SANDBOX_KEY }}
+        run: |
+          if [ -z "$STRIPE_SANDBOX_KEY" ]; then
+            echo "::error::Set the repository secret STRIPE_SANDBOX_KEY (a Stripe test-mode key)."
+            exit 1
+          fi
+          case "$STRIPE_SANDBOX_KEY" in
+            rk_test_* | sk_test_*) ;;
+            *) echo "::error::STRIPE_SANDBOX_KEY must be a test-mode key."; exit 1 ;;
+          esac
+          umask 077
+          printf '%s' "$STRIPE_SANDBOX_KEY" > "$RUNNER_TEMP/stripe-sandbox-key"
+      - name: Run the sandbox test
+        env:
+          STRIPE_SANDBOX_KEY_FILE: ${{ runner.temp }}/stripe-sandbox-key
+        run: >-
+          cargo nextest run --profile ci --offline --locked -p apassy-relay
+          -E 'binary(connect_billing_sandbox)' --run-ignored only
+      - name: Remove the key file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/stripe-sandbox-key"

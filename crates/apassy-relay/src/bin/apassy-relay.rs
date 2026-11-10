@@ -29,6 +29,7 @@ const USAGE: &str = "Usage:
   apassy-relay downgrade-schema-7
   apassy-relay downgrade-directory-1003
   apassy-relay downgrade-directory-1004
+  apassy-relay downgrade-directory-1005
   apassy-relay snapshot-check
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin node-code [--minutes <n>]
@@ -69,7 +70,10 @@ to 7 in place; the push handles stay for the next start of schema 8 (docs/OPERAT
 back to 1003 in place, and its OAuth clients, connect requests, refresh tokens, and unused
 node pairing codes are dropped (docs/OPERATIONS.md 24.3).
 `downgrade-directory-1004` runs with the relay stopped: relay.db goes from 1005 back to
-1004 in place, and its unused node pairing codes are dropped (docs/OPERATIONS.md 25.3).";
+1004 in place, and its unused node pairing codes are dropped (docs/OPERATIONS.md 25.3).
+`downgrade-directory-1005` runs with the relay stopped: relay.db goes from 1006 (Apassy
+Connect accounts) back to 1005 in place, and the vault stores of the accounts are deleted
+with their snapshots; the accounts stay, unread by that image (docs/OPERATIONS.md 26.3).";
 
 /// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
 /// before a deletion.
@@ -86,6 +90,7 @@ enum Command {
     DowngradeSchema7,
     DowngradeDirectory1003,
     DowngradeDirectory1004,
+    DowngradeDirectory1005,
     SnapshotCheck,
     Admin(Operator),
     Help,
@@ -281,6 +286,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "downgrade-schema-7" if args.len() == 1 => Ok(Command::DowngradeSchema7),
         "downgrade-directory-1003" if args.len() == 1 => Ok(Command::DowngradeDirectory1003),
         "downgrade-directory-1004" if args.len() == 1 => Ok(Command::DowngradeDirectory1004),
+        "downgrade-directory-1005" if args.len() == 1 => Ok(Command::DowngradeDirectory1005),
         "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
@@ -442,6 +448,21 @@ fn main() -> ExitCode {
                     println!("{}", serde_json::json!({"from": from, "to": to}));
                     eprintln!(
                         "apassy-relay: relay.db is at version {to}; the image of directory 1004 can open it."
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error.message),
+            }
+        }
+        Command::DowngradeDirectory1005 => {
+            match apassy_relay::server::directory::Directory::downgrade_to_1005(&config) {
+                Ok((from, to, stores)) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"from": from, "to": to, "vault_stores_deleted": stores})
+                    );
+                    eprintln!(
+                        "apassy-relay: relay.db is at version {to}; the image of directory 1005 can open it."
                     );
                     ExitCode::SUCCESS
                 }
@@ -707,6 +728,11 @@ mod tests {
             Command::DowngradeDirectory1004
         ));
         assert!(parse(&args(&["downgrade-directory-1004", "--now"])).is_err());
+        assert!(matches!(
+            parse(&args(&["downgrade-directory-1005"])).unwrap(),
+            Command::DowngradeDirectory1005
+        ));
+        assert!(parse(&args(&["downgrade-directory-1005", "--now"])).is_err());
         assert_eq!(
             parse_admin(&args(&["node-code"])).unwrap(),
             Operator::NodeCode { minutes: 10 }

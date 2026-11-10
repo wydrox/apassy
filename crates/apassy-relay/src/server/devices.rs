@@ -505,6 +505,7 @@ mod tests {
             auth_limiter: false,
             operator_socket: true,
             oauth: None,
+            connect: Default::default(),
         };
         let owner = Relay::init(&config, "team", "owner").unwrap();
         let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();

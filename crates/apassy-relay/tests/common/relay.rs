@@ -172,6 +172,7 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         auth_limiter: false,
         operator_socket: true,
         oauth: None,
+        connect: Default::default(),
     }
 }
 

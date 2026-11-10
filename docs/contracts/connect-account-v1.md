@@ -37,7 +37,7 @@ The encodings of relay-sync-v1 section 2 apply: b64u without padding, lowercase 
 
 - The Connect origin follows relay-sync-v1 section 3 (`https://` anywhere, `http://` on loopback only, no path). The hosted origin is `https://apassy-relay.wyderka.cc`.
 - The **edge endpoints** carry no `Authorization` header (Connect refuses a bearer there with `400 invalid_request`): `POST /v1/account`, `POST /v1/account/challenge`, `POST /v1/account/token`, `POST /v1/account/devices/join`, `POST /v1/account/devices/join/cancel`, `POST /v1/account/recover`, and `GET /.well-known/apassy-connect.json`.
-- Every other route of this contract needs `Authorization: Bearer <account token>` and answers `401 unauthenticated` without a valid one.
+- Every other route of this contract needs `Authorization: Bearer <account token>` and answers `401 unauthenticated` without a valid one. A token of a revoked device is not valid: `401 unauthenticated`, from the moment of the revoke (section 7.4). A relay-sync team token on one of these routes is `403 account_required`.
 - **The account token goes only to the Connect origin** (plan 0035 I-2). A client MUST NOT send it to the bouncer brain, a node, the push gateway, the site, or Stripe, and MUST NOT write it to disk or into a vault. It lives 15 minutes in memory (`Zeroizing`).
 - The Worker limits by client address: `POST /v1/account` and `POST /v1/account/recover` with `ACCOUNT_LIMITER` (namespace 1006, 5 a minute); `POST /v1/account/challenge`, `POST /v1/account/token`, `POST /v1/account/devices/join`, and `POST /v1/account/devices/join/cancel` with the existing `AUTH` limiter. A refusal is `429 rate_limited` with `Retry-After: 60`.
 - A JSON request body is at most 64 KiB.
@@ -63,9 +63,9 @@ The relay-sync-v1 codes keep their meaning: `invalid_request` 400, `unauthentica
 
 | Status | Code | When | Contract |
 | --- | --- | --- | --- |
-| 403 | `account_required` | A route of Connect that needs a live account device, called with a relay-sync team token, a token of a revoked device, or for a vault store that is not of kind `account` | this |
+| 403 | `account_required` | A route of Connect that needs an account token, called with a relay-sync team token. A token of a revoked device is `401 unauthenticated` (section 3), and a team id that is not a vault store is `404 not_found` (section 8) | this |
 | 403 | `not_in_group` | A device of another account is named for a vault store, a group route, or a dial, and the two accounts share no group (or no tunnel grant) | this, billing, tunnel |
-| 403 | `plan_required` | The account is not entitled for the action: a new vault store, a push to a store, the entitlement token, a dial, a checkout of a group member | this, billing, tunnel |
+| 403 | `plan_required` | The account is not entitled for the action: a new vault store, a push to a store, the entitlement token, a dial. A checkout by a member of a group is `409 conflict` ([connect-billing-v1](connect-billing-v1.md) section 4) | this, billing, tunnel |
 | 403 | `account_limit` | A count limit of section 13: devices, vault stores, nodes | this, tunnel |
 | 409 | `seat_limit` | Seats or people below the confirmed members, or above the maximum of the plan | billing |
 | 429 | `tunnel_limit` | Open streams, dials a minute, or the monthly byte budget of the account | tunnel |
@@ -171,6 +171,7 @@ A vault store is a relay-sync-v1 team of kind `account` with `TeamLimits::accoun
 - `GET /v1/account/vaults` lists the stores that hold a device of this account, as `VaultStoreView`s.
 - `POST /v1/account/vaults/{team_id}/devices` with `{"device_id":"dev_…"}`, from a device that is already in the store, adds a live device of the same account, or of an active member account of the same group (the store becomes `shared`), and answers `{"store_device_id":2,"device_id":"dev_…","account_id":"acc_…"}`. Any other device: `403 not_in_group`. The added device still needs the vault passphrase and merges by relay-sync-v1 sections 6 and 7; a member's device of a shared Family or Team vault joins through the link, the words, and the passphrase (M3).
 - `DELETE /v1/account/vaults/{team_id}` deletes the store with its snapshots (an owner check on the Mac) and answers `{"team_id":"t_…"}`.
+- On both `{team_id}` routes a team id that names no vault store (no team, or a relay-sync team of another kind) is `404 not_found`.
 - A push to a store of an account that is not entitled answers `403 plan_required` at the place of today's `sync_bytes` check (relay-sync-v1 section 4 order); pulls and downloads follow the plan state of [connect-billing-v1](connect-billing-v1.md) section 8.
 
 ## 9. Recovery
