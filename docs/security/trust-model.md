@@ -151,7 +151,7 @@ the contracts allow, and it becomes true when units C1 to C5 ship. The security 
 | Account directory (`relay.db`) | Account ids, person names, device names, platforms, device public keys, the signed device list of each account (each change signed by a device of the list), the hashes of link codes, the public recovery key of each account, the last-seen hour of each device, groups and roles, vault store ids and vault names, nodes (names, certificate pins, public names), tunnel grants, the public keys of the entitlement signing key | — | Private keys, link codes, recovery codes, tokens (memory only), passphrases, vault keys |
 | Plain files at rest | In `APASSY_RELAY_MODE=connect` there is no master key: `relay.db` and the vault store files are plain SQLite. They hold the directory above and, in the stores, SQLCipher snapshots under the user's passphrase, signed heads, and receipts | — | Nothing in them opens a vault. Disk encryption of the host is the owner's choice; backups go through the encrypted pull of today |
 | Vault stores (blind sync store) | One relay-sync-v1 team for each vault: the current and the previous snapshot | Ciphertext, sizes, times, which device pushed | Vault contents. The passphrase never reaches Connect |
-| Account sign-in, the device list, and the safety words | Public keys, signed challenges, and the signed device list; a 15-minute account token in memory | Which device signs in, and when | It cannot add or remove a device for an Apassy client: each change of the device list is an entry signed by a device of the list over the hash of the entry before, back to the account's first key, which each client pinned when it made or joined the account, and each client pins the highest version it verified. A row that Connect adds, a key it swaps, or a removed device it lists again is not in the list: the client shows it as "Not verified" and never uses it as an account device (no store, no sync head, no later confirmation). A list older than the pinned one, or another history, verifies no device. A device that Connect only hides stays a device until a device of the list signs its removal. A new device needs the confirmation of a verified device with six safety words and an owner check; the link code names the confirming device's key and the account's first key, and Connect never sees the code, so it can neither compute the words nor answer with other keys. Connect can refuse a sign-in, but a refusal never removes a device: the device forgets its key only when its owner confirms on it |
+| Account sign-in, the device list, and the safety words | Public keys, signed challenges, and the signed device list; a 15-minute account token in memory | Which device signs in, and when | It cannot add or remove a device for an Apassy client, or rename one: each change of the device list is an entry signed by a device of the list over the hash of the entry before (an `add` also over the new device's name), back to the account's first key, which each client pinned when it made or joined the account and which signed its own name, and each client pins the highest version it verified that holds its own key. A row that Connect adds, a key it swaps, or a removed device it lists again is not in the list: the client shows it as "Not verified" and never uses it as an account device (no store, no sync head, no later confirmation). A list older than the pinned one, or another history, verifies no device. A device that Connect only hides stays a device until a device of the list signs its removal. A new device needs the confirmation of a verified device with six safety words and an owner check; the link code names the confirming device's key and the account's first key, and Connect never sees the code, so it can neither compute the words nor answer with other keys. Connect can refuse a sign-in, but a refusal never removes a device: the device forgets its key only when its owner confirms on it |
 | The email | A copy of the Stripe customer's email, for the devices list and support | — | Connect sends no mail in stage 7. Account deletion deletes the copy |
 | Stripe (payment processor) | The customer: email, billing address, payment method, tax id; subscriptions and invoices (kept for legal retention) | The checkout and portal sessions, and the account id in `client_reference_id` and metadata | A device key, a token, a vault id, a device name, a value. Connect never sees card data or the address |
 | The webhook | Event ids for 30 days | Stripe events, checked with the endpoint secret | A forged or replayed event changes nothing: signature, 300 s tolerance, idempotency by event id |
@@ -207,25 +207,43 @@ answer, or a missing or unreadable account file removes nothing. Adding a device
 by hand and deleting a vault store need a fresh owner check on this Mac, as adding or revoking an
 account device does; the sync through Apassy Connect adds the other verified devices of the same
 account to a store that it turned on without one (each still needs the vault passphrase). Only a
-verified device can be added to a store.
+verified device can be added to a store. A vault store has no device link: a device of the account
+gets the copy from the store that lists it, with the passphrase of the copy, and a store of another
+account is refused before any request (sharing a vault between accounts is not available yet).
 
 **The device list** (connect-account-v1 section 7.5) is a signed list with a cryptographic root:
-version 1 is the first device of the account (after a recovery, the recovering device), and each
-later version is one change, an `add` or a `remove`, signed by a device of the list over the hash of
-the entry before. Each client keeps in its account file the root key, the version and the hash of
-the newest list it verified, the devices of that list, and the keys it knew that left; a confirmation
-and a revoke are entries that the client signs itself after an owner check. A device that a device
-confirmed before it left stays a device: its `add` precedes the `remove`. The heads of a vault store
-are accepted from the devices of the verified list only, and from a device that left only for the
-versions of that store that the client had merged when it learned of the removal; the decision never
-comes from Connect's answers (a group, a store marked shared, a device it lists). What a client cannot
-detect: a newer list that Connect withholds (the client keeps the last list it verified, so a removal
-it has not seen yet does not reach it), and the same for an account file restored from a backup,
-which learns the removals from the list at its next view only while Connect serves them. A device of
-another account (a member of the same family or team) signs nothing on a client: no step of this
-version pins the root of another account, so a vault of one account is not synced with another
-account's devices. A recovery starts a new root; a device of the old root learns it only by joining
-again with a link from the recovered device, never from Connect.
+version 1 is the first device of the account (after a recovery, the recovering device), signed by
+its own key over its name, and each later version is one change, an `add` or a `remove`, signed by
+a device of the list over the hash of the entry before. An `add` signs the name of the new device,
+so a name stays with the key that it was confirmed for, and a key that was in the list is never
+added again. Each client keeps in its account file the root key, the version and the hash of the
+newest list it verified, the devices of that list, and the keys it knew that left; it takes a list
+only while the list holds its own key as a device. A confirmation and a revoke are entries that the
+client signs itself after an owner check: the revoke names the key that the client's own verified
+list holds for the row, with that list's name and a short fingerprint of the key, and a row whose
+key is the client's own while its id is not (or the reverse) is refused. A new device pins only a
+list that holds its own `add`, signed by the confirming device that the code named. A device that a
+device confirmed before it left stays a device: its `add` precedes the `remove`. An `add` comes
+only while every device can still be removed before the list is full (256 entries), so a removal
+and a recovery always remain possible.
+
+The heads of a vault store are accepted from the devices of the verified list; from a device that
+left, as the current head only for the versions of that store that the client had merged when it
+learned of the removal (a key that the verified list removed, also one that left before the client joined), and below a head that a device of the list signed (that device had taken
+it). A live device whose own last head is one of a device that left signs a head of its own over it
+at its next sync, so a device that is behind takes the copy again; until then that device waits and
+says so. A key that was never a device of the verified list signs nothing; the decision never comes from
+Connect's answers (a group, a store marked shared, a device it lists). What a client cannot detect: a
+newer list that Connect withholds (the client keeps the last list it verified, so a removal it has
+not seen yet does not reach it); entries after its own `add` that Connect withholds at a join (the
+new device starts from the list that holds its `add`); and the same for an account file restored
+from a backup, which learns the removals from the list at its next view only while Connect serves
+them. The cost of the rule below the head: a device from which a removal was withheld can still take
+a push of the device that left, and its own later head carries that push into a head that the other
+devices take. A device of another account (a member of the same family or team) signs nothing on a
+client: no step of this version pins the root of another account, so a vault of one account is not
+synced with another account's devices. A recovery starts a new root; a device of the old root learns
+it only by joining again with a link from the recovered device, never from Connect.
 
 **The recovery code** is the seed of an Ed25519 key pair. Connect stores only the public key; a
 recovery is a signature by that key over the new device key and the next recovery key, so the code

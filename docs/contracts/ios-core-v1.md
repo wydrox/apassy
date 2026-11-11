@@ -170,6 +170,7 @@ Error codes:
 | `damaged` | The copy on the relay fails a check. |
 | `stale_copy` | The relay serves an older copy than this iPhone saw. |
 | `forked_copy` | The relay serves a copy whose chain does not have this iPhone's last change. |
+| `waits_for_device` | A vault store of Apassy Connect: the current copy was saved by a device that left the account after this iPhone's last sync; the iPhone waits until another device of the account syncs (connect-account-v1 section 7.5). Nothing was changed. The sync status shows it as `error` with this message. |
 | `busy` | Another sync of this vault runs. The next sync tries again. |
 | `too_large` | The copy is larger than the relay takes. |
 | `io` | A file operation failed. |
