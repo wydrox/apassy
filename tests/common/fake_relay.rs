@@ -683,6 +683,16 @@ impl FakeRelay {
             .cut_below = version;
     }
 
+    /// The store `team_id` after the relay dropped its heads below `version`, as the
+    /// maintenance of a long-lived store does: the head answer starts its chain and its
+    /// `kept_from` there.
+    pub fn prune_store_below(&self, team_id: &str, version: u64) {
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(team_id).expect("store");
+        team.heads.retain(|head| head.version >= version);
+        team.snapshots.retain(|stored, _| *stored >= version);
+    }
+
     /// The store `team_id` restored from an older backup: every head after `version` goes.
     pub fn roll_back_store(&self, team_id: &str, version: u64) {
         let mut relay = lock(&self.shared.0);
@@ -1277,6 +1287,9 @@ fn head_view(team: &Team, since: u64) -> Value {
     });
     if let Some(first) = page.first() {
         view["chain_from"] = json!(first.version);
+    }
+    if let Some(oldest) = team.heads.first() {
+        view["kept_from"] = json!(oldest.version);
     }
     view
 }

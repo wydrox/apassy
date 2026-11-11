@@ -3719,6 +3719,193 @@ mod connect_sync {
             .expect("the head that the owner took, served alone");
     }
 
+    /// A vault store of an account whose relay dropped the heads below version 3 (as the
+    /// relay does on a long-lived store, which keeps the newest heads only), with versions
+    /// 1 to 5 by A, and a new device D of the account in it, before its download.
+    struct PrunedStore {
+        cloud: Cloud,
+        team: String,
+        d: ConnectMac,
+        account_d: ConnectAccount,
+    }
+
+    fn pruned_store() -> PrunedStore {
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut vault_a = a.mac.create();
+        vault_a.add(item("Alpha", "SYNTH-alpha")).expect("add");
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable")
+            .team_id;
+        for title in ["Beta", "Gamma", "Delta", "Epsilon"] {
+            vault_a
+                .add(item(title, &format!("SYNTH-{title}")))
+                .expect("add");
+            assert!(a.mac.sync.sync(&mut vault_a).expect("push").pushed);
+        }
+        assert_eq!(cloud.relay.version_of(&team), 5);
+        cloud.relay.prune_store_below(&team, 3);
+        let d = connect_mac(&cloud, "d");
+        let account_d = join_account(&cloud, &mut account_a, &d, "Synthetic iMac");
+        a.mac
+            .sync
+            .register_account_devices(&mut account_a)
+            .expect("register D");
+        PrunedStore {
+            cloud,
+            team,
+            d,
+            account_d,
+        }
+    }
+
+    impl PrunedStore {
+        fn joined(&mut self) -> apassy::sync::JoinedDevice {
+            let store = self
+                .account_d
+                .vault_stores()
+                .expect("stores")
+                .into_iter()
+                .find(|store| store.team_id == self.team)
+                .expect("D is in the store");
+            RelaySync::joined_from_store(&mut self.account_d, &store).expect("joined")
+        }
+    }
+
+    /// A relay keeps only the newest heads of a store, so the chain of a long-lived store
+    /// starts above version 1. It says where its kept history starts, and a new device
+    /// checks every entry from there to the head: the store downloads and opens.
+    #[test]
+    fn a_new_device_gets_a_store_whose_relay_dropped_its_oldest_heads() {
+        let mut pruned = pruned_store();
+        let joined = pruned.joined();
+        let work = pruned.d.mac.data.join("sync");
+        let download = joined
+            .download(&work)
+            .expect("the kept chain from version 3 to the head");
+        let (vault, _) = pruned
+            .d
+            .mac
+            .sync
+            .adopt(&joined, &download, PASS)
+            .expect("adopt");
+        assert_eq!(
+            titles(&vault),
+            vec!["Alpha", "Beta", "Delta", "Epsilon", "Gamma"]
+        );
+    }
+
+    /// A chain that starts later than the history that the relay says it keeps cannot be
+    /// checked from there: the copy is refused, and nothing is downloaded.
+    #[test]
+    fn a_new_device_refuses_a_chain_shorter_than_the_kept_history() {
+        let mut pruned = pruned_store();
+        pruned.cloud.relay.cut_chain_below(&pruned.team, 4);
+        let joined = pruned.joined();
+        let work = pruned.d.mac.data.join("sync");
+        assert_eq!(joined.download(&work).unwrap_err(), SyncError::Damaged);
+        assert_eq!(joined.waiting_head(), None);
+    }
+
+    /// "Use the relay copy…" of a vault store takes only the head that the owner's check
+    /// named, also after the merge stopped on the copy's passphrase: the state keeps that
+    /// head with the forgotten anchor. When the relay then serves another head, a sync and
+    /// "Type the passphrase of the copy…" refuse it as a copy to check again, and change
+    /// nothing; with the named head served again, the passphrase of the copy merges it.
+    #[test]
+    fn the_approved_relay_copy_is_the_only_head_taken_until_it_merges() {
+        const NEW: &str = "synthetic-relay-new-pass";
+        let cloud = cloud();
+        let a = connect_mac(&cloud, "a");
+        let mut account_a = new_account(&cloud, &a, "Rafal", true);
+        let mut vault_a = a.mac.create();
+        vault_a.add(item("Alpha", "SYNTH-alpha")).expect("add");
+        let team = a
+            .mac
+            .sync
+            .enable_on_connect(&mut vault_a, &mut account_a, "Personal")
+            .expect("enable")
+            .team_id;
+        let first = cloud.relay.heads_of(&team)[0].clone();
+        vault_a.change_passphrase(PASS, NEW).expect("change");
+        vault_a.add(item("Beta", "SYNTH-beta")).expect("add");
+        assert!(a.mac.sync.sync(&mut vault_a).expect("push 2").pushed);
+        // A relay restored from a backup of version 1, from before the passphrase change.
+        cloud.relay.roll_back_store(&team, 1);
+        assert_eq!(
+            a.mac.sync.sync(&mut vault_a).unwrap_err(),
+            SyncError::StaleCopy
+        );
+        let approved = a.mac.sync.served_head().expect("the served head");
+        assert_eq!(
+            (approved.version, approved.head_hash.clone()),
+            (1, first.hash())
+        );
+        let slot = Mutex::new(Some(vault_a));
+        assert_eq!(
+            a.mac
+                .sync
+                .use_relay_copy_approved(&slot, |_| true, &approved)
+                .unwrap_err(),
+            SyncError::NeedsPassphrase
+        );
+        let mut vault_a = slot.into_inner().unwrap().expect("the vault");
+        let state = a.mac.sync.state().expect("state").expect("on");
+        assert_eq!((state.last_remote_version, state.last_head_sha256), (0, None));
+        assert_eq!(
+            state.approved_head,
+            Some(apassy::sync::ApprovedHead {
+                version: 1,
+                head_sha256: first.hash(),
+            }),
+            "the head that the check named stays with the forgotten anchor"
+        );
+        // The relay serves another head now, signed by a device of the list.
+        let a_signer = account_a.signer().expect("A's key");
+        let a_number = cloud
+            .relay
+            .team_devices(&team)
+            .into_iter()
+            .find(|(_, key)| key.as_slice() == a_signer.public_key())
+            .map(|(number, _)| number)
+            .expect("A in the store");
+        let other = forged_after(&first, a_number, &a_signer);
+        cloud.relay.replace_store_from(&team, vec![other]);
+        assert_eq!(
+            a.mac.sync.sync(&mut vault_a).unwrap_err(),
+            SyncError::StaleCopy,
+            "not the head that the owner's check named"
+        );
+        assert_eq!(
+            a.mac
+                .sync
+                .take_new_passphrase(&mut vault_a, PASS)
+                .unwrap_err(),
+            SyncError::StaleCopy,
+            "the passphrase step takes no other head either"
+        );
+        let state = a.mac.sync.state().expect("state").expect("on");
+        assert_eq!(state.last_remote_version, 0, "nothing was taken");
+        assert!(state.approved_head.is_some());
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Beta"]);
+        // The named head again: the passphrase of the copy merges it.
+        cloud.relay.roll_back_store(&team, 1);
+        let synced = a
+            .mac
+            .sync
+            .take_new_passphrase(&mut vault_a, PASS)
+            .expect("the named head with its passphrase");
+        assert!(synced.expect("the sync after it").pushed);
+        let state = a.mac.sync.state().expect("state").expect("on");
+        assert_eq!(state.last_remote_version, 2);
+        assert_eq!(state.approved_head, None, "a merged head ends the choice");
+        assert_eq!(titles(&vault_a), vec!["Alpha", "Beta"]);
+    }
+
     /// A head by a key that the device list never held stays refused: no waiting head is
     /// kept, and the core refuses to take it, for a vault and at a download.
     #[test]

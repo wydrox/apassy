@@ -91,6 +91,21 @@ pub struct SyncState {
     /// The anchor: lowercase hexadecimal head hash of that version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_head_sha256: Option<String>,
+    /// The one relay head that the owner chose with an owner check ("Use the relay copy…"
+    /// of a vault store of a Connect account), kept with the forgotten anchor: until a head
+    /// is merged and becomes the anchor, no other head is taken. Only in a state without an
+    /// anchor (an anchor drops it at the next write).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_head: Option<ApprovedHead>,
+}
+
+/// The relay head that an owner check named ([`SyncState::approved_head`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovedHead {
+    pub version: u64,
+    /// Lowercase hexadecimal head hash.
+    pub head_sha256: String,
 }
 
 impl SyncState {
@@ -110,6 +125,7 @@ impl SyncState {
             device_id: None,
             last_remote_version: 0,
             last_head_sha256: None,
+            approved_head: None,
         }
     }
 
@@ -156,7 +172,12 @@ impl SyncState {
                 .is_some_and(super::relay_crypto::valid_team_id)
             && self.device_id.is_some_and(|id| id >= 1)
             && self.last_head_sha256.as_deref().is_none_or(hex)
-            && (self.last_remote_version == 0) == self.last_head_sha256.is_none();
+            && (self.last_remote_version == 0) == self.last_head_sha256.is_none()
+            && self.approved_head.as_ref().is_none_or(|approved| {
+                approved.version >= 1
+                    && hex(&approved.head_sha256)
+                    && self.last_remote_version == 0
+            });
         common && (folder || relay)
     }
 }
@@ -188,6 +209,19 @@ pub(super) fn read(path: &Path) -> Result<Option<SyncState>, SyncError> {
 /// then renamed over the old file. The parent directory is made with mode `0700` when
 /// it does not exist.
 pub(super) fn write(path: &Path, state: &SyncState) -> Result<(), SyncError> {
+    // A head that became the anchor ends the owner's choice of a head.
+    let anchored;
+    let state = if state.approved_head.is_some()
+        && (state.last_remote_version != 0 || state.last_head_sha256.is_some())
+    {
+        anchored = SyncState {
+            approved_head: None,
+            ..state.clone()
+        };
+        &anchored
+    } else {
+        state
+    };
     if !state.is_valid() {
         return Err(SyncError::State);
     }
