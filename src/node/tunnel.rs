@@ -910,7 +910,6 @@ impl Link {
             stream.abort();
         }
     }
-
 }
 
 #[derive(Default)]
@@ -1400,9 +1399,7 @@ fn apply(
             }
             // Connect may send the initial window; the node grants the rest of its buffer
             // at once.
-            stream.grant(
-                u32::try_from(STREAM_BUFFER as u64 - frame::INITIAL_WINDOW).unwrap_or(0),
-            );
+            stream.grant(u32::try_from(STREAM_BUFFER as u64 - frame::INITIAL_WINDOW).unwrap_or(0));
             let handle = TunnelStream(stream);
             let serving = Arc::clone(serving);
             let spawned = thread::Builder::new()
@@ -2363,14 +2360,27 @@ mod tests {
     #[test]
     fn the_registration_must_name_the_node_kept_for_this_device() {
         let zone = "node.example.test";
-        let own = view("node_aaaaaaaaaa", "dev_1", "pin", "aaaaaaaaaa.node.example.test");
-        assert_eq!(check_registration(&own, "pin", zone, Some("dev_1"), None), Ok(()));
+        let own = view(
+            "node_aaaaaaaaaa",
+            "dev_1",
+            "pin",
+            "aaaaaaaaaa.node.example.test",
+        );
+        assert_eq!(
+            check_registration(&own, "pin", zone, Some("dev_1"), None),
+            Ok(())
+        );
         assert_eq!(
             check_registration(&own, "pin", zone, Some("dev_1"), Some("node_aaaaaaaaaa")),
             Ok(())
         );
         // Another node id than the kept one, even with its own matching name.
-        let other = view("node_bbbbbbbbbb", "dev_1", "pin", "bbbbbbbbbb.node.example.test");
+        let other = view(
+            "node_bbbbbbbbbb",
+            "dev_1",
+            "pin",
+            "bbbbbbbbbb.node.example.test",
+        );
         assert_eq!(
             check_registration(&other, "pin", zone, Some("dev_1"), Some("node_aaaaaaaaaa")),
             Err(Failure::WrongNode)
@@ -2389,7 +2399,11 @@ mod tests {
             check_registration(&renamed, "pin", zone, Some("dev_1"), None),
             Err(Failure::WrongNode)
         );
-        assert!(!Failure::WrongNode.to_string().contains("could not be reached"));
+        assert!(
+            !Failure::WrongNode
+                .to_string()
+                .contains("could not be reached")
+        );
     }
 
     #[test]

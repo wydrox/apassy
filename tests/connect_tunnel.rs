@@ -486,7 +486,7 @@ fn the_node_takes_only_its_own_public_name_in_the_zone() {
     wait_for("the registration is refused", || {
         matches!(
             &running.handle.status().state,
-            TunnelState::Reconnecting { why } if why.contains("does not match this node")
+            TunnelState::Reconnecting { why } if why.contains("a registration that is not this")
         )
     });
     assert_eq!(running.handle.status().public_name, None);

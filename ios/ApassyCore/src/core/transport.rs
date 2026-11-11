@@ -962,9 +962,7 @@ mod tests {
         let transport = Transport::new(accounts, true);
         transport.routes.closed_with(close::TRY_AGAIN);
         assert_eq!(transport.dial_state(), DialState::Unreachable);
-        let held = guard(&transport.routes.memory)
-            .hold_until
-            .expect("a hold");
+        let held = guard(&transport.routes.memory).hold_until.expect("a hold");
         assert!(held <= Instant::now() + Timing::default().backoff_first);
         // A definite end of the plan still waits long.
         transport.routes.closed_with(close::REVOKED);

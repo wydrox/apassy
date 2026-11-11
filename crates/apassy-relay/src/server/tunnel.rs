@@ -1392,8 +1392,7 @@ impl Broker {
             .directory
             .node(&node_id)
             .ok_or(IngressRefusal::Unrecognized)?;
-        if !self.online(&node_id) || self.inner.directory.entitled(&entry.account_id) != Ok(true)
-        {
+        if !self.online(&node_id) || self.inner.directory.entitled(&entry.account_id) != Ok(true) {
             return Err(IngressRefusal::Unrecognized);
         }
         let class = if kind == Kind::Acme {

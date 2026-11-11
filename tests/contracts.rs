@@ -6183,8 +6183,7 @@ mod connect_v1 {
             if flags & RESET != 0 && (flags != RESET || len != 0) {
                 return Err("bad_reset");
             }
-            if flags & WINDOW != 0 && (flags != WINDOW || len != 4 || bytes[8..] == [0, 0, 0, 0])
-            {
+            if flags & WINDOW != 0 && (flags != WINDOW || len != 4 || bytes[8..] == [0, 0, 0, 0]) {
                 return Err("bad_window");
             }
             if flags == 0 && len == 0 {

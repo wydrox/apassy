@@ -1128,13 +1128,14 @@ fn deleting_the_account_ends_its_tunnel_and_its_grants() {
             a = a.mac.account
         ))
     };
-    assert_eq!(
-        rows_of_a(),
-        vec![
+    assert_eq!(rows_of_a(), {
+        let mut rows = vec![
             a.mac.account.clone(),
-            format!("{}/dial/{}", b.mac.account, a.mac.account)
-        ]
-    );
+            format!("{}/dial/{}", b.mac.account, a.mac.account),
+        ];
+        rows.sort();
+        rows
+    });
     c.ok(
         "DELETE",
         "/v1/account",
@@ -1160,7 +1161,10 @@ fn deleting_the_account_ends_its_tunnel_and_its_grants() {
     flush();
     assert!(rows_of_a().is_empty(), "nothing comes back from memory");
     assert_eq!(broker.usage(&a.mac.account).bytes, 0);
-    assert_eq!(broker.grantee_usage(&b.mac.account, &a.mac.account).bytes, 0);
+    assert_eq!(
+        broker.grantee_usage(&b.mac.account, &a.mac.account).bytes,
+        0
+    );
     assert_eq!(
         c.directory_rows(&format!(
             "SELECT account_id FROM tunnel_usage WHERE account_id = '{}'",

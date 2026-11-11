@@ -1611,7 +1611,8 @@ fn window_node(mut node: Peer, total: usize) -> thread::JoinHandle<()> {
             let credit = seq.credit(open.stream, Dir::ToConnect).expect("live") as usize;
             if credit == 0 {
                 let frame = node.next_any_frame();
-                seq.apply(Dir::ToNode, &frame, || ()).expect("within the rules");
+                seq.apply(Dir::ToNode, &frame, || ())
+                    .expect("within the rules");
                 continue;
             }
             let take = credit.min(frame::MAX_PAYLOAD).min(total - sent);
@@ -1651,7 +1652,10 @@ fn a_large_answer_reaches_a_slow_client_whole_and_the_buffer_stays_bounded() {
     }
     assert_eq!(answer.len(), 5 * 1024 * 1024);
     assert!(
-        answer.iter().enumerate().all(|(i, byte)| *byte == (i % 251) as u8),
+        answer
+            .iter()
+            .enumerate()
+            .all(|(i, byte)| *byte == (i % 251) as u8),
         "every byte arrives, in order"
     );
     device.expect_close(close::NORMAL);
@@ -1684,7 +1688,11 @@ fn connect_sends_a_clients_bytes_only_within_the_nodes_window() {
         let frame = node.next_any_frame();
         seq.apply(Dir::ToNode, &frame, || ())
             .unwrap_or_else(|error| panic!("{}", error.code()));
-        got += if frame.is_window() { 0 } else { frame.payload.len() };
+        got += if frame.is_window() {
+            0
+        } else {
+            frame.payload.len()
+        };
         if seq.credit(open.stream, Dir::ToNode) == Some(0) && got < total {
             thread::sleep(Duration::from_millis(100));
             let grant = frame::window(open.stream, Kind::Device, 32 * 1024);
@@ -1819,10 +1827,7 @@ fn a_directory_that_cannot_answer_skips_rounds_and_then_ends_streams_with_1013()
     assert_eq!(granted.read_bytes(1), b"b");
     // A new dial while the store fails is 503 `busy`, never `plan_required`.
     h.directory.set_failing(true);
-    assert_eq!(
-        h.dial("tok-a2", NODE_A).err(),
-        Some((503, "busy".into()))
-    );
+    assert_eq!(h.dial("tok-a2", NODE_A).err(), Some((503, "busy".into())));
     // A long failure ends the open streams with 1013 (try again), never 4003.
     own.expect_close(close::TRY_AGAIN);
     granted.expect_close(close::TRY_AGAIN);
@@ -1876,7 +1881,10 @@ fn an_agent_that_half_closes_gives_the_node_the_close_grace_of_silence() {
     let open = node.next_frame();
     assert_eq!(open.kind, Kind::Public);
     let close_frame = node.next_frame();
-    assert_eq!((close_frame.stream, close_frame.flags), (open.stream, CLOSE));
+    assert_eq!(
+        (close_frame.stream, close_frame.flags),
+        (open.stream, CLOSE)
+    );
     // The node may still answer the half-closed agent within the grace.
     node.send_frame(open.stream, Kind::Public, 0, b"answer");
     let mut answer = [0u8; 6];
