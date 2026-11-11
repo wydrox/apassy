@@ -2446,11 +2446,16 @@ impl RelaySync {
         lock(&self.notes.unlisted).as_ref().map(|seen| seen.since)
     }
 
-    /// Tests: the check of the device list began `ago` earlier.
+    /// Tests: the check of the device list began `ago` earlier, as if that time had passed:
+    /// the time of the list noted before moves as far, so a list asked before the refusal
+    /// stays before it.
     #[doc(hidden)]
     pub fn backdate_check_for_test(&self, ago: Duration) {
         if let Some(seen) = lock(&self.notes.unlisted).as_mut() {
             seen.since = seen.since.checked_sub(ago).unwrap_or(seen.since);
+        }
+        if let Some(asked) = lock(&self.notes.listed).as_mut() {
+            *asked = asked.checked_sub(ago).unwrap_or(*asked);
         }
     }
 

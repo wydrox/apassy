@@ -2620,3 +2620,204 @@ fn a_long_check_of_the_device_list_says_so_and_offers_try_again() {
         "a fresh verified list decided the head"
     );
 }
+
+/// F11: a head of a store shared between accounts, by a key that no verified list holds,
+/// is decided only by the lists of the other accounts asked of Connect after its refusal.
+/// While every read of those lists fails, the store keeps checking: first "Checking who
+/// shares this vault…", and after the quiet time the line that Connect cannot be reached,
+/// with "Try Again"; it never becomes a damaged copy. "Try Again" with the reads working
+/// again decides it from the fresh lists.
+#[test]
+fn a_shared_store_whose_list_reads_fail_keeps_checking_and_offers_try_again() {
+    use crate::broker::approvals::{OwnerCheck, OwnerGate};
+    use crate::connect::{ShareNames, account_file};
+    use crate::sync::{HeadFields, sha256_hex};
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(crate::desktop::fake_relay::FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("mac"), true);
+    let ctx = egui::Context::default();
+    app.vault_list.name_input = "Family".to_owned();
+    app.owner_ui.passphrase.push_str(PASS);
+    app.owner_ui.passphrase_confirm.push_str(PASS);
+    super::start::create_vault(&mut app, &ctx);
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).expect("data dir");
+    app.connect_configure(Some(Arc::new(MemoryKeyStore::new())), Some(data));
+    let live = &mut app.ui.connect.live;
+    live.origin = Some(connect.url.clone());
+    live.poll_every = Some(Duration::from_millis(40));
+    live.join_poll_every = Some(Duration::from_millis(40));
+    super::open_settings(&mut app, super::SettingsSection::Connect);
+    let a_id = create_account(&ctx, &mut app, "Rafal");
+    connect.entitle(&a_id);
+    connect.make_group(&a_id, "family");
+    act(&ctx, &mut app, Action::SignIn);
+    until(&ctx, &mut app, "the plan", |app| {
+        app.ui
+            .connect
+            .live
+            .sync_account()
+            .is_some_and(|account| account.plan.is_some_and(crate::sync::StorePlan::entitled))
+    });
+    let entry = app.current_vault().expect("the open vault").clone();
+    app.relay_enable_connect(&entry.id).expect("turn on");
+    app.relay_settle_for_test();
+    let team = app
+        .relay_of(&entry.id)
+        .and_then(|relay| relay.state().ok().flatten())
+        .and_then(|state| state.team_id)
+        .expect("a store");
+    app.sync_now();
+    app.relay_settle_for_test();
+    // The owner's Mac shares the vault with Ola, who accepts.
+    let x_keys = MemoryKeyStore::new();
+    let (mut ola, _) = ConnectAccount::create(
+        ConnectClient::new(&connect.url).expect("client"),
+        &x_keys,
+        &account_file(&dir.path().join("ola")),
+        "Ola",
+        "Synthetic MacBook",
+    )
+    .expect("Ola");
+    let x_id = ola.state().account_id.clone();
+    connect.entitle(&x_id);
+    connect.add_member(&a_id, &x_id);
+    let gate_dir = TempDir::new().expect("dir");
+    let mut gate_vault =
+        crate::vault::Vault::create(&gate_dir.path().join("gate.db"), PASS).expect("vault");
+    gate_vault.unlock(PASS).expect("unlock");
+    let epoch = gate_vault.epoch();
+    let shared: crate::broker::SharedVault = Arc::new(std::sync::Mutex::new(Some(gate_vault)));
+    let gate = OwnerGate::new(Arc::clone(&shared), None);
+    let proof = |action| {
+        gate.authorize(action, OwnerCheck::passphrase(PASS))
+            .expect("owner check")
+    };
+    let names = ShareNames::default();
+    let session = app.connect_session();
+    let link = session
+        .with_account(|account| account.start_share(&x_id, &team))
+        .expect("code");
+    let answer = ola.accept_code(link.code()).expect("answer");
+    session
+        .with_account(|account| {
+            let requests = account.share_requests(&link)?;
+            let action = account.share_action(&link, &requests[0], &names)?;
+            account.confirm_share(&link, &requests[0], &names, proof(action), &epoch)
+        })
+        .expect("share");
+    let accept = ola.accept_action(&answer, &names).expect("action");
+    ola.accept_share(&answer, &names, proof(accept), &epoch)
+        .expect("Ola accepts");
+    app.ui.connect.share.refresh_now();
+    until(&ctx, &mut app, "the shared store", |app| {
+        !app.ui.connect.share.is_busy() && app.ui.connect.share.is_shared(&team)
+    });
+    // From now on every read of the other accounts' lists fails.
+    connect.answer_route_error("POST /v1/account/peers/lists", 500, "relay_error");
+    // A head by a key that no list holds.
+    let stranger =
+        crate::connect::AccountSigner::open_or_create(&MemoryKeyStore::new()).expect("key");
+    let number = relay.add_store_device(&team, "Mac Studio", stranger.public_key());
+    let last = relay.heads_of(&team).last().cloned().expect("a head");
+    let bytes = b"synthetic copy".to_vec();
+    let fields = HeadFields {
+        version: last.version + 1,
+        previous: last.hash(),
+        snapshot_sha256: sha256_hex(&bytes),
+        size: bytes.len() as u64,
+        device_id: number,
+        ..HeadFields::parse(&last.text).expect("head")
+    };
+    let signed = stranger.sign_head(fields).expect("sign");
+    relay.replace_store_from(
+        &team,
+        vec![(
+            crate::desktop::fake_relay::StoredHead {
+                version: last.version + 1,
+                text: signed.text,
+                signature: signed.signature,
+                device_id: number,
+            },
+            bytes,
+        )],
+    );
+    let reads = connect.count("POST /v1/account/peers/lists");
+    app.sync_now();
+    app.relay_settle_for_test();
+    let checking =
+        super::sync::UiStatus::Problem(crate::sync::SyncError::ChecksDeviceList.to_string());
+    assert_eq!(app.sync.statuses.get(&entry.id), Some(&checking));
+    // The head asks for the lists at once; the reads fail.
+    until(&ctx, &mut app, "a read of the lists for the head", |app| {
+        !app.ui.connect.share.is_busy() && connect.count("POST /v1/account/peers/lists") > reads
+    });
+    // A sync after that read still finds the head undecided.
+    app.relay_settle_for_test();
+    app.sync_now();
+    app.relay_settle_for_test();
+    assert_eq!(app.sync.statuses.get(&entry.id), Some(&checking));
+    let painted = vault_text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::connect::share::CHECKING),
+        "{painted}"
+    );
+    assert!(
+        !painted.contains(super::sync::relay::CHECK_LIST_UNREACHABLE),
+        "{painted}"
+    );
+    // Past the quiet time of the head the lists are due again, and the reads fail again.
+    for check in &mut app.ui.connect.share.checks.list {
+        let quiet = super::connect::share::CHECK_QUIET;
+        check.since = check.since.checked_sub(quiet).expect("an earlier time");
+        check.read_at = check.read_at.checked_sub(quiet).expect("an earlier time");
+    }
+    app.relay_of(&entry.id)
+        .expect("the relay sync")
+        .backdate_check_for_test(super::sync::relay::CHECK_LIST_LONG);
+    let reads = connect.count("POST /v1/account/peers/lists");
+    until(
+        &ctx,
+        &mut app,
+        "a read of the lists after the quiet time",
+        |app| {
+            !app.ui.connect.share.is_busy() && connect.count("POST /v1/account/peers/lists") > reads
+        },
+    );
+    app.relay_settle_for_test();
+    app.sync_now();
+    app.relay_settle_for_test();
+    assert_eq!(
+        app.sync.statuses.get(&entry.id),
+        Some(&checking),
+        "no list was read: nothing decided the head"
+    );
+    let painted = vault_text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::sync::relay::CHECK_LIST_UNREACHABLE),
+        "{painted}"
+    );
+    assert!(painted.contains("Try Again"), "{painted}");
+    assert!(
+        !painted.contains(super::connect::share::CHECKING),
+        "{painted}"
+    );
+    // "Try Again" with the reads working: the fresh lists, asked after the refusal, still
+    // do not hold the key.
+    connect.clear_route_errors("POST /v1/account/peers/lists");
+    let reads = connect.count("POST /v1/account/peers/lists");
+    app.relay_check_list_again(&entry.id);
+    until(&ctx, &mut app, "the lists read again", |app| {
+        !app.ui.connect.share.is_busy() && connect.count("POST /v1/account/peers/lists") > reads
+    });
+    app.relay_settle_for_test();
+    app.sync_now();
+    app.relay_settle_for_test();
+    assert_eq!(
+        app.sync.statuses.get(&entry.id),
+        Some(&super::sync::UiStatus::Damaged),
+        "fresh verified lists decided the head"
+    );
+}
