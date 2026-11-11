@@ -202,9 +202,11 @@ pub(crate) struct SyncAccount {
     /// version 1, so also a device removed before this one joined), by key; empty while
     /// no verified list is in memory, or while a worker holds the account.
     pub(crate) removed_names: Vec<(Vec<u8>, String)>,
-    /// When the refresh whose device list verified on this device (and gave `signers`)
-    /// was asked of Connect; `None` before such an answer. A refresh whose list did not
-    /// verify, and any other step, leave it as it was.
+    /// When the newest device list that verified on this device (and is in `signers`)
+    /// was asked of Connect; `None` before such an answer. It comes with `signers` as one
+    /// value (`crate::connect::ListedSigners`), so a new time never reaches the sync with
+    /// older signers. A refresh whose list did not verify, and any other step, leave it as
+    /// it was.
     pub(crate) verified_at: Option<Instant>,
 }
 
@@ -237,9 +239,6 @@ pub(crate) struct Live {
     refreshed_at: Option<Instant>,
     /// The last refresh could not reach Connect, and when.
     unreachable: Option<(ConnectError, Instant)>,
-    /// When the newest refresh whose device list verified here was asked
-    /// ([`SyncAccount::verified_at`]).
-    verified_at: Option<Instant>,
     /// The start screen showed the Connect path at the last frame ([`start_path`]).
     start_path: bool,
     /// A link for the account's origin on the start screen waits for the session of the
@@ -250,9 +249,10 @@ pub(crate) struct Live {
     /// Tests: shorter polls than [`POLL_EVERY`] and [`JOIN_POLL_EVERY`].
     pub(crate) poll_every: Option<Duration>,
     pub(crate) join_poll_every: Option<Duration>,
-    /// The signers of the vault stores from the last write of the account file
-    /// (`AccountSession::signers_after`), and the write it counts.
-    signers: Option<crate::sync::SignerPolicy>,
+    /// The signers of the vault stores from the last write of the account file, with the
+    /// time of the newest list that verified in them (`AccountSession::signers_after`), and
+    /// the write it counts.
+    signers: Option<crate::connect::ListedSigners>,
     signers_seen: u64,
 }
 
@@ -312,7 +312,6 @@ impl Live {
         self.pending.clear();
         self.refreshed_at = None;
         self.unreachable = None;
-        self.verified_at = None;
         self.error = None;
         self.signers = None;
     }
@@ -351,17 +350,25 @@ impl Live {
         }
         let file = self.file()?;
         let snapshot = self.snapshot.as_ref();
+        // The signers and the time of the list in them, as one value.
+        let (signers, verified_at) = match &self.signers {
+            Some(listed) => (listed.policy.clone(), listed.verified_at),
+            None => snapshot.map_or_else(
+                || (crate::connect::signer_policy(file), None),
+                |snapshot| {
+                    (
+                        snapshot.signers.clone(),
+                        snapshot.view.list_verified.then_some(snapshot.asked),
+                    )
+                },
+            ),
+        };
         Some(SyncAccount {
             account: self.session.slot(),
             origin: file.origin.clone(),
             plan: snapshot.map(|snapshot| StorePlan::from_view(&snapshot.view.plan)),
             signer: self.session.signer(),
-            signers: self.signers.clone().unwrap_or_else(|| {
-                snapshot.map_or_else(
-                    || crate::connect::signer_policy(file),
-                    |snapshot| snapshot.signers.clone(),
-                )
-            }),
+            signers,
             removed_names: self
                 .session
                 .slot()
@@ -380,7 +387,7 @@ impl Live {
                         })
                 })
                 .unwrap_or_default(),
-            verified_at: self.verified_at,
+            verified_at,
         })
     }
 
@@ -1218,8 +1225,10 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             live.error = Some(message(&ConnectError::RecoveryCodeNotShown));
         }
         Outcome::Refreshed(Ok((snapshot, plans))) => {
-            if snapshot.view.list_verified {
-                live.verified_at = Some(snapshot.asked);
+            // The signers of this refresh, with its time, reach the sync from the feed of
+            // the account file (one value, `hand_over_signers`).
+            if let Some(listed) = live.session.signers_after(&mut live.signers_seen) {
+                live.signers = Some(listed);
             }
             live.snapshot = Some(snapshot);
             live.unreachable = None;

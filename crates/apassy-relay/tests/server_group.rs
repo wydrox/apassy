@@ -179,7 +179,7 @@ fn a_pending_member_has_no_entitlement_until_confirmed() {
         "POST",
         "/v1/account/vaults",
         Some(&anna.token),
-        Some(&json!({"vault_id": VAULT, "name": "Anna"})),
+        Some(&c.vault_body(&anna, VAULT, "Anna", &connect::new_team_id())),
         403,
         "plan_required",
     );
@@ -356,7 +356,7 @@ fn a_removed_member_keeps_a_free_account_and_leaves_the_shared_stores() {
         "POST",
         "/v1/account/vaults",
         Some(&owner.token),
-        Some(&json!({"vault_id": VAULT, "name": "Family"})),
+        Some(&c.vault_body(&owner, VAULT, "Family", &connect::new_team_id())),
     );
     let team = store["team_id"].as_str().unwrap().to_string();
     c.share_store(&owner, &anna, &team);
@@ -426,7 +426,7 @@ fn a_members_device_joins_a_shared_store_and_a_strangers_does_not() {
         "POST",
         "/v1/account/vaults",
         Some(&owner.token),
-        Some(&json!({"vault_id": VAULT, "name": "Family"})),
+        Some(&c.vault_body(&owner, VAULT, "Family", &connect::new_team_id())),
     )["team_id"]
         .as_str()
         .unwrap()
@@ -611,7 +611,7 @@ fn a_member_removal_goes_on_past_a_store_that_refuses_the_write() {
             "POST",
             "/v1/account/vaults",
             Some(&owner.token),
-            Some(&json!({"vault_id": vault, "name": "Family"})),
+            Some(&c.vault_body(&owner, vault, "Family", &connect::new_team_id())),
         )["team_id"]
             .as_str()
             .unwrap()
@@ -700,7 +700,7 @@ fn a_store_device_added_again_clears_the_removal_that_waited_for_it() {
         "POST",
         "/v1/account/vaults",
         Some(&owner.token),
-        Some(&json!({"vault_id": VAULT, "name": "Family"})),
+        Some(&c.vault_body(&owner, VAULT, "Family", &connect::new_team_id())),
     )["team_id"]
         .as_str()
         .unwrap()
@@ -780,7 +780,7 @@ fn a_members_store_sign_in_needs_the_group() {
         "POST",
         "/v1/account/vaults",
         Some(&owner.token),
-        Some(&json!({"vault_id": VAULT, "name": "Family"})),
+        Some(&c.vault_body(&owner, VAULT, "Family", &connect::new_team_id())),
     )["team_id"]
         .as_str()
         .unwrap()
@@ -981,11 +981,12 @@ fn a_confirm_that_stripe_refuses_removes_the_store_rows_of_its_window() {
     let owner = team(&c, 1);
     let late = pending(&c, &owner, "Late");
     let (store, _) = c.store(&owner, VAULT);
-    c.stripe.delay_next("/v1/subscription_items/", 1500);
+    // Stripe holds its answer long enough for the rows below to land on a slow machine.
+    c.stripe.delay_next("/v1/subscription_items/", 6000);
     c.stripe.fail_path("/v1/subscription_items/", 400, 1);
     std::thread::scope(|scope| {
         let confirmed = scope.spawn(|| confirm(&c, &owner, &late));
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         // The member is active for the moment: a row of its device in the owner's store.
         c.edit_directory(&format!(
             "INSERT INTO account_store_device (team_id, device_id, account_id, store_device, added_at) \
@@ -1010,6 +1011,59 @@ fn a_confirm_that_stripe_refuses_removes_the_store_rows_of_its_window() {
             .len(),
         1
     );
+}
+
+/// A confirmation that goes back to pending voids, in its transaction, the shares that
+/// name the member and the shares that the member made (as a removal from the group
+/// does), each from the head of its owner's list: a share of its window counts for nothing
+/// after a later confirmation.
+#[test]
+fn a_confirm_that_stripe_refuses_voids_the_shares_of_its_window() {
+    let c = start();
+    let owner = team(&c, 1);
+    let late = pending(&c, &owner, "Late");
+    // Stripe holds its answer long enough for the rows below to land on a slow machine.
+    c.stripe.delay_next("/v1/subscription_items/", 6000);
+    c.stripe.fail_path("/v1/subscription_items/", 400, 1);
+    // Rows that stand for a `share` of each list naming the other, each after its head.
+    let share_row = |of: &Dev, names: &Dev, team: &str| {
+        let row = c.rows(&format!(
+            "SELECT version || ' ' || hash FROM account_list WHERE account_id = '{}' \
+             ORDER BY version DESC LIMIT 1",
+            of.account
+        ));
+        let (head, hash) = row[0].split_once(' ').unwrap();
+        let version: u64 = head.parse::<u64>().unwrap() + 1;
+        c.edit_directory(&format!(
+            "INSERT INTO account_list (account_id, version, op, key, link_hash, name, by_key, signature, hash, created_at, peer_account, peer_root, team_id) \
+             VALUES ('{}', {version}, 'share', NULL, NULL, NULL, x'00', x'00', '{hash}', 1, '{}', NULL, '{team}');",
+            of.account, names.account
+        ));
+        version
+    };
+    let versions = std::thread::scope(|scope| {
+        let confirmed = scope.spawn(|| confirm(&c, &owner, &late));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let versions = (
+            share_row(&owner, &late, "t_aaaaaaaaaa"),
+            share_row(&late, &owner, "t_bbbbbbbbbb"),
+        );
+        assert_eq!(
+            code_of(&confirmed.join().unwrap()),
+            (502, Some("upstream_failed"))
+        );
+        versions
+    });
+    assert_eq!(active_members(&c, &owner), 1);
+    let mut marks = c
+        .rows("SELECT account_id || ' ' || peer_account || ' ' || version FROM account_share_void");
+    marks.sort();
+    let mut wanted = vec![
+        format!("{} {} {}", owner.account, late.account, versions.0),
+        format!("{} {} {}", late.account, owner.account, versions.1),
+    ];
+    wanted.sort();
+    assert_eq!(marks, wanted);
 }
 
 #[test]

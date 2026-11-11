@@ -112,6 +112,10 @@ const DIAL_PREFIX = "/v1/tunnel/dial/";
 const ACCOUNT_LIST_PATH = "/v1/account/list";
 /** The share codes and the other accounts of a family or team (sections 16.2 and 16.4). */
 const PEERS_PREFIX = "/v1/account/peers/";
+/** The batch read of other accounts' lists (section 16.4). */
+const PEER_LISTS_PATH = "/v1/account/peers/lists";
+/** The read of one other account's list (section 16.4): `GET /v1/account/peers/acc_…`. */
+const PEER_VIEW_PATH = /^\/v1\/account\/peers\/acc_[a-z2-7]{10}$/;
 /** The WebSocket of a node (connect-tunnel-v1 section 3.2), limited apart from the dials. */
 const NODE_PATH = "/v1/tunnel/node";
 
@@ -399,10 +403,16 @@ export default {
     // and the node still connects.
     const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
     const isNode = request.method === "GET" && url.pathname === NODE_PATH;
-    // The routes of shared vaults (connect-account-v1 section 16), every method, in a budget
-    // of AUTH_LIMITER of their own (key `peers:` and the /64 or IPv4 address): the polling of
-    // `GET /v1/account/peers/pending` never uses up the sign-in budget of that address. The
-    // relay also limits each device (60 a minute).
+    // The routes of shared vaults (connect-account-v1 section 16), every method, in budgets
+    // of AUTH_LIMITER of their own: the reads of other accounts' lists (`POST
+    // /v1/account/peers/lists`, `GET /v1/account/peers/acc_…`; key `peer-reads:` and the /64
+    // or IPv4 address) apart from the ceremony and the list entries (key `peers:`), so the
+    // polling of `GET /v1/account/peers/pending` and the reads never use up the sign-in
+    // budget of that address or each other's. The relay also limits each device (60 a
+    // minute in each budget).
+    const isPeerRead =
+      (request.method === "POST" && url.pathname === PEER_LISTS_PATH) ||
+      (request.method === "GET" && PEER_VIEW_PATH.test(url.pathname));
     const isPeers = url.pathname === ACCOUNT_LIST_PATH || url.pathname.startsWith(PEERS_PREFIX);
     const limiter = limiterFor(request.method, url.pathname, env);
     if (limiter || isConnect || isAccount || isDial || isNode || isPeers) {
@@ -418,9 +428,11 @@ export default {
             ? [[env.TUNNEL_LIMITER, connectKey(address)]]
             : isNode
               ? [[env.TUNNEL_NODE_LIMITER, connectKey(address)]]
-              : isPeers
-                ? [[env.AUTH_LIMITER, `peers:${connectKey(address)}`]]
-                : [[limiter, address]];
+              : isPeerRead
+                ? [[env.AUTH_LIMITER, `peer-reads:${connectKey(address)}`]]
+                : isPeers
+                  ? [[env.AUTH_LIMITER, `peers:${connectKey(address)}`]]
+                  : [[limiter, address]];
       for (const [guard, key] of guards) {
         if (!guard) continue;
         try {

@@ -1388,6 +1388,9 @@ pub enum ListOp {
     Join,
     /// Section 16: a join ends; Connect removes this account's devices from the store.
     Leave,
+    /// Section 16: this account made the vault store; it names no other account. Its
+    /// `share` entries count only while the list holds it.
+    Store,
 }
 
 impl ListOp {
@@ -1402,6 +1405,7 @@ impl ListOp {
             Self::Unshare => "unshare",
             Self::Join => "join",
             Self::Leave => "leave",
+            Self::Store => "store",
         }
     }
 
@@ -1416,6 +1420,7 @@ impl ListOp {
             "unshare" => Some(Self::Unshare),
             "join" => Some(Self::Join),
             "leave" => Some(Self::Leave),
+            "store" => Some(Self::Store),
             _ => None,
         }
     }
@@ -1428,15 +1433,28 @@ impl ListOp {
         )
     }
 
-    /// An entry that adds something (`add`, `peer`, `share`, `join`): it comes only while
-    /// the list has room to end every device, peer, share, and join.
+    /// An entry of section 16: signed over the `apassy-connect share-list v1` message (the
+    /// entries that name another account, and `store`).
+    pub fn of_section_16(self) -> bool {
+        self.names_account() || self == Self::Store
+    }
+
+    /// An entry that adds something (`add`, `peer`, `share`, `join`, `store`): it comes
+    /// only while the list has room to end every device, peer, share, and join (a `store`
+    /// needs no end).
     pub fn adds(self) -> bool {
-        matches!(self, Self::Add | Self::Peer | Self::Share | Self::Join)
+        matches!(
+            self,
+            Self::Add | Self::Peer | Self::Share | Self::Join | Self::Store
+        )
     }
 
     /// An entry of section 16 that names a vault store.
     pub fn names_store(self) -> bool {
-        matches!(self, Self::Share | Self::Unshare | Self::Join | Self::Leave)
+        matches!(
+            self,
+            Self::Share | Self::Unshare | Self::Join | Self::Leave | Self::Store
+        )
     }
 }
 
@@ -1467,11 +1485,13 @@ pub struct ListEntry {
     /// its JSON is that of section 7.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
-    /// Section 16: b64u of the root that a `peer` pins, else `None`.
+    /// Section 16: b64u of the root that a `peer` pins, or the list hash of the `share`
+    /// that a `join` answers (`None` for a `join` stored before joins named it); else
+    /// `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
-    /// Section 16: the vault store of a `share`, `unshare`, `join`, or `leave`, else
-    /// `None`.
+    /// Section 16: the vault store of a `share`, `unshare`, `join`, `leave`, or `store`,
+    /// else `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
 }
@@ -1483,7 +1503,9 @@ pub struct ListEntry {
 pub struct AccountListAppend {
     pub version: u64,
     pub op: ListOp,
-    pub account_id: String,
+    /// The other account; `None` exactly for a `store`.
+    pub account_id: Option<String>,
+    /// The root of a `peer`, the list hash of the `share` that a `join` answers.
     pub root: Option<String>,
     pub team_id: Option<String>,
     /// b64u of the caller's DER signature over the `apassy-connect share-list v1` message.
@@ -1573,13 +1595,60 @@ pub struct PeerDevice {
     pub public_key: String,
 }
 
-/// `GET /v1/account/peers/{account_id}`: another account of the caller's group.
+/// A `share` of a list that is active in the list and void at Connect (a removal from
+/// the group since it, `account_share_void`): the store and the account it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoidShare {
+    pub team_id: String,
+    pub account_id: String,
+}
+
+/// `GET /v1/account/peers/{account_id}`: another account whose list the caller may read
+/// (one group, or a vault store of both).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerView {
     pub account_id: String,
     pub name: String,
     pub devices: Vec<PeerDevice>,
     pub device_list: Vec<ListEntry>,
+    pub void: Vec<VoidShare>,
+}
+
+/// The pin that a client holds of one list: its version and its list hash (`0` and `""`
+/// for none).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerListPin {
+    pub account_id: String,
+    pub version: u64,
+    pub head: String,
+}
+
+/// `POST /v1/account/peers/lists`: 1 to 64 other accounts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerListsRequest {
+    pub accounts: Vec<PeerListPin>,
+}
+
+/// One account of `POST /v1/account/peers/lists`: `state` is `newer` (with `name`,
+/// `device_list`, `void`), `same` (with `void`), `refused`, or `later`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerListItem {
+    pub account_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_list: Option<Vec<ListEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub void: Option<Vec<VoidShare>>,
+}
+
+/// `POST /v1/account/peers/lists` answer, in the asked order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLists {
+    pub accounts: Vec<PeerListItem>,
 }
 
 /// The plan of an account (connect-billing-v1 section 8). Billing (C2) fills it; without
@@ -1791,6 +1860,12 @@ pub struct AccountRevoked {
 pub struct VaultStoreCreate {
     pub vault_id: String,
     pub name: String,
+    /// The store id that the device made (`t_` and 10 of `a-z2-7`).
+    pub team_id: String,
+    /// The version of its `store` entry: the one after the head.
+    pub version: u64,
+    /// b64u of the caller's DER signature over the `store` entry's share-list message.
+    pub statement: String,
 }
 
 /// A device in a vault store.
@@ -1810,6 +1885,9 @@ pub struct VaultStoreView {
     pub created_at: u64,
     pub shared: bool,
     pub devices: Vec<StoreDevice>,
+    /// The accounts whose active `share` of this store (in the owner's list) is void at
+    /// Connect (a removal from the group since it).
+    pub void: Vec<String>,
 }
 
 /// `POST /v1/account/vaults/{team_id}/devices`.

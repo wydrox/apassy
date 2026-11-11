@@ -46,10 +46,10 @@ pub mod words;
 use std::fmt;
 
 pub use account::{
-    AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest, PendingJoin,
-    PendingRotation, RevokeOutcome, RotatedCode, Sleeper, account_file, drop_account_rows,
-    drop_stale_account_rows, forget_old_account_file, forget_this_device, group_invite_code,
-    has_pending_join, is_old_account_file, signer_policy,
+    AccountState, Clock, ConnectAccount, DeviceLink, Forgotten, JoinPoll, JoinRequest,
+    ListedSigners, PendingJoin, PendingRotation, RevokeOutcome, RotatedCode, Sleeper, account_file,
+    drop_account_rows, drop_stale_account_rows, forget_old_account_file, forget_this_device,
+    group_invite_code, has_pending_join, is_old_account_file, signer_policy,
 };
 pub use client::{
     AccountCreated, AccountDeleted, AccountView, CheckoutAnswer, CheckoutRequest, ConnectClient,
@@ -66,8 +66,8 @@ pub use entitlement::{Entitlement, EntitlementClaims, EntitlementError, Entitlem
 pub use key_file::{FileKeyStore, KEYRING_WARNING, key_file, platform_store};
 pub use session::{AccountSession, AccountSlot, Follow, OpenTicket, SessionState};
 pub use share::{
-    PeerPin, Person, ShareLink, ShareNames, ShareOffer, SharePeerJoin, ShareRequest, ShareStatus,
-    StoreShare, store_signer_policy,
+    LeftStore, PeerPin, Person, ShareLink, ShareNames, ShareOffer, SharePeerJoin, ShareRequest,
+    ShareStatus, StoreShare, store_signer_policy,
 };
 pub use trust::ListEntry;
 pub use words::{

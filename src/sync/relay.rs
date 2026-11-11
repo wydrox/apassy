@@ -274,18 +274,28 @@ fn rate_limits() -> &'static Mutex<BTreeMap<String, Instant>> {
 
 /// The time left before `url` may be asked again, when a `429` asked to wait.
 pub(crate) fn rate_limited(url: &RelayUrl) -> Option<Duration> {
+    limited(url.as_str())
+}
+
+/// The time left of the wait kept under `key`.
+fn limited(key: &str) -> Option<Duration> {
     let mut limits = lock(rate_limits());
     let left = limits
-        .get(url.as_str())
+        .get(key)
         .map(|until| until.saturating_duration_since(Instant::now()));
     match left {
         Some(left) if !left.is_zero() => Some(left),
         Some(_) => {
-            limits.remove(url.as_str());
+            limits.remove(key);
             None
         }
         None => None,
     }
+}
+
+/// The key of the waits of the budget `scope` of `url`.
+fn scope_key(url: &RelayUrl, scope: &str) -> String {
+    format!("{} {scope}", url.as_str())
 }
 
 fn rate_limit_error(left: Duration) -> ApiError {
@@ -322,7 +332,19 @@ pub(crate) fn call<T: DeserializeOwned>(
     url: &RelayUrl,
     request: &Request<'_>,
 ) -> Result<T, ApiError> {
-    call_with_busy_retries(url, request, BUSY_RETRIES)
+    call_with_busy_retries(url, request, BUSY_RETRIES, None)
+}
+
+/// [`call`] on a route that Connect counts in a budget of its own, `scope` (the reads and
+/// the ceremony of the shared vaults, connect-account-v1 sections 3 and 13): a `429` of it
+/// holds back only the calls of that budget until its `Retry-After` passed, and a wait of
+/// the whole relay holds it back too.
+pub(crate) fn call_in_scope<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+    scope: &str,
+) -> Result<T, ApiError> {
+    call_with_busy_retries(url, request, BUSY_RETRIES, Some(scope))
 }
 
 /// One call that never sends the same body again after `503 busy`: the caller decides
@@ -332,17 +354,19 @@ pub(crate) fn call_without_busy_retries<T: DeserializeOwned>(
     url: &RelayUrl,
     request: &Request<'_>,
 ) -> Result<T, ApiError> {
-    call_with_busy_retries(url, request, 0)
+    call_with_busy_retries(url, request, 0, None)
 }
 
 fn call_with_busy_retries<T: DeserializeOwned>(
     url: &RelayUrl,
     request: &Request<'_>,
     busy_retries: usize,
+    scope: Option<&str>,
 ) -> Result<T, ApiError> {
+    let key = scope.map_or_else(|| url.as_str().to_owned(), |scope| scope_key(url, scope));
     let mut attempt = 0;
     loop {
-        if let Some(left) = rate_limited(url) {
+        if let Some(left) = rate_limited(url).or_else(|| limited(&key)) {
             return Err(rate_limit_error(left));
         }
         let answer = relay_http::exchange(url, request).map_err(http_error)?;
@@ -369,7 +393,7 @@ fn call_with_busy_retries<T: DeserializeOwned>(
             }) => {
                 let wait =
                     Duration::from_secs(retry_after.unwrap_or(RATE_WAIT).clamp(1, MAX_RATE_WAIT));
-                lock(rate_limits()).insert(url.as_str().to_owned(), Instant::now() + wait);
+                lock(rate_limits()).insert(key, Instant::now() + wait);
                 return Err(rate_limit_error(wait));
             }
             other => return other,
@@ -660,9 +684,9 @@ impl Session {
         self
     }
 
-    /// The session with a policy of its own: a join or an adoption, which verified the
-    /// device list just before. An adoption rebinds it to the policy of its relay sync
-    /// ([`Self::rebound`]).
+    /// The session with a policy of its own: the join of a store of this account alone
+    /// or an adoption, which verified the device list just before. An adoption rebinds it
+    /// to the policy of its relay sync ([`Self::rebound`]).
     pub(crate) fn with_fixed_signers(mut self, policy: SignerPolicy) -> Self {
         self.signer_keys = Some(SignerSource::Fixed(Arc::new(policy)));
         self
@@ -1230,12 +1254,15 @@ pub(crate) fn link_chain(
     Ok((version, previous))
 }
 
-/// Whether `key` is a key that the device list of this Mac held and removed, by the
-/// policy of `session` now ([`SignerPolicy::left`]).
+/// Whether `key` is a key that left the signers of the store of `session`, by its policy
+/// now ([`SignerPolicy::for_team`]): for a store of this account a key that the device list
+/// of this Mac held and removed ([`SignerPolicy::left`]); for a store shared between
+/// accounts also an ended key of another account of the store (section 16.6).
 fn departed_key(session: &Session, key: &[u8]) -> bool {
-    session
-        .policy_now()
-        .is_some_and(|policy| policy.left_key(key) && !policy.accepts(key))
+    session.policy_now().is_some_and(|policy| {
+        let policy = policy.for_team(&session.team_id);
+        policy.left_key(key) && !policy.accepts(key)
+    })
 }
 
 // ---- The transport. ----
@@ -1379,8 +1406,10 @@ impl RelayTransport {
     /// itself, `Damaged`). A list that did not verify, or one asked before the refusal,
     /// ends nothing.
     ///
-    /// A policy of its own ([`SignerSource::Fixed`]: a join or an adoption, which verified
-    /// the list just before) waits for no list: its refusal is final at once.
+    /// A policy of its own ([`SignerSource::Fixed`]: the join of a store of this account
+    /// alone, or an adoption, which verified the list just before) waits for no list: its
+    /// refusal is final at once. The join of a store shared between accounts follows the
+    /// slot of the account's signers instead (`RelaySync::joined_from_store`).
     fn unlisted(&self, head: &str) -> SyncError {
         if matches!(self.signer_keys, Some(SignerSource::Fixed(_))) {
             return SyncError::UnknownSigner;
@@ -2460,11 +2489,16 @@ impl RelaySync {
         lock(&self.notes.unlisted).as_ref().map(|seen| seen.since)
     }
 
-    /// Tests: the check of the device list began `ago` earlier.
+    /// Tests: the check of the device list began `ago` earlier, as if that time had passed:
+    /// the time of the list noted before moves as far, so a list asked before the refusal
+    /// stays before it.
     #[doc(hidden)]
     pub fn backdate_check_for_test(&self, ago: Duration) {
         if let Some(seen) = lock(&self.notes.unlisted).as_mut() {
             seen.since = seen.since.checked_sub(ago).unwrap_or(seen.since);
+        }
+        if let Some(asked) = lock(&self.notes.listed).as_mut() {
+            *asked = asked.checked_sub(ago).unwrap_or(*asked);
         }
     }
 
@@ -3769,6 +3803,7 @@ impl PendingJoin {
                     session: Arc::clone(&self.session),
                     team: self.team.clone(),
                     notes: Arc::default(),
+                    signers: None,
                 }))
             }
             Err(error) => match sync_error(error) {
@@ -3819,6 +3854,7 @@ impl PendingJoin {
                     session: self.session,
                     team: self.team,
                     notes: Arc::default(),
+                    signers: None,
                 }
                 .cancel();
                 Ok(())
@@ -3834,6 +3870,9 @@ pub struct JoinedDevice {
     team: String,
     /// What the checks of its downloads noted ([`Self::waiting_head`]).
     notes: Arc<HeadNotes>,
+    /// For a vault store of a Connect account: the slot of the signer policy that its
+    /// session follows from the first request ([`Self::set_signers`]).
+    pub(crate) signers: Option<Arc<Mutex<Option<SignerPolicy>>>>,
 }
 
 impl fmt::Debug for JoinedDevice {
@@ -3869,6 +3908,16 @@ impl JoinedDevice {
     /// The team name.
     pub fn team(&self) -> &str {
         &self.team
+    }
+
+    /// The signer policy of the account file after a step that wrote it (the window hands
+    /// each one over): the session of a vault store shared between accounts follows it
+    /// while the copy downloads, so a list that a refresh read reaches the check of the
+    /// next download. No effect for any other device.
+    pub fn set_signers(&self, policy: Option<SignerPolicy>) {
+        if let Some(slot) = &self.signers {
+            *lock(slot) = policy;
+        }
     }
 
     /// The relay team id (for a vault store of an account, the store).
@@ -4441,5 +4490,30 @@ mod tests {
             assert_eq!(result, Err(SyncError::Vault(VaultErrorKind::Locked)));
             assert!(took < Duration::from_secs(3), "{took:?}");
         }
+    }
+    /// The signers that a relay sync holds say whether its store is shared between
+    /// accounts (`RelaySync::shares_between_accounts`): Shared Vaults notes the lists of such
+    /// a store itself, also before it has a status after an unlock.
+    #[test]
+    fn the_signers_say_which_stores_are_shared_between_accounts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sync = RelaySync::new(RelayConfig::in_data_dir(
+            dir.path(),
+            &dir.path().join("vault.db"),
+            "http://127.0.0.1:9",
+            "vault",
+        ));
+        assert!(!sync.shares_between_accounts("t_7k2m5q4x3c"));
+        sync.set_account_signers(Some(SignerPolicy {
+            accepted: Vec::new(),
+            left: Vec::new(),
+            stores: vec![StoreSigners {
+                team_id: "t_7k2m5q4x3c".to_owned(),
+                accepted: Vec::new(),
+                left: Vec::new(),
+            }],
+        }));
+        assert!(sync.shares_between_accounts("t_7k2m5q4x3c"));
+        assert!(!sync.shares_between_accounts("t_aaaaaaaaaa"));
     }
 }

@@ -7,6 +7,8 @@ use crate::sync::DeviceKey;
 
 const ORIGIN: &str = "https://connect.example.test";
 const STORE: &str = "t_7k2m5q4x3c";
+/// The op `store` (the name `STORE` is the store of these tests).
+const STORE_OP: &str = super::STORE;
 const OTHER_STORE: &str = "t_aaaaaaaaaa";
 
 fn key() -> DeviceKey {
@@ -106,16 +108,28 @@ impl List {
         root: Option<&[u8]>,
         team: Option<&str>,
     ) {
+        self.entry_by(by, op, Some(peer), root.map(encode_b64u), team);
+    }
+
+    /// An entry of section 16 signed by `by`: `peer` none for a `store`, `root` the root
+    /// of a `peer` or the share hash of a `join` (b64u).
+    fn entry_by(
+        &mut self,
+        by: &DeviceKey,
+        op: &str,
+        peer: Option<&str>,
+        root: Option<String>,
+        team: Option<&str>,
+    ) {
         let version = self.entries.len() as u64 + 1;
-        let root_b64u = root.map(encode_b64u);
         let message = share_list_message(
             ORIGIN,
             &self.id,
             version,
             &self.previous(),
             op,
-            peer,
-            root_b64u.as_deref().unwrap_or(LIST_NONE),
+            peer.unwrap_or(LIST_NONE),
+            root.as_deref().unwrap_or(LIST_NONE),
             team.unwrap_or(LIST_NONE),
             &b64(by),
         );
@@ -127,8 +141,8 @@ impl List {
             name: None,
             by: b64(by),
             signature: Some(encode_b64u(&by.sign(&message).unwrap())),
-            account_id: Some(peer.to_owned()),
-            root: root_b64u,
+            account_id: peer.map(str::to_owned),
+            root,
             team_id: team.map(str::to_owned),
         });
         self.hashes.push(list_hash(&message));
@@ -141,6 +155,41 @@ impl List {
 
     fn peer(&mut self, other: &List) {
         self.share(PEER, &other.id.clone(), Some(other.root.public_key()), None);
+    }
+
+    /// `store team`: this account made the store.
+    fn store(&mut self, team: &str) {
+        let root_key = self.root_signer();
+        self.entry_by(&root_key, STORE_OP, None, None, Some(team));
+    }
+
+    /// `share peer team`, after `store team` when the list does not hold it yet.
+    fn share_store(&mut self, peer: &str, team: &str) {
+        if !self.verified().is_some_and(|list| list.shares.made(team)) {
+            self.store(team);
+        }
+        self.share(SHARE, peer, None, Some(team));
+    }
+
+    /// The list hash of the last `share team member` of this list.
+    fn share_hash(&self, team: &str, member: &str) -> String {
+        let at = self
+            .entries
+            .iter()
+            .rposition(|entry| {
+                entry.op == SHARE
+                    && entry.team_id.as_deref() == Some(team)
+                    && entry.account_id.as_deref() == Some(member)
+            })
+            .expect("a share");
+        self.hashes[at].clone()
+    }
+
+    /// `join owner team` naming the last share of `owner`'s list for this account.
+    fn join(&mut self, owner: &List, team: &str) {
+        let share = owner.share_hash(team, &self.id);
+        let root_key = self.root_signer();
+        self.entry_by(&root_key, JOIN, Some(&owner.id), Some(share), Some(team));
     }
 
     fn verified(&self) -> Option<Verified> {
@@ -183,6 +232,7 @@ fn refresh_again(mut state: AccountState, list: &List, peers: &[&List]) -> Accou
         &own.shares,
         ORIGIN,
         &served,
+        &VoidShares::default(),
         &ListCache::default(),
     );
     assert!(state.is_valid_for_test(), "{state:?}");
@@ -216,12 +266,12 @@ fn family() -> (List, List, List) {
     );
     a.peer(&x);
     a.peer(&y);
-    a.share(SHARE, &x.id.clone(), None, Some(STORE));
-    a.share(SHARE, &y.id.clone(), None, Some(STORE));
+    a.share_store(&x.id.clone(), STORE);
+    a.share_store(&y.id.clone(), STORE);
     x.peer(&a);
-    x.share(JOIN, &a.id.clone(), None, Some(STORE));
+    x.join(&a, STORE);
     y.peer(&a);
-    y.share(JOIN, &a.id.clone(), None, Some(STORE));
+    y.join(&a, STORE);
     (a, x, y)
 }
 
@@ -260,7 +310,7 @@ fn the_entries_of_section_16_follow_their_rules() {
     };
     itself.share(PEER, &a.id.clone(), Some(a.root.public_key()), None);
     assert!(itself.verified().is_none());
-    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    a.share_store(&x.id.clone(), STORE);
     // A store that this list shares is not one it joins; the same share again, and an
     // unpeer while a share names the peer, are refused.
     for (op, team) in [(JOIN, Some(STORE)), (SHARE, Some(STORE)), (UNPEER, None)] {
@@ -402,7 +452,7 @@ fn without_a_share_entry_the_heads_of_another_account_are_refused() {
     assert!(!left(&state, STORE, &x.root));
     assert!(accepted(&state, STORE, &a.root));
     // With the share, X's verified devices sign.
-    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    a.share_store(&x.id.clone(), STORE);
     let state = refreshed(&a, &[&x]);
     assert!(accepted(&state, STORE, &x.root));
     // Another store of A still takes none of X's keys.
@@ -416,7 +466,7 @@ fn a_list_of_another_root_or_with_an_unsigned_key_counts_for_nothing() {
     let (mut a, mut x) = (List::new("acc_aaaaaaaaab"), List::new("acc_xxxxxxxxxb"));
     let x2 = key();
     a.peer(&x);
-    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    a.share_store(&x.id.clone(), STORE);
     let mut state = refreshed(&a, &[&x]);
     assert!(accepted(&state, STORE, &x.root));
     // An extra key in X's list that no device of X signed: the list does not verify, the
@@ -558,14 +608,14 @@ fn another_peer_naming_the_store_gives_it_no_signer() {
     let (a, mut x, _) = family();
     let mut b = List::new("acc_bbbbbbbbbb");
     b.peer(&x);
-    b.share(SHARE, &x.id.clone(), None, Some(STORE));
+    b.share_store(&x.id.clone(), STORE);
     x.peer(&b);
     let state = refreshed(&x, &[&a, &b]);
     assert!(accepted(&state, STORE, &a.root));
     assert!(!accepted(&state, STORE, &b.root));
     assert!(!left(&state, STORE, &b.root));
     // And a join of the same store from another owner is refused by the list itself.
-    x.share(JOIN, &b.id.clone(), None, Some(STORE));
+    x.join(&b, STORE);
     assert!(x.verified().is_none());
 }
 
@@ -634,13 +684,13 @@ fn two_owners(y_a: &List, y_b: &List) -> (List, List, List) {
     for (owner, y, team) in [(&mut a, y_a, S1), (&mut b, y_b, S2)] {
         owner.peer(&x);
         owner.peer(y);
-        owner.share(SHARE, &x.id.clone(), None, Some(team));
-        owner.share(SHARE, &y.id.clone(), None, Some(team));
+        owner.share_store(&x.id.clone(), team);
+        owner.share_store(&y.id.clone(), team);
     }
     x.peer(&a);
     x.peer(&b);
-    x.share(JOIN, &a.id.clone(), None, Some(S1));
-    x.share(JOIN, &b.id.clone(), None, Some(S2));
+    x.join(&a, S1);
+    x.join(&b, S2);
     (a, b, x)
 }
 
@@ -680,10 +730,10 @@ fn a_re_pin_by_the_owner_keeps_the_old_keys_as_keys_that_left() {
     let (mut a, mut x) = (List::new("acc_aaaaaaaaab"), List::new("acc_xxxxxxxxxb"));
     a.peer(&x);
     a.peer(&y_old);
-    a.share(SHARE, &x.id.clone(), None, Some(S1));
-    a.share(SHARE, &y_old.id.clone(), None, Some(S1));
+    a.share_store(&x.id.clone(), S1);
+    a.share_store(&y_old.id.clone(), S1);
     x.peer(&a);
-    x.share(JOIN, &a.id.clone(), None, Some(S1));
+    x.join(&a, S1);
     let state = refreshed(&x, &[&a, &y_old]);
     assert!(accepted(&state, S1, &y_old.root));
     // Y resets; A pins the new root after new words and shares again. X's next refresh
@@ -772,13 +822,13 @@ fn own_pins_and_pins_through_owners_have_caps_of_their_own() {
         .map(|index| List::new(&format!("acc_mmmmmmmm{}b", ["a", "b", "c", "d"][index])))
         .collect();
     a.peer(&x);
-    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    a.share_store(&x.id.clone(), STORE);
     for member in &members {
         a.peer(member);
-        a.share(SHARE, &member.id.clone(), None, Some(STORE));
+        a.share_store(&member.id.clone(), STORE);
     }
     x.peer(&a);
-    x.share(JOIN, &a.id.clone(), None, Some(STORE));
+    x.join(&a, STORE);
     let alphabet = "abcdefghijklmnopqrstuvwxyz234567";
     let others: Vec<List> = (0..63)
         .map(|index| {
@@ -838,11 +888,13 @@ fn the_adding_entries_stop_at_822_and_the_ends_go_on_to_1024() {
     for peer in &peers {
         base.peer(peer);
     }
+    base.store(S1);
+    base.store(S2);
     for peer in &peers {
         base.share(SHARE, &peer.id.clone(), None, Some(S1));
         base.share(SHARE, &peer.id.clone(), None, Some(S2));
     }
-    assert_eq!(base.entries.len(), 1 + 9 + MAX_PEERS + MAX_SHARED);
+    assert_eq!(base.entries.len(), 1 + 9 + MAX_PEERS + 2 + MAX_SHARED);
     let first = peers[0].id.clone();
     let second = peers[1].id.clone();
     while base.entries.len() < 818 {
@@ -884,6 +936,13 @@ fn the_adding_entries_stop_at_822_and_the_ends_go_on_to_1024() {
     add_822.device(&root, "remove", &devices[0], None, None);
     add_822.add(&key(), 200);
     assert!(add_822.verified().is_some(), "an add at 822");
+    let mut store_822 = fork(&base);
+    for op in [UNSHARE, SHARE, UNSHARE] {
+        store_822.share(op, &first, None, Some(S1));
+    }
+    store_822.store(S3);
+    assert_eq!(store_822.entries.len(), 822);
+    assert!(store_822.verified().is_some(), "a store at 822");
     // At 823 each adding kind is refused, also with room in the counts.
     let mut late = fork(&base);
     late.share(UNSHARE, &first, None, Some(S1));
@@ -908,6 +967,7 @@ fn the_adding_entries_stop_at_822_and_the_ends_go_on_to_1024() {
         "a join at 823"
     );
     assert!(refused(&|list| list.add(&key(), 201)), "an add at 823");
+    assert!(refused(&|list| list.store(S3)), "a store at 823");
     // From the full state at 822, every share, peer, and device ends up to 1024.
     let mut ends = share_822;
     for peer in &peers {
@@ -970,4 +1030,213 @@ fn the_keys_that_left_and_the_ended_accounts_keep_their_newest() {
     assert_eq!(store.ended.len(), MAX_ENDED);
     assert!(!store.ended.contains(&members[0].id));
     assert!(store.ended.contains(&members[MAX_ENDED].id));
+}
+
+// ---- Third pass: the `store` entry, the share that a join answers, the cleanup. ----
+
+/// F10: `store S` comes once and never for a store that the list joins; a share of S
+/// counts only once the list holds `store S`; a store that the list made is never joined.
+#[test]
+fn a_store_entry_makes_the_shares_of_a_store_count() {
+    let (mut a, mut x) = (List::new("acc_aaaaaaaaab"), List::new("acc_xxxxxxxxxb"));
+    a.peer(&x);
+    // A share before the store entry (a list of an earlier build) verifies, and counts for
+    // nothing: no member, no share for a join to name, no signer.
+    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    let shares = a.verified().unwrap().shares;
+    assert!(shares.members_of(STORE).is_empty());
+    assert!(shares.share_hash(STORE, &x.id).is_none());
+    assert!(!accepted(&refreshed(&a, &[&x]), STORE, &x.root));
+    a.store(STORE);
+    let shares = a.verified().unwrap().shares;
+    assert_eq!(shares.members_of(STORE), vec![x.id.clone()]);
+    assert!(shares.made(STORE));
+    assert!(accepted(&refreshed(&a, &[&x]), STORE, &x.root));
+    // The same store twice, a store that names an account or a root: refused.
+    let mut twice = fork(&a);
+    twice.store(STORE);
+    assert!(twice.verified().is_none());
+    for (peer, root) in [(Some(x.id.as_str()), None), (None, Some(b64(&x.root)))] {
+        let mut named = fork(&a);
+        let signer = named.root_signer();
+        named.entry_by(&signer, STORE_OP, peer, root, Some(OTHER_STORE));
+        assert!(named.verified().is_none(), "{peer:?}");
+    }
+    // X: a store that it joined is not one that it made, and one that it made is not joined.
+    x.peer(&a);
+    x.join(&a, STORE);
+    let mut claims = fork(&x);
+    claims.store(STORE);
+    assert!(claims.verified().is_none());
+    let mut made_first = List::new("acc_xxxxxxxxxb");
+    made_first.peer(&a);
+    made_first.store(STORE);
+    made_first.join(&a, STORE);
+    assert!(made_first.verified().is_none());
+}
+
+/// F2: a join names the share that it answers. After the owner's `unshare` the join is over
+/// without a `leave`, a new share leaves it over until the member joins that share, and the
+/// same share is not joined twice. A join without a share (an earlier build) counts for
+/// nothing.
+#[test]
+fn a_join_counts_only_while_the_share_it_answers_is_active() {
+    let (mut a, mut x, y) = family();
+    let state = refreshed(&x, &[&a, &y]);
+    assert!(accepted(&state, STORE, &a.root) && accepted(&state, STORE, &y.root));
+    let mut twice = fork(&x);
+    twice.join(&a, STORE);
+    assert!(twice.verified().is_none(), "the same share twice");
+    // A ends the share with X: X's join is over, though X signed no leave.
+    a.share(UNSHARE, &x.id.clone(), None, Some(STORE));
+    let state = refresh_again(state, &x, &[&a, &y]);
+    let policy = store_signer_policy(&state, STORE).unwrap();
+    assert!(policy.accepted.is_empty(), "{policy:?}");
+    assert!(
+        pin_of(&state, &y.id, Some(&a.id)).is_none(),
+        "no co-member pin"
+    );
+    // A shares again: X's join answers the old share, so the store stays ended here.
+    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    let state = refresh_again(state, &x, &[&a, &y]);
+    assert!(
+        store_signer_policy(&state, STORE)
+            .unwrap()
+            .accepted
+            .is_empty()
+    );
+    // X joins the new share: one join for the pair, and the store signs again.
+    x.join(&a, STORE);
+    let shares = x.verified().unwrap().shares;
+    assert_eq!(shares.joins, vec![(STORE.to_owned(), a.id.clone())]);
+    assert_eq!(
+        shares.join_share(STORE, &a.id),
+        Some(a.share_hash(STORE, &x.id).as_str())
+    );
+    let state = refresh_again(state, &x, &[&a, &y]);
+    assert!(accepted(&state, STORE, &a.root) && accepted(&state, STORE, &y.root));
+    // A join of another owner's store while one is active is refused, as before.
+    let mut b = List::new("acc_bbbbbbbbbb");
+    b.peer(&x);
+    b.share_store(&x.id.clone(), STORE);
+    let mut other = fork(&x);
+    other.peer(&b);
+    other.join(&b, STORE);
+    assert!(other.verified().is_none());
+    // A join without the share that it answers.
+    let mut legacy = List::new("acc_xxxxxxxxxb");
+    legacy.peer(&a);
+    legacy.share(JOIN, &a.id.clone(), None, Some(STORE));
+    let state = refreshed(&legacy, &[&a, &y]);
+    assert!(
+        store_signer_policy(&state, STORE)
+            .unwrap()
+            .accepted
+            .is_empty()
+    );
+    // A leave names the share of the join that it ended.
+    x.share(LEAVE, &a.id.clone(), None, Some(STORE));
+    let shares = x.verified().unwrap().shares;
+    assert!(shares.left_share(STORE, &a.id, &a.share_hash(STORE, &x.id)));
+}
+
+/// F8: a store that this account left goes from the file, with the pins that only it
+/// needed; the own pin of its owner stays while the own list pins it.
+#[test]
+fn a_left_store_goes_with_its_pins() {
+    let (a, mut x, y) = family();
+    let state = refreshed(&x, &[&a, &y]);
+    assert!(pin_of(&state, &y.id, Some(&a.id)).is_some());
+    x.share(LEAVE, &a.id.clone(), None, Some(STORE));
+    let state = refresh_again(state, &x, &[&a, &y]);
+    assert!(state.stores.iter().all(|store| store.team_id != STORE));
+    assert!(pin_of(&state, &y.id, Some(&a.id)).is_none());
+    assert!(store_signer_policy(&state, STORE).is_none());
+    assert!(pin_of(&state, &a.id, None).is_some());
+}
+
+/// F8: at 256 pins through owners the pins that no store needs any more go before a new
+/// co-member is refused: X joined O0's store, whose 63 co-members ended (their pins hold
+/// their keys as ended keys), and O1 to O3's (63 co-members each, 252 pins); X leaves O0's
+/// store, and O4 shares with 63 new co-members in the same round.
+#[test]
+fn at_the_pin_cap_the_pins_that_no_store_needs_go_first() {
+    let teams = [
+        "t_saaaaaaaaa",
+        "t_sbaaaaaaaa",
+        "t_scaaaaaaaa",
+        "t_sdaaaaaaaa",
+        "t_seaaaaaaaa",
+    ];
+    let mut x = List::new("acc_xxxxxxxxxb");
+    let mut owners: Vec<List> = (0..5)
+        .map(|i| List::new(&numbered("oooooooo", i)))
+        .collect();
+    let members: Vec<Vec<List>> = (0..5)
+        .map(|i| {
+            let prefix = format!("mmmmmmm{}", ["a", "b", "c", "d", "e"][i]);
+            (0..63).map(|j| List::new(&numbered(&prefix, j))).collect()
+        })
+        .collect();
+    for (i, owner) in owners.iter_mut().enumerate() {
+        owner.peer(&x);
+        owner.share_store(&x.id.clone(), teams[i]);
+        if i < 4 {
+            for member in &members[i] {
+                owner.peer(member);
+                owner.share(SHARE, &member.id.clone(), None, Some(teams[i]));
+            }
+        }
+    }
+    for member in &members[0] {
+        owners[0].share(UNSHARE, &member.id.clone(), None, Some(teams[0]));
+    }
+    for (i, owner) in owners.iter().enumerate() {
+        x.peer(owner);
+        x.join(owner, teams[i]);
+    }
+    let via = |state: &AccountState| state.peers.iter().filter(|pin| pin.via.is_some()).count();
+    let state = refreshed(&x, &owners.iter().collect::<Vec<_>>());
+    assert_eq!(via(&state), 252);
+    for member in &members[0] {
+        assert!(
+            pin_of(&state, &member.id, Some(&owners[0].id)).is_some(),
+            "the pin of an ended account"
+        );
+    }
+    // One round: X leaves O0's store, and O4 shares with 63 new co-members.
+    x.share(LEAVE, &owners[0].id.clone(), None, Some(teams[0]));
+    for member in &members[4] {
+        owners[4].peer(member);
+        owners[4].share(SHARE, &member.id.clone(), None, Some(teams[4]));
+    }
+    let mut state = state;
+    let own = x.verified().unwrap();
+    let lists: BTreeMap<String, Vec<ListEntry>> = owners
+        .iter()
+        .map(|list| (list.id.clone(), list.entries.clone()))
+        .collect();
+    let learned = learn_lists(
+        &mut state,
+        &own.shares,
+        ORIGIN,
+        &lists,
+        &VoidShares::default(),
+        &ListCache::default(),
+    );
+    assert!(
+        learned.unpinned.is_empty(),
+        "{} unpinned",
+        learned.unpinned.len()
+    );
+    let store = state
+        .stores
+        .iter()
+        .find(|store| store.team_id == teams[4])
+        .unwrap();
+    for member in &members[4] {
+        assert!(pin_of(&state, &member.id, Some(&owners[4].id)).is_some());
+        assert!(store.members.contains(&member.id));
+    }
+    assert_eq!(via(&state), 252);
 }

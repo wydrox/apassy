@@ -4369,6 +4369,9 @@ mod connect_v1 {
         struct VaultCreate {
             vault_id: String,
             name: String,
+            team_id: String,
+            version: u64,
+            statement: String,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4388,6 +4391,7 @@ mod connect_v1 {
             created_at: u64,
             shared: bool,
             devices: Vec<StoreDevice>,
+            void: Vec<String>,
         }
 
         #[derive(Debug, Deserialize)]
@@ -4582,6 +4586,7 @@ mod connect_v1 {
                         .devices
                         .iter()
                         .all(|d| d.account_id == view.devices[0].account_id))
+                && view.void.iter().all(|account| is_id(account, "acc_"))
         }
 
         /// `POST /v1/account/list` (section 16.3).
@@ -4590,7 +4595,7 @@ mod connect_v1 {
         struct ListAppend {
             version: u64,
             op: String,
-            account_id: String,
+            account_id: Option<String>,
             root: Option<String>,
             team_id: Option<String>,
             statement: String,
@@ -4674,24 +4679,116 @@ mod connect_v1 {
             name: String,
             devices: Vec<PeerDevice>,
             device_list: Vec<ListEntry>,
+            void: Vec<VoidMark>,
+        }
+
+        /// A share that Connect counts as void (section 16.4).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct VoidMark {
+            team_id: String,
+            account_id: String,
+        }
+
+        /// `POST /v1/account/peers/lists` (section 16.4).
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerListAsk {
+            account_id: String,
+            version: u64,
+            head: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerLists {
+            accounts: Vec<PeerListAsk>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerListItem {
+            account_id: String,
+            state: String,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            device_list: Option<Vec<ListEntry>>,
+            #[serde(default)]
+            void: Option<Vec<VoidMark>>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PeerListsAnswer {
+            accounts: Vec<PeerListItem>,
+        }
+
+        fn void_is_valid(marks: &[VoidMark]) -> bool {
+            marks
+                .iter()
+                .all(|mark| is_id(&mark.team_id, "t_") && is_id(&mark.account_id, "acc_"))
         }
 
         /// The examples of section 16.
         fn check_share(example: &Example) -> bool {
             match example.name.as_str() {
-                "list_append" => {
+                "list_append" | "list_append_store" => {
                     let body: ListAppend = strict(example);
                     assert!(
-                        ["peer", "unpeer", "share", "unshare", "join", "leave"]
-                            .contains(&body.op.as_str())
+                        [
+                            "peer", "unpeer", "share", "unshare", "join", "leave", "store"
+                        ]
+                        .contains(&body.op.as_str())
                     );
-                    assert!(is_id(&body.account_id, "acc_") && is_signature(&body.statement));
-                    assert_eq!(body.op == "peer", body.root.is_some());
+                    // No account exactly on a `store`.
+                    assert_eq!(body.op == "store", body.account_id.is_none());
+                    assert!(
+                        body.account_id
+                            .as_deref()
+                            .is_none_or(|account| is_id(account, "acc_"))
+                            && is_signature(&body.statement)
+                    );
+                    if !matches!(body.op.as_str(), "peer" | "join") {
+                        assert!(body.root.is_none());
+                    }
+                    if body.op == "peer" {
+                        assert!(body.root.is_some());
+                    }
                     assert_eq!(
-                        ["share", "unshare", "join", "leave"].contains(&body.op.as_str()),
+                        ["share", "unshare", "join", "leave", "store"].contains(&body.op.as_str()),
                         body.team_id.is_some()
                     );
                     assert!(body.version >= 2);
+                }
+                "peer_lists" => {
+                    let body: PeerLists = strict(example);
+                    assert!(!body.accounts.is_empty() && body.accounts.len() <= 64);
+                    for ask in &body.accounts {
+                        assert!(is_id(&ask.account_id, "acc_"));
+                        assert_eq!(ask.version == 0, ask.head.is_empty());
+                    }
+                }
+                "peer_lists_answer" => {
+                    let body: PeerListsAnswer = strict(example);
+                    for item in &body.accounts {
+                        assert!(is_id(&item.account_id, "acc_"));
+                        match item.state.as_str() {
+                            "newer" => {
+                                assert!(item.name.as_deref().is_some_and(is_name));
+                                assert!(item.device_list.as_deref().is_some_and(list_is_valid));
+                                assert!(item.void.as_deref().is_some_and(void_is_valid));
+                            }
+                            "same" => {
+                                assert!(item.device_list.is_none());
+                                assert!(item.void.as_deref().is_some_and(void_is_valid));
+                            }
+                            "refused" | "later" => {
+                                assert!(item.device_list.is_none() && item.void.is_none());
+                            }
+                            other => panic!("state {other}"),
+                        }
+                    }
                 }
                 "list_appended" => {
                     let body: ListAppended = strict(example);
@@ -4756,6 +4853,7 @@ mod connect_v1 {
                                 && is_public_key(&device.public_key))
                     );
                     assert!(list_is_valid(&body.device_list));
+                    assert!(void_is_valid(&body.void));
                 }
                 _ => return false,
             }
@@ -4879,6 +4977,8 @@ mod connect_v1 {
                 "vault_create" => {
                     let body: VaultCreate = strict(example);
                     assert!(is_uuid(&body.vault_id) && is_name(&body.name));
+                    assert!(is_id(&body.team_id, "t_") && is_signature(&body.statement));
+                    assert!(body.version >= 2);
                 }
                 "vault_created" => {
                     let body: VaultStoreView = strict(example);
@@ -7121,6 +7221,7 @@ fn connect_account_v1_share_vectors_match_the_contract() {
     };
     let (a_root, x_root) = (list("a", 1), list("x", 1));
     let (a_peer, x_peer) = (list("a", 2), list("x", 2));
+    let (a_store, a_share) = (list("a", 3), list("a", 4));
     let expected: Vec<(&str, Vec<u8>)> = vec![
         (
             "share_list_peer",
@@ -7138,13 +7239,28 @@ fn connect_account_v1_share_vectors_match_the_contract() {
             ]),
         ),
         (
-            "share_list_share",
+            "share_list_store",
             joined(&[
                 b"apassy-connect share-list v1",
                 origin,
                 a,
                 b"3",
                 a_peer.as_bytes(),
+                b"store",
+                b"-",
+                b"-",
+                store,
+                a64.as_bytes(),
+            ]),
+        ),
+        (
+            "share_list_share",
+            joined(&[
+                b"apassy-connect share-list v1",
+                origin,
+                a,
+                b"4",
+                a_store.as_bytes(),
                 b"share",
                 x,
                 b"-",
@@ -7177,7 +7293,7 @@ fn connect_account_v1_share_vectors_match_the_contract() {
                 x_peer.as_bytes(),
                 b"join",
                 a,
-                b"-",
+                a_share.as_bytes(),
                 store,
                 b64.as_bytes(),
             ]),

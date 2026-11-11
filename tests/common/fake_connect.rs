@@ -78,8 +78,14 @@ pub trait StoreRelay: Send + Sync {
     fn url(&self) -> String;
     /// The origin that the relay's challenges report and its sign-ins sign.
     fn set_origin(&self, origin: &str);
-    /// A new store team with `public_key` as its first device: (team id, device id).
-    fn add_store_team(&self, name: &str, device_name: &str, public_key: &[u8]) -> (String, u64);
+    /// A new store team `team_id` with `public_key` as its first device: its device id.
+    fn add_store_team(
+        &self,
+        team_id: &str,
+        name: &str,
+        device_name: &str,
+        public_key: &[u8],
+    ) -> u64;
     /// Another device in the store: its device id.
     fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64;
     /// Delete the store with its copy.
@@ -317,6 +323,8 @@ struct Store {
     account: String,
     created_at: u64,
     devices: Vec<(u64, String)>,
+    /// The accounts whose share of this store the fake counts as void (`void_share`).
+    void: Vec<String>,
 }
 
 #[derive(Default)]
@@ -351,6 +359,9 @@ struct State {
     lost_answers: Vec<(String, usize)>,
     /// Requests that start with the prefix answer this status and error code instead.
     route_errors: Vec<(String, u16, String)>,
+    /// `GET /v1/account/group` answers this view instead (a Connect that shows a group
+    /// without members, or without the caller).
+    group_view: Option<Value>,
     log: Vec<String>,
     bodies: Vec<String>,
     /// Each request line with its `Authorization` header.
@@ -731,6 +742,19 @@ impl FakeConnect {
         lock(&self.shared)
             .lost_answers
             .push((prefix.to_owned(), count));
+    }
+
+    /// `GET /v1/account/group` answers `view` from now on (`None`: the group again).
+    pub fn answer_group(&self, view: Option<Value>) {
+        lock(&self.shared).group_view = view;
+    }
+
+    /// No request that starts with `prefix` answers an error of [`Self::answer_route_error`]
+    /// any more (the other prefixes keep theirs).
+    pub fn clear_route_errors_of(&self, prefix: &str) {
+        lock(&self.shared)
+            .route_errors
+            .retain(|(held, _, _)| held != prefix);
     }
 
     /// Every request that starts with `prefix` answers `status` with the error `code`.
@@ -1343,7 +1367,8 @@ fn store_view(store: &Store, state: &State) -> Value {
         .iter()
         .any(|device| device["account_id"] != json!(store.account));
     json!({"team_id": store.team_id, "vault_id": store.vault_id, "name": store.name,
-           "created_at": store.created_at, "shared": shared, "devices": devices})
+           "created_at": store.created_at, "shared": shared, "devices": devices,
+           "void": store.void})
 }
 
 fn new_device(
@@ -2159,15 +2184,8 @@ fn authenticated(
             ok(json!({"device_id": target, "removed_from_stores": removed}))
         }
         ("POST", ["vaults"]) => {
-            if !strict(body, &["vault_id", "name"]) {
+            if !strict_versioned(body, &["vault_id", "name", "team_id", "statement"]) {
                 return fail(400, "invalid_request");
-            }
-            if !state
-                .accounts
-                .get(account)
-                .is_some_and(|entry| entry.entitled)
-            {
-                return fail(403, "plan_required");
             }
             let vault_id = text(body, "vault_id").to_owned();
             if let Some(store) = state
@@ -2177,8 +2195,24 @@ fn authenticated(
             {
                 return ok(store_view(store, state));
             }
+            if !state
+                .accounts
+                .get(account)
+                .is_some_and(|entry| entry.entitled)
+            {
+                return fail(403, "plan_required");
+            }
+            // The `store` entry of the new id, made by the caller, in the step that makes
+            // the store (connect-account-v1 section 8).
+            let team_id = text(body, "team_id").to_owned();
+            if !share::store_id_free(state, &team_id) {
+                return fail(409, "conflict");
+            }
+            if let Err(answer) = share::append_store(state, body, account, device, origin) {
+                return answer;
+            }
             state.next += 1;
-            let (team_id, number) = match state.relay.clone() {
+            let number = match state.relay.clone() {
                 Some(relay) => {
                     let me = state
                         .devices
@@ -2186,9 +2220,9 @@ fn authenticated(
                         .find(|entry| entry.id == device)
                         .cloned()
                         .expect("the caller");
-                    relay.add_store_team(text(body, "name"), &me.name, &me.public_key)
+                    relay.add_store_team(&team_id, text(body, "name"), &me.name, &me.public_key)
                 }
-                None => (id("t_", state.next), 1),
+                None => 1,
             };
             let store = Store {
                 team_id,
@@ -2197,6 +2231,7 @@ fn authenticated(
                 account: account.to_owned(),
                 created_at: now(),
                 devices: vec![(number, device.to_owned())],
+                void: Vec::new(),
             };
             let view = store_view(&store, state);
             state.stores.push(store);
@@ -2391,6 +2426,9 @@ fn billing(
             )
         }
         ("GET", ["group"]) => {
+            if let Some(view) = state.group_view.clone() {
+                return ok(view);
+            }
             let Some((group, member)) = membership(state, account) else {
                 return fail(404, "not_found");
             };

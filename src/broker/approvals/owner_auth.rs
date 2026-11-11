@@ -544,6 +544,9 @@ pub enum OwnerAction {
         team_id: String,
         vault_name: String,
         words: String,
+        /// The entries that the step signs, in their order: `peer` (unless the pair is
+        /// pinned), `store` (unless the list holds it), `share` (unless it is active).
+        entries: Vec<ShareEntry>,
     },
     /// "The Words Match" on the device of the account that a share code was sent to: this
     /// device signs `peer` for the root of the inviting account (section 16.2).
@@ -554,6 +557,8 @@ pub enum OwnerAction {
         peer_hint: String,
         fingerprint: String,
         words: String,
+        /// The entries that the step signs: the `peer`, or none for a root pinned already.
+        entries: Vec<ShareEntry>,
     },
     /// A new pin of an account that was reset (section 16.7), after new words: this device
     /// signs the ends of the old root first (`unshare` and `leave` of the stores `ends`
@@ -570,9 +575,15 @@ pub enum OwnerAction {
         ends: Vec<String>,
         team_id: Option<String>,
         vault_name: Option<String>,
+        /// The entries that the step signs, in their order (the ends, `unpeer`, `peer`,
+        /// and `store` and `share` of the store when one is named).
+        entries: Vec<ShareEntry>,
     },
     /// "Join" of a store that another account shares with this one: this device signs
-    /// `join` of the store (section 16.2 step 5).
+    /// `join` of the store (section 16.2 step 5). `vault_name` is the name of a vault of
+    /// this computer that syncs the store (empty when there is none: the prompt says "a
+    /// vault shared by" the person), `vault_hint` the name that Connect gives the store (a
+    /// hint only: the other account chose it).
     JoinConnectShare {
         account_id: String,
         peer_account: String,
@@ -581,6 +592,9 @@ pub enum OwnerAction {
         fingerprint: String,
         team_id: String,
         vault_name: String,
+        /// The entry that the step signs: the `join`.
+        entries: Vec<ShareEntry>,
+        vault_hint: String,
     },
     /// End a vault shared between accounts: the owner's `unshare` ("Stop Sharing with
     /// <name>…", `leave` false) or a member's `leave` ("Leave This Shared Vault…").
@@ -593,6 +607,8 @@ pub enum OwnerAction {
         team_id: String,
         vault_name: String,
         leave: bool,
+        /// The entry that the step signs: the `unshare` or the `leave`.
+        entries: Vec<ShareEntry>,
     },
     /// Turn the tailnet route of this Mac's node on or off (plan S2–S3, unit N7): the
     /// iPhone and the other Macs reach the approvals of this Mac directly, or no longer.
@@ -628,6 +644,28 @@ pub enum OwnerAction {
     /// Turn remote access on: Tailscale Funnel routes the internet to the node of this
     /// Mac. Off is stricter and needs no check.
     TurnOnRemoteAccess,
+}
+
+/// One entry of the signed device list that an owner check of a shared vault covers
+/// (connect-account-v1 section 16): its op, the other account (none for a `store`), and
+/// the store (none for a `peer` or an `unpeer`). The step signs exactly the entries of its
+/// check, in their order, or nothing more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareEntry {
+    pub op: String,
+    pub account: Option<String>,
+    pub team: Option<String>,
+}
+
+impl ShareEntry {
+    /// The entry `op` for `account` and `team`.
+    pub fn new(op: &str, account: Option<&str>, team: Option<&str>) -> Self {
+        Self {
+            op: op.to_owned(),
+            account: account.map(str::to_owned),
+            team: team.map(str::to_owned),
+        }
+    }
 }
 
 /// A change of a Connect group that needs the owner check (connect-billing-v1 section 6).
@@ -1132,6 +1170,14 @@ impl OwnerAction {
                 "verify the reset account of \"{}\" through Apassy Connect; both show: {}",
                 short_device_name(peer_name),
                 safe_words(words)
+            ),
+            Self::JoinConnectShare {
+                peer_name,
+                vault_name,
+                ..
+            } if vault_name.is_empty() => format!(
+                "join a vault shared by \"{}\" through Apassy Connect",
+                short_device_name(peer_name)
             ),
             Self::JoinConnectShare {
                 peer_name,
@@ -2669,6 +2715,7 @@ mod evaluation_tests {
                 team_id: "t_7k2m5q4x3c".into(),
                 vault_name: long.clone(),
                 words: "blaze cable flute board seal tiger".into(),
+                entries: Vec::new(),
             },
             OwnerAction::ShareConnectVault {
                 account_id: "acc_k7m2q4x3ca".into(),
@@ -2679,6 +2726,7 @@ mod evaluation_tests {
                 team_id: "t_7k2m5q4x3c".into(),
                 vault_name: long.clone(),
                 words: String::new(),
+                entries: Vec::new(),
             },
             OwnerAction::AcceptConnectShare {
                 account_id: "acc_m3n5p7q2rb".into(),
@@ -2687,6 +2735,7 @@ mod evaluation_tests {
                 peer_hint: "Rafal".into(),
                 fingerprint: "1a2b 3c4d 5e6f".into(),
                 words: "blaze cable flute board seal tiger".into(),
+                entries: Vec::new(),
             },
             OwnerAction::RepinConnectPeer {
                 account_id: "acc_k7m2q4x3ca".into(),
@@ -2699,6 +2748,7 @@ mod evaluation_tests {
                 ends: vec![long.clone()],
                 team_id: Some("t_7k2m5q4x3c".into()),
                 vault_name: Some(long.clone()),
+                entries: Vec::new(),
             },
             OwnerAction::JoinConnectShare {
                 account_id: "acc_m3n5p7q2rb".into(),
@@ -2708,6 +2758,8 @@ mod evaluation_tests {
                 fingerprint: "1a2b 3c4d 5e6f".into(),
                 team_id: "t_7k2m5q4x3c".into(),
                 vault_name: long.clone(),
+                entries: Vec::new(),
+                vault_hint: long.clone(),
             },
             OwnerAction::EndConnectShare {
                 account_id: "acc_k7m2q4x3ca".into(),
@@ -2718,6 +2770,7 @@ mod evaluation_tests {
                 team_id: "t_7k2m5q4x3c".into(),
                 vault_name: long.clone(),
                 leave: false,
+                entries: Vec::new(),
             },
             OwnerAction::EndConnectShare {
                 account_id: "acc_m3n5p7q2rb".into(),
@@ -2728,6 +2781,7 @@ mod evaluation_tests {
                 team_id: "t_7k2m5q4x3c".into(),
                 vault_name: long.clone(),
                 leave: true,
+                entries: Vec::new(),
             },
         ] {
             assert!(action.needs_fresh_local_check(), "{action:?}");

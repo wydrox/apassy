@@ -3,8 +3,11 @@
 //! over `apassy-connect share-list v1` with the hash of the head, at the next version),
 //! the share codes (`POST /v1/account/peers/link`, `POST /v1/account/peers/join` with the
 //! signed answer, `GET /v1/account/peers/pending`, `GET` and `DELETE
-//! /v1/account/peers/join/{id}`), and `GET /v1/account/peers/{account_id}` within one
-//! group. An `unshare` or a `leave` removes the store rows of the account.
+//! /v1/account/peers/join/{id}`), `GET /v1/account/peers/{account_id}` and the batch
+//! `POST /v1/account/peers/lists` within one group or a store that both accounts share or
+//! shared, and the `store` entry of `POST /v1/account/vaults`. An `unshare` or a `leave`
+//! removes the store rows of the account. Void marks (`void_share`) show in the store and
+//! peer views.
 //!
 //! It checks the shapes and the signatures, not the rules of section 16 or the share of a
 //! store device: there it plays a Connect that lies, which the client must catch. Hooks
@@ -44,6 +47,8 @@ pub(super) struct ShareState {
     inviter: Option<Value>,
     /// The answering key of the pending answers, instead of the key that answered.
     pending_key: Option<Vec<u8>>,
+    /// owner → the shares of its list that the fake counts as void: (store, member).
+    void: BTreeMap<String, Vec<(String, String)>>,
 }
 
 impl FakeConnect {
@@ -85,6 +90,30 @@ impl FakeConnect {
         }
     }
 
+    /// The share of `team` by `owner` with `member` is void at Connect (a quick removal
+    /// from the group and a new admission): the store view and the peer views say so.
+    pub fn void_share(&self, owner: &str, team: &str, member: &str) {
+        let mut state = lock(&self.shared);
+        state
+            .share
+            .void
+            .entry(owner.to_owned())
+            .or_default()
+            .push((team.to_owned(), member.to_owned()));
+        if let Some(store) = state.stores.iter_mut().find(|store| store.team_id == team) {
+            store.void.push(member.to_owned());
+        }
+    }
+
+    /// The list hash of each entry of `account`'s list.
+    pub fn list_hashes(&self, account: &str) -> Vec<String> {
+        lock(&self.shared)
+            .accounts
+            .get(account)
+            .map(|entry| entry.hashes.clone())
+            .unwrap_or_default()
+    }
+
     /// The hash of the head of `account`'s list.
     pub fn list_head(&self, account: &str) -> String {
         lock(&self.shared)
@@ -124,6 +153,115 @@ fn share_list_message(
 
 fn nullable(body: &Value, key: &str) -> Option<String> {
     body.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Whether no store and no `store` entry of any list has the id `team`.
+pub(super) fn store_id_free(state: &State, team: &str) -> bool {
+    team.len() == 12
+        && team.starts_with("t_")
+        && !state.stores.iter().any(|store| store.team_id == team)
+        && !state.accounts.values().any(|entry| {
+            entry
+                .list
+                .iter()
+                .any(|held| held["op"] == "store" && held["team_id"] == team)
+        })
+}
+
+/// The `store` entry of `POST /v1/account/vaults` (`team_id`, `version`, `statement`):
+/// the next version, signed by the caller over the hash of the head.
+pub(super) fn append_store(
+    state: &mut State,
+    body: &Value,
+    account: &str,
+    device: &str,
+    origin: &str,
+) -> Result<(), Outgoing> {
+    let version = body["version"]
+        .as_u64()
+        .ok_or_else(|| fail(400, "invalid_request"))?;
+    let team = text(body, "team_id").to_owned();
+    let key = caller_key(state, device);
+    let entry = state
+        .accounts
+        .get(account)
+        .ok_or_else(|| fail(401, "unauthenticated"))?;
+    if version != entry.list.len() as u64 + 1 {
+        return Err(fail(409, "conflict"));
+    }
+    if version > 822 {
+        return Err(fail(403, "account_limit"));
+    }
+    let message = share_list_message(
+        origin,
+        account,
+        version,
+        entry.hashes.last().expect("a list"),
+        "store",
+        "-",
+        "-",
+        &team,
+        &encode_b64u(&key),
+    );
+    let statement =
+        decode_b64u(text(body, "statement")).ok_or_else(|| fail(400, "invalid_request"))?;
+    if !verify(&key, &message, &statement) {
+        return Err(fail(400, "invalid_request"));
+    }
+    let entry = state.accounts.get_mut(account).expect("account");
+    entry.list.push(
+        json!({"version": version, "op": "store", "key": null, "link_hash": null,
+               "name": null, "by": encode_b64u(&key), "signature": encode_b64u(&statement),
+               "account_id": null, "root": null, "team_id": team}),
+    );
+    entry.hashes.push(list_hash(&message));
+    Ok(())
+}
+
+/// The accounts of the store `team` as its owner's list names them: the owner, and each
+/// account of a `share` entry of it (also one that ended).
+fn participants(state: &State, team: &str) -> Vec<String> {
+    let Some(store) = state.stores.iter().find(|store| store.team_id == team) else {
+        return Vec::new();
+    };
+    let mut accounts = vec![store.account.clone()];
+    if let Some(entry) = state.accounts.get(&store.account) {
+        for held in &entry.list {
+            if held["op"] == "share"
+                && held["team_id"] == team
+                && let Some(peer) = held["account_id"].as_str()
+            {
+                accounts.push(peer.to_owned());
+            }
+        }
+    }
+    accounts
+}
+
+/// Whether `account` may read the list of `other`: one group, or a store that both are
+/// or were in (connect-account-v1 section 16.4).
+fn may_read(state: &State, account: &str, other: &str) -> bool {
+    account != other
+        && (same_group(state, account, other)
+            || state.stores.iter().any(|store| {
+                let held = participants(state, &store.team_id);
+                held.iter().any(|held| held == account) && held.iter().any(|held| held == other)
+            }))
+}
+
+/// The void marks of the list of `owner` in a peer view.
+fn void_of(state: &State, owner: &str) -> Value {
+    json!(
+        state
+            .share
+            .void
+            .get(owner)
+            .map(|marks| marks
+                .iter()
+                .map(|(team, member)| json!({"team_id": team, "account_id": member}))
+                .collect::<Vec<_>>())
+            .unwrap_or_default()
+    )
 }
 
 fn caller_key(state: &State, device: &str) -> Vec<u8> {
@@ -293,8 +431,49 @@ pub(super) fn route(
             }
             ok(json!({"join_id": join.id, "state": join.state, "expires_at": join.expires_at}))
         }
+        ("POST", ["peers", "lists"]) => {
+            let Some(asks) = body
+                .as_object()
+                .filter(|map| map.len() == 1)
+                .and_then(|map| map.get("accounts"))
+                .and_then(Value::as_array)
+                .filter(|asks| !asks.is_empty() && asks.len() <= 64)
+            else {
+                return Some(fail(400, "invalid_request"));
+            };
+            let mut items = Vec::new();
+            for ask in asks {
+                let other = text(ask, "account_id").to_owned();
+                let (version, head) = (
+                    ask["version"].as_u64().unwrap_or(0),
+                    text(ask, "head").to_owned(),
+                );
+                let Some(entry) = state
+                    .accounts
+                    .get(&other)
+                    .filter(|_| may_read(state, account, &other))
+                else {
+                    items.push(json!({"account_id": other, "state": "refused"}));
+                    continue;
+                };
+                let served = state.share.served.get(&other).cloned();
+                let same = served.is_none()
+                    && version == entry.list.len() as u64
+                    && entry.hashes.last().is_some_and(|last| *last == head);
+                if same {
+                    items.push(json!({"account_id": other, "state": "same", "void": void_of(state, &other)}));
+                } else {
+                    let list = served.unwrap_or_else(|| entry.list.clone());
+                    items.push(
+                        json!({"account_id": other, "state": "newer", "name": entry.name,
+                                      "device_list": list, "void": void_of(state, &other)}),
+                    );
+                }
+            }
+            ok(json!({"accounts": items}))
+        }
         ("GET", ["peers", other]) => {
-            if !same_group(state, account, other) || account == *other {
+            if !may_read(state, account, other) {
                 return Some(fail(403, "not_in_group"));
             }
             let Some(entry) = state.accounts.get(*other) else {
@@ -317,7 +496,8 @@ pub(super) fn route(
                 })
                 .collect();
             ok(
-                json!({"account_id": other, "name": entry.name, "devices": devices, "device_list": list}),
+                json!({"account_id": other, "name": entry.name, "devices": devices, "device_list": list,
+                       "void": void_of(state, other)}),
             )
         }
         _ => return None,
@@ -332,10 +512,10 @@ fn append(state: &mut State, body: &Value, account: &str, device: &str, origin: 
     let shaped = body.as_object().is_some_and(|map| {
         map.len() == 6
             && map.get("version").is_some_and(Value::is_u64)
-            && ["op", "account_id", "statement"]
+            && ["op", "statement"]
                 .iter()
                 .all(|key| map.get(*key).is_some_and(Value::is_string))
-            && ["root", "team_id"].iter().all(|key| {
+            && ["account_id", "root", "team_id"].iter().all(|key| {
                 map.get(*key)
                     .is_some_and(|value| value.is_string() || value.is_null())
             })
@@ -347,11 +527,15 @@ fn append(state: &mut State, body: &Value, account: &str, device: &str, origin: 
     let op = text(body, "op").to_owned();
     if !matches!(
         op.as_str(),
-        "peer" | "unpeer" | "share" | "unshare" | "join" | "leave"
+        "peer" | "unpeer" | "share" | "unshare" | "join" | "leave" | "store"
     ) {
         return fail(400, "invalid_request");
     }
-    let peer = text(body, "account_id").to_owned();
+    // `null` exactly for a `store`.
+    if (op == "store") != body["account_id"].is_null() {
+        return fail(400, "invalid_request");
+    }
+    let peer = nullable(body, "account_id");
     let root = nullable(body, "root");
     let team = nullable(body, "team_id");
     let key = caller_key(state, device);
@@ -361,7 +545,9 @@ fn append(state: &mut State, body: &Value, account: &str, device: &str, origin: 
     if version != entry.list.len() as u64 + 1 {
         return fail(409, "conflict");
     }
-    if version > 1024 || (matches!(op.as_str(), "peer" | "share" | "join") && version > 822) {
+    if version > 1024
+        || (matches!(op.as_str(), "peer" | "share" | "join" | "store") && version > 822)
+    {
         return fail(403, "account_limit");
     }
     let message = share_list_message(
@@ -370,7 +556,7 @@ fn append(state: &mut State, body: &Value, account: &str, device: &str, origin: 
         version,
         entry.hashes.last().expect("a list"),
         &op,
-        &peer,
+        peer.as_deref().unwrap_or("-"),
         root.as_deref().unwrap_or("-"),
         team.as_deref().unwrap_or("-"),
         &encode_b64u(&key),
@@ -390,7 +576,7 @@ fn append(state: &mut State, body: &Value, account: &str, device: &str, origin: 
     );
     entry.hashes.push(list_hash(&message));
     let gone = match op.as_str() {
-        "unshare" => Some(peer.clone()),
+        "unshare" => peer.clone(),
         "leave" => Some(account.to_owned()),
         _ => None,
     };
@@ -414,7 +600,10 @@ fn append(state: &mut State, body: &Value, account: &str, device: &str, origin: 
             .map(|link| link.id)
             .collect();
         for join in &mut state.share.joins {
-            if join.account == peer && links.contains(&join.link_id) && join.state == "pending" {
+            if Some(&join.account) == peer.as_ref()
+                && links.contains(&join.link_id)
+                && join.state == "pending"
+            {
                 join.state = "confirmed".into();
             }
         }

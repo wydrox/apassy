@@ -352,7 +352,10 @@
       "part": "request",
       "body": {
         "vault_id": "0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77",
-        "name": "Personal"
+        "name": "Personal",
+        "team_id": "t_7k2m5q4x3c",
+        "version": 5,
+        "statement": "MEUCIQClGtXO-dDgJW8tGFZi2CrGEiKEZoJvKotPlVoWgao2LQIgTXc6bsgXQ3tYWHoLUw0rss0VHBKK36kBFqoD-BfZ8cw"
       }
     },
     {
@@ -371,7 +374,8 @@
             "device_id": "dev_m2k7q3x4ab",
             "account_id": "acc_k7m2q4x3ca"
           }
-        ]
+        ],
+        "void": []
       }
     },
     {
@@ -396,7 +400,8 @@
               "device_id": "dev_q2r4s6t3ua",
               "account_id": "acc_m3n5p7q2rb"
             }
-          ]
+          ],
+          "void": []
         }
       ]
     },
@@ -656,6 +661,19 @@
       }
     },
     {
+      "name": "list_append_store",
+      "route": "POST /v1/account/list",
+      "part": "request",
+      "body": {
+        "version": 6,
+        "op": "store",
+        "account_id": null,
+        "root": null,
+        "team_id": "t_7k2m5q4x3c",
+        "statement": "MEUCIQClGtXO-dDgJW8tGFZi2CrGEiKEZoJvKotPlVoWgao2LQIgTXc6bsgXQ3tYWHoLUw0rss0VHBKK36kBFqoD-BfZ8cw"
+      }
+    },
+    {
       "name": "peer_link",
       "route": "POST /v1/account/peers/link",
       "part": "request",
@@ -771,6 +789,67 @@
             "name": "iPhone",
             "by": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
             "signature": "MEUCIDtEXwX_OjUjP_eCTd29WAYFNISR1LupNUZvxmG7cqHcAiEA9DV3vFmjxthvWXdWlz20lb5qoN-ARzk5Eo3SUEkJ-VM"
+          }
+        ],
+        "void": [
+          {
+            "team_id": "t_7k2m5q4x3c",
+            "account_id": "acc_k7m2q4x3ca"
+          }
+        ]
+      }
+    },
+    {
+      "name": "peer_lists",
+      "route": "POST /v1/account/peers/lists",
+      "part": "request",
+      "body": {
+        "accounts": [
+          {
+            "account_id": "acc_m3n5p7q2rb",
+            "version": 1,
+            "head": "Hq0zA6m2xS1x3nU9yF2rD4kP7wL0vT5bQ8cE1jG6hI4"
+          },
+          {
+            "account_id": "acc_p4n6r2t7bc",
+            "version": 0,
+            "head": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "peer_lists_answer",
+      "route": "POST /v1/account/peers/lists",
+      "part": "result",
+      "body": {
+        "accounts": [
+          {
+            "account_id": "acc_m3n5p7q2rb",
+            "state": "same",
+            "void": []
+          },
+          {
+            "account_id": "acc_p4n6r2t7bc",
+            "state": "newer",
+            "name": "Ola",
+            "device_list": [
+              {
+                "version": 1,
+                "op": "root",
+                "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+                "link_hash": null,
+                "name": "iPhone",
+                "by": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+                "signature": "MEUCIDtEXwX_OjUjP_eCTd29WAYFNISR1LupNUZvxmG7cqHcAiEA9DV3vFmjxthvWXdWlz20lb5qoN-ARzk5Eo3SUEkJ-VM"
+              }
+            ],
+            "void": [
+              {
+                "team_id": "t_7k2m5q4x3c",
+                "account_id": "acc_k7m2q4x3ca"
+              }
+            ]
           }
         ]
       }

@@ -748,8 +748,11 @@ pub struct Accounts {
     stand_in_recovery_key: [u8; device::RECOVERY_KEY_BYTES],
     /// The new accounts of each client prefix today.
     prefixes: PrefixLimiter,
-    /// The requests of each device to the routes of section 16 (`peers::PeerCalls`).
+    /// The requests of each device to the ceremony routes of section 16 and `POST
+    /// /v1/account/list` (`peers::PeerCalls`).
     peer_calls: crate::server::peers::PeerCalls,
+    /// The reads of other accounts' lists by each device (`peers::PeerCalls::reads`).
+    peer_reads: crate::server::peers::PeerCalls,
     plans: RwLock<Arc<dyn Plans>>,
     groups: RwLock<Arc<dyn Groups>>,
     signer: Option<EntitlementSigner>,
@@ -780,6 +783,7 @@ impl Accounts {
             },
             prefixes: PrefixLimiter::default(),
             peer_calls: crate::server::peers::PeerCalls::default(),
+            peer_reads: crate::server::peers::PeerCalls::reads(),
             plans: RwLock::new(Arc::new(NoPlans)),
             groups: RwLock::new(Arc::new(NoGroups)),
             signer,
@@ -791,9 +795,16 @@ impl Accounts {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The requests of each device to the routes of section 16.
+    /// The requests of each device to the ceremony routes of section 16 and `POST
+    /// /v1/account/list`.
     pub fn peer_calls(&self) -> &crate::server::peers::PeerCalls {
         &self.peer_calls
+    }
+
+    /// The reads of other accounts' lists by each device (`GET
+    /// /v1/account/peers/{account_id}`, `POST /v1/account/peers/lists`).
+    pub fn peer_reads(&self) -> &crate::server::peers::PeerCalls {
+        &self.peer_reads
     }
 
     fn recovery(&self) -> std::sync::MutexGuard<'_, RecoveryState> {
@@ -1874,6 +1885,12 @@ fn delete_account(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Va
         // Its group rows (a member's membership; an owner's group without confirmed
         // members, with its pending members and invites).
         crate::server::group::forget_account(tx, &caller.account)?;
+        // The void marks that name it in other lists (its own go with its list).
+        tx.execute(
+            "DELETE FROM account_share_void WHERE account_id = ?1 OR peer_account = ?1",
+            params![caller.account],
+        )
+        .map_err(db)?;
         // The links, the joins, and the devices go with the account (ON DELETE CASCADE).
         tx.execute("DELETE FROM account WHERE id = ?1", params![caller.account])
             .map_err(db)?;
@@ -2419,6 +2436,10 @@ fn store_view(conn: &Connection, team: &TeamId) -> RelayResult<VaultStoreView> {
         .map_err(db)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db)?;
+    let void = crate::server::peers::void_shares(conn, &owner, Some(team.as_str()))?
+        .into_iter()
+        .map(|share| share.account_id)
+        .collect();
     Ok(VaultStoreView {
         team_id: team.clone(),
         vault_id: row.vault_id.unwrap_or_default(),
@@ -2426,6 +2447,7 @@ fn store_view(conn: &Connection, team: &TeamId) -> RelayResult<VaultStoreView> {
         created_at: row.created_at,
         shared: devices.iter().any(|device| device.account_id != owner),
         devices,
+        void,
     })
 }
 
@@ -2442,9 +2464,34 @@ fn owned_stores(conn: &Connection, account: &str) -> RelayResult<Vec<TeamId>> {
     Ok(ids.iter().filter_map(|id| TeamId::parse(id)).collect())
 }
 
+/// Whether the store id `team` is taken: a team row with it, an entry of any list that
+/// names it (also of a store that was deleted), or a file at its path.
+fn store_id_taken(hub: &Hub, conn: &Connection, team: &TeamId) -> RelayResult<bool> {
+    let named: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team WHERE id = ?1) \
+             OR EXISTS(SELECT 1 FROM account_list WHERE team_id = ?1)",
+            params![team.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(db)?;
+    Ok(named || std::fs::symlink_metadata(hub.config.team_path(team)).is_ok())
+}
+
+fn store_id_taken_error() -> RelayError {
+    conflict("That store id is taken. Make a new id and sign its entry again.")
+}
+
 /// `POST /v1/account/vaults`: the store of one vault, with the calling device as store
-/// device 1. Needs an entitled plan; the same vault id of the account again answers the
-/// existing store.
+/// device 1 and the id that the device made, and its signed `store` entry. In this order:
+/// the shape (400); a store of this account for the vault id answers it (nothing is
+/// written); an entitled plan (403 `plan_required`) and the store limit (403
+/// `account_limit`); the id is not taken (409 `conflict`: `store_id_taken`); then the
+/// store file is made with that id, and in the directory transaction that inserts the
+/// store the limit and the id again, the checks of the entry (`peers::store_entry`: 409
+/// for another version, 403 `account_limit` for the room, 401 for a signer, 400 for the
+/// signature, 409 for the rules), the entry, the store row, and the store device row. Any
+/// failure removes the file.
 fn vault_create(
     hub: &Hub,
     caller: &AccountCaller,
@@ -2457,6 +2504,29 @@ fn vault_create(
         ));
     }
     let name = checked_vault_name(&request.name)?;
+    let team = TeamId::parse(&request.team_id).ok_or_else(|| {
+        RelayError::invalid("The store id is t_ and 10 characters of a-z and 2-7.")
+    })?;
+    let statement = decode_b64(&request.statement, device::MAX_SIGNATURE_BYTES)
+        .map_err(|_| RelayError::invalid("The statement is not valid."))?;
+    let existing = hub.directory.store.with(|conn| {
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM team WHERE kind = 'account' AND account_id = ?1 AND vault_id = ?2",
+                params![caller.account, request.vault_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        Ok(existing.as_deref().and_then(TeamId::parse))
+    })?;
+    if let Some(existing) = existing {
+        return to_value(
+            &hub.directory
+                .store
+                .with(|conn| store_view(conn, &existing))?,
+        );
+    }
     let plans = hub.accounts.plans();
     if !plans
         .plan(&hub.directory.store, &caller.account, now)?
@@ -2467,40 +2537,52 @@ fn vault_create(
     let people = plans
         .people(&hub.directory.store, &caller.account, now)?
         .max(1);
-    let existing = hub.directory.store.with(|conn| {
-        let existing: Option<String> = conn
-            .query_row(
-                "SELECT id FROM team WHERE kind = 'account' AND account_id = ?1 AND vault_id = ?2",
-                params![caller.account, request.vault_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(db)?;
-        if let Some(id) = existing.as_deref().and_then(TeamId::parse) {
-            return Ok(Some(id));
+    let limit = STORES_PER_PERSON.saturating_mul(people);
+    let full = || account_limit(&format!("This account has {limit} vault stores."));
+    hub.directory.store.with(|conn| {
+        if to_u(owned_stores(conn, &caller.account)?.len() as i64) >= limit {
+            return Err(full());
         }
-        if to_u(owned_stores(conn, &caller.account)?.len() as i64)
-            >= STORES_PER_PERSON.saturating_mul(people)
-        {
-            return Err(account_limit(&format!(
-                "This account has {} vault stores.",
-                STORES_PER_PERSON.saturating_mul(people)
-            )));
+        if store_id_taken(hub, conn, &team)? {
+            return Err(store_id_taken_error());
         }
-        Ok(None)
+        Ok(())
     })?;
-    let team = match existing {
-        Some(team) => team,
-        None => hub.create_vault_store(
-            &caller.account,
-            &caller.device,
-            &caller.public_key,
-            &request.vault_id,
-            &name,
-            now,
-        )?,
-    };
-    to_value(&hub.directory.store.with(|conn| store_view(conn, &team))?)
+    let origin = hub.config.public_url.clone();
+    let made = hub.create_vault_store(
+        &caller.account,
+        &caller.device,
+        &caller.public_key,
+        &request.vault_id,
+        &name,
+        &team,
+        |tx| {
+            if to_u(owned_stores(tx, &caller.account)?.len() as i64) >= limit {
+                return Err(full());
+            }
+            let named: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM account_list WHERE team_id = ?1)",
+                    params![team.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(db)?;
+            if named {
+                return Err(store_id_taken_error());
+            }
+            crate::server::peers::store_entry(
+                tx,
+                &origin,
+                caller,
+                &team,
+                request.version,
+                &statement,
+                now,
+            )
+        },
+        now,
+    )?;
+    to_value(&hub.directory.store.with(|conn| store_view(conn, &made))?)
 }
 
 /// `GET /v1/account/vaults`: the stores that hold a device of this account, and the stores
@@ -3170,6 +3252,7 @@ pub fn prune(hub: &Hub, now: u64) -> RelayResult<(usize, usize)> {
 /// 33.13): the last `share` or `unshare` entry of the owner's list for that store and that
 /// account is a `share` (`l`); it came after the last removal of `<member>` from its group
 /// (`account_share_void`: a removal is never a grant, so only a newer `share` counts);
+/// the owner's list holds its `store` entry of the store (a share counts only with it);
 /// and the owner's last `peer` entry of `<member>` pins the root of `<member>`'s list now
 /// (the key of its version 1: after a recovery of `<member>` the old pin names no device of
 /// it). `<join>` is empty, or [`MEMBER_JOINED`] for a sign-in.
@@ -3180,14 +3263,16 @@ const ACTIVE_SHARE: &str = "EXISTS(SELECT 1 FROM account_list l WHERE l.account_
        AND u.version > l.version) \
      AND l.version > coalesce((SELECT v.version FROM account_share_void v \
        WHERE v.account_id = l.account_id AND v.peer_account = l.peer_account), 0) \
+     AND EXISTS(SELECT 1 FROM account_list st WHERE st.account_id = l.account_id \
+       AND st.team_id = l.team_id AND st.op = 'store') \
      AND (SELECT p.peer_root FROM account_list p WHERE p.account_id = l.account_id \
        AND p.peer_account = l.peer_account AND p.op = 'peer' ORDER BY p.version DESC LIMIT 1) \
        = (SELECT r.key FROM account_list r WHERE r.account_id = l.peer_account AND r.version = 1)\
      <join>)";
 
 /// The part of [`ACTIVE_SHARE`] for a sign-in: the member's list has an active `join` of
-/// the store naming the owner (no later `leave`), made while the share `l` was the active
-/// one (`account_join_share`). The owner may add the member's devices to the store before
+/// the store naming the owner (no later `leave`), whose last `join` answered the share `l`
+/// (`account_join_share`: the version of the share that the last `join` named). The owner may add the member's devices to the store before
 /// it; they sign in only after it.
 const MEMBER_JOINED: &str = " AND EXISTS(SELECT 1 FROM account_list j \
        JOIN account_join_share js ON js.account_id = j.account_id AND js.team_id = j.team_id \

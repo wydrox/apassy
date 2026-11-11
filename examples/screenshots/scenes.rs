@@ -49,8 +49,14 @@ impl StoreRelay for FakeRelay {
     fn set_origin(&self, origin: &str) {
         FakeRelay::set_origin(self, origin);
     }
-    fn add_store_team(&self, name: &str, device_name: &str, public_key: &[u8]) -> (String, u64) {
-        FakeRelay::add_store_team(self, name, device_name, public_key)
+    fn add_store_team(
+        &self,
+        team_id: &str,
+        name: &str,
+        device_name: &str,
+        public_key: &[u8],
+    ) -> u64 {
+        FakeRelay::add_store_team(self, team_id, name, device_name, public_key)
     }
     fn add_store_device(&self, team_id: &str, device_name: &str, public_key: &[u8]) -> u64 {
         FakeRelay::add_store_device(self, team_id, device_name, public_key)
@@ -316,6 +322,7 @@ impl Scene {
     pub fn hook(&mut self, hook: &str) {
         let names = ShareNames {
             vaults: BTreeMap::new(),
+            stores: BTreeMap::new(),
             people: BTreeMap::new(),
         };
         match hook {
@@ -329,7 +336,8 @@ impl Scene {
             "member-accepts" => {
                 let ola = self.other.as_mut().expect("Ola");
                 let answer = self.answer.take().expect("an answer");
-                let (proof, epoch) = ola.owner.proof(ola.account.accept_action(&answer, &names));
+                let action = ola.account.accept_action(&answer, &names).expect("action");
+                let (proof, epoch) = ola.owner.proof(action);
                 ola.account
                     .accept_share(&answer, &names, proof, &epoch)
                     .expect("accept");
@@ -362,9 +370,11 @@ impl Scene {
                 let link = self.code.take().expect("a share code");
                 let requests = alex.account.share_requests(&link).expect("requests");
                 let request = requests.first().expect("an answer of this computer");
-                let (proof, epoch) = alex
-                    .owner
-                    .proof(alex.account.share_action(&link, request, &names));
+                let action = alex
+                    .account
+                    .share_action(&link, request, &names)
+                    .expect("action");
+                let (proof, epoch) = alex.owner.proof(action);
                 alex.account
                     .confirm_share(&link, request, &names, proof, &epoch)
                     .expect("confirm");

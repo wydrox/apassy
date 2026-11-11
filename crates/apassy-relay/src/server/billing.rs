@@ -3282,8 +3282,8 @@ fn random_idempotency_key(action: &str) -> RelayResult<String> {
 /// without times. A subscription that left the group's kind (a switch to Personal) gives
 /// its members the read-only window of an ended plan from that switch, without a
 /// deletion day: the stores of a member are never deleted for a plan that is not its
-/// group's.
-fn account_plan(
+/// group's. Read-only: it writes nothing on `tx`.
+pub(crate) fn account_plan(
     tx: &mut dyn BillingTx,
     account: &str,
     now: u64,

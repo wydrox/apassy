@@ -103,6 +103,7 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             team_id,
             vault_name,
             words,
+            entries,
         } => OwnerAction::ShareConnectVault {
             account_id,
             peer_account,
@@ -112,6 +113,7 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             team_id,
             vault_name,
             words,
+            entries,
         },
         OwnerRequest::AcceptConnectShare {
             account_id,
@@ -120,6 +122,7 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             peer_hint,
             fingerprint,
             words,
+            entries,
         } => OwnerAction::AcceptConnectShare {
             account_id,
             peer_account,
@@ -127,6 +130,7 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             peer_hint,
             fingerprint,
             words,
+            entries,
         },
         OwnerRequest::RepinConnectPeer {
             account_id,
@@ -139,6 +143,7 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             ends,
             team_id,
             vault_name,
+            entries,
         } => OwnerAction::RepinConnectPeer {
             account_id,
             peer_account,
@@ -150,6 +155,7 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             ends,
             team_id,
             vault_name,
+            entries,
         },
         OwnerRequest::JoinConnectShare {
             account_id,
@@ -159,6 +165,8 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             fingerprint,
             team_id,
             vault_name,
+            entries,
+            vault_hint,
         } => OwnerAction::JoinConnectShare {
             account_id,
             peer_account,
@@ -167,6 +175,8 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             fingerprint,
             team_id,
             vault_name,
+            entries,
+            vault_hint,
         },
         OwnerRequest::EndConnectShare {
             account_id,
@@ -177,6 +187,7 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             team_id,
             vault_name,
             leave,
+            entries,
         } => OwnerAction::EndConnectShare {
             account_id,
             peer_account,
@@ -186,6 +197,7 @@ fn share_request_action(request: OwnerRequest) -> OwnerAction {
             team_id,
             vault_name,
             leave,
+            entries,
         },
         other => other.action(),
     }
@@ -860,6 +872,7 @@ pub enum OwnerRequest {
         team_id: String,
         vault_name: String,
         words: String,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
     },
     /// "The Words Match" of a share code of another account.
     AcceptConnectShare {
@@ -869,6 +882,7 @@ pub enum OwnerRequest {
         peer_hint: String,
         fingerprint: String,
         words: String,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
     },
     /// A new pin of an account that was reset, with what ends first.
     RepinConnectPeer {
@@ -882,8 +896,11 @@ pub enum OwnerRequest {
         ends: Vec<String>,
         team_id: Option<String>,
         vault_name: Option<String>,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
     },
-    /// "Join" of a store that another account shares.
+    /// "Join" of a store that another account shares: the vault by its name on this
+    /// computer when one syncs the store, else as "a vault shared by" the person, with the
+    /// name that Connect gives the store as a hint.
     JoinConnectShare {
         account_id: String,
         peer_account: String,
@@ -892,6 +909,8 @@ pub enum OwnerRequest {
         fingerprint: String,
         team_id: String,
         vault_name: String,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
+        vault_hint: String,
     },
     /// "Stop Sharing with <name>…" or "Leave This Shared Vault…".
     EndConnectShare {
@@ -903,6 +922,7 @@ pub enum OwnerRequest {
         team_id: String,
         vault_name: String,
         leave: bool,
+        entries: Vec<crate::broker::approvals::ShareEntry>,
     },
     /// Turn the tailnet route of this Mac's node on or off (Settings > Devices, plan
     /// S2–S3, unit N7). The node checks nothing itself: the caller asks first.
@@ -994,6 +1014,7 @@ impl OwnerRequest {
                 team_id,
                 vault_name,
                 words,
+                entries,
             } => Self::ShareConnectVault {
                 account_id,
                 peer_account,
@@ -1003,6 +1024,7 @@ impl OwnerRequest {
                 team_id,
                 vault_name,
                 words,
+                entries,
             },
             OwnerAction::AcceptConnectShare {
                 account_id,
@@ -1011,6 +1033,7 @@ impl OwnerRequest {
                 peer_hint,
                 fingerprint,
                 words,
+                entries,
             } => Self::AcceptConnectShare {
                 account_id,
                 peer_account,
@@ -1018,6 +1041,7 @@ impl OwnerRequest {
                 peer_hint,
                 fingerprint,
                 words,
+                entries,
             },
             OwnerAction::RepinConnectPeer {
                 account_id,
@@ -1030,6 +1054,7 @@ impl OwnerRequest {
                 ends,
                 team_id,
                 vault_name,
+                entries,
             } => Self::RepinConnectPeer {
                 account_id,
                 peer_account,
@@ -1041,6 +1066,7 @@ impl OwnerRequest {
                 ends,
                 team_id,
                 vault_name,
+                entries,
             },
             OwnerAction::JoinConnectShare {
                 account_id,
@@ -1050,6 +1076,8 @@ impl OwnerRequest {
                 fingerprint,
                 team_id,
                 vault_name,
+                entries,
+                vault_hint,
             } => Self::JoinConnectShare {
                 account_id,
                 peer_account,
@@ -1058,6 +1086,8 @@ impl OwnerRequest {
                 fingerprint,
                 team_id,
                 vault_name,
+                entries,
+                vault_hint,
             },
             OwnerAction::EndConnectShare {
                 account_id,
@@ -1068,6 +1098,7 @@ impl OwnerRequest {
                 team_id,
                 vault_name,
                 leave,
+                entries,
             } => Self::EndConnectShare {
                 account_id,
                 peer_account,
@@ -1077,6 +1108,7 @@ impl OwnerRequest {
                 team_id,
                 vault_name,
                 leave,
+                entries,
             },
             _ => return None,
         })
@@ -2002,7 +2034,7 @@ impl OwnerRequest {
             ),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The subscription ends now, and every vault store, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
             Self::NewRecoveryCode { .. } => "Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.".to_owned(),
-            Self::ForgetOldConnectAccount => concat!("Forget the Apassy Connect account on this ", crate::computer!(), "? Its account file is from an earlier version of Apassy. The file and the account key go from this ", crate::computer!(), "; nothing changes at Connect, and your vaults stay. Then join the account again from another device of the account.").to_owned(),
+            Self::ForgetOldConnectAccount => concat!("Forget the Apassy Connect account on this ", crate::computer!(), "? This version of Apassy cannot read its account file. The file and the account key go from this ", crate::computer!(), "; nothing changes at Connect, and your vaults stay. Then join the account again from another device of the account.").to_owned(),
             Self::DeleteVaultStore { vault_name, .. } => format!(
                 "Delete the relay copy of \"{}\" at Apassy Connect? Its snapshots go, and your devices stop syncing this vault through Connect. The vault stays on your devices.",
                 page_text(vault_name)
@@ -2146,9 +2178,27 @@ impl OwnerRequest {
                 peer_hint,
                 fingerprint,
                 vault_name,
+                vault_hint,
+                ..
+            } if vault_name.is_empty() => {
+                let hint = if vault_hint.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Apassy Connect calls it \"{}\".", page_text(vault_hint))
+                };
+                format!(
+                    "Join a vault shared by {}?{hint} This device downloads the shared copy and syncs it; you need the passphrase of the vault to open it.",
+                    person_text(peer_name, peer_hint, fingerprint)
+                )
+            }
+            Self::JoinConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
                 ..
             } => format!(
-                "Join \"{}\", shared by {}? This device downloads the shared copy and syncs it; you need the passphrase of the vault to open it.",
+                "Join \"{}\", shared by {}, again? This device syncs the shared copy again.",
                 page_text(vault_name),
                 person_text(peer_name, peer_hint, fingerprint)
             ),

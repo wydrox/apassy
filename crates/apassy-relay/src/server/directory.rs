@@ -87,9 +87,9 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 ///   account and never deleted: an id is used once, so no later account meets the
 ///   billing, tunnel, or key rows of an earlier one),
 ///   `account_device` (with the device that added it, `added_by`; none for a root),
-///   `account_list` (the signed device list of each account: one row for each entry,
-///   from the root at version 1, with the device name it signs and its signature; a
-///   recovery starts it again), `account_key` (the SHA-256
+///   `account_list` (`ACCOUNT_LIST`: the signed device list of each account, one row for
+///   each entry, from the root at version 1, with the device name it signs and its
+///   signature; a recovery starts it again), `account_key` (the SHA-256
 ///   of every key that was ever
 ///   a device of an account, and that account: one key makes at most one account, also
 ///   after a deletion), `account_link`, `account_join`, `account_store_device` (which
@@ -136,16 +136,6 @@ CREATE TABLE account_device (
   public_key BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_seen_at INTEGER,
   revoked_at INTEGER, added_by TEXT);
 CREATE INDEX account_device_account ON account_device(account_id);
-CREATE TABLE account_list (
-  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
-  version INTEGER NOT NULL,
-  op TEXT NOT NULL CHECK (op IN ('root','add','remove','peer','unpeer','share','unshare','join','leave')),
-  key BLOB, link_hash TEXT, name TEXT, by_key BLOB NOT NULL, signature BLOB NOT NULL,
-  hash TEXT NOT NULL, created_at INTEGER NOT NULL, peer_account TEXT, peer_root BLOB, team_id TEXT,
-  PRIMARY KEY (account_id, version),
-  CHECK ((op IN ('root','add','remove')) = (key IS NOT NULL AND peer_account IS NULL)));
-CREATE INDEX account_list_peer ON account_list(account_id, peer_account) WHERE peer_account IS NOT NULL;
-CREATE INDEX account_list_team ON account_list(team_id) WHERE team_id IS NOT NULL;
 CREATE TABLE account_key (
   key_hash BLOB PRIMARY KEY, created_at INTEGER NOT NULL, account_id TEXT);
 CREATE TABLE account_store_removal (
@@ -244,30 +234,69 @@ CREATE TABLE account_peer_join (
 CREATE INDEX account_peer_join_account ON account_peer_join(account_id);
 ";
 
-/// The marks of the share condition of section 16 (docs/SPEC.md section 33.13), part of
-/// the accounts step: `account_share_void` (the version of an owner's list at the last
-/// group removal of a member: a share of that owner naming that member counts only from a
-/// later version), `account_join_share` (the version of the owner's `share` that the
-/// member's last `join` of a store followed: the member's devices sign in to the store
-/// only while that share is the active one), and an index of the entries by the account
-/// they name. A file of 1006 from a build before them gets them at open (additive).
-const SHARE_MARKS: &str = "
-CREATE TABLE account_share_void (
+/// The signed device lists of the accounts step (`account_list`, with its two indexes):
+/// one row for each entry, from the root at version 1, with the device name it signs and
+/// its signature; a recovery starts it again. The entries of section 16 name another
+/// account (`peer` with the pinned root, `share` and `join` with the store, and their
+/// ends; a `join` keeps the list hash of the `share` it answers in `peer_root`), and a
+/// `store` names a vault store of the account and no other account. A file of 1006 whose
+/// `op` CHECK has no `store` (a build before it) gets the table rebuilt at open with the
+/// same rows (`add_store_op`).
+const ACCOUNT_LIST: &str = "
+CREATE TABLE account_list (
   account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
-  peer_account TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL,
-  PRIMARY KEY (account_id, peer_account));
-CREATE TABLE account_join_share (
-  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
-  team_id TEXT NOT NULL, share_version INTEGER NOT NULL, created_at INTEGER NOT NULL,
-  PRIMARY KEY (account_id, team_id));
-CREATE INDEX account_list_named ON account_list(peer_account) WHERE peer_account IS NOT NULL;
+  version INTEGER NOT NULL,
+  op TEXT NOT NULL CHECK (op IN ('root','add','remove','peer','unpeer','share','unshare','join','leave','store')),
+  key BLOB, link_hash TEXT, name TEXT, by_key BLOB NOT NULL, signature BLOB NOT NULL,
+  hash TEXT NOT NULL, created_at INTEGER NOT NULL, peer_account TEXT, peer_root BLOB, team_id TEXT,
+  PRIMARY KEY (account_id, version),
+  CHECK ((op IN ('root','add','remove')) = (key IS NOT NULL AND peer_account IS NULL)));
+CREATE INDEX account_list_peer ON account_list(account_id, peer_account) WHERE peer_account IS NOT NULL;
+CREATE INDEX account_list_team ON account_list(team_id) WHERE team_id IS NOT NULL;
 ";
 
-/// The SQL of a new directory: `SCHEMA_1005`, then `MIGRATE_ACCOUNTS` and `SHARE_MARKS`,
-/// then the version.
+/// The columns of `account_list`, in their order (the rebuild of `add_store_op`).
+const ACCOUNT_LIST_COLUMNS: &str = "account_id, version, op, key, link_hash, name, by_key, \
+     signature, hash, created_at, peer_account, peer_root, team_id";
+
+/// The marks of the share condition of section 16 (docs/SPEC.md section 33.13), part of
+/// the accounts step, each with its name: `account_share_void` (the version of an owner's
+/// list at the last group removal of a member or of the owner: a share of that owner
+/// naming that member counts only from a later version), `account_join_share` (the
+/// version of the owner's `share` that the member's last `join` of a store answered: the
+/// member's devices sign in to the store only while that share is the active one), and
+/// the index `account_list_named` of the entries by the account they name. A file of 1006
+/// without one of them (a build before it) gets it at open (additive, `add_share_marks`).
+const SHARE_MARKS: [(&str, &str); 3] = [
+    (
+        "account_share_void",
+        "CREATE TABLE account_share_void (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  peer_account TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, peer_account));",
+    ),
+    (
+        "account_join_share",
+        "CREATE TABLE account_join_share (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  team_id TEXT NOT NULL, share_version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, team_id));",
+    ),
+    (
+        "account_list_named",
+        "CREATE INDEX account_list_named ON account_list(peer_account) WHERE peer_account IS NOT NULL;",
+    ),
+];
+
+/// The SQL of a new directory: `SCHEMA_1005`, then `MIGRATE_ACCOUNTS`, `ACCOUNT_LIST`,
+/// and `SHARE_MARKS`, then the version.
 fn schema() -> String {
+    let marks: String = SHARE_MARKS
+        .iter()
+        .map(|(_, sql)| format!("{sql}\n"))
+        .collect();
     format!(
-        "{SCHEMA_1005}{MIGRATE_ACCOUNTS}{SHARE_MARKS}PRAGMA user_version = {DIRECTORY_VERSION};"
+        "{SCHEMA_1005}{MIGRATE_ACCOUNTS}{ACCOUNT_LIST}{marks}PRAGMA user_version = {DIRECTORY_VERSION};"
     )
 }
 
@@ -390,27 +419,70 @@ fn migrate_1005(conn: &Connection) -> RelayResult<()> {
     conn.pragma_update(None, "user_version", 1005).map_err(db)
 }
 
-/// The accounts step on a transaction: `MIGRATE_ACCOUNTS` when `team` has no
-/// `account_id` yet, and the version. A file that `downgrade_to_1005` took back has every
-/// table of the step already (it removed only the vault store rows): they stay.
+/// The accounts step on a transaction: `MIGRATE_ACCOUNTS`, `ACCOUNT_LIST`, and
+/// `SHARE_MARKS` when `team` has no `account_id` yet, and the version. A file that
+/// `downgrade_to_1005` took back has every table of the step already (it removed only the
+/// vault store rows): they stay, with the additive steps of `finish_accounts_step`.
 fn migrate_accounts(conn: &Connection) -> RelayResult<()> {
     if crate::server::store::has_column(conn, "team", "account_id")? {
-        refuse_earlier_accounts_step(conn)?;
-        add_share_marks(conn)?;
-        add_rotation_device(conn)?;
+        finish_accounts_step(conn)?;
     } else {
         conn.execute_batch(MIGRATE_ACCOUNTS).map_err(db)?;
-        conn.execute_batch(SHARE_MARKS).map_err(db)?;
+        conn.execute_batch(ACCOUNT_LIST).map_err(db)?;
+        add_share_marks(conn)?;
     }
     conn.pragma_update(None, "user_version", DIRECTORY_VERSION)
         .map_err(db)
 }
 
-/// `SHARE_MARKS` on a transaction, when the file has no `account_share_void` yet (a file
-/// of 1006 from a build before them).
+/// The accounts step of a file that has its tables, on a transaction: the refusal of an
+/// earlier build of it (`refuse_earlier_accounts_step`), then the additive steps of the
+/// builds since: the `store` op of `account_list` (`add_store_op`), the share marks
+/// (`add_share_marks`), and the device of the last recovery key (`add_rotation_device`).
+fn finish_accounts_step(conn: &Connection) -> RelayResult<()> {
+    refuse_earlier_accounts_step(conn)?;
+    add_store_op(conn)?;
+    add_share_marks(conn)?;
+    add_rotation_device(conn)
+}
+
+/// The SQL that `sqlite_master` holds for the table or index `name`, or `None`.
+fn schema_sql(conn: &Connection, name: &str) -> RelayResult<Option<String>> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db)
+}
+
+/// `account_list` rebuilt with the `op` CHECK of `ACCOUNT_LIST` (it takes `store`), on a
+/// transaction, when its CHECK does not take `store` (a file of 1006 from a build before
+/// it): SQLite cannot widen a CHECK in place, so the rows are copied into a new table of
+/// the same columns, and its indexes are made again (`account_list_named` by
+/// `add_share_marks`, which runs after it).
+fn add_store_op(conn: &Connection) -> RelayResult<()> {
+    let sql = schema_sql(conn, "account_list")?.unwrap_or_default();
+    if sql.contains("'store'") {
+        return Ok(());
+    }
+    conn.execute_batch(&format!(
+        "DROP INDEX IF EXISTS account_list_named; DROP INDEX IF EXISTS account_list_peer; \
+         DROP INDEX IF EXISTS account_list_team; ALTER TABLE account_list RENAME TO account_list_before_store; \
+         {ACCOUNT_LIST} INSERT INTO account_list ({ACCOUNT_LIST_COLUMNS}) \
+         SELECT {ACCOUNT_LIST_COLUMNS} FROM account_list_before_store; DROP TABLE account_list_before_store;"
+    ))
+    .map_err(db)
+}
+
+/// Each of `SHARE_MARKS` that the file does not have, on a transaction (a file of 1006
+/// from a build before some of them).
 fn add_share_marks(conn: &Connection) -> RelayResult<()> {
-    if !crate::server::store::has_column(conn, "account_share_void", "version")? {
-        conn.execute_batch(SHARE_MARKS).map_err(db)?;
+    for (name, sql) in SHARE_MARKS {
+        if schema_sql(conn, name)?.is_none() {
+            conn.execute_batch(sql).map_err(db)?;
+        }
     }
     Ok(())
 }
@@ -1042,11 +1114,7 @@ impl Directory {
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
         let store = open_directory_file(config)?;
         match store.user_version()? {
-            DIRECTORY_VERSION => store.tx(|tx| {
-                refuse_earlier_accounts_step(tx)?;
-                add_share_marks(tx)?;
-                add_rotation_device(tx)
-            })?,
+            DIRECTORY_VERSION => store.tx(|tx| finish_accounts_step(tx))?,
             version @ (1001..=BEFORE_ACCOUNTS_VERSION) => store.tx(|tx| {
                 if version == 1001 {
                     tx.execute_batch("ALTER TABLE team ADD COLUMN limits TEXT;")

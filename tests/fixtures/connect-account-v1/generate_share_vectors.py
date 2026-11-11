@@ -8,8 +8,10 @@ Run from the repository root with OpenSSL 3 on PATH (or OPENSSL=/path/to/openssl
 Account A (`acc_k7m2q4x3ca`, root device A) shares the store `t_7k2m5q4x3c` with account X
 (`acc_m3n5p7q2rb`, root device B, the family member of vectors.json):
 
-- A's list: the root (version 1), `peer X <root B>` (2), `share X <store>` (3), each signed by A.
-- X's list: the root (1), `peer A <root A>` (2), `join A <store>` (3), each signed by B.
+- A's list: the root (version 1), `peer X <root B>` (2), `store <store>` (3, no account, no root),
+  `share X <store>` (4), each signed by A.
+- X's list: the root (1), `peer A <root A>` (2), `join A <store>` (3) naming in its root field the list
+  hash of A's `share` (version 4), each signed by B.
 - A's share code with the share fingerprint of A's root and device A, its link hash, B's signed
   `apassy-connect peer-join v1` answer, and the six share words.
 
@@ -67,11 +69,12 @@ def main():
         # A's list.
         a_root = base.join("apassy-connect device-list v1", base.ORIGIN, ACCOUNT_A, "1", "-", "root", a64, "-", base.NAME_A, a64)
         a_peer = share_list(ACCOUNT_A, 2, h(a_root), "peer", ACCOUNT_X, b64, None, a64)
-        a_share = share_list(ACCOUNT_A, 3, h(a_peer), "share", ACCOUNT_X, None, STORE, a64)
+        a_store = share_list(ACCOUNT_A, 3, h(a_peer), "store", "-", None, STORE, a64)
+        a_share = share_list(ACCOUNT_A, 4, h(a_store), "share", ACCOUNT_X, None, STORE, a64)
         # X's list.
         x_root = base.join("apassy-connect device-list v1", base.ORIGIN, ACCOUNT_X, "1", "-", "root", b64, "-", base.NAME_B, b64)
         x_peer = share_list(ACCOUNT_X, 2, h(x_root), "peer", ACCOUNT_A, a64, None, b64)
-        x_join = share_list(ACCOUNT_X, 3, h(x_peer), "join", ACCOUNT_A, None, STORE, b64)
+        x_join = share_list(ACCOUNT_X, 3, h(x_peer), "join", ACCOUNT_A, h(a_share), STORE, b64)
 
         fingerprint = hashlib.sha256(base.join("apassy-connect share-keys v1", pub_a, pub_a)).digest()[:16].hex()
         code = SHARE_CODE + "_" + fingerprint
@@ -84,6 +87,7 @@ def main():
 
         messages = [
             base.message("share_list_peer", "apassy-connect share-list v1", "device_a", a_peer, pem_a, pub_a, tmp),
+            base.message("share_list_store", "apassy-connect share-list v1", "device_a", a_store, pem_a, pub_a, tmp),
             base.message("share_list_share", "apassy-connect share-list v1", "device_a", a_share, pem_a, pub_a, tmp),
             base.message("share_list_member_peer", "apassy-connect share-list v1", "device_b", x_peer, pem_b, pub_b, tmp),
             base.message("share_list_join", "apassy-connect share-list v1", "device_b", x_join, pem_b, pub_b, tmp),
@@ -97,7 +101,10 @@ def main():
 
         def share_entry(version, op, by, signature, peer, root=None, team=None):
             entry = {"version": version, "op": op, "key": None, "link_hash": None, "name": None,
-                     "by": by, "signature": signature, "account_id": peer}
+                     "by": by, "signature": signature}
+            # A `store` names no account: the field is absent, as Connect serves it.
+            if peer is not None:
+                entry["account_id"] = peer
             if root is not None:
                 entry["root"] = root
             if team is not None:
@@ -121,15 +128,16 @@ def main():
                     "entries": [
                         device_entry(1, a64, base.NAME_A, sign(pem_a, pub_a, a_root)),
                         share_entry(2, "peer", a64, by_name["share_list_peer"], ACCOUNT_X, root=b64),
-                        share_entry(3, "share", a64, by_name["share_list_share"], ACCOUNT_X, team=STORE),
+                        share_entry(3, "store", a64, by_name["share_list_store"], None, team=STORE),
+                        share_entry(4, "share", a64, by_name["share_list_share"], ACCOUNT_X, team=STORE),
                     ],
-                    "hashes": [h(a_root), h(a_peer), h(a_share)],
+                    "hashes": [h(a_root), h(a_peer), h(a_store), h(a_share)],
                 },
                 "x": {
                     "entries": [
                         device_entry(1, b64, base.NAME_B, sign(pem_b, pub_b, x_root)),
                         share_entry(2, "peer", b64, by_name["share_list_member_peer"], ACCOUNT_A, root=a64),
-                        share_entry(3, "join", b64, by_name["share_list_join"], ACCOUNT_A, team=STORE),
+                        share_entry(3, "join", b64, by_name["share_list_join"], ACCOUNT_A, root=h(a_share), team=STORE),
                     ],
                     "hashes": [h(x_root), h(x_peer), h(x_join)],
                 },

@@ -89,6 +89,8 @@ pub(crate) const ACCEPTED_LEAD: &str =
 pub(crate) const LEFT_HERE: &str =
     "You left this shared vault. It stays on this device and does not sync the shared copy.";
 pub(crate) const UNPINNED: &str = "Some people who share a vault that you joined could not be verified on this device. Their devices sign nothing here.";
+pub(crate) const DOWNLOAD: &str = "Download the Shared Copy…";
+pub(crate) const VAULT_OFFERED: &str = "A vault";
 
 /// Every fixed text of the section, for the wording tests.
 #[cfg(test)]
@@ -120,6 +122,8 @@ pub(crate) const TEXTS: &[&str] = &[
     ACCEPTED_LEAD,
     LEFT_HERE,
     UNPINNED,
+    DOWNLOAD,
+    VAULT_OFFERED,
 ];
 
 /// "Send this to <name>."
@@ -182,6 +186,38 @@ pub(crate) fn left_on(device: &str) -> String {
     format!("You left this shared vault on {device}.")
 }
 
+/// A store that this account joined, whose owner ended the share (or shares it anew).
+pub(crate) fn stopped(name: &str) -> String {
+    format!("{name} stopped sharing this vault.")
+}
+
+/// A member of a store of this account whose list left the share.
+pub(crate) fn left_vault(name: &str) -> String {
+    format!("{name} left this vault.")
+}
+
+/// A member of a store of this account whose share ended otherwise.
+pub(crate) fn sharing_ended(name: &str) -> String {
+    format!("Sharing with {name} ended.")
+}
+
+/// The button that shares a store again with a member whose share ended.
+pub(crate) fn share_again(name: &str) -> String {
+    format!("Share with {name} Again…")
+}
+
+/// The name that Connect gives a store of another account: a hint beside it.
+pub(crate) fn connect_calls(name: &str) -> String {
+    format!("Apassy Connect calls it \u{201c}{name}\u{201d}.")
+}
+
+/// Join worked, and Connect does not list this device in the store yet.
+pub(crate) fn not_listed(name: &str) -> String {
+    format!(
+        "This device is not in the shared copy yet. It is added when {name} opens Apassy on a device that syncs this vault. Then choose {DOWNLOAD}"
+    )
+}
+
 // ---- The model of the section. ----
 
 /// A store of this account and its members, as the section shows it.
@@ -191,9 +227,12 @@ pub(crate) struct OwnStore {
     pub(crate) vault: String,
     /// The members: name, account, the line under it.
     pub(crate) members: Vec<(String, String, String)>,
+    /// The members whose share ended: name, account, the line under it. Each row offers
+    /// "Share with <name> Again…".
+    pub(crate) ended: Vec<(String, String, String)>,
 }
 
-/// A store of another account: joined (with its state) or offered.
+/// A store of another account: joined (with its state), offered, or left.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OtherStore {
     pub(crate) team_id: String,
@@ -201,6 +240,12 @@ pub(crate) struct OtherStore {
     pub(crate) title: String,
     /// `None`: offered, not joined; else the line of the joined store.
     pub(crate) joined: Option<String>,
+    /// A line under an offer (the name that Connect gives the store), or of a left store.
+    pub(crate) note: Option<String>,
+    /// Joined, and no vault of this computer syncs it: the row offers the download.
+    pub(crate) download: bool,
+    /// This account left it: the row has no button.
+    pub(crate) left: bool,
 }
 
 /// What the section shows.
@@ -227,6 +272,17 @@ pub(crate) enum ShareAction {
     Join {
         team_id: String,
         owner: String,
+    },
+    /// Download the copy of a store that this account joined.
+    Download {
+        team_id: String,
+        owner: String,
+    },
+    /// Share a store of this account again with a member whose share ended.
+    ShareAgain {
+        team_id: String,
+        account: String,
+        name: String,
     },
     Stop {
         team_id: String,
@@ -331,12 +387,28 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                             }
                         });
                     }
+                    for (name, account, line) in &store.ended {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Label::new(rows::note(line)).wrap());
+                            if view.in_group
+                                && kit::small_button(ui, &share_again(name), Style::Bordered)
+                                    .clicked()
+                            {
+                                action = Some(ShareAction::ShareAgain {
+                                    team_id: store.team_id.clone(),
+                                    account: account.clone(),
+                                    name: name.clone(),
+                                });
+                            }
+                        });
+                    }
                 });
             }
             for store in &view.others {
                 g.row(|ui| {
                     rows::one_line(ui, rows::label_text(&store.title).into(), None, |ui| {
                         match &store.joined {
+                            _ if store.left => {}
                             None => {
                                 if kit::small_button(ui, JOIN, Style::Bordered).clicked() {
                                     action = Some(ShareAction::Join {
@@ -353,10 +425,23 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
                                         name: store.title.clone(),
                                     });
                                 }
+                                if store.download
+                                    && kit::small_button(ui, DOWNLOAD, Style::Bordered).clicked()
+                                {
+                                    action = Some(ShareAction::Download {
+                                        team_id: store.team_id.clone(),
+                                        owner: store.owner.clone(),
+                                    });
+                                }
                             }
                         }
                     });
-                    if let Some(line) = store.joined.as_deref().filter(|line| !line.is_empty()) {
+                    for line in store
+                        .joined
+                        .iter()
+                        .chain(&store.note)
+                        .filter(|line| !line.is_empty())
+                    {
                         ui.add(egui::Label::new(rows::note(line)).wrap());
                     }
                 });
@@ -649,7 +734,8 @@ fn sheet_body(
 // ---- The model from what the account knows. ----
 
 /// The view of the section from the last status, the stores, the names of the vaults on
-/// this computer (`local`, by store), and whether the account is in a group.
+/// this computer (`local`, by store), and whether the account is in a group. Every line
+/// comes from the lists of the status, so the section says the same after a restart.
 pub(crate) fn view_of(
     status: &ShareStatus,
     stores: &[VaultStoreView],
@@ -665,8 +751,21 @@ pub(crate) fn view_of(
                 .map_or_else(|| "A shared vault".to_owned(), |store| store.name.clone())
         })
     };
+    // A store of another account: by its name on this computer, else as "a vault shared
+    // by" the person, with Connect's name of it as a hint.
+    let other_title = |team: &str, owner_name: &str| match local.get(team) {
+        Some(vault) => (shared_by(vault, owner_name), None),
+        None => (
+            shared_by(VAULT_OFFERED, owner_name),
+            stores
+                .iter()
+                .find(|store| store.team_id == team)
+                .map(|store| connect_calls(&store.name)),
+        ),
+    };
     let theirs = |team: &str| {
         status.offers.iter().any(|offer| offer.team_id == team)
+            || status.left.iter().any(|left| left.team_id == team)
             || status
                 .stores
                 .iter()
@@ -679,6 +778,7 @@ pub(crate) fn view_of(
             team_id: store.team_id.clone(),
             vault: name_of(&store.team_id),
             members: Vec::new(),
+            ended: Vec::new(),
         })
         .collect();
     for shared in status.stores.iter().filter(|store| store.owner.is_none()) {
@@ -699,22 +799,60 @@ pub(crate) fn view_of(
                 .members
                 .push((member.name.clone(), member.account_id.clone(), line));
         }
+        for member in &shared.ended_members {
+            let line = if member.left {
+                left_vault(&member.name)
+            } else {
+                sharing_ended(&member.name)
+            };
+            store
+                .ended
+                .push((member.name.clone(), member.account_id.clone(), line));
+        }
     }
-    let mut others: Vec<OtherStore> = status
-        .offers
-        .iter()
-        .map(|offer| OtherStore {
+    let mut others: Vec<OtherStore> = Vec::new();
+    for offer in &status.offers {
+        let (title, note) = other_title(&offer.team_id, &offer.owner_name);
+        others.push(OtherStore {
             team_id: offer.team_id.clone(),
             owner: offer.owner.clone(),
-            title: shared_by(&name_of(&offer.team_id), &offer.owner_name),
+            title,
             joined: None,
-        })
-        .collect();
+            note,
+            download: false,
+            left: false,
+        });
+    }
     for store in status.stores.iter().filter(|store| store.owner.is_some()) {
-        if status.left.iter().any(|(team, _)| *team == store.team_id) {
+        if others.iter().any(|other| other.team_id == store.team_id) {
+            // A newer share of a store that this account joined: the offer row.
             continue;
         }
-        others.push(joined_store(store, &name_of(&store.team_id), checking));
+        let owner_name = store.owner_name.clone().unwrap_or_default();
+        let (title, note) = other_title(&store.team_id, &owner_name);
+        others.push(OtherStore {
+            download: !local.contains_key(&store.team_id) && !store.ended && !store.void,
+            ..joined_store(store, title, note, checking)
+        });
+    }
+    for left in &status.left {
+        if others.iter().any(|other| other.team_id == left.team_id) {
+            continue;
+        }
+        let (title, _) = other_title(&left.team_id, &status.name_of(&left.owner));
+        others.push(OtherStore {
+            team_id: left.team_id.clone(),
+            owner: left.owner.clone(),
+            title,
+            joined: None,
+            note: Some(if left.here {
+                LEFT_HERE.to_owned()
+            } else {
+                left_on(&left.device)
+            }),
+            download: false,
+            left: true,
+        });
     }
     let mut notes = Vec::new();
     if !status.unpinned.is_empty() {
@@ -730,12 +868,19 @@ pub(crate) fn view_of(
     }
 }
 
-fn joined_store(store: &StoreStatus, vault: &str, checking: &[String]) -> OtherStore {
+fn joined_store(
+    store: &StoreStatus,
+    title: String,
+    note: Option<String>,
+    checking: &[String],
+) -> OtherStore {
     let owner_name = store.owner_name.clone().unwrap_or_default();
     let line = if store.owner_suspended {
         reset_member(&owner_name)
-    } else if store.ended {
+    } else if store.void {
         ENDED.to_owned()
+    } else if store.ended {
+        stopped(&owner_name)
     } else if checking.contains(&store.team_id) {
         CHECKING.to_owned()
     } else {
@@ -744,8 +889,11 @@ fn joined_store(store: &StoreStatus, vault: &str, checking: &[String]) -> OtherS
     OtherStore {
         team_id: store.team_id.clone(),
         owner: store.owner.clone().unwrap_or_default(),
-        title: shared_by(vault, &owner_name),
+        title,
         joined: Some(line),
+        note,
+        download: false,
+        left: false,
     }
 }
 
@@ -897,13 +1045,24 @@ pub(crate) enum Outcome {
     Accepted(Result<(), ConnectError>),
     /// The owner action of a step, made on the worker from the account.
     Ask(Guard, Result<OwnerAction, ConnectError>),
-    Joined(Result<Option<VaultStoreView>, ConnectError>),
+    Joined(Result<Joined, ConnectError>),
     Ended {
         team_id: String,
         leave: bool,
         result: Result<(), ConnectError>,
     },
     Differed,
+}
+
+/// What a join (or a download of a joined store) leads to.
+pub(crate) enum Joined {
+    /// Download the copy, as "Use a Vault from Another Mac" › Apassy Connect does.
+    Download(VaultStoreView),
+    /// A vault of this computer synced the store before: it syncs again.
+    Again(String),
+    /// Connect does not list this device in the store yet: the person who shares it adds
+    /// it (named here).
+    NotListed(String),
 }
 
 /// What a refresh of the section read.
@@ -965,6 +1124,12 @@ impl ShareUi {
         self.refreshed_at = None;
     }
 
+    /// Read the lists of the other accounts again at the next frame ("Try Again" of a
+    /// shared store that checks who shares it).
+    pub(crate) fn check_again(&mut self) {
+        self.check_due = true;
+    }
+
     /// Whether a step of the section runs.
     #[cfg(test)]
     pub(crate) fn is_busy(&self) -> bool {
@@ -981,18 +1146,13 @@ impl ShareUi {
     /// The names that the owner checks show beside what the account verified: the vault
     /// names of this computer (`local`), else of Connect, and Connect's names of people.
     fn names(&self, local: &BTreeMap<String, String>) -> ShareNames {
-        let mut vaults: BTreeMap<String, String> = self
-            .stores
-            .iter()
-            .map(|store| (store.team_id.clone(), store.name.clone()))
-            .collect();
-        vaults.extend(
-            local
-                .iter()
-                .map(|(team, name)| (team.clone(), name.clone())),
-        );
         ShareNames {
-            vaults,
+            vaults: local.clone(),
+            stores: self
+                .stores
+                .iter()
+                .map(|store| (store.team_id.clone(), store.name.clone()))
+                .collect(),
             people: self
                 .status
                 .as_ref()
@@ -1068,15 +1228,17 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
         spawn(app, ctx, move |account| {
             let link = take(&link);
             match link.as_ref() {
-                Some(link) => Outcome::Requests(account.share_requests(link).map(|requests| {
-                    requests
-                        .into_iter()
-                        .map(|request| {
-                            let action = account.share_action(link, &request, &names);
-                            (request, action)
-                        })
-                        .collect()
-                })),
+                Some(link) => {
+                    Outcome::Requests(account.share_requests(link).and_then(|requests| {
+                        requests
+                            .into_iter()
+                            .map(|request| {
+                                let action = account.share_action(link, &request, &names)?;
+                                Ok((request, action))
+                            })
+                            .collect()
+                    }))
+                }
                 None => Outcome::Requests(Ok(Vec::new())),
             }
         });
@@ -1101,8 +1263,8 @@ fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
     let local: Vec<String> = local_stores(app).into_keys().collect();
     spawn(app, ctx, move |account| {
         Outcome::Refreshed(account.refresh_shares(&local).map(|status| Refreshed {
+            stores: status.vault_stores.clone(),
             status,
-            stores: account.vault_stores().ok(),
         }))
     });
 }
@@ -1135,29 +1297,40 @@ fn stop_syncing(app: &mut DesktopApp, team: &str) -> bool {
     !ids.is_empty()
 }
 
-/// A new status: the notes of what the account did by itself, and the vaults of the stores
-/// that this account left stop syncing here.
+/// A new status: the vaults of the stores that this account left stop syncing here (the
+/// rows of the section say so from the lists, also after a restart).
 fn take_status(app: &mut DesktopApp, status: ShareStatus) {
-    let mut notes = status.notes.clone();
-    for (team, device) in &status.left {
-        if stop_syncing(app, team) {
-            notes.push(left_on(device));
-        }
+    for left in &status.left {
+        stop_syncing(app, &left.team_id);
     }
+    // The devices of the other accounts, for the steps on a copy that one of them left.
+    app.sync.relay.shared_devices = status
+        .devices
+        .iter()
+        .filter_map(|(key, (account, device))| {
+            Some((
+                crate::sync::decode_b64u(key)?,
+                (device.clone(), status.name_of(account)),
+            ))
+        })
+        .collect();
     let share = &mut app.ui.connect.share;
     if let Some(members) = status.group.clone() {
         share.members = members;
     }
-    share.notes.extend(notes);
     share.status = Some(status);
     lists_read(app, Instant::now());
 }
 
 /// The lists of the other accounts were read again: each vault of a shared store whose head
 /// has a signer not verified yet syncs again, and one past the quiet time of its head notes
-/// the read (`RelaySync::note_device_list`), so a signer that the lists still do not hold
-/// is refused from then on. (Settings › Connect notes the account's own list for the other
-/// stores.)
+/// when the lists of every account of that store, and the own list, were asked of Connect
+/// in that refresh (`RelaySync::note_device_list`, `ShareStatus::asked_for`): a head that
+/// was refused before that time, by a signer that the lists still do not hold, is refused
+/// from then on. A read that failed or did not verify, for any account of the store, notes
+/// nothing: the store keeps checking (and after 10 minutes says that Connect cannot be
+/// reached, with "Try Again"), and a read asked before the refusal never ends the check.
+/// (Settings › Connect notes the account's own list for the other stores.)
 fn lists_read(app: &mut DesktopApp, now: Instant) {
     let ids: Vec<String> = app
         .vault_list
@@ -1184,8 +1357,15 @@ fn lists_read(app: &mut DesktopApp, now: Instant) {
         let quiet = relay
             .unlisted_head()
             .is_some_and(|head| app.ui.connect.share.checks.quiet(&team, &head, now));
-        if !quiet {
-            relay.note_device_list(now);
+        let asked = app
+            .ui
+            .connect
+            .share
+            .status
+            .as_ref()
+            .and_then(|status| status.asked_for(&team));
+        if !quiet && let Some(asked) = asked {
+            relay.note_device_list(asked);
         }
         app.relay_sync_now(&id);
     }
@@ -1304,17 +1484,29 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             }
         }
         Outcome::Ask(guard, Ok(action)) => ask(app, ctx, guard, action),
-        Outcome::Joined(result) => match result {
-            Ok(store) => {
-                share.refreshed_at = None;
-                if let Some(store) = store {
-                    // The download with the passphrase of the copy, as "Use a Vault from
-                    // Another Mac" › Apassy Connect does it.
-                    app.relay_connect_use(store, Some(ctx));
+        Outcome::Joined(result) => {
+            share.refreshed_at = None;
+            match result {
+                // The download with the passphrase of the copy, as "Use a Vault from
+                // Another Mac" › Apassy Connect does it.
+                Ok(Joined::Download(store)) => app.relay_connect_use(store, Some(ctx)),
+                Ok(Joined::Again(team)) => {
+                    let ids: Vec<String> = app
+                        .vault_list
+                        .registry
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.id.clone())
+                        .filter(|id| app.store_team(id).as_deref() == Some(team.as_str()))
+                        .collect();
+                    for id in ids {
+                        app.relay_sync_now(&id);
+                    }
                 }
+                Ok(Joined::NotListed(name)) => share.error = Some(not_listed(&name)),
+                Err(error) => share.error = Some(error.to_string()),
             }
-            Err(error) => share.error = Some(error.to_string()),
-        },
+        }
         Outcome::Ended {
             team_id,
             leave,
@@ -1325,7 +1517,6 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             match result {
                 Ok(()) if leave => {
                     stop_syncing(app, &team_id);
-                    app.ui.connect.share.notes.push(LEFT_HERE.to_owned());
                 }
                 Ok(()) => {}
                 Err(error) => share.error = Some(error.to_string()),
@@ -1412,14 +1603,16 @@ fn run_guarded(
             });
         }
         Guard::Join { team_id, owner } => spawn(app, ctx, move |account| {
+            let rejoin = local.contains(&team_id);
             Outcome::Joined(
                 account
                     .join_shared_store(&team_id, &owner, &local, &names, proof, &epoch)
                     .and_then(|()| {
-                        Ok(account
-                            .vault_stores()?
-                            .into_iter()
-                            .find(|store| store.team_id == team_id))
+                        if rejoin {
+                            Ok(Joined::Again(team_id.clone()))
+                        } else {
+                            joined_copy(account, &team_id, &owner, &names)
+                        }
                     }),
             )
         }),
@@ -1440,6 +1633,59 @@ fn run_guarded(
             }
         }),
     }
+}
+
+/// The copy of the store `team_id` that this account joined from `owner`, when Connect
+/// lists this device in it; else who adds it.
+fn joined_copy(
+    account: &mut ConnectAccount,
+    team_id: &str,
+    owner: &str,
+    names: &ShareNames,
+) -> Result<Joined, ConnectError> {
+    let me = account.state().device_id.clone();
+    let store = account.vault_stores()?.into_iter().find(|store| {
+        store.team_id == team_id && store.devices.iter().any(|device| device.device_id == me)
+    });
+    Ok(match store {
+        Some(store) => Joined::Download(store),
+        None => {
+            let (name, _) = account.person_of(owner);
+            Joined::NotListed(crate::connect::share::label(&name, &names.hint(owner)))
+        }
+    })
+}
+
+/// "Share with…" of `team_id` for `account` (`name` as the sheet shows it): one owner check
+/// for a member who is pinned and pins this account, else a share code.
+fn start_share_with(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    team_id: String,
+    account: String,
+    name: String,
+) {
+    let names = app.ui.connect.share.names(&local_stores(app));
+    app.ui.connect.share.pending = Some((team_id.clone(), account.clone(), name));
+    let link = Arc::clone(&app.ui.connect.share.link);
+    spawn(app, ctx, move |connect| {
+        // A pinned member whose list pins this account: no words. Else a code (also
+        // again, for a member who did not finish the words).
+        match connect.needs_share_code(&account) {
+            Ok(false) => Outcome::Started(
+                connect
+                    .share_again_action(&team_id, &account, &names)
+                    .map(Started::Again),
+            ),
+            Ok(true) | Err(ConnectError::NotVerified) => {
+                Outcome::Started(connect.start_share(&account, &team_id).map(|made| {
+                    *take(&link) = Some(made);
+                    Started::Code
+                }))
+            }
+            Err(error) => Outcome::Started(Err(error)),
+        }
+    });
 }
 
 /// A press in the section.
@@ -1485,6 +1731,17 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: ShareAction
                 Outcome::Ask(Guard::Join { team_id, owner }, Ok(action))
             });
         }
+        ShareAction::Download { team_id, owner } => {
+            let names = app.ui.connect.share.names(&local_stores(app));
+            spawn(app, ctx, move |account| {
+                Outcome::Joined(joined_copy(account, &team_id, &owner, &names))
+            });
+        }
+        ShareAction::ShareAgain {
+            team_id,
+            account,
+            name,
+        } => start_share_with(app, ctx, team_id, account, name),
         ShareAction::Stop {
             team_id,
             account,
@@ -1536,24 +1793,7 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
             let Some((account, name)) = members.get(index).cloned() else {
                 return;
             };
-            app.ui.connect.share.pending = Some((team_id.clone(), account.clone(), name));
-            let link = Arc::clone(&app.ui.connect.share.link);
-            spawn(app, ctx, move |connect| {
-                // A pinned member whose list pins this account: no words. Else a code
-                // (also again, for a member who did not finish the words).
-                match connect.needs_share_code(&account) {
-                    Ok(false) => Outcome::Started(Ok(Started::Again(
-                        connect.share_again_action(&team_id, &account, &names),
-                    ))),
-                    Ok(true) | Err(ConnectError::NotVerified) => {
-                        Outcome::Started(connect.start_share(&account, &team_id).map(|made| {
-                            *take(&link) = Some(made);
-                            Started::Code
-                        }))
-                    }
-                    Err(error) => Outcome::Started(Err(error)),
-                }
-            });
+            start_share_with(app, ctx, team_id, account, name);
         }
         (
             ShareSheet::Confirm {
@@ -1603,15 +1843,16 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
             let answer = Arc::clone(&app.ui.connect.share.answer);
             app.ui.connect.share.sheet = Some(ShareSheet::Paste { code: code.clone() });
             spawn(app, ctx, move |account| {
-                Outcome::Answered(account.accept_code(code.as_str()).map(|join| {
+                Outcome::Answered(account.accept_code(code.as_str()).and_then(|join| {
+                    let action = account.accept_action(&join, &names)?;
                     let shown = (
                         crate::connect::share::label(&join.root_name, &join.name),
                         join.device_name.clone(),
                         join.words.clone(),
-                        account.accept_action(&join, &names),
+                        action,
                     );
                     *take(&answer) = Some(join);
-                    shown
+                    Ok(shown)
                 }))
             });
         }
@@ -1783,8 +2024,14 @@ impl DesktopApp {
     /// Whether the vault `id` syncs a store shared between accounts: Shared Vaults reads the
     /// lists of the other accounts for it and notes them itself ([`lists_read`]).
     pub(crate) fn share_reads_lists(&self, id: &str) -> bool {
-        self.store_team(id)
-            .is_some_and(|team| self.ui.connect.share.is_shared(&team))
+        // Before Shared Vaults has a status (after an unlock), the account file says it:
+        // the signers that the relay sync holds give the store signers of its own.
+        self.store_team(id).is_some_and(|team| {
+            self.ui.connect.share.is_shared(&team)
+                || self
+                    .relay_of(id)
+                    .is_some_and(|relay| relay.shares_between_accounts(&team))
+        })
     }
 
     /// The sync line of a vault whose store is shared between accounts: "Checking who

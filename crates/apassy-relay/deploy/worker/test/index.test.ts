@@ -293,6 +293,10 @@ describe("shared vault rate limit", () => {
     ["GET", "/v1/account/peers/pending"],
     ["GET", "/v1/account/peers/join/4"],
     ["DELETE", "/v1/account/peers/join/4"],
+  ];
+  // The reads of other accounts' lists: a budget of their own.
+  const reads: [string, string][] = [
+    ["POST", "/v1/account/peers/lists"],
     ["GET", "/v1/account/peers/acc_k7m2q4x3ca"],
   ];
   const limiter = (used: string[], name: string, success: boolean) => ({
@@ -324,6 +328,43 @@ describe("shared vault rate limit", () => {
       assert.deepEqual(used, ["auth:peers:192.0.2.7"]);
     });
   }
+
+  for (const [method, path] of reads) {
+    it(`uses AUTH_LIMITER in a read budget of its own for ${method} ${path}`, async () => {
+      const used: string[] = [];
+      const body = method === "GET" ? undefined : "{}";
+      const refused = await call(path, { method, body, headers: { "cf-connecting-ip": "2001:db8:1:2:3:4:5:6" } }, {
+        AUTH_LIMITER: limiter(used, "auth", false),
+      });
+      assert.equal(refused.status, 429);
+      assert.equal(refused.headers.get("retry-after"), "60");
+      assert.equal((await envelope(refused)).error.code, "rate_limited");
+      assert.equal(seen.length, 0);
+      assert.deepEqual(used, ["auth:peer-reads:2001:db8:1:2::/64"]);
+      used.length = 0;
+      const passed = await call(path, { method, body, headers: { "cf-connecting-ip": "192.0.2.7" } }, {
+        AUTH_LIMITER: limiter(used, "auth", true),
+      });
+      assert.equal(passed.status, 201);
+      assert.equal(seen.length, 1);
+      assert.deepEqual(used, ["auth:peer-reads:192.0.2.7"]);
+    });
+  }
+
+  it("keeps the ceremony budget for another method or another path below /peers/", async () => {
+    for (const [method, path] of [
+      ["GET", "/v1/account/peers/lists"],
+      ["POST", "/v1/account/peers/acc_k7m2q4x3ca"],
+      ["GET", "/v1/account/peers/acc_k7m2q4x3ca/x"],
+    ]) {
+      const used: string[] = [];
+      const body = method === "GET" ? undefined : "{}";
+      await call(path!, { method: method!, body, headers: { "cf-connecting-ip": "192.0.2.7" } }, {
+        AUTH_LIMITER: limiter(used, "auth", true),
+      });
+      assert.deepEqual(used, ["auth:peers:192.0.2.7"], `${method} ${path}`);
+    }
+  });
 
   it("passes when AUTH_LIMITER is missing or fails, and leaves the other account routes alone", async () => {
     for (const AUTH_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {

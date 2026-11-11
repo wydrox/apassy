@@ -364,21 +364,37 @@ fn head_of(c: &Connect, account: &str, list: &Value) -> (u64, String) {
     for entry in list.as_array().expect("a device list") {
         version += 1;
         assert_eq!(entry["version"].as_u64(), Some(version), "{list}");
-        let message = device::account_list_message(
-            c.origin(),
-            account,
-            version,
-            &previous,
-            entry["op"].as_str().unwrap(),
-            entry["key"].as_str().unwrap(),
-            entry["link_hash"].as_str().unwrap_or(device::LIST_NONE),
-            entry["name"].as_str().unwrap_or(device::LIST_NONE),
-            entry["by"].as_str().unwrap(),
-        );
-        // A `root` and an `add` sign a device name; a `remove` names none.
+        // The `store` entry of a vault store (section 16) signs the share-list message.
+        let store = entry["op"] == "store";
+        let message = if store {
+            device::share_list_message(
+                c.origin(),
+                account,
+                version,
+                &previous,
+                "store",
+                device::LIST_NONE,
+                device::LIST_NONE,
+                entry["team_id"].as_str().unwrap(),
+                entry["by"].as_str().unwrap(),
+            )
+        } else {
+            device::account_list_message(
+                c.origin(),
+                account,
+                version,
+                &previous,
+                entry["op"].as_str().unwrap(),
+                entry["key"].as_str().unwrap(),
+                entry["link_hash"].as_str().unwrap_or(device::LIST_NONE),
+                entry["name"].as_str().unwrap_or(device::LIST_NONE),
+                entry["by"].as_str().unwrap(),
+            )
+        };
+        // A `root` and an `add` sign a device name; a `remove` and a `store` name none.
         assert_eq!(
             entry["name"].is_string(),
-            entry["op"] != "remove",
+            entry["op"] != "remove" && !store,
             "{entry}"
         );
         if version == 1 {
@@ -621,13 +637,38 @@ impl Pusher {
     }
 }
 
+/// A new vault store id as a device makes it: `t_` and 10 random characters of `a-z2-7`.
+fn new_team_id() -> String {
+    format!("t_{}", &new_account_id()[4..])
+}
+
+/// The body of `POST /v1/account/vaults` of `dev` (signed in with `token`) for `vault`: a
+/// new store id and its `store` entry at the version after the head, signed by `dev`.
+fn vault_body(c: &Connect, dev: &Dev, token: &str, vault: &str, name: &str) -> Value {
+    let (version, previous) = list_head(c, &dev.account, token);
+    let team = new_team_id();
+    let message = device::share_list_message(
+        c.origin(),
+        &dev.account,
+        version + 1,
+        &previous,
+        "store",
+        device::LIST_NONE,
+        device::LIST_NONE,
+        &team,
+        &dev.key.public_key_b64(),
+    );
+    json!({"vault_id": vault, "name": name, "team_id": team, "version": version + 1,
+           "statement": encode_b64(&dev.key.sign(&message).unwrap())})
+}
+
 /// The store of `a`'s account for `VAULT`: its id and `a`'s store device id.
-fn make_store(c: &Connect, token: &str) -> (TeamId, u64) {
+fn make_store(c: &Connect, a: &Dev, token: &str) -> (TeamId, u64) {
     let store = c.ok(
         "POST",
         "/v1/account/vaults",
         Some(token),
-        Some(&json!({"vault_id": VAULT, "name": "Personal"})),
+        Some(&vault_body(c, a, token, VAULT, "Personal")),
     );
     let team = TeamId::parse(store["team_id"].as_str().unwrap()).unwrap();
     let device = store["devices"][0]["store_device_id"].as_u64().unwrap();
@@ -1432,7 +1473,7 @@ fn a_revoked_device_loses_its_token_at_once_and_vanishes_from_every_store() {
     let token = sign_in(&c, &a);
     let b = add_device(&c, &a, &token);
     let b_token = sign_in(&c, &b);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     let added = c.ok(
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
@@ -1535,7 +1576,7 @@ fn a_vault_store_is_a_relay_sync_team_for_the_account_device_key() {
         "POST",
         "/v1/account/vaults",
         Some(&token),
-        Some(&json!({"vault_id": VAULT, "name": "Personal"})),
+        Some(&vault_body(&c, &a, &token, VAULT, "Personal")),
         403,
         "plan_required",
     );
@@ -1548,13 +1589,13 @@ fn a_vault_store_is_a_relay_sync_team_for_the_account_device_key() {
         "plan_required",
     );
     c.plans.set(&a.account, entitled());
-    let (team, a_store) = make_store(&c, &token);
+    let (team, a_store) = make_store(&c, &a, &token);
     assert_eq!(a_store, 1);
     let again = c.ok(
         "POST",
         "/v1/account/vaults",
         Some(&token),
-        Some(&json!({"vault_id": VAULT, "name": "Personal"})),
+        Some(&vault_body(&c, &a, &token, VAULT, "Personal")),
     );
     assert_eq!(again["team_id"], team.as_str());
     let b = add_device(&c, &a, &token);
@@ -1682,7 +1723,7 @@ fn a_device_of_another_account_cannot_read_or_join_a_store_without_a_group() {
     c.plans.set(&other.account, entitled());
     let token = sign_in(&c, &a);
     let other_token = sign_in(&c, &other);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     c.fails(
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
@@ -1781,7 +1822,7 @@ fn recover_works_only_with_zero_live_devices_and_deletes_the_stores() {
     };
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     let recover = |body: &Value| c.call("POST", "/v1/account/recover", None, Some(body));
     let new_key = DeviceKey::generate().unwrap();
     // With a live device: 403, the same as a wrong recovery key, and not counted.
@@ -2195,7 +2236,7 @@ fn open_plain_refuses_a_master_key_and_connect_mode_refuses_the_key() {
     let a = create(&c);
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     let a_sync = c.relay.sign_in(&team, &a.key);
     Pusher::new(&team).push(&c, &a_sync, 1, &a.key, b"ciphertext");
     for path in [
@@ -2240,7 +2281,7 @@ fn the_directory_moves_to_the_accounts_step_and_back_with_the_rollback_note() {
     let a = create(&c);
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     let (config, dir) = {
         let Connect { relay, .. } = c;
         relay.stop_keep()
@@ -2546,7 +2587,7 @@ fn every_route_refuses_a_key_off_the_curve() {
     let a = create(&c);
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     let off = encode_b64(&[4u8; 65]);
     assert!(device::decode_public_key(&off).is_err());
     let signature = encode_b64(&a.key.sign(b"anything").unwrap());
@@ -2648,7 +2689,7 @@ fn a_store_device_add_needs_the_checked_key_and_a_delete_a_device_in_the_store()
     let b_token = sign_in(&c, &b);
     let gone = add_device(&c, &a, &token);
     revoke(&c, &a, &token, &gone);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     let path = format!("/v1/account/vaults/{team}/devices");
     let mut other_key = store_add_body(&b);
     other_key["public_key"] = json!(DeviceKey::generate().unwrap().public_key_b64());
@@ -2747,7 +2788,7 @@ fn a_removal_that_waits_for_its_store_keeps_the_device_out_and_lands_later() {
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
     let devices: Vec<Dev> = (0..3).map(|_| add_device(&c, &a, &token)).collect();
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     for dev in &devices {
         c.ok(
             "POST",
@@ -3577,7 +3618,7 @@ fn a_store_device_add_that_races_a_revoke_maps_nothing() {
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
     let b = add_device(&c, &a, &token);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     // The route checked B (live, of the account); then B is revoked; then the add runs.
     revoke(&c, &a, &token, &b);
     let added =
@@ -3621,7 +3662,7 @@ fn a_removal_left_by_a_crash_after_the_commit_lands_when_the_store_opens() {
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
     let b = add_device(&c, &a, &token);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     let added = c.ok(
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),
@@ -3704,7 +3745,7 @@ fn a_vault_store_challenge_never_ends_another_and_a_nonce_works_once() {
     c.plans.set(&a.account, entitled());
     let token = sign_in(&c, &a);
     let b = add_device(&c, &a, &token);
-    let (team, _) = make_store(&c, &token);
+    let (team, _) = make_store(&c, &a, &token);
     c.ok(
         "POST",
         &format!("/v1/account/vaults/{team}/devices"),

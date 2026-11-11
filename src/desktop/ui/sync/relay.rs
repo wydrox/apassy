@@ -481,6 +481,20 @@ struct Join {
     phase: Phase,
 }
 
+impl Join {
+    /// The confirmed device of this join, once it has one.
+    fn joined(&self) -> Option<&JoinedDevice> {
+        match &self.phase {
+            Phase::Downloading { joined, .. }
+            | Phase::Departed { joined, .. }
+            | Phase::Ready { joined, .. }
+            | Phase::Passphrase { joined }
+            | Phase::Merging { joined } => Some(joined),
+            _ => None,
+        }
+    }
+}
+
 /// What a link for the origin of this Mac's Connect account turned out to be.
 enum Resolved {
     /// A vault store of the account that lists this Mac: no link is used.
@@ -579,39 +593,74 @@ pub(crate) enum JoinView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Departed {
     pub(crate) head: DepartedHead,
-    /// The signed name of the device, from the verified device list of the account;
-    /// `None` when no verified list is in memory.
+    /// The signed name of the device, from the verified device list of the account (or of
+    /// the other account of a shared vault); `None` when no verified list is in memory.
     pub(crate) name: Option<String>,
+    /// The person of another account of a shared vault whose device it was, as its
+    /// verified list names them; `None` for a device of this account.
+    pub(crate) person: Option<String>,
 }
 
 impl Departed {
+    /// The device and its key, by `departed_names` (this account) or `shared_devices`
+    /// (the other accounts of the shared vaults).
+    pub(crate) fn of(
+        head: DepartedHead,
+        departed_names: &BTreeMap<Vec<u8>, String>,
+        shared_devices: &BTreeMap<Vec<u8>, (String, String)>,
+    ) -> Self {
+        match departed_names.get(&head.key) {
+            Some(name) => Self {
+                name: Some(name.clone()),
+                person: None,
+                head,
+            },
+            None => {
+                let shared = shared_devices.get(&head.key).cloned();
+                Self {
+                    name: shared.as_ref().map(|(device, _)| device.clone()),
+                    person: shared.map(|(_, person)| person),
+                    head,
+                }
+            }
+        }
+    }
+
     /// The device at the start of a sentence.
     fn who(&self) -> String {
-        match &self.name {
-            Some(name) => format!("“{name}”"),
-            None => "A device that left the account".to_owned(),
+        match (&self.name, &self.person) {
+            (Some(name), Some(person)) => format!("“{name}” of {person}"),
+            (Some(name), None) => format!("“{name}”"),
+            (None, _) => "A device that left the account".to_owned(),
         }
     }
 
     /// The device inside a sentence.
     fn who_in(&self) -> String {
-        match &self.name {
-            Some(name) => format!("“{name}”"),
-            None => "a device that left the account".to_owned(),
+        match (&self.name, &self.person) {
+            (Some(name), Some(person)) => format!("“{name}” of {person}"),
+            (Some(name), None) => format!("“{name}”"),
+            (None, _) => "a device that left the account".to_owned(),
         }
     }
 
     /// The button that takes the copy.
     pub(crate) fn use_label(&self) -> String {
-        match &self.name {
-            Some(name) => format!("Use the Copy That “{name}” Left…"),
-            None => "Use the Copy That a Removed Device Left…".to_owned(),
+        match (&self.name, &self.person) {
+            (Some(name), Some(person)) => format!("Use the Copy That “{name}” of {person} Left…"),
+            (Some(name), None) => format!("Use the Copy That “{name}” Left…"),
+            (None, _) => "Use the Copy That a Removed Device Left…".to_owned(),
         }
     }
 
     /// The line under the status: who saved the copy, and when (by its clock).
     pub(crate) fn words(&self) -> String {
         match &self.name {
+            Some(_) if self.person.is_some() => format!(
+                "{} saved the last copy {} and then stopped sharing this vault.",
+                self.who(),
+                ago(self.head.time)
+            ),
             Some(_) => format!(
                 "{} saved the last copy {} and then left the account.",
                 self.who(),
@@ -704,6 +753,10 @@ pub(crate) struct RelayUi {
     /// The signed names of the devices that the verified device list of the account
     /// removed, by key, for the steps of a vault store that waits on one of them.
     departed_names: BTreeMap<Vec<u8>, String>,
+    /// The devices of other accounts of the shared vaults by key (X9.63): the name that
+    /// their verified lists signed, and the person (Settings › Connect › Shared Vaults
+    /// sets it after each refresh).
+    pub(crate) shared_devices: BTreeMap<Vec<u8>, (String, String)>,
     /// The same names, read by the worker of a join from a vault store while it holds the
     /// account (the window takes them when the join goes on).
     join_names: Arc<Mutex<RemovedNames>>,
@@ -772,10 +825,8 @@ impl RelayUi {
                 team: join.team.clone(),
             },
             Phase::Departed { head, .. } => {
-                let departed = Departed {
-                    head: head.clone(),
-                    name: self.departed_names.get(&head.key).cloned(),
-                };
+                let departed =
+                    Departed::of(head.clone(), &self.departed_names, &self.shared_devices);
                 JoinView::Departed {
                     words: departed.words(),
                     label: departed.use_label(),
@@ -2573,6 +2624,12 @@ impl DesktopApp {
                 relay.set_store_plan(Some(plan));
             }
         }
+        // A copy of a vault store that downloads follows the same signers.
+        if let Some(joined) = self.sync.relay.join.as_ref().and_then(Join::joined)
+            && account.signer.is_some()
+        {
+            joined.set_signers(Some(account.signers.clone()));
+        }
         self.relay_take_list(&account);
         Some(account)
     }
@@ -3179,6 +3236,10 @@ impl DesktopApp {
     /// that was asked after the refusal decides it.
     pub(crate) fn relay_check_list_again(&mut self, id: &str) {
         self.ui.connect.live.refresh_now();
+        // A store shared between accounts: Shared Vaults reads the other accounts' lists.
+        if self.share_reads_lists(id) {
+            self.ui.connect.share.check_again();
+        }
         self.relay_sync_now(id);
     }
 
@@ -3191,8 +3252,11 @@ impl DesktopApp {
             return None;
         }
         let head = self.relay_of(id)?.waiting_head()?;
-        let name = self.sync.relay.departed_names.get(&head.key).cloned();
-        Some(Departed { head, name })
+        Some(Departed::of(
+            head,
+            &self.sync.relay.departed_names,
+            &self.sync.relay.shared_devices,
+        ))
     }
 
     /// "Use This Copy" or "Replace" of the copy that a device that left pushed to the
@@ -4767,10 +4831,11 @@ impl DesktopApp {
         head: &DepartedHead,
         ctx: Option<&egui::Context>,
     ) {
-        let departed = Departed {
-            head: head.clone(),
-            name: self.sync.relay.departed_names.get(&head.key).cloned(),
-        };
+        let departed = Departed::of(
+            head.clone(),
+            &self.sync.relay.departed_names,
+            &self.sync.relay.shared_devices,
+        );
         let request = OwnerRequest::TakeDepartedCopy {
             team_id: joined.team_id().to_owned(),
             version: head.version,
@@ -7015,6 +7080,7 @@ mod departed_tests {
         let departed = Departed {
             head: head(),
             name: Some("Synthetic Mac mini".to_owned()),
+            person: None,
         };
         let text = painted(&JoinView::Departed {
             words: departed.words(),
@@ -7038,6 +7104,7 @@ mod departed_tests {
         let departed = Departed {
             head: head(),
             name: None,
+            person: None,
         };
         assert_eq!(
             departed.use_label(),

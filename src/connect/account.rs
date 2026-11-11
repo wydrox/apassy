@@ -91,7 +91,16 @@ pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 /// of the file, with a counter of the writes: the session of the app hands them to the
 /// sync of the vault stores, whether or not a call to Connect worked
 /// (`super::AccountSession::signers_after`).
-pub type SignerFeed = Arc<std::sync::Mutex<(u64, Option<crate::sync::SignerPolicy>)>>;
+pub type SignerFeed = Arc<std::sync::Mutex<(u64, Option<ListedSigners>)>>;
+
+/// The signers of the account file with when the newest device list that verified in them
+/// was asked of Connect (`None` before one in this session): one value, so a hand-over to
+/// the sync never pairs the time of a newer list with older signers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedSigners {
+    pub policy: crate::sync::SignerPolicy,
+    pub verified_at: Option<std::time::Instant>,
+}
 
 /// The waits between sign-in rounds. Tests make them instant.
 pub type Sleeper = Arc<dyn Fn(Duration) + Send + Sync>;
@@ -481,6 +490,16 @@ impl AccountState {
         if state.v == STATE_VERSION_3 && state.peers.is_empty() && state.stores.is_empty() {
             state.v = STATE_VERSION;
         }
+        // A file of the first build of version 4 kept keys in the ended accounts of a
+        // store: they go (the next refresh takes the ended accounts from the lists again),
+        // and the file is written back.
+        if state.v == STATE_VERSION
+            && !state.is_valid()
+            && share::drop_ended_keys(&mut state.stores)
+            && state.is_valid()
+        {
+            let _ = state.save(path);
+        }
         if state.is_valid() {
             Ok(Some(state))
         } else if state.v < STATE_VERSION_3 {
@@ -534,16 +553,19 @@ pub fn forget_this_device(
     Ok(Forgotten(()))
 }
 
-/// Whether the account file at `path` is of an earlier version of Apassy
-/// ([`ConnectError::OldAccountFile`]): this device must join its account again.
+/// Whether the account file at `path` exists and this version of Apassy cannot read it: a
+/// file of an earlier version ([`ConnectError::OldAccountFile`]), or one of a shape or with
+/// a mode that it does not take. This device must join its account again, after the owner
+/// forgets the file here ([`forget_old_account_file`]).
 pub fn is_old_account_file(path: &Path) -> bool {
-    matches!(AccountState::load(path), Err(ConnectError::OldAccountFile))
+    AccountState::load(path).is_err()
 }
 
-/// Forget an account file of an earlier version of Apassy at `path`, with the account key,
-/// after a fresh owner check for [`OwnerAction::ForgetOldConnectAccount`] in the vault
-/// session `epoch`; then a creation or a join works again on this device. A file of this
-/// version is not forgotten here ([`ConnectError::Invalid`]). The proof is used up.
+/// Forget an account file at `path` that this version cannot read ([`is_old_account_file`]),
+/// with the account key, after a fresh owner check for
+/// [`OwnerAction::ForgetOldConnectAccount`] in the vault session `epoch`; then a creation
+/// or a join works again on this device. A file that loads is not forgotten here
+/// ([`ConnectError::Invalid`]). The proof is used up.
 pub fn forget_old_account_file(
     store: &dyn DeviceKeyStore,
     path: &Path,
@@ -801,6 +823,10 @@ pub struct ConnectAccount {
     sleeper: Sleeper,
     /// Where each write of the account file publishes its signers ([`SignerFeed`]).
     feed: Option<SignerFeed>,
+    /// When the newest view whose device list verified here was asked of Connect.
+    verified_at: Option<std::time::Instant>,
+    /// What the shared vaults keep in memory between two refreshes (section 16).
+    shares: share::ShareMemory,
 }
 
 impl fmt::Debug for ConnectAccount {
@@ -842,6 +868,8 @@ impl ConnectAccount {
             clock: system_clock(),
             sleeper: system_sleeper(),
             feed: None,
+            verified_at: None,
+            shares: share::ShareMemory::default(),
         }
     }
 
@@ -859,7 +887,10 @@ impl ConnectAccount {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             held.0 = held.0.wrapping_add(1);
-            held.1 = Some(signer_policy(&self.state));
+            held.1 = Some(ListedSigners {
+                policy: signer_policy(&self.state),
+                verified_at: self.verified_at,
+            });
         }
     }
 
@@ -1324,6 +1355,11 @@ impl ConnectAccount {
         self.list.as_ref()
     }
 
+    /// What the shared vaults keep in memory between two refreshes (`super::share`).
+    pub(super) fn share_memory(&mut self) -> &mut share::ShareMemory {
+        &mut self.shares
+    }
+
     /// Move the trust store to the list version `version` with the hash `head`, the
     /// devices `live`, and the keys that the list removed `removed`, and write the account
     /// file when anything changed.
@@ -1416,11 +1452,17 @@ impl ConnectAccount {
     /// the trust store learns the list. The name of the person goes into the account file when this Mac did
     /// not know it; the email never does.
     pub fn view(&mut self) -> Result<AccountView, ConnectError> {
+        let asked = std::time::Instant::now();
         let mut view = self.with_token(|client, token| client.account(token))?;
         if view.account_id != self.state.account_id {
             return Err(ConnectError::BadAnswer);
         }
         self.verify(&mut view)?;
+        // The signers now hold that list: they go out with the time it was asked.
+        if view.list_verified && self.verified_at.is_none_or(|held| asked > held) {
+            self.verified_at = Some(asked);
+            self.publish();
+        }
         self.settle_recovery(&mut view)?;
         if self.state.name.is_none()
             && let Ok(name) = clean_name(&view.name)
@@ -1969,7 +2011,12 @@ impl ConnectAccount {
     // ---- Vault stores (section 8), for unit M3. ----
 
     /// `POST /v1/account/vaults`: the store of the vault `vault_id`, with this Mac as
-    /// store device 1. The same vault again answers the existing store.
+    /// store device 1. This Mac makes the store id and signs the `store` entry for it at
+    /// the version after the head that it verified (section 16), which Connect appends in
+    /// the transaction that makes the store: so the account's own list says which stores it
+    /// made. A `409` (the list moved, or the id is taken) reads the list again and signs
+    /// once more with a new id. The same vault again answers the existing store (its
+    /// entry is not signed twice: this Mac then reads the list again).
     pub fn create_vault_store(
         &mut self,
         vault_id: &str,
@@ -1983,12 +2030,73 @@ impl ConnectAccount {
         if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
             return Err(ConnectError::Invalid);
         }
-        let store =
-            self.with_token(|client, token| client.create_vault_store(token, vault_id, name))?;
-        if store.vault_id != vault_id || !crate::sync::relay_crypto::valid_team_id(&store.team_id) {
-            return Err(ConnectError::BadAnswer);
+        let signer = self.signer()?;
+        for round in 0..2 {
+            self.verified_view()?;
+            let mut shares = self
+                .list
+                .as_ref()
+                .map(|list| list.shares.clone())
+                .ok_or(ConnectError::BadAnswer)?;
+            let (version, previous) = (self.state.list_version + 1, self.state.list_head.clone());
+            if version > trust::MAX_ADD_VERSION {
+                return Err(ConnectError::AccountLimit);
+            }
+            let team_id = super::words::new_store_id()?;
+            let entry = trust::ListEntry {
+                version,
+                op: share::STORE.to_owned(),
+                key: None,
+                link_hash: None,
+                name: None,
+                by: signer.public_key_b64u(),
+                signature: None,
+                account_id: None,
+                root: None,
+                team_id: Some(team_id.clone()),
+            };
+            let (signature, hash) = signer.sign_share_entry(
+                self.client.origin(),
+                &self.state.account_id,
+                (version, &previous),
+                share::STORE,
+                super::device_key::LIST_NONE,
+                None,
+                Some(&team_id),
+            )?;
+            let statement = encode_b64u(&signature);
+            let body = super::client::VaultCreate {
+                vault_id,
+                name,
+                team_id: &team_id,
+                version,
+                statement: &statement,
+            };
+            match self.with_token(|client, token| client.create_vault_store(token, &body)) {
+                Ok(store) => {
+                    if store.vault_id != vault_id
+                        || !crate::sync::relay_crypto::valid_team_id(&store.team_id)
+                    {
+                        return Err(ConnectError::BadAnswer);
+                    }
+                    if store.team_id == team_id
+                        && shares.apply(&self.state.account_id, &entry, &hash).is_ok()
+                    {
+                        let known = AccountState::keys(&self.state.known);
+                        self.advance(version, &hash, &known, &[])?;
+                        if share::learn_own(&mut self.state, &shares) {
+                            self.write_state()?;
+                        }
+                    }
+                    // The names and the entries of the list come again with the next view.
+                    self.list = None;
+                    return Ok(store);
+                }
+                Err(ConnectError::Conflict) if round == 0 => {}
+                Err(error) => return Err(error),
+            }
         }
-        Ok(store)
+        Err(ConnectError::Conflict)
     }
 
     /// `GET /v1/account/vaults`.
@@ -3183,9 +3291,13 @@ mod tests {
             ConnectError::OldAccountFile
         );
         assert!(is_old_account_file(&path));
-        // A file of this version with a bad shape is no old file.
+        // A file of this version with a bad shape cannot be read either: the owner forgets
+        // it here too.
         fs::write(&path, b"{\"v\":4}").unwrap();
         assert_eq!(AccountState::load(&path).unwrap_err(), ConnectError::Local);
+        assert!(is_old_account_file(&path));
+        // A file that loads is not one.
+        state().save(&path).unwrap();
         assert!(!is_old_account_file(&path));
         // A key of the trust store that is not a point of the curve is refused too.
         let mut off = vec![4u8];
@@ -3214,6 +3326,36 @@ mod tests {
         ] {
             assert_eq!(bad.save(&path).unwrap_err(), ConnectError::Invalid);
         }
+    }
+
+    /// F6: a file of the first build of version 4 holds keys in the ended accounts of a
+    /// store: they go at the load, the file is written back, and it loads as it is then.
+    #[test]
+    fn a_first_pass_file_with_keys_in_ended_moves_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = account_file(dir.path());
+        let mut first = state();
+        first.stores = vec![StoreShare {
+            team_id: "t_7k2m5q4x3c".to_owned(),
+            owner: share::OWNER_SELF.to_owned(),
+            members: vec!["acc_m3n5p7q2rb".to_owned()],
+            ended: vec!["acc_p4n6r2t7bc".to_owned()],
+        }];
+        first.save(&path).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["stores"][0]["ended"] = serde_json::json!(["acc_p4n6r2t7bc", KEY]);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let loaded = AccountState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.stores[0].ended, vec!["acc_p4n6r2t7bc".to_owned()]);
+        assert_eq!(loaded, first);
+        // Written back: the file itself holds no key in `ended` any more.
+        let again: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            again["stores"][0]["ended"],
+            serde_json::json!(["acc_p4n6r2t7bc"])
+        );
+        assert!(!is_old_account_file(&path));
     }
 
     #[test]

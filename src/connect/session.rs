@@ -236,12 +236,13 @@ impl AccountSession {
         }
     }
 
-    /// The signers of the account file (`super::signer_policy`) when the account of this
-    /// session wrote the file since the write that `seen` counts: after any step that
+    /// The signers of the account file (`super::signer_policy`), with when the newest list
+    /// that verified in them was asked (one value: `super::ListedSigners`), when the account
+    /// of this session wrote the file since the write that `seen` counts: after any step that
     /// changed it (a ceremony step, a share, a join, an end, a verified list), whether or
     /// not a call to Connect worked. The window hands them to the sync of the vault
     /// stores at once. `seen` moves to the newest write.
-    pub fn signers_after(&self, seen: &mut u64) -> Option<crate::sync::SignerPolicy> {
+    pub fn signers_after(&self, seen: &mut u64) -> Option<super::account::ListedSigners> {
         let held = lock(&self.feed);
         if held.0 == *seen {
             return None;
@@ -719,7 +720,8 @@ mod tests {
         let mut seen = 0;
         let first = session
             .signers_after(&mut seen)
-            .expect("the signers at the open");
+            .expect("the signers at the open")
+            .policy;
         assert!(session.signers_after(&mut seen).is_none(), "nothing new");
         let other = AccountSigner::open_or_create(&MemoryKeyStore::new()).expect("key");
         let failed = session.with_account(|account| {
@@ -729,7 +731,10 @@ mod tests {
             Err::<(), _>(ConnectError::Offline)
         });
         assert_eq!(failed.unwrap_err(), ConnectError::Offline);
-        let after = session.signers_after(&mut seen).expect("the new signers");
+        let listed = session.signers_after(&mut seen).expect("the new signers");
+        // No list verified in this session: a write carries no time of one.
+        assert_eq!(listed.verified_at, None);
+        let after = listed.policy;
         assert_ne!(after, first);
         assert!(after.accepts(other.public_key()));
         assert!(session.signers_after(&mut seen).is_none());

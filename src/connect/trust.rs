@@ -15,10 +15,11 @@
 //! - The same list holds the entries that name another account (section 16,
 //!   `super::share`): `peer` and `unpeer` (the pinned root of another account), `share`
 //!   and `unshare` (a vault store of this account and that account), `join` and `leave` (a
-//!   store of that account that this account syncs). They share the version and the
-//!   `previous` hash of the device entries, so a removed device signs none of them, and
-//!   every entry that adds something (`add`, `peer`, `share`, `join`) leaves room to end
-//!   every device, peer, share, and join before the list is full.
+//!   store of that account that this account syncs), and `store` (a vault store that this
+//!   account made). They share the version and the `previous` hash of the device entries,
+//!   so a removed device signs none of them, and every entry that adds something (`add`,
+//!   `peer`, `share`, `join`, `store`) leaves room to end every device, peer, share, and
+//!   join before the list is full.
 //! - The **pin** of this device (in the account file): the root, and the highest version
 //!   and the hash of the list that it verified. [`verify_list`] takes a list only when it
 //!   starts at the pinned root and every entry verifies; [`Pin::accepts`] takes it only when
@@ -38,10 +39,10 @@ use crate::sync::{decode_b64u, encode_b64u, verify_signature};
 pub const MAX_LIST: usize = 1024;
 /// The most live devices of an account (contract section 13).
 pub const MAX_LIVE: usize = 10;
-/// The highest version of an entry that adds something (`add`, `peer`, `share`, `join`):
-/// the list keeps room to end every live device (also the last one, by itself), every
-/// peer, and every share and join before it is full (1024 − 10 − 64 − 128 = 822), and a
-/// recovery starts a new list.
+/// The highest version of an entry that adds something (`add`, `peer`, `share`, `join`,
+/// `store`): the list keeps room to end every live device (also the last one, by itself),
+/// every peer, and every share and join before it is full (1024 − 10 − 64 − 128 = 822; a
+/// `store` needs no end), and a recovery starts a new list.
 pub const MAX_ADD_VERSION: u64 = (MAX_LIST - MAX_LIVE - MAX_PEERS - MAX_SHARED) as u64;
 /// The list is nearly full when this many versions or fewer are left for an `add`: the
 /// app says so ahead of time.
@@ -59,7 +60,7 @@ pub const MAX_LEFT: usize = 128;
 pub struct ListEntry {
     pub version: u64,
     /// `root`, `add`, or `remove`; or one of section 16: `peer`, `unpeer`, `share`,
-    /// `unshare`, `join`, `leave`.
+    /// `unshare`, `join`, `leave`, `store`.
     pub op: String,
     /// b64u of the key that the entry adds or removes (the root key for `root`); `None`
     /// for an entry of section 16.
@@ -76,13 +77,14 @@ pub struct ListEntry {
     /// b64u of the DER signature.
     #[serde(default)]
     pub signature: Option<String>,
-    /// The other account of an entry of section 16, else `None`.
+    /// The other account of an entry of section 16 (none on a `store`), else `None`.
     #[serde(default)]
     pub account_id: Option<String>,
-    /// b64u of the root that a `peer` pins, else `None`.
+    /// b64u of the root that a `peer` pins; on a `join`, the list hash of the `share`
+    /// entry of the other account's list that it answers; else `None`.
     #[serde(default)]
     pub root: Option<String>,
-    /// The vault store of a `share`, `unshare`, `join`, or `leave`, else `None`.
+    /// The vault store of a `share`, `unshare`, `join`, `leave`, or `store`, else `None`.
     #[serde(default)]
     pub team_id: Option<String>,
 }
@@ -239,8 +241,9 @@ pub fn verify_list(
             {
                 return None;
             }
-            list.shares.apply(account_id, entry).ok()?;
-            hashes.push(list_hash(&message));
+            let hash = list_hash(&message);
+            list.shares.apply(account_id, entry, &hash).ok()?;
+            hashes.push(hash);
             continue;
         }
         if entry.account_id.is_some() || entry.root.is_some() || entry.team_id.is_some() {

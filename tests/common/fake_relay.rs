@@ -421,24 +421,19 @@ impl FakeRelay {
             .expect("team")
             .sync_bytes = Some(bytes);
     }
-    /// A vault store of Apassy Connect (plan s7 unit M3): a relay-sync-v1 team named
-    /// `name` with the account key `public_key` as its device 1 of its kind, made by the
-    /// fake Connect on `POST /v1/account/vaults`. Returns the team id and the device id.
+    /// A vault store of Apassy Connect (plan s7 unit M3): a relay-sync-v1 team `team_id`
+    /// (the id that the client made) named `name` with the account key `public_key` as
+    /// its device 1 of its kind, made by the fake Connect on `POST /v1/account/vaults`.
+    /// Returns the device id.
     pub fn add_store_team(
         &self,
+        team_id: &str,
         name: &str,
         device_name: &str,
         public_key: &[u8],
-    ) -> (String, u64) {
+    ) -> u64 {
         let mut relay = lock(&self.shared.0);
-        relay.next_team += 1;
-        let team_id: String = format!("t_fake{:06}", relay.next_team)
-            .chars()
-            .map(|ch| match ch.to_digit(10) {
-                Some(digit) => char::from(b'a' + digit as u8),
-                None => ch,
-            })
-            .collect();
+        let team_id = team_id.to_owned();
         let device_id = relay.next_device;
         relay.next_device += 1;
         relay.teams.insert(
@@ -454,8 +449,8 @@ impl FakeRelay {
                 ..Team::default()
             },
         );
-        relay.store_teams.insert(team_id.clone());
-        (team_id, device_id)
+        relay.store_teams.insert(team_id);
+        device_id
     }
 
     /// Add the account key `public_key` to the store `team_id` (`POST
