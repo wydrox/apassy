@@ -202,7 +202,7 @@ pub(super) fn create_account(ctx: &egui::Context, app: &mut DesktopApp, name: &s
     until(ctx, app, "the recovery code", |app| {
         matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. }))
     });
-    let Some(Sheet::Recovery { words }) = &app.ui.connect.sheet else {
+    let Some(Sheet::Recovery { words, .. }) = &app.ui.connect.sheet else {
         unreachable!();
     };
     assert_eq!(words.split_whitespace().count(), 16, "16 words, once");
@@ -1011,6 +1011,7 @@ fn the_plan_row_shows_its_whole_status_at_the_settings_width() {
                 list_verified: true,
                 list_nearly_full: false,
                 recovery_unseen: false,
+                recovery_changed: None,
             }),
             plans: Some(fixture_plans()),
             locked: false,
@@ -1081,6 +1082,7 @@ fn every_state_of_the_plan_row() {
                 list_verified: true,
                 list_nearly_full: false,
                 recovery_unseen: false,
+                recovery_changed: None,
             }),
             plans: Some(fixture_plans()),
             locked: false,
@@ -2440,19 +2442,87 @@ fn an_account_without_a_seen_recovery_code_says_so_until_a_new_code() {
     until(&ctx, &mut app, "the new code", |app| {
         matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. }))
     });
-    let Some(Sheet::Recovery { words }) = &app.ui.connect.sheet else {
+    let Some(Sheet::Recovery { words, .. }) = &app.ui.connect.sheet else {
         unreachable!();
     };
     assert_eq!(words.split_whitespace().count(), 16, "16 words, once");
     assert_ne!(connect.recovery_key(&account_id), before);
     choose(&ctx, &mut app, SheetChoice::Done);
-    until(&ctx, &mut app, "the account", |app| shown(app).is_some());
+    // "I Saved It" ends the line.
+    until(&ctx, &mut app, "the line ends", |app| {
+        shown(app).is_some_and(|account| !account.recovery_unseen)
+    });
     let painted = text(&ctx, &mut app);
     assert!(
         !painted.contains(super::connect::RECOVERY_UNSEEN),
         "{painted}"
     );
     assert!(painted.contains(super::connect::NEW_RECOVERY), "{painted}");
+}
+
+// ---- Round 6: the recovery code after a lock, and a new code of another device. ----
+
+/// A new code whose sheet a lock closed before "I Saved It": the next unlock shows the
+/// lasting line. A new code of another device shows its line with "OK", which ends it.
+#[test]
+fn a_new_code_left_unseen_and_a_new_code_elsewhere_show_lasting_lines() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    act(&ctx, &mut app, Action::SignIn);
+    settle(&ctx, &mut app);
+    assert!(!shown(&app).expect("account").recovery_unseen);
+    act(&ctx, &mut app, Action::NewRecoveryCode);
+    confirm_with(&mut app, &ctx, PASS);
+    until(&ctx, &mut app, "the new code", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. }))
+    });
+    // A lock before "I Saved It": the sheet goes with the session.
+    app.lock_vault(Some(&ctx));
+    pass(&ctx, &mut app, live::step);
+    assert!(app.ui.connect.sheet.is_none());
+    unlock(&ctx, &mut app);
+    until(&ctx, &mut app, "the account", |app| shown(app).is_some());
+    assert!(shown(&app).expect("account").recovery_unseen);
+    let painted = text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::connect::RECOVERY_UNSEEN),
+        "{painted}"
+    );
+    // Another device makes a new code.
+    let other = connect.insert_device(&account_id, "Synthetic iMac", &[4u8; 65]);
+    connect.rotate_recovery_by(&account_id, &[9u8; 32], &other);
+    act(&ctx, &mut app, Action::SignIn);
+    until(&ctx, &mut app, "the change", |app| {
+        shown(app).is_some_and(|account| account.recovery_changed.is_some())
+    });
+    let painted = text(&ctx, &mut app);
+    assert!(
+        painted.contains("The recovery code was changed on another device on"),
+        "{painted}"
+    );
+    assert!(
+        painted.contains("The old code no longer works."),
+        "{painted}"
+    );
+    assert!(
+        painted.contains(super::connect::RECOVERY_CHANGED_OK),
+        "{painted}"
+    );
+    act(&ctx, &mut app, Action::RecoveryChangeSeen);
+    until(&ctx, &mut app, "the change is seen", |app| {
+        shown(app).is_some_and(|account| account.recovery_changed.is_none())
+    });
+    let file =
+        crate::connect::AccountState::load(&crate::connect::account_file(&dir.path().join("data")))
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        file.recovery_key.as_deref(),
+        Some(crate::sync::encode_b64u(&[9u8; 32]).as_str())
+    );
 }
 
 /// Only a refresh whose device list verified moves the time that the sync of the vault

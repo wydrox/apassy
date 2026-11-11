@@ -113,6 +113,24 @@ pub(crate) const JOIN_NEW_KEY: &str = concat!(
     crate::computer!(),
     " made a new device key: its earlier key was used by a join that did not finish here. If the account lists that earlier device, remove it on another device of the account."
 );
+/// A join that made a new key while an account of an earlier join of this device still
+/// lists the earlier key, which this device could not remove there (connect-account-v1
+/// section 7.2): `confirmer` confirmed that earlier join, and `device` is this device's
+/// name there.
+pub(crate) fn join_left_behind(confirmer: &str, device: &str) -> String {
+    format!(
+        concat!(
+            "Another Apassy Connect account still lists this ",
+            crate::computer!(),
+            " as “{device}”: a device confirmed an earlier join after this ",
+            crate::computer!(),
+            " had left it. On “{confirmer}”, open Settings › Connect and remove “{device}”."
+        ),
+        device = device,
+        confirmer = confirmer,
+    )
+}
+
 /// Settings › Connect: a new recovery code (connect-account-v1 section 9.1).
 pub(crate) const RECOVERY_ROW: &str = "Recovery Code";
 pub(crate) const RECOVERY_ROW_NOTE: &str =
@@ -120,6 +138,30 @@ pub(crate) const RECOVERY_ROW_NOTE: &str =
 pub(crate) const NEW_RECOVERY: &str = "New Recovery Code…";
 pub(crate) const RECOVERY_UNSEEN: &str =
     "This account has no recovery code that you have seen. Make a new one now.";
+/// The sheet of a new recovery code that Connect took while the account file of this
+/// device could not be written (section 9.1).
+pub(crate) const RECOVERY_UNRECORDED: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " could not record the new code in its account file. The code works: save it now. Apassy records it when it next reads the account."
+);
+/// The row of a new recovery code that another device made.
+pub(crate) const RECOVERY_CHANGED_ROW: &str = "Changed on another device";
+pub(crate) const RECOVERY_CHANGED_OK: &str = "OK";
+
+/// The line of a new recovery code that another device made (section 9.1): `device`, the
+/// signed name of that device when the device list holds it, and `at`, the time of the
+/// change at Connect.
+pub(crate) fn recovery_changed(device: Option<&str>, at: Option<u64>) -> String {
+    let device = device.unwrap_or("another device");
+    match at {
+        Some(at) => format!(
+            "The recovery code was changed on {device} on {}. The old code no longer works.",
+            day(at)
+        ),
+        None => format!("The recovery code was changed on {device}. The old code no longer works."),
+    }
+}
 
 pub(crate) const PICKER_TITLE: &str = "Choose a Plan";
 pub(crate) const PICKER_LEAD: &str = "Apassy Connect, the hosted service of the Apassy project.";
@@ -253,6 +295,8 @@ pub(crate) const TEXTS: &[&str] = &[
     RECOVERY_TITLE,
     RECOVERY_LEAD,
     RECOVERY_NOTE,
+    RECOVERY_UNRECORDED,
+    RECOVERY_CHANGED_ROW,
     SAVED_IT,
     PICKER_TITLE,
     PICKER_LEAD,
@@ -566,8 +610,19 @@ pub(crate) struct Account {
     /// for a new device.
     pub(crate) list_nearly_full: bool,
     /// The recovery code of the account was never shown on this device (the account file
-    /// keeps the mark until a new code is made).
+    /// keeps the mark until a new code is made and its sheet is closed).
     pub(crate) recovery_unseen: bool,
+    /// Another device made a new recovery code since this device saw the key: the line,
+    /// and the key that "OK" pins.
+    pub(crate) recovery_changed: Option<RecoveryLine>,
+}
+
+/// The line of a new recovery code that another device made, and the recovery key that
+/// "OK" pins (`ConnectAccount::recovery_change_seen`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoveryLine {
+    pub(crate) text: String,
+    pub(crate) recovery_key: String,
 }
 
 impl Account {
@@ -777,6 +832,8 @@ pub(crate) enum Action {
     JoinGroup,
     /// "New Recovery Code…" (section 9.1).
     NewRecoveryCode,
+    /// "OK" of the line of a new recovery code that another device made.
+    RecoveryChangeSeen,
     Delete,
 }
 
@@ -987,6 +1044,20 @@ fn account_section(
     rows::group(ui, Some(RECOVERY_ROW), |g| {
         if account.recovery_unseen {
             g.tone_row(RECOVERY_UNSEEN, Tone::Warning.text());
+        }
+        if let Some(changed) = &account.recovery_changed {
+            g.tone_row(changed.text.as_str(), Tone::Warning.text());
+            g.line(RECOVERY_CHANGED_ROW, None, |ui| {
+                if ui
+                    .add_enabled_ui(!view.locked, |ui| {
+                        kit::small_button(ui, RECOVERY_CHANGED_OK, Style::Bordered)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    *action = Some(Action::RecoveryChangeSeen);
+                }
+            });
         }
         g.line_note(
             RECOVERY_ROW,
@@ -1286,8 +1357,12 @@ fn group_section(
 pub(crate) enum Sheet {
     /// Frame 2a.
     Create { name: String, device_name: String },
-    /// Frame 2b: the 16 words, once. They are erased with the sheet.
-    Recovery { words: zeroize::Zeroizing<String> },
+    /// Frame 2b: the 16 words, once. They are erased with the sheet. `unrecorded`: Connect
+    /// took a new code, and the account file of this device could not record it.
+    Recovery {
+        words: zeroize::Zeroizing<String>,
+        unrecorded: bool,
+    },
     /// Frame 4: the plan, `month` or `year`, and the people or seats.
     Picker {
         plan: String,
@@ -1733,9 +1808,13 @@ fn sheet_body(
             let ready = !name.trim().is_empty() && !device_name.trim().is_empty();
             cancel_and(ui, "Create Account", ready, busy)
         }
-        Sheet::Recovery { words } => {
+        Sheet::Recovery { words, unrecorded } => {
             let mut choice = None;
             kit::sheet_title(ui, RECOVERY_TITLE, Some(RECOVERY_LEAD));
+            if *unrecorded {
+                ui.label(kit::text(RECOVERY_UNRECORDED, Font::Callout).color(Tone::Warning.text()));
+                ui.add_space(6.0);
+            }
             let list: Vec<&str> = words.split_whitespace().collect();
             egui::Frame::new()
                 .fill(kit::palette().surface)

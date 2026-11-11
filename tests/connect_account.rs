@@ -2421,7 +2421,9 @@ fn a_new_recovery_code_replaces_the_old_one() {
     ));
     assert!(connect.rotations().is_empty());
     let (proof, epoch) = owner.proof(account.new_recovery_code_action());
-    let new = account.new_recovery_code(proof, &epoch).expect("new code");
+    let rotated = account.new_recovery_code(proof, &epoch).expect("new code");
+    assert!(rotated.recorded);
+    let new = rotated.code;
     assert_eq!(
         connect.recovery_key(&account_id),
         decode_b64u(&new.key().unwrap().public_key_b64u()).unwrap()
@@ -2497,6 +2499,14 @@ fn an_unseen_recovery_code_is_kept_in_the_account_file_until_a_new_one() {
     );
     let (proof, epoch) = owner.proof(account.new_recovery_code_action());
     account.new_recovery_code(proof, &epoch).expect("new code");
+    // The mark stays until the owner closes the sheet of the code ("I Saved It").
+    assert!(
+        AccountState::load(&a.path)
+            .unwrap()
+            .unwrap()
+            .recovery_unseen
+    );
+    account.recovery_code_seen().expect("I Saved It");
     assert!(
         !AccountState::load(&a.path)
             .unwrap()
@@ -2675,4 +2685,489 @@ fn a_pending_join_without_its_signature_is_not_offered() {
     assert_eq!(account.pending_joins(&link).expect("pending").len(), 1);
     connect.drop_pending_signatures();
     assert!(account.pending_joins(&link).expect("pending").is_empty());
+}
+
+// ---- Round 6: a new recovery code that survives a lost answer, and pending joins. ----
+
+/// Recover the account of `account_id` with the words `code` on a new device, after its
+/// last live device `device_id` was revoked.
+fn recovers(connect: &FakeConnect, account_id: &str, code: &str) -> Result<(), ConnectError> {
+    let b = device();
+    ConnectAccount::recover(
+        client(connect),
+        &b.store,
+        &b.path,
+        account_id,
+        code,
+        "MacBook Air",
+    )
+    .map(drop)
+}
+
+/// The answer of `POST /v1/account/recovery` is lost after Connect took the new key: the
+/// same body goes again, Connect answers the same result, and the code is shown. The old
+/// code recovers nothing; the new one recovers the account.
+#[test]
+fn a_lost_rotation_answer_is_repeated_and_its_code_is_shown() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, old) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    let device_id = account.state().device_id.clone();
+    connect.lose_next_answers("POST /v1/account/recovery", 2);
+    let (proof, epoch) = owner.proof(account.new_recovery_code_action());
+    let rotated = account.new_recovery_code(proof, &epoch).expect("the code");
+    let new = rotated.code;
+    assert!(rotated.recorded);
+    let key = new.key().unwrap().public_key_b64u();
+    assert_eq!(
+        connect.recovery_key(&account_id),
+        decode_b64u(&key).unwrap()
+    );
+    // Three tries with one body, and one rotation at Connect.
+    let bodies: Vec<String> = connect
+        .bodies()
+        .into_iter()
+        .filter(|body| body.contains("\"previous\""))
+        .collect();
+    assert_eq!(bodies.len(), 3, "{bodies:?}");
+    assert!(bodies.iter().all(|body| *body == bodies[0]));
+    assert_eq!(connect.rotations().len(), 1);
+    // The account file pins the new key and has no pending rotation; the mark stays until
+    // the sheet closes.
+    let state = AccountState::load(&a.path).unwrap().unwrap();
+    assert_eq!(state.recovery_key.as_deref(), Some(key.as_str()));
+    assert!(state.recovery_pending.is_none());
+    assert!(state.recovery_unseen);
+    account.recovery_code_seen().expect("I Saved It");
+    assert!(
+        !AccountState::load(&a.path)
+            .unwrap()
+            .unwrap()
+            .recovery_unseen
+    );
+    let file = std::fs::read_to_string(&a.path).unwrap();
+    assert!(!file.contains(new.text().as_str()), "no code in the file");
+    connect.revoke(&device_id);
+    assert_eq!(
+        recovers(&connect, &account_id, &old.words()).unwrap_err(),
+        ConnectError::Forbidden
+    );
+    recovers(&connect, &account_id, &new.words()).expect("the new code recovers");
+}
+
+/// A Connect that answers 200 and keeps the old key: no success, the owner is told, the
+/// pending rotation goes, and the old code is still the one that recovers.
+#[test]
+fn a_connect_that_keeps_the_old_key_reports_no_new_code() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, old) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    let device_id = account.state().device_id.clone();
+    let before = connect.recovery_key(&account_id);
+    connect.keep_recovery_key(true);
+    let (proof, epoch) = owner.proof(account.new_recovery_code_action());
+    assert_eq!(
+        account.new_recovery_code(proof, &epoch).unwrap_err(),
+        ConnectError::RecoveryNotTaken
+    );
+    assert_eq!(connect.recovery_key(&account_id), before);
+    let state = AccountState::load(&a.path).unwrap().unwrap();
+    assert!(state.recovery_pending.is_none());
+    assert!(!state.recovery_unseen, "the mark is as before");
+    assert_eq!(
+        state.recovery_key.as_deref(),
+        Some(encode_b64u(&before).as_str())
+    );
+    assert!(account.view().expect("view").recovery_changed.is_none());
+    connect.revoke(&device_id);
+    recovers(&connect, &account_id, &old.words()).expect("the old code still recovers");
+}
+
+/// No answer at all after the repeats: the pending rotation stays in the account file
+/// (never the code), and the next read settles it, also after a restart: Connect took the
+/// key, so the account has a code that nobody saw (the lasting line); or Connect did not
+/// take it, so the pending rotation goes and the old code stays valid.
+#[test]
+fn an_unanswered_rotation_is_settled_by_the_next_read() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    // Connect takes the key, and every answer is lost.
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    connect.lose_next_answers("POST /v1/account/recovery", 50);
+    let (proof, epoch) = owner.proof(account.new_recovery_code_action());
+    assert_eq!(
+        account.new_recovery_code(proof, &epoch).unwrap_err(),
+        ConnectError::RecoveryUnanswered
+    );
+    connect.keep_answers();
+    let state = AccountState::load(&a.path).unwrap().unwrap();
+    let pending = state.recovery_pending.clone().expect("pending");
+    assert!(state.recovery_unseen);
+    assert_eq!(
+        connect.recovery_key(&account_id),
+        decode_b64u(&pending.recovery_key).unwrap()
+    );
+    drop(account);
+    // A restart: the next read settles it.
+    let mut account = ConnectAccount::open(&a.store, &a.path)
+        .unwrap()
+        .expect("account");
+    account.set_sleeper(recorded_waits().0);
+    assert!(account.view().expect("view").recovery_changed.is_none());
+    let state = AccountState::load(&a.path).unwrap().unwrap();
+    assert!(state.recovery_pending.is_none());
+    assert!(state.recovery_unseen, "a code that nobody saw");
+    assert_eq!(state.recovery_key, Some(pending.recovery_key.clone()));
+    // Connect does not take the key (a busy service): the old code stays valid.
+    let b = device();
+    let (mut account, old) = create(&connect, &b);
+    let account_id = account.state().account_id.clone();
+    let device_id = account.state().device_id.clone();
+    let before = connect.recovery_key(&account_id);
+    connect.answer_route_error("POST /v1/account/recovery", 503, "busy");
+    let (proof, epoch) = owner.proof(account.new_recovery_code_action());
+    assert_eq!(
+        account.new_recovery_code(proof, &epoch).unwrap_err(),
+        ConnectError::RecoveryUnanswered
+    );
+    connect.clear_route_errors();
+    assert!(
+        AccountState::load(&b.path)
+            .unwrap()
+            .unwrap()
+            .recovery_pending
+            .is_some()
+    );
+    account.view().expect("view");
+    let state = AccountState::load(&b.path).unwrap().unwrap();
+    assert!(state.recovery_pending.is_none());
+    assert!(!state.recovery_unseen, "the mark is as before");
+    assert_eq!(connect.recovery_key(&account_id), before);
+    connect.revoke(&device_id);
+    recovers(&connect, &account_id, &old.words()).expect("the old code still recovers");
+}
+
+/// The rotation succeeds and Apassy quits before the sheet with the code closes: the
+/// account file keeps the mark, so the next start shows the lasting line.
+#[test]
+fn a_quit_between_the_answer_and_the_sheet_leaves_the_lasting_mark() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let (proof, epoch) = owner.proof(account.new_recovery_code_action());
+    let rotated = account.new_recovery_code(proof, &epoch).expect("the code");
+    // The quit: neither the sheet nor "I Saved It".
+    drop(rotated);
+    drop(account);
+    let mut account = ConnectAccount::open(&a.store, &a.path)
+        .unwrap()
+        .expect("account");
+    account.set_sleeper(recorded_waits().0);
+    account.view().expect("view");
+    assert!(account.state().recovery_unseen, "the lasting line");
+    assert!(
+        AccountState::load(&a.path)
+            .unwrap()
+            .unwrap()
+            .recovery_unseen
+    );
+}
+
+/// Connect takes the new code and the account file cannot be written then: the code is
+/// still given, marked as not recorded, and the next read records the rotation.
+#[test]
+fn a_failed_save_after_the_rotation_still_gives_the_code() {
+    use std::os::unix::fs::PermissionsExt;
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    let dir = a.path.parent().unwrap().to_owned();
+    // The first answer is lost; during the wait before the repeat the directory of the
+    // account file stops taking writes.
+    connect.lose_next_answers("POST /v1/account/recovery", 1);
+    let locked = dir.clone();
+    account.set_sleeper(Arc::new(move |_| {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }));
+    let (proof, epoch) = owner.proof(account.new_recovery_code_action());
+    let rotated = account.new_recovery_code(proof, &epoch).expect("the code");
+    let writable = std::fs::File::create(dir.join("probe")).is_ok();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let key = rotated.code.key().unwrap().public_key_b64u();
+    assert_eq!(
+        connect.recovery_key(&account_id),
+        decode_b64u(&key).unwrap()
+    );
+    if writable {
+        // A process that writes anywhere (root) cannot fail the save.
+        assert!(rotated.recorded);
+        return;
+    }
+    assert!(
+        !rotated.recorded,
+        "the sheet says that this computer could not record it"
+    );
+    // The file still holds the pending rotation; the next read records it.
+    let state = AccountState::load(&a.path).unwrap().unwrap();
+    assert!(state.recovery_pending.is_some());
+    account.set_sleeper(recorded_waits().0);
+    account.view().expect("view");
+    let state = AccountState::load(&a.path).unwrap().unwrap();
+    assert!(state.recovery_pending.is_none());
+    assert_eq!(state.recovery_key.as_deref(), Some(key.as_str()));
+    account.recovery_code_seen().expect("I Saved It");
+    assert!(
+        !AccountState::load(&a.path)
+            .unwrap()
+            .unwrap()
+            .recovery_unseen
+    );
+}
+
+/// Another device makes a new recovery code: this device names that device and the day
+/// until the owner takes note ("OK" pins the new key); a key that the line did not name is
+/// refused.
+#[test]
+fn a_new_code_of_another_device_shows_until_ok_pins_it() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let b = device();
+    let mut other = join(&connect, &mut account, &b, &owner);
+    assert!(account.view().expect("view").recovery_changed.is_none());
+    assert!(other.view().expect("view").recovery_changed.is_none());
+    let (proof, epoch) = owner.proof(other.new_recovery_code_action());
+    let rotated = other.new_recovery_code(proof, &epoch).expect("the code");
+    other.recovery_code_seen().expect("I Saved It");
+    let key = rotated.code.key().unwrap().public_key_b64u();
+    // The device that made it says nothing.
+    assert!(other.view().expect("view").recovery_changed.is_none());
+    let changed = account
+        .view()
+        .expect("view")
+        .recovery_changed
+        .expect("the change");
+    assert_eq!(changed.recovery_key, key);
+    assert_eq!(changed.device_name.as_deref(), Some("iPhone"));
+    assert_eq!(
+        changed.device_id.as_deref(),
+        Some(other.state().device_id.as_str())
+    );
+    assert!(changed.at.is_some());
+    // It stays through a restart.
+    let mut account = ConnectAccount::open(&a.store, &a.path)
+        .unwrap()
+        .expect("account");
+    account.set_sleeper(recorded_waits().0);
+    assert!(account.view().expect("view").recovery_changed.is_some());
+    assert_eq!(
+        account.recovery_change_seen(&encode_b64u(&[7u8; 32])),
+        Err(ConnectError::Invalid)
+    );
+    account.recovery_change_seen(&key).expect("OK");
+    assert_eq!(
+        AccountState::load(&a.path)
+            .unwrap()
+            .unwrap()
+            .recovery_key
+            .as_deref(),
+        Some(key.as_str())
+    );
+    assert!(account.view().expect("view").recovery_changed.is_none());
+}
+
+/// A join that waited on disk resumes, and Connect serves a list that verifies but is of
+/// another root, or a valid prefix older than the list of the join answer: both are
+/// refused, no account file is written, and the pending join ends.
+#[test]
+fn a_resumed_join_refuses_another_root_and_an_older_prefix() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    for case in ["another root", "an older prefix"] {
+        let a = device();
+        let (mut account, _) = create(&connect, &a);
+        let account_id = account.state().account_id.clone();
+        // A second device first: the list of the join answer is at version 2.
+        let c = device();
+        join_named(&connect, &mut account, &c, &owner, "iPad");
+        let prefix: Vec<Value> = connect.device_list(&account_id)[..1].to_vec();
+        let b = device();
+        let link = account.start_link().expect("link");
+        let request =
+            JoinRequest::start(client(&connect), &b.store, &b.path, link.code(), "iPhone")
+                .expect("join");
+        drop(request);
+        let joins = account.pending_joins(&link).expect("pending");
+        let (proof, epoch) = owner.proof(joins[0].owner_action(&account_id));
+        account
+            .confirm_join(&link, &joins[0], proof, &epoch)
+            .expect("confirm");
+        let served = match case {
+            "another root" => {
+                let x = device();
+                let (stranger, _) = create(&connect, &x);
+                connect.device_list(&stranger.state().account_id)
+            }
+            _ => prefix,
+        };
+        connect.set_device_list(&account_id, served);
+        let mut resumed = JoinRequest::resume(&b.store, &b.path)
+            .expect("resume")
+            .expect("a pending join");
+        assert_eq!(
+            resumed.poll().unwrap_err(),
+            ConnectError::LinkMismatch,
+            "{case}"
+        );
+        assert!(AccountState::load(&b.path).unwrap().is_none(), "{case}");
+        assert!(
+            JoinRequest::resume(&b.store, &b.path).unwrap().is_none(),
+            "{case}: the join ended"
+        );
+    }
+}
+
+/// A device that the other device confirmed while it was away and then removed: the
+/// resumed join gets `403 device_removed`, and the pending join ends instead of coming
+/// back at every start.
+#[test]
+fn a_resumed_join_of_a_device_removed_after_its_confirmation_ends() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    let a = device();
+    let (mut account, _) = create(&connect, &a);
+    let b = device();
+    let link = account.start_link().expect("link");
+    let request = JoinRequest::start(client(&connect), &b.store, &b.path, link.code(), "iPhone")
+        .expect("join");
+    drop(request);
+    let joins = account.pending_joins(&link).expect("pending");
+    let (proof, epoch) = owner.proof(joins[0].owner_action(&account.state().account_id));
+    let added = account
+        .confirm_join(&link, &joins[0], proof, &epoch)
+        .expect("confirm");
+    connect.revoke(&added.device_id);
+    let mut resumed = JoinRequest::resume(&b.store, &b.path)
+        .expect("resume")
+        .expect("a pending join");
+    assert_eq!(resumed.poll().unwrap_err(), ConnectError::Revoked);
+    assert!(!b.path.with_file_name("pending-join.json").exists());
+    assert!(JoinRequest::resume(&b.store, &b.path).unwrap().is_none());
+    assert!(AccountState::load(&b.path).unwrap().is_none());
+}
+
+/// A creation and a recovery end a join of this device that waits on disk: it is
+/// cancelled at Connect, and its file goes.
+#[test]
+fn a_creation_or_a_recovery_ends_a_pending_join() {
+    let connect = FakeConnect::start();
+    let a = device();
+    let (mut account, old) = create(&connect, &a);
+    let account_id = account.state().account_id.clone();
+    let device_id = account.state().device_id.clone();
+    // A creation.
+    let b = device();
+    let link = account.start_link().expect("link");
+    drop(
+        JoinRequest::start(client(&connect), &b.store, &b.path, link.code(), "iPhone")
+            .expect("join"),
+    );
+    let pending = b.path.with_file_name("pending-join.json");
+    assert!(pending.exists());
+    let cancels = connect.count("POST /v1/account/devices/join/cancel");
+    let (made, _) = create(&connect, &b);
+    assert!(!pending.exists(), "the creation ended the join");
+    assert_eq!(
+        connect.count("POST /v1/account/devices/join/cancel"),
+        cancels + 1
+    );
+    assert!(account.pending_joins(&link).expect("pending").is_empty());
+    drop(made);
+    // A recovery.
+    let c = device();
+    let link = account.start_link().expect("link");
+    drop(
+        JoinRequest::start(client(&connect), &c.store, &c.path, link.code(), "iPad").expect("join"),
+    );
+    let pending = c.path.with_file_name("pending-join.json");
+    assert!(pending.exists());
+    connect.revoke(&device_id);
+    ConnectAccount::recover(
+        client(&connect),
+        &c.store,
+        &c.path,
+        &account_id,
+        &old.words(),
+        "iPad",
+    )
+    .expect("recover");
+    assert!(!pending.exists(), "the recovery ended the join");
+}
+
+/// A join of account A that A confirmed after this device had left it, then a join of
+/// account B: before the key is forgotten, this device removes itself from A with a
+/// signed removal of its own key; when it cannot, the join says that A still lists it.
+#[test]
+fn a_join_of_another_account_leaves_the_account_that_confirmed_late() {
+    let connect = FakeConnect::start();
+    let owner = owner();
+    for removable in [true, false] {
+        let a = device();
+        let (mut account_a, _) = create(&connect, &a);
+        let a_id = account_a.state().account_id.clone();
+        let x = device();
+        let (mut account_b, _) = create(&connect, &x);
+        let b = device();
+        let link = account_a.start_link().expect("link");
+        drop(
+            JoinRequest::start(client(&connect), &b.store, &b.path, link.code(), "iPhone")
+                .expect("join"),
+        );
+        let joins = account_a.pending_joins(&link).expect("pending");
+        let (proof, epoch) = owner.proof(joins[0].owner_action(&a_id));
+        let added = account_a
+            .confirm_join(&link, &joins[0], proof, &epoch)
+            .expect("late confirmation");
+        assert!(connect.live_devices(&a_id).contains(&added.device_id));
+        if !removable {
+            connect.answer_route_error("DELETE /v1/account/devices/", 503, "busy");
+        }
+        let link_b = account_b.start_link().expect("link of B");
+        let request =
+            JoinRequest::start(client(&connect), &b.store, &b.path, link_b.code(), "iPhone")
+                .expect("join of B");
+        connect.clear_route_errors();
+        assert!(request.made_new_key());
+        if removable {
+            assert_eq!(request.left_in_other_account(), None);
+            assert!(
+                !connect.live_devices(&a_id).contains(&added.device_id),
+                "this device removed itself from A"
+            );
+            // The removal is an entry of A's list that A verifies.
+            let view = account_a.view().expect("view");
+            assert!(view.list_verified);
+            assert!(
+                view.devices
+                    .iter()
+                    .all(|device| device.device_id != added.device_id)
+            );
+        } else {
+            assert_eq!(
+                request.left_in_other_account(),
+                Some(("MacBook Pro", "iPhone"))
+            );
+            assert!(connect.live_devices(&a_id).contains(&added.device_id));
+        }
+    }
 }

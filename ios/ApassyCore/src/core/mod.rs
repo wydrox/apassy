@@ -761,7 +761,8 @@ impl Core {
             | "connect_join_poll"
             | "connect_join_cancel"
             | "connect_status"
-            | "connect_forget" => {
+            | "connect_forget"
+            | "connect_recovery_change_seen" => {
                 self.require_app()?;
                 self.connect_call(&op, request)
             }

@@ -4048,17 +4048,28 @@ fn a_live_device_makes_a_new_recovery_code_and_only_that_code_recovers() {
     let token = sign_in(&c, &a);
     let view = c.ok("GET", "/v1/account", Some(&token), None);
     assert_eq!(view["recovery_key"], recovery_key(&code).public_key_b64());
+    // The key of the creation: no device made it.
+    assert_eq!(view["recovery_rotated_at"], Value::Null, "{view}");
+    assert_eq!(view["recovery_rotated_by"], Value::Null, "{view}");
     let body = rotate_body(&c, &a, &code, &next);
     let rotated = c.ok("POST", "/v1/account/recovery", Some(&token), Some(&body));
     assert_eq!(rotated["account_id"], a.account.as_str());
     assert!(rotated["rotated_at"].as_u64().is_some(), "{rotated}");
+    // The answer names the key that Connect holds now: the new one.
+    assert_eq!(
+        rotated["recovery_key"],
+        recovery_key(&next).public_key_b64()
+    );
     assert_eq!(
         rotated.as_object().unwrap().len(),
-        2,
-        "only the account id and the time: {rotated}"
+        3,
+        "only the account id, the time, and the key: {rotated}"
     );
     let view = c.ok("GET", "/v1/account", Some(&token), None);
     assert_eq!(view["recovery_key"], recovery_key(&next).public_key_b64());
+    // The view names when and by which device: every other device notices the change.
+    assert_eq!(view["recovery_rotated_at"], rotated["rotated_at"], "{view}");
+    assert_eq!(view["recovery_rotated_by"], a.id.as_str(), "{view}");
     let rows = |action: &str| -> Vec<(String, String)> {
         c.relay
             .relay_audit()
@@ -4097,6 +4108,20 @@ fn a_live_device_makes_a_new_recovery_code_and_only_that_code_recovers() {
     let (status, recovered) = recover(&recover_body(&c, &a.account, &next, &new_key, &[9u8; 16]));
     assert_eq!(status, 200, "{recovered}");
     assert_eq!(recovered["result"]["account_id"], a.account.as_str());
+    // The recovery set the key: no device made it.
+    let b = Dev {
+        key: new_key,
+        account: a.account.clone(),
+        id: recovered["result"]["device_id"].as_str().unwrap().into(),
+    };
+    let token = sign_in(&c, &b);
+    let view = c.ok("GET", "/v1/account", Some(&token), None);
+    assert_eq!(
+        view["recovery_key"],
+        recovery_key(&[9u8; 16]).public_key_b64()
+    );
+    assert_eq!(view["recovery_rotated_at"], Value::Null, "{view}");
+    assert_eq!(view["recovery_rotated_by"], Value::Null, "{view}");
 }
 
 /// A new recovery code needs the caller's own signature over the stored key at this
@@ -4180,6 +4205,43 @@ fn a_new_recovery_code_needs_the_signature_of_a_live_device_over_the_stored_key(
         "{answer}"
     );
     assert_eq!(stored(&c), recovery_key(&[6u8; 16]).public_key_b64());
+}
+
+/// A 1006 file of a build before `account.recovery_rotated_by` opens: the column is added
+/// in place, empty, and the rows stay.
+#[test]
+fn a_directory_at_1006_without_the_rotating_device_gains_the_column() {
+    let c = start();
+    create(&c);
+    let (config, dir) = {
+        let Connect { relay, .. } = c;
+        relay.stop_keep()
+    };
+    let open = || {
+        let conn = rusqlite::Connection::open(config.directory_path()).unwrap();
+        conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+            .unwrap();
+        conn
+    };
+    open()
+        .execute_batch("ALTER TABLE account DROP COLUMN recovery_rotated_by;")
+        .unwrap();
+    drop(Directory::open(&config).expect("opens"));
+    let conn = open();
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+    assert_eq!(
+        count(
+            "SELECT COUNT(*) FROM pragma_table_info('account') WHERE name = 'recovery_rotated_by'"
+        ),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM account WHERE recovery_rotated_by IS NULL"),
+        1
+    );
+    assert_eq!(count("PRAGMA user_version"), DIRECTORY_VERSION);
+    drop(conn);
+    drop(dir);
 }
 
 /// A 1006 file that has `account_list.name` but lacks another part of this build's accounts

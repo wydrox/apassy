@@ -440,3 +440,90 @@ fn changing_the_hosting_or_training_needs_a_fresh_check() {
         None
     );
 }
+
+/// The start screen's gate while no vault is unlocked (connect-account-v1 section 7.5): only
+/// "Use the Copy That … Left…" of a store is confirmed there, with the platform check, and
+/// its proof is bound to the start-screen session. A new recovery code and the replace of a
+/// departed copy need an unlocked vault; a failed platform check gives no proof; and a proof
+/// of the start screen counts for nothing in the vault session that an unlock starts.
+#[test]
+fn the_gate_without_a_vault_confirms_only_the_copy_of_a_departed_device() {
+    use std::sync::{Arc, Mutex};
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _path) = vault(&dir);
+    assert!(session.is_locked());
+    let fake = FakeNative::new("start");
+    let start: Arc<Mutex<Option<[u8; 32]>>> = Arc::new(Mutex::new(Some([5u8; 32])));
+    let held = Arc::clone(&start);
+    let gate = OwnerGate::new(session.shared_vault(), Some(fake.helper()))
+        .with_start_session(Arc::new(move || *held.lock().unwrap()));
+    let take = OwnerAction::TakeDepartedCopy {
+        team_id: "t".repeat(32),
+        version: 7,
+        head: "a".repeat(64),
+        replace: false,
+    };
+    fake.respond("authenticate", r#"{"ok":true}"#);
+    for refused in [
+        OwnerAction::NewRecoveryCode {
+            account_id: "acc_k7m2q4x3ca".into(),
+        },
+        OwnerAction::TakeDepartedCopy {
+            team_id: "t".repeat(32),
+            version: 7,
+            head: "a".repeat(64),
+            replace: true,
+        },
+        OwnerAction::UseRelayCopy {
+            team_id: "t".repeat(32),
+            version: 7,
+            head: "a".repeat(64),
+        },
+    ] {
+        assert_eq!(
+            gate.authorize(refused.clone(), OwnerCheck::TouchId)
+                .unwrap_err(),
+            OwnerAuthError::VaultLocked,
+            "{refused:?}"
+        );
+    }
+    assert!(
+        fake.requests_for("authenticate").is_empty(),
+        "no platform check for a refused action"
+    );
+    // The platform check fails: no proof.
+    fake.fail("authenticate", "failed");
+    assert_eq!(
+        gate.authorize(take.clone(), OwnerCheck::TouchId)
+            .unwrap_err(),
+        OwnerAuthError::TouchIdFailed
+    );
+    fake.fail("authenticate", "cancelled");
+    assert_eq!(
+        gate.authorize(take.clone(), OwnerCheck::TouchId)
+            .unwrap_err(),
+        OwnerAuthError::TouchIdCancelled
+    );
+    // The passphrase cannot confirm it: no vault holds one.
+    assert!(matches!(
+        gate.authorize(take.clone(), OwnerCheck::passphrase(PASS)),
+        Err(OwnerAuthError::Other(_))
+    ));
+    fake.respond("authenticate", r#"{"ok":true}"#);
+    let proof = gate
+        .authorize(take.clone(), OwnerCheck::TouchId)
+        .expect("a proof for the start screen");
+    assert_eq!(proof.check(&take, &[5u8; 32]), Ok(()));
+    // A vault unlocks: the start-screen proof is of another session.
+    session.unlock(PASS).expect("unlock");
+    let epoch = session.epoch().expect("the vault session");
+    assert!(proof.check(&take, &epoch).is_err());
+    // And a start session that changed meanwhile gives no proof.
+    session.lock().expect("lock");
+    *start.lock().unwrap() = Some([6u8; 32]);
+    let proof = gate
+        .authorize(take.clone(), OwnerCheck::TouchId)
+        .expect("a proof for the new start session");
+    assert!(proof.check(&take, &[5u8; 32]).is_err());
+    assert_eq!(proof.check(&take, &[6u8; 32]), Ok(()));
+}

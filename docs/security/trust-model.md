@@ -200,8 +200,10 @@ starts, and only while no vault is unlocked. The key is read once for that step,
 list its vault stores: with Touch ID on the Mac; on Linux from the private file, with no prompt (ADR 0045:
 the mode of the file protects it, not a check of Apassy, so another program of the same user can read it
 whether or not this step runs). Every way out of the step (another source of that screen, the start
-screen's home, a lock, a quit, or the first vault session) closes the session and drops what holds the
-key, also a download from a vault store that is under way. The one owner check of that step, taking the
+screen's home, a lock, a quit, or the first vault session, also of another vault than the one that the
+step downloads) closes the session and drops what holds the key, also a download from a vault store
+that is under way and a copy that waits for its passphrase; only a copy that its passphrase opens
+already finishes opening. The one owner check of that step, taking the
 copy that a removed device left on a vault store, is Touch ID, or system authentication on Linux, bound
 to the session of the step: no unlocked vault holds a passphrase to check. A join of this device that
 waits keeps public values on disk (`connect/pending-join.json`, mode 0600: ids, names, keys, the link
@@ -306,7 +308,14 @@ signs the `unshare` by itself, until which the member's earlier heads still coun
 
 **The recovery code** is the seed of an Ed25519 key pair. Connect stores only the public key; a
 recovery is a signature by that key over the new device key and the next recovery key, so the code
-never leaves the device where it is typed.
+never leaves the device where it is typed. A new code of a live device (connect-account-v1 section 9.1)
+is written first as a pending rotation of public values (the old and the new public key and the signed
+statement), so a lost answer or a quit never leaves the owner with a code that stopped working
+unannounced: the device shows the code only when Connect names its key, and keeps the mark of a code
+that nobody saw until the owner closes its sheet. Each device pins the public key that it saw last, so
+a new code of another device shows on every other device with the name of that device and its day.
+A Connect that lies about the key can make a device say that the code changed, or that it did not;
+it cannot learn or use a code.
 
 **Relay copies without a code (plan s7 S0).** The hosted relay gets the team name `Vault` and the
 device name `Mac` (or `iPhone`) of a codeless relay copy, never the names that the owner gave them;
