@@ -285,6 +285,61 @@ describe("sign-in rate limit", () => {
   }
 });
 
+describe("shared vault rate limit", () => {
+  const routes: [string, string][] = [
+    ["POST", "/v1/account/list"],
+    ["POST", "/v1/account/peers/link"],
+    ["POST", "/v1/account/peers/join"],
+    ["GET", "/v1/account/peers/pending"],
+    ["GET", "/v1/account/peers/join/4"],
+    ["DELETE", "/v1/account/peers/join/4"],
+    ["GET", "/v1/account/peers/acc_k7m2q4x3ca"],
+  ];
+  const limiter = (used: string[], name: string, success: boolean) => ({
+    async limit({ key }: { key: string }) {
+      used.push(`${name}:${key}`);
+      return { success };
+    },
+  });
+  for (const [method, path] of routes) {
+    it(`uses AUTH_LIMITER in a budget of its own for ${method} ${path}`, async () => {
+      const used: string[] = [];
+      const body = method === "GET" ? undefined : "{}";
+      const refused = await call(path, { method, body, headers: { "cf-connecting-ip": "2001:db8:1:2:3:4:5:6" } }, {
+        AUTH_LIMITER: limiter(used, "auth", false),
+        CREATE_LIMITER: limiter(used, "create", true),
+        ACCOUNT_LIMITER: limiter(used, "account", true),
+      });
+      assert.equal(refused.status, 429);
+      assert.equal(refused.headers.get("retry-after"), "60");
+      assert.equal((await envelope(refused)).error.code, "rate_limited");
+      assert.equal(seen.length, 0);
+      assert.deepEqual(used, ["auth:peers:2001:db8:1:2::/64"]);
+      used.length = 0;
+      const passed = await call(path, { method, body, headers: { "cf-connecting-ip": "192.0.2.7" } }, {
+        AUTH_LIMITER: limiter(used, "auth", true),
+      });
+      assert.equal(passed.status, 201);
+      assert.equal(seen.length, 1);
+      assert.deepEqual(used, ["auth:peers:192.0.2.7"]);
+    });
+  }
+
+  it("passes when AUTH_LIMITER is missing or fails, and leaves the other account routes alone", async () => {
+    for (const AUTH_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+      const response = await call("/v1/account/peers/pending", { method: "GET" }, { AUTH_LIMITER });
+      assert.equal(response.status, 201);
+      assert.equal(seen.length, 1);
+    }
+    const used: string[] = [];
+    for (const [method, path] of [["GET", "/v1/account"], ["GET", "/v1/account/vaults"], ["GET", "/v1/account/peers"]]) {
+      const response = await call(path!, { method }, { AUTH_LIMITER: limiter(used, "auth", false) });
+      assert.equal(response.status, 201, path);
+    }
+    assert.deepEqual(used, []);
+  });
+});
+
 /** A relay that records the headers it is sent and does not read the body. */
 function recordingRelay() {
   const forwarded: { target: string; headers: Headers }[] = [];
