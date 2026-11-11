@@ -850,6 +850,112 @@ svg{display:block}
   </ul>
 </section>
 
+<!-- ============================================================ 9 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">9</span>Apassy Connect · the move and the end of the free path</b>
+    <span>Plan s7 unit M5. The shipped rows of this section, with new texts only; no new look.</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">9a · Both moves</div>
+      <div class="gl">This Mac</div>
+      <div class="grp">
+        <div class="fr"><div class="att"><div class="ai" style="background:var(--accent)"><svg><use href="#i-relay"/></svg></div><div><div class="t1">Approvals go through Apassy relay</div><div class="t2">Move them here: over your tailnet, or through Apassy Connect.</div></div></div></div>
+        <div class="fr" style="justify-content:flex-end;gap:6px"><span class="pb pri">Move Approvals to This Mac…</span><span class="pb">Move Approvals to Connect…</span></div>
+      </div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9b · Connect without Tailscale</div>
+      <div class="gl">This Mac</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>Reachable on Your Tailnet</div><div class="nt">Approvals go through Apassy relay.</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw"></span></div>
+        <div class="fr"><div class="att"><div class="ai" style="background:var(--accent)"><svg><use href="#i-relay"/></svg></div><div><div class="t1">Approvals go through Apassy relay</div><div class="t2">Move them to Apassy Connect: your iPhone reaches this Mac without Tailscale.</div></div></div><span class="pb pri">Move Approvals to Connect…</span></div>
+      </div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9c · Waits for the first approval</div>
+      <div class="gl">This Mac</div>
+      <div class="grp">
+        <div class="fr"><div class="att"><div class="ai" style="background:var(--accent)"><svg><use href="#i-relay"/></svg></div><div><div class="t1">Moving approvals to Apassy Connect</div><div class="t2">The old path stays until the first approval went through Apassy Connect.</div></div></div><span class="pb">Undo</span></div>
+      </div>
+      <div class="tn acc" style="margin:10px 4px 0"><svg><use href="#i-info"/></svg><span>HUD after the confirmation: "Approvals now go through Apassy Connect. The old path through apassy-relay.wyderka.cc stays until the first approval went through Apassy Connect."</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9d · The hosted relay ended the approvals (410)</div>
+      <div class="gl">Relay</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>Send Questions Through the Relay</div><div class="nt">Stopped. Questions wait on this Mac.</div></div><span class="hi"><svg><use href="#i-info"/></svg></span><span class="sw on"></span></div>
+        <div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Free approvals through apassy-relay.wyderka.cc ended with Apassy 0.5.20.</span></div><span class="hi"><svg><use href="#i-info"/></svg></span></div>
+        <div class="fr" style="justify-content:flex-end;gap:6px"><span class="pb">Move Approvals to This Mac…</span><span class="pb">Move Approvals to Connect…</span></div>
+      </div>
+      <p class="lead" style="margin-top:8px">Without either choice: "Turn on “Reachable on Your Tailnet” above, or Apassy Connect for this Mac in Bouncer › Agents." With <code>hosted_retired</code>: "apassy-relay.wyderka.cc no longer carries these approvals."</p>
+    </div>
+    <div class="shc">
+      <div class="plabel">9e · A device through Connect</div>
+      <div class="gl">Devices <span class="hi" style="margin-left:0"><svg><use href="#i-info"/></svg></span><span>2</span></div>
+      <div class="grp">
+        <div class="fr"><div class="dv"><svg><use href="#i-mini"/></svg></div><div class="kn"><div>Mac mini (office) <span class="cap">This Mac</span></div><div class="nt">Mac · Hosts approvals</div></div><span class="when">Now</span><span class="pb" style="visibility:hidden">Revoke…</span></div>
+        <div class="fr"><div class="dv"><svg><use href="#i-phone"/></svg></div><div class="kn"><div>Rafal's iPhone</div><div class="nt">iPhone · Approves runs</div></div><span class="route mac">via Apassy Connect</span><span class="when">4 min ago</span><span class="pb">Revoke…</span></div>
+      </div>
+    </div>
+    <div class="shc">
+      <div class="plabel">9f · A relay copy that the hosted relay ended</div>
+      <div class="gl">Sync</div>
+      <div class="grp">
+        <div class="fr"><div class="k">Personal</div><div class="v" style="color:#c93400">Relay copy ended</div></div>
+        <div class="fr"><div class="kn" style="color:var(--sec);font-size:12.5px">Relay sync on apassy-relay.wyderka.cc ended with Apassy 0.5.20. The vault on this Mac is safe and does not change. Make your own Mac or Linux node the sync home (free), or move the copy to Apassy Connect.</div></div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>9a, 9b</b> show while the approvals go through Apassy relay and the node runs on Apassy Connect (the owner's route is on and Connect named the node). Without Tailscale the node pairs with its own origin; the code carries the Connect route and the iPhone dials through Connect.</li>
+    <li><b>Move Approvals to Connect…</b> runs the move of frame 4 with a code that carries the Connect route. After the confirmation the vault asks through this Mac; the hosted membership stays (9c) until the first approval went round through Apassy Connect, then its devices leave Apassy relay. <b>Undo</b> puts the old path back before that; nothing needs Touch ID, because nothing new can approve.</li>
+    <li><b>The code</b> carries the Connect route only while the node is on Connect. Otherwise it is the code of today: an older iPhone app refuses a code with the new fields.</li>
+    <li><b>9d</b> replaces the notice once the hosted relay answers <code>410</code>. Apassy asks it nothing more; the questions wait on this Mac; Activity says it once.</li>
+    <li><b>9e</b>: "via Apassy Connect" when the node runs with only the Connect route. With the tailnet route on as well the row keeps "via your Mac": both routes reach this Mac, and the node does not record which one a request used yet.</li>
+    <li><b>9f</b>: the row of Settings › Vault › Sync and the sidebar ("Relay copy ended"); the worker and the waiter stop calling the hosted relay for that copy.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 10 -->
+<section class="frame">
+  <div class="flabel"><b><span class="fnum">10</span>Use a vault from another Mac › Apassy Connect</b>
+    <span>A Mac of the same account that does not have the vault yet. No link: the store lists this Mac already.</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">10a · The vaults of the account</div>
+      <h2>Use a vault from another Mac</h2>
+      <div style="margin:8px 0"><span class="pb">Synced folder</span> <span class="pb">Apassy relay</span> <span class="pb pri">Apassy Connect</span></div>
+      <p class="lead">The vaults that your other Macs keep in Apassy Connect. No link is needed: this Mac is a device of your account. Use the passphrase of the vault.</p>
+      <div class="gl">Vaults in Apassy Connect</div>
+      <div class="grp">
+        <div class="fr"><div class="kn"><div>Personal</div><div class="nt">Your vault</div></div><span class="pb">Use This Vault…</span></div>
+        <div class="fr"><div class="kn"><div>Family</div><div class="nt">Shared vault</div></div><span class="pb">Use This Vault…</span></div>
+      </div>
+    </div>
+    <div class="shc">
+      <div class="plabel">10b · Nothing waits</div>
+      <h2>Use a vault from another Mac</h2>
+      <p class="lead">No vault of your account waits for this Mac. On the other Mac, open Settings › Vault › Sync and select Apassy Connect.</p>
+      <p class="lead" style="color:var(--sec)">Signed out: "Sign in to Apassy Connect in Settings › Connect first. Then the vaults of your account show here."</p>
+    </div>
+    <div class="shc">
+      <div class="plabel">10c · The passphrase</div>
+      <h2>Use a vault from another Mac</h2>
+      <div class="tn acc"><svg><use href="#i-ok"/></svg><span>“Personal” is downloaded.</span></div>
+      <div class="grp" style="margin-top:10px">
+        <div class="fr"><div class="k">Vault passphrase</div><div class="v">••••••••••••</div></div>
+        <div class="fr"><div class="k">Name on this Mac</div><div class="v">Personal</div></div>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Use this vault</span></div>
+    </div>
+  </div>
+  <ul class="fnotes">
+    <li><b>The list</b> holds the stores of the account that list this Mac and whose vault is not on this Mac. A store that does not list this Mac yet comes when another Mac of the account adds the newer devices (it does so by itself every few minutes, only for verified devices).</li>
+    <li><b>Cancel</b> keeps this Mac in the store: it is this Mac's account device, not a new one.</li>
+    <li><b>The passphrase</b> step is the step of the relay source; the new vault syncs through Apassy Connect at once.</li>
+  </ul>
+</section>
+
 <div class="notes">
   <h2>Texts to keep exactly</h2>
   <table>
@@ -858,7 +964,8 @@ svg{display:block}
     <tr><td>Node rows</td><td>Address · Port · Node Words · Notifications</td><td>Address is the Tailscale IPv4 only; Copy copies the origin <code>https://100.101.7.12:8444</code>.</td></tr>
     <tr><td>Node problems</td><td>Tailscale is not installed. / Tailscale is not connected. / Another app uses port 8444. / The address changed. Paired devices must pair again.</td><td>Buttons: Get Tailscale… / Check Again / Use Port 8445 / Pair Again….</td></tr>
     <tr><td>Device sublines</td><td>&lt;Kind&gt; · &lt;Role&gt;[ · &lt;Role&gt;]</td><td>Kinds: Mac, iPhone, Apple Watch, Linux node. Roles: Hosts approvals, Asks for approvals, Approves runs, Sees requests, Syncs &lt;vault&gt;.</td></tr>
-    <tr><td>Route</td><td>via your Mac · via Apassy relay · Tailnet · Wi-Fi</td><td>Lowercase "via", as D9 writes it. Colors: green, grey, blue, orange.</td></tr>
+    <tr><td>Route</td><td>via your Mac · via Apassy relay · via Apassy Connect · Tailnet · Wi-Fi</td><td>Lowercase "via", as D9 writes it. Colors: green, grey, green, blue, orange.</td></tr>
+    <tr><td>Connect (frame 9)</td><td>Move Approvals to Connect… / Moving approvals to Apassy Connect / The old path stays until the first approval went through Apassy Connect. / Undo</td><td>Ended: "Free approvals through apassy-relay.wyderka.cc ended with Apassy &lt;version&gt;." and "Stopped. Questions wait on this Mac."</td></tr>
     <tr><td>Row buttons</td><td>Revoke… · Details… · Remove…</td><td>Revoke… for node and relay devices, Details… for a Linux node, Remove… for Wi-Fi iPhones (today's word).</td></tr>
     <tr><td>Primary</td><td>Add an iPhone or a Mac… · Move Approvals to This Mac…</td><td>Only one is blue at a time (frame 4).</td></tr>
     <tr><td>Add sheet</td><td>Add a Device / Scan with the Apassy app on the iPhone. / Expires In / On a Mac, paste the link instead.</td><td>Expired: "The link expired." + New Link.</td></tr>
@@ -875,7 +982,7 @@ svg{display:block}
   <ul>
     <li><b>Reachable on Your Tailnet</b> (frame 3e, open): over Tailscale; only tailnet devices connect, nothing opens to the internet; each device signs in with its own key; Touch ID to switch; stops when the vault locks.</li>
     <li><b>Node Words</b>: "Six words from this Mac's certificate." "Your iPhone shows them in Settings → Devices." "Other words there: revoke that iPhone and pair again."</li>
-    <li><b>Devices</b> (the ⓘ by the group title): "via your Mac: straight to this Mac over your tailnet." "via Apassy relay: through apassy-relay.wyderka.cc, end-to-end encrypted." "Tailnet: your own Linux node." "Wi-Fi: the old pairing. It ends soon."</li>
+    <li><b>Devices</b> (the ⓘ by the group title): "via your Mac: straight to this Mac over your tailnet." "via Apassy relay: through apassy-relay.wyderka.cc, end-to-end encrypted." "via Apassy Connect: to this Mac through Apassy Connect, pinned to its certificate." "Tailnet: your own Linux node." "Wi-Fi: the old pairing. It ends soon."</li>
     <li><b>Wi-Fi Pairing</b> (frame 6c, open).</li>
   </ul>
 

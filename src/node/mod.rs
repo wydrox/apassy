@@ -497,6 +497,21 @@ struct Running {
     tunnel: Option<TunnelHandle>,
     /// `https://<public name>` that this start used, when it knew it.
     connect_origin: Option<String>,
+    /// The pairing route of a node that runs with only the Connect route (no tailnet
+    /// route): the devices pair with it and reach the node through the Connect dial
+    /// (plan s7 unit M5). The Mac's own clients reach it through a local route.
+    connect_pairing: Option<ConnectPairing>,
+}
+
+/// The origin, the pin, and the name of the pairing codes of a node with only the
+/// Connect route (plan s7 unit M5; node-pairing-v1 sections 3 and 7a): the origin that
+/// the devices sign (the one they paired with, else the public name with the node port),
+/// the pin of the node certificate that the dial serves, and the node name.
+#[derive(Debug, Clone)]
+struct ConnectPairing {
+    origin: String,
+    pin: crate::net::pin::Pin,
+    name: String,
 }
 
 /// The "Apassy Connect" route of this Mac, for Bouncer > Agents.
@@ -658,6 +673,24 @@ impl Node {
             .as_ref()
             .and_then(|running| running.tailnet.as_ref())
             .map(|route| route.origin.clone())
+    }
+
+    /// The origin that a new node team and its pairing codes name: the node origin of the
+    /// tailnet route, else, for a node with only the Connect route, the origin that its
+    /// devices sign and reach through the Connect dial (plan s7 unit M5).
+    pub fn pairing_origin(&self) -> Option<String> {
+        lock(&self.running).as_ref().and_then(|running| {
+            running
+                .tailnet
+                .as_ref()
+                .map(|route| route.origin.clone())
+                .or_else(|| {
+                    running
+                        .connect_pairing
+                        .as_ref()
+                        .map(|pairing| pairing.origin.clone())
+                })
+        })
     }
 
     /// The last start failed for a reason that can pass by itself (Tailscale was not up,
@@ -1117,10 +1150,25 @@ impl Node {
             return Err(failure);
         }
         // The tunnel last: it connects by itself, and a stop closes it first.
+        let connect_pin = connect_certificate
+            .as_ref()
+            .map(|(certificate, _)| certificate.pin);
         let tunnel = match (connect, connect_certificate) {
             (Some(setup), Some((certificate, seal))) => {
                 self.start_tunnel(setup, certificate, seal, connect_targets)
             }
+            _ => None,
+        };
+        // Only the Connect route: the devices pair with the device origin and reach the
+        // node through the dial; this Mac's own clients take a local route to it.
+        let connect_pairing = match (&route, &tunnel, &device_origin, connect_pin) {
+            (None, Some(_), Some(origin), Some(pin)) => tailnet_target
+                .and_then(|(_, local)| crate::sync::relay_http::set_local_route(origin, local).ok())
+                .map(|()| ConnectPairing {
+                    origin: origin.clone(),
+                    pin,
+                    name: crate::sync::device_name(),
+                }),
             _ => None,
         };
         *lock(&self.running) = Some(Running {
@@ -1132,6 +1180,7 @@ impl Node {
             tailnet: route,
             tunnel,
             connect_origin,
+            connect_pairing,
         });
         Ok(())
     }
@@ -1411,6 +1460,9 @@ impl Node {
         // The front first, then the node: the sessions end at once, before the slower
         // command line. Then the local route of the origin.
         Self::stop_parts(&running.shared, running.host.take(), running.tailnet.take());
+        if let Some(pairing) = running.connect_pairing.take() {
+            crate::sync::relay_http::clear_local_route(&pairing.origin);
+        }
         if running.funnel_on {
             let _ = self.funnel.disable(running.port);
         }
@@ -1678,16 +1730,23 @@ impl Node {
         let Some(membership) = membership else {
             return status;
         };
+        // A node with only the Connect route pairs with its own origin (plan s7 unit M5).
+        let connect_origin = lock(&self.running)
+            .as_ref()
+            .filter(|running| running.tailnet.is_none())
+            .and_then(|running| running.connect_pairing.as_ref())
+            .map(|pairing| pairing.origin.clone());
         let here = status
             .origin
             .as_deref()
+            .or(connect_origin.as_deref())
             .is_some_and(|origin| questions_team::on_node(&membership, origin));
         if !here {
             status.questions_elsewhere = Some(membership.relay_url.clone());
             return status;
         }
         status.questions_team = Some(membership.team_id.clone());
-        if !status.running {
+        if !status.running && connect_origin.is_none() {
             return status;
         }
         let team = NodeTeamId(membership.team_id.clone());
@@ -1790,6 +1849,16 @@ impl Node {
                 ),
             )
         })?;
+        if running.tailnet.is_none()
+            && let Some(pairing) = &running.connect_pairing
+        {
+            // Only the Connect route (plan s7 unit M5).
+            return Ok((
+                pairing.origin.clone(),
+                pairing.name.clone(),
+                running.shared.epoch(),
+            ));
+        }
         let route = running.tailnet.as_ref().ok_or_else(|| {
             error(
                 "tailnet_off",
@@ -1807,14 +1876,38 @@ impl Node {
         ))
     }
 
+    /// The origin, the pin, and the tailnet alternatives that a new node team names: the
+    /// tailnet route, else the route of a node with only the Connect route (plan s7 unit
+    /// M5; its code adds the Connect route as its last alternative).
+    fn pairing_trust(&self) -> Result<(String, crate::net::pin::Pin, Vec<String>), NodeError> {
+        let running = lock(&self.running);
+        let running = running
+            .as_ref()
+            .ok_or_else(|| error("node_stopped", "The node is not running."))?;
+        if let Some(route) = &running.tailnet {
+            return Ok((route.origin.clone(), route.pin, route.alt.clone()));
+        }
+        running
+            .connect_pairing
+            .as_ref()
+            .map(|pairing| (pairing.origin.clone(), pairing.pin, Vec::new()))
+            .ok_or_else(|| error("node_stopped", "The node is not running."))
+    }
+
     /// The pin and the alternatives of the running route: the certificate that the front
     /// serves now.
     fn route_trust(&self) -> Result<(String, Vec<String>), NodeError> {
         let running = lock(&self.running);
-        running
+        let running = running
             .as_ref()
-            .and_then(|running| running.tailnet.as_ref())
-            .map(|route| (route.pin.text(), route.alt.clone()))
+            .ok_or_else(|| error("node_stopped", "The node is not running."))?;
+        if let Some(route) = &running.tailnet {
+            return Ok((route.pin.text(), route.alt.clone()));
+        }
+        running
+            .connect_pairing
+            .as_ref()
+            .map(|pairing| (pairing.pin.text(), Vec::new()))
             .ok_or_else(|| error("node_stopped", "The node is not running."))
     }
 
@@ -1919,13 +2012,11 @@ impl Node {
         }
         let route_err = || error("node_stopped", "The node is not running.");
         let membership = {
-            let running = lock(&self.running);
-            let route = running
-                .as_ref()
-                .and_then(|running| running.tailnet.as_ref())
-                .ok_or_else(route_err)?;
+            let (origin, pin, alt) = self.pairing_trust()?;
             shared
-                .with_node(|node| questions_team::new_node_team(node, route, device_name))
+                .with_node(|node| {
+                    questions_team::new_node_team_at(node, &origin, &pin, &alt, device_name)
+                })
                 .ok_or_else(route_err)??
         };
         let mut guard = lock(vault);
@@ -2102,13 +2193,11 @@ impl Node {
         let route_err = || error("node_stopped", "The node is not running.");
         let shared = self.shared().ok_or_else(route_err)?;
         let node = {
-            let running = lock(&self.running);
-            let route = running
-                .as_ref()
-                .and_then(|running| running.tailnet.as_ref())
-                .ok_or_else(route_err)?;
+            let (origin, pin, alt) = self.pairing_trust()?;
             shared
-                .with_node(|node| questions_team::new_node_team(node, route, device_name))
+                .with_node(|node| {
+                    questions_team::new_node_team_at(node, &origin, &pin, &alt, device_name)
+                })
                 .ok_or_else(route_err)??
         };
         let client = QuestionsClient::from_membership(&node).map_err(questions_team::sync_error)?;
@@ -2206,6 +2295,44 @@ impl Node {
         Ok(MoveDone {
             team_id,
             hosted_removed,
+        })
+    }
+
+    /// "Move Approvals to Connect", step 2 (plan s7 unit M5, section 5), after a device
+    /// joined the node team with a code that carries the Connect route: the questions of
+    /// the vault go through the node team now, but the hosted membership stays in the
+    /// vault (`crate::relay::membership::move_questions_keeping_hosted`) and its devices
+    /// stay on the hosted relay. The window takes them off only after the first question
+    /// went round through the node team (`finish_move_to_connect`), and puts the hosted
+    /// team back after a failure (`undo_move_to_connect`). No relay call.
+    pub fn finish_move_keeping_hosted(
+        &self,
+        vault: &SharedVault,
+        device_name: &str,
+    ) -> Result<MoveDone, NodeError> {
+        let moving = lock(&self.moving)
+            .take()
+            .ok_or_else(|| error("not_found", "No move of the approvals runs."))?;
+        let mut guard = lock(vault);
+        let open = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.epoch() == moving.epoch)
+            .ok_or_else(|| {
+                error(
+                    "vault_locked",
+                    "The vault was locked. Start the move again.",
+                )
+            })?;
+        crate::relay::membership::move_questions_keeping_hosted(
+            open,
+            &moving.node,
+            &moving.hosted_team,
+            device_name,
+        )
+        .map_err(questions_team::sync_error)?;
+        Ok(MoveDone {
+            team_id: moving.node.team_id.clone(),
+            hosted_removed: false,
         })
     }
 

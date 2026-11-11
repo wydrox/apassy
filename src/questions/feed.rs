@@ -1714,7 +1714,11 @@ impl Shared {
 
     /// A feed call failed for a reason that does not pass by itself.
     fn feed_error(&self, active: &Active, error: &QuestionsError) {
-        if error.status() == Some(404) {
+        if let Some(why) = error.path_ended() {
+            // `410` of the hosted relay (plan s7 unit M5): the questions and the feed of
+            // the team stop for good.
+            self.mark_ended(active, "Apassy", why);
+        } else if error.status() == Some(404) {
             self.feed_unsupported(active);
         } else if error.code() == Some("feed_rate") {
             // `403 feed_rate` (section 10.2): this Mac read its feed text of the relay's
@@ -1826,6 +1830,10 @@ impl Shared {
             Ok(list) => list,
             Err(error) if error.status() == Some(404) => {
                 self.feed_unsupported(&active);
+                return;
+            }
+            Err(error) if error.path_ended().is_some() => {
+                self.feed_error(&active, &error);
                 return;
             }
             Err(error) => {

@@ -110,6 +110,14 @@ impl Hold {
 /// The failure of a scripted `403 feed_rate` ([`FakeRelay::rate_feed_reads`]): no real
 /// status, so `fail_next` keeps its plain statuses.
 const FEED_RATE: u16 = 1403;
+/// Scripted `410 free_connect_ended` for [`FakeRelay::fail_next`] (plan s7 unit M5): the
+/// hosted relay ended the free path of a team.
+#[allow(dead_code)]
+pub const FREE_CONNECT_ENDED: u16 = 1410;
+/// Scripted `410 hosted_retired` for [`FakeRelay::fail_next`]: the hosted relay serves
+/// Apassy Connect only.
+#[allow(dead_code)]
+pub const HOSTED_RETIRED: u16 = 2410;
 
 #[derive(Clone)]
 struct Device {
@@ -1133,6 +1141,8 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
         }
         Some(503) => fail(503, "busy"),
         Some(FEED_RATE) => fail(403, "feed_rate"),
+        Some(FREE_CONNECT_ENDED) => fail(410, "free_connect_ended"),
+        Some(HOSTED_RETIRED) => fail(410, "hosted_retired"),
         Some(status) => fail(status, "relay_error"),
         None => route(shared, &request),
     };

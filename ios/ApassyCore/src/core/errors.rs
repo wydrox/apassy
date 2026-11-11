@@ -212,6 +212,13 @@ impl From<RelayRefusal> for CoreError {
                 Self::new("busy", "The relay is busy with another device. Try again.")
             }
             RelayRefusal::NotFound => Self::new("removed", "The relay does not know this vault."),
+            // `410 free_connect_ended` and `410 hosted_retired` to a sync call (a join, a
+            // sign-in, a vault sync): the code of the ended questions (ios-core-v1 section
+            // 5.10, "The end of the free hosted paths"), with words for any call.
+            RelayRefusal::FreeEnded | RelayRefusal::HostedRetired => Self::new(
+                super::questions::RELAY_ENDED,
+                "This relay has ended this service. Pair this iPhone again from Apassy on your Mac.",
+            ),
             RelayRefusal::InvalidRequest | RelayRefusal::Error => {
                 Self::internal("The relay refused the request.")
             }
