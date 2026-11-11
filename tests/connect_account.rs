@@ -324,7 +324,7 @@ fn the_vectors_reproduce_the_words_hashes_keys_and_messages() {
     assert_eq!(root_hash(origin, account, &a_public), hashes[0]);
     let verified = verify_list(origin, account, &a_public, &list).unwrap();
     assert_eq!(verified.hashes, hashes);
-    assert_eq!(verified.live, [a_public.clone()]);
+    assert_eq!(verified.live, std::slice::from_ref(&a_public));
     let at_two = verify_list(origin, account, &a_public, &list[..2]).unwrap();
     assert_eq!(at_two.live, [a_public.clone(), b_public.clone()]);
     assert!(verify_list(origin, account, &b_public, &list).is_none());

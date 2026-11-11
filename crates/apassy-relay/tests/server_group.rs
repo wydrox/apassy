@@ -721,7 +721,10 @@ fn a_members_store_sign_in_needs_the_group() {
         "DELETE FROM group_member WHERE account_id = '{}';",
         anna.account
     ));
-    assert_eq!(c.rows("SELECT device_id FROM account_store_device").len(), 2);
+    assert_eq!(
+        c.rows("SELECT device_id FROM account_store_device").len(),
+        2
+    );
     assert_eq!(challenge(&anna), 401);
     assert_eq!(challenge(&owner), 200);
 }

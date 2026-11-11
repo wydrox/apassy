@@ -661,7 +661,7 @@ mod tests {
         );
         assert_eq!(
             account_list_message("https://c.test/", "acc_a", 2, "PH", "add", "PK", "LH", "BY"),
-            b"apassy-connect device-list v1\0https://c.test\0acc_a\02\0PH\0add\0PK\0LH\0BY"
+            b"apassy-connect device-list v1\0https://c.test\0acc_a\x002\0PH\0add\0PK\0LH\0BY"
                 .to_vec()
         );
         assert_eq!(account_list_hash(b"").len(), 43);

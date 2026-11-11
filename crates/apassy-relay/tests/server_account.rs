@@ -2483,7 +2483,7 @@ fn a_removal_that_waits_for_its_store_keeps_the_device_out_and_lands_later() {
         .0
     };
     let revoke = |c: &Connect, dev: &Dev| {
-        let revoked = revoke(&c, &a, &token, &dev);
+        let revoked = revoke(c, &a, &token, dev);
         assert_eq!(revoked["removed_from_stores"], 1, "{revoked}");
     };
 
