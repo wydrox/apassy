@@ -1,8 +1,9 @@
 //! The demo build of Settings > Connect: every frame of `docs/design/connect-mockup.html`
 //! from synthetic fixtures, drawn by the same functions as the vault build. The menu at
 //! the top of the section picks a frame; `APASSY_DEMO_CONNECT` (1, 2a, 2b, 3, S, 4a, 4b,
-//! 4c, 5a, 5b, 5c, 6a to 6h, 7a to 7d, 8a, 8b, 8c, 9, 9a to 9e, 10a, 10b, 10c, 11a, 11b)
-//! opens it at start once Settings shows (`APASSY_DEMO_DEVICES=1` opens Settings). The
+//! 4c, 5a, 5b, 5c, 6a to 6h, 7a to 7d, 8a, 8b, 8c, 9, 9a to 9e, 10a, 10b, 10c, 11a, 11b,
+//! 13a, 13c, and the states without a mockup frame T1 to T8) opens it at start once
+//! Settings shows (`APASSY_DEMO_DEVICES=1` opens Settings). The
 //! prices are those of `tests/fixtures/connect-billing-v1/plans.json`, read as Connect
 //! would send them; no amount is written here.
 
@@ -59,6 +60,17 @@ const FRAMES: &[(&str, &str)] = &[
     ("10c", "Frame 10c: Join Refused"),
     ("11a", "Frame 11a: Delete"),
     ("11b", "Frame 11b: Members First"),
+    ("13a", "Frame 13a: Code Never Shown"),
+    ("13c", "Frame 13c: The New Code"),
+    // The states of the vault build that the mockup has no frame for.
+    ("T1", "Asking Connect"),
+    ("T2", "Connect Unreachable"),
+    ("T3", "Removed from the Account"),
+    ("T4", "Removed, Forget"),
+    ("T5", "Account File of an Earlier Version"),
+    ("T6", "Device List Not Verified"),
+    ("T7", "Device List Nearly Full"),
+    ("T8", "Device Added"),
 ];
 
 /// The frame that the section shows: an index into [`FRAMES`].
@@ -158,7 +170,7 @@ fn devices() -> Vec<Device> {
         ),
         device(
             "dev_mmmmmmmmmc",
-            "Rafal's iPhone",
+            "Alex's iPhone",
             "iphone",
             CREATED + DAY,
             Some(NOW - DAY - 600),
@@ -192,11 +204,11 @@ fn family(role: &str, state: &str) -> Group {
         kind: "family".to_owned(),
         role: role.to_owned(),
         state: state.to_owned(),
-        owner_name: "Rafal".to_owned(),
+        owner_name: "Alex".to_owned(),
         quantity: 4,
         members: if role == "owner" {
             vec![
-                member("acc_k7m2q4x3ca", "Rafal", "owner", "active", CREATED),
+                member("acc_k7m2q4x3ca", "Alex", "owner", "active", CREATED),
                 member("acc_m3n5p7q2rb", "Ola", "member", "active", CREATED + DAY),
                 member("acc_r5s7t2u4vc", "Jan", "member", "pending", NOW - 3_600),
             ]
@@ -212,9 +224,9 @@ fn account(plan: Plan, group: Option<Group>) -> Account {
         name: if group.as_ref().is_some_and(|group| group.role != "owner") {
             "Ola".to_owned()
         } else {
-            "Rafal".to_owned()
+            "Alex".to_owned()
         },
-        email: plan.entitled.then(|| "rafal@example.com".to_owned()),
+        email: plan.entitled.then(|| "alex@example.com".to_owned()),
         plan,
         devices: devices(),
         group,
@@ -251,7 +263,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "2a" => (
             Shown::None,
             Some(Sheet::Create {
-                name: "Rafal".to_owned(),
+                name: "Alex".to_owned(),
                 device_name: "Mac mini (office)".to_owned(),
             }),
         ),
@@ -266,7 +278,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         ),
         "S" => (
             Shown::SignedOut {
-                name: Some("Rafal".to_owned()),
+                name: Some("Alex".to_owned()),
                 device_name: "Mac mini (office)".to_owned(),
             },
             None,
@@ -372,7 +384,7 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
             personal(),
             Some(Sheet::Words {
                 join_id: 4,
-                device_name: "Rafal's iPhone".to_owned(),
+                device_name: "Alex's iPhone".to_owned(),
                 platform: "iphone".to_owned(),
                 words: words.to_owned(),
             }),
@@ -459,11 +471,72 @@ fn frame(code: &str) -> (Shown, Option<Sheet>) {
         "10b" => (
             none(),
             Some(Sheet::JoinSent {
-                owner_name: "Rafal".to_owned(),
+                owner_name: "Alex".to_owned(),
             }),
         ),
         "11a" => (personal(), Some(Sheet::Delete)),
         "11b" => (family_owner(), Some(Sheet::MembersFirst)),
+        "13a" => (
+            Shown::Account(Account {
+                recovery_unseen: true,
+                ..account(active("personal", renews), None)
+            }),
+            None,
+        ),
+        "13c" => (
+            personal(),
+            Some(Sheet::Recovery {
+                words: Zeroizing::new(
+                    "amber lotus quiet prism walnut ember falcon meadow pilot cobalt summit river nickel violet canyon tulip"
+                        .to_owned(),
+                ),
+            }),
+        ),
+        "T1" => (
+            Shown::Loading {
+                name: Some("Alex".to_owned()),
+            },
+            None,
+        ),
+        "T2" => (
+            Shown::Unreachable {
+                name: Some("Alex".to_owned()),
+                device_name: "Mac mini (office)".to_owned(),
+                note: "Apassy Connect could not be reached. Check the internet connection and try again."
+                    .to_owned(),
+            },
+            None,
+        ),
+        "T3" | "T4" => (
+            Shown::Removed {
+                name: Some("Alex".to_owned()),
+                device_name: "Mac mini (office)".to_owned(),
+                note: super::REMOVED_NOTE.to_owned(),
+            },
+            (code == "T4").then_some(Sheet::ForgetRemoved),
+        ),
+        "T5" => (Shown::OldFile, None),
+        "T6" => {
+            let mut shown = account(active("personal", renews), None);
+            shown.list_verified = false;
+            if let Some(device) = shown.devices.get_mut(2) {
+                device.verified = false;
+            }
+            (Shown::Account(shown), None)
+        }
+        "T7" => (
+            Shown::Account(Account {
+                list_nearly_full: true,
+                ..account(active("personal", renews), None)
+            }),
+            None,
+        ),
+        "T8" => (
+            personal(),
+            Some(Sheet::DeviceAdded {
+                name: "Alex's iPhone".to_owned(),
+            }),
+        ),
         // "3", and any other code.
         _ => (none(), None),
     }
@@ -539,6 +612,8 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(Action::ChangeSeats) => Some("9d"),
         Some(Action::JoinGroup) => Some("10a"),
         Some(Action::Delete) => Some("11a"),
+        Some(Action::ForgetRemoved) => Some("T4"),
+        Some(Action::NewRecoveryCode) => Some("13c"),
         _ => None,
     };
     if let Some(frame) = next.and_then(Frame::from_code) {

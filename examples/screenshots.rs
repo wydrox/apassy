@@ -46,8 +46,12 @@ use eframe::egui;
 
 /// The fake relay reads the app's sync module under this name.
 use apassy::sync as relay_api;
+#[path = "../tests/common/fake_connect.rs"]
+mod fake_connect;
 #[path = "../tests/common/fake_relay.rs"]
 mod fake_relay;
+#[path = "screenshots/scenes.rs"]
+mod scenes;
 
 const PASS: &str = "screenshots-demo-passphrase";
 /// The file in the scratch HOME with the token of the agent that asks in the tour.
@@ -61,6 +65,13 @@ fn main() {
         [cmd, home] if cmd == "seed" => seed(Path::new(home)),
         [cmd, home] if cmd == "seed-empty" => seed_empty(Path::new(home)),
         [cmd] if cmd == "run" => run(),
+        // The scenes of scripts/screenshots-linux.sh, one per line.
+        [cmd] if cmd == "scenes" => {
+            println!("linux");
+            for scene in scenes::SCENES {
+                println!("{scene}");
+            }
+        }
         // NSArgumentDomain changes only this tour process, never the owner's
         // global appearance preference. The product kit remains light-only.
         [cmd, flag, appearance]
@@ -103,8 +114,13 @@ fn declaration(project: &str, env: &str, risk: &str, scope: &str, undo: &str) ->
 }
 
 /// The data directory in `home`, empty, with the settings that keep the tour offline.
+/// On Linux, scripts/screenshots-linux.sh sets `XDG_DATA_HOME` to `home/.local/share`.
 fn data_dir(home: &Path) -> PathBuf {
-    let data = home.join("Library/Application Support/Apassy");
+    let data = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Apassy")
+    } else {
+        home.join(".local/share/apassy")
+    };
     let path = data.join("vault.db");
     assert!(
         !path.exists(),
@@ -145,6 +161,17 @@ fn seed_empty(home: &Path) {
     v.unlock(PASS).expect("unlock");
     v.lock().expect("lock");
     println!("seeded an empty vault {}", path.display());
+}
+
+/// A credential with one synthetic secret field, for the vaults of the scenes.
+fn item_draft(title: &str) -> ItemDraft {
+    ItemDraft {
+        title: title.to_owned(),
+        kind: CredentialKind::ApiKey,
+        notes: String::new(),
+        tags: Vec::new(),
+        fields: vec![field("token", &format!("SYNTH-{title}"), true)],
+    }
 }
 
 /// One credential of the seed.
@@ -283,7 +310,7 @@ fn seed(home: &Path) {
             env: "",
             variable: "",
             fields: vec![
-                field("username", "rafal@example.com", false),
+                field("username", "alex@example.com", false),
                 field("password", "demo-fly-password-not-real", true),
             ],
         },
@@ -825,6 +852,14 @@ enum Step {
     BrainHost(&'static str),
     Access,
     ConnectPhone,
+    /// `Shot NAME`, then three more pages of the detail column (`NAME-2` …): each
+    /// scrolled by the tour, as no window input comes from the system. The script drops a
+    /// page that shows the same picture as the page before.
+    Pages(&'static str),
+    /// A step of the other person or of the fake Connect in a scene ([`scenes::Scene::hook`]).
+    Hook(&'static str),
+    /// Paste the share code that the other person of the scene made.
+    PasteCode,
     Quit,
 }
 
@@ -842,15 +877,28 @@ struct Tour {
     next_frame: Vec<egui::Event>,
     /// Live mode: the last batch ended and `done` is written.
     live_idle: bool,
+    /// The scene of `APASSY_TOUR_SCENE`, with its fake services.
+    scene: Option<scenes::Scene>,
 }
 
 fn run() {
     // The relay of the synthetic relay scene serves the whole run.
     let relay = relay_scene();
+    let scene = std::env::var("APASSY_TOUR_SCENE")
+        .ok()
+        .and_then(|name| scenes::setup(&name));
     let steps = VecDeque::from(tour_steps());
     // A fixed size, so the positions of the tour hold on each screen.
+    // `APASSY_TOUR_SIZE=1100x760` (the Linux path) chooses another.
+    let (width, height) = std::env::var("APASSY_TOUR_SIZE")
+        .ok()
+        .and_then(|size| {
+            let (w, h) = size.split_once('x')?;
+            Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+        })
+        .unwrap_or((1180.0, 740.0));
     let mut options = native_options();
-    options.viewport = options.viewport.with_inner_size(egui::vec2(1180.0, 740.0));
+    options.viewport = options.viewport.with_inner_size(egui::vec2(width, height));
     eframe::run_native(
         "apassy",
         options,
@@ -869,6 +917,7 @@ fn run() {
                 snapping: None,
                 next_frame: Vec::new(),
                 live_idle: false,
+                scene,
             }))
         }),
     )
@@ -1099,12 +1148,31 @@ const LAYOUT: Layout = Layout {
 /// steps). `APASSY_TOUR_FIRST_STEPS` takes the first steps of an empty vault.
 fn tour_steps() -> Vec<Step> {
     use Step::*;
+    let scene = std::env::var("APASSY_TOUR_SCENE").ok();
     let mut steps = if std::env::var_os("APASSY_TOUR_RAW").is_some() {
         vec![Wait(1.0)]
+    } else if let Some(scene) = &scene {
+        // The Linux path: the unlock window first, then Return in the passphrase field.
+        let mut steps = vec![Wait(2.0)];
+        if scene == "linux" {
+            steps.push(Shot("unlock-passphrase"));
+        }
+        steps.extend([
+            Type(PASS),
+            Wait(0.5),
+            Key(egui::Key::Enter, egui::Modifiers::NONE),
+            Wait(3.5),
+        ]);
+        steps
     } else {
         vec![Type(PASS), Wait(0.5), Click(590.0, 461.0), Wait(3.5)]
     };
-    if std::env::var_os("APASSY_TOUR_FIRST_STEPS").is_some() {
+    if let Some(scene) = &scene {
+        // A live tour takes its steps from the script.
+        if std::env::var_os("APASSY_TOUR_LIVE").is_none() {
+            steps.extend(scenes::steps(scene));
+        }
+    } else if std::env::var_os("APASSY_TOUR_FIRST_STEPS").is_some() {
         steps.extend([Wait(1.0), Shot("first-steps")]);
     } else {
         match (std::env::var("APASSY_TOUR"), relay_mode()) {
@@ -1154,6 +1222,9 @@ fn parse_steps(text: &str) -> Vec<Step> {
             Some("ask") => steps.push(Ask),
             Some("brain-host") => steps.push(BrainHost(name(1))),
             Some("connect-phone") => steps.push(ConnectPhone),
+            Some("pages") => steps.push(Pages(name(1))),
+            Some("scene") => steps.push(Hook(name(1))),
+            Some("paste-code") => steps.push(PasteCode),
             Some("access") => steps.push(Access),
             Some("quit") => steps.push(Quit),
             Some("minimize") => steps.push(Minimize(true)),
@@ -1229,6 +1300,26 @@ fn write_png(path: &Path, image: &egui::ColorImage) {
 }
 
 impl Tour {
+    /// A scene keeps the last text that the window copied: the share code of a sheet.
+    fn keep_copied(&mut self, ctx: &egui::Context) {
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        let copied = ctx.output(|output| {
+            output
+                .commands
+                .iter()
+                .rev()
+                .find_map(|command| match command {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+        });
+        if copied.is_some() {
+            scene.copied = copied;
+        }
+    }
+
     /// Live mode: when the steps run out, write `done` once, then take the steps of
     /// `next.txt` in `$APASSY_TOUR_LIVE` when it appears. A script drives the window
     /// one batch at a time and reads the result between batches.
@@ -1286,6 +1377,33 @@ impl Tour {
                 );
             }
             Step::Wait(seconds) => pause = seconds,
+            Step::Pages(name) => {
+                let height = ctx.content_rect().height();
+                let x = ctx.content_rect().width() * 0.72;
+                let mut pages = vec![Step::Shot(name)];
+                for page in 2..=4 {
+                    pages.extend([
+                        Step::Scroll(x, height * 0.6, -(height - 200.0)),
+                        Step::Wait(0.8),
+                        Step::Shot(Box::leak(format!("{name}-{page}").into_boxed_str())),
+                    ]);
+                }
+                for step in pages.into_iter().rev() {
+                    self.steps.push_front(step);
+                }
+                pause = 0.0;
+            }
+            Step::Hook(hook) => {
+                self.scene
+                    .as_mut()
+                    .expect("a scene (APASSY_TOUR_SCENE)")
+                    .hook(hook);
+                pause = 1.0;
+            }
+            Step::PasteCode => {
+                let code = self.scene.as_ref().expect("a scene").code_text();
+                self.events.push(egui::Event::Paste(code));
+            }
             Step::Type(text) => self.events.push(egui::Event::Text(text.to_owned())),
             Step::Paste(text) => self.events.push(egui::Event::Paste(text.to_owned())),
             Step::Click(x, y) => {
@@ -1408,6 +1526,7 @@ impl eframe::App for Tour {
     /// The tour advances here too, so a minimized window still takes its steps.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.app.logic(ctx, frame);
+        self.keep_copied(ctx);
         self.advance(ctx);
         ctx.request_repaint_after(Duration::from_millis(50));
     }
@@ -1446,5 +1565,7 @@ impl eframe::App for Tour {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        let ctx = ui.ctx().clone();
+        self.keep_copied(&ctx);
     }
 }
