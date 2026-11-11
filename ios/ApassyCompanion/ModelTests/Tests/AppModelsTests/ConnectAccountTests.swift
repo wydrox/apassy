@@ -16,10 +16,13 @@ struct ConnectAccountTests {
         ConnectDevice(deviceID: "dev_p4n6r2t7bc", name: "iPhone", platform: "iphone", isThisDevice: true, verified: true),
     ]
 
-    static func account(removed: Bool = false, devices: [ConnectDevice] = devices) -> ConnectStatus {
+    static func account(
+        removed: Bool = false, devices: [ConnectDevice] = devices, listVerified: Bool? = nil
+    ) -> ConnectStatus {
         ConnectStatus(
             state: .account, removed: removed, accountID: "acc_k7m2q4x3ca", deviceName: "iPhone",
-            plan: ConnectPlan(plan: "personal", status: .active, entitled: true), devices: devices)
+            plan: ConnectPlan(plan: "personal", status: .active, entitled: true), devices: devices,
+            listVerified: listVerified)
     }
 
     static func unverified(_ name: String) -> ConnectDevice {
@@ -33,7 +36,8 @@ struct ConnectAccountTests {
         [
             ConnectDevicesText.header, ConnectDevicesText.forgetButton, ConnectDevicesText.confirmTitle,
             ConnectDevicesText.confirmButton, ConnectDevicesText.confirmOnAccount, ConnectDevicesText.confirmRemoved,
-            ConnectDevicesText.footer, ConnectDevicesText.forgetFailed, ConnectPlanRow.removedLine,
+            ConnectDevicesText.footer, ConnectDevicesText.forgetFailed, ConnectDevicesText.listNotVerifiedLine,
+            ConnectPlanRow.removedLine,
             RelayEndedNotice.value, RelayEndedNotice.line, JoinModel.connectCodeInvalid,
             ConnectDevicesText.notVerifiedLine(account(devices: [unverified("Mac Studio")]))!,
             ConnectDevicesText.notVerifiedLine(account(devices: [unverified("Mac Studio"), unverified("iMac")]))!,
@@ -75,6 +79,30 @@ struct ConnectAccountTests {
         #expect(ConnectDevicesText.notVerifiedLine(Self.account(removed: true, devices: [Self.unverified("iMac")])) == nil)
         #expect(ConnectDevicesText.notVerifiedLine(ConnectStatus(state: .none)) == nil)
         #expect(ConnectDevicesText.notVerifiedLine(nil) == nil)
+    }
+
+    @Test("a device list that did not verify has its own line, in the place of the count")
+    func listNotVerifiedLine() async throws {
+        let line = "Apassy could not verify the device list from Connect. Nothing was changed."
+        #expect(ConnectDevicesText.listNotVerifiedLine == line)
+        let unverified = Self.devices.map { Self.unverified($0.name) }
+        #expect(ConnectDevicesText.notVerifiedLine(Self.account(devices: unverified, listVerified: false)) == line)
+        // Also with no device listed.
+        #expect(ConnectDevicesText.notVerifiedLine(Self.account(devices: [], listVerified: false)) == line)
+        // A verified list, or none known (Connect did not answer, an older core): as before.
+        #expect(ConnectDevicesText.notVerifiedLine(Self.account(listVerified: true)) == nil)
+        #expect(
+            ConnectDevicesText.notVerifiedLine(Self.account(devices: [Self.unverified("iMac")], listVerified: true))
+                == "1 device of the account is not verified. Check Apassy on your Mac.")
+        #expect(
+            ConnectDevicesText.notVerifiedLine(Self.account(devices: [Self.unverified("iMac")], listVerified: nil))
+                == "1 device of the account is not verified. Check Apassy on your Mac.")
+        // After a removal: no line.
+        #expect(ConnectDevicesText.notVerifiedLine(Self.account(removed: true, listVerified: false)) == nil)
+
+        let service = PreviewVaultService(empty: true)
+        await service.setConnectAccount("acc_k7m2q4x3ca", devices: Self.devices, listVerified: false)
+        #expect(ConnectDevicesText.notVerifiedLine(try await service.connectStatus()) == line)
     }
 
     @Test("the confirmation says what Forget does, on an account and after a removal")

@@ -67,8 +67,9 @@ struct DevicesSettingsView: View {
 
 /// "Apassy Connect" of Settings > Devices (plan s7 unit I3), only while this iPhone is a device of an
 /// account (also one that removed it): one quiet line for the devices that this iPhone could not
-/// verify, and the one control of the account, "Forget This iPhone…" with a confirmation, which calls
-/// `connect_forget`. Leaving an account is no purchase action (plan section 6): no price, no plan
+/// verify (or, when the signed device list itself did not verify, the line that says so and that
+/// nothing was changed), and the one control of the account, "Forget This iPhone…" with a
+/// confirmation, which calls `connect_forget`. Leaving an account is no purchase action (plan section 6): no price, no plan
 /// choice, and no link here. After it, this iPhone can join an account again.
 struct ConnectAccountSection: View {
     let status: ConnectStatus?
@@ -86,6 +87,7 @@ struct ConnectAccountSection: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            // One line: the devices that are not verified, or the device list that did not verify.
             if let line = ConnectDevicesText.notVerifiedLine(status) {
                 Text(verbatim: line)
                     .font(.footnote)

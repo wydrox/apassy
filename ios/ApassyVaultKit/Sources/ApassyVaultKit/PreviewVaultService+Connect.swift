@@ -15,6 +15,8 @@ struct PreviewConnect {
     var removed = false
     /// Test support: the devices of the account, the dial route, and the dial state.
     var devices: [ConnectDevice] = []
+    /// Test support: whether the signed device list verified (false: as the core, no device is).
+    var listVerified = true
     var dialRoute = false
     var dialState: ConnectDialState = .unused
     /// Test support: the number of `connectForget` calls.
@@ -71,7 +73,7 @@ extension PreviewVaultService {
         return ConnectStatus(
             state: .account, removed: connectState.removed, accountID: account, deviceName: "iPhone",
             plan: connectState.plan, dialRoute: connectState.dialRoute, dialState: connectState.dialState,
-            devices: connectState.devices)
+            devices: connectState.devices, listVerified: connectState.removed ? nil : connectState.listVerified)
     }
 
     /// As the core: the key, the state, and a join that waits go; Connect is not asked.
@@ -86,10 +88,21 @@ extension PreviewVaultService {
     }
 
     /// Test support: this iPhone is a device of the synthetic account `accountID` (no join).
-    public func setConnectAccount(_ accountID: String?, removed: Bool = false, devices: [ConnectDevice] = []) {
+    /// With `listVerified` false the signed device list did not verify, and no device is verified.
+    public func setConnectAccount(
+        _ accountID: String?, removed: Bool = false, devices: [ConnectDevice] = [], listVerified: Bool = true
+    ) {
         connectState.accountID = accountID
         connectState.removed = removed
-        connectState.devices = devices
+        connectState.listVerified = listVerified
+        connectState.devices =
+            listVerified
+            ? devices
+            : devices.map {
+                var device = $0
+                device.verified = false
+                return device
+            }
     }
 
     /// Test support: the route and the state of the dial that `connectStatus` reports.

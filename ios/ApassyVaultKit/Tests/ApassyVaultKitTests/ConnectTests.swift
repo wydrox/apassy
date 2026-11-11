@@ -212,6 +212,42 @@ import Testing
         #expect(status.unverifiedDevices.map(\.name) == ["MacBook Pro", "Mac Studio"])
     }
 
+    @Test func whetherTheDeviceListVerifiedDecodesAndIsNilWhenMissing() throws {
+        let verified = try Self.decode(
+            #"{"state":"account","account_id":"acc_k7m2q4x3ca","plan":null,"list_verified":true}"#)
+        #expect(verified.listVerified == true)
+        let refused = try Self.decode(
+            """
+            {"state":"account","account_id":"acc_k7m2q4x3ca","plan":null,"list_verified":false,
+             "devices":[{"device_id":"dev_m2k7q3x4ab","name":"MacBook Pro","platform":"mac","this":false,"verified":false}]}
+            """)
+        #expect(refused.listVerified == false)
+        #expect(refused.unverifiedDevices.map(\.name) == ["MacBook Pro"])
+        // Connect did not answer, an older core, or a value this app cannot read: nil.
+        let stale = try Self.decode(#"{"state":"account","account_id":"acc_k7m2q4x3ca","plan":null,"stale":true}"#)
+        #expect(stale.listVerified == nil)
+        let unreadable = try Self.decode(#"{"state":"account","account_id":"acc_k7m2q4x3ca","plan":null,"list_verified":"yes"}"#)
+        #expect(unreadable.listVerified == nil)
+        #expect(try Self.decode(Self.contract).listVerified == nil)
+        // An encoded status decodes to the same value.
+        #expect(try JSONDecoder().decode(ConnectStatus.self, from: JSONEncoder().encode(refused)) == refused)
+    }
+
+    @Test func thePreviewReportsADeviceListThatDidNotVerify() async throws {
+        let service = PreviewVaultService(empty: true)
+        let mac = ConnectDevice(deviceID: "dev_m2k7q3x4ab", name: "MacBook Pro", platform: "mac", isThisDevice: false, verified: true)
+        await service.setConnectAccount("acc_k7m2q4x3ca", devices: [mac])
+        #expect(try await service.connectStatus().listVerified == true)
+        await service.setConnectAccount("acc_k7m2q4x3ca", devices: [mac], listVerified: false)
+        let refused = try await service.connectStatus()
+        #expect(refused.listVerified == false)
+        #expect(refused.unverifiedDevices.map(\.name) == ["MacBook Pro"])
+        await service.setConnectAccount("acc_k7m2q4x3ca", removed: true)
+        #expect(try await service.connectStatus().listVerified == nil)
+        _ = try await service.connectForget()
+        #expect(try await service.connectStatus().listVerified == nil)
+    }
+
     @Test func theEndOfTheHostedRelayDecodesInTheQuestionsAndTheFeed() throws {
         let list = try JSONDecoder().decode(
             QuestionsList.self,

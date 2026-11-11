@@ -376,15 +376,20 @@ enum ConnectDevicesText {
     static let footer = "Your vaults, approvals over Tailscale, and Wi-Fi stay on this iPhone."
     /// After a forget that failed.
     static let forgetFailed = "This iPhone could not forget the account. Try again."
+    /// When the signed device list of Connect did not verify (`list_verified: false`): no device is
+    /// verified, and the core kept what it knew.
+    static let listNotVerifiedLine = "Apassy could not verify the device list from Connect. Nothing was changed."
 
     /// Whether the section shows: only on an account (also a removed one). Without an account the
     /// iPhone shows nothing here: no call to action.
     static func shows(_ status: ConnectStatus?) -> Bool { status?.state == .account }
 
     /// "1 device of the account is not verified. Check Apassy on your Mac.", or nil when every
-    /// device is verified. After a removal the list is not the iPhone's any more: nil.
+    /// device is verified. When the device list itself did not verify, `listNotVerifiedLine` in its
+    /// place. After a removal the list is not the iPhone's any more: nil.
     static func notVerifiedLine(_ status: ConnectStatus?) -> String? {
         guard let status, status.state == .account, !status.removed else { return nil }
+        if status.listVerified == false { return listNotVerifiedLine }
         let count = status.unverifiedDevices.count
         switch count {
         case 0: return nil

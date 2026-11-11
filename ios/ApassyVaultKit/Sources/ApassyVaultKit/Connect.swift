@@ -197,6 +197,10 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     public var join: ConnectJoin?
     /// The devices of the account, each with `verified`; empty when Connect did not answer.
     public var devices: [ConnectDevice]
+    /// When Connect answered: whether the signed device list itself verified from the pinned root and
+    /// the pinned version. False: no device is verified, and the core changed nothing. Nil when Connect
+    /// did not answer, without an account, after a removal, or from a core that does not report it.
+    public var listVerified: Bool?
 
     /// The devices of the account that this iPhone could not verify.
     public var unverifiedDevices: [ConnectDevice] { devices.filter { !$0.verified } }
@@ -204,7 +208,7 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
     public init(
         state: State, removed: Bool = false, accountID: String? = nil, deviceName: String? = nil,
         plan: ConnectPlan? = nil, stale: Bool = false, dialRoute: Bool = false, dialState: ConnectDialState = .unused,
-        join: ConnectJoin? = nil, devices: [ConnectDevice] = []
+        join: ConnectJoin? = nil, devices: [ConnectDevice] = [], listVerified: Bool? = nil
     ) {
         self.state = state
         self.removed = removed
@@ -216,6 +220,7 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         self.dialState = dialState
         self.join = join
         self.devices = devices
+        self.listVerified = listVerified
     }
 
     public init(from decoder: any Decoder) throws {
@@ -232,6 +237,8 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         // A device that this app cannot read is left out; the others still show.
         devices = (try? container.decodeIfPresent([Lossy<ConnectDevice>].self, forKey: .devices))?
             .compactMap(\.value) ?? []
+        // Missing or unreadable: nil, and the app shows what it showed before.
+        listVerified = try? container.decodeIfPresent(Bool.self, forKey: .listVerified)
     }
 
     /// One element of a list that decodes to nil when it cannot be read.
@@ -246,6 +253,7 @@ public struct ConnectStatus: Codable, Sendable, Equatable {
         case deviceName = "device_name"
         case dialRoute = "dial_route"
         case dialState = "dial_state"
+        case listVerified = "list_verified"
     }
 }
 

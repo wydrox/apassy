@@ -35,7 +35,10 @@
 //! **Devices.** `connect_status` lists the devices of the account with `verified`: the
 //! core verifies the signed device list of the account from the pinned root and the
 //! pinned version of the state file (`apassy::connect::trust`), and the app shows "Not
-//! verified" for the others.
+//! verified" for the others. `list_verified` says whether the signed list itself verified:
+//! when it is false, no device is verified, the trust store keeps what it had, and the app
+//! says that Apassy could not verify the device list and changed nothing. It is absent
+//! when Connect did not answer.
 //!
 //! **The state file** is the Mac's account file, `connect/account.json` in the data
 //! directory (mode 0600): the origin, the ids, the names, the public key, and the trust
@@ -175,6 +178,12 @@ pub struct StatusOut {
     /// answer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceOut>,
+    /// When Connect answered: the signed device list verified from the pinned root and
+    /// went on from the pinned version (`AccountView::list_verified`). When it is false, no
+    /// device is verified and the trust store keeps what it had. `None` (absent) when
+    /// Connect did not answer, and without an account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_verified: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -211,6 +220,10 @@ fn core_error(error: ConnectError) -> CoreError {
         ConnectError::AccountExists => CoreError::new(
             "already_connected",
             "This iPhone is a device of an Apassy Connect account already.",
+        ),
+        ConnectError::OldAccountFile => CoreError::new(
+            "already_connected",
+            "This iPhone must join its Apassy Connect account again: its account file is from an earlier version of Apassy. Forget the account on this iPhone, then add it again from your Mac.",
         ),
         ConnectError::Revoked => CoreError::new(
             "removed",
@@ -552,6 +565,7 @@ impl Core {
             dial_state: dial_state.text(),
             join,
             devices: Vec::new(),
+            list_verified: None,
         };
         let answer = self.with_account(|account| {
             let view = account.view()?;
@@ -584,7 +598,8 @@ impl Core {
                 .iter()
                 .map(|device| DeviceOut {
                     device_id: device.device_id.clone(),
-                    name: device.name.clone(),
+                    // The name that the signed device list holds for the key.
+                    name: device.shown_name().to_owned(),
                     platform: device.platform.clone(),
                     this: device.device_id == state.device_id,
                     verified: device.verified,
@@ -595,9 +610,10 @@ impl Core {
                 state.device_name.clone(),
                 status_plan(&view.plan, group, people),
                 devices,
+                view.list_verified,
             ))
         });
-        let (account_id, device_name, plan, devices) = match answer {
+        let (account_id, device_name, plan, devices, list_verified) = match answer {
             Ok(Some(found)) => found,
             Ok(None) => return Ok(none(join)),
             Err(error) if error.code == "removed" => {
@@ -616,6 +632,7 @@ impl Core {
                     dial_state: dial_state.text(),
                     join,
                     devices: Vec::new(),
+                    list_verified: None,
                 });
             }
             Err(error) if matches!(error.code, "relay_unreachable" | "rate_limited") => {
@@ -641,6 +658,7 @@ impl Core {
                     dial_state: dial_state.text(),
                     join,
                     devices: Vec::new(),
+                    list_verified: None,
                 });
             }
             Err(error) => return Err(error),
@@ -657,6 +675,7 @@ impl Core {
             dial_state: dial_state.text(),
             join,
             devices,
+            list_verified: Some(list_verified),
         })
     }
 
