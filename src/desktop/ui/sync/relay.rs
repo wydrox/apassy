@@ -679,12 +679,19 @@ fn problem(text: &str) -> Option<SyncError> {
         SyncError::StaleCopy,
         SyncError::ForkedCopy,
         SyncError::WaitsForAccountDevice,
+        SyncError::SignerNotVerified,
         SyncError::Relay(RelayRefusal::RateLimited),
         SyncError::Relay(RelayRefusal::Busy),
         SyncError::Relay(RelayRefusal::TeamLimit),
     ]
     .into_iter()
     .find(|error| error.to_string() == text)
+}
+
+/// Whether `status` is the sync error of a head whose signer this device has not
+/// verified yet ([`SyncError::SignerNotVerified`]).
+pub(crate) fn is_signer_not_verified(status: &UiStatus) -> bool {
+    matches!(status, UiStatus::Problem(text) if problem(text) == Some(SyncError::SignerNotVerified))
 }
 
 /// The short tag of the status of a vault on the relay, and its tone.
@@ -707,6 +714,8 @@ pub(crate) fn tag(status: &UiStatus) -> (&'static str, Tone) {
                 ("Relay copy refused", Tone::Warning)
             }
             Some(SyncError::WaitsForAccountDevice) => ("Waiting for another device", Tone::Accent),
+            // No error at once: the lists are read again (Shared Vaults says so).
+            Some(SyncError::SignerNotVerified) => ("Checking the signer", Tone::Accent),
             Some(_) => ("Relay not reachable", Tone::Warning),
             None => ("Problem", Tone::Warning),
         },
@@ -1194,7 +1203,11 @@ impl DesktopApp {
             matches!(status, UiStatus::Damaged)
                 || matches!(status, UiStatus::Problem(text) if matches!(
                     problem(text),
-                    Some(SyncError::WaitsForAccountDevice | SyncError::RemovedFromRelay)
+                    Some(
+                        SyncError::WaitsForAccountDevice
+                            | SyncError::RemovedFromRelay
+                            | SyncError::SignerNotVerified
+                    )
                 ))
         });
         if refused {
@@ -2328,13 +2341,14 @@ impl DesktopApp {
         });
     }
 
-    /// The account key and the plan state of this Mac's Connect account go to the relay
-    /// sync of each vault (plan s7 unit M3): a vault store signs with that key and shows
-    /// the plan state. Settings › Connect calls it after each refresh.
-    pub(crate) fn relay_share_connect(&mut self) {
-        let Some(account) = self.ui.connect.live.sync_account() else {
-            return;
-        };
+    /// The account key, the signers of the vault stores, and the plan state go to the
+    /// relay sync of each vault, and the sessions that run take the signers at their next
+    /// check of a head. Nothing else: no registration of devices. Returns the account of
+    /// the session.
+    pub(crate) fn relay_hand_over_signers(
+        &mut self,
+    ) -> Option<crate::desktop::ui::connect::live::SyncAccount> {
+        let account = self.ui.connect.live.sync_account()?;
         for relay in lock(&self.sync.relay.cache).values() {
             if let Some(signer) = &account.signer {
                 relay.set_account_signers(Some(account.signers.clone()));
@@ -2344,6 +2358,16 @@ impl DesktopApp {
                 relay.set_store_plan(Some(plan));
             }
         }
+        Some(account)
+    }
+
+    /// The account key and the plan state of this Mac's Connect account go to the relay
+    /// sync of each vault (plan s7 unit M3): a vault store signs with that key and shows
+    /// the plan state. Settings › Connect calls it after each refresh.
+    pub(crate) fn relay_share_connect(&mut self) {
+        let Some(account) = self.relay_hand_over_signers() else {
+            return;
+        };
         // The open vault store takes the newer devices of the account (connect-account-v1
         // section 8); no owner check, as at its start (`register_own_store_device`).
         if let Some(id) = self.current_vault().map(|entry| entry.id.clone())

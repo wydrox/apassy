@@ -88,7 +88,7 @@ pub struct ListEntry {
 }
 
 /// A device name of section 2: 1 to 64 bytes of UTF-8, trimmed, no control character.
-fn valid_name(name: &str) -> bool {
+pub(super) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME_BYTES
         && name.trim() == name
@@ -136,8 +136,10 @@ pub struct Verified {
     /// the account before.
     pub removed: Vec<Vec<u8>>,
     /// What the list says of other accounts at its head (section 16): the active peers,
-    /// shares, and joins.
+    /// shares, and joins, and every store entry in the order of the list.
     pub shares: ListShares,
+    /// The device name that the root signed in version 1 (also after the root left).
+    pub root_name: String,
 }
 
 impl Verified {
@@ -167,7 +169,8 @@ impl Verified {
 /// each entry verifies: version 1 is the root, signed by itself over its name; each later
 /// entry is signed by a device of the list at the version before, over its message with
 /// the hash of the entry before; an `add` names a link, a name, and a key that was never
-/// in the list, at most at [`MAX_ADD_VERSION`]; a `remove` names a key that the list holds.
+/// in the list, at most at [`MAX_ADD_VERSION`] and while fewer than [`MAX_LIVE`] devices are
+/// live; a `remove` names a key that the list holds.
 /// `None` for anything else: another root, a gap, a bad signature, a bad name, a key that
 /// is not a point, a list of more than [`MAX_LIST`] entries.
 pub fn verify_list(
@@ -189,6 +192,7 @@ pub fn verify_list(
         links: Vec::new(),
         removed: Vec::new(),
         shares: ListShares::default(),
+        root_name: String::new(),
     };
     // Every key that was in the list: none is added again.
     let mut ever: Vec<Vec<u8>> = Vec::new();
@@ -212,7 +216,7 @@ pub fn verify_list(
             {
                 return None;
             }
-            list.shares.apply(account_id, entry)?;
+            list.shares.apply(account_id, entry).ok()?;
             hashes.push(list_hash(&message));
             continue;
         }
@@ -249,6 +253,7 @@ pub fn verify_list(
                 return None;
             }
             list.names.push(name.to_owned());
+            name.clone_into(&mut list.root_name);
             list.added_by.push(key.clone());
             list.links.push(None);
             ever.push(key.clone());
@@ -264,7 +269,8 @@ pub fn verify_list(
                         && version <= MAX_ADD_VERSION
                         && !ever.contains(&key) =>
                 {
-                    if list.live.len() >= MAX_KNOWN {
+                    // The room of [`MAX_ADD_VERSION`] counts [`MAX_LIVE`] live devices.
+                    if list.live.len() >= MAX_LIVE {
                         return None;
                     }
                     list.names.push(name.to_owned());
@@ -609,6 +615,21 @@ mod tests {
         // A list longer than 1024 entries is refused.
         let long = vec![list.entries[0].clone(); MAX_LIST + 1];
         assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &long).is_none());
+    }
+
+    /// The room arithmetic of [`MAX_ADD_VERSION`] counts [`MAX_LIVE`] live devices: a list
+    /// with more live devices than that does not verify.
+    #[test]
+    fn a_list_holds_at_most_ten_live_devices() {
+        let root = key();
+        let mut list = List::new(&root);
+        for seed in 0..(MAX_LIVE as u8 - 1) {
+            list.add(&root, &key(), seed + 1);
+        }
+        let ten = verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).unwrap();
+        assert_eq!(ten.live.len(), MAX_LIVE);
+        list.add(&root, &key(), 99);
+        assert!(verify_list(ORIGIN, ACCOUNT, root.public_key(), &list.entries).is_none());
     }
 
     #[test]

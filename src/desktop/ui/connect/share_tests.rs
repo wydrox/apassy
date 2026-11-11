@@ -50,6 +50,7 @@ fn status() -> ShareStatus {
         name: name.to_owned(),
         joined,
         suspended,
+        accepted: true,
     };
     let names: BTreeMap<String, String> = [
         ("acc_olaaaaaaaa", "Ola"),
@@ -97,8 +98,8 @@ fn status() -> ShareStatus {
             },
         ],
         suspended: vec!["acc_annaaaaaaa".to_owned(), "acc_piotraaaaa".to_owned()],
-        outside_group: Vec::new(),
         names,
+        ..ShareStatus::default()
     }
 }
 
@@ -113,7 +114,7 @@ fn stores() -> Vec<VaultStoreView> {
 
 #[test]
 fn the_section_shows_each_state_of_a_shared_vault() {
-    let view = view_of(&status(), &stores(), true, &[]);
+    let view = view_of(&status(), &stores(), &BTreeMap::new(), true, &[]);
     let text = painted(|_, ui| {
         draw(ui, &view);
     });
@@ -137,7 +138,13 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         assert!(text.contains(expected), "{expected} in:\n{text}");
     }
     // A head of a key not verified yet: the joined store says so.
-    let checking = view_of(&status(), &stores(), true, &["t_caraaaaaaa".to_owned()]);
+    let checking = view_of(
+        &status(),
+        &stores(),
+        &BTreeMap::new(),
+        true,
+        &["t_caraaaaaaa".to_owned()],
+    );
     let joined = checking
         .others
         .iter()
@@ -146,7 +153,13 @@ fn the_section_shows_each_state_of_a_shared_vault() {
     assert_eq!(joined.joined.as_deref(), Some(ENDED), "the end comes first");
     let mut alive = status();
     alive.stores[2].ended = false;
-    let checking = view_of(&alive, &stores(), true, &["t_caraaaaaaa".to_owned()]);
+    let checking = view_of(
+        &alive,
+        &stores(),
+        &BTreeMap::new(),
+        true,
+        &["t_caraaaaaaa".to_owned()],
+    );
     let joined = checking
         .others
         .iter()
@@ -154,7 +167,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
         .unwrap();
     assert_eq!(joined.joined.as_deref(), Some(CHECKING));
     // Outside a family or team, there is nothing to share with or accept.
-    let alone = view_of(&status(), &stores(), false, &[]);
+    let alone = view_of(&status(), &stores(), &BTreeMap::new(), false, &[]);
     let text = painted(|_, ui| {
         draw(ui, &alone);
     });
@@ -166,7 +179,7 @@ fn the_section_shows_each_state_of_a_shared_vault() {
 
 #[test]
 fn the_model_puts_each_store_where_it_belongs() {
-    let view = view_of(&status(), &stores(), true, &[]);
+    let view = view_of(&status(), &stores(), &BTreeMap::new(), true, &[]);
     assert_eq!(
         view.own
             .iter()
@@ -364,4 +377,49 @@ fn the_texts_name_nothing_of_one_platform() {
     assert_eq!(reset_member("Ola"), "Ola must verify this account again.");
     assert_eq!(not_joined("Ola"), "Ola: has not joined yet");
     assert_eq!(send_to("Ola"), "Send this to Ola.");
+}
+
+/// C7: the quiet time of a head whose signer is not verified yet runs once for that head:
+/// a lock (which resets the section) does not start it again, and after 10 minutes the
+/// line goes (the error shows). A new head of the store starts its own.
+#[test]
+fn the_check_of_a_head_keeps_its_start_across_a_lock() {
+    let t0 = Instant::now();
+    let head = (7, "a".repeat(64));
+    let mut share = ShareUi::default();
+    assert!(share.checks.due("t_familyaaaa", &head, t0));
+    share.reset();
+    assert!(
+        !share
+            .checks
+            .due("t_familyaaaa", &head, t0 + Duration::from_secs(5))
+    );
+    assert!(
+        share
+            .checks
+            .quiet("t_familyaaaa", &head, t0 + Duration::from_secs(599))
+    );
+    assert!(!share.checks.quiet("t_familyaaaa", &head, t0 + CHECK_QUIET));
+    let next = (8, "b".repeat(64));
+    assert!(share.checks.due("t_familyaaaa", &next, t0 + CHECK_QUIET));
+    assert!(share.checks.quiet("t_familyaaaa", &next, t0 + CHECK_QUIET));
+    share.checks.passed("t_familyaaaa");
+    assert!(!share.checks.quiet("t_familyaaaa", &next, t0 + CHECK_QUIET));
+}
+
+/// C7: the lists are read again at once, after 30 s, then after twice the last wait, up
+/// to 10 minutes.
+#[test]
+fn the_reads_of_a_head_not_verified_yet_back_off() {
+    let t0 = Instant::now();
+    let head = (7, "a".repeat(64));
+    let mut checks = HeadChecks::default();
+    let mut reads = Vec::new();
+    for second in 0..3000 {
+        if checks.due("t_familyaaaa", &head, t0 + Duration::from_secs(second)) {
+            reads.push(second);
+        }
+    }
+    assert_eq!(reads[..7], [0, 30, 90, 210, 450, 930, 1530]);
+    assert!(reads.windows(2).all(|pair| pair[1] - pair[0] <= 600));
 }

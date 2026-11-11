@@ -168,27 +168,23 @@ fn state_of(list: &List) -> AccountState {
 /// The account file of `list` after it read `peers` (each verified from its pinned root)
 /// and the lists of the owners of its joined stores.
 fn refreshed(list: &List, peers: &[&List]) -> AccountState {
-    let mut state = state_of(list);
+    refresh_again(state_of(list), list, peers)
+}
+
+/// `state` (an account file of `list` from an earlier refresh) after it read `peers`.
+fn refresh_again(mut state: AccountState, list: &List, peers: &[&List]) -> AccountState {
     let own = list.verified().unwrap();
-    for _ in 0..2 {
-        for other in peers {
-            let Some(pin) = peer_mut(&mut state, &other.id) else {
-                continue;
-            };
-            let (verified, _) = take_peer_list(pin, ORIGIN, &other.entries);
-            if let Some(verified) = verified {
-                let teams: Vec<String> = own
-                    .shares
-                    .joins
-                    .iter()
-                    .filter(|(_, owner)| *owner == other.id)
-                    .map(|(team, _)| team.clone())
-                    .collect();
-                learn_owner(&mut state, &other.id, &verified, &teams);
-            }
-        }
-    }
-    drop_unused_pins(&mut state);
+    let served: BTreeMap<String, Vec<ListEntry>> = peers
+        .iter()
+        .map(|other| (other.id.clone(), other.entries.clone()))
+        .collect();
+    learn_lists(
+        &mut state,
+        &own.shares,
+        ORIGIN,
+        &served,
+        &ListCache::default(),
+    );
     assert!(state.is_valid_for_test(), "{state:?}");
     state
 }
@@ -435,17 +431,17 @@ fn a_list_of_another_root_or_with_an_unsigned_key_counts_for_nothing() {
     forged.entries.last_mut().unwrap().signature = Some(encode_b64u(
         &x2.sign(b"apassy-connect device-list v1\0other").unwrap(),
     ));
-    let pin = peer_mut(&mut state, &x.id).unwrap();
-    let (list, changed) = take_peer_list(pin, ORIGIN, &forged.entries);
+    let pin = pin_mut(&mut state, &x.id, None).unwrap();
+    let (list, changed) = take_peer_list(pin, ORIGIN, &forged.entries, &ListCache::default());
     assert!(list.is_none() && !changed);
     assert!(!accepted(&state, STORE, &x2));
     // X's list from another root (Connect gives a new list): X is suspended. Its keys
     // sign only what this device had merged, and nothing of the new root signs.
     let reset = List::new("acc_xxxxxxxxxb");
-    let pin = peer_mut(&mut state, &x.id).unwrap();
-    let (list, changed) = take_peer_list(pin, ORIGIN, &reset.entries);
+    let pin = pin_mut(&mut state, &x.id, None).unwrap();
+    let (list, changed) = take_peer_list(pin, ORIGIN, &reset.entries, &ListCache::default());
     assert!(list.is_none() && changed);
-    assert!(peer(&state, &x.id).unwrap().suspended);
+    assert!(pin_of(&state, &x.id, None).unwrap().suspended);
     assert!(!accepted(&state, STORE, &x.root));
     assert!(left(&state, STORE, &x.root));
     assert!(!accepted(&state, STORE, &reset.root));
@@ -479,17 +475,19 @@ fn a_second_device_of_each_person_reads_the_lists() {
 }
 
 /// A co-member's root comes from the owner's `peer` entry, and counts only in the
-/// owner's stores; a root that differs from this account's own pin of it counts for
-/// nothing there.
+/// owner's stores: in a store of A, Y counts with the root that A's list names, also when
+/// this account pinned another root for Y itself (that pin counts in this account's own
+/// stores only).
 #[test]
 fn a_co_member_is_pinned_through_the_owner_only() {
     let (a, x, y) = family();
     let x_state = refreshed(&x, &[&a, &y]);
-    let pin = peer(&x_state, &y.id).unwrap();
+    let pin = pin_of(&x_state, &y.id, Some(&a.id)).unwrap();
     assert_eq!(pin.via.as_deref(), Some(a.id.as_str()));
+    assert!(pin_of(&x_state, &y.id, None).is_none());
     assert!(accepted(&x_state, STORE, &y.root));
     assert!(!accepted(&x_state, OTHER_STORE, &y.root));
-    // X pinned another root for Y itself: Y signs nothing in A's store.
+    // X pinned another root for Y itself: in A's store, A's naming counts.
     let other_y = List::new("acc_yyyyyyyyyb");
     let mut x_pins = List {
         id: x.id.clone(),
@@ -499,8 +497,9 @@ fn a_co_member_is_pinned_through_the_owner_only() {
     };
     x_pins.peer(&other_y);
     let state = refreshed(&x_pins, &[&a, &y]);
-    assert!(!accepted(&state, STORE, &y.root));
-    assert!(!state.stores[0].members.contains(&y.id));
+    assert!(accepted(&state, STORE, &y.root));
+    assert!(!accepted(&state, STORE, &other_y.root));
+    assert!(state.stores[0].members.contains(&y.id));
 }
 
 /// P3 (unit): after `unshare`, X's keys move to the keys that ended in the store: a head
@@ -523,22 +522,15 @@ fn an_unshare_and_a_remove_end_the_keys_of_the_store() {
     assert!(!accepted(&a_state, STORE, &x2) && left(&a_state, STORE, &x2));
     // A unshares the store with X: on A's second device X's keys ended.
     a.share(UNSHARE, &x.id.clone(), None, Some(STORE));
-    let mut a_second = state_of(&a);
-    for other in [&x, &y] {
-        let pin = peer_mut(&mut a_second, &other.id).unwrap();
-        take_peer_list(pin, ORIGIN, &other.entries);
-    }
-    // A's own list dropped X from the members before X's list was read: the keys that
-    // a fresh device learns later are not X's to sign any more either.
-    assert!(!accepted(&a_second, STORE, &x.root));
+    let a_second = refreshed(&a, &[&x, &y]);
+    // A's own list ended X's share: a fresh device takes X's keys as ended keys.
+    assert!(!accepted(&a_second, STORE, &x.root) && left(&a_second, STORE, &x.root));
     let mut a_before = refreshed(&a_before_unshare(&a), &[&x, &y]);
     assert!(accepted(&a_before, STORE, &x.root));
     learn_own(&mut a_before, &a.verified().unwrap().shares);
     assert!(!accepted(&a_before, STORE, &x.root) && left(&a_before, STORE, &x.root));
     // The co-member Y learns it from A's list: X's keys ended there too.
-    let pin = peer_mut(&mut y_state, &a.id).unwrap();
-    let (verified, _) = take_peer_list(pin, ORIGIN, &a.entries);
-    learn_owner(&mut y_state, &a.id, &verified.unwrap(), &[STORE.to_owned()]);
+    y_state = refresh_again(y_state, &y, &[&a, &x]);
     assert!(!accepted(&y_state, STORE, &x.root) && left(&y_state, STORE, &x.root));
     assert!(accepted(&y_state, STORE, &a.root));
     // X itself: the share ended here, nothing new merges.
@@ -585,8 +577,13 @@ fn a_fork_or_an_older_list_of_a_peer_is_not_taken() {
     let mut state = refreshed(&x, &[&a]);
     let before = state.clone();
     // A's list cut before its last entry: older than the pin.
-    let pin = peer_mut(&mut state, &a.id).unwrap();
-    let (list, changed) = take_peer_list(pin, ORIGIN, &a.entries[..a.entries.len() - 1]);
+    let pin = pin_mut(&mut state, &a.id, None).unwrap();
+    let (list, changed) = take_peer_list(
+        pin,
+        ORIGIN,
+        &a.entries[..a.entries.len() - 1],
+        &ListCache::default(),
+    );
     assert!(list.is_none() && !changed);
     // Another history of A from version 2 on.
     let mut fork = List {
@@ -596,8 +593,8 @@ fn a_fork_or_an_older_list_of_a_peer_is_not_taken() {
         hashes: a.hashes[..1].to_vec(),
     };
     fork.add(&key(), 9);
-    let pin = peer_mut(&mut state, &a.id).unwrap();
-    let (list, changed) = take_peer_list(pin, ORIGIN, &fork.entries);
+    let pin = pin_mut(&mut state, &a.id, None).unwrap();
+    let (list, changed) = take_peer_list(pin, ORIGIN, &fork.entries, &ListCache::default());
     assert!(list.is_none() && !changed);
     assert_eq!(state, before);
 }
@@ -617,6 +614,360 @@ fn the_account_file_bounds_its_peers_and_stores() {
     bad.stores[0].owner = a.id.clone();
     assert!(!bad.is_valid_for_test());
     let mut bad = state;
-    bad.stores[0].ended = vec![b64(&x.root); MAX_ENDED + 1];
+    bad.stores[0].ended = vec![x.id.clone(); MAX_ENDED + 1];
     assert!(!bad.is_valid_for_test());
+}
+
+// ---- Second pass: the pins of co-members, the ended keys, and the bounds. ----
+
+const S1: &str = "t_s3aaaaaaaa";
+const S2: &str = "t_s4aaaaaaaa";
+
+/// X joined S1 of A and S2 of B; A shares S1 with X and `y_a`, B shares S2 with X and
+/// `y_b` (two lists of one account Y, or the same list).
+fn two_owners(y_a: &List, y_b: &List) -> (List, List, List) {
+    let (mut a, mut b, mut x) = (
+        List::new("acc_aaaaaaaaab"),
+        List::new("acc_bbbbbbbbbb"),
+        List::new("acc_xxxxxxxxxb"),
+    );
+    for (owner, y, team) in [(&mut a, y_a, S1), (&mut b, y_b, S2)] {
+        owner.peer(&x);
+        owner.peer(y);
+        owner.share(SHARE, &x.id.clone(), None, Some(team));
+        owner.share(SHARE, &y.id.clone(), None, Some(team));
+    }
+    x.peer(&a);
+    x.peer(&b);
+    x.share(JOIN, &a.id.clone(), None, Some(S1));
+    x.share(JOIN, &b.id.clone(), None, Some(S2));
+    (a, b, x)
+}
+
+/// C1: a co-member that two owners name with one root counts in both stores.
+#[test]
+fn two_owners_naming_one_co_member_with_one_root_count_in_both_stores() {
+    let y = List::new("acc_yyyyyyyyyb");
+    let (a, b, x) = two_owners(&y, &y);
+    let state = refreshed(&x, &[&a, &b, &y]);
+    assert!(accepted(&state, S1, &y.root));
+    assert!(accepted(&state, S2, &y.root));
+}
+
+/// C1: two owners that name different roots for one co-member (Y reset its account, B
+/// pinned the new root, A not yet): each root counts only in the stores of the owner
+/// that named it. The new root signs in B's store; in A's store the old root's pin is
+/// suspended by the new list, and the new key signs nothing.
+#[test]
+fn conflicting_roots_of_one_co_member_stay_apart() {
+    let y_old = List::new("acc_yyyyyyyyyb");
+    let y_new = List::new("acc_yyyyyyyyyb");
+    let (a, b, x) = two_owners(&y_old, &y_new);
+    let state = refreshed(&x, &[&a, &b, &y_new]);
+    assert!(
+        accepted(&state, S2, &y_new.root),
+        "B's naming counts in B's store"
+    );
+    assert!(!accepted(&state, S1, &y_new.root), "not in A's store");
+    assert!(!accepted(&state, S1, &y_old.root));
+}
+
+/// C1: when an owner pins a co-member anew (after its reset), the old keys of that
+/// co-member are kept as keys that left in that owner's store, not forgotten.
+#[test]
+fn a_re_pin_by_the_owner_keeps_the_old_keys_as_keys_that_left() {
+    let y_old = List::new("acc_yyyyyyyyyb");
+    let (mut a, mut x) = (List::new("acc_aaaaaaaaab"), List::new("acc_xxxxxxxxxb"));
+    a.peer(&x);
+    a.peer(&y_old);
+    a.share(SHARE, &x.id.clone(), None, Some(S1));
+    a.share(SHARE, &y_old.id.clone(), None, Some(S1));
+    x.peer(&a);
+    x.share(JOIN, &a.id.clone(), None, Some(S1));
+    let state = refreshed(&x, &[&a, &y_old]);
+    assert!(accepted(&state, S1, &y_old.root));
+    // Y resets; A pins the new root after new words and shares again. X's next refresh
+    // takes A's new naming of Y.
+    let y_new = List::new("acc_yyyyyyyyyb");
+    let y_id = y_new.id.clone();
+    a.share(UNSHARE, &y_id, None, Some(S1));
+    a.share(UNPEER, &y_id, None, None);
+    a.peer(&y_new);
+    a.share(SHARE, &y_id, None, Some(S1));
+    let state = refresh_again(state, &x, &[&a, &y_new]);
+    assert!(accepted(&state, S1, &y_new.root));
+    assert!(
+        left(&state, S1, &y_old.root),
+        "the old key signs what was merged before"
+    );
+}
+
+/// C1: a co-member that one owner stops naming keeps the pin that another owner's store
+/// needs, with its version: a cut list of it is not taken afterwards.
+#[test]
+fn a_pin_that_another_store_needs_stays_when_one_owner_drops_the_member() {
+    let mut y = List::new("acc_yyyyyyyyyb");
+    let (mut a, b, x) = two_owners(&y, &y);
+    let y2 = key();
+    y.add(&y2, 4);
+    let root = y.root_signer();
+    let before_removal = y.entries.clone();
+    y.device(&root, "remove", &y2, None, None);
+    // X read Y's list with the removal of y2.
+    let state = refreshed(&x, &[&a, &b, &y]);
+    assert!(accepted(&state, S2, &y.root) && !accepted(&state, S2, &y2));
+    // A stops sharing S1 with Y; B still shares S2 with Y. Then Connect serves Y's list
+    // cut before the removal: the pin that S2 needs keeps its version and takes nothing.
+    a.share(UNSHARE, &y.id.clone(), None, Some(S1));
+    let cut = List {
+        id: y.id.clone(),
+        root: y.root_signer(),
+        entries: before_removal,
+        hashes: Vec::new(),
+    };
+    let state = refresh_again(state, &x, &[&a, &b, &cut]);
+    assert!(accepted(&state, S2, &y.root), "B still shares S2 with Y");
+    assert!(
+        !accepted(&state, S2, &y2),
+        "a cut list brings no removed key back"
+    );
+    assert!(!accepted(&state, S1, &y.root));
+}
+
+/// C1: a round in which one owner's list is not served changes nothing of that owner's
+/// store or of the other owner's store.
+#[test]
+fn one_owners_list_missing_in_a_round_leaves_the_other_store_alone() {
+    let y = List::new("acc_yyyyyyyyyb");
+    let (a, b, x) = two_owners(&y, &y);
+    let state = refreshed(&x, &[&a, &b, &y]);
+    assert!(accepted(&state, S1, &y.root) && accepted(&state, S2, &y.root));
+    let without_a = refresh_again(state, &x, &[&b, &y]);
+    assert!(accepted(&without_a, S1, &y.root));
+    assert!(accepted(&without_a, S2, &y.root));
+}
+
+/// C5: a device of the owner that reads the `share` and the `unshare` of a member at
+/// once (it was offline in between) holds that member's keys as ended keys of the store:
+/// the member's heads below an accepted head stay in the chain.
+#[test]
+fn a_device_that_reads_a_share_and_its_end_at_once_holds_the_ended_keys() {
+    let (mut a, x, y) = family();
+    a.share(UNSHARE, &x.id.clone(), None, Some(STORE));
+    let fresh = refreshed(&a, &[&x, &y]);
+    assert!(!accepted(&fresh, STORE, &x.root));
+    assert!(
+        left(&fresh, STORE, &x.root),
+        "the member's key signs below an accepted head and up to the anchor"
+    );
+}
+
+/// C8: the own pins (one for each `peer` of the own list, at most 64) have a cap of
+/// their own beside the pins through the owners of joined stores.
+#[test]
+fn own_pins_and_pins_through_owners_have_caps_of_their_own() {
+    let mut a = List::new("acc_aaaaaaaaab");
+    let mut x = List::new("acc_xxxxxxxxxb");
+    let members: Vec<List> = (0..4)
+        .map(|index| List::new(&format!("acc_mmmmmmmm{}b", ["a", "b", "c", "d"][index])))
+        .collect();
+    a.peer(&x);
+    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    for member in &members {
+        a.peer(member);
+        a.share(SHARE, &member.id.clone(), None, Some(STORE));
+    }
+    x.peer(&a);
+    x.share(JOIN, &a.id.clone(), None, Some(STORE));
+    let alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    let others: Vec<List> = (0..63)
+        .map(|index| {
+            let (hi, lo) = (index / 32, index % 32);
+            List::new(&format!(
+                "acc_pppppppp{}{}",
+                &alphabet[hi..=hi],
+                &alphabet[lo..=lo]
+            ))
+        })
+        .collect();
+    for other in &others {
+        x.peer(other);
+    }
+    let mut all: Vec<&List> = vec![&a];
+    all.extend(members.iter());
+    let state = refreshed(&x, &all);
+    let own = state.peers.iter().filter(|pin| pin.via.is_none()).count();
+    assert_eq!(own, 64, "every peer of the own list is pinned");
+    for member in &members {
+        assert!(accepted(&state, STORE, &member.root));
+    }
+}
+
+/// A copy of `list` to go on with.
+fn fork(list: &List) -> List {
+    List {
+        id: list.id.clone(),
+        root: list.root_signer(),
+        entries: list.entries.clone(),
+        hashes: list.hashes.clone(),
+    }
+}
+
+/// An account id of section 2 for the number `index` (below 1024), with the prefix `p`.
+fn numbered(prefix: &str, index: usize) -> String {
+    let alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    let (hi, lo) = (index / 32, index % 32);
+    format!("acc_{prefix}{}{}", &alphabet[hi..=hi], &alphabet[lo..=lo])
+}
+
+const S3: &str = "t_s5aaaaaaaa";
+
+/// C8: an entry that adds something (`add`, `peer`, `share`, `join`) comes at version 822
+/// at most, on the client as on Connect; with 10 live devices, 64 peers, and 128 shares at
+/// 822, every one of them can be ended up to version 1024, the last device by itself.
+#[test]
+fn the_adding_entries_stop_at_822_and_the_ends_go_on_to_1024() {
+    let mut base = List::new("acc_aaaaaaaaab");
+    let devices: Vec<DeviceKey> = (0..9).map(|_| key()).collect();
+    for (index, device) in devices.iter().enumerate() {
+        base.add(device, index as u8 + 1);
+    }
+    let peers: Vec<List> = (0..MAX_PEERS)
+        .map(|index| List::new(&numbered("qqqqqqqq", index)))
+        .collect();
+    for peer in &peers {
+        base.peer(peer);
+    }
+    for peer in &peers {
+        base.share(SHARE, &peer.id.clone(), None, Some(S1));
+        base.share(SHARE, &peer.id.clone(), None, Some(S2));
+    }
+    assert_eq!(base.entries.len(), 1 + 9 + MAX_PEERS + MAX_SHARED);
+    let first = peers[0].id.clone();
+    let second = peers[1].id.clone();
+    while base.entries.len() < 818 {
+        base.share(UNSHARE, &first, None, Some(S1));
+        base.share(SHARE, &first, None, Some(S1));
+    }
+    let full = base.verified().expect("full at 818");
+    assert_eq!(
+        (
+            full.live.len(),
+            full.shares.peers.len(),
+            full.shares.shares.len()
+        ),
+        (10, 64, 128)
+    );
+    // Each adding kind at 822 is taken.
+    let mut share_822 = fork(&base);
+    for op in [UNSHARE, SHARE, UNSHARE, SHARE] {
+        share_822.share(op, &first, None, Some(S1));
+    }
+    assert_eq!(share_822.entries.len(), 822);
+    assert!(share_822.verified().is_some(), "a share at 822");
+    let mut join_822 = fork(&base);
+    join_822.share(UNSHARE, &first, None, Some(S1));
+    join_822.share(UNSHARE, &first, None, Some(S2));
+    join_822.share(UNSHARE, &second, None, Some(S1));
+    join_822.share(JOIN, &second, None, Some(S3));
+    assert!(join_822.verified().is_some(), "a join at 822");
+    let mut peer_822 = fork(&base);
+    peer_822.share(UNSHARE, &first, None, Some(S1));
+    peer_822.share(UNSHARE, &first, None, Some(S2));
+    peer_822.share(UNPEER, &first, None, None);
+    peer_822.peer(&peers[0]);
+    assert!(peer_822.verified().is_some(), "a peer at 822");
+    let mut add_822 = fork(&base);
+    add_822.share(UNSHARE, &first, None, Some(S1));
+    add_822.share(UNSHARE, &first, None, Some(S2));
+    let root = add_822.root_signer();
+    add_822.device(&root, "remove", &devices[0], None, None);
+    add_822.add(&key(), 200);
+    assert!(add_822.verified().is_some(), "an add at 822");
+    // At 823 each adding kind is refused, also with room in the counts.
+    let mut late = fork(&base);
+    late.share(UNSHARE, &first, None, Some(S1));
+    late.share(UNSHARE, &first, None, Some(S2));
+    late.share(UNPEER, &first, None, None);
+    let late_root = late.root_signer();
+    late.device(&late_root, "remove", &devices[0], None, None);
+    assert!(late.verified().is_some());
+    let refused = |step: &dyn Fn(&mut List)| {
+        let mut list = fork(&late);
+        step(&mut list);
+        assert_eq!(list.entries.len(), 823);
+        list.verified().is_none()
+    };
+    assert!(refused(&|list| list.peer(&peers[0])), "a peer at 823");
+    assert!(
+        refused(&|list| list.share(SHARE, &second, None, Some(S3))),
+        "a share at 823"
+    );
+    assert!(
+        refused(&|list| list.share(JOIN, &second, None, Some(S3))),
+        "a join at 823"
+    );
+    assert!(refused(&|list| list.add(&key(), 201)), "an add at 823");
+    // From the full state at 822, every share, peer, and device ends up to 1024.
+    let mut ends = share_822;
+    for peer in &peers {
+        ends.share(UNSHARE, &peer.id.clone(), None, Some(S1));
+        ends.share(UNSHARE, &peer.id.clone(), None, Some(S2));
+    }
+    for peer in &peers {
+        ends.share(UNPEER, &peer.id.clone(), None, None);
+    }
+    let root = ends.root_signer();
+    for device in &devices {
+        ends.device(&root, "remove", device, None, None);
+    }
+    let root_key = ends.root_signer();
+    ends.device(&root_key, "remove", &root_key, None, None);
+    assert_eq!(ends.entries.len(), trust::MAX_LIST);
+    let ended = ends.verified().expect("the ends up to 1024");
+    assert!(ended.live.is_empty() && ended.shares.peers.is_empty());
+}
+
+/// C8: the keys that left a pin keep the newest (32) and never a live key; the ended
+/// accounts of a store keep the newest ends (64).
+#[test]
+fn the_keys_that_left_and_the_ended_accounts_keep_their_newest() {
+    let mut x = List::new("acc_xxxxxxxxxb");
+    let live = key();
+    x.add(&live, 1);
+    let passing: Vec<DeviceKey> = (0..40).map(|_| key()).collect();
+    let root = x.root_signer();
+    for (index, device) in passing.iter().enumerate() {
+        x.add(device, index as u8 + 2);
+        x.device(&root, "remove", device, None, None);
+    }
+    let mut a = List::new("acc_aaaaaaaaab");
+    a.peer(&x);
+    a.share(SHARE, &x.id.clone(), None, Some(STORE));
+    let state = refreshed(&a, &[&x]);
+    let pin = pin_of(&state, &x.id, None).unwrap();
+    assert_eq!(pin.left.len(), MAX_PEER_LEFT);
+    assert!(pin.left.contains(&b64(&passing[39])));
+    assert!(!pin.left.contains(&b64(&passing[0])));
+    assert!(!pin.left.contains(&b64(&live)) && pin.known.contains(&b64(&live)));
+    // 65 accounts each shared and ended in one store: the oldest end goes.
+    let mut owner = List::new("acc_aaaaaaaaab");
+    let members: Vec<List> = (0..=MAX_ENDED)
+        .map(|index| List::new(&numbered("rrrrrrrr", index)))
+        .collect();
+    for member in &members {
+        owner.peer(member);
+        owner.share(SHARE, &member.id.clone(), None, Some(STORE));
+        owner.share(UNSHARE, &member.id.clone(), None, Some(STORE));
+        owner.share(UNPEER, &member.id.clone(), None, None);
+    }
+    let state = state_of(&owner);
+    let store = state
+        .stores
+        .iter()
+        .find(|store| store.team_id == STORE)
+        .unwrap();
+    assert_eq!(store.ended.len(), MAX_ENDED);
+    assert!(!store.ended.contains(&members[0].id));
+    assert!(store.ended.contains(&members[MAX_ENDED].id));
 }

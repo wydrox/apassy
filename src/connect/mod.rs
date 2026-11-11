@@ -65,8 +65,8 @@ pub use entitlement::{Entitlement, EntitlementClaims, EntitlementError, Entitlem
 pub use key_file::{FileKeyStore, KEYRING_WARNING, key_file, platform_store};
 pub use session::{AccountSession, AccountSlot, Follow, OpenTicket, SessionState};
 pub use share::{
-    PeerPin, ShareLink, ShareOffer, SharePeerJoin, ShareRequest, ShareStatus, StoreShare,
-    store_signer_policy,
+    PeerPin, Person, ShareLink, ShareNames, ShareOffer, SharePeerJoin, ShareRequest, ShareStatus,
+    StoreShare, store_signer_policy,
 };
 pub use trust::ListEntry;
 pub use words::{

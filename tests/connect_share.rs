@@ -17,7 +17,7 @@ use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, OwnerProof};
 use apassy::connect::device_key::share_list_message;
 use apassy::connect::{
     AccountSigner, ConnectAccount, ConnectClient, ConnectError, JoinPoll, JoinRequest,
-    MemoryKeyStore, account_file, signer_policy,
+    MemoryKeyStore, ShareNames, account_file, signer_policy,
 };
 use apassy::contracts::CredentialKind;
 use apassy::sync::{RelayConfig, RelaySync, StoreError, encode_b64u};
@@ -255,23 +255,29 @@ impl Family {
         let requests = self.account_a.share_requests(&link).expect("requests");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].words, answer.words);
-        let (proof, epoch) = self
-            .owner_a
-            .proof(self.account_a.share_action(&link, &requests[0]));
+        let names = ShareNames::default();
+        let (proof, epoch) =
+            self.owner_a
+                .proof(self.account_a.share_action(&link, &requests[0], &names));
         self.account_a
-            .confirm_share(&link, &requests[0], proof, &epoch)
+            .confirm_share(&link, &requests[0], &names, proof, &epoch)
             .expect("confirm");
-        let (proof, epoch) = self.owner_x.proof(self.account_x.accept_action(&answer));
+        let (proof, epoch) = self
+            .owner_x
+            .proof(self.account_x.accept_action(&answer, &names));
         self.account_x
-            .accept_share(&answer, proof, &epoch)
+            .accept_share(&answer, &names, proof, &epoch)
             .expect("accept");
-        let status = self.account_x.refresh_shares().expect("refresh");
+        let status = self.account_x.refresh_shares(&[]).expect("refresh");
         assert_eq!(status.offers.len(), 1, "{status:?}");
         let a_id = self.a_id();
+        let (proof, epoch) = self
+            .owner_x
+            .proof(self.account_x.join_action(&self.team, &a_id, &names));
         self.account_x
-            .join_shared_store(&self.team, &a_id)
+            .join_shared_store(&self.team, &a_id, &[], &names, proof, &epoch)
             .expect("join");
-        self.account_a.refresh_shares().expect("A refreshes");
+        self.account_a.refresh_shares(&[]).expect("A refreshes");
     }
 
     /// X downloads the shared vault and adopts it with the passphrase of the copy.
@@ -376,7 +382,7 @@ fn without_a_share_the_member_signs_nothing_and_opens_nothing() {
         "{refused:?}"
     );
     // A's devices take no head of X's key in that store.
-    f.account_a.refresh_shares().expect("A refreshes");
+    f.account_a.refresh_shares(&[]).expect("A refreshes");
     let policy = signer_policy(f.account_a.state()).for_team(&f.team);
     assert!(!policy.accepts(&key_of(&f.account_x)));
     assert!(!policy.left_key(&key_of(&f.account_x)));
@@ -406,7 +412,7 @@ fn a_list_of_another_root_or_with_an_unsigned_key_is_refused() {
     extra["name"] = json!("Synthetic stranger");
     list.push(extra);
     f.cloud.connect.serve_peer_list(&x_id, Some(list));
-    f.account_a.refresh_shares().expect("A refreshes");
+    f.account_a.refresh_shares(&[]).expect("A refreshes");
     let policy = signer_policy(f.account_a.state()).for_team(&f.team);
     assert!(!policy.accepts(stranger.public_key()));
     assert!(policy.accepts(&x_key), "the pin keeps what it verified");
@@ -423,7 +429,7 @@ fn a_list_of_another_root_or_with_an_unsigned_key_is_refused() {
     .expect("another account");
     let reset = f.list_of(&other_account.state().account_id);
     f.cloud.connect.serve_peer_list(&x_id, Some(reset));
-    let status = f.account_a.refresh_shares().expect("A refreshes");
+    let status = f.account_a.refresh_shares(&[]).expect("A refreshes");
     assert_eq!(status.suspended, vec![x_id.clone()]);
     let policy = signer_policy(f.account_a.state()).for_team(&f.team);
     assert!(!policy.accepts(&x_key) && policy.left_key(&x_key));
@@ -440,14 +446,14 @@ fn second_devices_take_the_share_from_the_lists() {
     let mut account_a2 = join_account(&f.cloud, &mut f.account_a, &a2, "Synthetic Mac mini");
     let mut account_x2 = join_account(&f.cloud, &mut f.account_x, &x2, "Synthetic MacBook Air");
     f.share();
-    account_a2.refresh_shares().expect("A2");
+    account_a2.refresh_shares(&[]).expect("A2");
     let policy = signer_policy(account_a2.state()).for_team(&f.team);
     assert!(policy.accepts(&key_of(&f.account_x)));
     assert!(
         policy.accepts(&key_of(&account_x2)),
         "X's second device, from X's list"
     );
-    account_x2.refresh_shares().expect("X2");
+    account_x2.refresh_shares(&[]).expect("X2");
     let policy = signer_policy(account_x2.state()).for_team(&f.team);
     assert!(policy.accepts(&key_of(&f.account_a)));
     assert!(policy.accepts(&key_of(&account_a2)));
@@ -469,11 +475,12 @@ fn after_unshare_a_later_head_of_the_member_is_refused() {
     // A stops sharing; the store keeps X's device (the fake does not take it out of the
     // relay team), so X still pushes.
     let (team, x_id) = (f.team.clone(), f.x_id());
+    let names = ShareNames::default();
     let (proof, epoch) = f
         .owner_a
-        .proof(f.account_a.end_share_action(&team, &x_id, "Ola", false));
+        .proof(f.account_a.end_share_action(&team, &x_id, &names, false));
     f.account_a
-        .stop_sharing(&team, &x_id, "Ola", Some(proof), &epoch)
+        .stop_sharing(&team, &x_id, &names, proof, &epoch)
         .expect("unshare");
     hand_over(&f.a, &f.account_a);
     // A's head at its anchor is X's: it stays merged.
@@ -509,12 +516,19 @@ fn a_share_signed_by_another_than_a_live_device_of_the_owner_counts_for_nothing(
     let link = f.account_a.start_share(&x_id, &f.team).expect("code");
     let answer = f.account_x.accept_code(link.code()).expect("answer");
     let requests = f.account_a.share_requests(&link).expect("requests");
-    let (proof, epoch) = f.owner_x.proof(f.account_x.accept_action(&answer));
+    let names = ShareNames::default();
+    let (proof, epoch) = f.owner_x.proof(f.account_x.accept_action(&answer, &names));
     f.account_x
-        .accept_share(&answer, proof, &epoch)
+        .accept_share(&answer, &names, proof, &epoch)
         .expect("X pins A");
     // X's own view of A: no offers.
-    assert!(f.account_x.refresh_shares().expect("X").offers.is_empty());
+    assert!(
+        f.account_x
+            .refresh_shares(&[])
+            .expect("X")
+            .offers
+            .is_empty()
+    );
     drop(requests);
     let service = AccountSigner::with_key(apassy::sync::DeviceKey::generate().expect("key"));
     let x_signer = f.account_x.signer().expect("X signer");
@@ -522,7 +536,7 @@ fn a_share_signed_by_another_than_a_live_device_of_the_owner_counts_for_nothing(
         let (entry, hash) = forged_entry(&f, &a_id, signer, "share", &x_id, Some(&f.team));
         let saved = f.list_of(&a_id);
         f.cloud.connect.push_list_entry(&a_id, entry, hash);
-        let status = f.account_x.refresh_shares().expect("X refreshes");
+        let status = f.account_x.refresh_shares(&[]).expect("X refreshes");
         assert!(status.offers.is_empty(), "{status:?}");
         assert!(!f.account_x.shares_store(&f.team));
         f.cloud.connect.set_device_list(&a_id, saved);
@@ -629,13 +643,14 @@ fn a_cut_or_forked_list_of_the_owner_is_not_taken() {
     f.share();
     let (team, x_id, a_id) = (f.team.clone(), f.x_id(), f.a_id());
     let before_unshare = f.list_of(&a_id);
+    let names = ShareNames::default();
     let (proof, epoch) = f
         .owner_a
-        .proof(f.account_a.end_share_action(&team, &x_id, "Ola", false));
+        .proof(f.account_a.end_share_action(&team, &x_id, &names, false));
     f.account_a
-        .stop_sharing(&team, &x_id, "Ola", Some(proof), &epoch)
+        .stop_sharing(&team, &x_id, &names, proof, &epoch)
         .expect("unshare");
-    let status = f.account_x.refresh_shares().expect("X");
+    let status = f.account_x.refresh_shares(&[]).expect("X");
     assert!(
         status
             .stores
@@ -645,7 +660,7 @@ fn a_cut_or_forked_list_of_the_owner_is_not_taken() {
     );
     // Connect serves A's list without the unshare: X keeps the end.
     f.cloud.connect.serve_peer_list(&a_id, Some(before_unshare));
-    let status = f.account_x.refresh_shares().expect("X");
+    let status = f.account_x.refresh_shares(&[]).expect("X");
     assert!(
         status
             .stores
@@ -656,31 +671,262 @@ fn a_cut_or_forked_list_of_the_owner_is_not_taken() {
     assert!(policy.accepted.is_empty());
 }
 
-/// "Stop Sharing with <name>…" needs an owner check while Connect shows both accounts in
-/// the group, and none when it shows the member outside: a lying Connect can end a share
-/// this way, never start one.
+/// (iii) While Connect shows both accounts in the group, a refresh ends nothing; when it
+/// shows the member outside the group, the owner's device signs `unshare` by itself (no
+/// owner check: a lying Connect can end a share this way, never start one), once, and says
+/// so with the verified name.
 #[test]
-fn an_unshare_without_an_owner_check_needs_the_member_outside_the_group() {
+fn a_member_outside_the_group_ends_the_share_without_an_owner_check() {
     let mut f = family();
     f.share();
-    let (team, x_id) = (f.team.clone(), f.x_id());
-    let refused = f
-        .account_a
-        .stop_sharing(&team, &x_id, "Ola", None, &[0u8; 32])
-        .unwrap_err();
-    assert!(
-        matches!(refused, ConnectError::OwnerCheck(_)),
-        "{refused:?}"
+    let (team, x_id, a_id) = (f.team.clone(), f.x_id(), f.a_id());
+    let status = f.account_a.refresh_shares(&[]).expect("A");
+    assert!(status.notes.is_empty(), "{status:?}");
+    let head = f.list_of(&a_id).len();
+    f.cloud.connect.remove_member(&a_id, &x_id);
+    let status = f.account_a.refresh_shares(&[]).expect("A");
+    assert_eq!(f.list_of(&a_id).len(), head + 1, "one unshare");
+    assert_eq!(
+        f.list_of(&a_id).last().expect("entry")["op"],
+        json!("unshare")
     );
-    f.cloud.connect.remove_member(&f.a_id(), &x_id);
-    f.account_a
-        .stop_sharing(&team, &x_id, "Ola", None, &[0u8; 32])
-        .expect("unshare outside the group");
+    assert!(
+        status.notes.iter().any(
+            |note| note.ends_with("ended: no longer in your family or team.")
+                && !note.contains(&x_id)
+        ),
+        "{status:?}"
+    );
     assert!(
         !signer_policy(f.account_a.state())
             .for_team(&team)
             .accepts(&key_of(&f.account_x))
     );
+    // Again: nothing more is signed.
+    f.account_a.refresh_shares(&[]).expect("A");
+    assert_eq!(f.list_of(&a_id).len(), head + 1);
+}
+
+/// A device of an account that downloads the account's own store (`account` is a device of
+/// the account that made it, in the store already) and adopts it under `mac`.
+fn own_copy(mac: &Mac, account: &mut ConnectAccount, team: &str) -> Vault {
+    let store = account
+        .vault_stores()
+        .expect("stores")
+        .into_iter()
+        .find(|store| store.team_id == team)
+        .expect("in the store");
+    let joined = RelaySync::joined_from_store(account, &store).expect("joined");
+    let download = joined.download(&mac.data.join("sync")).expect("download");
+    let (vault, _) = mac.sync.adopt(&joined, &download, PASS).expect("adopt");
+    drop((vault, download, joined));
+    hand_over(mac, account);
+    let mut vault = Vault::open(&mac.vault_path).expect("open");
+    vault.unlock(PASS).expect("unlock");
+    vault
+}
+
+/// C5: the ended keys of a store come from the lists. A second device of A that was
+/// offline while A shared the store with X, X pushed, A pushed over it, and A ended the
+/// share, reads the `share` and the `unshare` at once: it holds X's keys as ended keys,
+/// and the chain from its anchor (X's head below A's head) merges.
+#[test]
+fn a_device_that_reads_a_share_and_its_end_at_once_follows_the_chain() {
+    let mut f = family();
+    let a2 = mac(&f.cloud, "a2");
+    let mut account_a2 = join_account(&f.cloud, &mut f.account_a, &a2, "Synthetic Mac mini");
+    f.a.sync
+        .register_account_devices(&mut f.account_a)
+        .expect("A2 in the store");
+    let mut vault_a2 = own_copy(&a2, &mut account_a2, &f.team.clone());
+    assert_eq!(titles(&vault_a2), vec!["Alpha"]);
+    // A2 is offline from here.
+    f.share();
+    let mut vault_x = f.x_vault();
+    hand_over(&f.a, &f.account_a);
+    vault_x.add(item("Beta")).expect("add");
+    assert!(f.x.sync.sync(&mut vault_x).expect("X").pushed);
+    f.a.sync.sync(&mut f.vault_a).expect("A merges X");
+    f.vault_a.add(item("Gamma")).expect("add");
+    assert!(f.a.sync.sync(&mut f.vault_a).expect("A").pushed);
+    let (team, x_id) = (f.team.clone(), f.x_id());
+    let names = ShareNames::default();
+    let (proof, epoch) = f
+        .owner_a
+        .proof(f.account_a.end_share_action(&team, &x_id, &names, false));
+    f.account_a
+        .stop_sharing(&team, &x_id, &names, proof, &epoch)
+        .expect("unshare");
+    // A2 reads A's list with both entries, and X's list.
+    account_a2.refresh_shares(&[]).expect("A2");
+    let policy = signer_policy(account_a2.state()).for_team(&team);
+    assert!(policy.left_key(&key_of(&f.account_x)), "{policy:?}");
+    assert!(!policy.accepts(&key_of(&f.account_x)));
+    hand_over(&a2, &account_a2);
+    a2.sync.sync(&mut vault_a2).expect("A2 follows the chain");
+    assert_eq!(titles(&vault_a2), vec!["Alpha", "Beta", "Gamma"]);
+}
+
+/// C4: the owner confirmed and the member did not finish the words (its list does not pin
+/// the owner): the owner shows a new code and the words again, the member finishes, and
+/// the owner signs nothing twice.
+#[test]
+fn a_member_who_did_not_finish_the_words_gets_a_new_code() {
+    let mut f = family();
+    let (team, x_id, a_id) = (f.team.clone(), f.x_id(), f.a_id());
+    let names = ShareNames::default();
+    let link = f.account_a.start_share(&x_id, &team).expect("code");
+    let answer = f.account_x.accept_code(link.code()).expect("answer");
+    let requests = f.account_a.share_requests(&link).expect("requests");
+    let (proof, epoch) = f
+        .owner_a
+        .proof(f.account_a.share_action(&link, &requests[0], &names));
+    f.account_a
+        .confirm_share(&link, &requests[0], &names, proof, &epoch)
+        .expect("confirm");
+    // X stops here (a lock, Cancel, a failed owner check).
+    drop(answer);
+    let status = f.account_a.refresh_shares(&[]).expect("A");
+    let member = &status
+        .stores
+        .iter()
+        .find(|store| store.team_id == team)
+        .expect("store")
+        .members[0];
+    assert!(!member.accepted, "{member:?}");
+    assert!(f.account_a.needs_share_code(&x_id).expect("check"));
+    let head = f.list_of(&a_id).len();
+    let link = f.account_a.start_share(&x_id, &team).expect("a new code");
+    let answer = f.account_x.accept_code(link.code()).expect("answer");
+    let requests = f.account_a.share_requests(&link).expect("requests");
+    assert_eq!(requests[0].words, answer.words);
+    let action = f.account_a.share_action(&link, &requests[0], &names);
+    assert!(
+        matches!(action, OwnerAction::ShareConnectVault { .. }),
+        "{action:?}"
+    );
+    let (proof, epoch) = f.owner_a.proof(action);
+    f.account_a
+        .confirm_share(&link, &requests[0], &names, proof, &epoch)
+        .expect("confirm again");
+    assert_eq!(f.list_of(&a_id).len(), head, "nothing was signed twice");
+    let (proof, epoch) = f.owner_x.proof(f.account_x.accept_action(&answer, &names));
+    f.account_x
+        .accept_share(&answer, &names, proof, &epoch)
+        .expect("X finishes");
+    assert!(!f.account_a.needs_share_code(&x_id).expect("check"));
+    let status = f.account_x.refresh_shares(&[]).expect("X");
+    assert_eq!(status.offers.len(), 1, "{status:?}");
+}
+
+/// (i) and (ii): X leaves the shared vault on one device. X's other device reads the
+/// `leave` and says on which device; A's device reads X's verified `leave` and signs
+/// `unshare` by itself, once ("<name> left this vault."); X gets no offer of the same
+/// share again until A shares it again, and a new share is not ended by the old leave.
+#[test]
+fn a_leave_ends_the_share_on_every_device_once() {
+    let mut f = family();
+    let x2 = mac(&f.cloud, "x2");
+    let mut account_x2 = join_account(&f.cloud, &mut f.account_x, &x2, "Synthetic MacBook Air");
+    f.share();
+    let (team, a_id) = (f.team.clone(), f.a_id());
+    let names = ShareNames::default();
+    let (proof, epoch) = f
+        .owner_x
+        .proof(f.account_x.end_share_action(&team, &a_id, &names, true));
+    f.account_x
+        .leave_shared_store(&team, &a_id, &names, proof, &epoch)
+        .expect("leave");
+    let status = account_x2.refresh_shares(&[]).expect("X2");
+    assert_eq!(
+        status.left,
+        vec![(team.clone(), "Synthetic MacBook".to_owned())],
+        "{status:?}"
+    );
+    assert!(
+        status.offers.is_empty(),
+        "the same share is not offered again"
+    );
+    let head = f.list_of(&a_id).len();
+    let status = f.account_a.refresh_shares(&[]).expect("A");
+    assert_eq!(f.list_of(&a_id).len(), head + 1);
+    assert!(
+        status
+            .notes
+            .iter()
+            .any(|note| note.ends_with("left this vault.")),
+        "{status:?}"
+    );
+    f.account_a.refresh_shares(&[]).expect("A again");
+    assert_eq!(f.list_of(&a_id).len(), head + 1, "once");
+    // A shares again (no words: the pair is pinned both ways). The old leave ends
+    // nothing of the new share, and X is offered the store again.
+    let x_id = f.x_id();
+    assert!(!f.account_a.needs_share_code(&x_id).expect("check"));
+    let (proof, epoch) = f
+        .owner_a
+        .proof(f.account_a.share_again_action(&team, &x_id, &names));
+    f.account_a
+        .share_again(&team, &x_id, &names, proof, &epoch)
+        .expect("share again");
+    let head = f.list_of(&a_id).len();
+    f.account_a.refresh_shares(&[]).expect("A");
+    assert_eq!(f.list_of(&a_id).len(), head);
+    let status = f.account_x.refresh_shares(&[]).expect("X");
+    assert_eq!(status.offers.len(), 1, "{status:?}");
+}
+
+/// C2: a list of a peer that names a store of this account in a `share` gives no offer of
+/// it, and this account signs no `join` of its own store: neither of a store that this
+/// computer syncs as its own (the local vault list), nor of one that its own list shares.
+/// Connect (or a peer) cannot turn this account's store into one that the peer's devices
+/// sign.
+#[test]
+fn a_store_of_this_account_is_never_offered_or_joined() {
+    let mut f = family();
+    f.share();
+    let (a_id, x_id) = (f.a_id(), f.x_id());
+    let second = f
+        .account_a
+        .create_vault_store("0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77", "Second")
+        .expect("second store")
+        .team_id;
+    let signer = f.account_x.signer().expect("signer");
+    let (entry, hash) = forged_entry(&f, &x_id, &signer, "share", &a_id, Some(&second));
+    f.cloud.connect.push_list_entry(&x_id, entry, hash);
+    let names = ShareNames::default();
+    let refused = |f: &mut Family, local: &[String]| {
+        let status = f.account_a.refresh_shares(local).expect("refresh");
+        assert!(
+            !status.offers.iter().any(|offer| offer.team_id == second),
+            "{status:?}"
+        );
+        let before = f.cloud.connect.count("POST /v1/account/list");
+        let (proof, epoch) = f
+            .owner_a
+            .proof(f.account_a.join_action(&second, &x_id, &names));
+        assert_eq!(
+            f.account_a
+                .join_shared_store(&second, &x_id, local, &names, proof, &epoch)
+                .unwrap_err(),
+            ConnectError::Invalid
+        );
+        assert_eq!(
+            f.cloud.connect.count("POST /v1/account/list"),
+            before,
+            "nothing was signed"
+        );
+    };
+    // This computer syncs the store as its own vault.
+    refused(&mut f, &[second.clone()]);
+    // The own list shares the store (with X): it is this account's.
+    let (proof, epoch) = f
+        .owner_a
+        .proof(f.account_a.share_again_action(&second, &x_id, &names));
+    f.account_a
+        .share_again(&second, &x_id, &names, proof, &epoch)
+        .expect("share the second store");
+    refused(&mut f, &[]);
 }
 
 /// An account file of version 3 (before the peers) is read as version 4 and written as
@@ -903,18 +1149,19 @@ fn a_reset_account_is_shared_again_only_with_new_words() {
         "Synthetic iMac",
     )
     .expect("recover X");
-    let status = f.account_a.refresh_shares().expect("A");
+    let status = f.account_a.refresh_shares(&[]).expect("A");
     assert_eq!(status.suspended, vec![x_id.clone()]);
     let policy = signer_policy(f.account_a.state()).for_team(&team);
     assert!(!policy.accepts(&old_key) && policy.left_key(&old_key));
     assert!(!policy.accepts(&key_of(&new_x)));
     // The same pin is not enough: new words are needed.
+    let names = ShareNames::default();
     let (proof, epoch) = f
         .owner_a
-        .proof(f.account_a.share_again_action(&team, &x_id, "Ola"));
+        .proof(f.account_a.share_again_action(&team, &x_id, &names));
     assert_eq!(
         f.account_a
-            .share_again(&team, &x_id, "Ola", proof, &epoch)
+            .share_again(&team, &x_id, &names, proof, &epoch)
             .unwrap_err(),
         ConnectError::NotVerified
     );
@@ -924,13 +1171,20 @@ fn a_reset_account_is_shared_again_only_with_new_words() {
     let requests = f.account_a.share_requests(&link).expect("requests");
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].words, answer.words);
-    let (proof, epoch) = f
-        .owner_a
-        .proof(f.account_a.share_action(&link, &requests[0]));
+    // A re-pin of its own: it says which shares end, and shares the store after it.
+    let action = f.account_a.share_action(&link, &requests[0], &names);
+    match &action {
+        OwnerAction::RepinConnectPeer { ends, team_id, .. } => {
+            assert_eq!(ends.len(), 1, "{action:?}");
+            assert_eq!(team_id.as_deref(), Some(team.as_str()));
+        }
+        other => panic!("not a re-pin: {other:?}"),
+    }
+    let (proof, epoch) = f.owner_a.proof(action);
     f.account_a
-        .confirm_share(&link, &requests[0], proof, &epoch)
+        .confirm_share(&link, &requests[0], &names, proof, &epoch)
         .expect("A shares again");
-    f.account_a.refresh_shares().expect("A");
+    f.account_a.refresh_shares(&[]).expect("A");
     let policy = signer_policy(f.account_a.state()).for_team(&team);
     assert!(policy.accepts(&key_of(&new_x)));
     assert!(!policy.accepts(&old_key));
@@ -941,4 +1195,61 @@ fn a_reset_account_is_shared_again_only_with_new_words() {
             .iter()
             .any(|pin| pin.account_id == x_id && !pin.suspended)
     );
+}
+
+/// C8: a re-pin of a reset account near the end of the list checks the room for all of
+/// its entries (the ends of the old root, `unpeer`, `peer`, and `share`) before the first
+/// one: at version 819 the `share` would come at 823, so nothing is signed.
+#[test]
+fn a_re_pin_near_the_end_of_the_list_signs_nothing() {
+    let mut f = family();
+    f.share();
+    let (team, x_id, a_id) = (f.team.clone(), f.x_id(), f.a_id());
+    let signer = f.account_a.signer().expect("signer");
+    while f.list_of(&a_id).len() < 819 {
+        for op in ["unshare", "share"] {
+            let (entry, hash) = forged_entry(&f, &a_id, &signer, op, &x_id, Some(&team));
+            f.cloud.connect.push_list_entry(&a_id, entry, hash);
+        }
+    }
+    assert_eq!(f.list_of(&a_id).len(), 819);
+    // X's only device leaves and X recovers its account: a new root.
+    let device_id = f.account_x.state().device_id.clone();
+    let row = f
+        .account_x
+        .view()
+        .expect("view")
+        .devices
+        .into_iter()
+        .find(|device| device.device_id == device_id)
+        .expect("this device");
+    let (proof, epoch) = f.owner_x.proof(f.account_x.revoke_action(&row));
+    f.account_x.revoke(&row, proof, &epoch).expect("revoke");
+    let fresh = mac(&f.cloud, "x-fresh");
+    let code = f.recovery_x.text();
+    let (mut new_x, _, _) = ConnectAccount::recover(
+        client(&f.cloud),
+        &fresh.keys,
+        &fresh.account_path,
+        &x_id,
+        &code,
+        "Synthetic iMac",
+    )
+    .expect("recover X");
+    f.account_a.refresh_shares(&[]).expect("A");
+    let link = f.account_a.start_share(&x_id, &team).expect("code");
+    let answer = new_x.accept_code(link.code()).expect("answer");
+    let requests = f.account_a.share_requests(&link).expect("requests");
+    assert_eq!(requests[0].words, answer.words);
+    let names = ShareNames::default();
+    let (proof, epoch) = f
+        .owner_a
+        .proof(f.account_a.share_action(&link, &requests[0], &names));
+    assert_eq!(
+        f.account_a
+            .confirm_share(&link, &requests[0], &names, proof, &epoch)
+            .unwrap_err(),
+        ConnectError::AccountLimit
+    );
+    assert_eq!(f.list_of(&a_id).len(), 819, "nothing was signed");
 }

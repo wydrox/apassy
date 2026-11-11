@@ -2546,9 +2546,11 @@ mod connect_sync {
             cloud
                 .relay
                 .replace_store_from(&team, vec![forged_after(&first, number, &relay_key)]);
+            // A key that the trust store does not hold signs nothing: the sync says that
+            // the signer is not verified, and merges nothing.
             assert_eq!(
                 a.mac.sync.sync(&mut vault_a).unwrap_err(),
-                SyncError::Damaged,
+                SyncError::SignerNotVerified,
                 "shared: {shared}"
             );
             assert_eq!(titles(&vault_a), vec!["Family"]);
@@ -2560,7 +2562,7 @@ mod connect_sync {
                 );
                 assert_eq!(
                     a.mac.sync.sync(&mut vault_a).unwrap_err(),
-                    SyncError::Damaged
+                    SyncError::SignerNotVerified
                 );
             }
             // The policy of this Mac holds its own key only.

@@ -156,6 +156,11 @@ impl From<SyncError> for CoreError {
                 "waits_for_device",
                 "Waiting for another device of this account to sync. Nothing was changed.",
             ),
+            // The same code as a damaged copy for the app: the device reads the lists again.
+            SyncError::SignerNotVerified => Self::new(
+                "damaged",
+                "The newest copy is signed by a device that this iPhone has not verified yet. Nothing was changed.",
+            ),
             SyncError::TooLarge => Self::new(
                 "too_large",
                 "The vault is too large for the relay (64 MiB).",

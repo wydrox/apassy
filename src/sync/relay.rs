@@ -1189,6 +1189,10 @@ pub struct RelayTransport {
     deadline: Option<Instant>,
     /// Which keys may sign a head of this copy, when set ([`Self::with_signer_policy`]).
     signer_keys: Option<SignerSource>,
+    /// The head (version, head hash) whose signer, or a signer of whose chain, was not a
+    /// key of the policy at the last [`SyncTransport::head`]; `None` after a head that
+    /// passed ([`RelaySync::unverified_head`]).
+    unverified: Arc<Mutex<Option<(u64, String)>>>,
 }
 
 impl RelayTransport {
@@ -1212,7 +1216,14 @@ impl RelayTransport {
             })),
             deadline: None,
             signer_keys,
+            unverified: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Record the head of a failed check in `slot` ([`RelaySync::unverified_head`]).
+    pub(crate) fn with_unverified_slot(mut self, slot: Arc<Mutex<Option<(u64, String)>>>) -> Self {
+        self.unverified = slot;
+        self
     }
 
     /// Accept a head, and each head of its chain, only when the key of its signer is one
@@ -1324,8 +1335,19 @@ impl RelayTransport {
         match self.signing(head, signers, Role::Head(head.fields.version), anchor) {
             signing @ (Signing::Accepted | Signing::Left) => Ok(signing),
             Signing::LeftAfterAnchor => Err(SyncError::WaitsForAccountDevice),
-            Signing::No => Err(SyncError::Damaged),
+            Signing::No => Err(self.not_a_signer(head)),
         }
+    }
+
+    /// The failure of a head whose signer the policy does not hold: for a vault store of a
+    /// Connect account (a policy is set) [`SyncError::SignerNotVerified`], with the head
+    /// recorded; for any other team `Damaged`.
+    fn not_a_signer(&self, head: &SignedHead) -> SyncError {
+        if self.signer_keys.is_none() {
+            return SyncError::Damaged;
+        }
+        *lock(&self.unverified) = Some((head.fields.version, head.hash()));
+        SyncError::SignerNotVerified
     }
 
     /// Accept `head`, signed as `signing`, as the current copy.
@@ -1338,6 +1360,7 @@ impl RelayTransport {
         anchor.current = Some((head.fields.version, head.hash()));
         anchor.current_departed = signing == Signing::Left;
         drop(anchor);
+        *lock(&self.unverified) = None;
         Ok(Remote::Head(RemoteHead {
             version: head.fields.version,
             sha256,
@@ -1410,12 +1433,16 @@ impl SyncTransport for RelayTransport {
                     } else {
                         Role::Below
                     };
-                    Ok(entry.fields.team_id == self.session.team_id
-                        && same_vault
-                        && matches!(
-                            self.signing(entry, &view.signers, role, anchor.version),
-                            Signing::Accepted | Signing::Left
-                        ))
+                    if entry.fields.team_id != self.session.team_id || !same_vault {
+                        return Ok(false);
+                    }
+                    match self.signing(entry, &view.signers, role, anchor.version) {
+                        Signing::Accepted | Signing::Left => Ok(true),
+                        // A key that the policy does not hold, in a vault store: the
+                        // device has not verified it yet (the head names this sync).
+                        Signing::No if self.signer_keys.is_some() => Err(self.not_a_signer(&head)),
+                        _ => Ok(false),
+                    }
                 })?;
             if last == version {
                 return match entries.last() {
@@ -1890,6 +1917,9 @@ pub struct RelaySync {
     /// The plan of the Connect account, as the window last read it, for the status of
     /// a vault store ([`connect::StorePlan`]).
     plan: Arc<Mutex<Option<connect::StorePlan>>>,
+    /// The head whose signer this device has not verified yet, at the last sync that met
+    /// it ([`Self::unverified_head`]).
+    unverified: Arc<Mutex<Option<(u64, String)>>>,
 }
 
 impl fmt::Debug for RelaySync {
@@ -1915,7 +1945,15 @@ impl RelaySync {
             account_keys: Arc::new(Mutex::new(None)),
             account_missing: Arc::new(AtomicBool::new(false)),
             plan: Arc::new(Mutex::new(None)),
+            unverified: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The head (version, head hash) of a vault store whose signer, or a signer of whose
+    /// chain, this device has not verified yet ([`SyncError::SignerNotVerified`]), as the
+    /// last sync that checked a head found it; `None` after a head that passed.
+    pub fn unverified_head(&self) -> Option<(u64, String)> {
+        lock(&self.unverified).clone()
     }
 
     /// Ask the relay again `every` after it refused the device of this Mac, instead of
@@ -2118,6 +2156,7 @@ impl RelaySync {
             state.last_head_sha256.as_deref(),
             self.max_bytes,
         )
+        .with_unverified_slot(Arc::clone(&self.unverified))
     }
 
     /// The transport of the vault, for a caller that drives it.
@@ -3736,10 +3775,12 @@ mod tests {
             Ok(Signing::Accepted)
         );
         let stranger = DeviceKey::generate().unwrap();
+        // A key that the policy does not hold: not verified yet (the lists are read
+        // again), not a damaged copy.
         for keys in [vec![stranger.public_key().to_vec()], Vec::new()] {
             assert_eq!(
                 transport(Some(keys)).check_identity(&two, &signers, 0),
-                Err(SyncError::Damaged)
+                Err(SyncError::SignerNotVerified)
             );
         }
         // Each head of a chain is checked the same way.
@@ -3773,7 +3814,7 @@ mod tests {
         );
         assert_eq!(
             fresh.check_identity(&two, &signers, 0),
-            Err(SyncError::Damaged)
+            Err(SyncError::SignerNotVerified)
         );
         // A key that left signs the version at the anchor; after it, the client waits for
         // a live device of the account instead of calling the copy damaged.

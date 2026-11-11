@@ -2,27 +2,40 @@
 //! or team (contract connect-account-v1 section 16, `crate::connect::share`).
 //!
 //! - **Share with…** on a store of this account: pick a member (the group view of Connect
-//!   is only a list to pick from). For a member whose root this account pinned already
-//!   the share needs one owner check and no words; else this Mac makes a share code, keeps
-//!   it in memory, and shows it with a QR code: "Send this to <name>." When the member
-//!   answers, both Macs show six words; Confirm runs the owner check, and this Mac signs
-//!   the `peer` and the `share` and adds the member's verified devices to the store.
+//!   is only a list to pick from). For a member whose root this account pinned already,
+//!   and whose verified list pins this account, the share needs one owner check and no
+//!   words; else this Mac makes a share code, keeps it in memory, and shows it with a QR
+//!   code: "Send this to <name>." (also again for a member who did not finish the words).
+//!   When the member answers, both Macs show six words; Confirm runs the owner check, and
+//!   this Mac signs the `peer` and the `share` and adds the member's verified devices to the
+//!   store.
 //! - **Accept a Shared Vault…**: paste the code. The Mac checks the account and the device
 //!   that Connect names against the code ("The code does not match the account that
 //!   answered." otherwise), shows the six words, and "The Words Match" runs the owner check
 //!   and signs the `peer`. The stores that the other account shares with this one then
-//!   show here: "<vault>, shared by <name>: Join". Join signs the `join` and opens the
-//!   download of "Use a Vault from Another Mac" with the passphrase of the copy.
+//!   show here: "<vault>, shared by <name>: Join". Join runs an owner check that names the
+//!   vault and the person, signs the `join`, and opens the download of "Use a Vault from
+//!   Another Mac" with the passphrase of the copy.
 //! - **Stop Sharing with <name>…** and **Leave This Shared Vault…** sign `unshare` and
-//!   `leave` after an owner check; while Connect shows the member outside the group, Stop
-//!   Sharing needs none (ending a share gives no one access).
+//!   `leave` after an owner check. Leave turns off the sync of that vault here and keeps the
+//!   vault; the other devices of the account do the same when they read the `leave`. The
+//!   ends that need no owner check (a member who left, a member outside the family or team)
+//!   are signed by the account itself at a refresh, and show as notes.
+//! - Each owner check names the vault by its name on this computer, the person by the name
+//!   that their verified device list signed with the short fingerprint of the pinned root,
+//!   and Connect's name for them only beside it.
 //! - The states: "<name>: has not joined yet", "<name> reset the account. Share again.",
 //!   "<name> must verify this account again.", and the sync lines "Checking who shares
-//!   this vault…" and "Waiting for a device that shares this vault".
+//!   this vault…" (for a head whose signer is not verified yet, 10 minutes once for each
+//!   head, while the lists are read again after 30 s, then after twice the wait, up to 10
+//!   minutes) and "Waiting for a device that shares this vault".
 //!
 //! One step at a time runs on a worker with the account of the one session of the app
-//! (`super::live`); the UI thread never waits on Connect.
+//! (`super::live`); the UI thread never waits on Connect. The signers of the vault stores
+//! reach the sync after each step that wrote the account file, whether or not a call to
+//! Connect worked (`super::live`, `AccountSession::signers_after`).
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,11 +44,11 @@ use zeroize::Zeroizing;
 
 use super::super::devices::rows;
 use super::super::kit::{self, Font, Style, Tone};
-use crate::broker::approvals::OwnerProof;
+use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::connect::share::{ShareConfirmed, StoreStatus};
 use crate::connect::{
-    ConnectAccount, ConnectError, GroupMember, ShareLink, SharePeerJoin, ShareRequest, ShareStatus,
-    VaultStoreView,
+    ConnectAccount, ConnectError, GroupMember, ShareLink, ShareNames, SharePeerJoin, ShareRequest,
+    ShareStatus, VaultStoreView,
 };
 use crate::desktop::DesktopApp;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
@@ -73,6 +86,9 @@ pub(crate) const STOP_LEAD: &str =
     "Their devices leave the shared copy now. The vault stays on every device that has it.";
 pub(crate) const ACCEPTED_LEAD: &str =
     "The vaults that they share with you show in Settings › Connect.";
+pub(crate) const LEFT_HERE: &str =
+    "You left this shared vault. It stays on this device and does not sync the shared copy.";
+pub(crate) const UNPINNED: &str = "Some people who share a vault that you joined could not be verified on this device. Their devices sign nothing here.";
 
 /// Every fixed text of the section, for the wording tests.
 #[cfg(test)]
@@ -102,6 +118,8 @@ pub(crate) const TEXTS: &[&str] = &[
     LEAVE_LEAD,
     STOP_LEAD,
     ACCEPTED_LEAD,
+    LEFT_HERE,
+    UNPINNED,
 ];
 
 /// "Send this to <name>."
@@ -111,7 +129,7 @@ pub(crate) fn send_to(name: &str) -> String {
 
 /// The words line on the device that made the code.
 pub(crate) fn asks(name: &str, device: &str) -> String {
-    format!("\"{name}\" ({device}) asks to share vaults with you.")
+    format!("{name} ({device}) asks to share vaults with you.")
 }
 
 /// The words tail on the device that made the code.
@@ -127,6 +145,11 @@ pub(crate) fn match_tail(name: &str) -> String {
 /// A member that has not joined yet.
 pub(crate) fn not_joined(name: &str) -> String {
     format!("{name}: has not joined yet")
+}
+
+/// A member whose list does not pin this account yet: they did not finish the words.
+pub(crate) fn not_accepted(name: &str) -> String {
+    format!("{name}: has not finished comparing the words. Share with… shows a new code.")
 }
 
 /// The owner's line for a member that reset its account.
@@ -152,6 +175,11 @@ pub(crate) fn shared_by(vault: &str, name: &str) -> String {
 /// The result of a share.
 pub(crate) fn shared_with(name: &str) -> String {
     format!("Shared with {name}")
+}
+
+/// A note on another device of the account that left a shared vault.
+pub(crate) fn left_on(device: &str) -> String {
+    format!("You left this shared vault on {device}.")
 }
 
 // ---- The model of the section. ----
@@ -184,6 +212,8 @@ pub(crate) struct ShareView {
     pub(crate) in_group: bool,
     pub(crate) busy: bool,
     pub(crate) error: Option<String>,
+    /// What this device did by itself, or learned: shown as notes.
+    pub(crate) notes: Vec<String>,
 }
 
 /// A press in the section.
@@ -271,6 +301,9 @@ pub(crate) fn draw(ui: &mut Ui, view: &ShareView) -> Option<ShareAction> {
     let mut action = None;
     if let Some(error) = &view.error {
         rows::footnote_colored(ui, error.as_str(), Tone::Critical.text());
+    }
+    for note in &view.notes {
+        rows::footnote(ui, note.as_str());
     }
     ui.add_enabled_ui(!view.busy, |ui| {
         rows::group(ui, Some(SECTION), |g| {
@@ -419,6 +452,33 @@ pub(crate) fn sheet(
     choice
 }
 
+fn continue_buttons(ui: &mut Ui, ready: bool, busy: bool) -> Option<ShareChoice> {
+    let mut choice = None;
+    kit::sheet_buttons(
+        ui,
+        |ui| {
+            if busy {
+                ui.add(egui::Spinner::new().size(14.0));
+            }
+        },
+        |ui| {
+            if ui
+                .add_enabled_ui(ready && !busy, |ui| {
+                    kit::button(ui, "Continue", Style::Prominent)
+                })
+                .inner
+                .clicked()
+            {
+                choice = Some(ShareChoice::Go);
+            }
+            if kit::alert_cancel(ui).clicked() {
+                choice = Some(ShareChoice::Cancel);
+            }
+        },
+    );
+    choice
+}
+
 fn sheet_body(
     ui: &mut Ui,
     sheet: &mut ShareSheet,
@@ -447,31 +507,7 @@ fn sheet_body(
                 }
             });
             ui.add_space(8.0);
-            let ready = chosen.is_some();
-            let mut choice = None;
-            kit::sheet_buttons(
-                ui,
-                |ui| {
-                    if busy {
-                        ui.add(egui::Spinner::new().size(14.0));
-                    }
-                },
-                |ui| {
-                    if ui
-                        .add_enabled_ui(ready && !busy, |ui| {
-                            kit::button(ui, "Continue", Style::Prominent)
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        choice = Some(ShareChoice::Go);
-                    }
-                    if kit::alert_cancel(ui).clicked() {
-                        choice = Some(ShareChoice::Cancel);
-                    }
-                },
-            );
-            choice
+            continue_buttons(ui, chosen.is_some(), busy)
         }
         ShareSheet::Code {
             name,
@@ -536,31 +572,7 @@ fn sheet_body(
             kit::sheet_title(ui, ACCEPT_TITLE, Some(ACCEPT_LEAD));
             kit::mono_input(ui, code, "connect-share-code", "apassy_shr_…");
             ui.add_space(8.0);
-            let ready = !code.trim().is_empty();
-            let mut choice = None;
-            kit::sheet_buttons(
-                ui,
-                |ui| {
-                    if busy {
-                        ui.add(egui::Spinner::new().size(14.0));
-                    }
-                },
-                |ui| {
-                    if ui
-                        .add_enabled_ui(ready && !busy, |ui| {
-                            kit::button(ui, "Continue", Style::Prominent)
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        choice = Some(ShareChoice::Go);
-                    }
-                    if kit::alert_cancel(ui).clicked() {
-                        choice = Some(ShareChoice::Cancel);
-                    }
-                },
-            );
-            choice
+            continue_buttons(ui, !code.trim().is_empty(), busy)
         }
         ShareSheet::Match {
             name,
@@ -571,7 +583,7 @@ fn sheet_body(
                 ui,
                 CONFIRM_TITLE,
                 Some(&format!(
-                    "\"{name}\" ({device}) shares vaults with you. Both devices show these words. {}",
+                    "{name} ({device}) shares vaults with you. Both devices show these words. {}",
                     match_tail(name)
                 )),
             );
@@ -585,19 +597,23 @@ fn sheet_body(
         }
         ShareSheet::End { name, leave, .. } => {
             let (title, lead, button) = if *leave {
-                ("Leave This Shared Vault?".to_owned(), LEAVE_LEAD, "Leave")
+                ("Leave This Shared Vault?".to_owned(), LEAVE_LEAD, "Leave…")
             } else {
                 (
                     format!("Stop Sharing with {name}?"),
                     STOP_LEAD,
-                    "Stop Sharing",
+                    "Stop Sharing…",
                 )
             };
             let mut choice = None;
             kit::sheet_title(ui, &title, Some(lead));
             kit::sheet_buttons(
                 ui,
-                |_| {},
+                |ui| {
+                    if busy {
+                        ui.add(egui::Spinner::new().size(14.0));
+                    }
+                },
                 |ui| {
                     if ui
                         .add_enabled_ui(!busy, |ui| kit::button(ui, button, Style::Destructive))
@@ -632,18 +648,22 @@ fn sheet_body(
 
 // ---- The model from what the account knows. ----
 
-/// The view of the section from the last status, the stores, and the group members.
+/// The view of the section from the last status, the stores, the names of the vaults on
+/// this computer (`local`, by store), and whether the account is in a group.
 pub(crate) fn view_of(
     status: &ShareStatus,
     stores: &[VaultStoreView],
+    local: &BTreeMap<String, String>,
     in_group: bool,
     checking: &[String],
 ) -> ShareView {
     let name_of = |team: &str| {
-        stores
-            .iter()
-            .find(|store| store.team_id == team)
-            .map_or_else(|| team.to_owned(), |store| store.name.clone())
+        local.get(team).cloned().unwrap_or_else(|| {
+            stores
+                .iter()
+                .find(|store| store.team_id == team)
+                .map_or_else(|| "A shared vault".to_owned(), |store| store.name.clone())
+        })
     };
     let theirs = |team: &str| {
         status.offers.iter().any(|offer| offer.team_id == team)
@@ -657,7 +677,7 @@ pub(crate) fn view_of(
         .filter(|store| !theirs(&store.team_id))
         .map(|store| OwnStore {
             team_id: store.team_id.clone(),
-            vault: store.name.clone(),
+            vault: name_of(&store.team_id),
             members: Vec::new(),
         })
         .collect();
@@ -670,6 +690,8 @@ pub(crate) fn view_of(
                 reset_owner(&member.name)
             } else if member.joined {
                 format!("{}: syncs this vault", member.name)
+            } else if !member.accepted {
+                not_accepted(&member.name)
             } else {
                 not_joined(&member.name)
             };
@@ -684,15 +706,19 @@ pub(crate) fn view_of(
         .map(|offer| OtherStore {
             team_id: offer.team_id.clone(),
             owner: offer.owner.clone(),
-            title: shared_by(
-                offer.vault_name.as_deref().unwrap_or(&offer.team_id),
-                &offer.owner_name,
-            ),
+            title: shared_by(&name_of(&offer.team_id), &offer.owner_name),
             joined: None,
         })
         .collect();
     for store in status.stores.iter().filter(|store| store.owner.is_some()) {
+        if status.left.iter().any(|(team, _)| *team == store.team_id) {
+            continue;
+        }
         others.push(joined_store(store, &name_of(&store.team_id), checking));
+    }
+    let mut notes = Vec::new();
+    if !status.unpinned.is_empty() {
+        notes.push(UNPINNED.to_owned());
     }
     ShareView {
         own,
@@ -700,6 +726,7 @@ pub(crate) fn view_of(
         in_group,
         busy: false,
         error: None,
+        notes,
     }
 }
 
@@ -722,19 +749,109 @@ fn joined_store(store: &StoreStatus, vault: &str, checking: &[String]) -> OtherS
     }
 }
 
+// ---- The checks of heads whose signer is not verified yet (kept across locks). ----
+
+/// The lists are read again this long after a head of a key not verified yet first came,
+/// then after twice the last wait.
+pub(crate) const CHECK_FIRST: Duration = Duration::from_secs(30);
+/// The longest wait between two reads for one head, and the quiet time of one head: for
+/// this long it shows "Checking who shares this vault…" and no error.
+pub(crate) const CHECK_QUIET: Duration = Duration::from_secs(600);
+/// The most heads that the checks keep (the oldest go first).
+const MAX_CHECKS: usize = 64;
+
+/// One head of a shared store whose signer this device has not verified yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeadCheck {
+    pub(crate) team: String,
+    /// The version and the head hash (`RelaySync::unverified_head`).
+    pub(crate) head: (u64, String),
+    /// When this device first met the head: the quiet time runs from it, once.
+    pub(crate) since: Instant,
+    /// When the lists were read for it last.
+    pub(crate) read_at: Instant,
+    /// The wait before the next read.
+    pub(crate) wait: Duration,
+}
+
+/// The checks of the heads, which a lock does not reset.
+#[derive(Debug, Default)]
+pub(crate) struct HeadChecks {
+    pub(crate) list: Vec<HeadCheck>,
+}
+
+impl HeadChecks {
+    /// A sync of `team` met `head`, whose signer is not verified yet, at `now`. Returns
+    /// whether the lists are due to be read again: at once for a new head, then after 30
+    /// s, and after twice the last wait up to 10 minutes. A new head of the store starts
+    /// its own quiet time; the same head keeps its first one.
+    pub(crate) fn due(&mut self, team: &str, head: &(u64, String), now: Instant) -> bool {
+        if let Some(check) = self
+            .list
+            .iter_mut()
+            .find(|check| check.team == team && check.head == *head)
+        {
+            if now.saturating_duration_since(check.read_at) < check.wait {
+                return false;
+            }
+            check.read_at = now;
+            check.wait = (check.wait * 2).min(CHECK_QUIET);
+            return true;
+        }
+        self.list.retain(|check| check.team != team);
+        if self.list.len() >= MAX_CHECKS {
+            self.list.remove(0);
+        }
+        self.list.push(HeadCheck {
+            team: team.to_owned(),
+            head: head.clone(),
+            since: now,
+            read_at: now,
+            wait: CHECK_FIRST,
+        });
+        true
+    }
+
+    /// Whether `team` is checking `head` within its quiet time at `now`.
+    pub(crate) fn quiet(&self, team: &str, head: &(u64, String), now: Instant) -> bool {
+        self.list.iter().any(|check| {
+            check.team == team
+                && check.head == *head
+                && now.saturating_duration_since(check.since) < CHECK_QUIET
+        })
+    }
+
+    /// The stores within the quiet time of their head at `now`.
+    pub(crate) fn quiet_teams(&self, now: Instant) -> Vec<String> {
+        self.list
+            .iter()
+            .filter(|check| now.saturating_duration_since(check.since) < CHECK_QUIET)
+            .map(|check| check.team.clone())
+            .collect()
+    }
+
+    /// A head of `team` passed: its check goes.
+    pub(crate) fn passed(&mut self, team: &str) {
+        self.list.retain(|check| check.team != team);
+    }
+}
+
 // ---- The vault build: the worker and the owner checks. ----
 
 type Slot<T> = Arc<Mutex<Option<T>>>;
+
+fn take<T>(slot: &Slot<T>) -> std::sync::MutexGuard<'_, Option<T>> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The section asks Connect again this long after the last answer while Settings shows it.
 pub(crate) const REFRESH_EVERY: Duration = Duration::from_secs(60);
 /// The answer to a share code is asked every 5 s while the code sheet is open.
 pub(crate) const POLL_EVERY: Duration = Duration::from_secs(5);
-/// A head of a key that this device has not verified yet: the lists are read again at
-/// most this often for one store.
-pub(crate) const CHECK_EVERY: Duration = Duration::from_secs(30);
-/// For this long such a head shows "Checking who shares this vault…" and no error.
-pub(crate) const CHECK_QUIET: Duration = Duration::from_secs(600);
+/// Without Settings › Connect on the screen the lists are read again this often (and when
+/// a head of a key not verified yet comes).
+pub(crate) const REFRESH_HIDDEN: Duration = Duration::from_secs(30 * 60);
 
 /// A step that waits for the proof of its owner check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,45 +862,54 @@ pub(crate) enum Guard {
     Again {
         team_id: String,
         account: String,
-        name: String,
     },
     Accept,
+    Join {
+        team_id: String,
+        owner: String,
+    },
     End {
         team_id: String,
         account: String,
-        name: String,
         leave: bool,
     },
+}
+
+/// What "Continue" of the picker found.
+pub(crate) enum Started {
+    /// A code was made (in the slot).
+    Code,
+    /// The member is pinned and pins this account: one owner check, no words.
+    Again(OwnerAction),
 }
 
 /// The result of one worker step.
 pub(crate) enum Outcome {
     Refreshed(Result<Refreshed, ConnectError>),
-    /// A code was made (in the slot: `None`), or the member is pinned already (the short
-    /// fingerprint of its pinned root, for the owner check of a share without words).
-    Started(Result<Option<String>, ConnectError>),
-    Requests(Result<Vec<ShareRequest>, ConnectError>),
+    /// The lists read again for a head whose signer is not verified yet.
+    Checked(Result<ShareStatus, ConnectError>),
+    Started(Result<Started, ConnectError>),
+    Requests(Result<Vec<(ShareRequest, OwnerAction)>, ConnectError>),
     Confirmed(Result<ShareConfirmed, ConnectError>),
-    Answered(Result<(String, String, String), ConnectError>),
+    Answered(Result<(String, String, String, OwnerAction), ConnectError>),
     Accepted(Result<(), ConnectError>),
+    /// The owner action of a step, made on the worker from the account.
+    Ask(Guard, Result<OwnerAction, ConnectError>),
     Joined(Result<Option<VaultStoreView>, ConnectError>),
-    Ended(Result<(), ConnectError>),
+    Ended {
+        team_id: String,
+        leave: bool,
+        result: Result<(), ConnectError>,
+    },
     Differed,
 }
 
 /// What a refresh of the section read.
 pub(crate) struct Refreshed {
     status: ShareStatus,
-    stores: Vec<VaultStoreView>,
-    members: Vec<GroupMember>,
-    /// The signers of every vault store after the refresh, from the account file
-    /// (`crate::connect::signer_policy`): the running syncs take them at once.
-    signers: crate::sync::SignerPolicy,
+    /// `None` when Connect did not list the stores: the last list stays.
+    stores: Option<Vec<VaultStoreView>>,
 }
-
-/// Without Settings › Connect on the screen the lists are read again this often (and at
-/// once when a head of a key not verified yet comes).
-pub(crate) const REFRESH_HIDDEN: Duration = Duration::from_secs(30 * 60);
 
 /// The section state.
 #[derive(Default)]
@@ -796,15 +922,20 @@ pub(crate) struct ShareUi {
     pub(crate) sheet: Option<ShareSheet>,
     link: Slot<ShareLink>,
     answer: Slot<SharePeerJoin>,
-    requests: Vec<ShareRequest>,
+    /// The owner action of the answer in [`Self::answer`].
+    answer_action: Option<OwnerAction>,
+    requests: Vec<(ShareRequest, OwnerAction)>,
     polled_at: Option<Instant>,
     pub(crate) guarded: Option<Guard>,
     error: Option<String>,
+    /// Notes of what the account did by itself, or learned (a leave on another device).
+    notes: Vec<String>,
     /// The share that the next "Continue" of the picker starts: (store, account, name).
     pending: Option<(String, String, String)>,
-    /// Stores whose newest head a key not verified yet signed: when this device first saw
-    /// it, and when it read the lists last.
-    checking: Vec<(String, Instant, Instant)>,
+    /// The heads whose signer is not verified yet; a lock keeps them.
+    pub(crate) checks: HeadChecks,
+    /// A read of the lists that a head made due while a step ran.
+    check_due: bool,
     /// When [`watch_heads`] looked last.
     watched_at: Option<Instant>,
     /// When the section was on the screen last.
@@ -816,9 +947,14 @@ impl ShareUi {
         self.task.is_some()
     }
 
-    /// Forget what the section showed (a lock, another vault session).
+    /// Forget what the section showed (a lock, another vault session). The checks of the
+    /// heads stay: their quiet time runs once for each head.
     pub(crate) fn reset(&mut self) {
-        *self = Self::default();
+        let checks = std::mem::take(&mut self.checks);
+        *self = Self {
+            checks,
+            ..Self::default()
+        };
     }
 
     /// Whether `team_id` is a store shared between accounts, as the last status says.
@@ -828,41 +964,38 @@ impl ShareUi {
             .is_some_and(|status| status.stores.iter().any(|store| store.team_id == team_id))
     }
 
-    /// The sync line of a shared store whose newest head a key not verified yet signed:
-    /// "Checking who shares this vault…" for [`CHECK_QUIET`], then `None` (the error of
-    /// the sync shows).
-    pub(crate) fn checking_line(&self, team_id: &str) -> Option<&'static str> {
-        self.checking
+    /// The names that the owner checks show beside what the account verified: the vault
+    /// names of this computer (`local`), else of Connect, and Connect's names of people.
+    fn names(&self, local: &BTreeMap<String, String>) -> ShareNames {
+        let mut vaults: BTreeMap<String, String> = self
+            .stores
             .iter()
-            .find(|(team, since, _)| team == team_id && since.elapsed() < CHECK_QUIET)
-            .map(|_| CHECKING)
-    }
-
-    /// A sync of the shared store `team_id` met a head of a key that this device has not
-    /// verified: the lists are read again (at most every [`CHECK_EVERY`] for the store).
-    pub(crate) fn note_unverified_head(&mut self, team_id: &str) {
-        match self
-            .checking
-            .iter_mut()
-            .find(|(team, _, _)| team == team_id)
-        {
-            Some((_, _, read)) if read.elapsed() >= CHECK_EVERY => {
-                *read = Instant::now();
-                self.refreshed_at = None;
-            }
-            Some(_) => {}
-            None => {
-                self.checking
-                    .push((team_id.to_owned(), Instant::now(), Instant::now()));
-                self.refreshed_at = None;
-            }
+            .map(|store| (store.team_id.clone(), store.name.clone()))
+            .collect();
+        vaults.extend(
+            local
+                .iter()
+                .map(|(team, name)| (team.clone(), name.clone())),
+        );
+        ShareNames {
+            vaults,
+            people: self
+                .status
+                .as_ref()
+                .map(ShareStatus::hints)
+                .unwrap_or_default(),
         }
     }
+}
 
-    /// The head of `team_id` verified again: the line goes.
-    pub(crate) fn head_verified(&mut self, team_id: &str) {
-        self.checking.retain(|(team, _, _)| team != team_id);
-    }
+/// The vault stores that this computer's vaults sync, with the name of each vault.
+fn local_stores(app: &DesktopApp) -> BTreeMap<String, String> {
+    app.vault_list
+        .registry
+        .entries()
+        .iter()
+        .filter_map(|entry| Some((app.store_team(&entry.id)?, entry.name.clone())))
+        .collect()
 }
 
 /// Run `work` with the account of the session on a worker.
@@ -888,8 +1021,8 @@ fn spawn(
     }));
 }
 
-/// The steps of one frame: the worker's result, the owner proof, the poll of the answer,
-/// and the refresh.
+/// The steps of one frame: the worker's result, the owner proof, the heads of the shared
+/// stores, the poll of the answer, and the refresh.
 pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     let share = &mut app.ui.connect.share;
     if let Some(task) = &share.task {
@@ -901,12 +1034,13 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
             }
             TaskPoll::Done(outcome) => {
                 share.task = None;
+                app.ui.connect.live.file_changed();
                 apply(app, ctx, outcome);
             }
         }
     }
     guarded(app, ctx);
-    watch_heads(app);
+    watch_heads(app, Instant::now());
     let session_open = app.connect_session().is_open();
     let share = &app.ui.connect.share;
     if !session_open || share.busy() {
@@ -916,18 +1050,28 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     if code_open && share.polled_at.is_none_or(|at| at.elapsed() >= POLL_EVERY) {
         app.ui.connect.share.polled_at = Some(Instant::now());
         let link = Arc::clone(&app.ui.connect.share.link);
+        let names = app.ui.connect.share.names(&local_stores(app));
         spawn(app, ctx, move |account| {
-            let link = link
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let link = take(&link);
             match link.as_ref() {
-                Some(link) => Outcome::Requests(account.share_requests(link)),
+                Some(link) => Outcome::Requests(account.share_requests(link).map(|requests| {
+                    requests
+                        .into_iter()
+                        .map(|request| {
+                            let action = account.share_action(link, &request, &names);
+                            (request, action)
+                        })
+                        .collect()
+                })),
                 None => Outcome::Requests(Ok(Vec::new())),
             }
         });
         return;
     }
-    let share = &app.ui.connect.share;
+    if share.check_due && share.sheet.is_none() {
+        check(app, ctx);
+        return;
+    }
     let shown = share
         .shown_at
         .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
@@ -940,49 +1084,92 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
 
 fn refresh(app: &mut DesktopApp, ctx: &egui::Context) {
     app.ui.connect.share.refreshed_at = Some(Instant::now());
-    spawn(app, ctx, |account| {
-        let result = account.refresh_shares().and_then(|status| {
-            let stores = account.vault_stores()?;
-            let members = account
-                .group()?
-                .map(|group| group.members)
-                .unwrap_or_default();
-            Ok(Refreshed {
-                status,
-                stores,
-                members,
-                signers: crate::connect::signer_policy(account.state()),
-            })
-        });
-        Outcome::Refreshed(result)
+    let local: Vec<String> = local_stores(app).into_keys().collect();
+    spawn(app, ctx, move |account| {
+        Outcome::Refreshed(account.refresh_shares(&local).map(|status| Refreshed {
+            status,
+            stores: account.vault_stores().ok(),
+        }))
     });
 }
 
+/// The lists read again for a head whose signer is not verified yet: the refresh of the
+/// shares alone (no list of stores, no registration of devices). The signers reach the
+/// sync through the account file.
+fn check(app: &mut DesktopApp, ctx: &egui::Context) {
+    app.ui.connect.share.check_due = false;
+    let local: Vec<String> = local_stores(app).into_keys().collect();
+    spawn(app, ctx, move |account| {
+        Outcome::Checked(account.refresh_shares(&local))
+    });
+}
+
+/// Turn off the sync of each vault of this computer that syncs `team` (a shared vault that
+/// this account left): the vault stays. Returns whether one was turned off.
+fn stop_syncing(app: &mut DesktopApp, team: &str) -> bool {
+    let ids: Vec<String> = app
+        .vault_list
+        .registry
+        .entries()
+        .iter()
+        .map(|entry| entry.id.clone())
+        .filter(|id| app.store_team(id).as_deref() == Some(team))
+        .collect();
+    for id in &ids {
+        app.sync_disable(id);
+    }
+    !ids.is_empty()
+}
+
+/// A new status: the notes of what the account did by itself, and the vaults of the stores
+/// that this account left stop syncing here.
+fn take_status(app: &mut DesktopApp, status: ShareStatus) {
+    let mut notes = status.notes.clone();
+    for (team, device) in &status.left {
+        if stop_syncing(app, team) {
+            notes.push(left_on(device));
+        }
+    }
+    let share = &mut app.ui.connect.share;
+    if let Some(members) = status.group.clone() {
+        share.members = members;
+    }
+    share.notes.extend(notes);
+    share.status = Some(status);
+}
+
+fn ask(app: &mut DesktopApp, ctx: &egui::Context, guard: Guard, action: OwnerAction) {
+    match OwnerRequest::from_share_action(action) {
+        Some(request) => {
+            app.ui.connect.share.guarded = Some(guard);
+            app.ask_owner(request, Some(ctx));
+        }
+        None => app.ui.connect.share.error = Some(ConnectError::Local.to_string()),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
     let share = &mut app.ui.connect.share;
     match outcome {
         Outcome::Refreshed(Ok(refreshed)) => {
-            share.status = Some(refreshed.status);
-            share.stores = refreshed.stores;
-            share.members = refreshed.members;
-            // The sessions that run take the new signers of the shared stores at once.
-            app.ui.connect.live.take_signers(refreshed.signers);
+            if let Some(stores) = refreshed.stores {
+                share.stores = stores;
+            }
+            take_status(app, refreshed.status);
             app.relay_share_connect();
         }
-        Outcome::Refreshed(Err(error)) | Outcome::Ended(Err(error)) => {
-            share.error = Some(error.to_string())
-        }
-        Outcome::Started(Ok(Some(fingerprint))) => {
-            // A pinned member: one owner check, no words.
-            if let Some((team_id, account, name)) = share.pending.clone() {
-                ask_again(app, ctx, (team_id, account, name), fingerprint);
+        Outcome::Checked(Ok(status)) => take_status(app, status),
+        Outcome::Refreshed(Err(error))
+        | Outcome::Checked(Err(error))
+        | Outcome::Ask(_, Err(error)) => share.error = Some(error.to_string()),
+        Outcome::Started(Ok(Started::Again(action))) => {
+            if let Some((team_id, account, _)) = share.pending.clone() {
+                ask(app, ctx, Guard::Again { team_id, account }, action);
             }
         }
-        Outcome::Started(Ok(None)) => {
-            let link = share
-                .link
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Outcome::Started(Ok(Started::Code)) => {
+            let link = take(&share.link);
             if let (Some(link), Some((_, _, name))) = (link.as_ref(), share.pending.as_ref()) {
                 share.sheet = Some(ShareSheet::Code {
                     name: name.clone(),
@@ -998,10 +1185,10 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             share.error = Some(error.to_string());
         }
         Outcome::Requests(Ok(requests)) => {
-            if let Some(first) = requests.first() {
+            if let Some((first, _)) = requests.first() {
                 share.sheet = Some(ShareSheet::Confirm {
                     join_id: first.join_id,
-                    name: first.name.clone(),
+                    name: crate::connect::share::label(&first.root_name, &first.name),
                     device: first.device_name.clone(),
                     words: first.words.clone(),
                 });
@@ -1015,10 +1202,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
                     .take()
                     .map(|(_, _, name)| name)
                     .unwrap_or_default();
-                *share
-                    .link
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *take(&share.link) = None;
                 share.requests.clear();
                 share.sheet = Some(ShareSheet::Done {
                     title: shared_with(&name),
@@ -1031,7 +1215,8 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
                 share.error = Some(error.to_string());
             }
         },
-        Outcome::Answered(Ok((name, device, words))) => {
+        Outcome::Answered(Ok((name, device, words, action))) => {
+            share.answer_action = Some(action);
             share.sheet = Some(ShareSheet::Match {
                 name,
                 device,
@@ -1049,10 +1234,8 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             });
         }
         Outcome::Accepted(result) => {
-            *share
-                .answer
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            *take(&share.answer) = None;
+            share.answer_action = None;
             match result {
                 Ok(()) => {
                     share.sheet = Some(ShareSheet::Done {
@@ -1067,6 +1250,7 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
                 }
             }
         }
+        Outcome::Ask(guard, Ok(action)) => ask(app, ctx, guard, action),
         Outcome::Joined(result) => match result {
             Ok(store) => {
                 share.refreshed_at = None;
@@ -1078,9 +1262,21 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             }
             Err(error) => share.error = Some(error.to_string()),
         },
-        Outcome::Ended(Ok(())) => {
+        Outcome::Ended {
+            team_id,
+            leave,
+            result,
+        } => {
             share.sheet = None;
             share.refreshed_at = None;
+            match result {
+                Ok(()) if leave => {
+                    stop_syncing(app, &team_id);
+                    app.ui.connect.share.notes.push(LEFT_HERE.to_owned());
+                }
+                Ok(()) => {}
+                Err(error) => share.error = Some(error.to_string()),
+            }
         }
         Outcome::Differed => {
             share.sheet = None;
@@ -1117,6 +1313,9 @@ fn run_guarded(
     proof: OwnerProof,
     epoch: [u8; 32],
 ) {
+    let local = local_stores(app);
+    let names = app.ui.connect.share.names(&local);
+    let local: Vec<String> = local.into_keys().collect();
     match guard {
         Guard::Confirm { join_id } => {
             let Some(request) = app
@@ -1125,20 +1324,18 @@ fn run_guarded(
                 .share
                 .requests
                 .iter()
-                .find(|request| request.join_id == join_id)
-                .cloned()
+                .find(|(request, _)| request.join_id == join_id)
+                .map(|(request, _)| request.clone())
             else {
                 return;
             };
             let link = Arc::clone(&app.ui.connect.share.link);
             spawn(app, ctx, move |account| {
-                let link = link
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let link = take(&link);
                 match link.as_ref() {
-                    Some(link) => {
-                        Outcome::Confirmed(account.confirm_share(link, &request, proof, &epoch))
-                    }
+                    Some(link) => Outcome::Confirmed(
+                        account.confirm_share(link, &request, &names, proof, &epoch),
+                    ),
                     None => Outcome::Confirmed(Err(ConnectError::JoinRefused)),
                 }
             });
@@ -1146,60 +1343,50 @@ fn run_guarded(
         Guard::Again {
             team_id,
             account: peer,
-            name,
         } => spawn(app, ctx, move |account| {
-            Outcome::Confirmed(account.share_again(&team_id, &peer, &name, proof, &epoch))
+            Outcome::Confirmed(account.share_again(&team_id, &peer, &names, proof, &epoch))
         }),
         Guard::Accept => {
             let answer = Arc::clone(&app.ui.connect.share.answer);
             spawn(app, ctx, move |account| {
-                let answer = answer
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let answer = take(&answer);
                 match answer.as_ref() {
-                    Some(join) => Outcome::Accepted(account.accept_share(join, proof, &epoch)),
+                    Some(join) => {
+                        Outcome::Accepted(account.accept_share(join, &names, proof, &epoch))
+                    }
                     None => Outcome::Accepted(Err(ConnectError::JoinRefused)),
                 }
             });
         }
+        Guard::Join { team_id, owner } => spawn(app, ctx, move |account| {
+            Outcome::Joined(
+                account
+                    .join_shared_store(&team_id, &owner, &local, &names, proof, &epoch)
+                    .and_then(|()| {
+                        Ok(account
+                            .vault_stores()?
+                            .into_iter()
+                            .find(|store| store.team_id == team_id))
+                    }),
+            )
+        }),
         Guard::End {
             team_id,
             account: peer,
-            name,
             leave,
         } => spawn(app, ctx, move |account| {
-            Outcome::Ended(if leave {
-                account.leave_shared_store(&team_id, &peer, &name, proof, &epoch)
+            let result = if leave {
+                account.leave_shared_store(&team_id, &peer, &names, proof, &epoch)
             } else {
-                account.stop_sharing(&team_id, &peer, &name, Some(proof), &epoch)
-            })
+                account.stop_sharing(&team_id, &peer, &names, proof, &epoch)
+            };
+            Outcome::Ended {
+                team_id,
+                leave,
+                result,
+            }
         }),
     }
-}
-
-fn ask_again(
-    app: &mut DesktopApp,
-    ctx: &egui::Context,
-    (team_id, account, name): (String, String, String),
-    fingerprint: String,
-) {
-    let Some(me) = app.ui.connect.share_account_id() else {
-        return;
-    };
-    let request = OwnerRequest::ShareConnectVault {
-        account_id: me,
-        peer_account: account.clone(),
-        peer_name: name.clone(),
-        team_id: team_id.clone(),
-        words: String::new(),
-        fingerprint,
-    };
-    app.ui.connect.share.guarded = Some(Guard::Again {
-        team_id,
-        account,
-        name,
-    });
-    app.ask_owner(request, Some(ctx));
 }
 
 /// A press in the section.
@@ -1209,6 +1396,7 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: ShareAction
     match action {
         ShareAction::ShareWith { team_id, vault } => {
             let me = app.ui.connect.share_account_id().unwrap_or_default();
+            let status = app.ui.connect.share.status.clone().unwrap_or_default();
             let members = app
                 .ui
                 .connect
@@ -1216,7 +1404,14 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: ShareAction
                 .members
                 .iter()
                 .filter(|member| member.account_id != me && member.state == "active")
-                .map(|member| (member.account_id.clone(), member.name.clone()))
+                .map(|member| {
+                    let name = if status.people.contains_key(&member.account_id) {
+                        status.name_of(&member.account_id)
+                    } else {
+                        member.name.clone()
+                    };
+                    (member.account_id.clone(), name)
+                })
                 .collect();
             app.ui.connect.share.sheet = Some(ShareSheet::Pick {
                 team_id,
@@ -1230,14 +1425,13 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: ShareAction
                 code: Zeroizing::new(String::new()),
             });
         }
-        ShareAction::Join { team_id, owner } => spawn(app, ctx, move |account| {
-            Outcome::Joined(account.join_shared_store(&team_id, &owner).and_then(|()| {
-                Ok(account
-                    .vault_stores()?
-                    .into_iter()
-                    .find(|store| store.team_id == team_id))
-            }))
-        }),
+        ShareAction::Join { team_id, owner } => {
+            let names = app.ui.connect.share.names(&local_stores(app));
+            spawn(app, ctx, move |account| {
+                let action = account.join_action(&team_id, &owner, &names);
+                Outcome::Ask(Guard::Join { team_id, owner }, Ok(action))
+            });
+        }
         ShareAction::Stop {
             team_id,
             account,
@@ -1266,6 +1460,7 @@ pub(crate) fn act(app: &mut DesktopApp, ctx: &egui::Context, action: ShareAction
 }
 
 /// A choice in a sheet of the section.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareChoice) {
     if let ShareChoice::Copy(text) = &choice {
         ctx.copy_text(text.clone());
@@ -1274,7 +1469,7 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
     let Some(sheet) = app.ui.connect.share.sheet.take() else {
         return;
     };
-    let me = app.ui.connect.share_account_id().unwrap_or_default();
+    let names = app.ui.connect.share.names(&local_stores(app));
     match (sheet, choice) {
         (
             ShareSheet::Pick {
@@ -1291,22 +1486,20 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
             app.ui.connect.share.pending = Some((team_id.clone(), account.clone(), name));
             let link = Arc::clone(&app.ui.connect.share.link);
             spawn(app, ctx, move |connect| {
-                if connect.is_pinned_peer(&account) {
-                    let fingerprint = match connect.share_again_action(&team_id, &account, "") {
-                        crate::broker::approvals::OwnerAction::ShareConnectVault {
-                            fingerprint,
-                            ..
-                        } => fingerprint,
-                        _ => String::new(),
-                    };
-                    return Outcome::Started(Ok(Some(fingerprint)));
+                // A pinned member whose list pins this account: no words. Else a code
+                // (also again, for a member who did not finish the words).
+                match connect.needs_share_code(&account) {
+                    Ok(false) => Outcome::Started(Ok(Started::Again(
+                        connect.share_again_action(&team_id, &account, &names),
+                    ))),
+                    Ok(true) | Err(ConnectError::NotVerified) => {
+                        Outcome::Started(connect.start_share(&account, &team_id).map(|made| {
+                            *take(&link) = Some(made);
+                            Started::Code
+                        }))
+                    }
+                    Err(error) => Outcome::Started(Err(error)),
                 }
-                Outcome::Started(connect.start_share(&account, &team_id).map(|made| {
-                    *link
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(made);
-                    None
-                }))
             });
         }
         (
@@ -1318,43 +1511,34 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
             },
             ShareChoice::Go,
         ) => {
-            let Some((team_id, account, _)) = app.ui.connect.share.pending.clone() else {
-                return;
-            };
-            let fingerprint = app
+            let action = app
                 .ui
                 .connect
                 .share
                 .requests
                 .iter()
-                .find(|request| request.join_id == join_id)
-                .map(|request| crate::connect::key_fingerprint(&request.root))
-                .unwrap_or_default();
-            let request = OwnerRequest::ShareConnectVault {
-                account_id: me,
-                peer_account: account,
-                peer_name: name.clone(),
-                team_id,
-                words: words.clone(),
-                fingerprint,
-            };
-            app.ui.connect.share.guarded = Some(Guard::Confirm { join_id });
+                .find(|(request, _)| request.join_id == join_id)
+                .map(|(_, action)| action.clone());
             app.ui.connect.share.sheet = Some(ShareSheet::Confirm {
                 join_id,
                 name,
                 words,
                 device,
             });
-            app.ask_owner(request, Some(ctx));
+            if let Some(action) = action {
+                ask(app, ctx, Guard::Confirm { join_id }, action);
+            }
         }
         (ShareSheet::Confirm { join_id, .. }, ShareChoice::Differ) => {
-            let requests = app.ui.connect.share.requests.clone();
-            *app.ui
+            let requests: Vec<ShareRequest> = app
+                .ui
                 .connect
                 .share
-                .link
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                .requests
+                .iter()
+                .map(|(request, _)| request.clone())
+                .collect();
+            *take(&app.ui.connect.share.link) = None;
             spawn(app, ctx, move |account| {
                 if let Some(request) = requests.iter().find(|request| request.join_id == join_id) {
                     let _ = account.refuse_share_request(request);
@@ -1368,13 +1552,12 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
             spawn(app, ctx, move |account| {
                 Outcome::Answered(account.accept_code(code.as_str()).map(|join| {
                     let shown = (
-                        join.name.clone(),
+                        crate::connect::share::label(&join.root_name, &join.name),
                         join.device_name.clone(),
                         join.words.clone(),
+                        account.accept_action(&join, &names),
                     );
-                    *answer
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(join);
+                    *take(&answer) = Some(join);
                     shown
                 }))
             });
@@ -1387,45 +1570,21 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
             },
             ShareChoice::Go,
         ) => {
-            let (peer, fingerprint) = {
-                let answer = app
-                    .ui
-                    .connect
-                    .share
-                    .answer
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match answer.as_ref() {
-                    Some(join) => (
-                        join.account_id.clone(),
-                        crate::connect::key_fingerprint(&join.root),
-                    ),
-                    None => return,
-                }
-            };
-            let request = OwnerRequest::AcceptConnectShare {
-                account_id: me,
-                peer_account: peer,
-                peer_name: name.clone(),
-                words: words.clone(),
-                fingerprint,
-            };
-            app.ui.connect.share.guarded = Some(Guard::Accept);
+            let action = app.ui.connect.share.answer_action.clone();
             app.ui.connect.share.sheet = Some(ShareSheet::Match {
                 name,
                 device,
                 words,
             });
-            app.ask_owner(request, Some(ctx));
+            if let Some(action) = action {
+                ask(app, ctx, Guard::Accept, action);
+            }
         }
         (ShareSheet::Match { .. }, ShareChoice::Differ | ShareChoice::Cancel) => {
             let answer = Arc::clone(&app.ui.connect.share.answer);
+            app.ui.connect.share.answer_action = None;
             spawn(app, ctx, move |account| {
-                let taken = answer
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                if let Some(join) = taken {
+                if let Some(join) = take(&answer).take() {
                     let _ = account.cancel_share_answer(join);
                 }
                 Outcome::Differed
@@ -1440,52 +1599,28 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: ShareCho
             },
             ShareChoice::Go,
         ) => {
-            let outside = !leave
-                && app
-                    .ui
-                    .connect
-                    .share
-                    .status
-                    .as_ref()
-                    .is_some_and(|status| status.outside_group.contains(&account));
-            if outside {
-                // Connect shows the member outside the group: ending the share needs no
-                // owner check (it gives no one access).
-                spawn(app, ctx, move |connect| {
-                    Outcome::Ended(
-                        connect.stop_sharing(&team_id, &account, &name, None, &[0u8; 32]),
-                    )
-                });
-                return;
-            }
-            let request = OwnerRequest::EndConnectShare {
-                account_id: me,
-                peer_account: account.clone(),
-                peer_name: name.clone(),
-                team_id: team_id.clone(),
-                leave,
-            };
-            app.ui.connect.share.guarded = Some(Guard::End {
+            // Always with the owner check; the ends without one are the account's own
+            // (a member who left, a member outside the group).
+            app.ui.connect.share.sheet = Some(ShareSheet::End {
                 team_id: team_id.clone(),
                 account: account.clone(),
-                name: name.clone(),
-                leave,
-            });
-            app.ui.connect.share.sheet = Some(ShareSheet::End {
-                team_id,
-                account,
                 name,
                 leave,
             });
-            app.ask_owner(request, Some(ctx));
+            spawn(app, ctx, move |connect| {
+                let action = connect.end_share_action(&team_id, &account, &names, leave);
+                Outcome::Ask(
+                    Guard::End {
+                        team_id,
+                        account,
+                        leave,
+                    },
+                    Ok(action),
+                )
+            });
         }
         (ShareSheet::Code { .. }, _) => {
-            *app.ui
-                .connect
-                .share
-                .link
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            *take(&app.ui.connect.share.link) = None;
             app.ui.connect.share.pending = None;
         }
         _ => {}
@@ -1497,20 +1632,21 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     app.ui.connect.share.shown_at = Some(Instant::now());
     step(app, &ctx);
+    let local = local_stores(app);
     let share = &app.ui.connect.share;
     let Some(status) = share.status.as_ref() else {
         return;
     };
-    let checking: Vec<String> = share
-        .checking
+    let checking = share.checks.quiet_teams(Instant::now());
+    let me = app.ui.connect.share_account_id().unwrap_or_default();
+    let in_group = share
+        .members
         .iter()
-        .filter(|(_, since, _)| since.elapsed() < CHECK_QUIET)
-        .map(|(team, _, _)| team.clone())
-        .collect();
-    let in_group = !share.members.is_empty();
-    let mut view = view_of(status, &share.stores, in_group, &checking);
+        .any(|member| member.account_id == me && member.state == "active");
+    let mut view = view_of(status, &share.stores, &local, in_group, &checking);
     view.busy = share.busy();
     view.error = share.error.clone();
+    view.notes.extend(share.notes.iter().cloned());
     if let Some(action) = draw(ui, &view) {
         act(app, &ctx, action);
     }
@@ -1535,9 +1671,9 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut Ui) {
 }
 
 /// The heads of the shared stores in the sync statuses, at most once a second: a store
-/// whose newest copy fails the check of its signer reads the lists again
-/// ([`ShareUi::note_unverified_head`]), and one in sync clears its line.
-fn watch_heads(app: &mut DesktopApp) {
+/// whose newest copy has a signer not verified yet reads the lists again when its check is
+/// due ([`HeadChecks::due`]), and one in sync clears its check.
+fn watch_heads(app: &mut DesktopApp, now: Instant) {
     let share = &mut app.ui.connect.share;
     if share
         .status
@@ -1545,33 +1681,42 @@ fn watch_heads(app: &mut DesktopApp) {
         .is_none_or(|status| status.stores.is_empty())
         || share
             .watched_at
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+            .is_some_and(|at| now.saturating_duration_since(at) < Duration::from_secs(1))
     {
         return;
     }
-    share.watched_at = Some(Instant::now());
+    share.watched_at = Some(now);
     let seen: Vec<(String, bool)> = app
         .sync
         .statuses
         .iter()
-        .filter_map(|(id, status)| match status {
-            crate::desktop::sync_worker::UiStatus::Damaged => Some((id.clone(), true)),
-            crate::desktop::sync_worker::UiStatus::UpToDate(_) => Some((id.clone(), false)),
-            _ => None,
+        .filter_map(|(id, status)| {
+            if super::super::sync::relay::is_signer_not_verified(status) {
+                Some((id.clone(), true))
+            } else if matches!(status, crate::desktop::sync_worker::UiStatus::UpToDate(_)) {
+                Some((id.clone(), false))
+            } else {
+                None
+            }
         })
         .collect();
-    for (id, damaged) in seen {
+    for (id, unverified) in seen {
         let Some(team) = app.store_team(&id) else {
             continue;
         };
+        let head = app.relay_of(&id).and_then(|relay| relay.unverified_head());
         let share = &mut app.ui.connect.share;
         if !share.is_shared(&team) {
             continue;
         }
-        if damaged {
-            share.note_unverified_head(&team);
-        } else {
-            share.head_verified(&team);
+        match (unverified, head) {
+            (true, Some(head)) => {
+                if share.checks.due(&team, &head, now) {
+                    share.check_due = true;
+                }
+            }
+            (false, _) => share.checks.passed(&team),
+            (true, None) => {}
         }
     }
 }
@@ -1583,9 +1728,10 @@ impl DesktopApp {
     }
 
     /// The sync line of a vault whose store is shared between accounts: "Checking who
-    /// shares this vault…" while a head of a key not verified yet waits for the lists, and
-    /// "Waiting for a device that shares this vault" for a head of a device that left,
-    /// after the anchor. `None` for every other vault and state.
+    /// shares this vault…" while a head whose signer is not verified yet waits for the
+    /// lists (10 minutes once for that head; then the error shows), and "Waiting for a
+    /// device that shares this vault" for a head of a device that left, after the anchor.
+    /// `None` for every other vault and state.
     pub(crate) fn share_sync_line(
         &self,
         id: &str,
@@ -1597,8 +1743,12 @@ impl DesktopApp {
             return None;
         }
         match status {
-            crate::desktop::sync_worker::UiStatus::Damaged => {
-                share.checking_line(&team).map(str::to_owned)
+            status if super::super::sync::relay::is_signer_not_verified(status) => {
+                let head = self.relay_of(id)?.unverified_head()?;
+                share
+                    .checks
+                    .quiet(&team, &head, Instant::now())
+                    .then(|| CHECKING.to_owned())
             }
             crate::desktop::sync_worker::UiStatus::Problem(text)
                 if *text == crate::sync::SyncError::WaitsForAccountDevice.to_string() =>

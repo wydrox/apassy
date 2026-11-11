@@ -316,6 +316,12 @@ pub enum SyncError {
     /// account after this Mac's last sync: this Mac waits for a device of the account to
     /// sync, which signs a head of its own over it. Nothing was changed.
     WaitsForAccountDevice,
+    /// A head of a vault store of Apassy Connect (the current head, or one of its chain)
+    /// is signed by a key that the trust store of this device does not hold: a device
+    /// that this device has not verified yet (a new device of the account or of a person
+    /// who shares the vault), or one that never was a device. The device reads the
+    /// signed lists again; nothing was changed.
+    SignerNotVerified,
     /// Another sync of this vault runs now. The next sync tries again.
     Running,
     /// The copy is larger than the relay takes (64 MiB).
@@ -448,6 +454,11 @@ impl fmt::Display for SyncError {
             Self::WaitsForAccountDevice => f.write_str(
                 "waiting for another device of this account to sync. The last copy was saved by a device that left the account; nothing was changed",
             ),
+            Self::SignerNotVerified => f.write_str(concat!(
+                "the newest copy is signed by a device that this ",
+                crate::computer!(),
+                " has not verified yet. Apassy reads the signed device lists again; nothing was changed"
+            )),
             Self::Running => f.write_str("another sync of this vault runs now. Apassy tries again"),
             Self::TooLarge => f.write_str("the vault is too large for the relay (64 MiB)"),
             Self::InvalidRelayAddress => f.write_str(

@@ -204,6 +204,10 @@ pub(crate) struct Live {
     /// Tests: shorter polls than [`POLL_EVERY`] and [`JOIN_POLL_EVERY`].
     pub(crate) poll_every: Option<Duration>,
     pub(crate) join_poll_every: Option<Duration>,
+    /// The signers of the vault stores from the last write of the account file
+    /// (`AccountSession::signers_after`), and the write it counts.
+    signers: Option<crate::sync::SignerPolicy>,
+    signers_seen: u64,
 }
 
 impl Live {
@@ -263,6 +267,7 @@ impl Live {
         self.refreshed_at = None;
         self.unreachable = None;
         self.error = None;
+        self.signers = None;
     }
 
     /// The account of this device for the sync through Apassy Connect (plan s7 unit M3):
@@ -280,10 +285,12 @@ impl Live {
             origin: file.origin.clone(),
             plan: snapshot.map(|snapshot| StorePlan::from_view(&snapshot.view.plan)),
             signer: self.session.signer(),
-            signers: snapshot.map_or_else(
-                || crate::connect::signer_policy(file),
-                |snapshot| snapshot.signers.clone(),
-            ),
+            signers: self.signers.clone().unwrap_or_else(|| {
+                snapshot.map_or_else(
+                    || crate::connect::signer_policy(file),
+                    |snapshot| snapshot.signers.clone(),
+                )
+            }),
         })
     }
 
@@ -292,13 +299,8 @@ impl Live {
         self.file().map(|file| file.account_id.clone())
     }
 
-    /// The signers of the vault stores after a refresh of Shared Vaults
-    /// (`super::share`): the sync takes them from the next hand-over on, and the account
-    /// file is read again.
-    pub(crate) fn take_signers(&mut self, signers: crate::sync::SignerPolicy) {
-        if let Some(snapshot) = self.snapshot.as_mut() {
-            snapshot.signers = signers;
-        }
+    /// The account file changed (a step of Shared Vaults): read it again.
+    pub(crate) fn file_changed(&mut self) {
         self.file = OnceCell::new();
     }
 
@@ -659,6 +661,7 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
 pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     follow(app, ctx);
     finish(app, ctx);
+    hand_over_signers(app);
     guarded(app, ctx);
     polls(app, ctx);
     keep_fresh(app, ctx);
@@ -666,6 +669,17 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     // also while Settings is closed (a head of a key not verified yet reads them again).
     if app.ui.connect.live.session.is_open() {
         super::share::step(app, ctx);
+    }
+}
+
+/// The signers of the vault stores after each write of the account file (any step of
+/// Settings › Connect, of Shared Vaults, or of the sync; also a step whose call to Connect
+/// failed): from the account file alone, to the sync of each vault at once.
+fn hand_over_signers(app: &mut DesktopApp) {
+    let live = &mut app.ui.connect.live;
+    if let Some(signers) = live.session.signers_after(&mut live.signers_seen) {
+        live.signers = Some(signers);
+        app.relay_hand_over_signers();
     }
 }
 

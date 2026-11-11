@@ -88,6 +88,12 @@ const MAX_NAME_BYTES: usize = 64;
 /// The time source: Unix seconds. Tests move it.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
+/// The signers that the account file gives ([`signer_policy`]), published after each write
+/// of the file, with a counter of the writes: the session of the app hands them to the
+/// sync of the vault stores, whether or not a call to Connect worked
+/// (`super::AccountSession::signers_after`).
+pub type SignerFeed = Arc<std::sync::Mutex<(u64, Option<crate::sync::SignerPolicy>)>>;
+
 /// The waits between sign-in rounds. Tests make them instant.
 pub type Sleeper = Arc<dyn Fn(Duration) + Send + Sync>;
 
@@ -595,6 +601,8 @@ pub struct ConnectAccount {
     list: Option<trust::Verified>,
     clock: Clock,
     sleeper: Sleeper,
+    /// Where each write of the account file publishes its signers ([`SignerFeed`]).
+    feed: Option<SignerFeed>,
 }
 
 impl fmt::Debug for ConnectAccount {
@@ -633,7 +641,33 @@ impl ConnectAccount {
             list: None,
             clock: system_clock(),
             sleeper: system_sleeper(),
+            feed: None,
         }
+    }
+
+    /// Publish the signers of the account file in `feed` now and after each write of the
+    /// file ([`SignerFeed`]).
+    pub fn set_signer_feed(&mut self, feed: SignerFeed) {
+        self.feed = Some(feed);
+        self.publish();
+    }
+
+    /// The signers of the account file into the feed, when one is set.
+    fn publish(&self) {
+        if let Some(feed) = &self.feed {
+            let mut held = feed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held.0 = held.0.wrapping_add(1);
+            held.1 = Some(signer_policy(&self.state));
+        }
+    }
+
+    /// Write the account file, and publish its signers.
+    fn write_state(&self) -> Result<(), ConnectError> {
+        self.state.save(&self.path)?;
+        self.publish();
+        Ok(())
     }
 
     /// Make a new account at `client` with the account device key of this Mac (made now
@@ -991,7 +1025,7 @@ impl ConnectAccount {
         // shared stores (section 16). The stores it joined learn their members from the
         // lists of the accounts that made them ([`Self::refresh_shares`]).
         if share::learn_own(&mut self.state, &list.shares) {
-            self.state.save(&self.path)?;
+            self.write_state()?;
         }
         self.list = Some(list);
         Ok(())
@@ -1002,9 +1036,9 @@ impl ConnectAccount {
         &mut self.state
     }
 
-    /// Write the account file.
+    /// Write the account file (and publish its signers).
     pub(super) fn save_state(&self) -> Result<(), ConnectError> {
-        self.state.save(&self.path)
+        self.write_state()
     }
 
     /// Forget the device list of the last view: the next view gives it again.
@@ -1037,7 +1071,7 @@ impl ConnectAccount {
         self.state.list_head = head.to_owned();
         self.state.known = known.iter().map(|key| encode_b64u(key)).collect();
         self.state.left = left.iter().map(|key| encode_b64u(key)).collect();
-        self.state.save(&self.path)
+        self.write_state()
     }
 
     /// A fresh [`Self::view`] whose device list verified: the head that the next entry of
@@ -1118,7 +1152,7 @@ impl ConnectAccount {
             && let Ok(name) = clean_name(&view.name)
         {
             self.state.name = Some(name);
-            self.state.save(&self.path)?;
+            self.write_state()?;
         }
         Ok(view)
     }
