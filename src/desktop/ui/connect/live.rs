@@ -224,6 +224,10 @@ pub(crate) struct Live {
     /// Tests: shorter polls than [`POLL_EVERY`] and [`JOIN_POLL_EVERY`].
     pub(crate) poll_every: Option<Duration>,
     pub(crate) join_poll_every: Option<Duration>,
+    /// The signers of the vault stores from the last write of the account file
+    /// (`AccountSession::signers_after`), and the write it counts.
+    signers: Option<crate::sync::SignerPolicy>,
+    signers_seen: u64,
 }
 
 impl Live {
@@ -283,6 +287,7 @@ impl Live {
         self.refreshed_at = None;
         self.unreachable = None;
         self.error = None;
+        self.signers = None;
     }
 
     /// The account of this device for the sync through Apassy Connect (plan s7 unit M3):
@@ -300,10 +305,12 @@ impl Live {
             origin: file.origin.clone(),
             plan: snapshot.map(|snapshot| StorePlan::from_view(&snapshot.view.plan)),
             signer: self.session.signer(),
-            signers: snapshot.map_or_else(
-                || crate::connect::signer_policy(file),
-                |snapshot| snapshot.signers.clone(),
-            ),
+            signers: self.signers.clone().unwrap_or_else(|| {
+                snapshot.map_or_else(
+                    || crate::connect::signer_policy(file),
+                    |snapshot| snapshot.signers.clone(),
+                )
+            }),
             removed_names: self
                 .session
                 .slot()
@@ -326,6 +333,16 @@ impl Live {
                 .and(self.refreshed_at)
                 .filter(|_| self.task.is_none() && self.unreachable.is_none()),
         })
+    }
+
+    /// The account id of the account file of this device.
+    pub(crate) fn account_id(&self) -> Option<String> {
+        self.file().map(|file| file.account_id.clone())
+    }
+
+    /// The account file changed (a step of Shared Vaults): read it again.
+    pub(crate) fn file_changed(&mut self) {
+        self.file = OnceCell::new();
     }
 
     /// The Connect origin of the account file of this device, also while the session is
@@ -455,6 +472,7 @@ impl DesktopApp {
         live.reset();
         live.epoch = None;
         self.ui.connect.sheet = None;
+        self.ui.connect.share.reset();
     }
 
     /// A link for the origin of this device's Connect account on the start screen, while
@@ -662,6 +680,9 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if let Some(action) = super::draw(ui, &view) {
         act(app, &ctx, action);
     }
+    if matches!(view.shown, Shown::Account(_)) && !view.locked {
+        super::share::section(app, ui);
+    }
     sheets(app, &ctx);
 }
 
@@ -711,9 +732,27 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     follow(app, ctx);
     link_after_open(app, ctx);
     finish(app, ctx);
+    hand_over_signers(app);
     guarded(app, ctx);
     polls(app, ctx);
     keep_fresh(app, ctx);
+    // Shared Vaults: its worker, its owner checks, and the lists of the shared stores,
+    // also while Settings is closed (a head of a key not verified yet reads them again);
+    // only with an unlocked vault (not for the start-screen step of the session).
+    if app.ui.connect.live.session.is_open() && app.owner_ui.session.epoch().is_some() {
+        super::share::step(app, ctx);
+    }
+}
+
+/// The signers of the vault stores after each write of the account file (any step of
+/// Settings › Connect, of Shared Vaults, or of the sync; also a step whose call to Connect
+/// failed): from the account file alone, to the sync of each vault at once.
+fn hand_over_signers(app: &mut DesktopApp) {
+    let live = &mut app.ui.connect.live;
+    if let Some(signers) = live.session.signers_after(&mut live.signers_seen) {
+        live.signers = Some(signers);
+        app.relay_hand_over_signers();
+    }
 }
 
 /// The session follows the vault session: it closes at a lock and at another vault

@@ -227,8 +227,9 @@ impl Account {
         if version != self.list.len() as u64 + 1 {
             return Err(fail(409, "conflict"));
         }
-        // The relay keeps room to remove every live device (connect-account-v1 section 13).
-        if version > 256 || (op == "add" && version > 246) {
+        // The relay keeps room to end every live device, peer, share, and join
+        // (connect-account-v1 sections 13 and 16).
+        if version > 1024 || (op == "add" && version > 822) {
             return Err(fail(403, "account_limit"));
         }
         let message = list_message(
@@ -360,7 +361,12 @@ struct State {
     invites: Vec<Invite>,
     /// The relay of the vault stores ([`FakeConnect::with_relay`]).
     relay: Option<Arc<dyn StoreRelay>>,
+    /// The share codes and the lying hooks of section 16 (`fake_connect_share.rs`).
+    share: share::ShareState,
 }
+
+#[path = "fake_connect_share.rs"]
+mod share;
 
 /// A running fake Connect.
 pub struct FakeConnect {
@@ -1793,6 +1799,9 @@ fn authenticated(
     device: &str,
     origin: &str,
 ) -> Outgoing {
+    if let Some(answer) = share::route(state, method, rest, body, account, device, origin) {
+        return answer;
+    }
     match (method, rest) {
         ("GET", []) => {
             let entry = state.accounts.get(account).expect("account").clone();

@@ -2082,6 +2082,9 @@ pub(crate) struct State {
     pub(crate) sheet: Option<Sheet>,
     #[cfg(feature = "vault")]
     pub(crate) live: live::Live,
+    /// Settings › Connect › Shared Vaults (connect-account-v1 section 16).
+    #[cfg(feature = "vault")]
+    pub(crate) share: share::ShareUi,
     /// The demo build: the mockup frame that the section shows.
     #[cfg(not(feature = "vault"))]
     pub(crate) demo: demo::Frame,
@@ -2094,6 +2097,17 @@ pub(super) use live::{section, status_line};
 
 #[cfg(feature = "vault")]
 pub(crate) mod live;
+#[cfg(feature = "vault")]
+pub(crate) mod share;
+
+#[cfg(feature = "vault")]
+impl State {
+    /// The account id of the account file of this device, for the owner checks of
+    /// Shared Vaults.
+    pub(crate) fn share_account_id(&self) -> Option<String> {
+        self.live.account_id()
+    }
+}
 
 #[cfg(not(feature = "vault"))]
 mod demo;

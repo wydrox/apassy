@@ -717,6 +717,37 @@ impl ConnectClient {
         self.send(Request::new("GET", path.to_owned(), bearer))
     }
 
+    /// `POST path` with a JSON body: the calls of the other modules of `connect`
+    /// (`super::share`).
+    pub(super) fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        bearer: Option<&str>,
+        body: &impl Serialize,
+    ) -> Result<T, ConnectError> {
+        self.post(path, bearer, body)
+    }
+
+    /// `GET path`.
+    pub(super) fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        bearer: Option<&str>,
+    ) -> Result<T, ConnectError> {
+        self.get(path, bearer)
+    }
+
+    /// `method path` with a JSON body.
+    pub(super) fn send_json<T: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        path: &str,
+        bearer: Option<&str>,
+        body: &impl Serialize,
+    ) -> Result<T, ConnectError> {
+        self.send(json_request(method, path, bearer, body))
+    }
+
     // ---- Edge routes: no Authorization. ----
 
     pub(super) fn create_account(

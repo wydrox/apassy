@@ -888,12 +888,101 @@ svg{display:block}
   </div>
   <ul class="fnotes"><li><b>Delete…</b> runs the owner check <code>OwnerAction::DeleteConnectAccount</code> (Touch ID), then <code>ConnectAccount::delete</code>: <code>DELETE /v1/account</code>; the account file and the Keychain key go, and the account rows of the vault are dropped.</li><li>A <code>409 conflict</code> for an organizer or a Team owner with members shows 11b.</li><li>Cancel is the default button; Return never deletes.</li></ul>
 </section>
+<!-- ============================================================ 12 -->
+<section class="frame" id="f12">
+  <div class="flabel"><b><span class="fnum">12</span>Shared Vaults</b>
+    <span>A vault shared between the accounts of a family or team (connect-account-v1 section 16). Proposed: the owner approves this frame before release.</span></div>
+  <div class="pgrid">
+    <div class="shc">
+      <div class="plabel">12a · The section, each state</div>
+      <h2>Shared Vaults</h2>
+      <div class="note">“Piotr’s MacBook” (Piotr) left this vault.</div>
+      <div class="note">Sharing with “Jan’s iMac” (Jan) ended: no longer in your family or team.</div>
+      <div class="note">You left this shared vault on MacBook Pro.</div>
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:110px">Family</div><div class="v"></div><span class="pb">Share with…</span></div>
+        <div class="fr"><div class="v" style="text-align:left;color:var(--secondary)">“Ola’s MacBook Air” (Ola): has not joined yet</div><span class="pb">Stop Sharing with “Ola’s MacBook Air” (Ola)…</span></div>
+        <div class="fr"><div class="v" style="text-align:left;color:var(--secondary)">“Ewa’s iMac” (Ewa): has not finished comparing the words. Share with… shows a new code.</div><span class="pb">Stop Sharing with “Ewa’s iMac” (Ewa)…</span></div>
+        <div class="fr"><div class="v" style="text-align:left;color:var(--secondary)">“Anna’s Mac mini” (Anna) reset the account. Share again.</div><span class="pb">Stop Sharing with “Anna’s Mac mini” (Anna)…</span></div>
+        <div class="fr"><div class="k" style="min-width:110px">Garden, shared by Piotr</div><div class="v"></div><span class="pb">Leave This Shared Vault…</span></div>
+        <div class="fr"><div class="v" style="text-align:left;color:var(--secondary)">Piotr must verify this account again.</div></div>
+        <div class="fr"><div class="k" style="min-width:110px">Travel, shared by Ola</div><div class="v"></div><span class="pb">Join</span></div>
+        <div class="fr"><div class="k" style="min-width:110px;white-space:normal">Share a vault with a person of your family or team. Each of you compares six words once.</div><div class="v"></div><span class="pb">Accept a Shared Vault…</span></div>
+      </div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12b · Share with… (pick a member)</div>
+      <h2>Share a Vault: Family</h2>
+      <p class="lead">Choose the person. They need the passphrase of the vault to open it.</p>
+      <div class="grp"><div class="fr"><div class="v" style="text-align:left">◉ Ola</div></div><div class="fr"><div class="v" style="text-align:left">○ Anna</div></div></div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12c · The share code</div>
+      <h2>Share Code</h2>
+      <p class="lead">Send this to Ola.</p>
+      <div class="qrbox"><svg viewBox="0 0 29 29" class="qr s" role="img" aria-label="Decorative QR code"><rect width="29" height="29" fill="#fff"/><path d="M1 1h7v7h-7zM2 2v5h5v-5zM3 3h3v3h-3zM21 1h7v7h-7zM22 2v5h5v-5zM23 3h3v3h-3zM1 21h7v7h-7zM2 22v5h5v-5zM3 23h3v3h-3zM10 1h1v2h-1zM12 2h2v1h-2zM15 1h1v3h-1zM10 10h2v1h-2zM13 9h3v1h-3zM17 10h1v3h-1zM10 13h1v4h-1zM12 15h3v1h-3zM16 14h2v2h-2zM10 21h2v2h-2zM13 22h1v3h-1zM17 21h2v1h-2z" fill="#0e1820"/></svg></div>
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:76px">Code</div><div class="v mono" style="color:var(--label);text-align:left">apassy_shr_acc_k7m2q4x3ca_…</div><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div>
+        <div class="fr"><div class="k" style="min-width:76px">Expires In</div><div class="v"><span class="tm">9:41</span></div></div>
+      </div>
+      <div class="bwait" style="margin:12px 0 0"><span class="spin"></span>Waiting for the other person…</div>
+      <div class="sbar"><span class="btn">Cancel</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12d · The words, on the sharing Mac</div>
+      <h2>Compare the Words</h2>
+      <p class="lead">"Ola" (MacBook Air) asks to share vaults with you. Both devices show these words. Confirm only if Ola's screen shows the same words.</p>
+      <div class="bigwords" style="font-size:18px"><span>nectar</span><span>cider</span><span>camel</span></div>
+      <div class="bigwords" style="font-size:18px;margin-top:6px"><span>satin</span><span>tiger</span><span>maple</span></div>
+      <div class="sbar"><span class="btn des left">Refuse</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Confirm…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12e · Accept a Shared Vault…</div>
+      <h2>Accept a Shared Vault</h2>
+      <p class="lead">Paste the code that the other person sent you.</p>
+      <div class="field ph" style="min-height:30px">apassy_shr_…</div>
+      <div class="note" style="color:#d70015">The code does not match the account that answered.</div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12f · The words, on the other person's Mac</div>
+      <h2>Compare the Words</h2>
+      <p class="lead">"Rafal" (MacBook Pro) shares vaults with you. Both devices show these words. Go on only if Rafal's screen shows the same words.</p>
+      <div class="bigwords" style="font-size:18px"><span>nectar</span><span>cider</span><span>camel</span></div>
+      <div class="bigwords" style="font-size:18px;margin-top:6px"><span>satin</span><span>tiger</span><span>maple</span></div>
+      <div class="sbar"><span class="btn des left">The Words Differ</span><span class="btn pri"><svg><use href="#i-touch"/></svg>The Words Match…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12g · Stop Sharing / Leave</div>
+      <div class="alert"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
+        <h2>Stop Sharing with Ola?</h2>
+        <p>Their devices leave the shared copy now. The vault stays on every device that has it.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des"><svg><use href="#i-touch"/></svg>Stop Sharing…</span></div>
+      <div class="alert" style="margin-top:14px"><div class="aic" style="background:#ff3b30"><svg><use href="#i-warn"/></svg></div>
+        <h2>Leave This Shared Vault?</h2>
+        <p>This device stops syncing the shared copy. The vault stays on this device, and the other person keeps theirs.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn des"><svg><use href="#i-touch"/></svg>Leave…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">12h · The sync line of a shared vault (Settings › Vault › Sync)</div>
+      <div class="grp">
+        <div class="fr"><div class="k" style="min-width:110px">Family</div><div class="v" style="text-align:left;color:var(--secondary)">Checking who shares this vault…</div></div>
+        <div class="fr"><div class="k" style="min-width:110px">Garden</div><div class="v" style="text-align:left;color:var(--secondary)">Waiting for a device that shares this vault</div></div>
+        <div class="fr"><div class="k" style="min-width:110px">Car</div><div class="v" style="text-align:left;color:var(--secondary)">The share ended. The vault stays on this device.</div></div>
+      </div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><b>12a</b>: the section is under the account in Settings › Connect, from <code>ConnectAccount::refresh_shares</code> (the lists verified from the pinned roots, never the group view). "Share with…" and "Accept a Shared Vault…" show only in an active family or team.</li><li><b>12b</b>: the members of the group view are only a list to pick from. A member that this account pinned before, and whose verified list pins this account, needs no code: Continue runs the owner check <code>ShareConnectVault</code> without words. A member who did not finish the words gets a new code (12c); nothing is signed twice.</li><li><b>12c</b>: <code>start_share</code>; Connect never sees the code; the sheet asks <code>GET /v1/account/peers/pending</code> every 5 s and moves to 12d with the first answer that verifies.</li><li><b>12d</b>: <b>Confirm…</b> runs the owner check <code>ShareConnectVault</code> with the words, then <code>confirm_share</code> (it signs <code>peer</code> and <code>share</code> and adds the member's verified devices). For an account that was reset the check is <code>RepinConnectPeer</code>: it names both account keys and the vaults whose shares end first. Refuse signs nothing. Each owner check names the vault by its name on this Mac, the person by the device name that their verified list signed with the short key fingerprint, and Connect's name for them as a hint beside it.</li><li><b>12e</b> and <b>12f</b>: <code>accept_code</code> checks the code against the account that answered; <b>The Words Match…</b> runs <code>AcceptConnectShare</code>, then <code>accept_share</code>. The Words Differ withdraws the answer and signs nothing.</li><li><b>Join</b> runs the owner check <code>JoinConnectShare</code> (the vault and the person), signs <code>join</code>, then opens "Use a Vault from Another Mac" › Apassy Connect: the passphrase of the copy opens it. No store that this Mac syncs as its own, or that this account's list holds, is offered.</li><li><b>12g</b>: Cancel is the default. Both always run the owner check <code>EndConnectShare</code>. Leave turns off the sync of that vault here; the other devices of the account do the same when they read the <code>leave</code> (the third note of 12a). The account ends a share by itself, with a note (12a), only when the person's verified list left the vault or Connect shows the person outside the family or team.</li><li><b>12h</b>: a head whose signer is not verified yet ("Checking the device list" of the sync) shows the first line for 10 minutes, once for each head (a lock does not start it again), while the lists are read again after 30 s and then after twice the last wait, up to 10 minutes; then the error shows. A head of a device that left, after this Mac's last sync, shows the second.</li></ul>
+</section>
 <section class="notes">
   <h2>Rules for every view</h2>
   <ul>
     <li><b>Prices</b> come only from <code>GET /v1/plans</code>; the app has no amount in its code. Amounts show as "€3", "€3.50"; the currency comes from the plans.</li>
     <li><b>Text</b> follows plans section 5: the paid part is Apassy Connect, never relay sync or shared vaults; the hosted relay is never "for teams"; "free" without a limit only for what is self-hosted; the plan names are Connect Personal, Connect Family, and Connect Team.</li>
-    <li><b>Owner checks</b> (Touch ID or the passphrase) before: confirming a device (<code>ConfirmConnectDevice</code>), revoking or forgetting one (<code>RevokeConnectDevice</code>), deleting the account (<code>DeleteConnectAccount</code>), and every group change: confirm, remove, leave, seats (<code>ChangeConnectGroup</code>). None for the plan picker, the checkout, the portal, an invite link, joining a group, or creating the account.</li>
+    <li><b>Owner checks</b> (Touch ID or the passphrase) before: confirming a device (<code>ConfirmConnectDevice</code>), revoking or forgetting one (<code>RevokeConnectDevice</code>), deleting the account (<code>DeleteConnectAccount</code>), every group change: confirm, remove, leave, seats (<code>ChangeConnectGroup</code>), sharing a vault (<code>ShareConnectVault</code>), accepting a shared vault (<code>AcceptConnectShare</code>), verifying a reset account (<code>RepinConnectPeer</code>), joining a shared vault (<code>JoinConnectShare</code>), and stopping or leaving a share (<code>EndConnectShare</code>). None for the plan picker, the checkout, the portal, an invite link, joining a group, or creating the account.</li>
     <li><b>Browser</b>: the Checkout and Portal URLs come from Connect and open in the default browser. Apassy sends Stripe nothing.</li>
     <li><b>Locked vault</b>: the section shows the account and the plan; every button that needs an owner check is off, with "Unlock Apassy to change Connect." under the first group.</li>
     <li><b>Errors</b> show as one red line with the text of <code>ConnectError</code>, under the group that failed, or in the sheet.</li>

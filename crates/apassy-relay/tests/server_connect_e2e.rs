@@ -232,9 +232,42 @@ fn connect_works_end_to_end_with_the_app_client() {
         ("member", "active")
     );
     assert!(anna_view.plan.entitled);
-    // The member's Mac joins the shared store.
+    // The member's Mac joins the shared store, after the owner's signed `peer` of Anna's
+    // root and `share` of the store (connect-account-v1 section 16).
     let anna_device = anna.state().device_id.clone();
     let anna_key = anna.state().public_key.clone();
+    for (op, root, store) in [
+        ("peer", Some(anna_key.clone()), None),
+        ("share", None, Some(team.to_string())),
+    ] {
+        owner.view().unwrap();
+        let state = owner.state().clone();
+        let origin = owner.client().origin().to_owned();
+        let (signature, _) = owner
+            .signer()
+            .unwrap()
+            .sign_share_entry(
+                &origin,
+                &state.account_id,
+                (state.list_version + 1, &state.list_head),
+                op,
+                &anna_id,
+                root.as_deref(),
+                store.as_deref(),
+            )
+            .unwrap();
+        with_account(
+            &mut owner,
+            &base,
+            "POST",
+            "/v1/account/list",
+            Some(
+                &json!({"version": state.list_version + 1, "op": op, "account_id": anna_id,
+                         "root": root, "team_id": store, "statement": encode_b64(&signature)}),
+            ),
+        )
+        .expect(op);
+    }
     let added = with_account(
         &mut owner,
         &base,

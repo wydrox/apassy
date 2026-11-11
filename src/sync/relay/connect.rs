@@ -19,8 +19,13 @@
 //!   and [`RelaySync::adopt`] with the passphrase of the copy). A device in the store adds
 //!   it first (`register_account_devices`, also the sync worker every 5 minutes). A vault
 //!   store has no device link (the relay refuses one): its devices come from the account.
-//! - Sharing a vault between accounts (a Family or Team vault) is not available yet: a
-//!   store of another account is refused before any request ([`StoreError::OtherAccount`]).
+//! - A vault shared between the accounts of a family or team (contract section 16): a
+//!   store that holds devices of another account opens only when the account file holds
+//!   a share of it that this device verified (a store of this account with signed `share`
+//!   entries, or a store of another account that this account's list joined and whose
+//!   owner's list still shares it with this account); any other is refused before any
+//!   request ([`StoreError::OtherAccount`]). Its heads are signed by the devices of the
+//!   accounts of the share (`crate::connect::store_signer_policy`).
 //! - [`RelaySync::move_to_connect`]: "Move the relay copy to Connect". It pushes to
 //!   Connect first and deletes the old copy second; the move record ([`MoveRecord`],
 //!   `<state>.move.json`, no secret) keeps the step, so a failure in between leaves both
@@ -105,8 +110,9 @@ pub enum StoreError {
     OtherConnect,
     /// The vault has no relay sync to move.
     NothingToMove,
-    /// The store belongs to another account, or holds a device of one: sharing a vault
-    /// between accounts is not available yet. Nothing was asked or made.
+    /// The store holds devices of another account, and the account file of this device
+    /// holds no verified share of it (connect-account-v1 section 16). Nothing was asked or
+    /// made.
     OtherAccount,
 }
 
@@ -151,9 +157,9 @@ impl fmt::Display for StoreError {
                 "This vault syncs through another Apassy Connect than the account of this Mac.",
             ),
             Self::NothingToMove => f.write_str("This vault has no relay copy to move."),
-            Self::OtherAccount => {
-                f.write_str("Sharing a vault between accounts is not available yet.")
-            }
+            Self::OtherAccount => f.write_str(
+                "This vault is shared with another account, and this device has not verified the share yet. Open Settings › Connect, then try again.",
+            ),
         }
     }
 }
@@ -252,6 +258,12 @@ impl RelaySync {
     /// later version from the next check on.
     pub fn set_account_signers(&self, policy: Option<super::SignerPolicy>) {
         *lock(&self.account_keys) = policy;
+    }
+
+    /// The signers that the running sessions of this vault take ([`Self::set_account_signers`]).
+    #[cfg(test)]
+    pub(crate) fn account_signers(&self) -> Option<super::SignerPolicy> {
+        lock(&self.account_keys).clone()
     }
 
     /// Whether a vault store of this vault asked for the account key, and no account
@@ -405,13 +417,15 @@ impl RelaySync {
     /// passphrase of the copy. The store must list this Mac. Its session takes the signer
     /// policy of the account file from the first request on (no answer of Connect is
     /// waited for), in a slot that [`Self::adopt`] hands to the relay sync of the new
-    /// vault, so a later refresh of the account reaches it. A store of another account
-    /// ([`VaultStoreView::shared`]) is [`StoreError::OtherAccount`], before any request.
+    /// vault, so a later refresh of the account reaches it. A store that holds devices of
+    /// another account ([`VaultStoreView::shared`]) needs a share of it in the account
+    /// file (`ConnectAccount::shares_store`), else it is [`StoreError::OtherAccount`],
+    /// before any request.
     pub fn joined_from_store(
         account: &mut ConnectAccount,
         store: &VaultStoreView,
     ) -> Result<JoinedDevice, StoreError> {
-        if store.shared {
+        if store.shared && !account.shares_store(&store.team_id) {
             return Err(StoreError::OtherAccount);
         }
         let url = crate::sync::RelayUrl::parse(account.client().origin())?;

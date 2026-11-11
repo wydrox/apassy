@@ -611,6 +611,148 @@
         "code": "hosted_retired",
         "message": "This route is retired on Apassy Connect."
       }
+    },
+    {
+      "name": "list_append",
+      "route": "POST /v1/account/list",
+      "part": "request",
+      "body": {
+        "version": 3,
+        "op": "share",
+        "account_id": "acc_m3n5p7q2rb",
+        "root": null,
+        "team_id": "t_7k2m5q4x3c",
+        "statement": "MEUCIQClGtXO-dDgJW8tGFZi2CrGEiKEZoJvKotPlVoWgao2LQIgTXc6bsgXQ3tYWHoLUw0rss0VHBKK36kBFqoD-BfZ8cw"
+      }
+    },
+    {
+      "name": "list_appended",
+      "route": "POST /v1/account/list",
+      "part": "result",
+      "body": {
+        "version": 3,
+        "op": "share"
+      }
+    },
+    {
+      "name": "peer_link",
+      "route": "POST /v1/account/peers/link",
+      "part": "request",
+      "body": {
+        "link_hash": "_HL1vWYL9Zw1YZicu91TV4X1zgfhRkgCMet8qA0a798",
+        "account_id": "acc_m3n5p7q2rb"
+      }
+    },
+    {
+      "name": "peer_link_created",
+      "route": "POST /v1/account/peers/link",
+      "part": "result",
+      "body": {
+        "link_id": 7,
+        "expires_at": 1790000600
+      }
+    },
+    {
+      "name": "peer_join",
+      "route": "POST /v1/account/peers/join",
+      "part": "request",
+      "body": {
+        "account_id": "acc_k7m2q4x3ca",
+        "link_hash": "_HL1vWYL9Zw1YZicu91TV4X1zgfhRkgCMet8qA0a798",
+        "signature": "MEUCIQDokecSIG05fzpJxLCbwwVb-BJkxk7m2jrLGlInVsxJCgIgLXuxCWJiJtJXXszOeFFCLcC9yuXb3lPFefEkXhv-xek"
+      }
+    },
+    {
+      "name": "peer_joined",
+      "route": "POST /v1/account/peers/join",
+      "part": "result",
+      "body": {
+        "join_id": 4,
+        "inviter": {
+          "account_id": "acc_k7m2q4x3ca",
+          "device_id": "dev_m2k7q3x4ab",
+          "name": "Rafal",
+          "public_key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA"
+        },
+        "expires_at": 1790000600,
+        "device_list": [
+          {
+            "version": 1,
+            "op": "root",
+            "key": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+            "link_hash": null,
+            "name": "MacBook Pro",
+            "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
+            "signature": "MEYCIQDEBJuhDxqVrcWj3Fi3dI2RgLrSD7vnsM7qih_dQwbxMwIhAKyLypA3_X_3a79lRm0Pr_MQ1l98EyLSftIqLpIVvupq"
+          }
+        ]
+      }
+    },
+    {
+      "name": "peer_pending",
+      "route": "GET /v1/account/peers/pending",
+      "part": "result",
+      "body": [
+        {
+          "join_id": 4,
+          "link_id": 7,
+          "account_id": "acc_m3n5p7q2rb",
+          "name": "Ola",
+          "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+          "signature": "MEUCIQDokecSIG05fzpJxLCbwwVb-BJkxk7m2jrLGlInVsxJCgIgLXuxCWJiJtJXXszOeFFCLcC9yuXb3lPFefEkXhv-xek",
+          "created_at": 1790000100,
+          "expires_at": 1790000600,
+          "device_list": [
+            {
+              "version": 1,
+              "op": "root",
+              "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+              "link_hash": null,
+              "name": "iPhone",
+              "by": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+              "signature": "MEUCIDtEXwX_OjUjP_eCTd29WAYFNISR1LupNUZvxmG7cqHcAiEA9DV3vFmjxthvWXdWlz20lb5qoN-ARzk5Eo3SUEkJ-VM"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "peer_join_state",
+      "route": "GET /v1/account/peers/join/{join_id}",
+      "part": "result",
+      "body": {
+        "join_id": 4,
+        "state": "confirmed",
+        "expires_at": 1790000600
+      }
+    },
+    {
+      "name": "peer_view",
+      "route": "GET /v1/account/peers/{account_id}",
+      "part": "result",
+      "body": {
+        "account_id": "acc_m3n5p7q2rb",
+        "name": "Ola",
+        "devices": [
+          {
+            "device_id": "dev_p4n6r2t7bc",
+            "name": "iPhone",
+            "platform": "iphone",
+            "public_key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U"
+          }
+        ],
+        "device_list": [
+          {
+            "version": 1,
+            "op": "root",
+            "key": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+            "link_hash": null,
+            "name": "iPhone",
+            "by": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
+            "signature": "MEUCIDtEXwX_OjUjP_eCTd29WAYFNISR1LupNUZvxmG7cqHcAiEA9DV3vFmjxthvWXdWlz20lb5qoN-ARzk5Eo3SUEkJ-VM"
+          }
+        ]
+      }
     }
   ]
 }

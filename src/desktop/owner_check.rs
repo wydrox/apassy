@@ -91,6 +91,123 @@ pub(crate) fn page_text(text: &str) -> String {
     dialog_cut(clean.trim())
 }
 
+/// The owner action of a request of a shared vault ([`OwnerRequest::from_share_action`]).
+fn share_request_action(request: OwnerRequest) -> OwnerAction {
+    match request {
+        OwnerRequest::ShareConnectVault {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            words,
+        } => OwnerAction::ShareConnectVault {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            words,
+        },
+        OwnerRequest::AcceptConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            words,
+        } => OwnerAction::AcceptConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            words,
+        },
+        OwnerRequest::RepinConnectPeer {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            old_fingerprint,
+            fingerprint,
+            words,
+            ends,
+            team_id,
+            vault_name,
+        } => OwnerAction::RepinConnectPeer {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            old_fingerprint,
+            fingerprint,
+            words,
+            ends,
+            team_id,
+            vault_name,
+        },
+        OwnerRequest::JoinConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+        } => OwnerAction::JoinConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+        },
+        OwnerRequest::EndConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            leave,
+        } => OwnerAction::EndConnectShare {
+            account_id,
+            peer_account,
+            peer_name,
+            peer_hint,
+            fingerprint,
+            team_id,
+            vault_name,
+            leave,
+        },
+        other => other.action(),
+    }
+}
+
+/// A person of another Connect account in an owner check: the name that its verified
+/// device list signed, the short fingerprint of its pinned root, and its name at Connect
+/// beside them as a hint only.
+fn person_text(name: &str, hint: &str, fingerprint: &str) -> String {
+    let (name, hint, fingerprint) = (page_text(name), page_text(hint), page_text(fingerprint));
+    let verified = if name.is_empty() {
+        "an account that this device has not verified yet".to_owned()
+    } else {
+        format!("\u{201c}{name}\u{201d} (account key {fingerprint})")
+    };
+    if hint.is_empty() || hint == name {
+        verified
+    } else {
+        format!("{verified}, which Apassy Connect calls \u{201c}{hint}\u{201d},")
+    }
+}
+
 /// The credentials of a question for the dialog: their names, or else the variables.
 fn question_items(run: &PendingRun) -> String {
     let names: Vec<String> = run
@@ -713,6 +830,62 @@ pub enum OwnerRequest {
         group_id: String,
         change: crate::broker::approvals::ConnectGroupChange,
     },
+    /// Share the vault store `team_id` with another account (connect-account-v1 section
+    /// 16): the words that both devices showed, empty for an account pinned already. The
+    /// fields are those of `OwnerAction::ShareConnectVault`.
+    ShareConnectVault {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        words: String,
+    },
+    /// "The Words Match" of a share code of another account.
+    AcceptConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        words: String,
+    },
+    /// A new pin of an account that was reset, with what ends first.
+    RepinConnectPeer {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        old_fingerprint: String,
+        fingerprint: String,
+        words: String,
+        ends: Vec<String>,
+        team_id: Option<String>,
+        vault_name: Option<String>,
+    },
+    /// "Join" of a store that another account shares.
+    JoinConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+    },
+    /// "Stop Sharing with <name>…" or "Leave This Shared Vault…".
+    EndConnectShare {
+        account_id: String,
+        peer_account: String,
+        peer_name: String,
+        peer_hint: String,
+        fingerprint: String,
+        team_id: String,
+        vault_name: String,
+        leave: bool,
+    },
     /// Turn the tailnet route of this Mac's node on or off (Settings > Devices, plan
     /// S2–S3, unit N7). The node checks nothing itself: the caller asks first.
     SetTailnetRoute {
@@ -788,6 +961,107 @@ impl OwnerRequest {
             } => accounts.get(*chosen),
             _ => None,
         }
+    }
+
+    /// The request of an owner action of a shared vault (connect-account-v1 section 16):
+    /// the same fields, so the prompt shows exactly what the account checks.
+    pub(crate) fn from_share_action(action: OwnerAction) -> Option<Self> {
+        Some(match action {
+            OwnerAction::ShareConnectVault {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                words,
+            } => Self::ShareConnectVault {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                words,
+            },
+            OwnerAction::AcceptConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                words,
+            } => Self::AcceptConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                words,
+            },
+            OwnerAction::RepinConnectPeer {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                old_fingerprint,
+                fingerprint,
+                words,
+                ends,
+                team_id,
+                vault_name,
+            } => Self::RepinConnectPeer {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                old_fingerprint,
+                fingerprint,
+                words,
+                ends,
+                team_id,
+                vault_name,
+            },
+            OwnerAction::JoinConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+            } => Self::JoinConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+            },
+            OwnerAction::EndConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                leave,
+            } => Self::EndConnectShare {
+                account_id,
+                peer_account,
+                peer_name,
+                peer_hint,
+                fingerprint,
+                team_id,
+                vault_name,
+                leave,
+            },
+            _ => return None,
+        })
     }
 
     /// The action that the proof must name.
@@ -1220,6 +1494,11 @@ impl OwnerRequest {
                 group_id: group_id.clone(),
                 change: change.clone(),
             },
+            share @ (Self::ShareConnectVault { .. }
+            | Self::AcceptConnectShare { .. }
+            | Self::RepinConnectPeer { .. }
+            | Self::JoinConnectShare { .. }
+            | Self::EndConnectShare { .. }) => share_request_action(share.clone()),
             Self::SetTailnetRoute { on } => OwnerAction::SetTailnetRoute { on: *on },
             Self::RevokeNodeDevice(request) => request.action(),
             Self::AllowConnect {
@@ -1732,6 +2011,110 @@ impl OwnerRequest {
                 "Let \"{}\" sync the relay copy of \"{}\" at Apassy Connect? It can then read and change the encrypted copy; it still needs the passphrase to open the vault.",
                 page_text(device_name),
                 page_text(vault_name)
+            ),
+            Self::ShareConnectVault {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                words,
+                ..
+            } if words.is_empty() => format!(
+                "Share \"{}\" with {} through Apassy Connect? Their devices can then read and change the encrypted copy; they still need the passphrase to open the vault.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint)
+            ),
+            Self::ShareConnectVault {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                words,
+                ..
+            } => format!(
+                "Share \"{}\" with {} through Apassy Connect? Both devices show: {}. Their devices can then read and change the encrypted copy of this vault; they still need its passphrase.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint),
+                page_text(words)
+            ),
+            Self::AcceptConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                words,
+                ..
+            } => format!(
+                "Accept the vaults that {} shares with you through Apassy Connect? Both devices show: {}. Each vault is joined on its own later.",
+                person_text(peer_name, peer_hint, fingerprint),
+                page_text(words)
+            ),
+            Self::RepinConnectPeer {
+                peer_name,
+                peer_hint,
+                old_fingerprint,
+                fingerprint,
+                words,
+                ends,
+                vault_name,
+                ..
+            } => {
+                let ends = if ends.is_empty() {
+                    "No vault is shared with the old account now.".to_owned()
+                } else {
+                    format!(
+                        "Sharing these vaults with the old account ends first: {}.",
+                        ends.iter()
+                            .map(|name| format!("\"{}\"", page_text(name)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let share = vault_name.as_deref().map_or_else(String::new, |vault| {
+                    format!(" Then \"{}\" is shared with the new account.", page_text(vault))
+                });
+                format!(
+                    "{} reset the account (old account key {}). Verify the new account key? Both devices show: {}. {}{}",
+                    person_text(peer_name, peer_hint, fingerprint),
+                    page_text(old_fingerprint),
+                    page_text(words),
+                    ends,
+                    share
+                )
+            }
+            Self::JoinConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                ..
+            } => format!(
+                "Join \"{}\", shared by {}? This device downloads the shared copy and syncs it; you need the passphrase of the vault to open it.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                leave: false,
+                ..
+            } => format!(
+                "Stop sharing \"{}\" with {}? Their devices leave the shared copy now.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint)
+            ),
+            Self::EndConnectShare {
+                peer_name,
+                peer_hint,
+                fingerprint,
+                vault_name,
+                leave: true,
+                ..
+            } => format!(
+                "Leave \"{}\", shared by {}? This device stops syncing the shared copy; the vault stays here.",
+                page_text(vault_name),
+                person_text(peer_name, peer_hint, fingerprint)
             ),
             Self::ChangeConnectGroup { change, .. } => match change {
                 crate::broker::approvals::ConnectGroupChange::ConfirmMember { name, .. } => format!(
@@ -2879,7 +3262,12 @@ impl DesktopApp {
             | OwnerRequest::DeleteVaultStore { .. }
             | OwnerRequest::TakeDepartedCopy { .. }
             | OwnerRequest::AddStoreDevice { .. }
-            | OwnerRequest::ChangeConnectGroup { .. } => {
+            | OwnerRequest::ChangeConnectGroup { .. }
+            | OwnerRequest::ShareConnectVault { .. }
+            | OwnerRequest::AcceptConnectShare { .. }
+            | OwnerRequest::RepinConnectPeer { .. }
+            | OwnerRequest::JoinConnectShare { .. }
+            | OwnerRequest::EndConnectShare { .. } => {
                 self.owner.connect_proof = Some(proof);
             }
             OwnerRequest::SetTailnetRoute { on } => self.devices_set_route(on, proof),

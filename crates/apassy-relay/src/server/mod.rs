@@ -33,6 +33,7 @@ pub mod joins;
 pub mod mcp;
 pub mod oauth;
 pub mod operator;
+pub mod peers;
 pub mod push;
 pub mod questions;
 pub mod rollback;

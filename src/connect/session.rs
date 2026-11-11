@@ -179,6 +179,9 @@ pub struct AccountSession {
     config: Mutex<Config>,
     slot: AccountSlot,
     inner: Mutex<Inner>,
+    /// The signers of the account file after each write of it, by the account of the
+    /// slot ([`Self::signers_after`]).
+    feed: super::account::SignerFeed,
 }
 
 impl fmt::Debug for AccountSession {
@@ -229,7 +232,22 @@ impl AccountSession {
                 waiting: None,
                 offered: None,
             }),
+            feed: Arc::new(Mutex::new((0, None))),
         }
+    }
+
+    /// The signers of the account file (`super::signer_policy`) when the account of this
+    /// session wrote the file since the write that `seen` counts: after any step that
+    /// changed it (a ceremony step, a share, a join, an end, a verified list), whether or
+    /// not a call to Connect worked. The window hands them to the sync of the vault
+    /// stores at once. `seen` moves to the newest write.
+    pub fn signers_after(&self, seen: &mut u64) -> Option<crate::sync::SignerPolicy> {
+        let held = lock(&self.feed);
+        if held.0 == *seen {
+            return None;
+        }
+        *seen = held.0;
+        held.1.clone()
     }
 
     /// A session over `store` and the account file of the data directory `dir`.
@@ -461,7 +479,8 @@ impl AccountSession {
 
     /// Put `account` in the slot, or let it wait there for a call of an earlier vault
     /// session that still holds the slot. Never waits.
-    fn put(&self, inner: &mut Inner, account: ConnectAccount) {
+    fn put(&self, inner: &mut Inner, mut account: ConnectAccount) {
+        account.set_signer_feed(Arc::clone(&self.feed));
         inner.waiting = Some(account);
         if let Some(mut slot) = try_lock(&self.slot) {
             inner.settle(&mut slot);
@@ -689,6 +708,31 @@ mod tests {
             Follow::Read(ticket) => session.open_now(ticket),
             Follow::Nothing => session.state(),
         }
+    }
+
+    /// C3: the signers of the account file reach the window after each write of the file
+    /// by a step of the session, also when the step's call to Connect then failed.
+    #[test]
+    fn each_write_of_the_account_file_publishes_its_signers() {
+        let (_dir, _store, session) = session_with_account();
+        assert_eq!(open(&session, EPOCH), SessionState::Open);
+        let mut seen = 0;
+        let first = session
+            .signers_after(&mut seen)
+            .expect("the signers at the open");
+        assert!(session.signers_after(&mut seen).is_none(), "nothing new");
+        let other = AccountSigner::open_or_create(&MemoryKeyStore::new()).expect("key");
+        let failed = session.with_account(|account| {
+            account.state_mut().known.push(other.public_key_b64u());
+            account.save_state()?;
+            // The call to Connect after the write fails.
+            Err::<(), _>(ConnectError::Offline)
+        });
+        assert_eq!(failed.unwrap_err(), ConnectError::Offline);
+        let after = session.signers_after(&mut seen).expect("the new signers");
+        assert_ne!(after, first);
+        assert!(after.accepts(other.public_key()));
+        assert!(session.signers_after(&mut seen).is_none());
     }
 
     #[test]

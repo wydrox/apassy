@@ -1137,8 +1137,8 @@ fn the_directory_moves_from_1002_to_1005_and_keeps_its_teams() {
     relay.edit_offline(|config| {
         edit_directory(
             config,
-            "DROP TABLE account_join; DROP TABLE account_link; DROP TABLE account_store_device; DROP TABLE account_store_removal;
-             DROP TABLE account_list; DROP TABLE account_device; DROP TABLE account; DROP TABLE account_key; DROP TABLE account_id_used;
+            "DROP TABLE account_peer_join; DROP TABLE account_peer_link; DROP TABLE account_join; DROP TABLE account_link; DROP TABLE account_store_device; DROP TABLE account_store_removal;
+             DROP TABLE account_list; DROP TABLE account_device; DROP TABLE account; DROP TABLE account_key; DROP TABLE account_id_used; DROP TABLE account_share_void; DROP TABLE account_join_share;
              DROP TABLE brain_event; DROP TABLE \"group\"; DROP TABLE group_member;
              DROP TABLE group_invite; DROP TABLE stripe_customer; DROP TABLE stripe_subscription;
              DROP TABLE stripe_event; DROP TABLE billing_problem; DROP TABLE billing_clock; DROP TABLE tunnel_node; DROP TABLE tunnel_grant;
