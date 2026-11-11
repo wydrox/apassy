@@ -2962,9 +2962,9 @@ impl ConnectAccount {
             if held >= list.live.len() {
                 continue;
             }
-            match self.add_peer_devices(team, member) {
-                Ok(confirmed) => status.added.extend(confirmed.added),
-                Err(_) => {}
+            // What Connect refuses waits for the next refresh.
+            if let Ok(confirmed) = self.add_peer_devices(team, member) {
+                status.added.extend(confirmed.added);
             }
         }
     }

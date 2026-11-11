@@ -1252,7 +1252,7 @@ fn a_re_pin_near_the_end_of_the_list_signs_nothing() {
     f.share();
     let (team, x_id, a_id) = (f.team.clone(), f.x_id(), f.a_id());
     let signer = f.account_a.signer().expect("signer");
-    if f.list_of(&a_id).len() % 2 == 0 {
+    if f.list_of(&a_id).len().is_multiple_of(2) {
         // One entry that changes nothing of X: the pairs below then end at 819.
         push_entry(
             &f.cloud,
@@ -1988,4 +1988,48 @@ fn a_refresh_of_300_pins_reads_in_batches() {
 /// The list hash of the entry at `index` of `account`'s list at Connect.
 fn lists_hash(cloud: &Cloud, account: &str, index: usize) -> String {
     cloud.connect.list_hashes(account)[index].clone()
+}
+
+/// F4: a device of a co-member that was offline while a member wrote to the store, and
+/// the member then left the group, still reads that member's list (Connect serves the
+/// lists of the accounts of a store that both are or were in): the member's head below
+/// the owner's head is an ended key there, and the chain merges.
+#[test]
+fn an_offline_co_member_reads_the_keys_of_a_member_that_left_the_group() {
+    let mut f = family();
+    let (y_mac, mut account_y, owner_y) = third(&f, "y", "Ewa");
+    let team = f.team.clone();
+    ceremony(
+        &mut f.account_a,
+        &f.owner_a,
+        &team,
+        &mut account_y,
+        &owner_y,
+    );
+    let mut vault_y = member_copy(&y_mac, &mut account_y, &team);
+    // Y is offline from here. X joins and writes; A merges and writes over it.
+    f.share();
+    let mut vault_x = f.x_vault();
+    hand_over(&f.a, &f.account_a);
+    vault_x.add(item("Beta")).expect("add");
+    assert!(f.x.sync.sync(&mut vault_x).expect("X").pushed);
+    f.a.sync.sync(&mut f.vault_a).expect("A merges X");
+    f.vault_a.add(item("Gamma")).expect("add");
+    assert!(f.a.sync.sync(&mut f.vault_a).expect("A").pushed);
+    // X leaves the group at Connect; A's device ends the share by itself.
+    let (a_id, x_id) = (f.a_id(), f.x_id());
+    f.cloud.connect.remove_member(&a_id, &x_id);
+    f.account_a.refresh_shares(&[]).expect("A");
+    assert_eq!(
+        f.list_of(&a_id).last().expect("entry")["op"],
+        json!("unshare")
+    );
+    // Y comes back: X's list is still served to it, X's key is an ended key of the store.
+    account_y.refresh_shares(&[]).expect("Y");
+    let policy = signer_policy(account_y.state()).for_team(&team);
+    assert!(policy.left_key(&key_of(&f.account_x)), "{policy:?}");
+    assert!(!policy.accepts(&key_of(&f.account_x)));
+    hand_over(&y_mac, &account_y);
+    y_mac.sync.sync(&mut vault_y).expect("Y follows the chain");
+    assert_eq!(titles(&vault_y), vec!["Alpha", "Beta", "Gamma"]);
 }

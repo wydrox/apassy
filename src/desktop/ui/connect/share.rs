@@ -1586,7 +1586,7 @@ fn run_guarded(
             });
         }
         Guard::Join { team_id, owner } => spawn(app, ctx, move |account| {
-            let rejoin = local.iter().any(|team| *team == team_id);
+            let rejoin = local.contains(&team_id);
             Outcome::Joined(
                 account
                     .join_shared_store(&team_id, &owner, &local, &names, proof, &epoch)
