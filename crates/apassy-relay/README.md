@@ -17,6 +17,29 @@ This is an alpha. The design is in [docs/SPEC.md](docs/SPEC.md). It follows ADR 
 - An audit log with no values, no placeholders, no tokens, no keys.
 - Agents use a remote MCP endpoint, a stdio MCP adapter, or `apassy-team run`.
 
+## Two modes: the relay, and Apassy Connect
+
+The same binary runs in one of two modes (`APASSY_RELAY_MODE`, SPEC section 37):
+
+- **`relay`** (the default): every route above, the files encrypted with the master key. A
+  relay that you run for yourself, and the hosted relay until its cutover.
+- **`connect`**: Apassy Connect only (ADR 0037 stage 7): accounts and their devices, vault
+  stores (relay sync of a vault, ciphertext only), billing through Stripe, Family and Team
+  groups, and the tunnel between devices and nodes. No master key, no proxy, no push, no
+  team vault; every other route answers 410 `hosted_retired`; `relay.db` and the stores are
+  plain SQLite files, because nothing in them is secret. Everything Connect does can be
+  self-hosted from this repository.
+
+A relay moves from `relay` to `connect` once, with the relay stopped:
+`apassy-relay backup` (a byte-for-byte copy of the stopped data directory), then
+`apassy-relay connect-cutover` (a dry run that checks that backup and prints the plan and its
+`plan_sha256`), then `apassy-relay connect-cutover --confirm-delete-teams <plan_sha256>` (keeps
+the vault stores of the accounts as plain files and deletes every other team with its files and
+keys, only if the plan is still the one of the dry run). Before it, the
+transition switch `APASSY_RELAY_FREE_CONNECT=0` ends the free questions-only Connect path.
+The owner's runbook is [docs/operations/connect.md](../../docs/operations/connect.md); the
+operator reference is section 29 of [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ## License
 
 The relay is Apache-2.0, like the rest of this repository (see the [LICENSE](../../LICENSE) at the root). Versions up to 0.5.13 were published under FSL-1.1-ALv2 in the private `wydrox/apassy-relay` repository; on 2026-11-02 the copyright holder relicensed the whole history under Apache-2.0 and moved it here ([ADR 0037](../../docs/adr/0037-own-relay-open-source.md)).

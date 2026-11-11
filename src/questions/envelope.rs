@@ -581,7 +581,11 @@ pub const MAX_CODE_BYTES: usize = 16;
 pub const MAX_REDIRECT_HOST_BYTES: usize = 255;
 /// The line of the Mac's owner check for a connect request whose code goes back to a
 /// program on a computer (review 0.5.16).
-pub const LOCAL_CONNECT_WARNING: &str = "A program on this Mac can start this request.";
+pub const LOCAL_CONNECT_WARNING: &str = concat!(
+    "A program on this ",
+    crate::computer!(),
+    " can start this request."
+);
 
 /// True for the host of a redirect URI that names a computer itself, not a site:
 /// `localhost` and names under it, an address of `127.0.0.0/8`, `[::1]`, or the
@@ -1712,7 +1716,11 @@ mod tests {
         );
         assert_eq!(
             LOCAL_CONNECT_WARNING,
-            "A program on this Mac can start this request."
+            concat!(
+                "A program on this ",
+                crate::computer!(),
+                " can start this request."
+            )
         );
     }
 

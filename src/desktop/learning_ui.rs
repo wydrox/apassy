@@ -1651,7 +1651,11 @@ mod tests {
         assert!(some[2].contains("Requests in shadow mode: 130. No answer from the candidate: 2."));
         assert_eq!(
             some[3],
-            "Its head set is on the bouncer brain on this Mac, where it answers in the requests of the active brain."
+            concat!(
+                "Its head set is on the bouncer brain on this ",
+                crate::computer!(),
+                ", where it answers in the requests of the active brain."
+            )
         );
         // The Promote button stays off below each threshold of ADR 0010.
         for (decisions, agreed, denials) in [(99, 99, 0), (100, 94, 0), (120, 119, 1)] {

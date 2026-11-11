@@ -1559,3 +1559,144 @@ describe("tunnel", () => {
     }
   });
 });
+
+describe("relay mode (one build for the hosted relay and Connect)", () => {
+  const PUSH_SECRET = "push-secret-synthetic-0123456789abcdef";
+  /** A call of the Worker's own push route with the right secret and a body it refuses. */
+  function internalPush(env: Record<string, unknown>) {
+    return call("/internal/push", {
+      method: "POST",
+      body: "{}",
+      headers: { "x-apassy-push": PUSH_SECRET, "content-type": "application/json" },
+    }, { PUSH_SECRET, ...env });
+  }
+
+  for (const mode of [undefined, "relay", " relay "]) {
+    it(`keeps /internal/push and the free Connect guards with RELAY_MODE ${JSON.stringify(mode)}`, async () => {
+      // The push route reads the body: 400 for one that is not a push, never forwarded.
+      const pushed = await internalPush(mode === undefined ? {} : { RELAY_MODE: mode });
+      assert.equal(pushed.status, 400);
+      assert.equal(seen.length, 0);
+      const limits = everyLimiter(true);
+      const created = await call("/v1/connect", {
+        method: "POST",
+        body: '{"v":1}',
+        headers: { "cf-connecting-ip": "198.51.100.42" },
+      }, { ...limits.env, ...(mode === undefined ? {} : { RELAY_MODE: mode }) });
+      assert.equal(created.status, 201);
+      assert.deepEqual(limits.used, ["connect:198.51.100.42", "prefix:198.51.100.0/24"]);
+      assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), ["198.51.100.0/24"]);
+      assert.equal(values(seen[0]!, "x-apassy-client-prefix-mac").length, 1);
+    });
+  }
+
+  it("turns /internal/push off in connect mode, before the APNs sender reads anything", async () => {
+    for (const path of ["/internal/push", "/internal/x", "/./internal/push"]) {
+      const response = await call(path, {
+        method: "POST",
+        body: "{}",
+        headers: { "x-apassy-push": PUSH_SECRET },
+      }, { PUSH_SECRET, RELAY_MODE: "connect", RELAY: vpc() });
+      assert.equal(response.status, 404, path);
+      assert.equal(await response.text(), "not found");
+    }
+    assert.equal(seen.length, 0);
+    assert.equal(vpcTargets.length, 0);
+  });
+
+  it("answers the free Connect routes with 410 at the edge in connect mode, without a guard or the relay", async () => {
+    for (const [method, path] of [
+      ["POST", "/v1/connect"],
+      ["GET", "/v1/connect"],
+      ["POST", "/v1/connect/challenge"],
+      ["POST", "/v1/./connect"],
+    ]) {
+      const limits = everyLimiter(false);
+      const response = await call(path!, {
+        method,
+        ...(method === "POST" ? { body: '{"v":1}' } : {}),
+        headers: {
+          "cf-connecting-ip": "198.51.100.42",
+          "x-apassy-client-prefix": "203.0.113.0/24",
+          "x-apassy-client-prefix-mac": "00",
+        },
+      }, { ...limits.env, RELAY_MODE: "connect", RELAY: vpc() });
+      assert.equal(response.status, 410, `${method} ${path}`);
+      const answer = await response.json() as { ok: boolean; error: { code: string } };
+      assert.equal(answer.ok, false);
+      assert.equal(answer.error.code, "hosted_retired");
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      // No guard is asked (none can be flooded), and nothing reaches the relay.
+      assert.deepEqual(limits.used, []);
+      assert.equal(seen.length, 0);
+      assert.equal(vpcTargets.length, 0);
+    }
+    // The guards of Connect stay: a new account and a dial are limited as before.
+    const account = everyLimiter(false);
+    const refused = await call("/v1/account", {
+      method: "POST",
+      body: "{}",
+      headers: { "cf-connecting-ip": "198.51.100.42" },
+    }, { ...account.env, RELAY_MODE: "connect" });
+    assert.equal(refused.status, 429);
+    assert.deepEqual(account.used, ["account:198.51.100.42"]);
+    const dial = everyLimiter(false);
+    const dialed = await call("/v1/tunnel/dial/node_abc", {
+      headers: { "cf-connecting-ip": "198.51.100.42" },
+    }, { ...dial.env, RELAY_MODE: "connect" });
+    assert.equal(dialed.status, 429);
+    assert.deepEqual(dial.used, ["tunnel:198.51.100.42"]);
+  });
+
+  it("gives /p/ the JSON cap in connect mode and the proxy cap otherwise", async () => {
+    const declared = String(MAX_JSON_LENGTH + 1);
+    const body = new Uint8Array(MAX_JSON_LENGTH + 1);
+    const connect = await call("/p/apassy_ses_x/v1/upload", {
+      method: "POST",
+      body,
+      headers: { "content-length": declared },
+    }, { RELAY_MODE: "connect" });
+    assert.equal(connect.status, 413);
+    assert.match(await connect.text(), /64 KiB/);
+    assert.equal(seen.length, 0);
+    const relay = await call("/p/apassy_ses_x/v1/upload", {
+      method: "POST",
+      body,
+      headers: { "content-length": declared },
+    }, { RELAY_MODE: "relay" });
+    assert.equal(relay.status, 201);
+    assert.ok(MAX_PROXY_LENGTH > MAX_JSON_LENGTH);
+  });
+
+  it("serves /dl, /guide, and /install.sh in both modes", async () => {
+    for (const mode of ["relay", "connect"]) {
+      for (const path of ["/install.sh", "/guide", "/dl/apassy.tar.gz"]) {
+        const fixture = assets(() => new Response("asset body"));
+        const response = await call(path, {}, { ASSETS: fixture.binding, RELAY_MODE: mode });
+        assert.equal(response.status, 200, `${mode} ${path}`);
+        assert.equal(await response.text(), "asset body");
+        assert.equal(seen.length, 0);
+      }
+    }
+  });
+
+  it("answers 503 for a bad RELAY_MODE on the relay routes, keeps the files, and keeps push off", async () => {
+    const response = await call("/v1/me", {}, { RELAY_MODE: "conect" });
+    assert.equal(response.status, 503);
+    assert.equal(await response.text(), "relay not configured");
+    assert.equal(seen.length, 0);
+    const pushed = await internalPush({ RELAY_MODE: "conect" });
+    assert.equal(pushed.status, 404);
+    const fixture = assets(() => new Response("asset body"));
+    const file = await call("/install.sh", {}, { ASSETS: fixture.binding, RELAY_MODE: "conect" });
+    assert.equal(file.status, 200);
+  });
+
+  it("forwards the routes of Connect in connect mode as before", async () => {
+    for (const [method, path] of [["GET", "/v1/account"], ["GET", "/v1/sync/head"], ["GET", "/healthz"]]) {
+      const response = await call(path!, { method }, { RELAY_MODE: "connect" });
+      assert.equal(response.status, 201, `${method} ${path}`);
+      assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+    }
+  });
+});

@@ -49,7 +49,7 @@ impl fmt::Display for ConnectError {
             Self::NetworkLimit => "This network has reached Connect's creation limit (up to 5 connections per day). Wait until tomorrow and try again. Your saved key will be reused.",
             Self::Unsupported => "This relay does not support Connect. Update the relay, then try again.",
             Self::OriginChanged => "A connection is already waiting at another relay address. Retry with that address so Apassy can reuse its saved key.",
-            Self::JoinOtherMac => "This vault already has a relay connection on another Mac. On that Mac, turn on relay sync for this vault, then select “Join from another Mac” here.",
+            Self::JoinOtherMac => concat!("This vault already has a relay connection on another ", crate::computer!(), ". On that ", crate::computer!(), ", turn on relay sync for this vault, then select “Join from another ", crate::computer!(), "” here."),
             Self::Refused => "The relay could not complete Connect. Nothing was enabled. Your connection key is saved; try again later.",
             Self::Sync(e) => return write!(f, "{e}"),
         })

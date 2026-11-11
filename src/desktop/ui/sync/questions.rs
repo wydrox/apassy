@@ -82,7 +82,15 @@ const DEVICES_EVERY: Duration = Duration::from_secs(30);
 /// How often a Mac that joins the questions team asks whether the other Mac confirmed.
 const JOIN_POLL_EVERY: Duration = Duration::from_secs(2);
 /// The note of a Mac whose relay sync key was removed from the questions.
-pub(crate) const REMOVED_SYNC: &str = "This Mac was removed from the questions of this vault. To answer and ask through the relay again, turn relay sync off and join the vault again from another Mac: that gives this Mac a new key.";
+pub(crate) const REMOVED_SYNC: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " was removed from the questions of this vault. To answer and ask through the relay again, turn relay sync off and join the vault again from another ",
+    crate::computer!(),
+    ": that gives this ",
+    crate::computer!(),
+    " a new key."
+);
 
 /// The notice of ADR 0037 D14 (plan s7 unit N1): the free approvals through the hosted
 /// relay end with [`FREE_RELAY_PATHS_END_VERSION`]. Settings > Devices shows it under
@@ -92,8 +100,8 @@ pub(crate) const REMOVED_SYNC: &str = "This Mac was removed from the questions o
 pub(crate) fn free_approvals_notice(relay_url: &str) -> Option<String> {
     on_hosted_relay(relay_url).then(|| {
         format!(
-            "Free approvals through apassy-relay.wyderka.cc end with Apassy {FREE_RELAY_PATHS_END_VERSION}. Keep them free over Tailscale with this Mac as the node, or use Apassy Connect (paid)."
-        )
+            concat!("Free approvals through apassy-relay.wyderka.cc end with Apassy {FREE_RELAY_PATHS_END_VERSION}. Keep them free over Tailscale with this ", crate::computer!(), " as the node, or use Apassy Connect (paid).")
+        , FREE_RELAY_PATHS_END_VERSION = FREE_RELAY_PATHS_END_VERSION)
     })
 }
 
@@ -154,7 +162,7 @@ enum NodeDone {
     /// The questions team of the vault is on the node.
     Team,
     /// A move started: the node team waits for a device.
-    MoveStarted(MoveStart),
+    MoveStarted(Box<MoveStart>),
     /// The move ended.
     Moved(MoveDone),
 }
@@ -264,8 +272,13 @@ impl QuestionsUi {
 #[allow(dead_code)]
 pub(crate) fn device_words(device: &TrustedDevice, this_mac: bool, push: Option<bool>) -> String {
     let mut words = match (device.kind, this_mac) {
-        (TrustedDeviceKind::Mac, true) => "This Mac".to_owned(),
-        (TrustedDeviceKind::Mac, false) => "Mac · answers after Touch ID".to_owned(),
+        (TrustedDeviceKind::Mac, true) => concat!("This ", crate::computer!()).to_owned(),
+        (TrustedDeviceKind::Mac, false) => concat!(
+            crate::computer_cap!(),
+            " · answers after ",
+            crate::touch_id!()
+        )
+        .to_owned(),
         (TrustedDeviceKind::Iphone, _) if device.answer_key.is_some() => {
             "iPhone · answers with Face ID".to_owned()
         }
@@ -310,12 +323,17 @@ pub(crate) struct DeviceRow {
 /// What the removal of a trusted device means, for its confirmation.
 pub(crate) fn removal_words(kind: TrustedDeviceKind, icloud: bool) -> String {
     let device = match kind {
-        TrustedDeviceKind::Mac => "this Mac",
+        TrustedDeviceKind::Mac => concat!("this ", crate::computer!()),
         TrustedDeviceKind::Iphone => "this iPhone",
         TrustedDeviceKind::Watch => "this Apple Watch",
     };
     let mut words = format!(
-        "It can no longer answer the questions of this vault, and Apassy makes a new question key, so {device} cannot read the next questions. Apassy also removes it from the relay when this Mac can, so it gets no more notifications. To answer again it needs a new link and your confirmation."
+        concat!(
+            "It can no longer answer the questions of this vault, and Apassy makes a new question key, so {device} cannot read the next questions. Apassy also removes it from the relay when this ",
+            crate::computer!(),
+            " can, so it gets no more notifications. To answer again it needs a new link and your confirmation."
+        ),
+        device = device
     );
     if icloud {
         words.push_str(
@@ -412,7 +430,7 @@ impl DesktopApp {
     pub(crate) fn questions_move_to_node(&mut self, ctx: Option<&egui::Context>) {
         if !self.questions_can_move() {
             return self.set_err(
-                "Turn on “Reachable on your tailnet” first. The approvals of this vault then move to this Mac.",
+                concat!("Turn on “Reachable on your tailnet” first. The approvals of this vault then move to this ", crate::computer!(), "."),
             );
         }
         let origin = self.questions_node_origin().unwrap_or_default();
@@ -593,7 +611,7 @@ impl DesktopApp {
             let device = device_name();
             let done = if elsewhere {
                 node.move_approvals(&vault, &device)
-                    .map(NodeDone::MoveStarted)
+                    .map(|start| NodeDone::MoveStarted(Box::new(start)))
             } else {
                 node.ensure_questions_team(&vault, &device)
                     .map(|_| NodeDone::Team)
@@ -628,12 +646,17 @@ impl DesktopApp {
         match done {
             Some(Ok(NodeDone::Team)) => {
                 self.wake_questions();
-                self.set_ok("Approvals now go through this Mac on your tailnet. Scan the pairing code with Apassy on your iPhone.");
+                self.set_ok(concat!(
+                    "Approvals now go through this ",
+                    crate::computer!(),
+                    " on your tailnet. Scan the pairing code with Apassy on your iPhone."
+                ));
                 if open {
                     self.questions_add_iphone(Some(ctx));
                 }
             }
             Some(Ok(NodeDone::MoveStarted(start))) if open => {
+                let start = *start;
                 // The questions still go through the hosted team here.
                 let (questions_only, watches) = self
                     .owner_ui
@@ -664,7 +687,11 @@ impl DesktopApp {
                     watches,
                     joined: Vec::new(),
                 });
-                self.set_note("Scan the pairing code with Apassy on your iPhone. The approvals move to this Mac when you confirm it here.");
+                self.set_note(concat!(
+                    "Scan the pairing code with Apassy on your iPhone. The approvals move to this ",
+                    crate::computer!(),
+                    " when you confirm it here."
+                ));
                 self.sync_open_sheet(SyncSheet::AddIphone { id: call.vault }, Some(ctx));
             }
             Some(Ok(NodeDone::MoveStarted(_))) => {
@@ -699,9 +726,17 @@ impl DesktopApp {
                 questions.push_team = None;
                 questions.devices_read = None;
                 if done.hosted_removed {
-                    self.set_ok("Approvals now go through this Mac on your tailnet. The old devices left the Apassy relay.");
+                    self.set_ok(concat!(
+                        "Approvals now go through this ",
+                        crate::computer!(),
+                        " on your tailnet. The old devices left the Apassy relay."
+                    ));
                 } else {
-                    self.set_ok("Approvals now go through this Mac on your tailnet.");
+                    self.set_ok(concat!(
+                        "Approvals now go through this ",
+                        crate::computer!(),
+                        " on your tailnet."
+                    ));
                 }
             }
             Some(Err(text)) => {
@@ -743,7 +778,11 @@ impl DesktopApp {
                 questions.push.clear();
                 questions.push_team = None;
                 questions.devices_read = None;
-                self.set_note("Questions stay on this Mac and the paired iPhones on this network.");
+                self.set_note(concat!(
+                    "Questions stay on this ",
+                    crate::computer!(),
+                    " and the paired iPhones on this network."
+                ));
             }
             Err(message) => self.set_err(message),
         }
@@ -873,15 +912,22 @@ impl DesktopApp {
     ) -> Result<(), String> {
         let link = Zeroizing::new(link.trim().to_owned());
         if link.is_empty() {
-            return Err("Paste the link from a Mac that has the questions on.".to_owned());
+            return Err(concat!(
+                "Paste the link from a ",
+                crate::computer!(),
+                " that has the questions on."
+            )
+            .to_owned());
         }
         let (url, code) = PendingJoin::parse_link(&link, DEFAULT_RELAY_URL)
             .map_err(|_| "This is not a device link of the Apassy relay.".to_owned())?;
         if link_code_team(&code) != Some(team_id) {
-            return Err(
-                "This link is of another team. Make the link on a Mac that has the questions of this vault on."
-                    .to_owned(),
-            );
+            return Err(concat!(
+                "This link is of another team. Make the link on a ",
+                crate::computer!(),
+                " that has the questions of this vault on."
+            )
+            .to_owned());
         }
         let device = match device.trim() {
             "" => device_name(),
@@ -1010,10 +1056,14 @@ impl DesktopApp {
                 },
                 Some(TaskPoll::Done(Err(error))) => {
                     let text = match error {
-                        SyncError::Relay(RelayRefusal::JoinRefused) => {
-                            "The other Mac refused this Mac, or the link expired. Nothing changed."
-                                .to_owned()
-                        }
+                        SyncError::Relay(RelayRefusal::JoinRefused) => concat!(
+                            "The other ",
+                            crate::computer!(),
+                            " refused this ",
+                            crate::computer!(),
+                            ", or the link expired. Nothing changed."
+                        )
+                        .to_owned(),
                         other => format!("Nothing changed. {}", call_error(other)),
                     };
                     return fail(self, text);
@@ -1079,7 +1129,13 @@ impl DesktopApp {
             Err(error) => {
                 std::thread::spawn(move || joined.cancel());
                 let text = format!(
-                    "The other Mac confirmed this Mac, but the vault did not keep the key: {}",
+                    concat!(
+                        "The other ",
+                        crate::computer!(),
+                        " confirmed this ",
+                        crate::computer!(),
+                        ", but the vault did not keep the key: {}"
+                    ),
                     call_error(error)
                 );
                 self.sync.relay.questions.error = Some(text.clone());
@@ -1424,8 +1480,11 @@ impl DesktopApp {
         let (name, revoke) = match found {
             Some(Ok(found)) => found,
             Some(Err(SyncError::Vault(VaultErrorKind::InvalidInput))) => {
-                return self
-                    .set_err("To stop this Mac, turn “Send questions through the relay” off.");
+                return self.set_err(concat!(
+                    "To stop this ",
+                    crate::computer!(),
+                    ", turn “Send questions through the relay” off."
+                ));
             }
             Some(Err(SyncError::Vault(VaultErrorKind::NotFound))) => {
                 return self.set_err("This device is not in the questions of this vault any more.");
@@ -1550,7 +1609,7 @@ pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vaul
                         DEFAULT_RELAY_URL,
                     )
                 });
-                s.field("Name of this Mac", |ui| {
+                s.field(concat!("Name of this ", crate::computer!()), |ui| {
                     kit::text_input(
                         ui,
                         &mut app.sync.relay.device_input,
@@ -1638,9 +1697,17 @@ fn join_sheet(
         kit::sheet_title(
             ui,
             &format!("Join the questions of “{}”", entry.name),
-            Some(
-                "This vault already sends its questions through a team on the relay, so this Mac joins that team. On a Mac that has “Send questions through the relay” on, open Settings > Devices, select “Add an iPhone or a Mac…”, and paste its link here. Joining needs Touch ID or your passphrase here, and a confirmation on the other Mac.",
-            ),
+            Some(concat!(
+                "This vault already sends its questions through a team on the relay, so this ",
+                crate::computer!(),
+                " joins that team. On a ",
+                crate::computer!(),
+                " that has “Send questions through the relay” on, open Settings > Devices, select “Add an iPhone or a ",
+                crate::computer!(),
+                "…”, and paste its link here. Joining needs Touch ID or your passphrase here, and a confirmation on the other ",
+                crate::computer!(),
+                "."
+            )),
         );
         if !joining {
             kit::section(ui, None, None, |s| {
@@ -1652,9 +1719,19 @@ fn join_sheet(
         match &words {
             Some(words) => super::relay::safety_lines(
                 ui,
-                "Waiting for the other Mac… Both Macs show:",
+                concat!(
+                    "Waiting for the other ",
+                    crate::computer!(),
+                    "… Both ",
+                    crate::computers!(),
+                    " show:"
+                ),
                 words,
-                "Confirm on the other Mac only if it shows the same words.",
+                concat!(
+                    "Confirm on the other ",
+                    crate::computer!(),
+                    " only if it shows the same words."
+                ),
             ),
             None if joining => {
                 kit::tone_note(ui, "Apassy sends the link to the relay…", Tone::Accent);

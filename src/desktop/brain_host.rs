@@ -48,18 +48,34 @@ fn now() -> u64 {
 fn changed_text(role: BouncerHostRole, change: &BouncerHostChange) -> String {
     let url = change.normalized_url();
     match (role, change.kind) {
-        (BouncerHostRole::Hosting, BouncerHostKind::ThisMac) => {
-            "The bouncer brain runs on this Mac again.".to_owned()
-        }
+        (BouncerHostRole::Hosting, BouncerHostKind::ThisMac) => concat!(
+            "The bouncer brain runs on this ",
+            crate::computer!(),
+            " again."
+        )
+        .to_owned(),
         (BouncerHostRole::Hosting, BouncerHostKind::OwnServer) => format!(
-            "The bouncer brain now runs on your server at {url}. The bouncer gate still decides on this Mac."
+            concat!(
+                "The bouncer brain now runs on your server at {url}. The bouncer gate still decides on this ",
+                crate::computer!(),
+                "."
+            ),
+            url = url
         ),
         (BouncerHostRole::Hosting, BouncerHostKind::Connect) => format!(
-            "The bouncer brain now runs at Apassy Connect ({url}). The bouncer gate still decides on this Mac."
+            concat!(
+                "The bouncer brain now runs at Apassy Connect ({url}). The bouncer gate still decides on this ",
+                crate::computer!(),
+                "."
+            ),
+            url = url
         ),
-        (BouncerHostRole::Training, BouncerHostKind::ThisMac) => {
-            "The bouncer brain trains on this Mac again.".to_owned()
-        }
+        (BouncerHostRole::Training, BouncerHostKind::ThisMac) => concat!(
+            "The bouncer brain trains on this ",
+            crate::computer!(),
+            " again."
+        )
+        .to_owned(),
         (BouncerHostRole::Training, BouncerHostKind::OwnServer) => {
             format!("The bouncer brain now trains on your server at {url}.")
         }
@@ -88,7 +104,16 @@ impl DesktopApp {
         let result = match open {
             None => Ok(None),
             Some(vault) => TlsClient::platform()
-                .map_err(|error| format!("The TLS settings of this Mac did not load ({error})."))
+                .map_err(|error| {
+                    format!(
+                        concat!(
+                            "The TLS settings of this ",
+                            crate::computer!(),
+                            " did not load ({error})."
+                        ),
+                        error = error
+                    )
+                })
                 .and_then(|tls| brain_host::hosting_client(vault, &Arc::new(tls))),
         };
         drop(guard);
@@ -125,7 +150,14 @@ impl DesktopApp {
         let shared = self.owner_ui.session.shared_vault();
         let result = TlsClient::platform()
             .map_err(|error| {
-                format!("Nothing changed. The TLS settings of this Mac did not load ({error}).")
+                format!(
+                    concat!(
+                        "Nothing changed. The TLS settings of this ",
+                        crate::computer!(),
+                        " did not load ({error})."
+                    ),
+                    error = error
+                )
             })
             .and_then(|tls| {
                 brain_host::switch(&shared, role, &change, proof, &Arc::new(tls), now())
@@ -140,7 +172,12 @@ impl DesktopApp {
                 }
                 match self.bouncer_host.problem.clone() {
                     Some(problem) if role == BouncerHostRole::Hosting => self.set_err(format!(
-                        "The choice is saved, but the bouncer brain runs on this Mac: {problem}"
+                        concat!(
+                            "The choice is saved, but the bouncer brain runs on this ",
+                            crate::computer!(),
+                            ": {problem}"
+                        ),
+                        problem = problem
                     )),
                     _ => self.set_ok(changed_text(role, &change)),
                 }
@@ -166,11 +203,18 @@ mod tests {
         };
         let text = changed_text(BouncerHostRole::Hosting, &change);
         assert!(text.contains("https://brain.synthetic.ts.net."), "{text}");
-        assert!(text.contains("still decides on this Mac"), "{text}");
+        assert!(
+            text.contains(concat!("still decides on this ", crate::computer!())),
+            "{text}"
+        );
         assert!(!text.contains("SYNTH-desktop-bearer"));
         assert_eq!(
             changed_text(BouncerHostRole::Training, &BouncerHostChange::this_mac()),
-            "The bouncer brain trains on this Mac again."
+            concat!(
+                "The bouncer brain trains on this ",
+                crate::computer!(),
+                " again."
+            )
         );
     }
 }

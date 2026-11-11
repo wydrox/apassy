@@ -1,14 +1,15 @@
 # Linux vault packages
 
-These packages implement ADR 0045. They are CI artifacts until a separately
-approved release publishes and verifies them. Existing node downloads do not
-contain the vault desktop or browser host.
+These packages implement ADR 0045. A release publishes them on
+https://apassy-relay.wyderka.cc/dl/ with `SHA256SUMS`; pull-request builds are CI
+artifacts. The node downloads do not contain the vault desktop or browser host.
 
 The `apassy-vault` package includes the egui desktop, interactive owner commands,
 Chrome stable/Chromium native messaging host and extension, plus optional polkit
 policy. It replaces the node-only `apassy` package; node commands stay available.
 Install with `sudo apt install ./apassy-vault_<version>_<amd64|arm64>.deb`.
-These builds need `libc6 (>= 2.39)`: Ubuntu 24.04+ or Debian 13+.
+Release builds need glibc 2.31 or later and are tested on Debian 12 and 13 and
+Ubuntu 22.04 and 24.04.
 The package starts no process and does not enable any keyring integration.
 
 The tar archive has a fixed `/usr` tree and an `install-vault.sh` installer.
@@ -17,8 +18,8 @@ then run `sudo sh ./apassy-vault-<version>-linux-<arch>/install-vault.sh`.
 A per-user installation cannot meet the browser executable ownership checks.
 Use the deb when possible: tar installs do not register files with dpkg, and the
 operator must install the dependencies recorded in `release-vault-linux-*.json`.
-The desktop glibc requirement is recorded per artifact; the node's glibc 2.31
-compatibility promise does not extend to these desktop builds.
+The glibc requirement is recorded per artifact (`glibc_max`); release builds
+refuse anything newer than 2.31.
 
 Run `apassy` from your desktop session. A Wayland session is preferred; X11 can
 expose keyboard input to other clients. Secret and TOTP Copy works where Apassy can
@@ -32,7 +33,13 @@ account, using Apassy's extension installation flow. Browser manifests point to
 `/usr/lib/apassy/apassy-browser-host`; extension assets live in
 `/usr/share/apassy/browser-extension`. Native manifest templates for both browsers
 are in `/usr/share/apassy/native-messaging-hosts/`. Chrome stable and Chromium use their own
-`NativeMessagingHosts/com.wydrox.apassy.json` under `~/.config`.
+`NativeMessagingHosts/com.wydrox.apassy.json` under `~/.config`. Snap and Flatpak
+browsers (Ubuntu's Chromium) cannot start the host: Apassy lists them as not
+supported and writes no manifest for them; use Google Chrome, or Chromium from a
+.deb. Debian's Chromium works when at least one Debian `webext-*-chromium` package
+is installed: Apassy accepts its wrapper's `--load-extension` only for those
+root-owned folders in `/usr/share/chromium/extensions`, and refuses the empty value
+that the wrapper passes without one.
 
 Passphrase unlock remains the default. Headless owner commands require a real
 interactive terminal, and do not require a session bus, desktop, screen lock,

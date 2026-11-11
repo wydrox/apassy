@@ -287,6 +287,44 @@ pub fn drop_stale_account_rows(vault: &mut Vault, state: &AccountState) -> Vault
     Ok(removed)
 }
 
+/// Which keys may sign the heads of a vault store of the account of `state`, after `view`
+/// was verified ([`ConnectAccount::view`]): the verified devices of the account; never a
+/// device that `view` lists without its verification, nor a key that this device knew as
+/// a device of the account and saw leave it; a device of another account only while the
+/// account is an active member of a family or team (relay-sync-v1 admits it through the
+/// device link and the passphrase).
+pub fn signer_policy(view: &AccountView, state: &AccountState) -> crate::sync::SignerPolicy {
+    let accepted: Vec<Vec<u8>> = view
+        .devices
+        .iter()
+        .filter(|device| device.verified)
+        .filter_map(|device| point(&device.public_key))
+        .collect();
+    let mut refused: Vec<Vec<u8>> = view
+        .devices
+        .iter()
+        .filter(|device| !device.verified)
+        .filter_map(|device| decode_b64u(&device.public_key))
+        .collect();
+    for key in state.revoked.iter().chain(&state.known) {
+        if let Some(key) = decode_b64u(key)
+            && !accepted.contains(&key)
+            && !refused.contains(&key)
+        {
+            refused.push(key);
+        }
+    }
+    let others = view
+        .group
+        .as_ref()
+        .is_some_and(|group| group.state == "active");
+    crate::sync::SignerPolicy {
+        accepted,
+        refused,
+        others,
+    }
+}
+
 /// Remove every vault store row of `vault` that signs with an account key, after this
 /// Mac left its account (`_forgotten`). Returns how many rows went.
 pub fn drop_account_rows(vault: &mut Vault, _forgotten: &Forgotten) -> VaultResult<usize> {
@@ -888,6 +926,13 @@ impl ConnectAccount {
             .collect())
     }
 
+    /// Which keys may sign the heads of a vault store of this account, from a fresh
+    /// [`Self::view`] ([`signer_policy`]).
+    pub fn signer_policy(&mut self) -> Result<crate::sync::SignerPolicy, ConnectError> {
+        let view = self.view()?;
+        Ok(signer_policy(&view, &self.state))
+    }
+
     /// The owner action of the deletion of this account.
     pub fn delete_action(&self) -> OwnerAction {
         OwnerAction::DeleteConnectAccount {
@@ -1201,6 +1246,41 @@ impl ConnectAccount {
             .filter(|device| device.verified)
             .map(|device| device.public_key)
             .ok_or(ConnectError::NotVerified)?;
+        let added = self.with_token(|client, token| {
+            client.add_store_device(token, team_id, device_id, &public_key)
+        })?;
+        if added.device_id != device_id || added.account_id != account_id {
+            return Err(ConnectError::BadAnswer);
+        }
+        Ok(added)
+    }
+
+    /// `POST /v1/account/vaults/{team_id}/devices` for `device_id`, another live device
+    /// of **this** account, without an owner check: the sync through Apassy Connect of
+    /// unit M3 registers the account's own devices in a store that this Mac turned on
+    /// (connect-account-v1 section 8). Those devices joined the account with the safety
+    /// words and a fresh owner check on a live device, and each still needs the vault
+    /// passphrase. A device that `devices` of the last [`Self::view`] does not list as a
+    /// live device of this account is [`ConnectError::NotInGroup`] before any call, and
+    /// one that this Mac did not verify ([`DeviceView::verified`]) is
+    /// [`ConnectError::NotVerified`]; the call sends the key that this Mac verified. A
+    /// member of a group goes through the link of relay-sync-v1 section 7.
+    pub(crate) fn register_own_store_device(
+        &mut self,
+        team_id: &str,
+        device_id: &str,
+        live: &[DeviceView],
+    ) -> Result<StoreDevice, ConnectError> {
+        let device = live
+            .iter()
+            .find(|d| d.device_id == device_id)
+            .filter(|_| device_id != self.state.device_id)
+            .ok_or(ConnectError::NotInGroup)?;
+        if !device.verified {
+            return Err(ConnectError::NotVerified);
+        }
+        let public_key = device.public_key.clone();
+        let account_id = self.state.account_id.clone();
         let added = self.with_token(|client, token| {
             client.add_store_device(token, team_id, device_id, &public_key)
         })?;

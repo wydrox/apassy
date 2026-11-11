@@ -316,7 +316,10 @@ fn allow_in_project_remembers_the_answer_for_all_agents_and_only_for_that_action
     assert_eq!(answers[0].scope, AnswerScope::Project);
     assert_eq!(answers[0].action, ActionKind::Change);
     assert_eq!(answers[0].project.key, project_key(&fx.project));
-    assert_eq!(answers[0].answered_on, "this Mac");
+    assert_eq!(
+        answers[0].answered_on,
+        concat!("this ", apassy::computer!())
+    );
     // The same kind of action runs without a question, also for another agent.
     assert_eq!(
         decided_by(&run_in(&fx, &fx.project.join("sub"), &sentry_call())),
@@ -1541,7 +1544,8 @@ fn an_owner_answer_keeps_its_wait_time_and_other_decisions_keep_none() {
     assert!(
         uses.iter()
             .filter(|u| u.decided_by == UseDecidedBy::Owner)
-            .all(|u| u.answered_on == "this Mac" || u.answered_on.is_empty()),
+            .all(|u| u.answered_on == concat!("this ", apassy::computer!())
+                || u.answered_on.is_empty()),
         "{uses:?}"
     );
 }

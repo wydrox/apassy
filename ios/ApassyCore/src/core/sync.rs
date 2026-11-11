@@ -1,6 +1,8 @@
 //! Relay sync of the selected vault (contract section 5.5) and removing a vault from
 //! this iPhone (section 5.6). The engine is the Mac's (`apassy::sync::RelaySync`): the
-//! same merge, the same signed heads, the same checks of the chain.
+//! same merge, the same signed heads, the same checks of the chain. Its layout takes the
+//! transport of the core (`Transport::config`, section 5.15), so a vault on a node with a
+//! Connect route syncs through the dial when the tailnet is not there.
 
 use std::fs;
 use std::path::PathBuf;

@@ -728,7 +728,10 @@ fn promotion_is_refused_below_each_threshold_and_without_the_owner_check() {
     // Plan 0035 unit F: the head file must be on the host first.
     let refused = promote(&fx, id, CANDIDATE).expect_err("not on the host");
     assert!(
-        refused.contains("not on the bouncer brain on this Mac"),
+        refused.contains(concat!(
+            "not on the bouncer brain on this ",
+            apassy::computer!()
+        )),
         "{refused}"
     );
     assert_eq!(active(&fx), None);

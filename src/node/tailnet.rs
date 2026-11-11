@@ -128,7 +128,11 @@ pub fn find(cli: &dyn TailscaleCli) -> Result<TailnetHere, NodeError> {
     let Some(output) = cli.run(&["status", "--json"]) else {
         return Err(NodeError::new(
             "no_tailscale",
-            "Tailscale is not installed on this Mac. Install it from tailscale.com, then sign in.",
+            concat!(
+                "Tailscale is not installed on this ",
+                crate::computer!(),
+                ". Install it from tailscale.com, then sign in."
+            ),
         ));
     };
     if !output.success {
@@ -160,7 +164,11 @@ pub fn find_in(
     let ipv4 = status.ipv4().ok_or_else(|| {
         NodeError::new(
             "tailscale_no_address",
-            "Tailscale gives this Mac no IPv4 address.",
+            concat!(
+                "Tailscale gives this ",
+                crate::computer!(),
+                " no IPv4 address."
+            ),
         )
     })?;
     let dns_name = match funnel::parse_status(status_json) {
@@ -264,7 +272,13 @@ fn front_error(error: &FrontError, port: u16) -> NodeError {
         FrontError::Bind(_) => NodeError::new(
             "tailnet_port_taken",
             format!(
-                "Port {port} on the tailnet address of this Mac is taken: {error}. Choose another port before the first pairing."
+                concat!(
+                    "Port {port} on the tailnet address of this ",
+                    crate::computer!(),
+                    " is taken: {error}. Choose another port before the first pairing."
+                ),
+                port = port,
+                error = error
             ),
         ),
         other => NodeError::new(
@@ -407,7 +421,11 @@ impl TailnetRoute {
             route.stop_front();
             return Err(NodeError::new(
                 "node_failed",
-                "The node origin cannot be routed to the node on this Mac.",
+                concat!(
+                    "The node origin cannot be routed to the node on this ",
+                    crate::computer!(),
+                    "."
+                ),
             ));
         }
         route.local_route = true;

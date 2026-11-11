@@ -22,7 +22,9 @@ use std::os::unix::net::UnixStream;
 
 #[cfg(target_os = "linux")]
 pub(in crate::browser) const HOST: &str = "/usr/lib/apassy/apassy-browser-host";
-const BROWSERS: &[&str] = &[
+/// The packaged browser executables that the check accepts. `install` names the same
+/// paths when it tells a supported browser from a snap or Flatpak.
+pub(in crate::browser) const BROWSERS: &[&str] = &[
     "/opt/google/chrome/chrome",
     "/usr/lib/chromium/chromium",
     "/usr/lib/chromium-browser/chromium-browser",
@@ -153,6 +155,82 @@ fn image(pid: u32, expected: &[&str]) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// The folder where Debian's `chromium` package (and the `webext-*` packages that it
+/// loads) keep system extensions, relative to the file system root. Debian's
+/// `/etc/chromium.d/extensions` starts Chromium with `--load-extension=` and the
+/// comma-separated list `ls -dm /usr/share/chromium/extensions/*` (observed on Debian
+/// 13, chromium 156). An empty folder gives an empty value, which stays refused.
+const SYSTEM_EXTENSIONS: &str = "usr/share/chromium/extensions";
+
+/// Where [`safe_arguments_in`] looks for system extensions, and whose they must be.
+/// Production uses `/` and root ([`Trust::system`]); tests use a private temporary
+/// folder and their own user, because they cannot create root-owned files.
+#[derive(Debug, Clone, Copy)]
+struct Trust<'a> {
+    root: &'a Path,
+    owner: u32,
+}
+
+impl Trust<'static> {
+    fn system() -> Self {
+        Self {
+            root: Path::new("/"),
+            owner: 0,
+        }
+    }
+}
+
+/// True when `value`, the whole value of one `--load-extension` switch, names only
+/// system extensions: one or more comma-separated absolute paths, each of which,
+/// after resolving symlinks, is a directory strictly inside [`SYSTEM_EXTENSIONS`].
+/// That folder, each named directory and every folder above them up to the root are
+/// owned by `trust.owner` and not writable by group or others. So only the owner of
+/// the browser binary (root) can choose what this switch loads: the same trust as the
+/// root-owned browser executable itself. An empty value, an empty item, a relative
+/// path, a missing path, a file, the folder itself and every path outside it are
+/// refused.
+fn system_extensions(value: &[u8], trust: Trust<'_>) -> bool {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    if value.is_empty() {
+        return false;
+    }
+    let Ok(root) = fs::canonicalize(trust.root) else {
+        return false;
+    };
+    // `path` (canonical, under `root`) and every folder above it up to `root`, which
+    // is included: directories of the trusted owner, not writable by group or others.
+    let owned = |path: &Path| {
+        path.starts_with(&root)
+            && path
+                .ancestors()
+                .take_while(|p| p.starts_with(&root))
+                .all(|p| {
+                    fs::symlink_metadata(p).is_ok_and(|metadata| {
+                        metadata.is_dir()
+                            && metadata.uid() == trust.owner
+                            && metadata.mode() & 0o022 == 0
+                    })
+                })
+    };
+    let Ok(folder) = fs::canonicalize(root.join(SYSTEM_EXTENSIONS)) else {
+        return false;
+    };
+    if !owned(&folder) {
+        return false;
+    }
+    value.split(|b| *b == b',').all(|item| {
+        let Some(relative) = item.strip_prefix(b"/").filter(|rest| !rest.is_empty()) else {
+            return false;
+        };
+        let Ok(real) = fs::canonicalize(root.join(OsStr::from_bytes(relative))) else {
+            return false;
+        };
+        real != folder && real.starts_with(&folder) && owned(&real)
+    })
+}
+
 /// Match conservatively, including switches after `--`, single dashes and unusual
 /// case. Values are never logged, returned, or used as identity.
 ///
@@ -161,31 +239,58 @@ fn image(pid: u32, expected: &[&str]) -> io::Result<PathBuf> {
 /// whitespace-separated word of every string is checked, `argv[0]` too. A value that
 /// contains a space and a switch-like word is refused: this refuses more than the
 /// browser reads, never less.
+///
+/// `--load-extension` is accepted only for system extensions ([`system_extensions`]),
+/// with one value: a second occurrence must repeat it exactly. The joined title hides
+/// where an argument ends, so a value with a space could go on into the next words,
+/// and Chrome splits the whole value at commas. So with that switch present, a comma
+/// in any other word refuses the browser.
 fn safe_arguments(bytes: &[u8]) -> bool {
+    safe_arguments_in(bytes, Trust::system())
+}
+
+fn safe_arguments_in(bytes: &[u8], trust: Trust<'_>) -> bool {
     if bytes.is_empty() || bytes.last() != Some(&0) {
         return false;
     }
-    !bytes
-        .split(|b| *b == 0 || b.is_ascii_whitespace())
-        .any(|arg| {
-            let Some(first) = arg.first() else {
-                return false;
-            };
-            if *first != b'-' {
-                return false;
-            }
-            let switch = arg
-                .iter()
+    let mut extensions: Option<&[u8]> = None;
+    let mut comma_elsewhere = false;
+    for arg in bytes.split(|b| *b == 0 || b.is_ascii_whitespace()) {
+        let Some(first) = arg.first() else {
+            continue;
+        };
+        let switch = if *first == b'-' {
+            arg.iter()
                 .copied()
                 .skip_while(|b| *b == b'-')
                 .take_while(|b| *b != b'=')
                 .map(|b| b.to_ascii_lowercase())
-                .collect::<Vec<_>>();
-            switch.starts_with(b"remote-debugging")
-                || switch == b"load-extension"
-                || switch == b"disable-extensions-except"
-                || switch == b"type"
-        })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if switch.starts_with(b"remote-debugging")
+            || switch == b"disable-extensions-except"
+            || switch == b"type"
+        {
+            return false;
+        }
+        if switch == b"load-extension" {
+            let value = arg
+                .iter()
+                .position(|b| *b == b'=')
+                .map_or(&[][..], |at| &arg[at + 1..]);
+            match extensions {
+                Some(seen) if seen != value => return false,
+                Some(_) => {}
+                None if system_extensions(value, trust) => extensions = Some(value),
+                None => return false,
+            }
+            continue;
+        }
+        comma_elsewhere |= arg.contains(&b',');
+    }
+    !(extensions.is_some() && comma_elsewhere)
 }
 
 #[cfg(target_os = "linux")]
@@ -368,6 +473,240 @@ mod tests {
             b"/opt/google/chrome/chrome\t--disable-extensions-except=/tmp/x\0",
             b"/opt/google/chrome/chrome --type=utility --utility-sub-type=x\0",
             b"--remote-debugging-pipe\0",
+        ] {
+            assert!(!safe_arguments(title), "{}", String::from_utf8_lossy(title));
+        }
+    }
+
+    /// A private stand-in for `/`: `usr/share/chromium/extensions` with the
+    /// extensions `a` and `b`, and a folder `home/user/evil` outside it. Every folder
+    /// is the test user's and mode 0755; the root is 0700. The trusted owner is the
+    /// test user, because a test cannot make root-owned files.
+    struct FakeRoot {
+        dir: TestDir,
+        owner: u32,
+    }
+
+    /// A new private folder in the temporary folder, removed on drop. (`tempfile` is a
+    /// dependency of the vault feature only, and this module builds without it.)
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "apassy-caller-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl FakeRoot {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = TestDir::new();
+            for path in [
+                "usr/share/chromium/extensions/a",
+                "usr/share/chromium/extensions/b",
+                "home/user/evil",
+            ] {
+                fs::create_dir_all(dir.path().join(path)).unwrap();
+            }
+            for path in [
+                "usr",
+                "usr/share",
+                "usr/share/chromium",
+                "usr/share/chromium/extensions",
+                "usr/share/chromium/extensions/a",
+                "usr/share/chromium/extensions/b",
+                "home",
+                "home/user",
+                "home/user/evil",
+            ] {
+                fs::set_permissions(dir.path().join(path), fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let owner = fs::metadata(dir.path()).unwrap().uid();
+            Self { dir, owner }
+        }
+
+        fn trust(&self) -> Trust<'_> {
+            Trust {
+                root: self.dir.path(),
+                owner: self.owner,
+            }
+        }
+
+        fn path(&self, relative: &str) -> std::path::PathBuf {
+            self.dir.path().join(relative)
+        }
+
+        fn chmod(&self, relative: &str, mode: u32) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(self.path(relative), fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        fn accepts(&self, title: &str) -> bool {
+            safe_arguments_in(format!("{title}\0").as_bytes(), self.trust())
+        }
+    }
+
+    const A: &str = "/usr/share/chromium/extensions/a";
+    const B: &str = "/usr/share/chromium/extensions/b";
+    /// The start of the process title of Debian 13's Chromium 156 after its wrapper
+    /// (`/usr/bin/chromium`) and `/etc/chromium.d/*` added their switches.
+    const DEBIAN: &str = "/usr/lib/chromium/chromium --show-component-extension-options --enable-gpu-rasterization --no-default-browser-check --disable-pings --media-router=0 --enable-remote-extensions";
+
+    #[test]
+    fn system_extensions_of_the_distribution_are_accepted() {
+        let root = FakeRoot::new();
+        assert!(root.accepts(&format!("{DEBIAN} --load-extension={A}")));
+        assert!(root.accepts(&format!("{DEBIAN} --load-extension={A},{B}")));
+        // The same switch twice with the same value, and argument strings as the
+        // kernel shows them before a title rewrite.
+        assert!(root.accepts(&format!(
+            "{DEBIAN} --load-extension={A},{B} --load-extension={A},{B}"
+        )));
+        assert!(safe_arguments_in(
+            format!("/usr/lib/chromium/chromium\0--load-extension={A}\0http://localhost:4174/\0")
+                .as_bytes(),
+            root.trust()
+        ));
+        // A symlink in the folder that resolves to another extension in it.
+        std::os::unix::fs::symlink(
+            root.path(&A[1..]),
+            root.path("usr/share/chromium/extensions/c"),
+        )
+        .unwrap();
+        assert!(root.accepts(&format!(
+            "{DEBIAN} --load-extension=/usr/share/chromium/extensions/c"
+        )));
+        // Without the switch a comma in a URL is harmless.
+        assert!(root.accepts(&format!("{DEBIAN} http://localhost:4174/?a,b")));
+    }
+
+    #[test]
+    fn every_other_extension_value_is_refused() {
+        let root = FakeRoot::new();
+        fs::write(root.path("usr/share/chromium/extensions/file"), b"").unwrap();
+        std::os::unix::fs::symlink(
+            root.path("home/user/evil"),
+            root.path("usr/share/chromium/extensions/link-out"),
+        )
+        .unwrap();
+        for value in [
+            // Empty: Debian's default without system extensions.
+            "--load-extension=".to_owned(),
+            "--load-extension".to_owned(),
+            // Elsewhere, relative, missing, a file, the folder itself.
+            "--load-extension=/home/user/evil".to_owned(),
+            format!("--load-extension={A},/home/user/evil"),
+            "--load-extension=usr/share/chromium/extensions/a".to_owned(),
+            "--load-extension=./a".to_owned(),
+            "--load-extension=/usr/share/chromium/extensions/missing".to_owned(),
+            "--load-extension=/usr/share/chromium/extensions/file".to_owned(),
+            "--load-extension=/usr/share/chromium/extensions".to_owned(),
+            "--load-extension=/usr/share/chromium/extensions/".to_owned(),
+            "--load-extension=/usr/share/chromium/extensions/../../../../home/user/evil".to_owned(),
+            "--load-extension=/usr/share/chromium/extensions/link-out".to_owned(),
+            "--load-extension=/usr/share/chromium/extensions-x".to_owned(),
+            "--load-extension=//home/user/evil".to_owned(),
+            // Empty items.
+            format!("--load-extension={A},"),
+            format!("--load-extension=,{A}"),
+            format!("--load-extension={A},,{B}"),
+            // A second switch with another value, in either order.
+            format!("--load-extension={A} --load-extension={B}"),
+            format!("--load-extension={A},{B} --load-extension={A}"),
+            format!("--load-extension={A} --load-extension=/home/user/evil"),
+            // A value with a space can go on into the next words: Chrome would load
+            // `/home/user/evil` as a second item.
+            format!("--load-extension={A} /x,/home/user/evil"),
+            format!("--load-extension={A} --x,/home/user/evil"),
+            format!("http://localhost:4174/?a,b --load-extension={A}"),
+            // Other unsafe switches stay refused next to a system extension.
+            format!("--load-extension={A} --remote-debugging-port=9222"),
+            format!("--load-extension={A} --disable-extensions-except={A}"),
+            format!("--load-extension={A} --type=renderer"),
+            format!("--LOAD-EXTENSION={A},/home/user/evil"),
+        ] {
+            assert!(!root.accepts(&format!("{DEBIAN} {value}")), "{value}");
+        }
+    }
+
+    /// The exact process titles of Debian 13's Chromium 156 in the second Linux
+    /// acceptance run (2026-11-10): with the Debian package `chromium-lwn4chrome`
+    /// (accepted), without any system extension (the wrapper's empty value, which the
+    /// title shows without `=`), and with the owner's own extension folder added.
+    #[test]
+    fn observed_debian_13_titles() {
+        let root = FakeRoot::new();
+        fs::create_dir_all(root.path("usr/share/chromium/extensions/lwn4chrome")).unwrap();
+        root.chmod("usr/share/chromium/extensions/lwn4chrome", 0o755);
+        const START: &str = "/usr/lib/chromium/chromium --show-component-extension-options --enable-gpu-rasterization --no-default-browser-check --disable-pings --media-router=0 --disable-dev-shm-usage --enable-remote-extensions";
+        assert!(root.accepts(&format!(
+            "{START} --load-extension=/usr/share/chromium/extensions/lwn4chrome http://localhost:4174/passkey.html"
+        )));
+        assert!(!root.accepts(&format!("{START} --load-extension")));
+        assert!(!root.accepts(&format!(
+            "{START} --load-extension=/usr/share/chromium/extensions/lwn4chrome --load-extension=/home/l5owner/l5-user-ext http://localhost:4174/passkey.html"
+        )));
+    }
+
+    #[test]
+    fn system_extensions_need_trusted_unwritable_folders_up_to_the_root() {
+        let root = FakeRoot::new();
+        let title = format!("{DEBIAN} --load-extension={A}");
+        assert!(root.accepts(&title));
+        for (path, mode) in [
+            (&A[1..], 0o775),
+            (&A[1..], 0o757),
+            ("usr/share/chromium/extensions", 0o775),
+            ("usr/share/chromium", 0o757),
+            ("usr/share", 0o775),
+            ("usr", 0o777),
+            ("", 0o770),
+        ] {
+            root.chmod(path, mode);
+            assert!(!root.accepts(&title), "{path} {mode:o}");
+            root.chmod(path, if path.is_empty() { 0o700 } else { 0o755 });
+            assert!(root.accepts(&title), "{path} restored");
+        }
+        // Another owner than the trusted one.
+        let other = Trust {
+            root: root.dir.path(),
+            owner: root.owner.wrapping_add(1),
+        };
+        assert!(!safe_arguments_in(format!("{title}\0").as_bytes(), other));
+        // No extension folder at all.
+        fs::remove_dir_all(root.path("usr/share/chromium")).unwrap();
+        assert!(!root.accepts(&title));
+    }
+
+    #[test]
+    fn the_system_root_refuses_paths_outside_the_system_extension_folder() {
+        for title in [
+            &b"/usr/lib/chromium/chromium --load-extension=/tmp\0"[..],
+            b"/usr/lib/chromium/chromium --load-extension=\0",
+            b"/usr/lib/chromium/chromium --load-extension=/usr/share/chromium/extensions/../../../../tmp\0",
         ] {
             assert!(!safe_arguments(title), "{}", String::from_utf8_lossy(title));
         }

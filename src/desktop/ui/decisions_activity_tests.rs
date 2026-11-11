@@ -203,7 +203,7 @@ fn the_week_shows_each_environment_and_the_most_active_agents() {
         "By you",
         "Automatic",
         "Environments",
-        "This Mac",
+        concat!("This ", crate::computer!()),
         local_row.as_str(),
         "MacBook Pro",
         "3 by you · 128 automatic",
@@ -213,12 +213,13 @@ fn the_week_shows_each_environment_and_the_most_active_agents() {
         "Claude Code",
         "12 uses · MacBook Pro",
         "Local Agent",
-        "1 use · This Mac",
+        concat!("1 use · This ", crate::computer!()),
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(
-        text.find("12 uses · MacBook Pro") < text.find("1 use · This Mac"),
+        text.find("12 uses · MacBook Pro")
+            < text.find(concat!("1 use · This ", crate::computer!())),
         "the most uses first: {text}"
     );
     assert!(past.is_empty(), "{past:?}");
@@ -229,7 +230,10 @@ fn the_week_shows_each_environment_and_the_most_active_agents() {
     assert!(!text.contains("3 by you · 128 automatic"), "{text}");
     assert!(!text.contains("12 uses · MacBook Pro"), "{text}");
     assert!(!text.contains("Mac mini"), "{text}");
-    assert!(text.contains("1 use · This Mac"), "{text}");
+    assert!(
+        text.contains(concat!("1 use · This ", crate::computer!())),
+        "{text}"
+    );
 }
 
 #[test]

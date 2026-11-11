@@ -38,7 +38,11 @@ fn text_width(ui: &egui::Ui, text: &str) -> f32 {
 // ---- The bar of the Bouncer pages. ----
 
 /// "Other Macs appear when they use this vault." under the menu of a vault with one Mac.
-pub(super) const ONE_MAC: &str = "Other Macs appear when they use this vault.";
+pub(super) const ONE_MAC: &str = concat!(
+    "Other ",
+    crate::computers!(),
+    " appear when they use this vault."
+);
 
 /// The label of the environment scope: "All Environments", or the name of the Mac. A Mac
 /// that is gone shows as "All Environments", as the pages treat it.
@@ -320,7 +324,7 @@ mod tests {
             [MenuItem {
                 scope: DeviceScope::ThisMac,
                 name: "Mac mini (office)".to_owned(),
-                detail: "This Mac".to_owned(),
+                detail: concat!("This ", crate::computer!()).to_owned(),
                 dimmed: false,
             }]
         );
@@ -332,7 +336,14 @@ mod tests {
             environment_label(&DeviceScope::ThisMac, &envs),
             "Mac mini (office)"
         );
-        assert_eq!(ONE_MAC, "Other Macs appear when they use this vault.");
+        assert_eq!(
+            ONE_MAC,
+            concat!(
+                "Other ",
+                crate::computers!(),
+                " appear when they use this vault."
+            )
+        );
         assert!(ONE_MAC.split_whitespace().count() <= 12);
     }
 
@@ -356,7 +367,11 @@ mod tests {
             rows,
             [
                 ("All Environments", "", false),
-                ("Mac mini (office)", "This Mac", false),
+                (
+                    "Mac mini (office)",
+                    concat!("This ", crate::computer!()),
+                    false
+                ),
                 ("Mac mini (studio)", "2 min ago", false),
                 ("MacBook Pro", "1 Nov", true),
                 ("iMac (home)", "Never reported", true),

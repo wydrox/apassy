@@ -218,6 +218,12 @@ pub fn read_passphrase(path: &Path) -> Result<Zeroizing<String>, String> {
     Ok(Zeroizing::new(text.to_owned()))
 }
 
+/// True when `/usr/bin/secret-tool` is installed. Without it Apassy never stored a
+/// keyring unlock item: [`store_passphrase`] runs that program.
+pub fn secret_tool_installed() -> bool {
+    Path::new("/usr/bin/secret-tool").is_file()
+}
+
 pub fn delete_passphrase(path: &Path) -> Result<(), String> {
     let account = account(path)?;
     run(

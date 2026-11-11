@@ -7,10 +7,12 @@
 //
 //   node server.mjs --port 4174 [--log events.jsonl]
 //   L4_LOGIN_PASSWORD=<synthetic password> enables the password login check.
+//   L4_TOTP_SEED=<synthetic base32 seed> enables the one-time code check (otp.html):
+//   RFC 6238, SHA-1, 6 digits, 30 s, the current step or one step either side.
 //
 // The expected origin and RP ID come from this configuration, never from a request.
 
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
@@ -30,6 +32,8 @@ const STATIC = {
   "/passkey.js": ["passkey.js", "text/javascript; charset=utf-8"],
   "/login.html": ["login.html", "text/html; charset=utf-8"],
   "/login.js": ["login.js", "text/javascript; charset=utf-8"],
+  "/otp.html": ["otp.html", "text/html; charset=utf-8"],
+  "/otp.js": ["otp.js", "text/javascript; charset=utf-8"],
   "/style.css": ["style.css", "text/css; charset=utf-8"],
 };
 const ES256 = -7;
@@ -48,6 +52,28 @@ class HttpError extends Error {
 
 const b64u = (bytes) => Buffer.from(bytes).toString("base64url");
 
+function base32(text) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = "";
+  for (const ch of text.replace(/=+$/, "").toUpperCase()) {
+    const value = alphabet.indexOf(ch);
+    if (value < 0) throw new Error("L4_TOTP_SEED is not base32");
+    bits += value.toString(2).padStart(5, "0");
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+  return Buffer.from(bytes);
+}
+
+export function totp(seed, unixSeconds) {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(unixSeconds / 30)));
+  const mac = createHmac("sha1", base32(seed)).update(counter).digest();
+  const offset = mac[mac.length - 1] & 0x0f;
+  const code = (mac.readUInt32BE(offset) & 0x7fffffff) % 1_000_000;
+  return String(code).padStart(6, "0");
+}
+
 function parseArgs(argv) {
   const out = { port: 4174, log: null };
   for (let i = 0; i < argv.length; i += 1) {
@@ -59,7 +85,7 @@ function parseArgs(argv) {
   return out;
 }
 
-export function createRp({ port, log, loginPassword }) {
+export function createRp({ port, log, loginPassword, totpSeed }) {
   const origin = `http://localhost:${port}`;
   const rpID = "localhost";
   const userID = randomBytes(32);
@@ -177,6 +203,14 @@ export function createRp({ port, log, loginPassword }) {
     return record("password_login", ok, { usernameMatches: username === LOGIN_USER, passwordMatches: password === loginPassword, passwordLength: typeof password === "string" ? password.length : 0 });
   }
 
+  function otpLogin({ code }) {
+    if (!totpSeed) throw new HttpError(400, "no_totp_seed_configured");
+    const now = Date.now() / 1000;
+    const ok = typeof code === "string" && [-30, 0, 30].some((skew) => totp(totpSeed, now + skew) === code);
+    // Never log the code; only whether it matched.
+    return record("otp_login", ok, { codeMatches: ok, codeLength: typeof code === "string" ? code.length : 0 });
+  }
+
   function clientEvent(body) {
     const pick = (v) => (typeof v === "string" ? v.slice(0, 300) : undefined);
     return record(`client_${pick(body.kind) ?? "event"}`, body.ok === true, { name: pick(body.name), message: pick(body.message) });
@@ -188,6 +222,7 @@ export function createRp({ port, log, loginPassword }) {
     "POST /api/authenticate/options": authenticateOptions,
     "POST /api/authenticate/verify": authenticateVerify,
     "POST /api/login": login,
+    "POST /api/otp": otpLogin,
     "POST /api/client-event": clientEvent,
     "GET /api/status": () => ({ origin, rpID, credentials: [...credentials.keys()], events }),
   };
@@ -259,7 +294,7 @@ function send(res, status, body, type) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
-  const rp = createRp({ ...args, loginPassword: process.env.L4_LOGIN_PASSWORD || null });
+  const rp = createRp({ ...args, loginPassword: process.env.L4_LOGIN_PASSWORD || null, totpSeed: process.env.L4_TOTP_SEED || null });
   const info = await rp.start();
   console.log(JSON.stringify({ ready: true, ...info }));
   const quit = () => rp.stop().then(() => process.exit(0));

@@ -63,9 +63,10 @@ out why before you report the TestFlight group.
 Read back all six destinations after delivery: the signed macOS download and
 `latest.json` (including hashes/source), processed TestFlight marketing version and
 build in the intended group, public extension listing/package, public Linux node
-packages (both tarballs and both `.deb`s) and the old `apassy-team` binary with their
-checksums and `--version`, running relay version/source, and live website and
-changelog. A submitted extension awaiting store review is pending, not published.
+packages (both tarballs and both `.deb`s), the public Linux vault packages (both
+tarballs and both `.deb`s, [Linux vault packages](#linux-vault-packages)) and the old
+`apassy-team` binary with their checksums and `--version`, running relay
+version/source, and live website and changelog. A submitted extension awaiting store review is pending, not published.
 Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
@@ -89,7 +90,39 @@ The `linux-cli` component of `release-versions.json` is the Linux node from 0.5.
 - The PR CI job `linux-node` (`ci.yml`) builds the node without the window, fails when `cargo tree` resolves eframe for it, runs `shellcheck` on the scripts and `install.sh`, and packages and verifies its debug build with the same scripts (without the Debian containers: that build needs Ubuntu 24.04's glibc).
 - Test the workflow on a test tag before the release tag (plan L3): the owner pushes `image-test-<version>-<n>` on the release commit. The tag builds artifacts only; deployment stays a separate step.
 
-To stage `/dl/` for the Worker deploy, download the artifacts of the run (`gh run download RUN_ID -n apassy-node-linux-x86_64 -n apassy-node-linux-aarch64 -n apassy-node-sha256sums -n apassy-team-linux-x86_64 -n apassy-team-darwin-arm64`), copy the four packages and both team CLIs into `crates/apassy-relay/deploy/worker/public/dl/`, write `dl/SHA256SUMS` with all six lines (`SHA256SUMS-node`, `SHA256SUMS-linux`, `SHA256SUMS-darwin`), and `dl/release.json` with `version`, `commit`, `artifacts` (the two team CLIs, as before), and `node` (a map from each package's file name to its `sha256` and `size`). `check-public-assets.py` refuses a staging that misses one of them, and reads every file back from the public origin. `install.sh` picks the single `apassy-<x.y.z>-linux-<arch>.tar.gz` of `SHA256SUMS` on Linux and the team CLI on macOS.
+To stage `/dl/` for the Worker deploy, download the artifacts of the run (`gh run download RUN_ID -n apassy-node-linux-x86_64 -n apassy-node-linux-aarch64 -n apassy-node-sha256sums -n apassy-vault-linux-x86_64 -n apassy-vault-linux-aarch64 -n apassy-vault-sha256sums -n apassy-team-linux-x86_64 -n apassy-team-darwin-arm64`), copy the four node packages, the four vault packages and both team CLIs into `crates/apassy-relay/deploy/worker/public/dl/`, write `dl/SHA256SUMS` with all ten lines (`SHA256SUMS-node`, `SHA256SUMS-vault`, `SHA256SUMS-linux`, `SHA256SUMS-darwin`), and `dl/release.json` with `version`, `commit`, `artifacts` (the two team CLIs, as before), `node` and `vault` (each a map from a package's file name to its `sha256` and `size`). The Worker build (`verify-assets.mjs`) and `check-public-assets.py` refuse a staging that misses one of them or has a file over 25 MiB, and `check-public-assets.py` reads every file back from the public origin. `install.sh` picks the single `apassy-<x.y.z>-linux-<arch>.tar.gz` of `SHA256SUMS` on Linux, the team CLI on macOS, and with `APASSY_COMPONENT=vault` the single `apassy-vault_<x.y.z>_<deb arch>.deb` (or, with `APASSY_VAULT_FORMAT=tar`, the vault tarball).
+
+## Linux vault packages
+
+Date: 2026-11-10. Decision: [ADR 0045](../adr/0045-linux-vault-passkeys.md); unit L6. Guide: [Linux vault](linux-vault.md). Evidence: [linux-acceptance-2026-11.md](../reviews/linux-acceptance-2026-11.md), "Release packages".
+
+`apassy-vault` is the Linux desktop: the window, the owner commands, the node commands and the browser host, from `crates/apassy-app` (default features) and `apassy-browser-host`. It is delivered with the `linux-cli` component at the shared release version (`release-versions.json`; `build-vault.sh` reads it and requires the app crate and `apassy --version` to agree). `relay-image.yml` builds it on the `image-*` tag beside the node; the node jobs are unchanged:
+
+| Job | Runner | What |
+| --- | --- | --- |
+| `linux-vault (x86_64)` | `ubuntu-24.04`, in `rust:1.97.0-bullseye` (the node's image and digest) | `packaging/linux/build-vault-release.sh`: `apassy-vault-<version>-linux-x86_64.tar.gz`, `apassy-vault_<version>_amd64.deb`, `SHA256SUMS-vault-x86_64`, `release-vault-linux-x86_64.json`, `dpkg-deb --info` and `--contents`, `file`, `ldd` and `readelf --version-info` of both executables, the SBOM; attested |
+| `linux-vault (aarch64)` | `ubuntu-24.04-arm`, the same image (arm64) | the same files for aarch64 (`_arm64.deb`) |
+| `linux-vault-verify` | both runners | `packaging/linux/verify-vault.sh --containers`: the checksums and deb fields; the `.deb` installs on Ubuntu 24.04, `apassy owner create` refuses piped input, the `.deb` removes; `install.sh` installs the tarball twice from a `file://` directory; then in minimal `debian:12-slim`, `debian:13-slim`, `ubuntu:22.04` and `ubuntu:24.04` containers `apt-get install --no-install-recommends` resolves the dependencies, `ldd -r` finds every library and symbol version, the tarball's `apassy --version` runs, and the window maps on an Xvfb display of the runner |
+| `linux-vault-sums` | `ubuntu-24.04` | `SHA256SUMS-vault` of the four packages (artifact `apassy-vault-sha256sums`) |
+
+- glibc: built against glibc 2.31; `build-vault.sh --max-glibc 2.31` refuses a newer GLIBC symbol version in either executable, and `Depends` carries `libc6 (>= <newest symbol>)`. Debian 11 and Ubuntu 20.04 have glibc 2.31 too, but are not tested; `install.sh` refuses them (override `APASSY_ALLOW_UNSUPPORTED=1`).
+- `Depends`: the executables link only glibc and libgcc_s; the window loads the rest at run time. Observed with `LD_DEBUG` under Xvfb in the four minimal containers: on X11 libX11, libX11-xcb, libxcb, libXcursor, libXi, libxkbcommon and libxkbcommon-x11, and GLX through libGL (Mesa via `libgl1`); on Wayland winit and glutin load libwayland-client, -cursor, -egl, libxkbcommon and libEGL. `Suggests`: `libsecret-tools`, `polkitd | policykit-1`, `xdg-desktop-portal`. No `Recommends`.
+- Size: each package must be at most 25 MiB, the largest file that Workers static assets (the relay Worker's `/dl/`) serve; `build-vault-release.sh` and `verify-assets.mjs` refuse a larger one. If a package outgrows it, move the vault packages to the downloads bucket of the site (R2) and change `install.sh` and both checks, instead of splitting files.
+- The PR CI jobs `linux-vault-package` and `linux-vault-verify` (`ci.yml`) run the same script and the same checks on every pull request, from its head commit (the package records that commit, not the merge commit), and upload `apassy-vault-linux-<arch>`. They are not downloads.
+- Test the workflow on an `image-test-<version>-<n>` tag before the release tag, as for the node.
+- Read back after the Worker deploy (part of "verify each delivered artifact"): `check-public-assets.py --version <version> --commit <commit>` fetches all ten `/dl/` files and compares their bytes with the staging; then, on a disposable Linux machine (a devbox), the published package itself:
+
+  ```sh
+  mkdir v && cd v
+  curl -fsSLO https://apassy-relay.wyderka.cc/dl/SHA256SUMS
+  curl -fsSLO https://apassy-relay.wyderka.cc/dl/apassy-vault_<version>_amd64.deb
+  grep ' apassy-vault_<version>_amd64.deb$' SHA256SUMS | sha256sum -c
+  dpkg-deb --field apassy-vault_<version>_amd64.deb Version Depends
+  docker run --rm -v "$PWD:/v:ro" debian:12-slim sh -c \
+    'apt-get update -q && apt-get install -y -q --no-install-recommends /v/apassy-vault_<version>_amd64.deb && apassy --version'
+  ```
+
+  `apassy --version` must print `apassy <version>`. Repeat for `arm64` on an arm64 machine and for the tarballs (`tar -xzf`, `usr/bin/apassy --version`), and run `curl -fsSL https://apassy-relay.wyderka.cc/install.sh -o i.sh && sudo env APASSY_COMPONENT=vault APASSY_INSTALL_AS_ROOT=1 sh i.sh` in a fresh `ubuntu:22.04` container.
 
 ## 0.5.17 coordinated release
 
@@ -241,7 +274,7 @@ window. Old extensions remain on the fresh-check path.
 | Site | `site/src/pages/index.astro` | The home page, one component per section in `site/src/components`. Light or dark from the system setting. The design follows [t3.codes](https://t3.codes), as the footer says. |
 | Changelog page | `site/src/pages/changelog.astro` | Renders `CHANGELOG.md` at `/changelog`. Links to `docs/...` go to GitHub. |
 | Pricing page | `site/src/pages/pricing.astro`, `site/src/lib/plans.ts` | The plans of [plans](../product/plans.md). `plans.ts` is the one source of the prices on the site (EUR cents, VAT included). `CONNECT_STATUS` is `"coming"` until stage 7 of ADR 0037 ships: the page says "Coming" and has no buy button. The site workflow runs `scripts/check-site-plans.py`, which checks the prices against the table of plans.md section 3 and, once it exists, `tests/fixtures/connect-billing-v1/plans.json`. |
-| Connect pages | `site/src/pages/connect/{done,cancel,join}.astro` | The return pages of a Connect checkout ("Return to Apassy", `apassy://connect/done`) and the invite page of a family or team. No secret, no API call. `site/public/_headers` sends `Referrer-Policy: no-referrer`, `no-store`, and `noindex` for `/connect/*`. |
+| Connect pages | `site/src/pages/connect/{done,cancel,join}.astro` | The return pages of a Connect checkout (text only: "Apassy on your Mac shows your plan in a moment. You can close this page."; the Mac app registers no URL scheme) and the invite page of a family or team (Settings › Connect › Join a Family or Team). No secret, no API call. `site/public/_headers` sends `Referrer-Policy: no-referrer`, `no-store`, and `noindex` for `/connect/*`. |
 | Legal pages | `site/src/pages/{terms,imprint,privacy-connect}.astro`, `site/src/layouts/Legal.astro`, `site/src/lib/legal.ts` | Drafts of the terms (with the right of withdrawal, the consent to start at once, and the refunds), the imprint, and the privacy update for Connect. Each says "Draft — not yet in force", has `noindex`, and is not linked from the footer. The owner gives the facts in `legal.ts`; a missing one shows `OWNER-TEXT-NEEDED`. A page without `draft` fails the build while it shows that marker. |
 | Site version | `site/src/lib/site.ts` | `VERSION` is the first dated release section of `CHANGELOG.md`, not the version of `Cargo.toml`. The site never advertises a version that is not released. |
 | Installer | `scripts/install.sh`, served at `/install.sh` (`site/src/pages/install.sh.ts`, `site/public/_headers`) | Builds the newest release from source, signs it with the Apple Development identity of the person who runs it, and installs it in `/Applications`. Until `/latest.json` exists, the "Coming soon for macOS" button opens a note with its command. |
@@ -450,6 +483,7 @@ the SBOM. Only the jobs that attest have `id-token: write` and `attestations: wr
 | Mac test build | `release.yml` (`provider-check`) | the same, source ref is the branch | the same | in `apassy-provider-test-<sha>-<attempt>` (3 days) |
 | Relay image | `relay-image.yml` (`image`) | `relay-image.tar.gz`, `relay-image.release.json` | the image `apassy-relay:release-<version>`, to the tarball | `relay-image.spdx.json` in `relay-image` (7 days) |
 | Linux node | `relay-image.yml` (`linux-node`, x86_64 and aarch64) | `apassy-<version>-linux-<arch>.tar.gz`, `apassy_<version>_<deb arch>.deb`, `release-linux-<arch>.json` | the stripped `apassy` and the workspace `Cargo.lock`, to both packages | `apassy-node-linux-<arch>.spdx.json` in `apassy-node-linux-<arch>` (7 days) |
+| Linux vault | `relay-image.yml` (`linux-vault`, x86_64 and aarch64) | `apassy-vault-<version>-linux-<arch>.tar.gz`, `apassy-vault_<version>_<deb arch>.deb`, `release-vault-linux-<arch>.json` | the stripped `apassy` and `apassy-browser-host` and the workspace `Cargo.lock`, to both packages | `apassy-vault-linux-<arch>.spdx.json` in `apassy-vault-linux-<arch>` (7 days) |
 | Old Linux CLI | `relay-image.yml` (`linux-node`, x86_64) | `apassy-team-linux-x86_64`, `release-linux.json` | the binary and the workspace `Cargo.lock`, to the binary | `apassy-team-linux-x86_64.spdx.json` in `apassy-team-linux-x86_64` (7 days) |
 | Darwin CLI | `relay-image.yml` (`darwin-cli`) | `apassy-team-darwin-arm64`, `release-darwin.json` | the same, to the binary | `apassy-team-darwin-arm64.spdx.json` in `apassy-team-darwin-arm64` (7 days) |
 | Extension zip | `extension-package.yml` (`package`, on a change of `extension/` on `main`, or by hand) | `apassy-extension-<version>.zip` | every file of the zip with its SHA-256, to the zip | `apassy-extension-<version>`: zip, `.sha256`, `.spdx.json` (90 days) |
@@ -491,6 +525,10 @@ to R2.
      apassy_<version>_amd64.deb apassy_<version>_arm64.deb SHA256SUMS-node \
      release-linux-x86_64.json release-linux-aarch64.json \
      apassy-node-linux-x86_64.spdx.json apassy-node-linux-aarch64.spdx.json \
+     apassy-vault-<version>-linux-x86_64.tar.gz apassy-vault-<version>-linux-aarch64.tar.gz \
+     apassy-vault_<version>_amd64.deb apassy-vault_<version>_arm64.deb SHA256SUMS-vault \
+     release-vault-linux-x86_64.json release-vault-linux-aarch64.json \
+     apassy-vault-linux-x86_64.spdx.json apassy-vault-linux-aarch64.spdx.json \
      apassy-team-linux-x86_64.spdx.json apassy-team-darwin-arm64.spdx.json \
      apassy-ios-<version>-<build>.json apassy-ios-<version>-<build>.spdx.json
    ```
@@ -524,6 +562,9 @@ gh attestation verify apassy-extension-0.5.16.zip --repo wydrox/apassy \
 # release-linux-<arch>.json, release-linux.json, and relay-image.release.json. The
 # source ref is the image-* tag.
 gh attestation verify apassy_0.5.17_amd64.deb --repo wydrox/apassy \
+  --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
+  --source-digest COMMIT
+gh attestation verify apassy-vault_0.5.20_amd64.deb --repo wydrox/apassy \
   --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
   --source-digest COMMIT
 gh attestation verify apassy-team-linux-x86_64 --repo wydrox/apassy \

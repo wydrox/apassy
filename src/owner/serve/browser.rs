@@ -743,11 +743,17 @@ impl BrowserOp {
                     }
                     None => {}
                 }
+                // The vault lists the newest first; the time tells two passkeys of
+                // one account apart (Linux acceptance, 2026-11-10).
                 for (index, account) in accounts.iter().enumerate() {
+                    let added = account
+                        .added
+                        .map(|at| format!(", added {}", crate::vault::format_utc(at)))
+                        .unwrap_or_default();
                     facts.push((
                         "Account",
                         format!(
-                            "{}. {} ({}) in \"{}\"",
+                            "{}. {} ({}) in \"{}\"{added}",
                             index + 1,
                             page_text(&account.user_name),
                             page_text(&account.user_display_name),

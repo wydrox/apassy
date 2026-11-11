@@ -1,7 +1,9 @@
 {
   "name": "apassy-relay-edge",
   "main": "src/index.ts",
-  "build": { "command": "node scripts/verify-assets.mjs" },
+  // The build hook runs on every deploy: the asset preflight, and the check that RELAY_MODE
+  // below is the mode that the relay reports on /healthz (scripts/check-relay-mode.mjs).
+  "build": { "command": "node scripts/verify-assets.mjs && node scripts/check-relay-mode.mjs" },
   "compatibility_date": "2026-09-01",
   "workers_dev": false,
   "routes": [{ "pattern": "apassy-relay.wyderka.cc", "custom_domain": true }],
@@ -34,7 +36,12 @@
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },
   // APNS_KEY_ID is set by the owner before the deploy. The Worker secrets are EDGE_SECRET,
   // PUSH_SECRET, and APNS_KEY: set them with `wrangler secret put`, never in this file.
+  // RELAY_MODE: "relay" before the cutover, "connect" after it (docs/operations/connect.md).
+  // In "connect" the APNs route /internal/push is off and /v1/connect answers 410 here; the
+  // APNs vars and secrets are then unused and can be removed after the cutover. A deploy
+  // refuses a value that is not the mode of the relay (x-apassy-relay-mode on /healthz).
   "vars": {
+    "RELAY_MODE": "relay",
     "RELAY_ORIGIN": "https://replace-me.trycloudflare.com",
     "APNS_KEY_ID": "2549AX5SGX",
     "APNS_TEAM_ID": "7S3F9767BM",

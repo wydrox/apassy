@@ -6,7 +6,8 @@
 #   packaging/linux/acceptance/build-on-devbox.sh x86|arm [COMMIT] [--test]
 #
 # The source is the committed tree (git archive), so uncommitted edits are never
-# packaged. Artifacts land in ~/work/l4/artifacts/build-<arch>-<short> on the devbox.
+# packaged. Artifacts land in ~/work/$L4_RUN/artifacts/build-<arch>-<short> on the devbox
+# (L4_RUN defaults to l4).
 # --test also runs the CI Linux browser/passkey test filter in the same container.
 set -euo pipefail
 fail() { printf 'build-on-devbox.sh: %s\n' "$*" >&2; exit 1; }
@@ -18,16 +19,17 @@ case "$box" in x86) arch=x86_64 ;; arm) arch=aarch64 ;; *) fail 'box must be x86
 host="dev@devbox-$box"
 short=${commit:0:8}
 epoch=$(git log -1 --format=%ct "$commit")
-remote="work/l4/src-$short"
-ssh "$host" "rm -rf ~/$remote && mkdir -p ~/$remote ~/work/l4/artifacts"
+run=${L4_RUN:-l4}   # l5: ~/work/l5 and the container l5-build-<commit>
+remote="work/$run/src-$short"
+ssh "$host" "rm -rf ~/$remote && mkdir -p ~/$remote ~/work/$run/artifacts"
 git archive --format=tar "$commit" | ssh "$host" "tar -x -C ~/$remote"
 # shellcheck disable=SC2087
 ssh "$host" bash -s <<REMOTE
 set -euo pipefail
 cd ~/$remote
-out=~/work/l4/artifacts/build-$arch-$short
+out=~/work/$run/artifacts/build-$arch-$short
 rm -rf "\$out" && mkdir -p "\$out"
-docker run --rm --name l4-build-$short --memory ${L4_MEM:-4500m} --memory-swap ${L4_MEM:-4500m} \
+docker run --rm --name $run-build-$short --memory ${L4_MEM:-4500m} --memory-swap ${L4_MEM:-4500m} \
   -v "\$PWD:/src" -v "\$out:/out" -v l4-target:/src/target -v l4-cargo:/root/.cargo \
   -e APASSY_RELEASE_COMMIT=$commit -e SOURCE_DATE_EPOCH=$epoch -e CARGO_INCREMENTAL=0 \
   -e CARGO_BUILD_JOBS=${L4_JOBS:-2} -e RUN_TESTS=$run_tests -w /src ubuntu:24.04 bash -euo pipefail -c '

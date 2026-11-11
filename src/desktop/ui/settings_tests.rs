@@ -180,7 +180,7 @@ fn cases() -> [(
         (
             SettingsSection::Devices,
             &[
-                "This Mac",
+                concat!("This ", crate::computer!()),
                 ROUTE_SWITCH,
                 "Notifications",
                 ADD_DEVICE,
@@ -191,7 +191,7 @@ fn cases() -> [(
                 "Pair an iPhone",
                 "Allow the iPhone app on this network",
                 WIFI_GROUP,
-                "Other Macs",
+                concat!("Other ", crate::computers!()),
                 "Questions reach every device.",
                 "Get approvals on your iPhone",
                 "None paired",
@@ -216,6 +216,8 @@ fn cases() -> [(
             &[
                 "Command line",
                 "apassy",
+                // The Linux package brings the command: Settings offers no install there.
+                #[cfg(not(target_os = "linux"))]
                 "Install tools…",
                 "Browser extension",
             ],
@@ -334,7 +336,11 @@ fn the_gear_and_command_comma_open_settings_and_the_sidebar_leaves_it() {
 
     // ⌘, comes back to the section that was open last; ⌘1 leaves.
     press(&ctx, &mut app, Key::Comma, Modifiers::COMMAND);
-    assert_eq!(app.place, Place::Settings, "⌘, opens Settings");
+    assert_eq!(
+        app.place,
+        Place::Settings,
+        concat!(crate::shortcut!(","), " opens Settings")
+    );
     assert_eq!(app.ui.settings_section, SettingsSection::Security);
     press(&ctx, &mut app, Key::Num1, Modifiers::COMMAND);
     assert_eq!(app.place, Place::CREDENTIALS);
@@ -529,7 +535,7 @@ fn devices_frame_one_draws_the_mockup() {
     assert_eq!(view.status_line(), "Tailnet on · 6 devices");
     let text = view_texts(&view);
     for expected in [
-        "This Mac",
+        concat!("This ", crate::computer!()),
         ROUTE_SWITCH,
         ROUTE_ON,
         "Address",
@@ -543,12 +549,12 @@ fn devices_frame_one_draws_the_mockup() {
         "Devices",
         "6",
         "Mac mini (office)",
-        "Mac · Hosts approvals",
+        concat!(crate::computer_cap!(), " · Hosts approvals"),
         "iPhone · Approves runs",
         "Apple Watch · Sees requests",
-        "Mac · Syncs Personal",
+        concat!(crate::computer_cap!(), " · Syncs Personal"),
         "Linux node · Syncs Acme team",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "via Apassy relay",
         "Tailnet",
         "Now",
@@ -618,7 +624,11 @@ fn devices_node_states_draw_the_mockup() {
         (
             "3c",
             with(NodeState::Off, None),
-            vec![ROUTE_OFF, "Notifications", "via your Mac"],
+            vec![
+                ROUTE_OFF,
+                "Notifications",
+                concat!("via your ", crate::computer!()),
+            ],
             vec!["Address", "Port", "Node Words"],
         ),
         (
@@ -735,7 +745,10 @@ fn devices_node_states_draw_the_mockup() {
         node: NodeState::Missing,
         ..frame_one()
     };
-    assert_eq!(first_run.status_line(), "This Mac only");
+    assert_eq!(
+        first_run.status_line(),
+        concat!("This ", crate::computer!(), " only")
+    );
     let off = DevicesView {
         node: NodeState::Off,
         ..frame_one()
@@ -769,7 +782,10 @@ fn devices_words_follow_the_mockup() {
     device.roles.push("Asks for approvals".to_owned());
     assert_eq!(
         device.subline(),
-        "Mac · Syncs Personal · Asks for approvals"
+        concat!(
+            crate::computer_cap!(),
+            " · Syncs Personal · Asks for approvals"
+        )
     );
     assert_eq!(device.button(), None);
     assert_eq!(origin_host("https://100.101.7.12:8444"), "100.101.7.12");
@@ -779,7 +795,12 @@ fn devices_words_follow_the_mockup() {
     );
     assert_eq!(
         [Route::Mac, Route::Relay, Route::Tailnet, Route::Wifi].map(Route::words),
-        ["via your Mac", "via Apassy relay", "Tailnet", "Wi-Fi"]
+        [
+            concat!("via your ", crate::computer!()),
+            "via Apassy relay",
+            "Tailnet",
+            "Wi-Fi"
+        ]
     );
 }
 
@@ -848,7 +869,11 @@ fn devices_sheets_draw_the_mockup() {
     for expected in [
         "Revoke MacBook Pro?",
         "It stops syncing Personal and seeing approvals.",
-        "Its copy of the vault stays on that Mac.",
+        concat!(
+            "Its copy of the vault stays on that ",
+            crate::computer!(),
+            "."
+        ),
     ] {
         assert!(text.contains(expected), "5b shows {expected}: {text}");
     }
@@ -870,11 +895,19 @@ fn devices_sheets_draw_the_mockup() {
     for (tailnet, way) in [
         (
             true,
-            "The iPhone app now reaches this Mac through your tailnet.",
+            concat!(
+                "The iPhone app now reaches this ",
+                crate::computer!(),
+                " through your tailnet."
+            ),
         ),
         (
             false,
-            "The iPhone app now reaches this Mac through Apassy relay.",
+            concat!(
+                "The iPhone app now reaches this ",
+                crate::computer!(),
+                " through Apassy relay."
+            ),
         ),
     ] {
         let text = sheet_texts(DevicesSheet::WifiNotice { tailnet });
@@ -1084,7 +1117,7 @@ fn devices_route_chip_sits_under_the_qr_code() {
     });
     for (frame, texts) in [("2a", &add), ("4b", &moving)] {
         let qr = rect_of(texts, "QR");
-        let chip = rect_of(texts, "via your Mac");
+        let chip = rect_of(texts, concat!("via your ", crate::computer!()));
         assert!(
             chip.top() > qr.bottom() + 40.0,
             "{frame}: the chip is under the QR code: {chip:?} {qr:?}"
@@ -1104,7 +1137,7 @@ fn devices_route_chip_sits_under_the_qr_code() {
     });
     assert!(!joined(&texts).contains("QR"), "{}", joined(&texts));
     assert!(
-        joined(&texts).contains("via your Mac"),
+        joined(&texts).contains(concat!("via your ", crate::computer!())),
         "{}",
         joined(&texts)
     );
@@ -1115,7 +1148,7 @@ fn devices_route_chip_sits_under_the_qr_code() {
 #[test]
 fn devices_rows_follow_their_label_as_under_this_mac() {
     let texts = view_rects(&frame_one());
-    let this_mac = rect_of(&texts, "This Mac");
+    let this_mac = rect_of(&texts, concat!("This ", crate::computer!()));
     let reachable = rect_of(&texts, devices::ROUTE_SWITCH);
     let first = rect_of(&texts, "Mac mini (office)");
     // The group label: the last "Devices" above the first row.
@@ -1151,13 +1184,13 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     for expected in [
         "Add a Device",
         "Scan with the Apassy app on the iPhone.",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "Link",
         "https://100.101.7.12:8444/link#…",
         "Copy",
         "Expires In",
         "9:41",
-        "On a Mac, paste the link instead.",
+        concat!("On a ", crate::computer!(), ", paste the link instead."),
         "Cancel",
     ] {
         assert!(text.contains(expected), "2a: {expected}: {text}");
@@ -1173,7 +1206,10 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
         devices::link_step(ui, &hosted, |_| {}, |_| {});
     });
     assert!(text.contains("via Apassy relay"), "{text}");
-    for gone in ["Copy", "On a Mac, paste the link instead."] {
+    for gone in [
+        "Copy",
+        concat!("On a ", crate::computer!(), ", paste the link instead."),
+    ] {
         assert!(!text.contains(gone), "{gone}: {text}");
     }
     // 2a expired: "The link expired." and New Link only.
@@ -1212,7 +1248,7 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
         "Kind",
         "iPhone",
         "Route",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "Refuse",
         "Confirm…",
     ] {
@@ -1220,7 +1256,11 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     }
     assert_eq!(
         devices::join_lead(Kind::Mac),
-        "Confirm only if the Mac shows these words."
+        concat!(
+            "Confirm only if the ",
+            crate::computer!(),
+            " shows these words."
+        )
     );
     // 2c: the Tailscale line only for a node device.
     let text = step_texts(|ui| {
@@ -1228,8 +1268,12 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     });
     for expected in [
         "Rafal's iPhone Added",
-        "It approves runs through this Mac.",
-        "The iPhone needs Tailscale on to reach this Mac.",
+        concat!("It approves runs through this ", crate::computer!(), "."),
+        concat!(
+            "The iPhone needs Tailscale on to reach this ",
+            crate::computer!(),
+            "."
+        ),
         "Done",
     ] {
         assert!(text.contains(expected), "2c: {expected}: {text}");
@@ -1250,13 +1294,17 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
         );
     });
     for expected in [
-        "Move Approvals to This Mac",
-        "Your iPhone pairs again, with this Mac.",
+        concat!("Move Approvals to This ", crate::computer!()),
+        concat!(
+            "Your iPhone pairs again, with this ",
+            crate::computer!(),
+            "."
+        ),
         "Approvals team made here",
         "Scan with Rafal's iPhone",
         "Then check the words on both.",
         "Remove from Apassy relay",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "Cancel",
     ] {
         assert!(text.contains(expected), "4b: {expected}: {text}");
@@ -1284,9 +1332,9 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     });
     for expected in [
         "Approvals Moved",
-        "Questions now go through this Mac.",
+        concat!("Questions now go through this ", crate::computer!(), "."),
         "Rafal's iPhone",
-        "via your Mac",
+        concat!("via your ", crate::computer!()),
         "Removed from Apassy relay",
         "Pair Rafal's Apple Watch again from the iPhone.",
         "Done",
@@ -1308,7 +1356,7 @@ fn devices_add_and_move_sheets_use_the_mockup_texts() {
     });
     for expected in [
         "Old Entry Still on Relay",
-        "Approvals already use this Mac.",
+        concat!("Approvals already use this ", crate::computer!(), "."),
         "Apassy relay did not answer the removal.",
         "Later",
     ] {
@@ -1474,8 +1522,11 @@ fn the_route_switch_and_revoke_name_their_owner_check() {
     let on = OwnerRequest::SetTailnetRoute { on: true };
     assert_eq!(on.action(), OwnerAction::SetTailnetRoute { on: true });
     assert!(
-        on.describe()
-            .starts_with("Make this Mac reachable on your tailnet."),
+        on.describe().starts_with(concat!(
+            "Make this ",
+            crate::computer!(),
+            " reachable on your tailnet."
+        )),
         "{}",
         on.describe()
     );
@@ -1505,7 +1556,7 @@ fn the_route_switch_and_revoke_name_their_owner_check() {
     );
     assert_eq!(
         OwnerAction::SetTailnetRoute { on: true }.touch_id_title(),
-        "Reach this Mac on your tailnet"
+        concat!("Reach this ", crate::computer!(), " on your tailnet")
     );
     assert!(
         !OwnerAction::SetTailnetRoute { on: true }
@@ -1556,7 +1607,7 @@ fn devices_of_a_vault_without_a_team_show_this_mac_and_the_add_button() {
     }
     assert_eq!(
         super::status_line(&app, SettingsSection::Devices),
-        "This Mac only"
+        concat!("This ", crate::computer!(), " only")
     );
     // The switch is disabled: no Tailscale, no route.
     let ctx = egui::Context::default();
@@ -1665,7 +1716,7 @@ fn devices_list_the_team_and_revoke_needs_the_owner_check() {
     }
     let (text, _) = frames(&mut app, TALL);
     assert!(
-        text.contains("This Mac") && text.contains(ADD_DEVICE),
+        text.contains(concat!("This ", crate::computer!())) && text.contains(ADD_DEVICE),
         "{text}"
     );
 
@@ -1795,10 +1846,17 @@ fn device_rows_say_how_each_device_answers() {
         updated_by: String::new(),
     };
     let mac = device(TrustedDeviceKind::Mac, None);
-    assert_eq!(device_words(&mac, true, None), "This Mac");
+    assert_eq!(
+        device_words(&mac, true, None),
+        concat!("This ", crate::computer!())
+    );
     assert_eq!(
         device_words(&mac, false, None),
-        "Mac · answers after Touch ID"
+        concat!(
+            crate::computer_cap!(),
+            " · answers after ",
+            crate::touch_id!()
+        )
     );
     let phone = device(TrustedDeviceKind::Iphone, Some(vec![4; 65]));
     assert_eq!(
@@ -1988,7 +2046,7 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
             "How often to ask for Touch ID",
             "After you confirm with Touch ID or your passphrase",
             "Apassy doesn't ask again for anything until this time is up",
-            "Mac locks or sleeps",
+            concat!(crate::computer!(), " locks or sleeps"),
         ]
     };
     for expected in expected {
@@ -1998,7 +2056,7 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
         for unavailable in [
             "Touch ID",
             "Apassy doesn't ask again for anything until this time is up",
-            "Mac locks or sleeps",
+            concat!(crate::computer!(), " locks or sleeps"),
             "unavailable on Linux",
         ] {
             assert!(
@@ -2139,7 +2197,10 @@ fn the_runs_on_row_starts_on_this_mac() {
     super::super::open_settings(&mut app, SettingsSection::Bouncer);
     let (text, _) = frames(&mut app, TALL);
     assert!(text.contains(RUNS_ON), "{text}");
-    assert!(text.contains("This Mac"), "{text}");
+    assert!(
+        text.contains(concat!("This ", crate::computer!())),
+        "{text}"
+    );
     assert!(!text.contains(GATE_STAYS), "{text}");
     assert!(!text.contains(FALLBACK_HEADLINE), "{text}");
     assert_eq!(stored_hosting(&app), None);
@@ -2322,7 +2383,12 @@ fn a_host_that_cannot_be_used_shows_the_fallback_and_the_return_needs_the_check(
         text.contains("needs the Connect sign-in, which this version does not have yet."),
         "{text}"
     );
-    assert_eq!(text.matches("runs on this Mac").count(), 1, "{text}");
+    assert_eq!(
+        text.matches(concat!("runs on this ", crate::computer!()))
+            .count(),
+        1,
+        "{text}"
+    );
 
     hosting::apply(&mut app, RunsOnAction::ThisMac, None);
     let request = app

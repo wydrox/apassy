@@ -236,7 +236,7 @@ pub fn placement_refusal(candidate: &CandidateRecord, host: &str) -> Option<Stri
         return None;
     }
     let place = if host == THIS_MAC_HOST {
-        "the bouncer brain on this Mac".to_owned()
+        concat!("the bouncer brain on this ", crate::computer!()).to_owned()
     } else {
         format!("the bouncer brain server {host}")
     };
@@ -601,7 +601,10 @@ mod tests {
         let mut vault = vault(&dir);
         let record = register(&mut vault, "");
         let refusal = placement_refusal(&record, THIS_MAC_HOST).expect("refused");
-        assert!(refusal.contains("on this Mac"), "{refusal}");
+        assert!(
+            refusal.contains(concat!("on this ", crate::computer!())),
+            "{refusal}"
+        );
         let refusal = placement_refusal(&record, REMOTE).expect("refused");
         assert!(refusal.contains(REMOTE), "{refusal}");
         vault

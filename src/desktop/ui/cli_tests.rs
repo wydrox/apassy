@@ -50,13 +50,20 @@ fn next_steps_show_choices_without_registration_and_exclude_archived_items() {
     let ctx = egui::Context::default();
     let text = next_steps_text(&mut app, &ctx);
     assert!(
-        text.contains("1 active credential is available on this Mac"),
+        text.contains(concat!(
+            "1 active credential is available on this ",
+            crate::computer!()
+        )),
         "{text}"
     );
     for choice in ["Claude Code", "Codex", "CLI", "Skip"] {
         assert!(text.contains(choice), "{text}");
     }
-    assert!(text.contains("Agents stay on this Mac. Connect them here"));
+    assert!(text.contains(concat!(
+        "Agents stay on this ",
+        crate::computer!(),
+        ". Connect them here"
+    )));
     assert!(
         !text.contains("Setup checks"),
         "the initial panel stays compact"
@@ -69,7 +76,10 @@ fn next_steps_show_choices_without_registration_and_exclude_archived_items() {
     app.owner_ui.session.archive(item).unwrap();
     let text = next_steps_text(&mut app, &ctx);
     assert!(
-        text.contains("0 active credentials are available on this Mac"),
+        text.contains(concat!(
+            "0 active credentials are available on this ",
+            crate::computer!()
+        )),
         "{text}"
     );
     app.owner_ui.session.lock().unwrap();

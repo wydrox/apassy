@@ -9,6 +9,16 @@
 // A WebSocket upgrade goes to the relay only on `GET /v1/tunnel/*` (connect-tunnel-v1),
 // unchanged, and the relay's `101` comes back as it is; an upgrade anywhere else is
 // refused here. Dials (`GET /v1/tunnel/dial/*`) have their own per-address limiter.
+// One build serves both phases of the hosted relay (docs/operations/connect.md): the var
+// RELAY_MODE is `relay` (unset: today's hosted relay) or `connect` (after the cutover,
+// ADR 0037 stage 7). In `connect` mode the APNs sender `/internal/push` is off (404), the
+// free Connect routes `/v1/connect` and `/v1/connect/challenge` answer 410 `hosted_retired`
+// here (so they need no guard: CONNECT_LIMITER and CONNECT_PREFIX_LIMITER are not used, and
+// nothing reaches the relay), and the agent proxy `/p/` has the JSON cap (the relay has no
+// proxy there and answers 410). `/dl/*`, `/guide`, and `/install.sh` are the same in both.
+// Any other value is a configuration error: 503 on every relay route, 404 on
+// `/internal/*`; the static files stay. The deploy refuses a RELAY_MODE that differs from
+// the mode of the relay (scripts/check-relay-mode.mjs).
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
 // Node can run it with type stripping in the tests.
 // workerd accepts only handlers as exports of this main module, so values such as
@@ -53,6 +63,16 @@ export interface Env extends PushEnv {
   TUNNEL_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
+  /** `relay` (or unset) before the cutover, `connect` after it. A var. */
+  RELAY_MODE?: string;
+}
+
+/** The phase of the hosted relay that this Worker fronts, from RELAY_MODE; undefined for a bad value. */
+function relayMode(env: Env): "relay" | "connect" | undefined {
+  const mode = env.RELAY_MODE?.trim();
+  if (mode === undefined || mode === "" || mode === "relay") return "relay";
+  if (mode === "connect") return "connect";
+  return undefined;
 }
 
 const EDGE_HEADER = "x-apassy-edge";
@@ -116,7 +136,7 @@ function jsonError(status: number, code: string, message: string, extra: Record<
 // MAX_STRIPE_WEBHOOK_LENGTH, the agent proxy up to MAX_PROXY_LENGTH, everything else up
 // to MAX_JSON_LENGTH. A snapshot push, a feed put, and a webhook must declare their length.
 // Elsewhere a request without one has no body or a chunked one, which tiny_http does not drain.
-function lengthError(request: Request, path: string): Response | undefined {
+function lengthError(request: Request, path: string, connectMode: boolean): Response | undefined {
   const snapshot = request.method === "PUT" && path === SNAPSHOT_PATH;
   const feed = request.method === "PUT" && path === FEED_PATH;
   const webhook = request.method === "POST" && path === STRIPE_WEBHOOK_PATH;
@@ -150,7 +170,7 @@ function lengthError(request: Request, path: string): Response | undefined {
     if (Number(length) > MAX_STRIPE_WEBHOOK_LENGTH) {
       return jsonError(413, "payload_too_large", "The webhook body is larger than 256 KiB.");
     }
-  } else if (path.startsWith(PROXY_PREFIX)) {
+  } else if (path.startsWith(PROXY_PREFIX) && !connectMode) {
     if (Number(length) > MAX_PROXY_LENGTH) {
       return jsonError(413, "payload_too_large", "The body is larger than 8 MiB.");
     }
@@ -230,6 +250,11 @@ function staticResponse(response: Response, noStore: boolean): Response {
 
 /** The codeless team route (SPEC 26): anyone can call it, so its limiter is the strictest. */
 const CONNECT_PATH = "/v1/connect";
+/** The challenge of the codeless team route. */
+const CONNECT_CHALLENGE_PATH = "/v1/connect/challenge";
+/** The answer of the relay in `connect` mode to a retired route (relay SPEC 37.2). */
+const HOSTED_RETIRED =
+  "This route is retired: this relay serves Apassy Connect only (accounts, vault stores, billing, groups, and the tunnel). Approvals and teams run on your own Apassy node (ADR 0037).";
 
 // The per-IP limiter of a route. Creation (a team, a join, a device link) is rare;
 // sign-in is frequent (a waiting CLI asks every 5 s); a snapshot push holds a relay
@@ -268,9 +293,16 @@ export default {
     // Check the raw path before URL parsing removes dot segments or backslashes.
     const rawPath = request.url.replace(/^[^:]+:\/\/[^/?#]+/, "").split(/[?#]/, 1)[0]!;
     const url = new URL(request.url);
+    const mode = relayMode(env);
+    const connectMode = mode === "connect";
     // The parsed path is checked too: `/./internal/push` parses to `/internal/push`.
     for (const path of [rawPath, url.pathname]) {
-      if (path === "/internal" || path.startsWith("/internal/")) return handleInternal(request, env);
+      if (path === "/internal" || path.startsWith("/internal/")) {
+        // The APNs sender serves the hosted relay before the cutover only: Connect sends no
+        // push (the nodes use the push gateway, ADR 0037 D7). A bad mode keeps it off too.
+        if (mode !== "relay") return text(404, "not found");
+        return handleInternal(request, env);
+      }
     }
     // The relay refuses an upgrade on every other route too; it never reaches it from here.
     if (wantsUpgrade(request)) {
@@ -297,15 +329,23 @@ export default {
       return staticResponse(await env.ASSETS.fetch(assetRequest), noStore);
     }
 
+    if (mode === undefined) return text(503, "relay not configured");
+    // Connect has no free Connect teams: their two routes are retired, and the edge answers
+    // as the relay would, before a guard, a body, or the relay.
+    if (connectMode && (url.pathname === CONNECT_PATH || url.pathname === CONNECT_CHALLENGE_PATH)) {
+      return jsonError(410, "hosted_retired", HOSTED_RETIRED);
+    }
+
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     if (hasBody) {
-      const refused = lengthError(request, url.pathname);
+      const refused = lengthError(request, url.pathname, connectMode);
       if (refused) return refused;
     }
 
     // Connect has two guards, each on its own key: the client's /64 (or IPv4 address) first,
     // then its coarser /48 (or /24) prefix, asked only when the first one lets the call pass.
-    // Every other route has one guard, keyed by the full address.
+    // Every other route has one guard, keyed by the full address. (In `connect` mode the
+    // route answered 410 above.)
     const isConnect = request.method === "POST" && url.pathname === CONNECT_PATH;
     // A new account, and a recovery, are keyed like Connect's first guard: one client usually
     // holds a whole /64.

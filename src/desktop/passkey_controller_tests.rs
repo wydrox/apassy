@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use super::DesktopApp;
 use super::model::{DetailDraft, ItemDraft};
-use super::owner_check::OwnerRequest;
+use super::owner_check::{NO_ACCOUNT, OwnerRequest};
 use super::owner_socket::{self, Envelope, LineWire, PeerGone};
 use super::owner_store::{SecretForm, detail_field_name};
 use super::passkey_socket::{Out, PeerRule, PlatformEvent, PlatformTicket, read_bridge};
@@ -743,6 +743,18 @@ fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
     let bob = add_passkey(&app, "bob@example.com", "Bob");
     let answer = ask(&mut app, &ctx, Command::PasskeyGet(get_request(&[])));
     let request = app.owner.check.as_ref().unwrap().request.clone();
+    // The newest passkey comes first: Bob's login is the later one. The accounts differ,
+    // so none is chosen.
+    let OwnerRequest::SignPasskey {
+        accounts, chosen, ..
+    } = &request
+    else {
+        panic!("not a passkey request");
+    };
+    assert_eq!(*chosen, NO_ACCOUNT);
+    assert_eq!(accounts[0].credential_id, bob.credential_id);
+    assert_eq!(accounts[1].credential_id, ada.credential_id);
+    assert!(accounts.iter().all(|account| account.added.is_some()));
     assert!(!request.is_ready(), "no account is chosen");
     assert!(!request.starts_touch_id(), "Touch ID waits for the choice");
     let text = request.describe();
@@ -760,14 +772,15 @@ fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
     let OwnerAction::SignPasskey { credential_id, .. } = &chosen else {
         panic!("not a passkey action");
     };
-    assert_eq!(credential_id, &bob.credential_id);
+    assert_eq!(credential_id, &ada.credential_id);
     // A proof for the account before the choice is refused.
     let stale_choice = fresh_proof(&app, first);
     app.finish_owner_check_with(stale_choice);
     assert_eq!(now(&answer).code, "refused");
 
+    // The newest one, chosen and confirmed, signs.
     let answer = ask(&mut app, &ctx, Command::PasskeyGet(get_request(&[])));
-    app.choose_passkey(1);
+    app.choose_passkey(0);
     confirm(&mut app);
     let json = serde_json::to_value(now(&answer)).unwrap();
     assert_eq!(
@@ -780,6 +793,38 @@ fn several_accounts_wait_for_a_choice_and_sign_the_chosen_one() {
         client_json("webauthn.get", ORIGIN).as_bytes(),
     );
     assert_ne!(ada.credential_id, bob.credential_id);
+}
+
+#[test]
+fn two_passkeys_of_one_account_select_the_newest() {
+    let dir = TempDir::new().unwrap();
+    let mut app = unlocked_app(&dir);
+    let ctx = egui::Context::default();
+    let older = add_passkey(&app, "ada@example.com", "Ada");
+    let newer = add_passkey(&app, "ada@example.com", "Ada");
+    let answer = ask(&mut app, &ctx, Command::PasskeyGet(get_request(&[])));
+    let request = app.owner.check.as_ref().unwrap().request.clone();
+    // One account with two passkeys: the older one may be unknown to the site, so the
+    // newest is selected, and the owner can still choose the other.
+    let OwnerRequest::SignPasskey {
+        accounts, chosen, ..
+    } = &request
+    else {
+        panic!("not a passkey request");
+    };
+    assert_eq!(*chosen, 0);
+    assert_eq!(accounts[0].credential_id, newer.credential_id);
+    assert_eq!(accounts[1].credential_id, older.credential_id);
+    assert!(
+        request.is_ready(),
+        "the newest passkey of the account is chosen"
+    );
+    confirm(&mut app);
+    let json = serde_json::to_value(now(&answer)).unwrap();
+    assert_eq!(
+        json["data"]["credential_id"],
+        encode_bytes(&newer.credential_id)
+    );
 }
 
 // ---- Browser registration. ----

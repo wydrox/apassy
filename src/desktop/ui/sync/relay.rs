@@ -54,6 +54,7 @@ use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::desktop::companion::QrModules;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::desktop::owner_store::Ephemeral;
+use crate::desktop::sync_worker::ConnectState;
 use crate::desktop::{DesktopApp, Place};
 use crate::questions::device_link::{LinkedDeviceKind, shown_link_name, split_linked_device_name};
 use crate::questions::{QuestionsClient, TeamDevice};
@@ -80,9 +81,23 @@ const QUIT_WAIT: Duration = Duration::from_secs(3);
 /// A relay call whose thread ended without an answer.
 const LOST: &str = "The relay call ended without an answer. Try again.";
 /// A cancel of a link that the relay did not hear.
-const NOT_CANCELLED: &str = "The relay did not hear that this Mac cancelled. The link ends on its own within 10 minutes. If the other Mac shows this Mac, select “Refuse” there.";
+const NOT_CANCELLED: &str = concat!(
+    "The relay did not hear that this ",
+    crate::computer!(),
+    " cancelled. The link ends on its own within 10 minutes. If the other ",
+    crate::computer!(),
+    " shows this ",
+    crate::computer!(),
+    ", select “Refuse” there."
+);
 /// A device of a Mac that joined that Apassy could not remove.
-const NOT_REMOVED: &str = "Apassy could not remove this Mac from the relay. The other Mac shows it in “Devices…”: remove it there.";
+const NOT_REMOVED: &str = concat!(
+    "Apassy could not remove this ",
+    crate::computer!(),
+    " from the relay. The other ",
+    crate::computer!(),
+    " shows it in “Devices…”: remove it there."
+);
 /// The end of the state name of a relay sync that turns on, until the relay answered.
 const STAGED: &str = ".relay-new";
 /// The masked team code field of the "Apassy relay" sheet.
@@ -112,6 +127,10 @@ pub(crate) enum SetupMode {
     /// the node pairing link of `apassy pair` (node-pairing-v1, `/pair#`): its origin,
     /// its pin, its alternatives, and a one-use team code of kind `node`.
     Node,
+    /// "Apassy Connect" (plan s7 unit M3): the vault store of the account of this Mac,
+    /// offered while the account has a plan that pushes. A second Mac of the account
+    /// turns on the same way, without a link code, and merges.
+    Connect,
 }
 
 /// A relay call of the owner that runs on its own thread.
@@ -148,6 +167,12 @@ pub(crate) enum Job {
     UseCopy,
     /// The cancel of a Mac that joins.
     Cancel,
+    /// "Move the relay copy to Connect".
+    Move,
+    /// "Undo the move" after a move that kept both copies.
+    UndoMove,
+    /// The newer devices of the account join the vault store of the open vault.
+    Register,
 }
 
 impl Job {
@@ -156,19 +181,42 @@ impl Job {
         match self {
             Self::TurnOn => "Apassy turns relay sync on and uploads the vault…",
             Self::NewLink => "Apassy asks the relay for a link…",
-            Self::Links => "Apassy asks the relay for the Macs that wait…",
-            Self::Confirm => "Apassy adds the other Mac…",
-            Self::Refuse => "Apassy refuses the other Mac…",
-            Self::Devices => "Apassy asks the relay for the Macs…",
-            Self::Remove => "Apassy removes the Mac…",
-            Self::LastMac => "Apassy asks the relay for the Macs of the team…",
+            Self::Links => concat!(
+                "Apassy asks the relay for the ",
+                crate::computers!(),
+                " that wait…"
+            ),
+            Self::Confirm => concat!("Apassy adds the other ", crate::computer!(), "…"),
+            Self::Refuse => concat!("Apassy refuses the other ", crate::computer!(), "…"),
+            Self::Devices => concat!("Apassy asks the relay for the ", crate::computers!(), "…"),
+            Self::Remove => concat!("Apassy removes the ", crate::computer!(), "…"),
+            Self::LastMac => concat!(
+                "Apassy asks the relay for the ",
+                crate::computers!(),
+                " of the team…"
+            ),
             Self::SyncNow => "Apassy syncs with the relay…",
-            Self::Receipts => "Apassy asks the relay which Macs have the vault…",
-            Self::TurnOff => "Apassy removes this Mac from the relay team…",
-            Self::Replace => "Apassy uploads the vault of this Mac to the relay…",
+            Self::Receipts => concat!(
+                "Apassy asks the relay which ",
+                crate::computers!(),
+                " have the vault…"
+            ),
+            Self::TurnOff => concat!(
+                "Apassy removes this ",
+                crate::computer!(),
+                " from the relay team…"
+            ),
+            Self::Replace => concat!(
+                "Apassy uploads the vault of this ",
+                crate::computer!(),
+                " to the relay…"
+            ),
             Self::Passphrase => "Apassy checks the passphrase with the relay copy…",
             Self::UseCopy => "Apassy merges the relay copy and uploads the vault…",
             Self::Cancel => "Apassy cancels the link…",
+            Self::Move => "Apassy moves the relay copy to Apassy Connect…",
+            Self::UndoMove => "Apassy deletes the copy on Apassy Connect…",
+            Self::Register => "Apassy adds your other devices to the copy on Apassy Connect…",
         }
     }
 }
@@ -256,7 +304,21 @@ enum Reply {
     UsedCopy(Result<SyncOutcome, SyncError>),
     /// A cancel of a Mac that joins: the note when the relay did not hear it.
     Cancelled(Option<String>),
+    /// "Move the relay copy to Connect" ended: the relay sync of Connect that ran it,
+    /// the sync setting when it started, and the result.
+    Moved(Box<Moved>),
+    /// "Undo the move" ended.
+    Undone(Result<(), String>),
+    /// The newer devices of the account that joined the store of the open vault.
+    Registered(Vec<String>),
     Nothing,
+}
+
+/// The answer of "Move the relay copy to Connect".
+struct Moved {
+    connect: RelaySync,
+    before: Option<SyncLink>,
+    result: Result<crate::sync::ConnectEnableReport, crate::sync::MoveFailure>,
 }
 
 /// A relay call that runs, for the vault `id` (empty for a Mac that joins).
@@ -482,6 +544,10 @@ pub(crate) struct RelayUi {
     repaint: Option<egui::Context>,
     /// "Send questions through the relay" in Settings > Devices.
     pub(crate) questions: super::questions::QuestionsUi,
+    /// The text of the last move to Connect that did not finish, by list ID.
+    move_error: BTreeMap<String, String>,
+    /// The vault whose "Undo the move" waits for its owner check.
+    undo: Option<String>,
 }
 
 impl RelayUi {
@@ -599,6 +665,47 @@ pub(crate) fn tag(status: &UiStatus) -> (&'static str, Tone) {
         },
         // Folder statuses; the relay has no file to wait for.
         UiStatus::Waiting | UiStatus::FolderUnavailable => ("Relay not reachable", Tone::Warning),
+        UiStatus::Connect(state) => connect_tag(*state),
+    }
+}
+
+/// The short tag of a vault store of Apassy Connect in a plan state (plan s7 unit M3).
+pub(crate) fn connect_tag(state: ConnectState) -> (&'static str, Tone) {
+    match state {
+        ConnectState::PastDue { .. } => ("Connect: past due", Tone::Warning),
+        ConnectState::ReadOnly { .. } => ("Connect: read-only", Tone::Warning),
+        ConnectState::Suspended { .. } => ("Connect: suspended", Tone::Warning),
+        ConnectState::SignedOut => ("Connect: signed out", Tone::Warning),
+    }
+}
+
+/// The plan state of a vault store in a sentence: what works, what waits, and that
+/// nothing is lost on this Mac. No price and no purchase words (plans section 5).
+pub(crate) fn connect_words(state: ConnectState) -> String {
+    use crate::desktop::ui::connect::day;
+    match state {
+        ConnectState::PastDue { grace_until, .. } => match grace_until {
+            Some(until) => format!(
+                "Connect: past due. Sync works until {}. Update the payment method in Settings › Connect › Manage billing….",
+                day(until)
+            ),
+            None => "Connect: past due. Sync works for now. Update the payment method in Settings › Connect › Manage billing….".to_owned(),
+        },
+        ConnectState::ReadOnly { until } => format!(
+            "{}. Apassy downloads the changes of your other devices. The changes of this Mac stay on this Mac and go up when the plan is active again.",
+            match until {
+                Some(until) => format!("Connect: read-only until {}", day(until)),
+                None => "Connect: read-only".to_owned(),
+            }
+        ),
+        ConnectState::Suspended { delete_at } => match delete_at {
+            Some(at) => format!(
+                "Connect: suspended. Apassy Connect keeps the copy until {}. The vault on this Mac is safe.",
+                day(at)
+            ),
+            None => "Connect: suspended. The vault on this Mac is safe.".to_owned(),
+        },
+        ConnectState::SignedOut => "Connect: signed out on this Mac. Open Settings › Connect and select “Sign In…” to sync this vault.".to_owned(),
     }
 }
 
@@ -612,7 +719,7 @@ pub(crate) fn words(status: &UiStatus, received: Option<&Receipt>) -> String {
                 (Some(receipt), _) => line.push_str(&format!(
                     " Received by {} {}.",
                     match receipt.device_name.trim() {
-                        "" => "another Mac",
+                        "" => concat!("another ", crate::computer!()),
                         name => name,
                     },
                     ago(receipt.at)
@@ -622,9 +729,9 @@ pub(crate) fn words(status: &UiStatus, received: Option<&Receipt>) -> String {
             }
             line
         }
-        UiStatus::Syncing => "Saved on this Mac. A change waits for the relay.".to_owned(),
+        UiStatus::Syncing => concat!("Saved on this ", crate::computer!(), ". A change waits for the relay.").to_owned(),
         UiStatus::NeedsPassphrase => {
-            "The passphrase changed on another Mac. Type the new passphrase.".to_owned()
+            concat!("The passphrase changed on another ", crate::computer!(), ". Type the new passphrase.").to_owned()
         }
         UiStatus::Damaged => {
             "The copy on the relay fails a check. Apassy did not use it, and does not download it again until it changes.".to_owned()
@@ -634,13 +741,14 @@ pub(crate) fn words(status: &UiStatus, received: Option<&Receipt>) -> String {
                 "The relay asks Apassy to wait a minute. Apassy syncs after that.".to_owned()
             }
             Some(SyncError::Relay(RelayRefusal::TeamLimit)) => {
-                "The relay limits the pushes of this vault for this hour. The changes stay on this Mac and sync later.".to_owned()
+                concat!("The relay limits the pushes of this vault for this hour. The changes stay on this ", crate::computer!(), " and sync later.").to_owned()
             }
             _ => sentence(text),
         },
         UiStatus::Waiting | UiStatus::FolderUnavailable => {
             sentence(&SyncError::RelayUnreachable.to_string())
         }
+        UiStatus::Connect(state) => connect_words(*state),
     }
 }
 
@@ -656,7 +764,7 @@ pub(crate) const OLDER_COPY_WORDS: &str = "The copy on the relay uses another pa
 pub(crate) fn relay_sync_notice(relay_url: &str) -> Option<String> {
     crate::relay::membership::on_hosted_relay(relay_url).then(|| {
         format!(
-            "Relay sync on apassy-relay.wyderka.cc is free until Apassy {}. Then the hosted store is part of Apassy Connect; your own Mac or Linux node can be the sync home (free).",
+            concat!("Relay sync on apassy-relay.wyderka.cc is free until Apassy {}. Then the hosted store is part of Apassy Connect; your own ", crate::computer!(), " or Linux node can be the sync home (free)."),
             crate::relay::membership::FREE_RELAY_PATHS_END_VERSION
         )
     })
@@ -678,7 +786,13 @@ pub(crate) fn needs_team_code(url_input: &str, with_code: bool) -> bool {
 /// does, and that the free relay sync ends with Apassy Connect, by version (N1).
 pub(crate) fn codeless_copy_words() -> String {
     format!(
-        "No team code needed. Apassy makes a key for this Mac, keeps it in the vault, and uploads the encrypted copy. Relay sync is free until Apassy Connect starts with Apassy {}; then the hosted store is part of Apassy Connect, and your own Mac or Linux node can be the sync home (free).",
+        concat!(
+            "No team code needed. Apassy makes a key for this ",
+            crate::computer!(),
+            ", keeps it in the vault, and uploads the encrypted copy. Relay sync is free until Apassy Connect starts with Apassy {}; then the hosted store is part of Apassy Connect, and your own ",
+            crate::computer!(),
+            " or Linux node can be the sync home (free)."
+        ),
         crate::relay::membership::FREE_RELAY_PATHS_END_VERSION
     )
 }
@@ -695,15 +809,55 @@ fn typed_relay_url(typed: &str) -> Result<RelayUrl, String> {
 
 /// What "Your own node" says when the pasted text is a device link of another Mac, not
 /// the pairing link of a node.
-pub(crate) const NOT_A_PAIRING_LINK: &str =
-    "This is a link from another Mac. Choose “Join from another Mac” and paste it there.";
+pub(crate) const NOT_A_PAIRING_LINK: &str = concat!(
+    "This is a link from another ",
+    crate::computer!(),
+    ". Choose “Join from another ",
+    crate::computer!(),
+    "” and paste it there."
+);
 /// What "Join from another Mac" says for the pairing link of a node.
 pub(crate) const A_PAIRING_LINK: &str =
     "This is the pairing link of a node. Choose “Your own node” and paste it there.";
 
 /// The words of "Your own node" (plan S2–S3 unit L4): where the link comes from, and what
 /// Apassy checks.
-pub(crate) const NODE_SETUP_WORDS: &str = "Your own node keeps the encrypted copy of this vault on your Linux machine, over your tailnet. On the node, run “apassy pair” and paste the link that it prints. The link works once, for 10 minutes. Apassy connects only to the node whose certificate matches the link, makes a key for this Mac, and keeps it in the vault.";
+pub(crate) const NODE_SETUP_WORDS: &str = concat!(
+    "Your own node keeps the encrypted copy of this vault on your Linux machine, over your tailnet. On the node, run “apassy pair” and paste the link that it prints. The link works once, for 10 minutes. Apassy connects only to the node whose certificate matches the link, makes a key for this ",
+    crate::computer!(),
+    ", and keeps it in the vault."
+);
+
+/// Why "Apassy Connect" is not offered or did not start: no signed-in account with a
+/// plan that pushes. No price and no purchase words (plans section 5).
+pub(crate) const CONNECT_NEEDS_PLAN: &str = "Apassy Connect needs an account with an active plan on this Mac. Open Settings › Connect, sign in, and try again.";
+
+/// The words of the "Apassy Connect" choice (plan s7 unit M3).
+pub(crate) const CONNECT_SETUP_WORDS: &str = "Apassy Connect keeps the encrypted copy of this vault for your account and passes the changes between your devices within seconds. It never gets the passphrase. The account key of this Mac signs each change; it stays in the Keychain. Your other Macs of the account turn on the same way, without a link code, and merge.";
+
+/// The relay row of a move that kept both copies.
+pub(crate) const MOVE_BOTH_COPIES: &str = "The copy is on Apassy Connect, and the old copy is still on apassy-relay.wyderka.cc. Both copies are kept, and the vault syncs with the relay as before. Try again to finish the move, or undo it.";
+
+/// The relay row of a move whose old copy is deleted, while Connect did not turn on.
+pub(crate) const MOVE_OLD_DELETED: &str = "The copy is on Apassy Connect, and the old copy is deleted, but the sync with Apassy Connect did not turn on yet. The vault is safe on this Mac. Try again.";
+
+/// The words of "Move the relay copy to Connect" before it runs.
+pub(crate) const MOVE_WORDS: &str = "Apassy uploads this vault to Apassy Connect first and deletes the copy on apassy-relay.wyderka.cc second. If a step fails, both copies stay, and you can try again or undo.";
+
+/// "<names> got the vault on Apassy Connect too." for the devices that a Mac added.
+fn registered_words(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => format!(" “{one}” of your account can turn it on without a link code."),
+        many => format!(
+            " {} of your account can turn it on without a link code.",
+            many.iter()
+                .map(|name| format!("“{name}”"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
 
 /// The text of a failed relay call of an owner action.
 pub(super) fn call_error(error: SyncError) -> String {
@@ -723,14 +877,20 @@ pub(super) fn call_error(error: SyncError) -> String {
 /// The text of a failed join (contract section 7.2).
 fn join_error(error: SyncError) -> String {
     match error {
-        SyncError::Relay(RelayRefusal::JoinRefused) => {
-            "The other Mac refused, or the link expired. Make a new link on the other Mac."
-                .to_owned()
-        }
-        SyncError::Vault(VaultErrorKind::WrongKeyOrCorrupt) => {
-            "The passphrase does not open this vault. Nothing changed on this Mac. Type it again."
-                .to_owned()
-        }
+        SyncError::Relay(RelayRefusal::JoinRefused) => concat!(
+            "The other ",
+            crate::computer!(),
+            " refused, or the link expired. Make a new link on the other ",
+            crate::computer!(),
+            "."
+        )
+        .to_owned(),
+        SyncError::Vault(VaultErrorKind::WrongKeyOrCorrupt) => concat!(
+            "The passphrase does not open this vault. Nothing changed on this ",
+            crate::computer!(),
+            ". Type it again."
+        )
+        .to_owned(),
         SyncError::OtherVault => "The relay copy holds another vault. Nothing changed.".to_owned(),
         other => call_error(other),
     }
@@ -750,7 +910,12 @@ fn enable_error(error: SyncError, vault: &str, folder: bool, node: bool) -> Stri
             "The pairing link is wrong, used, or expired. Run “apassy pair” on the node for a new link. {stays}"
         ),
         SyncError::RelayUnreachable if node => format!(
-            "Your node is not reachable. Check that it runs (“apassy status”) and that this Mac is on the same tailnet, then try again. {stays}"
+            concat!(
+                "Your node is not reachable. Check that it runs (“apassy status”) and that this ",
+                crate::computer!(),
+                " is on the same tailnet, then try again. {stays}"
+            ),
+            stays = stays
         ),
         SyncError::PinMismatch => format!("{PIN_CHANGED_TEXT} {stays}"),
         SyncError::Relay(RelayRefusal::InviteInvalid) => format!(
@@ -954,6 +1119,7 @@ impl DesktopApp {
                 None => self.relay_lost(&id, job),
             }
         }
+        self.relay_undo_step();
     }
 
     /// A relay call whose thread ended without an answer.
@@ -1158,8 +1324,13 @@ impl DesktopApp {
                             Some(merge) => {
                                 let count = merge.inserted + merge.updated + merge.deleted;
                                 format!(
-                                    "Relay sync: {count} credential{} changed on this Mac.",
-                                    if count == 1 { "" } else { "s" }
+                                    concat!(
+                                        "Relay sync: {count} credential{} changed on this ",
+                                        crate::computer!(),
+                                        "."
+                                    ),
+                                    if count == 1 { "" } else { "s" },
+                                    count = count,
                                 )
                             }
                             None => "Saved to the relay.".to_owned(),
@@ -1187,9 +1358,13 @@ impl DesktopApp {
                     self.relay_close_sheet(id, |sheet| {
                         matches!(sheet, SyncSheet::ReplaceDamaged { .. })
                     });
-                    self.set_ok(
-                        "The relay has the vault of this Mac now. Your other Macs merge it at their next sync.",
-                    );
+                    self.set_ok(concat!(
+                        "The relay has the vault of this ",
+                        crate::computer!(),
+                        " now. Your other ",
+                        crate::computers!(),
+                        " merge it at their next sync."
+                    ));
                 }
                 Err(error) => {
                     self.set_err(format!(
@@ -1214,7 +1389,12 @@ impl DesktopApp {
                         .unwrap_or_default();
                     let done = if kept {
                         format!(
-                            "Apassy merged the relay copy into “{name}”, which keeps the passphrase of this Mac."
+                            concat!(
+                                "Apassy merged the relay copy into “{name}”, which keeps the passphrase of this ",
+                                crate::computer!(),
+                                "."
+                            ),
+                            name = name
                         )
                     } else {
                         format!("“{name}” uses the new passphrase.")
@@ -1290,6 +1470,38 @@ impl DesktopApp {
                     self.set_note(note);
                 }
             }
+            Reply::Moved(moved) => {
+                let Moved {
+                    connect,
+                    before,
+                    result,
+                } = *moved;
+                self.relay_moved(id, connect, before, result);
+            }
+            Reply::Registered(names) => {
+                if !names.is_empty() {
+                    let vault = self
+                        .vault_list
+                        .registry
+                        .get(id)
+                        .map(|entry| entry.name.clone())
+                        .unwrap_or_default();
+                    self.set_ok(format!(
+                        "“{vault}” is on Apassy Connect for your other devices too.{}",
+                        registered_words(&names)
+                    ));
+                }
+            }
+            Reply::Undone(result) => match result {
+                Ok(()) => {
+                    self.sync.relay.move_error.remove(id);
+                    self.set_ok(
+                        "The copy on Apassy Connect is deleted. The vault syncs with the relay as before."
+                            .to_owned(),
+                    );
+                }
+                Err(text) => self.set_err(text),
+            },
             Reply::Nothing => {}
         }
     }
@@ -1312,6 +1524,8 @@ impl DesktopApp {
         let name = name.as_str();
         // A node: a pinned relay (node-pairing-v1), the owner's own.
         let node = relay.config().trust != TlsTrust::System;
+        // A vault store of Apassy Connect: its session signs with the account key.
+        let connect = relay.uses_account_key();
         // The merge with the passphrase of the copy ended.
         if self.sync.relay.join.as_ref().is_some_and(|join| {
             join.target.as_deref() == Some(id) && matches!(join.phase, Phase::Merging { .. })
@@ -1372,17 +1586,44 @@ impl DesktopApp {
                 self.relay_close_sheet(id, |sheet| matches!(sheet, SyncSheet::RelaySetup { .. }));
                 self.set_ok(if typed {
                     format!(
-                        "“{name}” uses the passphrase of the relay copy now, as your other Macs, and merged with the copy. It syncs through the Apassy relay."
+                        concat!(
+                            "“{name}” uses the passphrase of the relay copy now, as your other ",
+                            crate::computers!(),
+                            ", and merged with the copy. It syncs through the Apassy relay."
+                        ),
+                        name = name
+                    )
+                } else if connect && joined {
+                    format!("“{name}” syncs through Apassy Connect and merged with the copy there.")
+                } else if connect && report.outcome.merge.is_some() {
+                    format!(
+                        "“{name}” syncs through Apassy Connect and merged with the copy of your other Mac. No link code was needed."
+                    )
+                } else if connect {
+                    format!(
+                        "“{name}” syncs through Apassy Connect. Your other Macs of the account get it in Settings › Vault › Sync › Apassy Connect, without a link code."
                     )
                 } else if joined {
-                    format!("“{name}” syncs through the Apassy relay and merged with the relay copy.")
+                    format!(
+                        "“{name}” syncs through the Apassy relay and merged with the relay copy."
+                    )
                 } else if node {
                     format!(
-                        "“{name}” syncs through your own node. To add another Mac or an iPhone, select “Add a device…”."
+                        concat!(
+                            "“{name}” syncs through your own node. To add another ",
+                            crate::computer!(),
+                            " or an iPhone, select “Add a device…”."
+                        ),
+                        name = name
                     )
                 } else {
                     format!(
-                        "“{name}” syncs through the Apassy relay. To add another Mac or an iPhone, select “Add a device…”."
+                        concat!(
+                            "“{name}” syncs through the Apassy relay. To add another ",
+                            crate::computer!(),
+                            " or an iPhone, select “Add a device…”."
+                        ),
+                        name = name
                     )
                 });
             }
@@ -1716,6 +1957,324 @@ impl DesktopApp {
         Ok(())
     }
 
+    /// Turn on the sync of the open, unlocked vault `id` through Apassy Connect with the
+    /// account of this Mac (plan s7 unit M3): `RelaySync::enable_on_connect_shared` on
+    /// its own thread makes the vault store (or takes the store of this vault), pushes
+    /// version 1 or merges the copy of another Mac of the account, and registers the
+    /// other devices of the account. As [`Self::relay_enable_new`] otherwise.
+    pub(crate) fn relay_enable_connect(&mut self, id: &str) -> Result<(), String> {
+        let entry = self.relay_target(id)?;
+        let account = self
+            .ui
+            .connect
+            .live
+            .sync_account()
+            .filter(|account| account.plan.entitled())
+            .ok_or_else(|| CONNECT_NEEDS_PLAN.to_owned())?;
+        let url = RelayUrl::parse(&account.origin).map_err(|error| sentence(&error.to_string()))?;
+        if self.relay_changing(id) {
+            return Ok(());
+        }
+        let relay = self.relay_staged(&entry, &url);
+        let before = entry.sync.clone();
+        let slot = self.relay_slot();
+        let name = entry.name;
+        let job = relay.clone();
+        self.relay_spawn_with(id, Job::TurnOn, Some(relay.clone()), move || {
+            let mut guard = lock(&account.account);
+            let (result, refused) = match guard.as_mut() {
+                None => (
+                    Err(SyncError::Relay(RelayRefusal::Error)),
+                    Some(crate::connect::ConnectError::SignedOut.to_string()),
+                ),
+                Some(account) => {
+                    match relay.enable_on_connect_shared(&slot, same_file(&relay), account, &name) {
+                        Ok(report) => (Ok(report.enable), None),
+                        Err(crate::sync::StoreError::Sync(error)) => (Err(error), None),
+                        Err(other) => (
+                            Err(SyncError::Relay(RelayRefusal::Error)),
+                            Some(other.to_string()),
+                        ),
+                    }
+                }
+            };
+            drop(guard);
+            Reply::TurnedOn(Box::new(TurnedOn {
+                relay: job,
+                name,
+                joined: false,
+                before,
+                result,
+                device: None,
+                typed: false,
+                rekeyed: false,
+                refused,
+            }))
+        });
+        Ok(())
+    }
+
+    /// Whether this Mac can sync through Apassy Connect now: an account that is signed
+    /// in, with a plan that pushes.
+    pub(crate) fn connect_sync_available(&self) -> bool {
+        self.ui
+            .connect
+            .live
+            .sync_account()
+            .is_some_and(|account| account.plan.entitled())
+    }
+
+    /// Whether "Move the relay copy to Connect" fits the vault `id`: it syncs through the
+    /// hosted relay with a key of its own, and this Mac can sync through Connect.
+    pub(crate) fn relay_can_move(&self, id: &str) -> bool {
+        let hosted = self
+            .relay_of(id)
+            .and_then(|relay| relay.state().ok().flatten())
+            .and_then(|state| state.relay_url)
+            .is_some_and(|url| crate::relay::membership::on_hosted_relay(&url));
+        hosted
+            && self.connect_sync_available()
+            && self
+                .relay_of(id)
+                .is_some_and(|relay| !relay.uses_account_key())
+    }
+
+    /// The move of the vault `id` that did not finish: its step and the text of its
+    /// failure, for the relay row.
+    pub(crate) fn relay_move_state(&self, id: &str) -> Option<(crate::sync::MoveStep, String)> {
+        let relay = self.relay_of(id).or_else(|| self.relay_old_of(id))?;
+        let record = relay.pending_move()?;
+        let text = self
+            .sync
+            .relay
+            .move_error
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| match record.step {
+                crate::sync::MoveStep::Pushed => MOVE_BOTH_COPIES.to_owned(),
+                crate::sync::MoveStep::OldDeleted => MOVE_OLD_DELETED.to_owned(),
+            });
+        Some((record.step, text))
+    }
+
+    /// The relay sync of the vault `id` under its own state name, also when the vault
+    /// list no longer names a relay (a move after its old copy went).
+    fn relay_old_of(&self, id: &str) -> Option<RelaySync> {
+        let entry = self.vault_list.registry.get(id)?;
+        Some(RelaySync::new(RelayConfig::in_data_dir(
+            &self.vault_list.data_dir,
+            &entry.path,
+            DEFAULT_RELAY_URL,
+            &entry.id,
+        )))
+    }
+
+    /// "Move the relay copy to Connect" for the open, unlocked vault `id` (plan s7 unit
+    /// M3): `RelaySync::move_to_connect_shared` on its own thread pushes to Connect first
+    /// and deletes the old copy second. The same call goes on after a failure.
+    pub(crate) fn relay_move_to_connect(&mut self, id: &str) -> Result<(), String> {
+        let entry = self.relay_target(id)?;
+        let account = self
+            .ui
+            .connect
+            .live
+            .sync_account()
+            .filter(|account| account.plan.entitled())
+            .ok_or_else(|| CONNECT_NEEDS_PLAN.to_owned())?;
+        let url = RelayUrl::parse(&account.origin).map_err(|error| sentence(&error.to_string()))?;
+        if self.relay_changing(id) {
+            return Ok(());
+        }
+        let old = self
+            .relay_of(id)
+            .or_else(|| self.relay_old_of(id))
+            .ok_or_else(|| "This vault has no relay copy to move.".to_owned())?;
+        let connect = self.relay_staged(&entry, &url);
+        let before = entry.sync.clone();
+        let slot = self.relay_slot();
+        let name = entry.name;
+        let job = connect.clone();
+        self.sync.relay.move_error.remove(id);
+        self.relay_spawn_with(id, Job::Move, Some(old.clone()), move || {
+            let mut guard = lock(&account.account);
+            let result = match guard.as_mut() {
+                None => Err(crate::sync::MoveFailure {
+                    step: old.pending_move().map(|record| record.step),
+                    error: crate::sync::StoreError::Connect(
+                        crate::connect::ConnectError::SignedOut,
+                    ),
+                }),
+                Some(account) => {
+                    old.move_to_connect_shared(&connect, &slot, same_file(&old), account, &name)
+                }
+            };
+            drop(guard);
+            Reply::Moved(Box::new(Moved {
+                connect: job,
+                before,
+                result,
+            }))
+        });
+        Ok(())
+    }
+
+    /// The answer of "Move the relay copy to Connect".
+    fn relay_moved(
+        &mut self,
+        id: &str,
+        connect: RelaySync,
+        before: Option<SyncLink>,
+        result: Result<crate::sync::ConnectEnableReport, crate::sync::MoveFailure>,
+    ) {
+        let name = self
+            .vault_list
+            .registry
+            .get(id)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default();
+        match result {
+            Ok(report) => {
+                self.sync.relay.move_error.remove(id);
+                // The old sync is off here; the vault list still names the old relay.
+                let relay = match self.relay_take_staged(id, &connect, before) {
+                    Ok(relay) => relay,
+                    Err(text) => {
+                        self.set_err(text);
+                        return;
+                    }
+                };
+                self.relay_linked(id, relay, report.enable.link, &report.enable.outcome);
+                self.set_ok(format!(
+                    "“{name}” syncs through Apassy Connect now. The copy on apassy-relay.wyderka.cc is deleted.{}",
+                    registered_words(&report.registered)
+                ));
+            }
+            Err(failure) => {
+                if failure.step == Some(crate::sync::MoveStep::OldDeleted) {
+                    // The old sync is off: the vault list no longer names the old relay.
+                    if let Some(listed) = self.vault_list.registry.entry_mut(id) {
+                        listed.sync = None;
+                    }
+                    lock(&self.sync.relay.cache).remove(id);
+                    self.save_vault_list();
+                    self.sync_track_open_vault();
+                    self.sync_refresh();
+                }
+                let _ = connect.disable(None);
+                let text = failure.to_string();
+                self.sync
+                    .relay
+                    .move_error
+                    .insert(id.to_owned(), text.clone());
+                self.set_err(text);
+            }
+        }
+    }
+
+    /// "Undo the move": the owner check for the deletion of the Connect copy first.
+    pub(crate) fn relay_ask_undo_move(&mut self, id: &str, ctx: Option<&egui::Context>) {
+        let Some(old) = self.relay_of(id).or_else(|| self.relay_old_of(id)) else {
+            return;
+        };
+        let Some(record) = old
+            .pending_move()
+            .filter(|record| record.step == crate::sync::MoveStep::Pushed)
+        else {
+            return;
+        };
+        let vault_name = self
+            .vault_list
+            .registry
+            .get(id)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default();
+        self.sync.relay.undo = Some(id.to_owned());
+        self.ask_owner(
+            OwnerRequest::DeleteVaultStore {
+                team_id: record.team_id,
+                vault_name,
+            },
+            ctx,
+        );
+    }
+
+    /// The undo of a move after its owner check: the proof of the check, once.
+    fn relay_undo_step(&mut self) {
+        let Some(id) = self.sync.relay.undo.clone() else {
+            return;
+        };
+        if self.ui.connect.live.guarded.is_some() {
+            return;
+        }
+        let Some(proof) = self.owner.take_connect_proof() else {
+            if self.owner.check.is_none() {
+                self.sync.relay.undo = None;
+            }
+            return;
+        };
+        self.sync.relay.undo = None;
+        let (Some(epoch), Some(old), Some(account)) = (
+            self.owner_ui.session.epoch(),
+            self.relay_of(&id).or_else(|| self.relay_old_of(&id)),
+            self.ui.connect.live.sync_account(),
+        ) else {
+            self.set_err(CONNECT_NEEDS_PLAN.to_owned());
+            return;
+        };
+        self.relay_spawn_with(&id, Job::UndoMove, None, move || {
+            let mut guard = lock(&account.account);
+            let result = match guard.as_mut() {
+                None => Err(crate::connect::ConnectError::SignedOut.to_string()),
+                Some(account) => old
+                    .undo_move(account, proof, &epoch)
+                    .map_err(|error| error.to_string()),
+            };
+            Reply::Undone(result)
+        });
+    }
+
+    /// The account key and the plan state of this Mac's Connect account go to the relay
+    /// sync of each vault (plan s7 unit M3): a vault store signs with that key and shows
+    /// the plan state. Settings › Connect calls it after each refresh.
+    pub(crate) fn relay_share_connect(&mut self) {
+        let Some(account) = self.ui.connect.live.sync_account() else {
+            return;
+        };
+        for relay in lock(&self.sync.relay.cache).values() {
+            if let Some(signer) = &account.signer {
+                relay.set_account_signers(Some(account.signers.clone()));
+                relay.set_account_signer(Some(Arc::clone(signer)));
+            }
+            relay.set_store_plan(Some(account.plan));
+        }
+        // The open vault store takes the newer devices of the account (connect-account-v1
+        // section 8); no owner check, as at its start (`register_own_store_device`).
+        if let Some(id) = self.current_vault().map(|entry| entry.id.clone())
+            && let Some(relay) = self.relay_of(&id).filter(RelaySync::uses_account_key)
+            && !self.relay_busy(&id, Job::Register)
+        {
+            let slot = Arc::clone(&account.account);
+            self.relay_spawn_with(&id, Job::Register, None, move || {
+                let mut guard = lock(&slot);
+                let names = guard
+                    .as_mut()
+                    .and_then(|account| relay.register_account_devices(account).ok())
+                    .unwrap_or_default();
+                Reply::Registered(names)
+            });
+        }
+        // A vault store that waited for the account syncs now.
+        if let Some(id) = self.current_vault().map(|entry| entry.id.clone())
+            && matches!(
+                self.sync.statuses.get(&id),
+                Some(UiStatus::Connect(ConnectState::SignedOut))
+            )
+            && account.signer.is_some()
+        {
+            self.relay_sync_now(&id);
+        }
+    }
+
     /// The relay sync of the vault `entry` that turns on, with its state under a name of
     /// its own ([`STAGED`]) until the relay answered. A state of an earlier try goes. The
     /// trust of `url` goes with it: a node (a pinned origin, node-pairing-v1) connects
@@ -1762,7 +2321,13 @@ impl DesktopApp {
                 let _ = staged.disable(None);
             }
             return Err(format!(
-                "Relay sync of “{}” did not turn on: its sync setting changed in the meantime. The relay team stays; remove this Mac in “Devices…” on another Mac, or ask the operator of the relay.",
+                concat!(
+                    "Relay sync of “{}” did not turn on: its sync setting changed in the meantime. The relay team stays; remove this ",
+                    crate::computer!(),
+                    " in “Devices…” on another ",
+                    crate::computer!(),
+                    ", or ask the operator of the relay."
+                ),
                 entry.name
             ));
         }
@@ -1821,6 +2386,7 @@ impl DesktopApp {
         }
         lock(&self.sync.relay.cache).insert(id.to_owned(), relay);
         self.save_vault_list();
+        self.relay_share_connect();
         self.sync_track_open_vault();
         self.sync_note_merge(id, outcome);
         self.sync_refresh();
@@ -2040,17 +2606,48 @@ impl DesktopApp {
                 return;
             }
             Left::Deleted => {
-                format!("{off} The copy on the relay is deleted. The vault on this Mac stays.")
+                format!(
+                    concat!(
+                        "{off} The copy on the relay is deleted. The vault on this ",
+                        crate::computer!(),
+                        " stays."
+                    ),
+                    off = off
+                )
             }
             Left::Removed => format!("{off} The copy on the relay stays."),
             Left::Gone => format!(
-                "{off} The copy on the relay stays. This Mac was no longer in the relay team. If the relay was paused and this Mac still shows in “Devices…” on another Mac, remove it there."
+                concat!(
+                    "{off} The copy on the relay stays. This ",
+                    crate::computer!(),
+                    " was no longer in the relay team. If the relay was paused and this ",
+                    crate::computer!(),
+                    " still shows in “Devices…” on another ",
+                    crate::computer!(),
+                    ", remove it there."
+                ),
+                off = off
             ),
             Left::LastMac => format!(
-                "{off} The copy on the relay stays. This Mac was the last Mac of the relay team, so only the operator of the relay can delete the copy now."
+                concat!(
+                    "{off} The copy on the relay stays. This ",
+                    crate::computer!(),
+                    " was the last ",
+                    crate::computer!(),
+                    " of the relay team, so only the operator of the relay can delete the copy now."
+                ),
+                off = off
             ),
             Left::Kept(reason) => format!(
-                "{off} The copy on the relay stays. This Mac is still in the relay team ({reason}): remove it in “Devices…” on another Mac."
+                concat!(
+                    "{off} The copy on the relay stays. This ",
+                    crate::computer!(),
+                    " is still in the relay team ({reason}): remove it in “Devices…” on another ",
+                    crate::computer!(),
+                    "."
+                ),
+                off = off,
+                reason = reason
             ),
         };
         self.sync_disable(id);
@@ -2566,7 +3163,11 @@ impl DesktopApp {
             }
             Err(SyncError::Relay(RelayRefusal::Conflict)) => {
                 forget_link(self);
-                self.set_err("The relay's record of this Mac does not match. Nothing was added.");
+                self.set_err(concat!(
+                    "The relay's record of this ",
+                    crate::computer!(),
+                    " does not match. Nothing was added."
+                ));
             }
             Err(error) => self.set_err(format!("Nothing was added. {}", call_error(error))),
         }
@@ -2726,7 +3327,8 @@ impl DesktopApp {
         relay.join_error = None;
         let text = Zeroizing::new(relay.link_input.trim().to_owned());
         if text.is_empty() {
-            relay.join_error = Some("Paste the link from the other Mac.".to_owned());
+            relay.join_error =
+                Some(concat!("Paste the link from the other ", crate::computer!(), ".").to_owned());
             return;
         }
         let url_field = match relay.url_input.trim() {
@@ -2748,6 +3350,31 @@ impl DesktopApp {
             "" => device_name(),
             typed => typed.to_owned(),
         };
+        // A link of a vault store of Apassy Connect (a shared Family or Team vault, or a
+        // vault of the account): this Mac joins with its account key (plan s7 unit M3).
+        let account = self
+            .ui
+            .connect
+            .live
+            .sync_account()
+            .filter(|account| RelayUrl::parse(&account.origin).is_ok_and(|own| own.as_str() == url))
+            .and_then(|account| account.signer);
+        let relay = &mut self.sync.relay;
+        if let Some(signer) = account {
+            relay.join_key = None;
+            self.relay_join_cancel();
+            let task = Task::spawn(ctx.cloned(), move || {
+                PendingJoin::request_with_account(&text, &url_field, &device, signer)
+            });
+            self.sync.relay.join = Some(Join {
+                target,
+                url,
+                team: String::new(),
+                safety: String::new(),
+                phase: Phase::Requesting(task),
+            });
+            return;
+        }
         // One key for each pasted code: a retry after a lost answer is the same request.
         let key = match relay
             .join_key
@@ -3177,7 +3804,14 @@ impl DesktopApp {
         }
         let _ = self.apply(
             unlocked,
-            &format!("“{name}” is on this Mac. Relay sync is on."),
+            &format!(
+                concat!(
+                    "“{name}” is on this ",
+                    crate::computer!(),
+                    ". Relay sync is on."
+                ),
+                name = name
+            ),
         );
         None
     }
@@ -3304,18 +3938,44 @@ fn join_progress(ui: &mut egui::Ui, view: &JoinView) {
         }
         JoinView::Waiting { safety } => safety_lines(
             ui,
-            "Waiting for the other Mac… Both Macs show:",
+            concat!(
+                "Waiting for the other ",
+                crate::computer!(),
+                "… Both ",
+                crate::computers!(),
+                " show:"
+            ),
             safety,
-            "Confirm on the other Mac if it shows the same words.",
+            concat!(
+                "Confirm on the other ",
+                crate::computer!(),
+                " if it shows the same words."
+            ),
         ),
         JoinView::Downloading { team } => kit::tone_note(
             ui,
-            format!("The other Mac confirmed this Mac. Apassy downloads “{team}” from the relay…"),
+            format!(
+                concat!(
+                    "The other ",
+                    crate::computer!(),
+                    " confirmed this ",
+                    crate::computer!(),
+                    ". Apassy downloads “{team}” from the relay…"
+                ),
+                team = team
+            ),
             Tone::Accent,
         ),
         JoinView::Ready { team } => kit::tone_note(
             ui,
-            format!("“{team}” is on this Mac, still encrypted."),
+            format!(
+                concat!(
+                    "“{team}” is on this ",
+                    crate::computer!(),
+                    ", still encrypted."
+                ),
+                team = team
+            ),
             Tone::Good,
         ),
         JoinView::Opening { team } => kit::tone_note(
@@ -3326,7 +3986,14 @@ fn join_progress(ui: &mut egui::Ui, view: &JoinView) {
         JoinView::Passphrase { team } => kit::tone_note(
             ui,
             format!(
-                "The other Mac confirmed this Mac. The relay copy of “{team}” uses another passphrase than this vault."
+                concat!(
+                    "The other ",
+                    crate::computer!(),
+                    " confirmed this ",
+                    crate::computer!(),
+                    ". The relay copy of “{team}” uses another passphrase than this vault."
+                ),
+                team = team
             ),
             Tone::Warning,
         ),
@@ -3358,7 +4025,7 @@ pub(super) fn link_fields(app: &mut DesktopApp, s: &mut kit::Section<'_>, focus:
     if focus {
         kit::claim_start_focus(&mut app.ui.focus_start_field, &link);
     }
-    s.field("Name of this Mac", |ui| {
+    s.field(concat!("Name of this ", crate::computer!()), |ui| {
         kit::text_input(
             ui,
             &mut app.sync.relay.device_input,
@@ -3385,21 +4052,32 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
         kit::sheet_title(
             ui,
             &format!("Sync “{}” through the Apassy relay", entry.name),
-            Some(
-                "The relay keeps one encrypted copy of this vault and passes the changes of each Mac to the others within seconds. It never gets the passphrase, so it cannot open the vault. Agents, their exceptions, your answers, and the activity stay on each Mac.",
-            ),
+            Some(concat!(
+                "The relay keeps one encrypted copy of this vault and passes the changes of each ",
+                crate::computer!(),
+                " to the others within seconds. It never gets the passphrase, so it cannot open the vault. Agents, their exceptions, your answers, and the activity stay on each ",
+                crate::computer!(),
+                "."
+            )),
         );
+        // "Apassy Connect" while this Mac has an account with a plan that pushes.
+        let connect = app.connect_sync_available();
+        if !connect && app.sync.relay.mode == SetupMode::Connect {
+            app.sync.relay.mode = SetupMode::NewCopy;
+        }
         if joining.is_none() {
-            kit::segmented(
-                ui,
-                "sync-relay-mode",
-                &mut app.sync.relay.mode,
-                &[
-                    (SetupMode::NewCopy, "New relay copy"),
-                    (SetupMode::Join, "Join from another Mac"),
-                    (SetupMode::Node, "Your own node"),
-                ],
-            );
+            let mut modes = vec![
+                (SetupMode::NewCopy, "New relay copy"),
+                (
+                    SetupMode::Join,
+                    concat!("Join from another ", crate::computer!()),
+                ),
+                (SetupMode::Node, "Your own node"),
+            ];
+            if connect {
+                modes.insert(0, (SetupMode::Connect, "Apassy Connect"));
+            }
+            kit::segmented(ui, "sync-relay-mode", &mut app.sync.relay.mode, &modes);
             ui.add_space(12.0);
         }
         match (app.sync.relay.mode, &joining) {
@@ -3410,7 +4088,11 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                     ui,
                     None,
                     Some(&format!(
-                        "Type the passphrase of the relay copy. “{}” takes it, as on your other Macs, and Apassy merges the copy into it. From then on you unlock “{}” with the passphrase of the copy.",
+                        concat!(
+                            "Type the passphrase of the relay copy. “{}” takes it, as on your other ",
+                            crate::computers!(),
+                            ", and Apassy merges the copy into it. From then on you unlock “{}” with the passphrase of the copy."
+                        ),
                         entry.name, entry.name
                     )),
                     |s| {
@@ -3430,12 +4112,15 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                 );
             }
             (_, Some(view)) => join_progress(ui, view),
+            (SetupMode::Connect, None) => {
+                kit::section(ui, None, Some(CONNECT_SETUP_WORDS), |_| {});
+            }
             (SetupMode::NewCopy, None) => {
                 // The hosted relay needs no team code (plan s7 unit S0).
                 let hosted = !needs_team_code(&app.sync.relay.url_input, false);
                 let code = needs_team_code(&app.sync.relay.url_input, app.sync.relay.with_code);
                 let words = if code {
-                    "The operator of the relay gives you a team code. It works once. Apassy makes a key for this Mac and keeps it in the vault.".to_owned()
+                    concat!("The operator of the relay gives you a team code. It works once. Apassy makes a key for this ", crate::computer!(), " and keeps it in the vault.").to_owned()
                 } else {
                     codeless_copy_words()
                 };
@@ -3467,7 +4152,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                             )
                         });
                     }
-                    s.field("Name of this Mac", |ui| {
+                    s.field(concat!("Name of this ", crate::computer!()), |ui| {
                         kit::text_input(
                             ui,
                             &mut app.sync.relay.device_input,
@@ -3488,7 +4173,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                         )
                     });
                     kit::claim_start_focus(&mut app.ui.focus_start_field, &link);
-                    s.field("Name of this Mac", |ui| {
+                    s.field(concat!("Name of this ", crate::computer!()), |ui| {
                         kit::text_input(
                             ui,
                             &mut app.sync.relay.device_input,
@@ -3502,9 +4187,21 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                 kit::section(
                     ui,
                     None,
-                    Some(
-                        "For a vault that is on the relay already. On the Mac that syncs it, select “Add a device…” and copy the link. Apassy merges the relay copy with this vault.",
-                    ),
+                    Some(if connect {
+                        concat!(
+                            "For a vault that is on the relay or on Apassy Connect already. On the ",
+                            crate::computer!(),
+                            " that syncs it, select “Add a device…” and copy the link. Apassy merges the copy with this vault. A family or team vault that someone shares with you joins the same way: their ",
+                            crate::computer!(),
+                            " shows the same words as this one, and you type the passphrase of the vault."
+                        )
+                    } else {
+                        concat!(
+                            "For a vault that is on the relay already. On the ",
+                            crate::computer!(),
+                            " that syncs it, select “Add a device…” and copy the link. Apassy merges the relay copy with this vault."
+                        )
+                    }),
                     |s| {
                         s.field("Relay address", |ui| {
                             kit::text_input(
@@ -3532,7 +4229,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                         merge |= kit::button(ui, "Merge", Style::Prominent).clicked();
                     }
                     (_, Some(_)) => {}
-                    (SetupMode::NewCopy | SetupMode::Node, None) => {
+                    (SetupMode::NewCopy | SetupMode::Node | SetupMode::Connect, None) => {
                         turn_on |= kit::button(ui, "Turn on", Style::Prominent).clicked();
                     }
                     (SetupMode::Join, None) => {
@@ -3546,7 +4243,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
     // Return in a field, or with no focus, does the default action of the sheet.
     if joining.is_none() && !busy && super::super::save_pressed(app, ctx) {
         match app.sync.relay.mode {
-            SetupMode::NewCopy | SetupMode::Node => turn_on = true,
+            SetupMode::NewCopy | SetupMode::Node | SetupMode::Connect => turn_on = true,
             SetupMode::Join => send = true,
         }
     }
@@ -3558,6 +4255,11 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
         forget_secret_field(ctx, super::SYNC_PASSPHRASE_FIELD);
         // The answer of the relay closes the sheet, or asks again.
         app.relay_join_passphrase(passphrase.into_zeroizing());
+    } else if turn_on && app.sync.relay.mode == SetupMode::Connect {
+        // The answer of Connect closes the sheet ([`Job::TurnOn`]).
+        if let Err(text) = app.relay_enable_connect(&entry.id) {
+            app.set_err(text);
+        }
     } else if turn_on && app.sync.relay.mode == SetupMode::Node {
         // The team code of the link works once: the field forgets it after each try.
         let link = Zeroizing::new(std::mem::take(&mut app.sync.relay.pair_input));
@@ -3672,7 +4374,13 @@ pub(super) fn add_mac_sheet(
     } else {
         (
             format!("Add a device to “{}”", entry.name),
-            "On an iPhone, open Apassy, select “Add your vault”, and scan this code. On another Mac, open Apassy, select “Use a vault from another Mac”, then Apassy relay, and paste the link. The link works once, for 10 minutes. It gives nothing until you confirm the device here.",
+            concat!(
+                "On an iPhone, open Apassy, select “Add your vault”, and scan this code. On another ",
+                crate::computer!(),
+                ", open Apassy, select “Use a vault from another ",
+                crate::computer!(),
+                "”, then Apassy relay, and paste the link. The link works once, for 10 minutes. It gives nothing until you confirm the device here."
+            ),
             "asks to sync",
         )
     };
@@ -4192,10 +4900,17 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
     let response = kit::sheet(ctx, "sync-relay-devices", 500.0, |ui| {
         kit::sheet_title(
             ui,
-            &format!("Macs that sync “{}”", entry.name),
-            Some(
-                "Each Mac has its own key on the relay. A removed Mac keeps its copy of the vault and the passphrase: to lock a person out, also change the passphrase and rotate each credential.",
+            &format!(
+                concat!(crate::computers_cap!(), " that sync “{}”"),
+                entry.name
             ),
+            Some(concat!(
+                "Each ",
+                crate::computer!(),
+                " has its own key on the relay. A removed ",
+                crate::computer!(),
+                " keeps its copy of the vault and the passphrase: to lock a person out, also change the passphrase and rotate each credential."
+            )),
         );
         progress(app, ui, &entry.id, Job::Remove);
         match &list {
@@ -4213,7 +4928,11 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                                     .wrap(),
                                 );
                                 if device.current {
-                                    kit::tag(ui, "This Mac", Tone::Neutral);
+                                    kit::tag(
+                                        ui,
+                                        concat!("This ", crate::computer!()),
+                                        Tone::Neutral,
+                                    );
                                 }
                             });
                             let seen = device.last_seen_at.map_or_else(
@@ -4337,13 +5056,13 @@ pub(super) fn turn_off_sheet(
     let response = kit::sheet(ctx, "sync-relay-turn-off", 480.0, |ui| {
         let mut text = match (open, last) {
             (false, _) => {
-                "The key of this Mac for the relay is in the vault. Open and unlock the vault to turn relay sync off: the key then leaves the vault, and this Mac leaves the relay team."
+                concat!("The key of this ", crate::computer!(), " for the relay is in the vault. Open and unlock the vault to turn relay sync off: the key then leaves the vault, and this ", crate::computer!(), " leaves the relay team.")
             }
             (true, Some(true)) => {
-                "Apassy stops merging this vault, and its key for the relay leaves the vault. The vault on this Mac stays. This Mac is the last Mac of the relay team: the copy on the relay stays unless you delete it now."
+                concat!("Apassy stops merging this vault, and its key for the relay leaves the vault. The vault on this ", crate::computer!(), " stays. This ", crate::computer!(), " is the last ", crate::computer!(), " of the relay team: the copy on the relay stays unless you delete it now.")
             }
             (true, _) => {
-                "Apassy stops merging this vault, and this Mac leaves the relay team. The vault on this Mac stays. The copy on the relay stays, and your other Macs keep syncing with it. To sync this Mac again, add it from another Mac."
+                concat!("Apassy stops merging this vault, and this ", crate::computer!(), " leaves the relay team. The vault on this ", crate::computer!(), " stays. The copy on the relay stays, and your other ", crate::computers!(), " keep syncing with it. To sync this ", crate::computer!(), " again, add it from another ", crate::computer!(), ".")
             }
         }
         .to_owned();
@@ -4364,9 +5083,11 @@ pub(super) fn turn_off_sheet(
             kit::section(ui, None, None, |s| {
                 s.toggle(
                     "Delete the copy on the relay",
-                    Some(
-                        "Apassy deletes every version of the copy on the relay. The vault on this Mac stays.",
-                    ),
+                    Some(concat!(
+                        "Apassy deletes every version of the copy on the relay. The vault on this ",
+                        crate::computer!(),
+                        " stays."
+                    )),
                     &mut turn_off.delete,
                 );
             });
@@ -4421,7 +5142,13 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let view = app.sync.relay.join_view(None);
     kit::paragraph(
         ui,
-        "On the Mac that has the vault, open Settings > Vault > Sync, select “Add a device…”, and copy the link. Paste it here. Both Macs then show the same two words.",
+        concat!(
+            "On the ",
+            crate::computer!(),
+            " that has the vault, open Settings > Vault > Sync, select “Add a device…”, and copy the link. Paste it here. Both ",
+            crate::computers!(),
+            " then show the same two words."
+        ),
         Font::Callout,
         kit::palette().secondary,
     );
@@ -4462,9 +5189,13 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
             kit::section(
                 ui,
                 None,
-                Some(
-                    "Use the passphrase of the vault on the other Mac. Apassy keeps a local copy on this Mac.",
-                ),
+                Some(concat!(
+                    "Use the passphrase of the vault on the other ",
+                    crate::computer!(),
+                    ". Apassy keeps a local copy on this ",
+                    crate::computer!(),
+                    "."
+                )),
                 |s| {
                     let field = s.field("Vault passphrase", |ui| {
                         secure_input(
@@ -4482,7 +5213,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         app,
                         s,
                         "vault-relay-name",
-                        "Name on this Mac",
+                        concat!("Name on this ", crate::computer!()),
                     );
                 },
             );
@@ -4533,7 +5264,23 @@ pub(super) fn use_copy_sheet(
             ui,
             "Use the copy on the relay?",
             Some(&format!(
-                "This Mac refuses the copy of “{}” on the relay: it is older than the copy that this Mac saw last, or its history does not include the last change of this Mac. That happens when the relay comes back from a backup. Apassy can take the relay copy as it is now, merge it with the vault on this Mac, and upload the result. Nothing on this Mac is lost. First look at the Macs in “Devices…”, and remove a Mac that you do not know.",
+                concat!(
+                    "This ",
+                    crate::computer!(),
+                    " refuses the copy of “{}” on the relay: it is older than the copy that this ",
+                    crate::computer!(),
+                    " saw last, or its history does not include the last change of this ",
+                    crate::computer!(),
+                    ". That happens when the relay comes back from a backup. Apassy can take the relay copy as it is now, merge it with the vault on this ",
+                    crate::computer!(),
+                    ", and upload the result. Nothing on this ",
+                    crate::computer!(),
+                    " is lost. First look at the ",
+                    crate::computers!(),
+                    " in “Devices…”, and remove a ",
+                    crate::computer!(),
+                    " that you do not know."
+                ),
                 entry.name
             )),
         );
@@ -4666,5 +5413,78 @@ mod access_repair_tests {
             watch_confirm_title("Test Watch"),
             "Connect Apple Watch “Test Watch”"
         );
+    }
+
+    /// The plan states of a vault store of Apassy Connect (plan s7 unit M3): the tag
+    /// and the sentence name the state and its date, say that pulls go on and that the
+    /// changes of this Mac stay, and never name a price or a purchase (plans section 5).
+    #[test]
+    fn the_connect_states_say_what_works_with_their_date() {
+        use crate::sync::StorePlan;
+        let read_only = ConnectState::refused(Some(StorePlan::ReadOnly {
+            until: Some(1_799_020_800),
+        }));
+        assert_eq!(
+            read_only,
+            ConnectState::ReadOnly {
+                until: Some(1_799_020_800)
+            }
+        );
+        let words = connect_words(read_only);
+        assert!(
+            words.starts_with("Connect: read-only until 4 Jan 2027."),
+            "{words}"
+        );
+        assert!(words.contains("downloads the changes of your other devices"));
+        assert!(words.contains("stay on this Mac"));
+        assert_eq!(connect_tag(read_only).0, "Connect: read-only");
+        assert_eq!(
+            ConnectState::refused(None),
+            ConnectState::ReadOnly { until: None },
+            "a refusal before the plan is known is read-only too"
+        );
+        assert!(connect_words(ConnectState::refused(None)).starts_with("Connect: read-only."));
+        let past_due = ConnectState::PastDue {
+            last: None,
+            grace_until: Some(1_796_860_800),
+        };
+        assert_eq!(connect_tag(past_due).0, "Connect: past due");
+        assert!(
+            connect_words(past_due).contains("Sync works until 10 Dec 2026"),
+            "{}",
+            connect_words(past_due)
+        );
+        assert!(
+            connect_words(ConnectState::SignedOut).contains("Settings › Connect"),
+            "the way on"
+        );
+        for state in [
+            read_only,
+            past_due,
+            ConnectState::Suspended {
+                delete_at: Some(1_805_000_000),
+            },
+            ConnectState::SignedOut,
+        ] {
+            let text = connect_words(state);
+            for refused in ["€", "$", "Buy", "Subscribe", "Upgrade", "free"] {
+                assert!(!text.contains(refused), "{refused}: {text}");
+            }
+            // The status of a store is a warning in every state.
+            assert_eq!(connect_tag(state).1, Tone::Warning);
+            assert_eq!(UiStatus::Connect(state).tag().0, connect_tag(state).0);
+        }
+        // The words of the setup and of the move follow the same rules.
+        for text in [
+            CONNECT_SETUP_WORDS,
+            CONNECT_NEEDS_PLAN,
+            MOVE_WORDS,
+            MOVE_BOTH_COPIES,
+            MOVE_OLD_DELETED,
+        ] {
+            for refused in ["€", "Buy", "Subscribe", "Upgrade", "paid"] {
+                assert!(!text.contains(refused), "{refused}: {text}");
+            }
+        }
     }
 }

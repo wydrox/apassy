@@ -331,11 +331,25 @@ pub(super) fn draw(ui: &mut Ui, view: &OverviewView, now: u64, offset: i64) -> O
         "Median answer: the time you took to answer.",
     ];
     if view.several {
-        notes.push("Across Macs the median is each Mac's median, weighted by its answers.");
-        notes.push("Other Macs count from their reports; allowed runs are approximate.");
+        notes.push(concat!(
+            "Across ",
+            crate::computers!(),
+            " the median is each ",
+            crate::computer!(),
+            "'s median, weighted by its answers."
+        ));
+        notes.push(concat!(
+            "Other ",
+            crate::computers!(),
+            " count from their reports; allowed runs are approximate."
+        ));
     }
     if view.totals.partial {
-        notes.push("A Mac on an older Apassy reports no numbers: it counts as —.");
+        notes.push(concat!(
+            "A ",
+            crate::computer!(),
+            " on an older Apassy reports no numbers: it counts as —."
+        ));
     }
     ui.add_space(10.0);
     ui.horizontal(|ui| {
@@ -524,7 +538,7 @@ fn environments(ui: &mut Ui, rows: &[EnvRow]) -> Option<Action> {
                     ui.horizontal(|ui| {
                         ui.label(kit::text(&row.name, Font::Body).color(kit::palette().label));
                         if row.this_mac {
-                            kit::cap_toned(ui, "This Mac", Tone::Accent);
+                            kit::cap_toned(ui, concat!("This ", crate::computer!()), Tone::Accent);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(

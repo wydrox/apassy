@@ -144,6 +144,8 @@ svg{display:block}
 .fr .k{flex:none;min-width:130px;color:var(--label)}
 .fr .v{flex:1;min-width:0;text-align:right;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fr .v.l{text-align:left;color:var(--label);white-space:normal}
+.fr.pl{flex-wrap:wrap;row-gap:2px}
+.fr.pl .pst{flex-basis:100%;text-align:left;color:var(--sec);white-space:normal;line-height:1.4}
 .fr .kn{flex:1;min-width:0}
 .fr .kn .nt{font-size:12px;color:var(--sec);margin-top:2px;line-height:1.4}
 .fr .chev,.tr .chev{color:var(--ter);font-size:15px}
@@ -619,7 +621,7 @@ svg{display:block}
       <div class="sbar"><span class="btn left">Check Again</span><span class="btn pri">Close</span></div>
     </div>
   </div>
-  <ul class="fnotes"><li><b>Polling</b>: <code>GET /v1/account</code> every 3 s while the sheet is open; it stops on an entitled plan (5b), on Cancel, or after 30 minutes (5c). The browser's return never changes the plan: only the webhook does.</li><li><b>Open the Page Again</b> opens the same Checkout URL again. Cancel closes the sheet; a payment that the owner still finishes in the browser shows on the next refresh of the section.</li><li><b>apassy://connect/done</b>: the app bundle has no URL scheme yet, and eframe gives no open-URL event; polling is the only path (the plan allows it). The done page's link does nothing until a later unit registers the scheme.</li></ul>
+  <ul class="fnotes"><li><b>Polling</b>: <code>GET /v1/account</code> every 3 s while the sheet is open; it stops on an entitled plan (5b), on Cancel, or after 30 minutes (5c). The browser's return never changes the plan: only the webhook does.</li><li><b>Open the Page Again</b> opens the same Checkout URL again. Cancel closes the sheet; a payment that the owner still finishes in the browser shows on the next refresh of the section.</li><li><b>No link back to the app</b>: the app bundle registers no URL scheme, and eframe gives no open-URL event; polling is the only path (the plan allows it). The done page says "Apassy on your Mac shows your plan in a moment. You can close this page." as text, with no link.</li></ul>
 </section>
 <!-- ============================================================ 6 -->
 <section class="frame" id="f6">
@@ -627,30 +629,30 @@ svg{display:block}
     <span>The Plan row of the Apassy Connect group, from the PlanView of GET /v1/account (connect-billing-v1 section 8).</span></div>
   <div class="pgrid"><div class="pcard"><div class="plabel">6a · Active<small>Status line: Connect Personal · Renews 10 Dec 2026</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr"><div class="k">Plan</div><div class="v">Connect Personal · Renews 10 Dec 2026</div><span class="pb">Manage Billing…</span></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Connect Personal · Renews 10 Dec 2026</div></div>
       </div></div><div class="pcard"><div class="plabel">6b · Canceled at the end of the period<small>Status line: Connect Personal · Ends 10 Dec 2026</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr"><div class="k">Plan</div><div class="v">Connect Personal · Ends 10 Dec 2026</div><span class="pb">Manage Billing…</span></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Connect Personal · Ends 10 Dec 2026</div></div>
       </div></div><div class="pcard"><div class="plabel">6c · Past due (grace)<small>Status line: Connect Personal · Past due</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr"><div class="k">Plan</div><div class="v" style="color:var(--t-warn)">Connect Personal · Past due</div><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>The last payment failed. Update the payment method by 17 Nov 2026 to keep Connect.</span></div></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst" style="color:var(--t-warn)">Connect Personal · Past due</div></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>The last payment failed. Update the payment method by 17 Nov 2026 to keep Connect.</span></div></div>
       </div></div><div class="pcard"><div class="plabel">6d · Read-only until a date<small>Status line: Read-only until 4 Jan 2027</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr"><div class="k">Plan</div><div class="v" style="color:var(--t-warn)">Read-only until 4 Jan 2027</div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Your devices can still download their copies from Connect; nothing new is uploaded. The copies at Connect are deleted on 3 Mar 2027.</span></div></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span><div class="pst" style="color:var(--t-warn)">Read-only until 4 Jan 2027</div></div><div class="fr"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>Your devices can still download their copies from Connect; nothing new is uploaded. The copies at Connect are deleted on 3 Mar 2027.</span></div></div>
       </div></div><div class="pcard"><div class="plabel">6e · Suspended<small>Status line: Connect ended</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr"><div class="k">Plan</div><div class="v" style="color:var(--t-crit)">Ended</div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span></div><div class="fr"><div class="tn crit" style="flex:1"><svg><use href="#i-warn"/></svg><span>The copies at Connect are deleted on 3 Mar 2027. Choose a plan before then to keep them.</span></div></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb pri">Choose a Plan…</span><span class="pb">Manage Billing…</span><div class="pst" style="color:var(--t-crit)">Ended</div></div><div class="fr"><div class="tn crit" style="flex:1"><svg><use href="#i-warn"/></svg><span>The copies at Connect are deleted on 3 Mar 2027. Choose a plan before then to keep them.</span></div></div>
       </div></div><div class="pcard"><div class="plabel">6f · Waiting for the payment<small>Status line: Waiting for the payment</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr"><div class="k">Plan</div><div class="v">Waiting for the payment</div><span class="pb">Manage Billing…</span></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Waiting for the payment</div></div>
       </div></div><div class="pcard"><div class="plabel">6g · Connect Family, organizer<small>Status line: Connect Family · 3 of 4 people</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr"><div class="k">Plan</div><div class="v">Connect Family · Renews 10 Nov 2027</div><span class="pb">Manage Billing…</span></div><div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><span class="pb">Manage Billing…</span><div class="pst">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="k">People</div><div class="v">3 of 4</div><span class="pb">Change…</span></div>
       </div></div><div class="pcard"><div class="plabel">6h · Member of a family<small>Status line: Connect Family · Renews 10 Nov 2027</small></div>
       <div class="grp" style="margin-top:10px">
-<div class="fr"><div class="k">Plan</div><div class="v">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><svg><use href="#i-info"/></svg><span>Rafal manages the plan and the billing.</span></div></div>
+<div class="fr pl"><div class="k">Plan</div><div class="v"></div><div class="pst">Connect Family · Renews 10 Nov 2027</div></div><div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><svg><use href="#i-info"/></svg><span>Rafal manages the plan and the billing.</span></div></div>
       </div></div></div>
-  <ul class="fnotes"><li><b>active</b> and <b>trialing</b>: "Renews &lt;renews_at&gt;", or "Ends &lt;ends_at&gt;" when the plan is canceled at the end of the period. <b>past_due</b>: the warning line with <code>grace_until</code>. <b>read_only</b>: <code>read_only_until</code> and <code>delete_at</code>. <b>suspended</b>: <code>delete_at</code>. <b>pending</b>: "Waiting for the payment". <b>none</b>: "No plan" with Choose a Plan… (frame 3).</li><li><b>Manage Billing…</b>: <code>POST /v1/account/portal</code>, then the URL that Connect returned opens in the default browser. No owner check: the portal changes nothing in Apassy, and Stripe asks for its own confirmation. It shows only for the account that pays (no group, or the owner of the group).</li><li>Dates are UTC days, "10 Dec 2026". The list row and the header show the status line under each card.</li><li>A member of a family or team sees the plan without a price, a button, or the billing (6h).</li></ul>
+  <ul class="fnotes"><li><b>active</b> and <b>trialing</b>: "Renews &lt;renews_at&gt;", or "Ends &lt;ends_at&gt;" when the plan is canceled at the end of the period. <b>past_due</b>: the warning line with <code>grace_until</code>. <b>read_only</b>: <code>read_only_until</code> and <code>delete_at</code>. <b>suspended</b>: <code>delete_at</code>. <b>pending</b>: "Waiting for the payment". <b>none</b>: "No plan" with Choose a Plan… (frame 3).</li><li><b>Manage Billing…</b>: <code>POST /v1/account/portal</code>, then the URL that Connect returned opens in the default browser. No owner check: the portal changes nothing in Apassy, and Stripe asks for its own confirmation. It shows only for the account that pays (no group, or the owner of the group).</li><li>The status goes under the label in full and wraps at the width of Settings; it never ends in "…". The buttons stay on the line of the label.</li><li>Dates are UTC days, "10 Dec 2026". The list row and the header show the status line under each card.</li><li>A member of a family or team sees the plan without a price, a button, or the billing (6h).</li></ul>
 </section>
 <!-- ============================================================ 7 -->
 <section class="frame" id="f7">

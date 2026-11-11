@@ -39,7 +39,7 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
 **Owner** pastes these texts into the dashboard.
 
 - **Name:** Apassy (from the manifest).
-- **Summary:** from the manifest: "Fill, save, and create logins from the Apassy app on your Mac. Your Mac settings control how often routine fills ask for Touch ID."
+- **Summary:** from the manifest: "Fill, save, and create logins from the Apassy app on your computer. Apassy's settings control how often fills ask you to confirm." (platform-neutral since unit L7: the extension also serves the Linux app).
 - **Category:** Privacy & Security, or Productivity › Tools if the dashboard has no such category.
 - **Language:** English.
 - **Homepage:** <https://apassy.wyderka.cc>. **Support:** <https://github.com/wydrox/apassy/issues>.

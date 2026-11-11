@@ -1803,24 +1803,22 @@ fn open_plain_refuses_a_master_key_and_connect_mode_refuses_the_key() {
             .unwrap_or_else(|error| panic!("{} is not plain: {error}", path.display()));
         assert!(tables > 0);
     }
-    // The downgrade commands open the plain relay.db of `connect` mode as the relay does,
-    // and it stays plain.
+    // The downgrade commands do not apply to the plain files of `connect` mode: each is
+    // refused, and relay.db and the store stay as they are.
     let (config, dir) = {
         let Connect { relay, .. } = c;
         relay.stop_keep()
     };
-    assert_eq!(
-        Directory::downgrade_to_1005(&config).unwrap(),
-        (1006, 1005, 1)
-    );
-    assert!(!config.team_path(&team).exists());
+    assert!(Directory::downgrade_to_1005(&config).is_err());
+    assert!(Directory::downgrade_to_1004(&config).is_err());
+    assert!(Directory::downgrade_to_1003(&config).is_err());
+    assert!(config.team_path(&team).exists());
     let conn = rusqlite::Connection::open(config.directory_path()).unwrap();
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1005);
+    assert_eq!(version, DIRECTORY_VERSION);
     drop(conn);
-    assert_eq!(Directory::downgrade_to_1004(&config).unwrap(), (1005, 1004));
     let directory = Directory::open(&config).unwrap();
     assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
     drop(directory);

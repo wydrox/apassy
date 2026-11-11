@@ -77,6 +77,9 @@ pub(crate) const PICKER_LEAD: &str = "Apassy Connect, the hosted service of the 
 pub(crate) const PICKER_NOTE: &str =
     "VAT included. You pay in your browser, through Stripe; Apassy never sees your card.";
 pub(crate) const LOADING_PRICES: &str = "Loading prices…";
+/// The picker when `GET /v1/plans` failed: the error shows under the sheet.
+pub(crate) const PRICES_FAILED: &str = "The prices did not load.";
+pub(crate) const TRY_AGAIN: &str = "Try Again";
 pub(crate) const CONTINUE_BROWSER: &str = "Continue in the Browser…";
 pub(crate) const WAIT_TITLE: &str = "Finish in Your Browser";
 pub(crate) const WAIT_LEAD: &str =
@@ -158,6 +161,8 @@ pub(crate) const TEXTS: &[&str] = &[
     PICKER_LEAD,
     PICKER_NOTE,
     LOADING_PRICES,
+    PRICES_FAILED,
+    TRY_AGAIN,
     CONTINUE_BROWSER,
     WAIT_TITLE,
     WAIT_LEAD,
@@ -754,8 +759,12 @@ fn account_section(
             Tone::Neutral => kit::palette().secondary,
             tone => tone.text(),
         };
-        g.line(
+        // The buttons stay on the line of the label, and the status goes under it in
+        // full: "Connect Personal · Renews 10 Dec 2026" never ends in "…" at the width
+        // of Settings (frame 6 of the mockup).
+        g.line_note(
             "Plan",
+            None,
             Some(kit::text(value, Font::Body).color(color)),
             |ui| {
                 if billing && kit::small_button(ui, MANAGE_BILLING, Style::Bordered).clicked() {
@@ -1157,6 +1166,8 @@ pub(crate) enum SheetChoice {
     Done,
     OpenAgain,
     CheckAgain,
+    /// Ask Connect again after a failed step: the prices of the picker.
+    TryAgain,
     Copy(String),
 }
 
@@ -1268,7 +1279,8 @@ fn done_sheet(ui: &mut Ui, title: &str, lines: &[&str]) -> Option<SheetChoice> {
     choice
 }
 
-/// The plan picker (frame 4). The rows and the total come from `plans`.
+/// The plan picker (frame 4). The rows and the total come from `plans`. `failed`: the
+/// prices did not load, and "Try Again" asks Connect again.
 fn picker(
     ui: &mut Ui,
     plans: Option<&Plans>,
@@ -1276,6 +1288,7 @@ fn picker(
     interval: &mut String,
     count: &mut u64,
     busy: bool,
+    failed: bool,
 ) -> Option<SheetChoice> {
     let mut choice = None;
     kit::sheet_title(ui, PICKER_TITLE, Some(PICKER_LEAD));
@@ -1294,25 +1307,32 @@ fn picker(
         rows::group(ui, None, |g| {
             g.row(|ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(12.0));
-                    ui.label(rows::value(LOADING_PRICES));
+                    if failed {
+                        ui.label(rows::value(PRICES_FAILED));
+                    } else {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(rows::value(LOADING_PRICES));
+                    }
                 });
             });
         });
         ui.add_space(8.0);
-        kit::sheet_buttons(
+        return pair(
             ui,
-            |_| {},
+            |ui| {
+                (failed && kit::button(ui, TRY_AGAIN, Style::Bordered).clicked())
+                    .then_some(SheetChoice::TryAgain)
+            },
             |ui| {
                 ui.add_enabled_ui(false, |ui| {
                     kit::button(ui, CONTINUE_BROWSER, Style::Prominent)
                 });
-                if kit::alert_cancel(ui).clicked() {
-                    choice = Some(SheetChoice::Cancel);
-                }
+                kit::alert_cancel(ui)
+                    .clicked()
+                    .then_some(SheetChoice::Cancel)
             },
-        );
-        return choice;
+        )
+        .or(choice);
     };
     rows::group_box(ui, |g| {
         for offer in &plans.offers {
@@ -1438,8 +1458,10 @@ pub(crate) fn sheet(
     } else {
         420.0
     };
+    // A step that failed and does not run again: the picker offers "Try Again".
+    let failed = error.is_some() && !busy;
     let response = kit::sheet(ctx, "connect-sheet", width, |ui| {
-        choice = sheet_body(ui, sheet, plans, busy, now, qr);
+        choice = sheet_body(ui, sheet, plans, busy, failed, now, qr);
         if let Some(error) = error {
             ui.add_space(4.0);
             kit::paragraph(ui, error, Font::Callout, Tone::Critical.text());
@@ -1484,6 +1506,7 @@ fn sheet_body(
     sheet: &mut Sheet,
     plans: Option<&Plans>,
     busy: bool,
+    failed: bool,
     now: u64,
     qr: &dyn Fn(&mut Ui, &str),
 ) -> Option<SheetChoice> {
@@ -1552,7 +1575,7 @@ fn sheet_body(
             plan,
             interval,
             count,
-        } => picker(ui, plans, plan, interval, count, busy),
+        } => picker(ui, plans, plan, interval, count, busy, failed),
         Sheet::Waiting { stopped, .. } => {
             let mut choice = None;
             if *stopped {

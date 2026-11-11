@@ -42,7 +42,12 @@ impl std::fmt::Display for SendError {
         match self {
             Self::NotRunning(err) => write!(
                 f,
-                "{err}. Check the socket path. If Apassy is closed, open Apassy.app, then try again.",
+                concat!(
+                    "{}. Check the socket path. If Apassy is closed, open ",
+                    crate::app_package!(),
+                    ", then try again."
+                ),
+                err,
             ),
             Self::TooLarge => f.write_str("The request is too large."),
             Self::Io(err) => write!(f, "The connection to Apassy failed: {err}"),

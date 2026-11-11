@@ -28,7 +28,15 @@
 //!
 //! The team and device calls (a new team, "Add a Mac", the device list) are in
 //! [`devices`].
+//!
+//! A vault store of Apassy Connect (plan s7 unit M3, contract connect-account-v1 section
+//! 8) is a relay-sync-v1 team whose device key is the account device key of this Mac
+//! ([`SessionKey::Account`]): the vault row holds no private key (schema 34), and the
+//! signer comes from the Connect account in memory ([`RelaySync::set_account_signer`]).
+//! Turning it on, the second Mac of the account, and the move from the hosted relay are
+//! in [`connect`].
 
+pub mod connect;
 mod devices;
 mod link;
 mod member;
@@ -503,12 +511,85 @@ impl SignIns {
     }
 }
 
+/// The key of a session: a key of the vault's own (the PKCS#8 document of the
+/// membership), or the Connect account device key of this Mac for a vault store (schema
+/// 34, `key_source = 'account'`). The account key signs only the relay-sync sign-in and
+/// the heads here (its allow-list, `crate::connect::SIGNING_TAGS`).
+pub(crate) enum SessionKey {
+    Own(DeviceKey),
+    Account(Arc<crate::connect::AccountSigner>),
+}
+
+impl From<DeviceKey> for SessionKey {
+    fn from(key: DeviceKey) -> Self {
+        Self::Own(key)
+    }
+}
+
+impl SessionKey {
+    /// The public key, X9.63 (65 bytes).
+    pub(crate) fn public_key(&self) -> &[u8] {
+        match self {
+            Self::Own(key) => key.public_key(),
+            Self::Account(signer) => signer.public_key(),
+        }
+    }
+
+    /// The public key as b64u, as the wire carries it.
+    pub(crate) fn public_key_b64u(&self) -> String {
+        match self {
+            Self::Own(key) => key.public_key_b64u(),
+            Self::Account(signer) => signer.public_key_b64u(),
+        }
+    }
+
+    /// An ECDSA P-256 SHA-256 signature, DER. The account key refuses a message outside
+    /// its allow-list (`Damaged`: no code of this module asks for one).
+    pub(crate) fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SyncError> {
+        match self {
+            Self::Own(key) => key.sign(message),
+            Self::Account(signer) => signer.sign(message).map_err(account_key_error),
+        }
+    }
+
+    /// The PKCS#8 document for the vault row. `None` for the account key: it never
+    /// leaves the Keychain, and its row holds no private key.
+    pub(crate) fn pkcs8(&self) -> Option<&Zeroizing<Vec<u8>>> {
+        match self {
+            Self::Own(key) => key.pkcs8(),
+            Self::Account(_) => None,
+        }
+    }
+
+    /// Whether this is the Connect account key of this Mac.
+    pub(crate) fn is_account(&self) -> bool {
+        matches!(self, Self::Account(_))
+    }
+
+    /// The signed head of `fields`.
+    fn sign_head(&self, fields: HeadFields) -> Result<SignedHead, SyncError> {
+        match self {
+            Self::Own(key) => SignedHead::sign(fields, key),
+            Self::Account(signer) => signer.sign_head(fields).map_err(account_key_error),
+        }
+    }
+}
+
+/// A failure of the account key as a sync error: signed out (a lock) is `Locked`, any
+/// other `Damaged`.
+fn account_key_error(error: crate::connect::ConnectError) -> SyncError {
+    match error {
+        crate::connect::ConnectError::SignedOut => SyncError::Vault(VaultErrorKind::Locked),
+        _ => SyncError::Damaged,
+    }
+}
+
 /// A device of one team on one relay: its key, and an access token while it lasts.
 /// Debug is redacted.
 pub(crate) struct Session {
     url: RelayUrl,
     team_id: String,
-    key: DeviceKey,
+    key: SessionKey,
     device_id: Mutex<Option<u64>>,
     token: Mutex<Option<Token>>,
     devices: Mutex<Option<Vec<DeviceView>>>,
@@ -520,6 +601,10 @@ pub(crate) struct Session {
     /// One sign-in at a time: the waiter of the worker and a sync can need a token at
     /// the same moment.
     sign_ins: SignIns,
+    /// For a vault store of a Connect account: which keys may sign its heads
+    /// (`ConnectAccount::signer_policy`). Every transport of the session takes it
+    /// ([`RelayTransport::with_signer_policy`]).
+    signer_keys: Option<Arc<SignerPolicy>>,
 }
 
 impl fmt::Debug for Session {
@@ -535,20 +620,28 @@ impl Session {
     pub(crate) fn new(
         url: RelayUrl,
         team_id: &str,
-        key: DeviceKey,
+        key: impl Into<SessionKey>,
         device_id: Option<u64>,
     ) -> Self {
         Self {
             url,
             team_id: team_id.to_owned(),
-            key,
+            key: key.into(),
             device_id: Mutex::new(device_id),
             token: Mutex::new(None),
             devices: Mutex::new(None),
             cancel: Cancel::default(),
             removed: Arc::new(Removal::new(REMOVED_PROBE_EVERY)),
             sign_ins: SignIns::default(),
+            signer_keys: None,
         }
+    }
+
+    /// The session whose transports accept heads only as `policy` allows: the vault
+    /// store of a Connect account.
+    pub(crate) fn with_signer_policy(mut self, policy: SignerPolicy) -> Self {
+        self.signer_keys = Some(Arc::new(policy));
+        self
     }
 
     /// The session with the removal mark `removed` of its relay sync.
@@ -814,7 +907,41 @@ struct Signer {
 /// of the team for any version, a removed device only for a version up to the last one
 /// it pushed while it was a member. With `allowed` (a vault store of a Connect account:
 /// the keys of its verified devices) the signer's key must also be one of them.
-fn signed_by_member(head: &SignedHead, signers: &[Signer], allowed: Option<&[Vec<u8>]>) -> bool {
+/// Which keys may sign a head of a vault store of a Connect account (connect-account-v1
+/// section 7.5): the keys of the devices of this account that this Mac verified; never a
+/// key that Connect lists as a device of this account without its verification, or that
+/// this Mac knew as a device of the account and saw leave it; a key of another account
+/// only in a store of a family or team (`others`), as relay-sync-v1 accepts it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignerPolicy {
+    /// X9.63 keys that may sign.
+    pub accepted: Vec<Vec<u8>>,
+    /// X9.63 keys that never sign.
+    pub refused: Vec<Vec<u8>>,
+    /// Whether a key in neither list may sign: a device of another account of the group.
+    pub others: bool,
+}
+
+impl SignerPolicy {
+    /// Only `keys` may sign.
+    pub fn only(keys: Vec<Vec<u8>>) -> Self {
+        Self {
+            accepted: keys,
+            refused: Vec::new(),
+            others: false,
+        }
+    }
+
+    /// Whether `key` may sign.
+    pub fn allows(&self, key: &[u8]) -> bool {
+        if self.accepted.iter().any(|accepted| accepted == key) {
+            return true;
+        }
+        !self.refused.iter().any(|refused| refused == key) && self.others
+    }
+}
+
+fn signed_by_member(head: &SignedHead, signers: &[Signer], allowed: Option<&SignerPolicy>) -> bool {
     signers
         .iter()
         .find(|signer| signer.device_id == head.fields.device_id)
@@ -826,7 +953,7 @@ fn signed_by_member(head: &SignedHead, signers: &[Signer], allowed: Option<&[Vec
             in_time
                 && decode_b64u(&signer.public_key)
                     .filter(|key| key.len() == 65 && key[0] == 0x04)
-                    .filter(|key| allowed.is_none_or(|allowed| allowed.contains(key)))
+                    .filter(|key| allowed.is_none_or(|allowed| allowed.allows(key)))
                     .is_some_and(|key| head.verify(&key))
         })
 }
@@ -894,8 +1021,8 @@ pub struct RelayTransport {
     anchor: Arc<Mutex<Anchor>>,
     /// Every relay call of this transport ends by then (the step before a lock).
     deadline: Option<Instant>,
-    /// The keys that may sign a head of this copy, when set ([`Self::with_signer_keys`]).
-    signer_keys: Option<Arc<[Vec<u8>]>>,
+    /// Which keys may sign a head of this copy, when set ([`Self::with_signer_policy`]).
+    signer_keys: Option<Arc<SignerPolicy>>,
 }
 
 impl RelayTransport {
@@ -906,6 +1033,7 @@ impl RelayTransport {
         anchor_hash: Option<&str>,
         max_bytes: u64,
     ) -> Self {
+        let signer_keys = session.signer_keys.clone();
         Self {
             session,
             vault_id: vault_id.map(str::to_owned),
@@ -916,7 +1044,7 @@ impl RelayTransport {
                 current: None,
             })),
             deadline: None,
-            signer_keys: None,
+            signer_keys,
         }
     }
 
@@ -924,8 +1052,14 @@ impl RelayTransport {
     /// of `keys` (X9.63): for a vault store of a Connect account, the keys of the
     /// verified devices of the account (`ConnectAccount::verified_keys`). A device that
     /// Connect lists but this Mac did not verify signs nothing that this Mac merges.
-    pub fn with_signer_keys(mut self, keys: Vec<Vec<u8>>) -> Self {
-        self.signer_keys = Some(keys.into());
+    pub fn with_signer_keys(self, keys: Vec<Vec<u8>>) -> Self {
+        self.with_signer_policy(SignerPolicy::only(keys))
+    }
+
+    /// Accept a head, and each head of its chain, only when `policy` allows the key of
+    /// its signer: a vault store of a Connect account ([`SignerPolicy`]).
+    pub fn with_signer_policy(mut self, policy: SignerPolicy) -> Self {
+        self.signer_keys = Some(Arc::new(policy));
         self
     }
 
@@ -1197,7 +1331,7 @@ impl SyncTransport for RelayTransport {
             device_id: self.device_id()?,
             time: unix_now(),
         };
-        let signed = SignedHead::sign(fields, &self.session.key)?;
+        let signed = self.session.key.sign_head(fields)?;
         let (head_header, signature_header) = (signed.head_b64u(), signed.signature_b64u());
         let deadline = self.transfer_deadline();
         let pushed = self
@@ -1285,6 +1419,36 @@ impl<F: Fn(&Vault) -> bool> VaultAccess for SharedSlot<'_, F> {
     }
 }
 
+/// Store the relay identity of `session` as the sync membership of `vault`: its own key
+/// in the row, or an account row without a private key for a vault store of Apassy
+/// Connect (schema 34).
+fn store_session_row(
+    vault: &mut Vault,
+    session: &Session,
+    device_id: u64,
+) -> Result<(), SyncError> {
+    match &session.key {
+        SessionKey::Own(key) => {
+            let row = RelayDevice {
+                relay_url: session.url.as_str().to_owned(),
+                team_id: session.team_id.clone(),
+                device_id,
+                public_key: key.public_key().to_vec(),
+                key_pkcs8: key.pkcs8().ok_or(SyncError::Damaged)?.clone(),
+                created_at: 0,
+                account_key: false,
+            };
+            Ok(vault.set_relay_device(&row)?)
+        }
+        SessionKey::Account(signer) => Ok(vault.set_account_relay_device(
+            session.url.as_str(),
+            &session.team_id,
+            device_id,
+            signer.public_key(),
+        )?),
+    }
+}
+
 // ---- The engine. ----
 
 /// A failure after the session closed (a lock, a pause, a quit) is `Locked`: the relay
@@ -1342,8 +1506,12 @@ pub struct RelayConfig {
     /// How the client checks the relay's certificate: pinned for a node
     /// (node-pairing-v1). [`TlsTrust::System`] from [`Self::in_data_dir`].
     pub trust: TlsTrust,
-    /// The alternative destinations of a pinned relay, `host:port` each, in order.
+    /// The alternative destinations of a pinned relay, `host:port` each, in order, and
+    /// its Connect route last (node-pairing-v1 section 7a).
     pub alt: Vec<String>,
+    /// What dials the Connect route of a pinned relay ([`Self::with_dialer`], the iPhone
+    /// core). None: the route is kept and never dialled.
+    dialer: Option<super::relay_http::DialerRef>,
 }
 
 impl RelayConfig {
@@ -1359,6 +1527,7 @@ impl RelayConfig {
             work_dir: dir,
             trust: TlsTrust::System,
             alt: Vec::new(),
+            dialer: None,
         }
     }
 
@@ -1392,9 +1561,21 @@ impl RelayConfig {
         self.with_trust(url.trust(), &url.alternative_list())
     }
 
-    /// The relay address with its trust and alternatives.
+    /// The same layout whose relay address dials its Connect route with `dialer`.
+    #[must_use]
+    pub fn with_dialer(mut self, dialer: Arc<dyn super::relay_http::TunnelDialer>) -> Self {
+        self.dialer = Some(super::relay_http::DialerRef(dialer));
+        self
+    }
+
+    /// The relay address with its trust and alternatives (and the dialer of its Connect
+    /// route, when the layout has one).
     pub fn relay_url(&self) -> Result<RelayUrl, SyncError> {
-        RelayUrl::parse_with_trust(&self.url, self.trust)?.alternatives(&self.alt)
+        let url = RelayUrl::parse_with_trust(&self.url, self.trust)?.alternatives(&self.alt)?;
+        Ok(match &self.dialer {
+            Some(dialer) => url.with_dialer(Arc::clone(&dialer.0)),
+            None => url,
+        })
     }
 }
 
@@ -1494,6 +1675,19 @@ pub struct RelaySync {
     /// The relay refused the device of this Mac ([`Self::is_removed`]). It outlives a
     /// lock; a sign-in that works, turning sync off, or a new join clears it.
     removed: Arc<Removal>,
+    /// The Connect account key of this Mac, for a vault store ([`SessionKey::Account`]),
+    /// set by the window while the account is signed in. A clone shares it.
+    account: Arc<Mutex<Option<Arc<crate::connect::AccountSigner>>>>,
+    /// Which keys may sign the heads of a vault store ([`SignerPolicy`]), set by the window
+    /// with the account key ([`Self::set_account_signers`]). Without it a vault store
+    /// waits as it waits for the key.
+    account_keys: Arc<Mutex<Option<SignerPolicy>>>,
+    /// A vault store asked for the account key, and none was in memory: Connect is
+    /// signed out on this Mac ([`Self::needs_account_key`]).
+    account_missing: Arc<AtomicBool>,
+    /// The plan of the Connect account, as the window last read it, for the status of
+    /// a vault store ([`connect::StorePlan`]).
+    plan: Arc<Mutex<Option<connect::StorePlan>>>,
 }
 
 impl fmt::Debug for RelaySync {
@@ -1515,6 +1709,10 @@ impl RelaySync {
             runs: Arc::new(Mutex::new(())),
             paused: Arc::new(AtomicBool::new(false)),
             removed: Arc::new(Removal::new(REMOVED_PROBE_EVERY)),
+            account: Arc::new(Mutex::new(None)),
+            account_keys: Arc::new(Mutex::new(None)),
+            account_missing: Arc::new(AtomicBool::new(false)),
+            plan: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1561,6 +1759,9 @@ impl RelaySync {
             session.close();
         }
         *lock(&self.refused) = None;
+        // The Connect account key leaves memory with the vault key (a lock, a quit); the
+        // window shares it again after the next "Sign In…".
+        *lock(&self.account) = None;
     }
 
     /// Whether the key is in memory, so that [`Self::poll`] can sign in.
@@ -1673,14 +1874,36 @@ impl RelaySync {
             return Err(SyncError::WrongVault);
         }
         let url = membership_url(vault, url, &row.team_id)?;
-        let key = DeviceKey::from_pkcs8(row.key_pkcs8)?;
-        if key.public_key() != row.public_key.as_slice() {
-            return Err(SyncError::Damaged);
+        let mut signer_keys = None;
+        let key = if row.uses_account_key() {
+            // A vault store of Apassy Connect: the account key of this Mac signs, and it
+            // must be the key that the row names.
+            let (Some(signer), Some(keys)) = (
+                lock(&self.account).clone(),
+                lock(&self.account_keys).clone(),
+            ) else {
+                self.account_missing.store(true, Ordering::SeqCst);
+                return Err(SyncError::Vault(VaultErrorKind::Locked));
+            };
+            self.account_missing.store(false, Ordering::SeqCst);
+            if signer.public_key() != row.public_key.as_slice() {
+                return Err(SyncError::WrongVault);
+            }
+            signer_keys = Some(keys);
+            SessionKey::Account(signer)
+        } else {
+            let key = DeviceKey::from_pkcs8(row.key_pkcs8)?;
+            if key.public_key() != row.public_key.as_slice() {
+                return Err(SyncError::Damaged);
+            }
+            SessionKey::Own(key)
+        };
+        let mut session = Session::new(url, &row.team_id, key, Some(row.device_id))
+            .sharing_removed(&self.removed);
+        if let Some(policy) = signer_keys {
+            session = session.with_signer_policy(policy);
         }
-        let session = Arc::new(
-            Session::new(url, &row.team_id, key, Some(row.device_id))
-                .sharing_removed(&self.removed),
-        );
+        let session = Arc::new(session);
         *lock(&self.session) = Some(Arc::clone(&session));
         Ok(session)
     }
@@ -2551,18 +2774,8 @@ impl RelaySync {
             None => None,
         };
         let outcome = self.rounds(vault, &mut state, &transport, false, fetched)?;
-        let key = session.key.pkcs8().ok_or(SyncError::Damaged)?.clone();
-        let row = RelayDevice {
-            relay_url: session.url.as_str().to_owned(),
-            team_id: session.team_id.clone(),
-            device_id,
-            public_key: session.key.public_key().to_vec(),
-            key_pkcs8: key,
-            created_at: 0,
-            account_key: false,
-        };
         vault.with(|vault| {
-            vault.set_relay_device(&row)?;
+            store_session_row(vault, session, device_id)?;
             keep_membership_trust(vault, &session.url, &session.team_id)
         })?;
         self.write_state(&state)?;
@@ -2605,29 +2818,22 @@ impl RelaySync {
         let session = &joined.session;
         let stored = vault
             .unlock(passphrase)
-            .and_then(|()| {
-                vault.set_relay_device(&RelayDevice {
-                    relay_url: session.url.as_str().to_owned(),
-                    team_id: session.team_id.clone(),
-                    device_id,
-                    public_key: session.key.public_key().to_vec(),
-                    key_pkcs8: session.key.pkcs8().cloned().unwrap_or_default(),
-                    created_at: 0,
-                    account_key: false,
-                })
-            })
+            .map_err(SyncError::from)
+            .and_then(|()| store_session_row(&mut vault, session, device_id))
             // A pinned node: its pin and alternatives stay with the membership.
             .and_then(|()| match session.url.pin() {
-                Some(pin) => vault.set_membership_trust(
-                    &session.team_id,
-                    Some(&pin.text()),
-                    &session.url.alternative_list(),
-                ),
+                Some(pin) => vault
+                    .set_membership_trust(
+                        &session.team_id,
+                        Some(&pin.text()),
+                        &session.url.alternative_list(),
+                    )
+                    .map_err(SyncError::from),
                 None => Ok(()),
             })
-            .and_then(|()| vault.lock());
+            .and_then(|()| vault.lock().map_err(SyncError::from));
         if let Err(error) = stored {
-            return fail(vault, error.into());
+            return fail(vault, error);
         }
         let mut state = SyncState::new_relay(
             session.url.as_str(),
@@ -2780,6 +2986,7 @@ impl PendingJoin {
                 code: Zeroizing::new(trimmed.to_owned()),
                 pin: None,
                 alt: Vec::new(),
+                tunnel: None,
                 name: None,
                 handoff: None,
                 without_handoff: Zeroizing::new(format!("{}/link#{trimmed}", url.as_str())),
@@ -2807,7 +3014,53 @@ impl PendingJoin {
         device: &str,
         key: DeviceKey,
     ) -> Result<Self, SyncError> {
+        Self::request_as(text, relay_url, device, SessionKey::Own(key), None)
+    }
+
+    /// [`Self::request_with_key`] whose address dials the Connect route of a pinned link
+    /// with `dialer` (the iPhone core, node-pairing-v1 section 7a): the join and every
+    /// later call of its session reach the node through the dial when the tailnet does
+    /// not. The requests and their bodies are the same.
+    pub fn request_via(
+        text: &str,
+        relay_url: &str,
+        device: &str,
+        key: DeviceKey,
+        dialer: Option<Arc<dyn super::relay_http::TunnelDialer>>,
+    ) -> Result<Self, SyncError> {
+        Self::request_as(text, relay_url, device, SessionKey::Own(key), dialer)
+    }
+
+    /// [`Self::request`] with the Connect account key of this Mac: the join of a vault
+    /// store of Apassy Connect, for a shared Family or Team vault (plan s7 unit M3). The
+    /// link, the safety words, and the confirmation on the other Mac are those of
+    /// relay-sync-v1 section 7; Connect adds the device only for a device of the same
+    /// account or of a member of the same group (`403 not_in_group`). The passphrase
+    /// still opens the copy. A pairing link of an iPhone is not for this key.
+    pub fn request_with_account(
+        text: &str,
+        relay_url: &str,
+        device: &str,
+        signer: Arc<crate::connect::AccountSigner>,
+    ) -> Result<Self, SyncError> {
+        if crate::relay::pairing::PairingChannel::parse(text).is_some() {
+            return Err(SyncError::LinkInvalid(LinkRefusal::BadCode));
+        }
+        Self::request_as(text, relay_url, device, SessionKey::Account(signer), None)
+    }
+
+    fn request_as(
+        text: &str,
+        relay_url: &str,
+        device: &str,
+        key: SessionKey,
+        dialer: Option<Arc<dyn super::relay_http::TunnelDialer>>,
+    ) -> Result<Self, SyncError> {
         let (url, code) = Self::parse_link(text, relay_url)?;
+        let url = match dialer {
+            Some(dialer) => url.with_dialer(dialer),
+            None => url,
+        };
         let team_id = link_code_team(&code).unwrap_or_default().to_owned();
         let answer: LinkAnswer = call(
             &url,
@@ -2831,11 +3084,12 @@ impl PendingJoin {
             return Err(SyncError::SafetyMismatch);
         }
         // The legacy words stay on the relay wire; a Connect screen authenticates both keys.
-        let safety = match crate::relay::pairing::PairingChannel::parse(text) {
-            Some((_, channel)) => channel
-                .phone_safety(&team_id, &key, &clean_name(device, "Mac"))
+        let safety = match (crate::relay::pairing::PairingChannel::parse(text), &key) {
+            (Some((_, channel)), SessionKey::Own(own)) => channel
+                .phone_safety(&team_id, own, &clean_name(device, "Mac"))
                 .ok_or(SyncError::SafetyMismatch)?,
-            None => safety,
+            (Some(_), SessionKey::Account(_)) => return Err(SyncError::SafetyMismatch),
+            (None, _) => safety,
         };
         Ok(Self {
             session: Arc::new(Session::new(url, &team_id, key, None)),
@@ -3118,6 +3372,32 @@ mod tests {
     }
 
     /// A vault store of a Connect account accepts a head only from the keys of the
+    /// A vault store of a family or team: a key of this account's verified devices signs;
+    /// a key that the account lists without its verification, or that left the account,
+    /// never signs; a key of another account signs only in a group.
+    #[test]
+    fn a_signer_policy_refuses_unverified_keys_of_the_account_also_in_a_group() {
+        let (mine, unverified, left, member) =
+            (vec![1u8; 65], vec![2u8; 65], vec![3u8; 65], vec![4u8; 65]);
+        let solo = SignerPolicy {
+            accepted: vec![mine.clone()],
+            refused: vec![unverified.clone(), left.clone()],
+            others: false,
+        };
+        let group = SignerPolicy {
+            others: true,
+            ..solo.clone()
+        };
+        assert!(solo.allows(&mine) && group.allows(&mine));
+        for policy in [&solo, &group] {
+            assert!(!policy.allows(&unverified));
+            assert!(!policy.allows(&left));
+        }
+        assert!(!solo.allows(&member));
+        assert!(group.allows(&member));
+        assert!(!SignerPolicy::only(vec![mine.clone()]).allows(&member));
+    }
+
     /// verified devices of the account, also when the relay lists another signer.
     #[test]
     fn an_account_store_accepts_heads_only_from_the_verified_keys() {
@@ -3257,11 +3537,11 @@ mod tests {
             SyncError::Relay(RelayRefusal::JoinPending)
         );
         assert_eq!(sync_error(ApiError::Broken), SyncError::RelayUnreachable);
-        assert!(
-            SyncError::ForkedCopy
-                .to_string()
-                .contains("does not include this Mac's last change")
-        );
+        assert!(SyncError::ForkedCopy.to_string().contains(concat!(
+            "does not include this ",
+            crate::computer!(),
+            "'s last change"
+        )));
         assert!(SyncError::TooLarge.to_string().contains("64 MiB"));
     }
 

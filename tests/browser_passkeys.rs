@@ -1052,7 +1052,10 @@ fn build_guard(name: &str, flags: &[&str]) -> Option<PathBuf> {
     match status {
         Ok(status) if status.success() => Some(out),
         _ => {
-            eprintln!("skip: the Swift guard does not build on this Mac");
+            eprintln!(concat!(
+                "skip: the Swift guard does not build on this ",
+                apassy::computer!()
+            ));
             None
         }
     }

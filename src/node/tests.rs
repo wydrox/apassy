@@ -929,7 +929,13 @@ fn a_cloud_run_always_asks_remembers_nothing_and_releases_the_values_in_item_ord
     assert_eq!(question.question.project, None);
     assert_eq!(question.request_source, CLOUD_REQUEST_SOURCE);
     assert_eq!(question.user_request, "Check my httpbin token.");
-    assert!(question.cwd.contains("not on this Mac"), "{}", question.cwd);
+    assert!(
+        question
+            .cwd
+            .contains(concat!("not on this ", crate::computer!())),
+        "{}",
+        question.cwd
+    );
     assert_eq!(question.remember, None);
     assert_eq!(
         question.env_names,

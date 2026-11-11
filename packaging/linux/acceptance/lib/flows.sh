@@ -104,3 +104,29 @@ flow_save_and_fill() {
     n=$(l4_rp_count)
     echo "$n"
 }
+
+# A login for otp.html with the synthetic TOTP seed, imported through the owner
+# command line: `apassy login` and `apassy import` each ask for the owner check in
+# the Apassy window, which this approves with the vault passphrase. The CSV is
+# private (0600) and removed after the import.
+flow_otp_item() {
+    local name=$1 csv="/home/$L4_USER/l4-otp.csv" script="/home/$L4_USER/l4-otp.sh"
+    l4_as bash -c "umask 077; printf '%s\n%s\n' 'Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,Notes' \
+        'L4 OTP site,http://localhost:$L4_RP_PORT/otp.html,synthetic.otp@example.test,$(cat "$L4_STATE/site-password"),otpauth://totp/L4:otp?secret=$(cat "$L4_STATE/totp-seed")&issuer=L4,false,false,,' > $csv"
+    # l4_spawn joins its words into one shell line, so the steps go in a script.
+    printf '%s\n' 'cd ~' 's=$(apassy login); echo "login=$?"' 'eval "$s"' \
+        "apassy import $csv --format 1password; echo \"import=\$?\"" "rm -f $csv" |
+        l4_as bash -c "umask 077; cat > $script"
+    l4_spawn otpimport bash "$script"
+    local step
+    for step in login import; do
+        sleep 4
+        l4_shot "${name}-30-otp-${step}-card"
+        # Type only while the command waits for a card.
+        l4_logs otpimport | grep -q "^$step=" && continue
+        l4_type "$(l4_vault_passphrase)"; l4_key Return
+    done
+    sleep 3
+    l4_as rm -f "$script"
+    l4_logs otpimport
+}

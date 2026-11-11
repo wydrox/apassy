@@ -234,3 +234,216 @@ In `docs/reviews/linux-acceptance-2026-11/` (1600x1000, synthetic data):
 `ubuntu-14-browser-killed-nothing-signed`, `ubuntu-15-settings-security`,
 `ubuntu-16-settings-tools`, `debian13-01-chromium-as-packaged-refused`,
 `debian13-02-chromium-without-load-extension-card`.
+
+## Second run, 2026-11-10: commit c8f05170 (unit L5)
+
+The fixes of unit L5 (branch `feat/linux-browser-rules`, stacked on PR #110): Debian's
+system extensions in the browser check, honest browser states, the small defects
+R2, R4, R5, R6, R8 and R9 of the first run, and the passkey chooser. Same kit, with a run
+prefix (`L4_RUN=l5`, `~/work/l5`, accounts `l5owner` and `l5headless`), a one-time
+code page on the RP (RFC 6238, checked by the server) and a headless sway session.
+
+Result: everything that ran passed. Debian 13's packaged Chromium now creates and
+uses passkeys and fills and saves logins when it loads a Debian system extension;
+without one (Debian's default) it stays refused, and so does an extension folder of
+the owner's own. The Wayland window ran natively; Copy under Wayland was **not run**.
+arm64 was not run.
+
+### Build under test
+
+| Build | Source | Files (SHA-256) |
+| --- | --- | --- |
+| c8f05170 | `c8f05170f9d4eeb8a8437e5b3ae7c87747511edf`, exported with `git archive`; built on devbox-x86 in an `ubuntu:24.04` container with Rust 1.97.0 by the commands of `build-on-devbox.sh` (debug build, stripped, `build-vault.sh`, shellcheck of the kit) | `apassy-vault_0.5.19_amd64.deb` `043da637f8afa6042219aeaa8e70b61375f3f75206d4d173e8edda013ebe55bd`, `apassy-vault-0.5.19-linux-x86_64.tar.gz` `a01e8416775fecdc490406252645a1272938ef92bd8b5068212d158cbba4e915` |
+
+`release-vault-linux-x86_64.json` records `"commit"` and the new `"built_from"`, both
+`c8f05170…` for this local build (R9: in CI on a pull request, `built_from` is the merge
+and `commit` the head). Version 0.5.19, `glibc_max` 2.39, Settings > Updates "0.5.19
+(development build)". Later commits of the branch change tests, the kit and this record
+only, and a `cfg` of a test helper; the packaged code is that of c8f05170.
+
+### Environment
+
+- Host `devbox-x86` (Hetzner CPX32): Ubuntu 24.04.5 LTS, kernel 6.8.0-147-generic,
+  x86_64. Seat session of `l5owner` on tty3 (logind `Type=tty Class=user Seat=seat0
+  Active=yes Remote=no`). Xvfb 2:21.1.12-1ubuntu1.9 at 1600x1000, openbox 3.6.1,
+  xdotool 3.20160805.1, gnome-keyring 46.1, libsecret-tools 0.21.4, polkitd 124.
+  Google Chrome 157.0.8103.50; Chromium snap 157.0.8103.38 (revision 3590).
+- Wayland: sway 1.9-1build2, headless backend (`WLR_BACKENDS=headless`), in the
+  owner's logind session, `DISPLAY` unset; grim 1.4.0, wtype 0.4, wlrctl 0.2.2,
+  wl-clipboard 2.2.1 (installed for the run, removed after).
+- Debian: `debian:trixie` container `l5-debian13` (privileged, no logind seat), Debian
+  13.7, libc6 2.41-12+deb13u4, Xvfb 2:21.1.16, Chromium 156.0.8078.79-1~deb13u1, Google
+  Chrome 157.0.8103.50-1; later `chromium-lwn4chrome` 1.0-3 (a Debian system extension).
+- RP: `packaging/linux/acceptance/rp`, Node.js 22.23.4, `@simplewebauthn/server` 14.0.3.
+
+### Matrix
+
+PASS and FAIL are observed on c8f05170. NOT RUN was not tested in this run (the first
+run's result, where there was one, is named).
+
+| Check | Ubuntu 24.04 host | Debian 13 container |
+| --- | --- | --- |
+| `sha256sum -c`, `apt-get install ./…deb` | PASS (after `apt-get remove` of the first run's package) | PASS |
+| Headless owner commands, 13 checks | PASS 13/13 | PASS 13/13 |
+| …wrong passphrase: one line, no SQLCipher lines (R5) | PASS: `apassy owner: The passphrase is wrong, or the vault file is damaged. The vault stays locked.` | PASS |
+| …`change-passphrase` asks once (R6) | PASS: one `Current passphrase:`; without a bus the keyring note names `keyring-disable` in the desktop session | PASS |
+| Secret Service opt-in, 8 checks | PASS 8/8 | NOT RUN |
+| polkit `auth_self` | NOT RUN (first run: PASS with the fix) | NOT RUN (no seat) |
+| Window under X11: first run, create vault, item list | PASS | PASS |
+| Window under Wayland (sway): native start, unlock | PASS: app_id `apassy`, no X | – |
+| Copy under Wayland | NOT RUN (see below) | – |
+| Settings > Tools: command line (R4) | PASS: `apassy  /usr/bin/apassy`, "Installed by the apassy-vault package", no Install tools | NOT RUN |
+| Settings > Tools: Chromium snap (R2, item 2) | PASS: "Not supported", the reason and "Use Google Chrome, or Chromium from a .deb.", no Connect | – |
+| `apassy setup browser --browser chromium` | PASS: snap refused with the reason, nothing written, exit 1; `--json`: `"state": "unsupported", "reason": "snap"` | PASS: deb Chromium written |
+| API refusals (`refusals.sh api`, 7 cases) | PASS 7/7 | NOT RUN |
+
+| Browser check | Ubuntu Chrome 157 | Debian Chrome 157 | Debian Chromium 156, as packaged (no system extension) | Debian Chromium 156 + `chromium-lwn4chrome` |
+| --- | --- | --- | --- | --- |
+| Load unpacked, ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` | PASS | PASS | PASS | (same profile) |
+| Passkey create, verified by the RP | PASS | PASS | REFUSED as intended: the browser's own security-key dialog, no Apassy card | PASS |
+| Passkey sign-in, verified | PASS | PASS | NOT RUN | PASS |
+| Two passkeys of one account: chooser (R8, item 4) | PASS: newest first and selected, both with "Added … UTC"; the RP (which knew only the newest) verified the sign-in | PASS: same | – | – |
+| Wrong RP ID create and sign-in | PASS: `SecurityError`, no card | NOT RUN | – | NOT RUN |
+| One-time code fill (otp.html) | PASS: card "fill the current code…", RP `otp_login` `codeMatches: true` | NOT RUN | – | NOT RUN |
+| Password save, then fill and RP login | NOT RUN (first run: PASS) | NOT RUN | – | PASS: save card, saved, fill card, RP `passwordMatches: true` |
+| Refused: `--remote-debugging-port=9333`, a copied Chrome under `/opt`, `chmod o+w` Chrome | PASS 3/3: security-key dialog, no card; positive control after restoring the mode verified | NOT RUN | – | – |
+| Refused: the owner's own folder added (`--load-extension=/home/l5owner/l5-user-ext`) | – | – | – | PASS: security-key dialog, no card, no verified sign-in |
+
+Each verified ceremony also passed the RP's negative re-checks (wrong origin, wrong RP
+ID, and for sign-in a damaged signature: all `refused`); attestation `none`, AAGUID
+zero, user verification true.
+
+The first attempt at the three Chrome refusals is not counted: Chrome's search-engine
+choice dialog covered the page, so no request was made. The rerun after dismissing it
+is the result above; each screenshot shows the browser's dialog.
+
+First-run items: R1 (as decided by the parent agent: only root-owned system
+extensions), R2, R4, R5, R6, R8 and R9 are fixed and observed fixed above, except R9,
+which only a CI run on a pull request shows. Documentation errors 6 and 7 are
+corrected (debug builds; ADR 0041 describes the owner check that exists). R3 (macOS
+wording), R7 (toast after a failed polkit check), R10 and R11 are not part of this unit.
+
+### Debian's Chromium, observed
+
+- `/usr/bin/chromium` sources `/etc/chromium.d/*`; `/etc/chromium.d/extensions` adds
+  `--enable-remote-extensions` and `--load-extension=$(ls -dm
+  /usr/share/chromium/extensions/* | tr -d '\n')`. The three Debian 13 packages checked
+  (`webext-keepassxc-browser`, `webext-ublock-origin-chromium`, `chromium-lwn4chrome`)
+  install real directories there, root-owned, mode 0755; without such a package the
+  folder does not exist.
+- The browser process's `/proc/PID/cmdline` is one NUL-terminated string (title
+  rewritten). Without a system extension it ends with `--enable-remote-extensions
+  --load-extension` (no `=`, no value): refused. With `chromium-lwn4chrome`:
+  `--load-extension=/usr/share/chromium/extensions/lwn4chrome`: accepted. With the
+  owner's own folder: `--load-extension=/usr/share/chromium/extensions/lwn4chrome
+  --load-extension=/home/l5owner/l5-user-ext`: refused. These three titles are the
+  test `observed_debian_13_titles`.
+
+### Wayland, observed and not
+
+- Observed: the window ran as a native Wayland client of sway 1.9 with `DISPLAY` unset
+  and unlocked with the passphrase (typed through the virtual-keyboard protocol). Its
+  `WAYLAND_DEBUG` log shows the registry advertising `zwlr_data_control_manager_v1`
+  version 2 and no `ext_data_control_manager_v1`; the clipboard's probe connections
+  read it.
+- Not observed: a Copy. The headless sway had no input device; `wlrctl` makes a
+  virtual pointer per call, so no click reached the window, and keyboard navigation did
+  not open an item. So the protocol path of Copy under Wayland is not shown by this run.
+  From the advertised globals and `src/desktop/clipboard/wayland.rs` it would be
+  wlr-data-control: an inference, not an observation. Tests of the clipboard against a
+  headless sway with wl-clipboard run in CI (`desktop::clipboard::`).
+
+### Not run in this run
+
+arm64 (`devbox-arm` stopped; its start needs the owner); polkit; Copy under Wayland; a
+real desktop (GNOME, KDE); Secret Service on Debian; on Debian: wrong RP ID, OTP,
+refusals other than the extension folder; on Ubuntu: password save and fill, cancel,
+locked vault, a killed browser (all PASS in the first run, code unchanged); Flatpak
+browsers (only the unit tests of the "not supported" state); the tar install.
+
+### Host changes undone
+
+`cleanup-host.sh --packages` (new in the kit) removed the automatic login on tty3,
+the accounts `l5owner` and `l5headless` with their homes and processes, and sway,
+grim, wtype, wlrctl and wl-clipboard; ydotool (tried for pointer input) was removed;
+the containers `l5-debian13` and `l5-dev` were deleted. The host keeps the Apassy
+package of this build (it replaced the first run's), Chrome, the Chromium snap and the
+other packages of `setup-host.sh`, as after the first run. The first run's accounts
+`l4owner` and `l4headless` still exist on the host; they are not this run's.
+
+### Screenshots
+
+In `docs/reviews/linux-acceptance-2026-11/` (1600x1000, synthetic data):
+`l5-ubuntu-01-chooser-newest-selected`, `l5-ubuntu-02-settings-tools`,
+`l5-ubuntu-03-remote-debugging-refused`, `l5-ubuntu-04-otp-card`,
+`l5-ubuntu-05-otp-verified`, `l5-wayland-01-native-window`,
+`l5-wayland-02-unlocked`, `l5-debian13-01-chromium-default-refused`,
+`l5-debian13-02-chromium-system-extension-card`,
+`l5-debian13-03-chromium-user-extension-refused`, `l5-debian13-04-save-card`,
+`l5-debian13-05-password-filled`, `l5-debian13-06-chrome-chooser`.
+
+## Release packages, 2026-11-10 (unit L6)
+
+The release path of the vault package: release mode, built in `rust:1.97.0-bullseye`
+(glibc 2.31) by `packaging/linux/build-vault-release.sh`, the same script in PR CI
+(`linux-vault-package`) and in `relay-image.yml` (`linux-vault`). Packages under test:
+CI run 42903422377 of draft PR #122, head `1f998a4c`; `release-vault-linux-*.json`
+records `commit` `1f998a4c8948775ad4330edab1872b4b7b0561b7`, the head, not a merge
+commit (R9 fixed for these jobs). Version 0.5.19, release build, stripped.
+
+| File | Size (bytes) | SHA-256 |
+| --- | --- | --- |
+| `apassy-vault_0.5.19_amd64.deb` | 16750076 | `967389334d6a56cd564d6cbb82607446f32a346866f9acf937e86d24959e6849` |
+| `apassy-vault-0.5.19-linux-x86_64.tar.gz` | 23692382 | `37fda34fdad24277e1eddabab7ed12ad17543571c07c9e870f5f475bf1720275` |
+| `apassy-vault_0.5.19_arm64.deb` | 15201868 | `829746688d68891f949f9f5428fb528b0efb069f5dc5054697d18c6dbe75076e` |
+| `apassy-vault-0.5.19-linux-aarch64.tar.gz` | 22280813 | `be637a14d616a24af18d3f8573b1c13bdc1436df1be4a61a7e77c38d94140d88` |
+
+The debug packages of the first run were 22.5 MB (deb) and 34.6 MB (tar). The largest
+release file, the x86_64 tarball, is 90% of the 25 MiB (26214400 bytes) that the relay
+Worker's `/dl/` can serve; the build refuses a larger one.
+
+glibc requirement (newest `GLIBC_` symbol version, `readelf --version-info`): `apassy`
+2.30 and `apassy-browser-host` 2.30, on both architectures (was 2.39 and 2.38). Shared
+libraries linked (`NEEDED`): libc, libm, libdl, libgcc_s, the loader.
+
+### Matrix
+
+Minimal containers, x86_64 on `devbox-x86` (`packaging/linux/acceptance/release-matrix.sh`),
+and both architectures in CI (`verify-vault.sh --containers` on `ubuntu-24.04` and
+`ubuntu-24.04-arm`). PASS is observed.
+
+| Check | Debian 12 (glibc 2.36) | Debian 13 (2.41) | Ubuntu 22.04 (2.35) | Ubuntu 24.04 (2.39) |
+| --- | --- | --- | --- | --- |
+| x86_64: `install.sh` vault from `file://`, deb with apt, no Recommends (packages added) | PASS (56) | PASS (52) | PASS (56) | PASS (52) |
+| x86_64: `ldd -r` of `apassy` and `apassy-browser-host` | PASS | PASS | PASS | PASS |
+| x86_64: window maps on Xvfb (X11), "Apassy" 1180x800, still running after 4 s | PASS | PASS | PASS | PASS |
+| x86_64: headless owner checks of the kit (11) | PASS 11/11 | PASS 11/11 | PASS 11/11 | PASS 11/11 |
+| x86_64: `install.sh` vault tar (`APASSY_VAULT_FORMAT=tar`, Depends installed first), window | PASS | PASS | PASS | PASS |
+| x86_64 CI: apt install, `ldd -r`, tar `--version`, window | PASS | PASS | PASS | PASS |
+| aarch64 CI (native arm64 runner): apt install, `ldd -r`, tar `--version`, window | PASS | PASS | PASS | PASS |
+| aarch64: headless owner checks, `install.sh` deb path | NOT RUN (`devbox-arm` not available) | NOT RUN | NOT RUN | NOT RUN |
+
+Also observed: on the CI runners (Ubuntu 24.04, both architectures) the deb installs,
+`apassy owner create` refuses piped input, the deb removes, and `install.sh` installs
+the tarball twice. `install.sh` refuses Debian 11 and Ubuntu 20.04 before any download:
+"The vault package supports Debian 12 or later and Ubuntu 22.04 or later; this system
+is Debian GNU/Linux 11 (bullseye). Set APASSY_ALLOW_UNSUPPORTED=1 to try it anyway
+(untested)."
+
+### Dependencies found
+
+The window under X11 loaded (LD_DEBUG, the same on all four): libX11, libX11-xcb,
+libxcb (and its dri2, dri3, glx, present, randr, shm, sync, xfixes, xkb extensions,
+through Mesa), libXcursor, libXi, libxkbcommon, libxkbcommon-x11, libGL, libGLX and
+libGLX_mesa with `swrast_dri.so`; no libEGL, no Wayland library, no libXrandr. With
+the previous `Depends` minus `libstdc++6` and `libxrandr2`, the window starts on all
+four. `Depends` now: `libc6 (>= 2.30), libgcc-s1, libx11-6, libx11-xcb1, libxcb1,
+libxcursor1, libxi6, libxkbcommon0, libxkbcommon-x11-0, libgl1, libegl1,
+libwayland-client0, libwayland-cursor0, libwayland-egl1`; the Wayland and EGL entries
+are what winit and glutin load in a Wayland session, which was not run. `Suggests:
+libsecret-tools, polkitd | policykit-1, xdg-desktop-portal`.
+
+Not covered by this section: Wayland sessions; arm64 headless owner checks; Secret
+Service and polkit on Debian 12 and Ubuntu 22.04; browsers on the release build (the
+browser matrix above is of debug builds); the release workflow itself (no `image-*`
+tag was pushed); the published `/dl/` download.

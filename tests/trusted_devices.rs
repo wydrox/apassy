@@ -289,7 +289,10 @@ fn relay_memberships_stay_on_their_mac() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(rows, 0, "a pushed copy carries no key of this Mac");
+    assert_eq!(
+        rows, 0,
+        concat!("a pushed copy carries no key of this ", apassy::computer!())
+    );
     conn.close().map_err(|(_, e)| e).unwrap();
     w.b.merge_from(&copy, &SyncScope::vault()).unwrap();
     assert!(w.b.relay_memberships().unwrap().is_empty());

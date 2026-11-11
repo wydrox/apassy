@@ -181,7 +181,10 @@ device does, and only a verified device can be added to a store.
 the account (after a recovery, the recovering device). Each client keeps that root key, the keys it
 verified, and the keys it saw removed, in its account file. What a client cannot detect: a removal
 that Connect hides from a client that never saw the removed device listed, while the removed
-device's key is also in someone else's hands. A recovery starts a new root; a device of the old
+device's key is also in someone else's hands; and, in a vault shared with a family or team, a
+device that Connect names for another member's account: the client cannot check another account's
+chain, so there it relies on the relay-sync device link (the safety words on a device in the store)
+and the vault passphrase, which such a device would also need. A recovery starts a new root; a device of the old
 root learns it only by joining again with a link from the recovered device, never from Connect.
 
 **The recovery code** is the seed of an Ed25519 key pair. Connect stores only the public key; a

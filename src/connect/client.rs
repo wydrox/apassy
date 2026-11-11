@@ -22,14 +22,37 @@ use crate::sync::{RelayUrl, SyncError};
 /// The deadline of one call.
 const CALL_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The Connect origin of this build: `APASSY_CONNECT_URL` when it is set (a sandbox
-/// Connect), else [`super::DEFAULT_CONNECT_URL`]. An account keeps the origin it was made
-/// at in its account file, so this only chooses where a new account or join goes.
+/// The Connect origin that the host of this process set ([`set_configured_origin`]).
+static PROCESS_ORIGIN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// The Connect origin of this build: the one that the host of this process set
+/// ([`set_configured_origin`], the iPhone core from its config), else
+/// `APASSY_CONNECT_URL` when it is set (a sandbox Connect), else
+/// [`super::DEFAULT_CONNECT_URL`]. An account keeps the origin it was made at in its
+/// account file, so this only chooses where a new account or join goes, and which
+/// Connect host a pairing code may name (node-pairing-v1 section 7a).
 pub fn configured_origin() -> String {
+    if let Some(origin) = PROCESS_ORIGIN
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return origin;
+    }
     std::env::var("APASSY_CONNECT_URL")
         .ok()
         .filter(|text| !text.trim().is_empty())
         .unwrap_or_else(|| super::DEFAULT_CONNECT_URL.to_owned())
+}
+
+/// Set the Connect origin of this process (without a trailing slash): the iPhone core
+/// does it at its start with the origin of its config, as it sets the device name, so
+/// the pairing codes that it reads name the same Connect host. The last call wins.
+pub fn set_configured_origin(origin: &str) {
+    *PROCESS_ORIGIN
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(origin.trim_end_matches('/').to_owned());
 }
 
 /// The error of a failed call.

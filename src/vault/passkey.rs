@@ -282,6 +282,14 @@ pub struct PasskeyInfo {
     pub user_handle: Vec<u8>,
     pub user_name: String,
     pub user_display_name: String,
+    /// When the login with this passkey was added to the vault (unix seconds): the
+    /// first event of its history. That is when the passkey was made for a passkey
+    /// that Apassy saved as a new login, or imported; for a passkey added to an older
+    /// login it is the date of that login. The vault keeps no separate passkey time.
+    /// Set by the lookups of one site or one item ([`Vault::passkeys`],
+    /// [`Vault::passkey_info`], the export); `None` in [`Vault::all_passkeys`] and
+    /// without a history.
+    pub added: Option<u64>,
 }
 
 /// Where a new passkey goes.
@@ -659,6 +667,7 @@ impl StoredPasskey {
             user_handle: self.user_handle.clone(),
             user_name: self.user_name.clone(),
             user_display_name: self.user_display_name.clone(),
+            added: None,
         }
     }
 }
@@ -1284,6 +1293,19 @@ pub(super) fn is_valid_passkey(fields: &[Field]) -> bool {
     parse_stored(fields, true).is_some()
 }
 
+/// The first event of the history of item `item_id` (unix seconds): when it was added,
+/// or when its history started. `None` without a history.
+fn first_event_at(conn: &Connection, item_id: u64) -> PasskeyResult<Option<u64>> {
+    let first: Option<i64> = conn
+        .query_row(
+            "SELECT MIN(at) FROM item_event WHERE item_id = ?1",
+            [to_sql_id(item_id)?],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    Ok(first.and_then(|at| u64::try_from(at).ok()))
+}
+
 /// Reserved rows of login items, without secret values (the key and the extension
 /// data): item ID to (title, fields).
 fn listed_rows(
@@ -1476,18 +1498,35 @@ fn store(
 }
 
 impl Vault {
-    /// Active passkeys of `rp_id`. A non-empty `allowed` keeps only those credential IDs.
-    /// See [`Vault::all_passkeys`] for the items in the list.
+    /// Active passkeys of `rp_id`, the newest first, each with its
+    /// [`added`](PasskeyInfo::added) time. A non-empty `allowed` keeps only those
+    /// credential IDs. See [`Vault::all_passkeys`] for the items in the list.
+    ///
+    /// Every account chooser shows this order (the desktop dialog, `apassy owner
+    /// serve`, the macOS and iPhone lists): two passkeys of one site and account
+    /// looked the same, and the older one, which the site may no longer know, came
+    /// first (Linux acceptance, 2026-11-10). Without a time, a higher item ID (a later
+    /// item) counts as newer; items without a time come last.
     pub fn passkeys(&self, rp_id: &str, allowed: &[Vec<u8>]) -> PasskeyResult<Vec<PasskeyInfo>> {
         if !valid_rp_id(rp_id) {
             return Err(invalid());
         }
-        Ok(self
+        let mut list: Vec<PasskeyInfo> = self
             .all_passkeys()?
             .into_iter()
             .filter(|info| info.rp_id == rp_id)
             .filter(|info| allowed.is_empty() || allowed.contains(&info.credential_id))
-            .collect())
+            .collect();
+        let conn = self.conn_ref()?;
+        for info in &mut list {
+            info.added = first_event_at(conn, info.item_id)?;
+        }
+        list.sort_by(|a, b| {
+            b.added
+                .cmp(&a.added)
+                .then_with(|| b.item_id.cmp(&a.item_id))
+        });
+        Ok(list)
     }
 
     /// Each canonical passkey, in item ID order: one entry for each credential (RP ID
@@ -1567,9 +1606,11 @@ impl Vault {
             .map_err(storage)?
             .ok_or_else(|| PasskeyError::kind(VaultErrorKind::NotFound))?;
         let fields = stored_fields(conn, sql_id)?;
-        parse_stored(&fields, false)
+        let mut info = parse_stored(&fields, false)
             .map(|stored| stored.info(item_id, title))
-            .ok_or_else(|| PasskeyError::kind(VaultErrorKind::NotFound))
+            .ok_or_else(|| PasskeyError::kind(VaultErrorKind::NotFound))?;
+        info.added = first_event_at(conn, item_id)?;
+        Ok(info)
     }
 
     /// Make a new ES256 passkey (WebAuthn authenticatorMakeCredential) with "none"
@@ -1924,7 +1965,7 @@ impl Vault {
             return Err(not_found());
         }
         let stored = parse_stored(&stored_fields(conn, sql_id)?, true).ok_or_else(not_found)?;
-        let info = self
+        let mut info = self
             .all_passkeys()?
             .into_iter()
             .find(|info| {
@@ -1933,6 +1974,7 @@ impl Vault {
                     && info.credential_id == stored.credential_id
             })
             .ok_or_else(not_found)?;
+        info.added = first_event_at(conn, item_id)?;
         Ok((stored, info))
     }
 
@@ -2865,5 +2907,87 @@ mod tests {
         assert_eq!(key.value.expose(), "");
         let all = stored_fields(vault.conn_ref().unwrap(), created.item_id as i64).unwrap();
         assert!(is_valid_passkey(&all));
+    }
+
+    /// Two passkeys of one site and one account: the newest comes first, each with
+    /// the time its login was added (the account chooser shows both).
+    #[test]
+    fn passkeys_of_a_site_come_newest_first_with_their_time() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("v.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let mut make = |handle: &[u8]| {
+            vault
+                .create_passkey(PasskeyCreate {
+                    rp_id: "localhost",
+                    user_handle: handle,
+                    user_name: "l4@example.test",
+                    user_display_name: "L4 Owner",
+                    client_data_hash: &[7; 32],
+                    algorithms: &[ES256],
+                    exclude: &[],
+                    target: PasskeyTarget::NewItem {
+                        title: "localhost".to_owned(),
+                    },
+                })
+                .unwrap()
+                .item_id
+        };
+        let first = make(b"user-1");
+        let second = make(b"user-2");
+        let third = make(b"user-3");
+        let at = |vault: &Vault, item: u64, when: i64| {
+            vault
+                .conn_ref()
+                .unwrap()
+                .execute(
+                    "UPDATE item_event SET at = ?1 WHERE item_id = ?2",
+                    (when, item as i64),
+                )
+                .unwrap();
+        };
+        // The second is the newest; the first and the third share a time, so the later
+        // item (the higher ID) comes first among them.
+        at(&vault, first, 1_000);
+        at(&vault, second, 3_000);
+        at(&vault, third, 1_000);
+        let listed = vault.passkeys("localhost", &[]).unwrap();
+        let order: Vec<(u64, Option<u64>)> = listed
+            .iter()
+            .map(|info| (info.item_id, info.added))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (second, Some(3_000)),
+                (third, Some(1_000)),
+                (first, Some(1_000))
+            ]
+        );
+        // No history: no time, and last.
+        vault
+            .conn_ref()
+            .unwrap()
+            .execute("DELETE FROM item_event WHERE item_id = ?1", [second as i64])
+            .unwrap();
+        let listed = vault.passkeys("localhost", &[]).unwrap();
+        assert_eq!(
+            listed.last().map(|info| (info.item_id, info.added)),
+            Some((second, None))
+        );
+        // The filter by credential keeps the order and the time.
+        let only = vault
+            .passkeys("localhost", &[listed[0].credential_id.clone()])
+            .unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].added, listed[0].added);
+        // The list for every relying party is unchanged: item order, no time.
+        let all: Vec<u64> = vault
+            .all_passkeys()
+            .unwrap()
+            .iter()
+            .map(|i| i.item_id)
+            .collect();
+        assert_eq!(all, vec![first, second, third]);
     }
 }

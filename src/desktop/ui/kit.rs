@@ -1296,6 +1296,15 @@ pub(crate) fn shortcut(ctx: &egui::Context, modifiers: egui::Modifiers, key: Key
     ctx.input_mut(|input| input.consume_shortcut(&egui::KeyboardShortcut::new(modifiers, key)))
 }
 
+/// The shortcut that hides or shows the sidebar: ⌃⌘S on macOS; F9 on Linux, where
+/// Ctrl+S means Save ([`crate::sidebar_shortcut!`] names it).
+#[cfg(not(target_os = "linux"))]
+pub(crate) const SIDEBAR_SHORTCUT: (egui::Modifiers, Key) =
+    (egui::Modifiers::COMMAND.plus(egui::Modifiers::CTRL), Key::S);
+/// F9 on Linux: the side-pane key of GNOME and KDE applications.
+#[cfg(target_os = "linux")]
+pub(crate) const SIDEBAR_SHORTCUT: (egui::Modifiers, Key) = (egui::Modifiers::NONE, Key::F9);
+
 /// The default action of a sheet: ⌘S, ⌘Return, or Return (see [`sheet`]).
 pub(crate) fn save_shortcut(ctx: &egui::Context) -> bool {
     let command = shortcut(ctx, egui::Modifiers::COMMAND, Key::S)
@@ -2649,7 +2658,7 @@ pub(crate) fn environment_header(ui: &mut Ui, name: &str, this_mac: bool, detail
         ui.add_space(2.0);
         ui.label(text(name, Font::Headline).color(palette().label));
         if this_mac {
-            cap_toned(ui, "This Mac", Tone::Accent);
+            cap_toned(ui, concat!("This ", crate::computer!()), Tone::Accent);
         } else {
             cap(ui, "Read-only", false);
         }

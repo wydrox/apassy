@@ -1263,7 +1263,10 @@ printf '{{"version":"apassy-local-v1+{short}","sha256":"{sha}","checkpoint":"%s/
         let refused = heads_place::place(&vault, record.id, &brain.client()).expect_err("leak");
         assert_eq!(
             refused.failure,
-            PlaceFailure::Files("its manifest.json names a folder on this Mac")
+            PlaceFailure::Files(concat!(
+                "its manifest.json names a folder on this ",
+                apassy::computer!()
+            ))
         );
         assert!(brain.seen().is_empty(), "nothing was sent");
         assert_eq!(uploaded_to(&vault, record.id), None);

@@ -32,13 +32,14 @@ use super::{
 };
 use crate::broker::approvals::{ConnectGroupChange, OwnerProof};
 use crate::connect::{
-    AccountState, AccountView, CheckoutRequest, ConnectAccount, ConnectClient, ConnectError,
-    DeviceKeyStore, DeviceLink, Forgotten, GroupDetail, JoinPoll, JoinRequest,
+    AccountSigner, AccountState, AccountView, CheckoutRequest, ConnectAccount, ConnectClient,
+    ConnectError, DeviceKeyStore, DeviceLink, Forgotten, GroupDetail, JoinPoll, JoinRequest,
     KeychainDeviceKeyStore, PendingJoin, PlansView, account_file, drop_account_rows,
     forget_this_device,
 };
 use crate::desktop::DesktopApp;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
+use crate::sync::StorePlan;
 
 type Slot<T> = Arc<Mutex<Option<T>>>;
 
@@ -107,6 +108,22 @@ struct Waiting {
     polled: Option<Instant>,
 }
 
+/// What the sync of a vault store needs of the account (plan s7 unit M3).
+#[derive(Clone)]
+pub(crate) struct SyncAccount {
+    /// The account in memory; a worker of the sync locks it for its Connect calls.
+    pub(crate) account: Slot<ConnectAccount>,
+    /// The Connect origin of the account.
+    pub(crate) origin: String,
+    /// The plan state of the last refresh.
+    pub(crate) plan: StorePlan,
+    /// The account key, when the section read it.
+    pub(crate) signer: Option<Arc<AccountSigner>>,
+    /// Which keys may sign the heads of a vault store, from the last refresh
+    /// (connect-account-v1 section 7.5, `crate::connect::signer_policy`).
+    pub(crate) signers: crate::sync::SignerPolicy,
+}
+
 /// The vault build's part of the section state.
 #[derive(Default)]
 pub(crate) struct Live {
@@ -126,6 +143,9 @@ pub(crate) struct Live {
     link: Slot<DeviceLink>,
     pending: Vec<PendingJoin>,
     pending_at: Option<Instant>,
+    /// The account key of this Mac while the account is signed in, for the sync of the
+    /// vault stores (plan s7 unit M3). It goes with the account at a lock.
+    signer: Option<Arc<AccountSigner>>,
     join: Slot<JoinRequest>,
     join_at: Option<Instant>,
     /// The note of the removed state: Connect said this Mac was removed, or its key is
@@ -184,6 +204,23 @@ impl Live {
         self.pending.clear();
         self.join = slot();
         self.removed = None;
+        self.signer = None;
+    }
+
+    /// The account of this Mac for the sync through Apassy Connect (plan s7 unit M3):
+    /// `Some` while it is signed in and Settings › Connect read it.
+    pub(crate) fn sync_account(&self) -> Option<SyncAccount> {
+        if !self.open {
+            return None;
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        Some(SyncAccount {
+            account: Arc::clone(&self.account),
+            origin: self.file()?.origin.clone(),
+            plan: StorePlan::from_view(&snapshot.view.plan),
+            signer: self.signer.clone(),
+            signers: crate::connect::signer_policy(&snapshot.view, self.file()?),
+        })
     }
 
     /// The poll intervals.
@@ -539,6 +576,14 @@ fn apply(app: &mut DesktopApp, ctx: &egui::Context, outcome: Outcome) {
             if let Some(plans) = plans {
                 live.plans = Some(plans_of(&plans));
             }
+            // The worker ended, so the account is free: its key goes to the sync of the
+            // vault stores, with the plan state.
+            if let Ok(account) = live.account.try_lock()
+                && let Some(account) = account.as_ref()
+            {
+                live.signer = account.signer().ok();
+            }
+            app.relay_share_connect();
         }
         Outcome::Plans(Ok(plans)) => live.plans = Some(plans_of(&plans)),
         Outcome::Checkout(Ok((url, _session))) => {
@@ -1211,6 +1256,11 @@ pub(crate) fn choose(app: &mut DesktopApp, ctx: &egui::Context, choice: SheetCho
         (Sheet::Waiting { url, stopped }, SheetChoice::OpenAgain) => {
             ctx.open_url(egui::OpenUrl::new_tab(url.clone()));
             app.ui.connect.sheet = Some(Sheet::Waiting { url, stopped });
+        }
+        (sheet @ Sheet::Picker { .. }, SheetChoice::TryAgain) => {
+            app.ui.connect.sheet = Some(sheet);
+            app.ui.connect.live.error = None;
+            load_plans(app, ctx);
         }
         (Sheet::Waiting { url, .. }, SheetChoice::CheckAgain) => {
             app.ui.connect.live.waiting = Some(Waiting {

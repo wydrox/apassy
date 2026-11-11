@@ -285,7 +285,11 @@ impl DesktopApp {
         match &self.companion.listener {
             Listener::Running { handle, .. } => {
                 let message = format!(
-                    "The iPhone listener is on, port {}. Paired Wi-Fi iPhones reach this Mac.",
+                    concat!(
+                        "The iPhone listener is on, port {}. Paired Wi-Fi iPhones reach this ",
+                        crate::computer!(),
+                        "."
+                    ),
                     handle.port()
                 );
                 self.set_ok(message);
@@ -415,7 +419,12 @@ impl DesktopApp {
     pub(crate) fn remove_companion_device(&mut self, device_id: &str, name: &str) {
         match self.owner_ui.session.remove_companion_device(device_id) {
             Ok(true) => self.set_ok(format!(
-                "The iPhone \"{name}\" is removed. It cannot reach this Mac any more."
+                concat!(
+                    "The iPhone \"{name}\" is removed. It cannot reach this ",
+                    crate::computer!(),
+                    " any more."
+                ),
+                name = name
             )),
             Ok(false) => self.set_note(format!("The iPhone \"{name}\" was already removed.")),
             Err(error) => self.set_err(error.message),
@@ -428,9 +437,11 @@ impl DesktopApp {
         self.stop_companion();
         match self.owner_ui.session.reset_companion_pairing() {
             Ok(()) => {
-                self.set_ok(
-                    "Pairing is reset. Every iPhone is removed, and this Mac has a new certificate. Pair each iPhone again.",
-                );
+                self.set_ok(concat!(
+                    "Pairing is reset. Every iPhone is removed, and this ",
+                    crate::computer!(),
+                    " has a new certificate. Pair each iPhone again."
+                ));
                 self.sync_companion();
             }
             Err(error) => self.set_err(error.message),

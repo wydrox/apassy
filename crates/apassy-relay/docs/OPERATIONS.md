@@ -49,7 +49,9 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    run `npm ci --no-audit --no-fund`, `npm test`, `npm run typecheck`, and
    `npm run preflight`. The Wrangler build hook repeats the preflight even for a
    direct `npx wrangler deploy`; do not bypass it with `--no-bundle` or an alternate
-   config. A fresh checkout with missing downloads must fail.
+   config. A fresh checkout with missing downloads must fail. The preflight also refuses a
+   `RELAY_MODE` in `wrangler.jsonc` that is not the mode the relay reports on `GET /healthz`
+   (`x-apassy-relay-mode`, section 29; `scripts/check-relay-mode.mjs`).
 4. With the owner's explicit deployment approval, verify account/bindings/secrets
    and deploy the Worker with `npm run deploy`. Preserve routing, limits and secrets.
    Read back its deployment ID, both public download hashes, `SHA256SUMS`,
@@ -89,6 +91,8 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    verified backup only for data recovery, while stopped, reconciling all access
    changes since it was taken (restoring can revive revoked identities). Revalidate
    snapshots before reopening. An older image reintroduces the audited defects.
+   From `APASSY_RELAY_MODE=connect` (section 29) no downgrade command applies: the way
+   back is the stopped backup of the cutover and the image before it (section 29.6).
    Worker rollback must retain both downloads from its matching verified artifacts.
 8. Verify the other application publication surfaces separately. Record pending
    store reviews and old public versions explicitly; the relay does not publish them.
@@ -943,9 +947,9 @@ The Worker serves three things itself, without the relay and without the edge se
 
 | Path | What |
 | --- | --- |
-| `/install.sh` | after a SHA-256 check: on Linux (x86_64, aarch64) the node `apassy` and the `apassy-team` shim from the node tarball, on macOS `apassy-team`, into `~/.local/bin` (`deploy/worker/public/install.sh`) |
+| `/install.sh` | after a SHA-256 check: on Linux (x86_64, aarch64) the node `apassy` and the `apassy-team` shim from the node tarball, on macOS `apassy-team`, into `~/.local/bin`; with `APASSY_COMPONENT=vault` as root, the Linux vault package (`.deb` with apt, or the tarball), on Debian 12+ and Ubuntu 22.04+ only (`deploy/worker/public/install.sh`) |
 | `/guide` | the guide for owners and members of a relay that they run (`deploy/worker/public/guide.html`; source `docs/ONBOARDING.md`) |
-| `/dl/*` | the CLI binaries, the Linux node packages (`.tar.gz` and `.deb` for x86_64 and aarch64), and `SHA256SUMS` |
+| `/dl/*` | the CLI binaries, the Linux node packages and the Linux vault packages (`.tar.gz` and `.deb` for x86_64 and aarch64 each), and `SHA256SUMS` (ten lines). Workers static assets serve at most 25 MiB per file; the build refuses a larger package |
 
 Users install with:
 
@@ -1693,9 +1697,10 @@ Settings (all optional; the defaults change nothing):
   the Worker) makes at most 5 accounts a UTC day (429).
 - `APASSY_CONNECT_SITE_URL`: the site of the Stripe return pages (default
   `https://apassy.wyderka.cc`).
-- `APASSY_RELAY_MODE=connect` is the cutover of R3 (unit C5), not this step: it refuses a
-  master key (`APASSY_RELAY_KEY` and `_FILE` must be unset) and keeps `relay.db` and the
-  vault stores as plain files. Do not set it on the running relay before the cutover.
+- `APASSY_RELAY_MODE=connect` is the cutover of R3 (unit C5, section 29), not this step: it
+  refuses a master key (`APASSY_RELAY_KEY` and `_FILE` must be unset) and keeps `relay.db`
+  and the vault stores as plain files. Do not set it on the running relay before the
+  cutover: a keyed `relay.db` does not open plain, and the start fails.
 
 What changes at the first start of this version:
 
@@ -1918,3 +1923,130 @@ The broker and the ingress (docs/SPEC.md section 35) run on a relay with the acc
 - The whole tunnel goes only with the account routes (`APASSY_RELAY_CONNECT_ACCOUNTS=0`); nodes reconnect with backoff and devices fall back to the tailnet.
 - The tunnel's rows (`tunnel_node`, `tunnel_grant`, `tunnel_usage`) are part of directory 1006 and stay. A restart keeps the month's budgets (the stop writes them). Deleting `tunnel_usage` rows resets budgets: do it only to correct a counting bug, with a backup first.
 - The vendored HTTP change (`GET` upgrades reach the handler) stays; `http::handle` refuses an upgrade on every route but the two tunnel routes.
+
+## 29. The end of the free paths, Connect-only mode, and the cutover
+
+SPEC section 37; plan s7 unit C5 and release R3. The owner's runbook, with each production
+step, its effect, and its undo, is [docs/operations/connect.md](../../../docs/operations/connect.md);
+this section is the operator's reference for the settings and the two commands. Nothing here
+changes the hosted relay by itself: each step is the owner's.
+
+### 29.1 The transition switches
+
+Both default to the behaviour before C5, so a self-run relay is unchanged.
+
+| Setting | What the relay does |
+| --- | --- |
+| `APASSY_RELAY_FREE_CONNECT=0` | `POST /v1/connect` and `/v1/connect/challenge`: 410 `free_connect_ended`. Free Connect teams: their questions, feed, and push routes are 410 `free_connect_ended`; their devices, sign-in, leaving, and relay sync stay |
+| and `APASSY_RELAY_CONNECT_SYNC_BYTES=0` (or unset) | Free Connect teams: a push or a receipt is 403 `plan_required` whatever their `sync_bytes`; pulls and downloads work, so their Macs can move the vault |
+
+Operator teams (made with a team code) and vault stores of accounts are never affected.
+`admin limits --sync-bytes` on a free Connect team has no effect while both are set. A
+change takes effect at the next start.
+
+What to watch: `sync_refused` rows with `plan_required` in the free teams' audits, and 410
+answers in the Worker's analytics for `/v1/connect`, `/v1/questions`, and `/v1/feed`: devices
+of users who have not moved yet. Undo: unset the setting and restart.
+
+### 29.2 `APASSY_RELAY_MODE=connect`
+
+Only Apassy Connect is served: accounts, vault stores (relay-sync-v1), billing, groups, the
+tunnel and its ingress, `/healthz`, and the well-known document; every other route of the
+relay answers 410 `hosted_retired` before its body is read; `/p/` and `/mcp` never reach a
+handler (no proxy is built). The start refuses `APASSY_RELAY_KEY` and `APASSY_RELAY_KEY_FILE`,
+every push setting (`APASSY_RELAY_PUSH_*`), and `APASSY_RELAY_CONNECT_ACCOUNTS=0`. `relay.db`
+and the stores are plain SQLite files. `/healthz` sends `x-apassy-relay-mode: connect` beside
+the version and the commit. `admin team-code`, `admin node-code`, `init --team`, `migrate`,
+`rollback-check`, and every `downgrade-*` command are refused with a message; the way back is
+29.6.
+
+The relay does not start on a cutover that is not finished, in either mode, and changes no file
+then: a plain `relay.db` beside `relay.db.keyed` is refused in both modes; `connect` mode also
+refuses an encrypted `relay.db` and a `cutover.json` whose `state` is not `done`. The message
+says to run the cutover again (29.5) with the configuration before it. A vault store that does
+not open at start is logged as out of service with the advice to keep its file and restore it
+from a backup, never to delete it.
+
+### 29.3 Backups
+
+- `admin backup` works in both modes; in `connect` mode it copies plain files, and its
+  `MANIFEST.json` says `"mode": "connect"`. `snapshot-check` reads plain files there.
+- `apassy-relay backup` is the backup of a **stopped** relay (it takes `relay.lock`): a
+  byte-for-byte copy of `relay.db`, `teams/` with the snapshots and `.pre-v*` copies,
+  `team.db`, `team.db.pre-teams`, `relay.db.migrating` and its journal, and `audit-archive/`,
+  with `MANIFEST.json` (`"stopped": true`, sizes and SHA-256). It refuses while the relay runs,
+  while a write journal remains (start and stop the relay once), and on a committed cutover
+  (`relay.db` plain beside `relay.db.keyed`). A `relay.db.keyed` beside a keyed `relay.db` (a
+  cutover that stopped before its commit point) is left out of it.
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay backup
+```
+
+A restore of either kind: stop the relay, put the backup's `relay.db` and `teams/` (and, from
+a stopped backup, its other files) into an empty data volume (owner 10001, mode 0700, files
+0600), and start the relay in the mode of the backup (`MANIFEST.json`: no `mode` or
+`"relay"` needs the master key of that time; `"connect"` needs none). Check it first with
+`docker compose run --rm --no-deps -T relay snapshot-check` on the restored volume.
+
+### 29.4 `apassy-relay connect-cutover`
+
+```sh
+docker compose run --rm --no-deps -T relay connect-cutover > cutover-plan.json   # the dry run
+docker compose run --rm --no-deps -T relay connect-cutover \
+  --confirm-delete-teams "$(jq -r .plan_sha256 cutover-plan.json)"
+```
+
+It runs with the configuration **before** the cutover (the master key set, `APASSY_RELAY_MODE`
+unset) and the relay stopped. The dry run (the default) checks everything and prints the plan
+as JSON (the stores that stay, the teams that go, the files with their hashes, the backup it
+checked, and `plan_sha256`, the SHA-256 of that plan); it writes nothing.
+`--confirm-delete-teams <plan_sha256>` goes on only if the plan is still that one (a newer
+backup or a changed file refuses it: run the dry run again and read it). It keeps `relay.db`
+and the vault stores of the accounts as plain files (a keyed `.pre-v*` copy of a store too),
+deletes every other team with its file, snapshots, `.pre-v*` copies, and key, and writes
+`cutover.json` in the data directory. It edits and vacuums a keyed working copy of `relay.db`
+(`relay.db.work`) and exports only the result: no team key reaches the disk in plain. An error
+before the commit point removes the side files it wrote. `--backup <folder>` names the
+stopped backup to check; otherwise the newest one is checked. Exit 0 with the JSON on stdout,
+or exit 1 with the reason on stderr.
+
+**The backup check:** the stopped backup holds a byte-identical copy (size and SHA-256) of
+every file that the cutover keeps or deletes, and its own files still match its
+`MANIFEST.json`. Any write to the data directory after the backup (a start of the relay
+included) fails it: make the stopped backup right before the cutover. The confirmed run checks
+the backup again before each step that deletes (also when it finishes a stopped run): keep the
+backup folder in place, unchanged, until the cutover is done.
+
+`cutover.json` holds `state` (`committing` or `done`), the stores kept, the files made plain,
+the teams deleted, the counts and the file list with SHA-256 before and after, the rows deleted
+from `relay.db`, the files deleted (every file of the list before that is gone), the entries
+left, `plan_sha256`, and the backup checked with the SHA-256 of its manifest. Keep a copy with
+the backup.
+
+Deleted files are freed blocks, not overwritten ones. What the cutover deletes is SQLCipher or
+snapshot ciphertext, and it writes no key in plain, so those blocks open only with the master
+key; to leave none at all, restore a stopped backup of Connect into a new volume and destroy
+the old one (docs/operations/connect.md, section 9.6).
+
+### 29.5 A cutover that stopped
+
+Run it again with `--confirm-delete-teams <plan_sha256>`: before its commit point (the plain
+`relay.db` in place) it starts over; after it, it finishes, with the `plan_sha256` of
+`cutover.json`. `relay.db.keyed` exists from the commit point to the end; it is the keyed
+directory with the team keys, the second run needs it, and it is deleted only when it is, byte
+for byte, the `relay.db` of the inventory. A dry run says which case it is (`state`, `pending`)
+and names the plan. The relay does not start in either mode until the run ends with
+`"state": "done"` (29.2). The stopped backup restores the relay as it was at any point (29.3).
+
+### 29.6 Rollback from Connect
+
+There is no in-place way back. Stop the relay, restore the stopped backup of the cutover into
+an empty volume (29.3), select the previous image and compose settings (relay mode, the master
+key, the push settings), start, and read back `/healthz` (`x-apassy-relay-mode: relay`). Every
+account change since the cutover is lost with it (accounts, devices, vault stores, Stripe
+state). Stripe does not send again an event that the relay already answered: resend the
+events of the subscriptions that changed since the backup from the Stripe dashboard
+(Developers › Events › the event › Resend), or reconcile them by hand. The Worker goes back
+with `RELAY_MODE=relay`.

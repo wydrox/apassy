@@ -1133,10 +1133,18 @@ impl DesktopApp {
                 user_name: info.user_name,
                 user_display_name: info.user_display_name,
                 credential_id: info.credential_id,
+                added: info.added,
             })
             .collect();
-        // With several accounts the owner chooses one; no check starts before.
-        let chosen = if accounts.len() > 1 { NO_ACCOUNT } else { 0 };
+        // The vault lists the newest passkey first. Several passkeys of ONE account:
+        // the dialog selects the newest, because the older one may be unknown to the
+        // site; the owner sees the selection and can choose another. Passkeys of
+        // different accounts: the owner chooses first, and no check starts before.
+        let one_account = !accounts[0].user_name.is_empty()
+            && accounts
+                .iter()
+                .all(|account| account.user_name == accounts[0].user_name);
+        let chosen = if one_account { 0 } else { NO_ACCOUNT };
         ticket.echo = Some(PasskeyEcho {
             rid: client.rid.clone(),
             client_data_json: webauthn::encode_bytes(&client.client_data_json),

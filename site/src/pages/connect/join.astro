@@ -2,7 +2,8 @@
 // The invite page of a Connect Family or Connect Team (implementation plan s7,
 // decision 3): https://apassy.wyderka.cc/connect/join#<code>. The code is in the
 // fragment, so the browser never sends it to this site. The page only says how
-// to use the invite and copies the link; it never reads or shows the code.
+// to use the invite and copies the link; it never reads or shows the code. The Mac
+// app registers no URL scheme: the person pastes the link in the app.
 import Notice from "../../components/connect/Notice.astro";
 ---
 <Notice
@@ -12,7 +13,7 @@ import Notice from "../../components/connect/Notice.astro";
 >
   <p>
     Someone invited you to their Connect Family or Connect Team. Copy this link, then open Apassy on your Mac:
-    <kbd>Settings</kbd> › <kbd>Connect</kbd> › <kbd>Join</kbd>, and paste it.
+    <kbd>Settings</kbd> › <kbd>Connect</kbd> › <kbd>Join a Family or Team</kbd>, and paste the link there.
   </p>
   <div class="copy-row">
     <button class="btn btn-primary" type="button" data-copy="" data-invite>

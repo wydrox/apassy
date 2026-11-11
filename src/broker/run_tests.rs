@@ -28,13 +28,19 @@ fn a_cloud_card_shows_no_folder_of_the_agent() {
         stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let card = context.card_cwd();
-    assert_eq!(card, "(the cloud agent, not on this Mac)");
+    assert_eq!(
+        card,
+        concat!("(the cloud agent, not on this ", crate::computer!(), ")")
+    );
     assert!(!card.contains('\n') && !card.contains("Approved") && !card.contains("/work"));
     let empty = CloudContext {
         agent_cwd: None,
         ..context
     };
-    assert_eq!(empty.card_cwd(), "(the cloud agent, not on this Mac)");
+    assert_eq!(
+        empty.card_cwd(),
+        concat!("(the cloud agent, not on this ", crate::computer!(), ")")
+    );
 }
 
 #[test]

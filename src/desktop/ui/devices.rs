@@ -36,15 +36,21 @@ pub(super) mod rows;
 /// The label of the route switch, and its name for VoiceOver.
 pub(crate) const ROUTE_SWITCH: &str = "Reachable on Your Tailnet";
 /// The subline of the switch while the route is on.
-pub(crate) const ROUTE_ON: &str = "Your iPhone and Macs reach this Mac directly.";
+pub(crate) const ROUTE_ON: &str = concat!(
+    "Your iPhone and ",
+    crate::computers!(),
+    " reach this ",
+    crate::computer!(),
+    " directly."
+);
 /// The subline of the switch while the route is off or cannot be on.
 pub(crate) const ROUTE_OFF: &str = "Approvals go through Apassy relay.";
 /// The subline of the switch while the vault is locked.
 pub(crate) const ROUTE_LOCKED: &str = "Stopped while the vault is locked.";
 /// The one add button of the section.
-pub(crate) const ADD_DEVICE: &str = "Add an iPhone or a Mac…";
+pub(crate) const ADD_DEVICE: &str = concat!("Add an iPhone or a ", crate::computer!(), "…");
 /// The button of the move row (frame 4).
-pub(crate) const MOVE_APPROVALS: &str = "Move Approvals to This Mac…";
+pub(crate) const MOVE_APPROVALS: &str = concat!("Move Approvals to This ", crate::computer!(), "…");
 /// The hint row of a list with only this Mac (frame 7).
 pub(crate) const ONLY_THIS_MAC: &str = "Add an iPhone to approve runs with Face ID.";
 /// The group of the Wi-Fi iPhones (ADR 0028 stage 3).
@@ -60,7 +66,13 @@ pub(crate) const STARTING_FOR: std::time::Duration = std::time::Duration::from_s
 
 /// The help of the route switch (frame 3e).
 const ROUTE_HELP: [&str; 4] = [
-    "Your iPhone and Macs reach this Mac over Tailscale.",
+    concat!(
+        "Your iPhone and ",
+        crate::computers!(),
+        " reach this ",
+        crate::computer!(),
+        " over Tailscale."
+    ),
     "Only devices on your tailnet can connect. Nothing opens to the internet.",
     "Each device still signs in with its own key.",
     concat!(
@@ -71,14 +83,28 @@ const ROUTE_HELP: [&str; 4] = [
 ];
 /// The help of Node Words: safety words to compare, never proof of the node (N8-7).
 const WORDS_HELP: [&str; 4] = [
-    "Safety words to compare: six words from this Mac's certificate.",
+    concat!(
+        "Safety words to compare: six words from this ",
+        crate::computer!(),
+        "'s certificate."
+    ),
     "Your iPhone shows them in Settings → Devices.",
     "Other words there: revoke that iPhone and pair again.",
-    "The same words are not proof of this Mac. The iPhone checks the whole certificate.",
+    concat!(
+        "The same words are not proof of this ",
+        crate::computer!(),
+        ". The iPhone checks the whole certificate."
+    ),
 ];
 /// The help of the Devices list.
 const DEVICES_HELP: [&str; 4] = [
-    "via your Mac: straight to this Mac over your tailnet.",
+    concat!(
+        "via your ",
+        crate::computer!(),
+        ": straight to this ",
+        crate::computer!(),
+        " over your tailnet."
+    ),
     "via Apassy relay: through apassy-relay.wyderka.cc, end-to-end encrypted.",
     "Tailnet: your own Linux node.",
     "Wi-Fi: the old pairing. It ends soon.",
@@ -106,23 +132,33 @@ pub(crate) const RELAY_QUESTIONS_NEW_TEAM: &str =
     "Approve on your iPhone on any network. No account needed.";
 pub(crate) const RELAY_QUESTIONS_JOIN: &str =
     "Off. Turning it on joins this vault's questions team.";
-pub(crate) const RELAY_QUESTIONS_REMOVED: &str =
-    "This Mac was removed. Turning it on needs a new link.";
-pub(crate) const RELAY_QUESTIONS_REMOVED_SYNC: &str =
-    "This Mac was removed from the questions of this vault.";
+pub(crate) const RELAY_QUESTIONS_REMOVED: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " was removed. Turning it on needs a new link."
+);
+pub(crate) const RELAY_QUESTIONS_REMOVED_SYNC: &str = concat!(
+    "This ",
+    crate::computer!(),
+    " was removed from the questions of this vault."
+);
 /// The line under a Mac whose relay sync key was removed from the questions.
-pub(crate) const RELAY_QUESTIONS_REMOVED_SYNC_FIX: &str =
-    "Turn relay sync off, then join the vault again from another Mac.";
+pub(crate) const RELAY_QUESTIONS_REMOVED_SYNC_FIX: &str = concat!(
+    "Turn relay sync off, then join the vault again from another ",
+    crate::computer!(),
+    "."
+);
 pub(crate) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it.";
 /// The switch of the feed of the agents for the other devices of the vault (relay-feed-v1
 /// section 8), and its name for VoiceOver. On by default; `ui.json` keeps it.
 pub(crate) const SHOW_AGENTS: &str = "Show Agents on My Other Devices";
-pub(crate) const SHOW_AGENTS_NOTE: &str = "Only this Mac changes them.";
+pub(crate) const SHOW_AGENTS_NOTE: &str =
+    concat!("Only this ", crate::computer!(), " changes them.");
 /// The row of the other Macs of a synced vault.
-pub(crate) const OTHER_MACS: &str = "Other Macs";
+pub(crate) const OTHER_MACS: &str = concat!("Other ", crate::computers!());
 /// Its buttons while the vault syncs through the relay.
 pub(crate) const OTHER_MACS_DEVICES: &str = "Devices…";
-pub(crate) const ADD_MAC: &str = "Add a Mac…";
+pub(crate) const ADD_MAC: &str = concat!("Add a ", crate::computer!(), "…");
 /// The row of frame 4d after "Later": the hosted relay kept the old entry of a move.
 pub(crate) const OLD_RELAY_ENTRY: &str = "Old entry still on Apassy relay";
 
@@ -139,18 +175,36 @@ const RELAY_HELP: [&str; 4] = [
 ];
 /// The help of the feed switch.
 const SHOW_AGENTS_HELP: [&str; 3] = [
-    "Your iPhone and your other Macs of this vault show this Mac's agents.",
-    "Only this Mac changes them.",
-    "Off: Apassy deletes this Mac's feed from the relay.",
+    concat!(
+        "Your iPhone and your other ",
+        crate::computers!(),
+        " of this vault show this ",
+        crate::computer!(),
+        "'s agents."
+    ),
+    concat!("Only this ", crate::computer!(), " changes them."),
+    concat!(
+        "Off: Apassy deletes this ",
+        crate::computer!(),
+        "'s feed from the relay."
+    ),
 ];
 /// The help of the other Macs row.
 const OTHER_MACS_HELP: [&str; 2] = [
-    "The Macs that sync this vault.",
-    "Devices… lists them; Add a Mac… links one more.",
+    concat!("The ", crate::computers!(), " that sync this vault."),
+    concat!(
+        "Devices… lists them; Add a ",
+        crate::computer!(),
+        "… links one more."
+    ),
 ];
 /// The help of the old entry row (frame 4d).
 const OLD_RELAY_ENTRY_HELP: [&str; 2] = [
-    "Approvals already go through this Mac.",
+    concat!(
+        "Approvals already go through this ",
+        crate::computer!(),
+        "."
+    ),
     "Apassy relay did not answer the removal of the old devices.",
 ];
 
@@ -172,7 +226,7 @@ pub(crate) enum Route {
 impl Route {
     pub(crate) fn words(self) -> &'static str {
         match self {
-            Self::Mac => "via your Mac",
+            Self::Mac => concat!("via your ", crate::computer!()),
             Self::Relay => "via Apassy relay",
             Self::Tailnet => "Tailnet",
             Self::Wifi => "Wi-Fi",
@@ -202,7 +256,7 @@ pub(crate) enum Kind {
 impl Kind {
     pub(crate) fn words(self) -> &'static str {
         match self {
-            Self::Mac => "Mac",
+            Self::Mac => crate::computer_cap!(),
             Self::Iphone => "iPhone",
             Self::Watch => "Apple Watch",
             Self::LinuxNode => "Linux node",
@@ -443,9 +497,9 @@ impl DevicesView {
         };
         match (self.route_on(), devices) {
             (true, Some(devices)) => format!("Tailnet on · {devices}"),
-            (true, None) => "Tailnet on · This Mac only".to_owned(),
+            (true, None) => concat!("Tailnet on · This ", crate::computer!(), " only").to_owned(),
             (false, Some(devices)) => devices,
-            (false, None) => "This Mac only".to_owned(),
+            (false, None) => concat!("This ", crate::computer!(), " only").to_owned(),
         }
     }
 }
@@ -653,7 +707,7 @@ fn this_mac_group(
     notifications: impl FnOnce(&mut rows::Group<'_>),
     action: &mut Option<Action>,
 ) {
-    rows::group(ui, Some("This Mac"), |g| {
+    rows::group(ui, Some(concat!("This ", crate::computer!())), |g| {
         let (subline, enabled) = match &view.node {
             NodeState::Missing | NodeState::NotConnected => (ROUTE_OFF, false),
             NodeState::Off => (ROUTE_OFF, !view.locked),
@@ -958,7 +1012,11 @@ fn device_row(g: &mut rows::Group<'_>, device: &DeviceEntry, now: u64) -> Option
                             ui.spacing_mut().item_spacing.x = 6.0;
                             ui.add(Label::new(rows::label_text(&device.name)).truncate());
                             if device.target == Target::ThisMac {
-                                kit::cap_toned(ui, "This Mac", Tone::Neutral);
+                                kit::cap_toned(
+                                    ui,
+                                    concat!("This ", crate::computer!()),
+                                    Tone::Neutral,
+                                );
                             }
                         });
                         if device.failed {
@@ -1059,7 +1117,12 @@ pub(crate) fn free_end_line(version: &str) -> String {
 fn free_end_help(version: &str) -> [String; 3] {
     [
         format!("Free approvals through apassy-relay.wyderka.cc end with Apassy {version}."),
-        "Keep them free over Tailscale with this Mac as the node.".to_owned(),
+        concat!(
+            "Keep them free over Tailscale with this ",
+            crate::computer!(),
+            " as the node."
+        )
+        .to_owned(),
         "Or use Apassy Connect (paid).".to_owned(),
     ]
 }
@@ -1198,7 +1261,11 @@ pub(crate) fn revoke_sheet(
         let (lead, note) = match (device.kind, vault) {
             (Kind::Mac, Some(vault)) => (
                 format!("It stops syncing {vault} and seeing approvals."),
-                "Its copy of the vault stays on that Mac.",
+                concat!(
+                    "Its copy of the vault stays on that ",
+                    crate::computer!(),
+                    "."
+                ),
             ),
             _ => (
                 "It can no longer see or answer questions.".to_owned(),
@@ -1260,7 +1327,14 @@ pub(crate) fn linux_sheet(
         ui.add_space(8.0);
         kit::note(
             ui,
-            format!("Revoke: this Mac stops syncing {vault} through it. Its copy stays there."),
+            format!(
+                concat!(
+                    "Revoke: this ",
+                    crate::computer!(),
+                    " stops syncing {vault} through it. Its copy stays there."
+                ),
+                vault = vault
+            ),
         );
         ui.add_space(8.0);
         let mut revoke = false;
@@ -1290,9 +1364,17 @@ pub(crate) fn wifi_notice(ctx: &egui::Context, tailnet: bool) -> (Option<Choice>
             ui.label(kit::text(WIFI_NOTICE_TITLE, Font::Title3).color(kit::palette().label));
             ui.add_space(4.0);
             let way = if tailnet {
-                "The iPhone app now reaches this Mac through your tailnet."
+                concat!(
+                    "The iPhone app now reaches this ",
+                    crate::computer!(),
+                    " through your tailnet."
+                )
             } else {
-                "The iPhone app now reaches this Mac through Apassy relay."
+                concat!(
+                    "The iPhone app now reaches this ",
+                    crate::computer!(),
+                    " through Apassy relay."
+                )
             };
             kit::paragraph(ui, way, Font::Callout, kit::palette().secondary);
             kit::paragraph(
@@ -1329,23 +1411,35 @@ pub(crate) fn wifi_notice(ctx: &egui::Context, tailnet: bool) -> (Option<Choice>
 pub(crate) const ADD_TITLE: &str = "Add a Device";
 pub(crate) const ADD_LEAD: &str = "Scan with the Apassy app on the iPhone.";
 pub(crate) const LINK_EXPIRED: &str = "The link expired.";
-pub(crate) const PASTE_ON_MAC: &str = "On a Mac, paste the link instead.";
+pub(crate) const PASTE_ON_MAC: &str =
+    concat!("On a ", crate::computer!(), ", paste the link instead.");
 pub(crate) const NEW_LINK: &str = "New Link";
 pub(crate) const EXPIRES_IN: &str = "Expires In";
-pub(crate) const ADDED_LEAD: &str = "It approves runs through this Mac.";
+pub(crate) const ADDED_LEAD: &str =
+    concat!("It approves runs through this ", crate::computer!(), ".");
 /// The lead of 2c for an Apple Watch: it cannot approve runs (ADR 0039).
 pub(crate) const ADDED_WATCH_LEAD: &str = "It allows access requests once, on a wrist.";
-pub(crate) const ADDED_TAILSCALE: &str = "The iPhone needs Tailscale on to reach this Mac.";
-pub(crate) const MOVE_TITLE: &str = "Move Approvals to This Mac";
-pub(crate) const MOVE_LEAD: &str = "Your iPhone pairs again, with this Mac.";
+pub(crate) const ADDED_TAILSCALE: &str = concat!(
+    "The iPhone needs Tailscale on to reach this ",
+    crate::computer!(),
+    "."
+);
+pub(crate) const MOVE_TITLE: &str = concat!("Move Approvals to This ", crate::computer!());
+pub(crate) const MOVE_LEAD: &str = concat!(
+    "Your iPhone pairs again, with this ",
+    crate::computer!(),
+    "."
+);
 pub(crate) const MOVE_STEP_TEAM: &str = "Approvals team made here";
 pub(crate) const MOVE_STEP_WORDS: &str = "Then check the words on both.";
 pub(crate) const MOVE_STEP_REMOVE: &str = "Remove from Apassy relay";
 pub(crate) const MOVED_TITLE: &str = "Approvals Moved";
-pub(crate) const MOVED_LEAD: &str = "Questions now go through this Mac.";
+pub(crate) const MOVED_LEAD: &str =
+    concat!("Questions now go through this ", crate::computer!(), ".");
 pub(crate) const MOVED_REMOVED: &str = "Removed from Apassy relay";
 pub(crate) const OLD_ENTRY_TITLE: &str = "Old Entry Still on Relay";
-pub(crate) const OLD_ENTRY_LEAD: &str = "Approvals already use this Mac.";
+pub(crate) const OLD_ENTRY_LEAD: &str =
+    concat!("Approvals already use this ", crate::computer!(), ".");
 pub(crate) const OLD_ENTRY_NOTE: &str = "Apassy relay did not answer the removal.";
 
 /// "Rafal's iPhone Wants to Join".
@@ -1357,7 +1451,7 @@ pub(crate) fn join_title(name: &str) -> String {
 /// from the iPhone).
 pub(crate) fn join_lead(kind: Kind) -> String {
     let device = match kind {
-        Kind::Mac | Kind::LinuxNode => "Mac",
+        Kind::Mac | Kind::LinuxNode => crate::computer!(),
         Kind::Iphone | Kind::Watch => "iPhone",
     };
     format!("Confirm only if the {device} shows these words.")
@@ -1897,7 +1991,11 @@ mod live {
     /// worker thread: it runs the Tailscale command line).
     pub(crate) const READ_EVERY: Duration = Duration::from_secs(10);
     /// The words of a start that failed because the port is taken (`tailnet_port_taken`).
-    const PORT_TAKEN: &str = "on the tailnet address of this Mac is taken";
+    const PORT_TAKEN: &str = concat!(
+        "on the tailnet address of this ",
+        crate::computer!(),
+        " is taken"
+    );
 
     /// The node status as the last read on a worker thread saw it. The section draws this
     /// copy; a frame never runs the Tailscale command line.
@@ -2021,10 +2119,19 @@ mod live {
                 node.set_tailnet(&vault, on)
                     .map(|()| {
                         if on {
-                            "This Mac is reachable on your tailnet.".to_owned()
+                            concat!(
+                                "This ",
+                                crate::computer!(),
+                                " is reachable on your tailnet."
+                            )
+                            .to_owned()
                         } else {
-                            "This Mac is off your tailnet. Approvals go through Apassy relay."
-                                .to_owned()
+                            concat!(
+                                "This ",
+                                crate::computer!(),
+                                " is off your tailnet. Approvals go through Apassy relay."
+                            )
+                            .to_owned()
                         }
                     })
                     .map_err(|error| (String::new(), error.message))
@@ -2557,7 +2664,14 @@ mod live {
                     Ok(()) => {
                         app.ui.devices.cache.invalidate();
                         app.node_changed();
-                        app.set_ok(format!("The node of this Mac uses port {port} now."));
+                        app.set_ok(format!(
+                            concat!(
+                                "The node of this ",
+                                crate::computer!(),
+                                " uses port {port} now."
+                            ),
+                            port = port
+                        ));
                     }
                     Err(error) => app.set_err(error.message),
                 }
@@ -2565,7 +2679,11 @@ mod live {
             Action::PairAgain | Action::Move => app.questions_move_to_node(Some(ctx)),
             Action::Copy(origin) => {
                 ctx.copy_text(origin);
-                app.set_ok("The address of this Mac is copied.");
+                app.set_ok(concat!(
+                    "The address of this ",
+                    crate::computer!(),
+                    " is copied."
+                ));
             }
             Action::Add => app.questions_add_iphone(Some(ctx)),
             Action::Revoke(index) => {

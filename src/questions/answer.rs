@@ -179,7 +179,12 @@ impl AnswerError {
             Self::Expired => "Expired.".to_owned(),
             Self::NotRouted => "This device cannot answer this question.".to_owned(),
             Self::TooManyAnswers => "The relay refused the answer: too many answers.".to_owned(),
-            Self::Gone => "This question no longer waits on this Mac.".to_owned(),
+            Self::Gone => concat!(
+                "This question no longer waits on this ",
+                crate::computer!(),
+                "."
+            )
+            .to_owned(),
             Self::Relay(QuestionsError::Unreachable) => {
                 "The relay did not answer. Try again.".to_owned()
             }
