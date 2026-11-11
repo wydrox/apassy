@@ -1117,10 +1117,12 @@ fn the_relay_copy_of_a_store_is_taken_only_after_an_owner_check() {
         "{}",
         a.status_text
     );
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     a.sync_open_sheet(
         super::sync::SyncSheet::UseRelayCopy { id: id.clone() },
         None,
     );
+    frame(&ctx, &mut a);
     let text = frame(&ctx, &mut a);
     assert!(text.contains("The relay holds version 1"), "{text}");
     assert!(
