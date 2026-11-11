@@ -40,6 +40,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -894,6 +895,9 @@ pub(super) struct Learned {
     /// The signed device names of the keys of other accounts in the verified lists of this
     /// round: b64u key → (account, device name).
     pub names: BTreeMap<String, (String, String)>,
+    /// The accounts whose served list a pin took in this round: it verified from the
+    /// pinned root and goes on from the pin.
+    pub verified: BTreeSet<String>,
 }
 
 /// The shares of other accounts that Connect counts as void (`account_share_void`), as
@@ -970,6 +974,7 @@ pub(super) fn learn_lists(
         if let Some(entries) = served.get(&pin.account_id)
             && let (Some(list), _) = take_peer_list(pin, origin, entries, cache)
         {
+            learned.verified.insert(pin.account_id.clone());
             learned.own.insert(pin.account_id.clone(), list);
         }
     }
@@ -1052,6 +1057,7 @@ pub(super) fn learn_lists(
         if let Some(entries) = served.get(&pin.account_id)
             && let (Some(list), _) = take_peer_list(pin, origin, entries, cache)
         {
+            learned.verified.insert(pin.account_id.clone());
             note_names(&mut learned.names, &pin.account_id, &list);
         }
     }
@@ -1694,6 +1700,9 @@ pub struct StoreStatus {
     pub members: Vec<MemberStatus>,
     /// A store of this account: the accounts whose share ended, newest last.
     pub ended_members: Vec<EndedMember>,
+    /// Every other account whose keys sign, or signed, in this store as the account file
+    /// holds it: its owner, its members, and its ended accounts.
+    pub accounts: Vec<String>,
     /// The share ended for this account (a store it joined): the owner's list ended it, or
     /// shares it anew and this account did not join that share yet.
     pub ended: bool,
@@ -1738,6 +1747,14 @@ pub struct ShareStatus {
     pub wait: Option<u64>,
     /// The devices of members that this refresh added to the stores of this account.
     pub added: Vec<StoreDevice>,
+    /// The accounts whose list this refresh asked of Connect and that verified here (a
+    /// `same` answer counts when the held list verified again), with when it was asked;
+    /// a failed, refused, or unverified read is not in it. A head of a shared store that
+    /// was refused for a signer not verified yet is decided only by lists asked after the
+    /// refusal ([`Self::asked_for`]).
+    pub read: BTreeMap<String, Instant>,
+    /// When this refresh asked for the own list (which verified).
+    pub own_read: Option<Instant>,
 }
 
 /// A store that this account's list left.
@@ -1752,6 +1769,18 @@ pub struct LeftStore {
 }
 
 impl ShareStatus {
+    /// When the lists of every account of the shared store `team` (its owner, members, and
+    /// ended accounts, and this account) were asked in this refresh, all of them verified:
+    /// the oldest of those times. `None` when one of them was not read or did not verify.
+    pub fn asked_for(&self, team: &str) -> Option<Instant> {
+        let store = self.stores.iter().find(|store| store.team_id == team)?;
+        let mut oldest = self.own_read?;
+        for account in &store.accounts {
+            oldest = oldest.min(*self.read.get(account)?);
+        }
+        Some(oldest)
+    }
+
     /// The name of `account` as a row shows it: the verified name with the name at Connect
     /// beside it; never the account id.
     pub fn name_of(&self, account: &str) -> String {
@@ -2629,8 +2658,10 @@ impl ConnectAccount {
     /// not give, or that does not verify, changes nothing of it; a refusal, an error, or a
     /// `429` of a read ends nothing.
     pub fn refresh_shares(&mut self, local_teams: &[String]) -> Result<ShareStatus, ConnectError> {
+        let mut own_read = Instant::now();
         let mut own = self.own_shares()?;
         if self.claim_own_stores(&own, local_teams)? {
+            own_read = Instant::now();
             own = self.own_shares()?;
         }
         let origin = self.client().origin().to_owned();
@@ -2644,6 +2675,11 @@ impl ConnectAccount {
         }
         status.unpinned.clone_from(&learned.unpinned);
         status.devices.clone_from(&learned.names);
+        // Only the lists that verified here count as read.
+        status
+            .read
+            .retain(|account, _| learned.verified.contains(account));
+        status.own_read = Some(own_read);
         let group = self.group();
         status.group = group.as_ref().ok().map(|group| {
             group
@@ -2710,6 +2746,7 @@ impl ConnectAccount {
     ) -> Result<(BTreeMap<String, Vec<ListEntry>>, VoidShares), ConnectError> {
         let origin = self.client().origin().to_owned();
         let now = self.now();
+        status.read.clear();
         let mut served: BTreeMap<String, Vec<ListEntry>> = BTreeMap::new();
         let mut tried: BTreeSet<String> = BTreeSet::new();
         let mut stopped = now < self.share_memory().wait_until;
@@ -2760,6 +2797,7 @@ impl ConnectAccount {
                         })
                         .collect(),
                 };
+                let asked = Instant::now();
                 let answer = match self.with_token(|client, token| client.peer_lists(token, &body))
                 {
                     Ok(answer) => answer,
@@ -2794,6 +2832,7 @@ impl ConnectAccount {
                                 head,
                             );
                             self.note_void(&item.account_id, &item.void);
+                            status.read.insert(item.account_id.clone(), asked);
                             served.insert(item.account_id.clone(), item.device_list);
                         }
                         "same" => {
@@ -2802,6 +2841,7 @@ impl ConnectAccount {
                             if let Some((_, _, entries)) =
                                 self.share_memory().lists.get(&item.account_id)
                             {
+                                status.read.insert(item.account_id.clone(), asked);
                                 served.insert(item.account_id.clone(), entries.clone());
                             }
                         }
@@ -3127,6 +3167,13 @@ impl ConnectAccount {
                     .is_some_and(|pin| pin.suspended),
                 ended: owner.is_some() && !store.members.contains(&me),
                 void: void_here,
+                accounts: owner
+                    .iter()
+                    .chain(&store.members)
+                    .chain(&store.ended)
+                    .filter(|account| **account != me)
+                    .cloned()
+                    .collect(),
                 owner,
                 members,
                 ended_members,

@@ -90,6 +90,7 @@ fn status() -> ShareStatus {
                         left: false,
                     },
                 ],
+                accounts: vec!["acc_olaaaaaaaa".to_owned(), "acc_annaaaaaaa".to_owned()],
                 ended: false,
                 void: false,
                 owner_suspended: false,
@@ -100,6 +101,7 @@ fn status() -> ShareStatus {
                 owner_name: Some("Piotr".to_owned()),
                 members: Vec::new(),
                 ended_members: Vec::new(),
+                accounts: vec!["acc_piotraaaaa".to_owned()],
                 ended: false,
                 void: false,
                 owner_suspended: true,
@@ -110,6 +112,7 @@ fn status() -> ShareStatus {
                 owner_name: Some("Ewa".to_owned()),
                 members: Vec::new(),
                 ended_members: Vec::new(),
+                accounts: vec!["acc_ewaaaaaaaa".to_owned()],
                 ended: true,
                 void: false,
                 owner_suspended: false,
@@ -525,4 +528,35 @@ fn the_reads_of_a_head_not_verified_yet_back_off() {
     }
     assert_eq!(reads[..7], [0, 30, 90, 210, 450, 930, 1530]);
     assert!(reads.windows(2).all(|pair| pair[1] - pair[0] <= 600));
+}
+
+/// F11: a shared store is decided only by lists asked after its refusal: the time of a
+/// refresh counts for a store only when the lists of every account of it, and the own list,
+/// were asked and verified; a read that failed or did not verify gives no time.
+#[test]
+fn a_store_is_decided_only_by_lists_that_verified() {
+    let start = Instant::now();
+    let later = start + Duration::from_secs(5);
+    let mut status = status();
+    assert_eq!(status.asked_for("t_familyaaaa"), None, "no read at all");
+    status.own_read = Some(later);
+    status.read.insert("acc_olaaaaaaaa".to_owned(), start);
+    assert_eq!(
+        status.asked_for("t_familyaaaa"),
+        None,
+        "Anna's list was not read"
+    );
+    status.read.insert("acc_annaaaaaaa".to_owned(), later);
+    assert_eq!(
+        status.asked_for("t_familyaaaa"),
+        Some(start),
+        "the oldest read"
+    );
+    status.own_read = None;
+    assert_eq!(
+        status.asked_for("t_familyaaaa"),
+        None,
+        "the own list was not read"
+    );
+    assert_eq!(status.asked_for("t_unknownaaa"), None);
 }

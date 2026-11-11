@@ -4291,4 +4291,29 @@ mod tests {
             assert!(took < Duration::from_secs(3), "{took:?}");
         }
     }
+    /// The signers that a relay sync holds say whether its store is shared between
+    /// accounts (`RelaySync::shares_between_accounts`): Shared Vaults notes the lists of such
+    /// a store itself, also before it has a status after an unlock.
+    #[test]
+    fn the_signers_say_which_stores_are_shared_between_accounts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sync = RelaySync::new(RelayConfig::in_data_dir(
+            dir.path(),
+            &dir.path().join("vault.db"),
+            "http://127.0.0.1:9",
+            "vault",
+        ));
+        assert!(!sync.shares_between_accounts("t_7k2m5q4x3c"));
+        sync.set_account_signers(Some(SignerPolicy {
+            accepted: Vec::new(),
+            left: Vec::new(),
+            stores: vec![StoreSigners {
+                team_id: "t_7k2m5q4x3c".to_owned(),
+                accepted: Vec::new(),
+                left: Vec::new(),
+            }],
+        }));
+        assert!(sync.shares_between_accounts("t_7k2m5q4x3c"));
+        assert!(!sync.shares_between_accounts("t_aaaaaaaaaa"));
+    }
 }
