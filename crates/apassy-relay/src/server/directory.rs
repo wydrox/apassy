@@ -80,7 +80,8 @@ ALTER TABLE team_code ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (ki
 /// - `team` gains the kind `account` (a vault store, one relay-sync team for each vault)
 ///   and `account_id`, `vault_id`. SQLite cannot widen a CHECK in place, so the table is
 ///   rebuilt with the same rows; the index `team_legacy` is made again.
-/// - `account` (with the public recovery key and the last recovery, for its retry),
+/// - `account` (with the public recovery key, the last recovery, for its retry, and the
+///   time of the last new recovery code from a device, `recovery_rotated_at`),
 ///   `account_id_used` (every account id that an account ever had, written with the
 ///   account and never deleted: an id is used once, so no later account meets the
 ///   billing, tunnel, or key rows of an earlier one),
@@ -124,7 +125,8 @@ CREATE UNIQUE INDEX team_vault ON team(account_id, vault_id) WHERE kind = 'accou
 CREATE TABLE account (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
   recovery_key BLOB NOT NULL, create_hash BLOB NOT NULL, email TEXT, group_id TEXT,
-  recover_hash BLOB, recovered_at INTEGER, recover_device TEXT, recover_deleted INTEGER);
+  recover_hash BLOB, recovered_at INTEGER, recover_device TEXT, recover_deleted INTEGER,
+  recovery_rotated_at INTEGER);
 CREATE INDEX account_created ON account(created_at);
 CREATE TABLE account_id_used (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
 CREATE TABLE account_device (
@@ -486,8 +488,8 @@ fn add_share_marks(conn: &Connection) -> RelayResult<()> {
 /// The tables of the accounts step from an earlier, unreleased build of it (no
 /// `account_list.name`: the device lists whose entries sign no device name; no
 /// `account_list.team_id`: the lists without the entries of section 16; no
-/// `account_id_used`; no `account_join.signature`): this build does not read them, and
-/// does not change them.
+/// `account_id_used`; no `account_join.signature`; no `account.recovery_rotated_at`):
+/// this build does not read them, and does not change them.
 fn refuse_earlier_accounts_step(conn: &Connection) -> RelayResult<()> {
     let used: bool = conn
         .query_row(
@@ -500,11 +502,12 @@ fn refuse_earlier_accounts_step(conn: &Connection) -> RelayResult<()> {
         && crate::server::store::has_column(conn, "account_list", "name")?
         && crate::server::store::has_column(conn, "account_list", "team_id")?
         && crate::server::store::has_column(conn, "account_join", "signature")?
+        && crate::server::store::has_column(conn, "account", "recovery_rotated_at")?
     {
         return Ok(());
     }
     Err(RelayError::internal(
-        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list.name, account_list.team_id, account_id_used, or account_join.signature). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
+        "relay.db holds the accounts tables of an earlier, unreleased build of directory 1006 (no account_list.name, account_list.team_id, account_id_used, account_join.signature, or account.recovery_rotated_at). This build cannot open it: restore relay.db from the backup taken before that build, or start that build's image again.",
     ))
 }
 

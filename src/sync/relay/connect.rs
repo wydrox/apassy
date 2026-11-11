@@ -431,12 +431,18 @@ impl RelaySync {
     /// copy ("Use a vault from another Mac" › "Apassy Connect"): download it with
     /// [`JoinedDevice::download`] and make the vault with [`Self::adopt`] and the
     /// passphrase of the copy. The store must list this Mac (a store of another account
-    /// that this account joined: [`StoreError::NotInSharedStore`]). Its session follows
-    /// the signer policy of the account file from the first request on (no answer of
-    /// Connect is waited for), in a slot of its own that the window updates after each
-    /// refresh ([`JoinedDevice::set_signers`]) and that [`Self::adopt`] hands to the relay
-    /// sync of the new vault: a head of a member whose list a refresh reads meanwhile is
-    /// "checking the device list", never a damaged copy at once. A store that holds
+    /// that this account joined: [`StoreError::NotInSharedStore`]). The caller read the
+    /// account just before, and no answer of Connect is waited for. For a store of this
+    /// account alone the session has a fixed signer policy, the trust store of the account
+    /// file as it is now: a head or a chain entry of a key that it does not hold is refused
+    /// at once. For a store shared between accounts (the account file holds a share of it)
+    /// the session follows the signers of the account file from the first request on, in a
+    /// slot of its own that the window updates after each refresh
+    /// ([`JoinedDevice::set_signers`]): a head of a member whose list a refresh reads
+    /// meanwhile is "checking the device list", never a damaged copy at once
+    /// (connect-account-v1 section 16.6). [`Self::adopt`] rebinds the session to the policy
+    /// of the relay sync of the new vault, so a later refresh of the account reaches it. A
+    /// store that holds
     /// devices of another account ([`VaultStoreView::shared`]) needs a share of it in the
     /// account file (`ConnectAccount::shares_store`), else it is
     /// [`StoreError::OtherAccount`], before any request.
@@ -462,19 +468,24 @@ impl RelaySync {
             .filter(|id| *id > 0)
             .ok_or(not_in)?;
         let signer = account.signer()?;
-        let slot = Arc::new(std::sync::Mutex::new(Some(crate::connect::signer_policy(
-            account.state(),
-        ))));
+        let policy = crate::connect::signer_policy(account.state());
+        let session = Session::new(
+            url,
+            &store.team_id,
+            SessionKey::Account(signer),
+            Some(store_device),
+        );
+        if crate::connect::store_signer_policy(account.state(), &store.team_id).is_none() {
+            return Ok(JoinedDevice {
+                session: Arc::new(session.with_fixed_signers(policy)),
+                team: store.name.clone(),
+                notes: Arc::default(),
+                signers: None,
+            });
+        }
+        let slot = Arc::new(std::sync::Mutex::new(Some(policy)));
         Ok(JoinedDevice {
-            session: Arc::new(
-                Session::new(
-                    url,
-                    &store.team_id,
-                    SessionKey::Account(signer),
-                    Some(store_device),
-                )
-                .with_shared_signers(Arc::clone(&slot)),
-            ),
+            session: Arc::new(session.with_shared_signers(Arc::clone(&slot))),
             team: store.name.clone(),
             notes: Arc::default(),
             signers: Some(slot),

@@ -293,6 +293,11 @@ pub struct AccountState {
     /// signs only the versions of a vault store that this Mac had merged already, and below
     /// a head of a device of the list any (`crate::sync::SignerPolicy`).
     pub left: Vec<String>,
+    /// The recovery code of this account was never shown on this device: a creation that a
+    /// restart interrupted finished without it. Settings › Connect says so until a new
+    /// code is made ([`ConnectAccount::new_recovery_code`]).
+    #[serde(default)]
+    pub recovery_unseen: bool,
     /// The other accounts whose root this account pinned (its own `peer` entries) or took
     /// from the `peer` entry of the account that made a store it joined (at most 64,
     /// section 16, [`PeerPin`]).
@@ -334,6 +339,7 @@ impl AccountState {
             list_head,
             known: vec![public_key.to_owned()],
             left: Vec::new(),
+            recovery_unseen: false,
             peers: Vec::new(),
             stores: Vec::new(),
         }
@@ -911,9 +917,14 @@ impl ConnectAccount {
         if created.account_id != creation.account_id || !valid_device_id(&created.device_id) {
             return Err(ConnectError::BadAnswer);
         }
-        // This Mac is the account root: version 1 of the device list.
+        // This Mac is the account root: version 1 of the device list. A code that this
+        // process does not hold any more was never shown: the account file keeps saying so.
+        let shown = pending_codes()
+            .iter()
+            .any(|(held, id, _)| held == path && *id == creation.account_id);
         let state = AccountState {
             name: Some(creation.name.clone()),
+            recovery_unseen: !shown,
             ..AccountState::for_root(
                 client.origin(),
                 &created.account_id,
@@ -1405,6 +1416,74 @@ impl ConnectAccount {
         self.sign_out();
         let forgotten = forget_this_device(store, &self.path)?;
         Ok((deleted, forgotten))
+    }
+
+    /// The action of "New Recovery Code…" for this account.
+    pub fn new_recovery_code_action(&self) -> OwnerAction {
+        OwnerAction::NewRecoveryCode {
+            account_id: self.state.account_id.clone(),
+        }
+    }
+
+    /// "New Recovery Code…" (section 9.1), after a fresh owner check for
+    /// [`Self::new_recovery_code_action`] in the session `epoch`: this device makes a new
+    /// recovery code and replaces the recovery key at Connect with its public key, in a
+    /// statement that this device's key signs over the key that Connect stores now. Only a
+    /// device that the verified device list holds does it. The new code comes back once:
+    /// show it as at the creation; from now on only it recovers the account. A rotation
+    /// that another device made in the meantime (`409 conflict`) reads the account and
+    /// signs once more. Success also ends the mark of a code that was never shown
+    /// ([`AccountState::recovery_unseen`]). The proof is used up, also when the call fails.
+    pub fn new_recovery_code(
+        &mut self,
+        proof: OwnerProof,
+        epoch: &[u8; 32],
+    ) -> Result<RecoveryCode, ConnectError> {
+        proof
+            .check(&self.new_recovery_code_action(), epoch)
+            .map_err(ConnectError::OwnerCheck)?;
+        drop(proof);
+        let code = RecoveryCode::generate()?;
+        let recovery_key = code.key()?.public_key_b64u();
+        let mut rotated = None;
+        for _ in 0..2 {
+            let view = self.view()?;
+            if !view.list_verified {
+                return Err(ConnectError::NotVerified);
+            }
+            let previous = view
+                .recovery_key
+                .filter(|key| decode_b64u(key).is_some_and(|bytes| bytes.len() == 32))
+                .ok_or(ConnectError::BadAnswer)?;
+            let signer = self.signer()?;
+            let signature = encode_b64u(&signer.sign_recovery_rotate(
+                self.client.origin(),
+                &self.state.account_id,
+                &previous,
+                &recovery_key,
+            )?);
+            let body = super::client::RecoveryRotate {
+                previous: &previous,
+                recovery_key: &recovery_key,
+                signature: &signature,
+            };
+            match self.with_token(|client, token| client.rotate_recovery(token, &body)) {
+                Err(ConnectError::Conflict) => continue,
+                other => {
+                    rotated = Some(other?);
+                    break;
+                }
+            }
+        }
+        let rotated = rotated.ok_or(ConnectError::Conflict)?;
+        if rotated.account_id != self.state.account_id {
+            return Err(ConnectError::BadAnswer);
+        }
+        if self.state.recovery_unseen {
+            self.state.recovery_unseen = false;
+            self.state.save(&self.path)?;
+        }
+        Ok(code)
     }
 
     // ---- Devices (section 7). ----
@@ -2096,54 +2175,153 @@ pub enum JoinPoll {
 
 /// This Mac joins an account with a link code of a live device (section 7.2). Debug is
 /// redacted.
+///
+/// The join is kept on disk while it waits ([`PendingJoinFile`], public values only), so a
+/// restart resumes it ([`Self::resume`]) and a confirmation that came after the owner left
+/// the step still ends with this device in the account.
 pub struct JoinRequest {
     client: ConnectClient,
     path: PathBuf,
     signer: Arc<AccountSigner>,
-    code: LinkCode,
+    account_id: String,
+    link_hash: String,
     device_name: String,
+    /// `0` for a key that is a device of the account already ([`Self::confirmer`] is
+    /// `None`): no join waits at Connect.
     join_id: u64,
     confirmer_name: String,
     /// The account root, named by the fingerprint of the code with the confirming
     /// device's key.
     root: Vec<u8>,
-    /// The key of the confirming device that the code named (X9.63).
-    confirmer: Vec<u8>,
-    /// The device list of the join answer, verified from that root. The list that the new
-    /// account file pins goes on from it and holds this device's own `add`.
-    list: trust::Verified,
+    /// The key of the confirming device that the code named (X9.63); `None` when this
+    /// device's key is in the account already (an earlier join that a device confirmed
+    /// after this device had left it): the list then needs only this key as a device.
+    confirmer: Option<Vec<u8>>,
+    /// The pin of the device list of the join answer, verified from that root. The list
+    /// that the new account file pins goes on from it and holds this device's own `add`.
+    start: (u64, String),
     words: String,
     expires_at: u64,
+    /// This device made a new account key for this join: its earlier key was used by a
+    /// join that did not finish here.
+    new_key: bool,
     clock: Clock,
 }
 
 impl fmt::Debug for JoinRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JoinRequest")
-            .field("account_id", &self.code.account_id())
+            .field("account_id", &self.account_id)
             .field("join_id", &self.join_id)
             .field("words", &self.words)
             .finish_non_exhaustive()
     }
 }
 
-/// Cancel the join of `code` with the signed `apassy-connect join-cancel v1` body.
+/// Cancel the join of `link_hash` in `account_id` with the signed `apassy-connect
+/// join-cancel v1` body.
 fn cancel_join(
     client: &ConnectClient,
     signer: &AccountSigner,
-    code: &LinkCode,
+    account_id: &str,
+    link_hash: &str,
 ) -> Result<u64, ConnectError> {
-    let link_hash = code.link_hash();
     let public_key = signer.public_key_b64u();
     let signature =
-        encode_b64u(&signer.sign_join_cancel(client.origin(), code.account_id(), &link_hash)?);
+        encode_b64u(&signer.sign_join_cancel(client.origin(), account_id, link_hash)?);
     let answer = client.cancel_join(&JoinCancel {
-        account_id: code.account_id(),
-        link_hash: &link_hash,
+        account_id,
+        link_hash,
         public_key: &public_key,
         signature: &signature,
     })?;
     Ok(answer.join_id)
+}
+
+/// The join of this device that waits for a confirmation, next to the account file
+/// (`connect/pending-join.json`, mode 0600): written when Connect took the join, removed
+/// when it ended (confirmed, refused, expired, or cancelled at Connect). Public values
+/// only: the ids, the names, the keys, the hash of the link, the pin of the list of the
+/// join answer, and the safety words; never the link code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingJoinFile {
+    v: u8,
+    origin: String,
+    account_id: String,
+    link_hash: String,
+    device_name: String,
+    public_key: String,
+    join_id: u64,
+    confirmer_name: String,
+    confirmer: String,
+    root: String,
+    list_version: u64,
+    list_head: String,
+    words: String,
+    expires_at: u64,
+}
+
+impl PendingJoinFile {
+    fn path(account_file: &Path) -> PathBuf {
+        account_file.with_file_name("pending-join.json")
+    }
+
+    /// The pending join of `account_file`; `None` when there is none, or one of another
+    /// shape (it goes).
+    fn load(account_file: &Path) -> Option<Self> {
+        let path = Self::path(account_file);
+        let meta = fs::symlink_metadata(&path).ok()?;
+        let pending = (meta.is_file() && meta.permissions().mode() & 0o077 == 0)
+            .then(|| fs::read(&path).ok())
+            .flatten()
+            .filter(|text| text.len() as u64 <= MAX_STATE_BYTES)
+            .and_then(|text| serde_json::from_slice::<Self>(&text).ok())
+            .filter(|pending| {
+                pending.v == STATE_VERSION
+                    && valid_account_id(&pending.account_id)
+                    && valid_list_hash(&pending.link_hash)
+                    && valid_list_hash(&pending.list_head)
+                    && pending.list_version >= 1
+                    && trust::valid_name(&pending.device_name)
+                    && point(&pending.public_key).is_some()
+                    && point(&pending.confirmer).is_some()
+                    && point(&pending.root).is_some()
+            });
+        if pending.is_none() {
+            let _ = fs::remove_file(&path);
+        }
+        pending
+    }
+
+    fn save(&self, account_file: &Path) -> Result<(), ConnectError> {
+        let text = serde_json::to_vec_pretty(self).map_err(|_| ConnectError::Local)?;
+        write_private(&Self::path(account_file), &text)
+    }
+
+    fn remove(account_file: &Path) {
+        let _ = fs::remove_file(Self::path(account_file));
+    }
+}
+
+/// Whether a join of this device waits on disk next to `account_file` ([`JoinRequest::resume`]).
+pub fn has_pending_join(account_file: &Path) -> bool {
+    PendingJoinFile::load(account_file).is_some()
+}
+
+/// End the pending join of `account_file` that the key of `signer` made: cancel it at
+/// Connect, best effort, and remove the file. A device that starts another join, makes an
+/// account, or recovers one calls it first.
+fn end_pending_join(account_file: &Path, signer: &AccountSigner) {
+    let Some(pending) = PendingJoinFile::load(account_file) else {
+        return;
+    };
+    if pending.public_key == signer.public_key_b64u()
+        && let Ok(client) = ConnectClient::new(&pending.origin)
+    {
+        let _ = cancel_join(&client, signer, &pending.account_id, &pending.link_hash);
+    }
+    PendingJoinFile::remove(account_file);
 }
 
 impl JoinRequest {
@@ -2156,6 +2334,13 @@ impl JoinRequest {
     /// signed device list of the answer and the confirmer's key give the fingerprint of the
     /// code, the list verifies from that root, and the confirmer is a device of it. Any
     /// other answer is [`ConnectError::LinkMismatch`], and the join is cancelled.
+    ///
+    /// A join of this device that still waits on disk is cancelled first (best effort).
+    /// When Connect says that the key of this device is used (`409 conflict`: an earlier
+    /// join that a device confirmed after this device had left it, so it has no account
+    /// file), the join goes on from the device list that holds this key, verified from the
+    /// root that the code names; when the key is no device of that account, this device
+    /// makes a new key, joins with it, and says so ([`Self::made_new_key`]).
     pub fn start(
         client: ConnectClient,
         store: &dyn DeviceKeyStore,
@@ -2185,6 +2370,40 @@ impl JoinRequest {
         let code = LinkCode::parse(code).ok_or(ConnectError::Invalid)?;
         let device_name = clean_name(device_name)?;
         let signer = AccountSigner::open_or_create(store)?;
+        end_pending_join(path, &signer);
+        match Self::ask(&client, signer, path, &code, &device_name, platform)? {
+            Asked::Waiting(request) => Ok(*request),
+            Asked::KeyUsed(signer) => {
+                match Self::already_joined(&client, signer, path, &code)? {
+                    Ok(request) => Ok(request),
+                    Err(signer) => {
+                        // The key is no device of this account: a new key joins.
+                        drop(signer);
+                        AccountSigner::forget(store)?;
+                        let signer = AccountSigner::open_or_create(store)?;
+                        match Self::ask(&client, signer, path, &code, &device_name, platform)? {
+                            Asked::Waiting(mut request) => {
+                                request.new_key = true;
+                                Ok(*request)
+                            }
+                            Asked::KeyUsed(_) => Err(ConnectError::Conflict),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `POST /v1/account/devices/join` with the key of `signer`, the checks of the answer,
+    /// and the pending join on disk.
+    fn ask(
+        client: &ConnectClient,
+        signer: AccountSigner,
+        path: &Path,
+        code: &LinkCode,
+        device_name: &str,
+        platform: &'static str,
+    ) -> Result<Asked, ConnectError> {
         let account_id = code.account_id().to_owned();
         let link_hash = code.link_hash();
         let public_key = signer.public_key_b64u();
@@ -2194,17 +2413,21 @@ impl JoinRequest {
             client.origin(),
             &account_id,
             &link_hash,
-            &device_name,
+            device_name,
         )?);
         let body = JoinBody {
             account_id: &account_id,
             link_hash: &link_hash,
-            device_name: &device_name,
+            device_name,
             platform,
             public_key: &public_key,
             signature: &signature,
         };
-        let answer = twice(|| client.join(&body))?;
+        let answer = match twice(|| client.join(&body)) {
+            Ok(answer) => answer,
+            Err(ConnectError::Conflict) => return Ok(Asked::KeyUsed(signer)),
+            Err(error) => return Err(error),
+        };
         let confirmer_key = point(&answer.confirmer.public_key).ok_or(ConnectError::BadAnswer)?;
         if answer.account_id != account_id || !valid_device_id(&answer.confirmer.device_id) {
             return Err(ConnectError::BadAnswer);
@@ -2222,7 +2445,7 @@ impl JoinRequest {
             });
         let Some((root, list)) = checked else {
             // Best effort: the link of the code is used up anyway.
-            let _ = cancel_join(&client, &signer, &code);
+            let _ = cancel_join(client, &signer, &account_id, &link_hash);
             return Err(ConnectError::LinkMismatch);
         };
         let words = safety_words(
@@ -2231,22 +2454,190 @@ impl JoinRequest {
             &confirmer_key,
             signer.public_key(),
         );
-        Ok(Self {
-            client,
+        let request = Self {
+            client: client.clone(),
             path: path.to_owned(),
             signer: Arc::new(signer),
-            code,
-            device_name,
+            account_id,
+            link_hash,
+            device_name: device_name.to_owned(),
             join_id: answer.join_id,
             confirmer_name: clean_name(&answer.confirmer.name)
                 .unwrap_or_else(|_| "your other device".to_owned()),
             root,
-            confirmer: confirmer_key,
-            list,
+            confirmer: Some(confirmer_key),
+            start: (list.version, list.head().to_owned()),
             words,
             expires_at: answer.expires_at,
+            new_key: false,
             clock: system_clock(),
-        })
+        };
+        // A restart, a lock, or a quit while it waits resumes it from here.
+        if let Err(error) = request.pending_file().save(path) {
+            let _ = cancel_join(
+                client,
+                &request.signer,
+                &request.account_id,
+                &request.link_hash,
+            );
+            return Err(error);
+        }
+        Ok(Asked::Waiting(Box::new(request)))
+    }
+
+    /// The join of a key that Connect says is used: when it is a device of the account of
+    /// `code` (a sign-in works) and the device list of the account, verified from the root
+    /// that the code names with one of its live devices, holds it, the join goes on from
+    /// that list, with the name that the list signed for this key. `Err(signer)` when the
+    /// key is no device of that account.
+    fn already_joined(
+        client: &ConnectClient,
+        signer: AccountSigner,
+        path: &Path,
+        code: &LinkCode,
+    ) -> Result<Result<Self, AccountSigner>, ConnectError> {
+        let account_id = code.account_id().to_owned();
+        let public_key = signer.public_key_b64u();
+        let challenge = match client.challenge(&ChallengeRequest {
+            account_id: &account_id,
+            public_key: &public_key,
+        }) {
+            Ok(challenge) => challenge,
+            Err(
+                ConnectError::Unauthenticated
+                | ConnectError::JoinPending
+                | ConnectError::JoinRefused,
+            ) => return Ok(Err(signer)),
+            Err(error) => return Err(error),
+        };
+        let now = system_clock()();
+        let (token, _) = match finish_sign_in(client, &signer, &account_id, challenge, None, now) {
+            Ok(signed_in) => signed_in,
+            Err(ConnectError::Revoked) => return Ok(Err(signer)),
+            Err(error) => return Err(error),
+        };
+        let view = client.account(token.value.as_str())?;
+        if view.account_id != account_id {
+            return Err(ConnectError::BadAnswer);
+        }
+        let Some(root) = view
+            .device_list
+            .first()
+            .and_then(|entry| entry.key.as_deref())
+            .and_then(point)
+        else {
+            return Err(ConnectError::BadAnswer);
+        };
+        let Some(list) = trust::verify_list(client.origin(), &account_id, &root, &view.device_list)
+        else {
+            return Err(ConnectError::LinkMismatch);
+        };
+        // The code names the root and one of its live devices.
+        let Some(confirmer) = list
+            .live
+            .iter()
+            .find(|key| link_fingerprint(&root, key) == code.fingerprint())
+            .cloned()
+        else {
+            return Err(ConnectError::LinkMismatch);
+        };
+        let own = signer.public_key().to_vec();
+        let Some(name) = list
+            .live
+            .contains(&own)
+            .then(|| list.name_of(&own))
+            .flatten()
+            .map(str::to_owned)
+        else {
+            return Ok(Err(signer));
+        };
+        let confirmer_name = list
+            .name_of(&confirmer)
+            .unwrap_or("your other device")
+            .to_owned();
+        Ok(Ok(Self {
+            client: client.clone(),
+            path: path.to_owned(),
+            signer: Arc::new(signer),
+            account_id,
+            link_hash: code.link_hash(),
+            device_name: name,
+            join_id: 0,
+            confirmer_name,
+            root,
+            confirmer: None,
+            start: (list.version, list.head().to_owned()),
+            words: String::new(),
+            expires_at: 0,
+            new_key: false,
+            clock: system_clock(),
+        }))
+    }
+
+    /// The join of this device that waits on disk next to `path`, with its key from
+    /// `store`: a restart, a lock, or a quit came while it waited. `None` without one, with
+    /// an account file, or when the key of the store is not the key of the join (the file
+    /// goes).
+    pub fn resume(store: &dyn DeviceKeyStore, path: &Path) -> Result<Option<Self>, ConnectError> {
+        if AccountState::load(path)?.is_some() {
+            return Ok(None);
+        }
+        let Some(pending) = PendingJoinFile::load(path) else {
+            return Ok(None);
+        };
+        let client = ConnectClient::new(&pending.origin)?;
+        let signer = match AccountSigner::open(store)? {
+            Some(signer) if signer.public_key_b64u() == pending.public_key => signer,
+            _ => {
+                PendingJoinFile::remove(path);
+                return Ok(None);
+            }
+        };
+        let (Some(root), Some(confirmer)) = (point(&pending.root), point(&pending.confirmer))
+        else {
+            PendingJoinFile::remove(path);
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            client,
+            path: path.to_owned(),
+            signer: Arc::new(signer),
+            account_id: pending.account_id,
+            link_hash: pending.link_hash,
+            device_name: pending.device_name,
+            join_id: pending.join_id,
+            confirmer_name: pending.confirmer_name,
+            root,
+            confirmer: Some(confirmer),
+            start: (pending.list_version, pending.list_head),
+            words: pending.words,
+            expires_at: pending.expires_at,
+            new_key: false,
+            clock: system_clock(),
+        }))
+    }
+
+    fn pending_file(&self) -> PendingJoinFile {
+        PendingJoinFile {
+            v: STATE_VERSION,
+            origin: self.client.origin().to_owned(),
+            account_id: self.account_id.clone(),
+            link_hash: self.link_hash.clone(),
+            device_name: self.device_name.clone(),
+            public_key: self.signer.public_key_b64u(),
+            join_id: self.join_id,
+            confirmer_name: self.confirmer_name.clone(),
+            confirmer: self
+                .confirmer
+                .as_deref()
+                .map(encode_b64u)
+                .unwrap_or_default(),
+            root: encode_b64u(&self.root),
+            list_version: self.start.0,
+            list_head: self.start.1.clone(),
+            words: self.words.clone(),
+            expires_at: self.expires_at,
+        }
     }
 
     /// Use `clock` for every time of this join (tests).
@@ -2254,7 +2645,8 @@ impl JoinRequest {
         self.clock = clock;
     }
 
-    /// The six safety words that this Mac shows.
+    /// The six safety words that this Mac shows; empty when this device's key is in the
+    /// account already (nothing to compare: the next poll finishes the join).
     pub fn words(&self) -> &str {
         &self.words
     }
@@ -2265,7 +2657,7 @@ impl JoinRequest {
     }
 
     pub fn account_id(&self) -> &str {
-        self.code.account_id()
+        &self.account_id
     }
 
     pub fn join_id(&self) -> u64 {
@@ -2274,6 +2666,19 @@ impl JoinRequest {
 
     pub fn expires_at(&self) -> u64 {
         self.expires_at
+    }
+
+    /// Whether this device made a new account key for this join, because its earlier key
+    /// was used by a join that did not finish on it. The device of that key stays in the
+    /// account until a device of the account removes it.
+    pub fn made_new_key(&self) -> bool {
+        self.new_key
+    }
+
+    /// Whether this device's key is in the account already: the next poll finishes the
+    /// join, with no words to compare.
+    pub fn already_in_account(&self) -> bool {
+        self.confirmer.is_none()
     }
 
     /// Ask whether the other device confirmed: `403 join_pending` waits, `403
@@ -2285,17 +2690,32 @@ impl JoinRequest {
     /// other list (an older one, one without that entry, or one whose entry names this Mac
     /// otherwise) is [`ConnectError::LinkMismatch`], and no account file is written. A token call
     /// refused with `401` or `503`, or a read of the account that fails on the way, waits
-    /// for the next poll.
+    /// for the next poll. A key that Connect does not know any more (`401` at the
+    /// challenge: the join was cancelled or pruned) ends the join as refused. The pending
+    /// join on disk goes when the join ends.
     pub fn poll(&mut self) -> Result<JoinPoll, ConnectError> {
+        let polled = self.poll_once();
+        if matches!(
+            polled,
+            Ok(JoinPoll::Refused | JoinPoll::Confirmed(_)) | Err(ConnectError::LinkMismatch)
+        ) {
+            PendingJoinFile::remove(&self.path);
+        }
+        polled
+    }
+
+    fn poll_once(&mut self) -> Result<JoinPoll, ConnectError> {
         let public_key = self.signer.public_key_b64u();
-        let account_id = self.code.account_id().to_owned();
+        let account_id = self.account_id.clone();
         let challenge = match self.client.challenge(&ChallengeRequest {
             account_id: &account_id,
             public_key: &public_key,
         }) {
             Ok(challenge) => challenge,
             Err(ConnectError::JoinPending) => return Ok(JoinPoll::Waiting),
-            Err(ConnectError::JoinRefused) => return Ok(JoinPoll::Refused),
+            Err(ConnectError::JoinRefused | ConnectError::Unauthenticated) => {
+                return Ok(JoinPoll::Refused);
+            }
             Err(error) => return Err(error),
         };
         let now = (self.clock)();
@@ -2323,10 +2743,10 @@ impl JoinRequest {
             Err(error) => return Err(error),
         };
         let start = Pin {
-            version: self.list.version,
-            head: self.list.head(),
+            version: self.start.0,
+            head: &self.start.1,
         };
-        let link_hash = self.code.link_hash();
+        let own = self.signer.public_key();
         let list = trust::verify_list(
             self.client.origin(),
             &account_id,
@@ -2334,8 +2754,12 @@ impl JoinRequest {
             &view.device_list,
         )
         .filter(|list| start.accepts(list))
-        .filter(|list| list.added(self.signer.public_key(), &self.confirmer, &link_hash))
-        .filter(|list| list.name_of(self.signer.public_key()) == Some(self.device_name.as_str()))
+        .filter(|list| match &self.confirmer {
+            Some(confirmer) => list.added(own, confirmer, &self.link_hash),
+            // A key in the account already: its `add` precedes the list of the start.
+            None => list.live.iter().any(|key| key.as_slice() == own),
+        })
+        .filter(|list| list.name_of(own) == Some(self.device_name.as_str()))
         .ok_or(ConnectError::LinkMismatch)?;
         let state = AccountState {
             v: STATE_VERSION,
@@ -2361,6 +2785,7 @@ impl JoinRequest {
                 .filter(|key| !list.live.contains(key))
                 .map(|key| encode_b64u(key))
                 .collect(),
+            recovery_unseen: false,
             peers: Vec::new(),
             stores: Vec::new(),
         };
@@ -2381,13 +2806,33 @@ impl JoinRequest {
         Ok(JoinPoll::Confirmed(Box::new(account)))
     }
 
-    /// Cancel before the confirmation, with the signature of this Mac's key.
+    /// Cancel before the confirmation, with the signature of this Mac's key. The pending
+    /// join on disk goes when Connect took the cancel; after any other answer it stays, so a
+    /// confirmation that came first still ends with this device in the account at the
+    /// next resume ([`Self::resume`]).
     pub fn cancel(self) -> Result<(), ConnectError> {
-        if cancel_join(&self.client, &self.signer, &self.code)? != self.join_id {
+        if self.confirmer.is_none() {
+            return Ok(());
+        }
+        let cancelled = cancel_join(
+            &self.client,
+            &self.signer,
+            &self.account_id,
+            &self.link_hash,
+        )?;
+        if cancelled != self.join_id {
             return Err(ConnectError::BadAnswer);
         }
+        PendingJoinFile::remove(&self.path);
         Ok(())
     }
+}
+
+/// What a join request of one key got.
+enum Asked {
+    Waiting(Box<JoinRequest>),
+    /// `409 conflict`: the key is or was a device of an account.
+    KeyUsed(AccountSigner),
 }
 
 #[cfg(test)]
@@ -2417,6 +2862,7 @@ mod tests {
             ),
             known: vec![KEY.to_owned()],
             left: Vec::new(),
+            recovery_unseen: false,
             peers: Vec::new(),
             stores: Vec::new(),
         }

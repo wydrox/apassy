@@ -372,6 +372,10 @@ struct State {
     invites: Vec<Invite>,
     /// The relay of the vault stores ([`FakeConnect::with_relay`]).
     relay: Option<Arc<dyn StoreRelay>>,
+    /// The recovery-key rotations: the account and the device of each.
+    rotations: Vec<(String, String)>,
+    /// The pending joins are answered without their `signature` field.
+    pending_without_signature: bool,
     /// The share codes and the lying hooks of section 16 (`fake_connect_share.rs`).
     share: share::ShareState,
 }
@@ -778,6 +782,25 @@ impl FakeConnect {
     }
 
     /// The live device ids of `account`.
+    /// The public recovery key that Connect stores for `account` (32 bytes).
+    pub fn recovery_key(&self, account: &str) -> Vec<u8> {
+        lock(&self.shared)
+            .accounts
+            .get(account)
+            .map(|entry| entry.recovery_key.clone())
+            .unwrap_or_default()
+    }
+
+    /// The recovery-key rotations (section 9.1): the account and the device of each.
+    pub fn rotations(&self) -> Vec<(String, String)> {
+        lock(&self.shared).rotations.clone()
+    }
+
+    /// Connect answers each pending join without its `signature` field.
+    pub fn drop_pending_signatures(&self) {
+        lock(&self.shared).pending_without_signature = true;
+    }
+
     pub fn live_devices(&self, account: &str) -> Vec<String> {
         lock(&self.shared)
             .devices
@@ -1626,6 +1649,12 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
                     "expires_at": link.expires_at, "device_list": list_of(&state, &account)}));
             }
             let at = now();
+            // A key that is or was a device of an account (the relay's `key_used`), checked
+            // after the link, as the relay does.
+            let used = state
+                .devices
+                .iter()
+                .any(|device| device.public_key == public_key);
             let Some(link) = state.links.iter_mut().find(|link| {
                 link.account == account
                     && link.hash == text(&body, "link_hash")
@@ -1634,6 +1663,9 @@ fn route(shared: &Arc<Mutex<State>>, request: &Incoming) -> Outgoing {
             }) else {
                 return fail(403, "forbidden");
             };
+            if used {
+                return fail(409, "conflict");
+            }
             link.used = true;
             let (link_id, creator, expires_at) = (link.id, link.device.clone(), link.expires_at);
             state.next += 1;
@@ -1841,8 +1873,53 @@ fn authenticated(
                       "created_at": entry.created_at,
                       "plan": account_plan(state, account),
                       "devices": devices, "group": account_group(state, account),
-                      "device_list": entry.list}),
+                      "device_list": entry.list,
+                      "recovery_key": encode_b64u(&entry.recovery_key)}),
             )
+        }
+        ("POST", ["recovery"]) => {
+            if !strict(body, &["previous", "recovery_key", "signature"]) {
+                return fail(400, "invalid_request");
+            }
+            let (Some(previous), Some(recovery_key)) = (
+                decode_b64u(text(body, "previous")).filter(|key| key.len() == 32),
+                decode_b64u(text(body, "recovery_key")).filter(|key| key.len() == 32),
+            ) else {
+                return fail(400, "invalid_request");
+            };
+            let Some(caller_key) = state
+                .devices
+                .iter()
+                .find(|entry| entry.id == device)
+                .map(|entry| entry.public_key.clone())
+            else {
+                return fail(401, "unauthenticated");
+            };
+            let message = joined(&[
+                "apassy-connect recovery-rotate v1",
+                origin,
+                account,
+                &encode_b64u(&caller_key),
+                text(body, "previous"),
+                text(body, "recovery_key"),
+            ]);
+            let signature = decode_b64u(text(body, "signature")).unwrap_or_default();
+            if !verify(&caller_key, &message, &signature) {
+                return fail(400, "invalid_request");
+            }
+            let at = now();
+            let entry = state.accounts.get_mut(account).expect("account");
+            if entry.recovery_key == recovery_key {
+                return ok(json!({"account_id": account, "rotated_at": at}));
+            }
+            if entry.recovery_key != previous {
+                return fail(409, "conflict");
+            }
+            entry.recovery_key = recovery_key;
+            state
+                .rotations
+                .push((account.to_owned(), device.to_owned()));
+            ok(json!({"account_id": account, "rotated_at": at}))
         }
         ("DELETE", []) => {
             if body.as_object().is_none_or(|map| !map.is_empty()) {
@@ -1915,6 +1992,14 @@ fn authenticated(
                            "public_key": encode_b64u(&join.public_key),
                            "signature": encode_b64u(&join.signature),
                            "created_at": now(), "expires_at": now() + 600})
+                })
+                .map(|mut join| {
+                    if state.pending_without_signature
+                        && let Some(map) = join.as_object_mut()
+                    {
+                        map.remove("signature");
+                    }
+                    join
                 })
                 .collect();
             ok(Value::Array(pending))

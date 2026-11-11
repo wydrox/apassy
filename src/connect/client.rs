@@ -382,6 +382,10 @@ pub struct AccountView {
     /// The signed device list, from version 1 ([`super::trust`]).
     #[serde(default)]
     pub device_list: Vec<ListEntry>,
+    /// b64u of the public recovery key that Connect stores (section 9.1): the `previous`
+    /// of a new recovery code.
+    #[serde(default)]
+    pub recovery_key: Option<String>,
     /// Set by this device, never by Connect: `device_list` verified from the pinned root and
     /// went on from the pinned version. When it is false, no device of the view is
     /// verified, and the trust store keeps what it had.
@@ -478,6 +482,24 @@ pub struct VaultStoreView {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(super) struct VaultDeleted {
     pub team_id: String,
+}
+
+/// `POST /v1/account/recovery` (section 9.1).
+#[derive(Serialize)]
+pub(super) struct RecoveryRotate<'a> {
+    /// b64u of the recovery key that Connect stores now.
+    pub previous: &'a str,
+    /// b64u of the Ed25519 public key of the new recovery code.
+    pub recovery_key: &'a str,
+    /// The device's signature over the `apassy-connect recovery-rotate v1` message.
+    pub signature: &'a str,
+}
+
+/// The answer of `POST /v1/account/recovery`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RecoveryRotated {
+    pub account_id: String,
+    pub rotated_at: u64,
 }
 
 /// `POST /v1/account/recover`.
@@ -870,6 +892,14 @@ impl ConnectClient {
                 statement,
             },
         )
+    }
+
+    pub(super) fn rotate_recovery(
+        &self,
+        token: &str,
+        body: &RecoveryRotate<'_>,
+    ) -> Result<RecoveryRotated, ConnectError> {
+        self.post("/v1/account/recovery", Some(token), body)
     }
 
     pub(super) fn refuse(&self, token: &str, join_id: u64) -> Result<JoinId, ConnectError> {

@@ -53,10 +53,10 @@ use crate::api::{
     AccountChallengeRequest, AccountConfirm, AccountConfirmer, AccountCreate, AccountCreated,
     AccountDeleted, AccountDevice, AccountGroup, AccountJoin, AccountJoinCancel, AccountJoinId,
     AccountJoined, AccountLinkCreated, AccountLinkRequest, AccountPendingJoin, AccountRecover,
-    AccountRecovered, AccountRevoke, AccountRevoked, AccountTokenRef, AccountTokenRequest,
-    AccountView, EmptyRequest, EntitlementAnswer, ListEntry, ListOp, PlanView, Platform,
-    StoreDevice, StoreDeviceAdd, TeamKind, VaultStoreCreate, VaultStoreDeleted, VaultStoreView,
-    WellKnown, WellKnownKey,
+    AccountRecovered, AccountRecoveryRotate, AccountRecoveryRotated, AccountRevoke, AccountRevoked,
+    AccountTokenRef, AccountTokenRequest, AccountView, EmptyRequest, EntitlementAnswer, ListEntry,
+    ListOp, PlanView, Platform, StoreDevice, StoreDeviceAdd, TeamKind, VaultStoreCreate,
+    VaultStoreDeleted, VaultStoreView, WellKnown, WellKnownKey,
 };
 use crate::device;
 use crate::error::{RelayError, RelayResult, codes};
@@ -248,6 +248,8 @@ pub enum AccountEndpoint {
     Recover,
     WellKnown,
     View,
+    /// `POST /v1/account/recovery`: a live device makes a new recovery code (section 9.1).
+    RecoveryRotate,
     Delete,
     Link,
     Pending,
@@ -307,6 +309,7 @@ pub fn route(method: &str, path: &str) -> RelayResult<(Need, AccountEndpoint)> {
         ["v1", "account", "challenge"] => pick(vec![("POST", Need::Edge, Challenge)]),
         ["v1", "account", "token"] => pick(vec![("POST", Need::Edge, Token)]),
         ["v1", "account", "recover"] => pick(vec![("POST", Need::Edge, Recover)]),
+        ["v1", "account", "recovery"] => pick(vec![("POST", Need::Account, RecoveryRotate)]),
         ["v1", "account", "entitlement"] => pick(vec![("GET", Need::Account, Entitlement)]),
         ["v1", "account", "plan"] => pick(vec![("GET", Need::Account, Plan)]),
         ["v1", "account", "checkout"] => pick(vec![("POST", Need::Account, Checkout)]),
@@ -1024,6 +1027,7 @@ pub fn dispatch(
             no_body(body)?;
             delete_account(hub, caller, now)
         }
+        AccountEndpoint::RecoveryRotate => recovery_rotate(hub, caller, &strict(body)?, now),
         AccountEndpoint::Link => link(hub, caller, &strict(body)?, now),
         AccountEndpoint::Pending => pending(hub, caller, now),
         AccountEndpoint::Confirm(join_id) => confirm(hub, caller, *join_id, &strict(body)?, now),
@@ -1786,11 +1790,11 @@ fn view(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
         .groups()
         .group_of(&hub.directory.store, &caller.account, now)?;
     let view = hub.directory.store.with(|conn| {
-        let (name, email, created_at): (String, Option<String>, i64) = conn
+        let (name, email, created_at, recovery_key): (String, Option<String>, i64, Vec<u8>) = conn
             .query_row(
-                "SELECT name, email, created_at FROM account WHERE id = ?1",
+                "SELECT name, email, created_at, recovery_key FROM account WHERE id = ?1",
                 params![caller.account],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(db)?;
         let mut statement = conn
@@ -1816,6 +1820,7 @@ fn view(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Value> {
             devices,
             group,
             device_list: list_entries(conn, &caller.account)?,
+            recovery_key: encode_b64(&recovery_key),
         })
     })?;
     to_value(&view)
@@ -2915,7 +2920,7 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
         start_list(tx, &hub.config.public_url, &request.account_id, &root, now)?;
         tx.execute(
             "UPDATE account SET recovery_key = ?2, recover_hash = ?3, recovered_at = ?4, \
-             recover_device = ?5, recover_deleted = ?6 WHERE id = ?1",
+             recover_device = ?5, recover_deleted = ?6, recovery_rotated_at = NULL WHERE id = ?1",
             params![
                 request.account_id,
                 next_recovery.as_slice(),
@@ -2941,6 +2946,95 @@ fn recover(hub: &Hub, request: &AccountRecover, prefix: &str, now: u64) -> Relay
         device_id: device,
         deleted_stores,
     })
+}
+
+/// `POST /v1/account/recovery` (section 9.1): a live device replaces the account's
+/// recovery key with the key of a new recovery code. `previous` and `recovery_key` must be
+/// recovery keys and the caller's own key must sign the `apassy-connect recovery-rotate v1`
+/// message of this Connect (else 400). A stored key that already is `recovery_key` is a
+/// retry after a lost answer: the same result, nothing changes. Else, in one transaction,
+/// the stored key must still be `previous` (else 409: the device reads the account again
+/// and signs once more), the caller must still be live (else 401), and the key is
+/// replaced with an audit row. The time of the change (`recovery_rotated_at`) answers a
+/// retry; a recovery clears it, so a retry then answers the time of that recovery.
+fn recovery_rotate(
+    hub: &Hub,
+    caller: &AccountCaller,
+    request: &AccountRecoveryRotate,
+    now: u64,
+) -> RelayResult<Value> {
+    let previous = device::decode_recovery_key(&request.previous)
+        .map_err(|_| RelayError::invalid("The previous recovery key is b64u of 32 bytes."))?;
+    let next = device::decode_recovery_key(&request.recovery_key)
+        .map_err(|_| RelayError::invalid("The recovery key is b64u of 32 bytes."))?;
+    let signature = signature_of(&request.signature)?;
+    let message = device::account_recovery_rotate_message(
+        &hub.config.public_url,
+        &caller.account,
+        &encode_b64(&caller.public_key),
+        &request.previous,
+        &request.recovery_key,
+    );
+    if !device::verify(&caller.public_key, &message, &signature) {
+        return Err(RelayError::invalid(
+            "The signature is not one of this device over the recovery-rotate message of this Connect.",
+        ));
+    }
+    // The time at which the stored key was set: its rotation, else its recovery, else the
+    // creation of the account.
+    let stored = |conn: &Connection| -> RelayResult<(Vec<u8>, u64)> {
+        let (key, at): (Vec<u8>, i64) = conn
+            .query_row(
+                "SELECT recovery_key, COALESCE(recovery_rotated_at, recovered_at, created_at) \
+                 FROM account WHERE id = ?1",
+                params![caller.account],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?
+            .ok_or_else(RelayError::unauthenticated)?;
+        Ok((key, to_u(at)))
+    };
+    let answer = |rotated_at: u64| {
+        to_value(&AccountRecoveryRotated {
+            account_id: caller.account.clone(),
+            rotated_at,
+        })
+    };
+    let (key, at) = hub.directory.store.with(stored)?;
+    if same_bytes(&key, next.as_slice()) {
+        return answer(at);
+    }
+    let rotated_at = hub.directory.store.tx(|tx| {
+        // Again under the lock: another device may have made a new code in the meantime.
+        let (key, at) = stored(tx)?;
+        if same_bytes(&key, next.as_slice()) {
+            return Ok(at);
+        }
+        if !same_bytes(&key, previous.as_slice()) {
+            return Err(conflict(
+                "The recovery key of this account changed. Read the account again and sign the new key.",
+            ));
+        }
+        live_device(tx, &caller.device)?
+            .filter(|live| live.account == caller.account)
+            .ok_or_else(RelayError::unauthenticated)?;
+        tx.execute(
+            "UPDATE account SET recovery_key = ?2, recovery_rotated_at = ?3 WHERE id = ?1",
+            params![caller.account, next.as_slice(), to_i(now)],
+        )
+        .map_err(db)?;
+        hub.directory.audit.write_on(
+            tx,
+            now,
+            &actor(&caller.account),
+            "recovery_key_rotated",
+            None,
+            &json!({"account_id": caller.account, "device_id": caller.device}),
+        )?;
+        Ok(now)
+    })?;
+    answer(rotated_at)
 }
 
 // ---- The entitlement token (section 10). ----
@@ -3276,6 +3370,14 @@ mod tests {
                 .unwrap_err()
                 .code,
             codes::NOT_FOUND
+        );
+        assert_eq!(
+            route("POST", "/v1/account/recovery").unwrap(),
+            (Need::Account, AccountEndpoint::RecoveryRotate)
+        );
+        assert_eq!(
+            route("GET", "/v1/account/recovery").unwrap_err().code,
+            codes::METHOD_NOT_ALLOWED
         );
         assert_eq!(
             route("PUT", "/v1/account").unwrap_err().code,

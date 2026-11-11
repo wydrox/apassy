@@ -1022,6 +1022,7 @@ fn the_plan_row_shows_its_whole_status_at_the_settings_width() {
                 group: None,
                 list_verified: true,
                 list_nearly_full: false,
+                recovery_unseen: false,
             }),
             plans: Some(fixture_plans()),
             locked: false,
@@ -1091,6 +1092,7 @@ fn every_state_of_the_plan_row() {
                 group: None,
                 list_verified: true,
                 list_nearly_full: false,
+                recovery_unseen: false,
             }),
             plans: Some(fixture_plans()),
             locked: false,
@@ -2107,7 +2109,18 @@ fn a_store_that_waits_on_a_removed_device_offers_its_copy_by_name() {
         text.contains("Use the copy that “Synthetic iMac” left?"),
         "{text}"
     );
-    d.app.relay_use_departed(&d.id);
+    // Another head than the one that the store waits on is refused, and nothing changes.
+    let mut other = departed.head.clone();
+    other.version += 1;
+    let before = d.relay.heads_of(&d.team).len();
+    d.app.relay_use_departed(&d.id, &other);
+    d.app.relay_settle_for_test();
+    assert_eq!(
+        d.app.status_text,
+        "The copy on the relay changed. Nothing changed."
+    );
+    assert_eq!(d.relay.heads_of(&d.team).len(), before);
+    d.app.relay_use_departed(&d.id, &departed.head);
     d.app.relay_settle_for_test();
     assert!(d.app.ui.sheet.is_none(), "{}", d.app.status_text);
     assert!(
@@ -2363,5 +2376,247 @@ fn the_signers_reach_the_sync_after_a_share_step_whose_later_call_failed() {
             .signers
             .for_team(&team)
             .accepts(&x2_key)
+    );
+}
+
+// ---- Round 5: the recovery code, the time of the device list, and a long check. ----
+
+/// A creation that a restart interrupted shows the account with a lasting line and "New
+/// Recovery Code…"; the line stays after a refresh and a new session; the new code is made
+/// behind an owner check, shown once as at the creation, and ends the line.
+#[test]
+fn an_account_without_a_seen_recovery_code_says_so_until_a_new_code() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    connect.lose_next_answers("POST /v1/account", 50);
+    let create = |app: &mut DesktopApp| {
+        act(&ctx, app, Action::Create);
+        if let Some(Sheet::Create { name: typed, .. }) = &mut app.ui.connect.sheet {
+            typed.clear();
+            typed.push_str("Rafal");
+        }
+        choose(&ctx, app, SheetChoice::Go);
+    };
+    create(&mut app);
+    settle(&ctx, &mut app);
+    // A restart: the code of the pending creation is not in memory any more.
+    crate::connect::account::forget_pending_creation_codes();
+    connect.keep_answers();
+    create(&mut app);
+    until(&ctx, &mut app, "the account", |app| shown(app).is_some());
+    let account_id = shown(&app).expect("account").account_id;
+    assert!(shown(&app).expect("account").recovery_unseen);
+    let painted = text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::connect::RECOVERY_UNSEEN),
+        "{painted}"
+    );
+    assert!(painted.contains(super::connect::NEW_RECOVERY), "{painted}");
+    // A refresh, and a new session of the section, keep the line.
+    act(&ctx, &mut app, Action::SignIn);
+    settle(&ctx, &mut app);
+    assert!(text(&ctx, &mut app).contains(super::connect::RECOVERY_UNSEEN));
+    let store = app.connect_session().store();
+    app.connect_configure(store, Some(dir.path().join("data")));
+    until(&ctx, &mut app, "the account again", |app| {
+        shown(app).is_some()
+    });
+    assert!(text(&ctx, &mut app).contains(super::connect::RECOVERY_UNSEEN));
+    // "New Recovery Code…": the owner check, then the code once.
+    let before = connect.recovery_key(&account_id);
+    act(&ctx, &mut app, Action::NewRecoveryCode);
+    let action = app
+        .owner
+        .check
+        .as_ref()
+        .map(|check| check.request.action())
+        .expect("an owner check");
+    assert_eq!(
+        action,
+        crate::broker::approvals::OwnerAction::NewRecoveryCode {
+            account_id: account_id.clone()
+        }
+    );
+    assert_eq!(
+        connect.recovery_key(&account_id),
+        before,
+        "nothing before it"
+    );
+    confirm_with(&mut app, &ctx, PASS);
+    until(&ctx, &mut app, "the new code", |app| {
+        matches!(app.ui.connect.sheet, Some(Sheet::Recovery { .. }))
+    });
+    let Some(Sheet::Recovery { words }) = &app.ui.connect.sheet else {
+        unreachable!();
+    };
+    assert_eq!(words.split_whitespace().count(), 16, "16 words, once");
+    assert_ne!(connect.recovery_key(&account_id), before);
+    choose(&ctx, &mut app, SheetChoice::Done);
+    until(&ctx, &mut app, "the account", |app| shown(app).is_some());
+    let painted = text(&ctx, &mut app);
+    assert!(
+        !painted.contains(super::connect::RECOVERY_UNSEEN),
+        "{painted}"
+    );
+    assert!(painted.contains(super::connect::NEW_RECOVERY), "{painted}");
+}
+
+/// Only a refresh whose device list verified moves the time that the sync of the vault
+/// stores gets; a refresh whose list does not verify, and the end of another step, keep
+/// it as it was.
+#[test]
+fn only_a_verified_device_list_moves_the_time_of_the_list() {
+    let dir = TempDir::new().expect("temp dir");
+    let connect = FakeConnect::start();
+    let mut app = connect_app(&dir, &connect);
+    let ctx = egui::Context::default();
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    act(&ctx, &mut app, Action::SignIn);
+    settle(&ctx, &mut app);
+    let first = app
+        .ui
+        .connect
+        .live
+        .sync_account()
+        .and_then(|account| account.verified_at)
+        .expect("a verified list");
+    // A list that does not verify: a changed name under the same signature.
+    let list = connect.device_list(&account_id);
+    let mut broken = list.clone();
+    broken[0]["name"] = serde_json::json!("Another Name");
+    connect.set_device_list(&account_id, broken);
+    std::thread::sleep(Duration::from_millis(5));
+    act(&ctx, &mut app, Action::SignIn);
+    settle(&ctx, &mut app);
+    assert!(
+        shown(&app).is_some_and(|account| !account.list_verified),
+        "the list did not verify"
+    );
+    let verified = |app: &DesktopApp| {
+        app.ui
+            .connect
+            .live
+            .sync_account()
+            .and_then(|account| account.verified_at)
+    };
+    assert_eq!(verified(&app), Some(first));
+    // Another step ends: nothing changes.
+    act(&ctx, &mut app, Action::AddDevice);
+    settle(&ctx, &mut app);
+    choose(&ctx, &mut app, SheetChoice::Cancel);
+    settle(&ctx, &mut app);
+    assert_eq!(verified(&app), Some(first));
+    // The list verifies again: a later time.
+    connect.set_device_list(&account_id, list);
+    act(&ctx, &mut app, Action::SignIn);
+    settle(&ctx, &mut app);
+    assert!(verified(&app).is_some_and(|at| at > first));
+}
+
+/// A vault store that checks the device list for ten minutes says that Connect cannot be
+/// reached to check it, with "Try Again"; the check asks Connect, and a verified list asked
+/// after the refusal decides it.
+#[test]
+fn a_long_check_of_the_device_list_says_so_and_offers_try_again() {
+    use crate::sync::{HeadFields, sha256_hex};
+    let dir = TempDir::new().expect("temp dir");
+    let relay = Arc::new(crate::desktop::fake_relay::FakeRelay::start());
+    let connect = FakeConnect::with_relay(Arc::clone(&relay) as _);
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("mac"), true);
+    let ctx = egui::Context::default();
+    app.vault_list.name_input = "Personal".to_owned();
+    app.owner_ui.passphrase.push_str(PASS);
+    app.owner_ui.passphrase_confirm.push_str(PASS);
+    super::start::create_vault(&mut app, &ctx);
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).expect("data dir");
+    app.connect_configure(Some(Arc::new(MemoryKeyStore::new())), Some(data));
+    let live = &mut app.ui.connect.live;
+    live.origin = Some(connect.url.clone());
+    live.poll_every = Some(Duration::from_millis(40));
+    super::open_settings(&mut app, super::SettingsSection::Connect);
+    let account_id = create_account(&ctx, &mut app, "Rafal");
+    connect.entitle(&account_id);
+    act(&ctx, &mut app, Action::SignIn);
+    until(&ctx, &mut app, "the plan", |app| {
+        app.ui
+            .connect
+            .live
+            .sync_account()
+            .is_some_and(|account| account.plan.is_some_and(crate::sync::StorePlan::entitled))
+    });
+    let entry = app.current_vault().expect("the open vault").clone();
+    app.relay_enable_connect(&entry.id).expect("turn on");
+    app.relay_settle_for_test();
+    let team = app
+        .relay_of(&entry.id)
+        .and_then(|relay| relay.state().ok().flatten())
+        .and_then(|state| state.team_id)
+        .expect("a store");
+    app.sync_now();
+    app.relay_settle_for_test();
+    // A head by a key that this Mac does not know.
+    let stranger =
+        crate::connect::AccountSigner::open_or_create(&MemoryKeyStore::new()).expect("key");
+    let number = relay.add_store_device(&team, "Mac Studio", stranger.public_key());
+    let last = relay.heads_of(&team).last().cloned().expect("a head");
+    let bytes = b"synthetic copy".to_vec();
+    let fields = HeadFields {
+        version: last.version + 1,
+        previous: last.hash(),
+        snapshot_sha256: sha256_hex(&bytes),
+        size: bytes.len() as u64,
+        device_id: number,
+        ..HeadFields::parse(&last.text).expect("head")
+    };
+    let signed = stranger.sign_head(fields).expect("sign");
+    relay.replace_store_from(
+        &team,
+        vec![(
+            crate::desktop::fake_relay::StoredHead {
+                version: last.version + 1,
+                text: signed.text,
+                signature: signed.signature,
+                device_id: number,
+            },
+            bytes,
+        )],
+    );
+    app.sync_now();
+    app.relay_settle_for_test();
+    let checking =
+        super::sync::UiStatus::Problem(crate::sync::SyncError::ChecksDeviceList.to_string());
+    assert_eq!(app.sync.statuses.get(&entry.id), Some(&checking));
+    let painted = vault_text(&ctx, &mut app);
+    assert!(
+        !painted.contains(super::sync::relay::CHECK_LIST_UNREACHABLE),
+        "{painted}"
+    );
+    // Ten minutes later.
+    app.relay_of(&entry.id)
+        .expect("the relay sync")
+        .backdate_check_for_test(super::sync::relay::CHECK_LIST_LONG);
+    let painted = vault_text(&ctx, &mut app);
+    assert!(
+        painted.contains(super::sync::relay::CHECK_LIST_UNREACHABLE),
+        "{painted}"
+    );
+    assert!(painted.contains("Try Again"), "{painted}");
+    // "Try Again": Connect is asked now; its verified list still does not hold the key.
+    let asked = connect.count("GET /v1/account");
+    app.relay_check_list_again(&entry.id);
+    until(&ctx, &mut app, "the refresh", |app| {
+        !live::view(app).busy && connect.count("GET /v1/account") > asked
+    });
+    app.relay_settle_for_test();
+    app.sync_now();
+    app.relay_settle_for_test();
+    assert_eq!(
+        app.sync.statuses.get(&entry.id),
+        Some(&super::sync::UiStatus::Damaged),
+        "a fresh verified list decided the head"
     );
 }

@@ -421,6 +421,8 @@ svg{display:block}
     <li>Family or Team members</li>
     <li>Join a family or team</li>
     <li>Delete the account</li>
+    <li>Shared Vaults</li>
+    <li>A new recovery code</li>
   </ol>
 </div>
 
@@ -982,6 +984,38 @@ svg{display:block}
     </div>
   </div>
   <ul class="fnotes"><li><b>12a</b>: the section is under the account in Settings › Connect, from <code>ConnectAccount::refresh_shares</code> (the lists verified from the pinned roots, never the group view). "Share with…" and "Accept a Shared Vault…" show only in an active family or team. Every line comes from the lists, so it says the same after a restart: a member whose verified list left the share ("left this vault.") or whose share ended otherwise ("Sharing with … ended.") gets "Share with … Again…"; a joined vault whose owner ended the share says "… stopped sharing this vault." until the owner shares it again (then it is offered: Join); a vault that this account left says on which device. A vault of another account that no vault of this Mac syncs is "A vault, shared by …", with Connect's name of it as a hint only; a joined one offers "Download the Shared Copy…".</li><li><b>12b</b>: the members of the group view are only a list to pick from. A member that this account pinned before, and whose verified list pins this account, needs no code: Continue runs the owner check <code>ShareConnectVault</code> without words. A member who did not finish the words gets a new code (12c); nothing is signed twice.</li><li><b>12c</b>: <code>start_share</code>; Connect never sees the code; the sheet asks <code>GET /v1/account/peers/pending</code> every 5 s and moves to 12d with the first answer that verifies.</li><li><b>12d</b>: <b>Confirm…</b> runs the owner check <code>ShareConnectVault</code> with the words, then <code>confirm_share</code> (it signs <code>peer</code> and <code>share</code> and adds the member's verified devices). For an account that was reset the check is <code>RepinConnectPeer</code>: it names both account keys and the vaults whose shares end first. Refuse signs nothing. Each owner check names the vault by its name on this Mac, the person by the device name that their verified list signed with the short key fingerprint, and Connect's name for them as a hint beside it.</li><li><b>12e</b> and <b>12f</b>: <code>accept_code</code> checks the code against the account that answered; <b>The Words Match…</b> runs <code>AcceptConnectShare</code>, then <code>accept_share</code>. The Words Differ withdraws the answer and signs nothing.</li><li><b>Join</b> runs the owner check <code>JoinConnectShare</code> ("Join a vault shared by …?", with Connect's name of the vault as a hint; the name on this Mac when one of its vaults synced it before), signs <code>join</code> naming the share that it answers, reads the lists of the other people of the vault, then opens "Use a Vault from Another Mac" › Apassy Connect: the passphrase of the copy opens it. When Connect does not list this Mac in the copy yet: "This device is not in the shared copy yet. It is added when … opens Apassy on a device that syncs this vault. Then choose Download the Shared Copy…". No store that this account made (its <code>store</code> entry), that this Mac syncs as its own, or that this account's list holds, is offered.</li><li><b>12g</b>: Cancel is the default. Both always run the owner check <code>EndConnectShare</code>. Leave turns off the sync of that vault here; the other devices of the account do the same when they read the <code>leave</code> (the third note of 12a). The account ends a share by itself, without an owner check, only when the person's verified list left that share, when Connect's group answer shows this account active and not the person, or when Connect marks the share void; an error or an unclear group answer ends nothing. Each owner check names the exact entries that it signs.</li><li><b>12h</b>: a head whose signer is not verified yet ("Checking the device list" of the sync) shows the first line for 10 minutes, once for each head (a lock does not start it again), while the lists are read again after 30 s and then after twice the last wait, up to 10 minutes; then the error shows. A head of a device that left, after this Mac's last sync, shows the second.</li></ul>
+</section>
+<!-- ============================================================ 13 -->
+<section class="frame" id="f13">
+  <div class="flabel"><b><span class="fnum">13</span>A new recovery code</b>
+    <span>The Recovery Code row of the account, the owner check, and the new code once (connect-account-v1 section 9.1).</span></div>
+  <div class="pgrid three">
+    <div class="shc">
+      <div class="plabel">13a · An account whose code was never shown</div>
+      <div class="grp" style="margin-top:6px">
+        <div class="fr"><div class="tn warn" style="flex:1;color:var(--t-warn)"><svg><use href="#i-warn"/></svg><span>This account has no recovery code that you have seen. Make a new one now.</span></div></div>
+        <div class="fr pl"><div class="k">Recovery Code</div><div class="v"><span class="btn">New Recovery Code…</span></div><div class="pst">Make a new code if you cannot find the one you saved. The old code stops working.</div></div>
+      </div>
+      <div class="note">The warning line stays through every refresh and restart until a new code is made. Without it, the group shows only the Recovery Code row.</div>
+    </div>
+    <div class="shc">
+      <div class="plabel">13b · The owner check</div>
+      <div class="alert"><div class="aic" style="background:#007aff"><svg><use href="#i-lock"/></svg></div>
+        <h2>Make a New Recovery Code?</h2>
+        <p>Make a new recovery code for your Apassy Connect account? Apassy shows the new code once. The old recovery code stops working.</p>
+      </div>
+      <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Touch ID…</span></div>
+    </div>
+    <div class="shc">
+      <div class="plabel">13c · The new code, shown once</div>
+      <h2>Save Your Recovery Code</h2>
+      <p class="lead">Shown once. Save it in another password manager.</p>
+      <div class="rcode"><span data-n="1">amber</span><span data-n="2">lotus</span><span data-n="3">quiet</span><span data-n="4">prism</span><span data-n="5">walnut</span><span data-n="6">ember</span><span data-n="7">falcon</span><span data-n="8">meadow</span><span data-n="9">pilot</span><span data-n="10">cobalt</span><span data-n="11">summit</span><span data-n="12">river</span><span data-n="13">nickel</span><span data-n="14">violet</span><span data-n="15">canyon</span><span data-n="16">tulip</span></div>
+      <div class="note">If every device of the account is lost, this code gives the account to a new Mac. The vault copies at Connect are deleted then; your vaults stay on your devices.</div>
+      <div class="sbar"><span class="btn left"><svg><use href="#i-copy"/></svg>Copy</span><span class="btn pri">I Saved It</span></div>
+    </div>
+  </div>
+  <ul class="fnotes"><li><b>New Recovery Code…</b> runs the owner check <code>OwnerAction::NewRecoveryCode</code> (Touch ID or the passphrase), then <code>ConnectAccount::new_recovery_code</code>: a new code on this Mac, and <code>POST /v1/account/recovery</code> with its public key, signed by the device key over the key that Connect holds now. The button is off while the vault is locked and while the device list did not verify.</li><li><b>13c</b> is the sheet of 2b: the 16 words once; Apassy never stores them. After it the old code recovers nothing.</li><li>The warning of 12a comes from the account file (<code>recovery_unseen</code>), written when a creation finished after a restart without showing its code; a new code clears it.</li></ul>
 </section>
 <section class="notes">
   <h2>Rules for every view</h2>

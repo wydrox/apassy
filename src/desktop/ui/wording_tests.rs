@@ -437,6 +437,7 @@ fn connect_screens(screens: &mut Vec<Screen>) {
         ConnectSheet::JoinWaiting {
             confirmer: "Synthetic Phone".to_owned(),
             words: "blaze cable flute board seal tiger".to_owned(),
+            note: None,
         },
     );
     sheet(screens, &mut app, "joined", ConnectSheet::Joined);

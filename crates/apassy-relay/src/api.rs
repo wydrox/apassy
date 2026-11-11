@@ -1719,6 +1719,9 @@ pub struct AccountView {
     pub group: Option<AccountGroup>,
     /// The signed device list, from version 1.
     pub device_list: Vec<ListEntry>,
+    /// The account's stored public recovery key (b64u of 32 bytes): the `previous` of a
+    /// new recovery code (`POST /v1/account/recovery`).
+    pub recovery_key: String,
 }
 
 /// An empty JSON object: `DELETE /v1/account`, a refusal of a join.
@@ -1922,6 +1925,25 @@ pub struct AccountRecovered {
     pub account_id: String,
     pub device_id: String,
     pub deleted_stores: u64,
+}
+
+/// `POST /v1/account/recovery`: a live device replaces the account's recovery key with
+/// the key of a new recovery code. `signature` is the caller's DER signature over
+/// `device::account_recovery_rotate_message` with `previous` (the key that Connect holds
+/// now) and `recovery_key` (the new one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountRecoveryRotate {
+    pub previous: String,
+    pub recovery_key: String,
+    pub signature: String,
+}
+
+/// `POST /v1/account/recovery` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRecoveryRotated {
+    pub account_id: String,
+    pub rotated_at: u64,
 }
 
 /// `GET /v1/account/entitlement` answer.

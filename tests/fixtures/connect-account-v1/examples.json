@@ -127,7 +127,8 @@
             "by": "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA",
             "signature": "MEUCIQD4IuwtQ9zw9Up_3cmAcjOOF_sHjOMRFxC7NfG3GaxZkQIgIQavBtThFru9tyKVNVeuENBiR8Ppei2bE4zWXVBlGHA"
           }
-        ]
+        ],
+        "recovery_key": "P3VZgQkKwrU01IKiaSsnbCkDDAnFmM4Quzo8s1pM_w0"
       }
     },
     {
@@ -178,7 +179,8 @@
             "by": "BHT0n4Fm59J03ZsiW90m9QduYBelWtRV3UCWnVat-4vhMVwrG6Yb1N49dMdAoMjybq7EF8VHiKvw2YADXal0V8U",
             "signature": "MEUCIE0vASQMCO07zkpcAy3cZ6J6hzMLf3F_6yOuVrRa-mGsAiEAkxndZenuwkLS_5SdjlUhEmIIvpSgpx0qZn4hJsyils0"
           }
-        ]
+        ],
+        "recovery_key": "Rm63i8k0aVY1Ue7s6R-B6veiHsYyxRzhNiJ_0vk8tO0"
       }
     },
     {
@@ -453,6 +455,25 @@
         "account_id": "acc_k7m2q4x3ca",
         "device_id": "dev_p4n6r2t7bc",
         "deleted_stores": 2
+      }
+    },
+    {
+      "name": "recovery_rotate",
+      "route": "POST /v1/account/recovery",
+      "part": "request",
+      "body": {
+        "previous": "P3VZgQkKwrU01IKiaSsnbCkDDAnFmM4Quzo8s1pM_w0",
+        "recovery_key": "r2R5QtU7fp3jzI7EDD1nbeVun7gwsivx6G78ktOGPss",
+        "signature": "MEYCIQCsgnTlEufIhJ0T6QOJGVJXzC4KC0nRIk_xfQIb5rHVGQIhANDjpAeRs6LNhcXVXLNp-c-neKtQGfYY6hJGrPkgAj_s"
+      }
+    },
+    {
+      "name": "recovery_rotated",
+      "route": "POST /v1/account/recovery",
+      "part": "result",
+      "body": {
+        "account_id": "acc_k7m2q4x3ca",
+        "rotated_at": 1790003600
       }
     },
     {
