@@ -1192,6 +1192,7 @@ fn the_tunnel_carries_dials_public_agents_and_acme_and_ends_with_the_node() {
     })
     .with_test_tailnet();
     let mut acme = AcmeOptions::new(&ca.directory());
+    acme.loopback_test_ca = true;
     acme.poll_every = Duration::from_millis(50);
     node.set_connect(Some(setup(
         &connect,
@@ -1248,22 +1249,19 @@ fn the_tunnel_carries_dials_public_agents_and_acme_and_ends_with_the_node() {
         );
     }
     let connect_dir = node_dir.join("connect");
-    for file in [
-        "public-key.sealed",
-        "public-chain.pem",
-        "acme-account.sealed",
-        "node.json",
-    ] {
+    for file in ["public-cert.sealed", "acme-account.sealed", "node.json"] {
         assert_eq!(mode_of(&connect_dir.join(file)), 0o600, "{file}");
     }
     assert_eq!(mode_of(&connect_dir), 0o700);
     // The keys are sealed under the node key: no PKCS#8 key in the clear.
-    for file in ["public-key.sealed", "acme-account.sealed"] {
+    for file in ["public-cert.sealed", "acme-account.sealed"] {
         let bytes = std::fs::read(connect_dir.join(file)).expect("key file");
         // The sealed form starts with its version byte 1; a PKCS#8 DER with 0x30.
         assert_eq!(bytes.first(), Some(&1), "{file}: the sealed form");
     }
-    assert!(!connect_dir.join("public-key.der").exists());
+    for old in ["public-key.der", "public-key.sealed", "public-chain.pem"] {
+        assert!(!connect_dir.join(old).exists(), "{old}");
+    }
     assert!(!connect_dir.join("acme-account.der").exists());
     // The node answers nothing but its pending token on the ACME path (none now).
     let mut probe = TcpStream::connect(connect.acme.addr).expect("acme");

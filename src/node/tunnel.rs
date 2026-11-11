@@ -2024,7 +2024,9 @@ fn serve_link(
 }
 
 /// The certificate thread: order a certificate when there is none or it ends within the
-/// renewal window, through the tunnel once it is open; then look again every hour.
+/// renewal window, through the tunnel once it is open; then look again every hour. A
+/// certificate that was issued but could not be stored or installed is kept in memory
+/// and stored again with the backoff, without a new order, while it is usable.
 fn renew_loop(
     shared: &Arc<Shared>,
     options: &AcmeOptions,
@@ -2034,6 +2036,7 @@ fn renew_loop(
 ) {
     let stop = &shared.stop;
     let mut failures: u32 = 0;
+    let mut pending: Option<acme::Issued> = None;
     while !stop.load(Ordering::SeqCst) {
         let ready = lock(&shared.status).state == TunnelState::On;
         let picker = lock(&shared.picker).clone();
@@ -2043,26 +2046,44 @@ fn renew_loop(
             }
             continue;
         };
-        let due = match lock(&shared.status).certificate.clone() {
-            CertState::Valid { not_after } => {
-                acme::renewal_due(not_after, (options.now)(), options.renew_before)
-            }
-            _ => true,
-        };
-        if !due {
-            if !clock.wait(options.check_every, stop) {
-                return;
-            }
-            continue;
-        }
-        shared.set_cert(CertState::Requesting);
         let name = picker.public_name().to_owned();
-        match acme::obtain(options, node_dir, seal, &name, &shared.challenges, stop) {
-            Ok(issued) => {
-                let installed =
+        let installed = match lock(&shared.status).certificate.clone() {
+            CertState::Valid { not_after } => Some(not_after),
+            _ => None,
+        };
+        let step = acme::renew_step(
+            pending.as_ref(),
+            &name,
+            installed,
+            (options.now)(),
+            options.renew_before,
+        );
+        let issued = match step {
+            acme::RenewStep::Wait => {
+                if !clock.wait(options.check_every, stop) {
+                    return;
+                }
+                continue;
+            }
+            acme::RenewStep::KeepIssued => pending.take(),
+            acme::RenewStep::Order => {
+                pending = None;
+                shared.set_cert(CertState::Requesting);
+                match acme::obtain(options, node_dir, seal, &name, &shared.challenges, stop) {
+                    Ok(issued) => Some(issued),
+                    Err(error) => {
+                        shared.set_cert(CertState::Missing(error.to_string()));
+                        None
+                    }
+                }
+            }
+        };
+        match issued {
+            Some(issued) => {
+                let kept =
                     public_cert::store_public(node_dir, &issued.chain_pem, &issued.key, seal)
                         .and_then(|()| picker.install_public(&issued.chain, &issued.key));
-                match installed {
+                match kept {
                     Ok(()) => {
                         failures = 0;
                         shared.set_cert(CertState::Valid {
@@ -2074,13 +2095,11 @@ fn renew_loop(
                         shared.set_cert(CertState::Missing(format!(
                             "the certificate cannot be kept: {error}"
                         )));
+                        pending = Some(issued);
                     }
                 }
             }
-            Err(error) => {
-                failures += 1;
-                shared.set_cert(CertState::Missing(error.to_string()));
-            }
+            None => failures += 1,
         }
         if failures > 0 {
             // 1 min, doubling, at most the check interval.
