@@ -3983,3 +3983,255 @@ fn names_have_one_canonical_form_from_the_app_to_the_device_list() {
         assert!(view.devices.iter().all(|row| row.verified));
     }
 }
+
+// ---- A new recovery code from a live device (section 9.1). ----
+
+/// The body of `POST /v1/account/recovery` for the device `dev`: `signer` signs, over the
+/// `apassy-connect recovery-rotate v1` message of `origin` with `dev`'s key, the change from
+/// the recovery key `previous` to `next` (b64u).
+fn rotate_body_at(
+    origin: &str,
+    dev: &Dev,
+    signer: &DeviceKey,
+    previous: &str,
+    next: &str,
+) -> Value {
+    let message = device::account_recovery_rotate_message(
+        origin,
+        &dev.account,
+        &dev.key.public_key_b64(),
+        previous,
+        next,
+    );
+    json!({"previous": previous, "recovery_key": next,
+           "signature": encode_b64(&signer.sign(&message).unwrap())})
+}
+
+/// The body of a new recovery code by `dev`: from the key of the code `previous` to the key
+/// of the code `next`.
+fn rotate_body(c: &Connect, dev: &Dev, previous: &[u8; 16], next: &[u8; 16]) -> Value {
+    rotate_body_at(
+        c.origin(),
+        dev,
+        &dev.key,
+        &recovery_key(previous).public_key_b64(),
+        &recovery_key(next).public_key_b64(),
+    )
+}
+
+/// An account made with the recovery code `code`.
+fn create_with_code(c: &Connect, code: &[u8; 16]) -> Dev {
+    let key = DeviceKey::generate().unwrap();
+    let made = c.ok(
+        "POST",
+        "/v1/account",
+        None,
+        Some(&account_body(c, &key, code)),
+    );
+    Dev {
+        key,
+        account: made["account_id"].as_str().unwrap().into(),
+        id: made["device_id"].as_str().unwrap().into(),
+    }
+}
+
+/// A live device replaces the account's recovery key: the view shows the new key, an audit
+/// row names the account and the device, the same body again answers the same result and
+/// changes nothing, and from then on the old code's recovery is 403 and the new code
+/// recovers (once the account has no live device).
+#[test]
+fn a_live_device_makes_a_new_recovery_code_and_only_that_code_recovers() {
+    let c = start();
+    let code: [u8; 16] = std::array::from_fn(|index| 16 + index as u8);
+    let next: [u8; 16] = std::array::from_fn(|index| 80 + index as u8);
+    let a = create_with_code(&c, &code);
+    let token = sign_in(&c, &a);
+    let view = c.ok("GET", "/v1/account", Some(&token), None);
+    assert_eq!(view["recovery_key"], recovery_key(&code).public_key_b64());
+    let body = rotate_body(&c, &a, &code, &next);
+    let rotated = c.ok("POST", "/v1/account/recovery", Some(&token), Some(&body));
+    assert_eq!(rotated["account_id"], a.account.as_str());
+    assert!(rotated["rotated_at"].as_u64().is_some(), "{rotated}");
+    assert_eq!(
+        rotated.as_object().unwrap().len(),
+        2,
+        "only the account id and the time: {rotated}"
+    );
+    let view = c.ok("GET", "/v1/account", Some(&token), None);
+    assert_eq!(view["recovery_key"], recovery_key(&next).public_key_b64());
+    let rows = |action: &str| -> Vec<(String, String)> {
+        c.relay
+            .relay_audit()
+            .into_iter()
+            .filter(|(_, row, _)| row == action)
+            .map(|(actor, _, detail)| (actor, detail))
+            .collect()
+    };
+    let audit = rows("recovery_key_rotated");
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    assert_eq!(audit[0].0, format!("account:{}", a.account));
+    let detail: Value = serde_json::from_str(&audit[0].1).unwrap();
+    assert_eq!(
+        detail,
+        json!({"account_id": a.account, "device_id": a.id}),
+        "the audit names ids, never a key"
+    );
+    // The same body again (a lost answer): the same result, nothing changes.
+    std::thread::sleep(Duration::from_millis(1100));
+    let again = c.ok("POST", "/v1/account/recovery", Some(&token), Some(&body));
+    assert_eq!(again, rotated);
+    assert_eq!(rows("recovery_key_rotated").len(), 1);
+    let view = c.ok("GET", "/v1/account", Some(&token), None);
+    assert_eq!(view["recovery_key"], recovery_key(&next).public_key_b64());
+    // No live device: the old code's recovery is refused as any wrong recovery signature,
+    // and the new code recovers.
+    revoke(&c, &a, &token, &a);
+    let new_key = DeviceKey::generate().unwrap();
+    let recover = |body: &Value| c.call("POST", "/v1/account/recover", None, Some(body));
+    let (status, refused) = recover(&recover_body(&c, &a.account, &code, &new_key, &[9u8; 16]));
+    assert_eq!(
+        (status, refused["error"]["code"].as_str()),
+        (403, Some("forbidden")),
+        "{refused}"
+    );
+    let (status, recovered) = recover(&recover_body(&c, &a.account, &next, &new_key, &[9u8; 16]));
+    assert_eq!(status, 200, "{recovered}");
+    assert_eq!(recovered["result"]["account_id"], a.account.as_str());
+}
+
+/// A new recovery code needs the caller's own signature over the stored key at this
+/// Connect (else 400), the stored key as `previous` (else 409, and nothing changes), and a
+/// live device (a revoked device's token is 401).
+#[test]
+fn a_new_recovery_code_needs_the_signature_of_a_live_device_over_the_stored_key() {
+    let c = start();
+    let code: [u8; 16] = std::array::from_fn(|index| 16 + index as u8);
+    let a = create_with_code(&c, &code);
+    let token = sign_in(&c, &a);
+    let b = add_device(&c, &a, &token);
+    let b_token = sign_in(&c, &b);
+    let stored = |c: &Connect| {
+        c.ok("GET", "/v1/account", Some(&token), None)["recovery_key"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let old = recovery_key(&code).public_key_b64();
+    let next = recovery_key(&[5u8; 16]).public_key_b64();
+    let rotate =
+        |token: &str, body: &Value| c.call("POST", "/v1/account/recovery", Some(token), Some(body));
+    // Signed by another key, by the other device of the account, over another origin, or
+    // naming a key that is not 32 bytes: 400, nothing changes.
+    let stranger = DeviceKey::generate().unwrap();
+    let mut short = rotate_body_at(c.origin(), &a, &a.key, &old, &next);
+    short["recovery_key"] = json!(encode_b64(&[1u8; 31]));
+    let mut short_previous = rotate_body_at(c.origin(), &a, &a.key, &old, &next);
+    short_previous["previous"] = json!(encode_b64(&[1u8; 33]));
+    let mut extra = rotate_body(&c, &a, &code, &[5u8; 16]);
+    extra["device_id"] = json!(a.id);
+    let mut missing = rotate_body(&c, &a, &code, &[5u8; 16]);
+    missing.as_object_mut().unwrap().remove("previous");
+    for bad in [
+        rotate_body_at(c.origin(), &a, &stranger, &old, &next),
+        rotate_body_at(c.origin(), &a, &b.key, &old, &next),
+        rotate_body_at("https://other.example.test", &a, &a.key, &old, &next),
+        short,
+        short_previous,
+        extra,
+        missing,
+    ] {
+        let (status, answer) = rotate(&token, &bad);
+        assert_eq!(
+            (status, answer["error"]["code"].as_str()),
+            (400, Some("invalid_request")),
+            "{bad}: {answer}"
+        );
+    }
+    assert_eq!(stored(&c), old);
+    // Without a token, or with a team token's form: 401.
+    let (status, _) = c.call(
+        "POST",
+        "/v1/account/recovery",
+        None,
+        Some(&rotate_body(&c, &a, &code, &[5u8; 16])),
+    );
+    assert_eq!(status, 401);
+    // B rotates first; A's statement over the old key is then stale: 409, nothing changes.
+    let by_b = rotate_body(&c, &b, &code, &[5u8; 16]);
+    let (status, answer) = rotate(&b_token, &by_b);
+    assert_eq!(status, 200, "{answer}");
+    let (status, answer) = rotate(&token, &rotate_body(&c, &a, &code, &[6u8; 16]));
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (409, Some("conflict")),
+        "{answer}"
+    );
+    assert_eq!(stored(&c), next);
+    // A reads the account again and signs once more over the stored key.
+    let (status, answer) = rotate(&token, &rotate_body(&c, &a, &[5u8; 16], &[6u8; 16]));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(stored(&c), recovery_key(&[6u8; 16]).public_key_b64());
+    // A revoked device's token cannot rotate: 401, as any revoked token.
+    revoke(&c, &a, &token, &b);
+    let (status, answer) = rotate(&b_token, &rotate_body(&c, &b, &[6u8; 16], &[7u8; 16]));
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (401, Some("unauthenticated")),
+        "{answer}"
+    );
+    assert_eq!(stored(&c), recovery_key(&[6u8; 16]).public_key_b64());
+}
+
+/// A 1006 file that has `account_list.name` but lacks another part of this build's accounts
+/// step (the table `account_id_used`, the column `account_join.signature`, or the column
+/// `account.recovery_rotated_at`) is refused at open, and the open changes nothing in it.
+#[test]
+fn a_directory_at_1006_without_a_part_of_the_accounts_step_is_refused_and_left_alone() {
+    let cases = [
+        (
+            "DROP TABLE account_id_used;",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'account_id_used'",
+        ),
+        (
+            "ALTER TABLE account_join DROP COLUMN signature;",
+            "SELECT COUNT(*) FROM pragma_table_info('account_join') WHERE name = 'signature'",
+        ),
+        (
+            "ALTER TABLE account DROP COLUMN recovery_rotated_at;",
+            "SELECT COUNT(*) FROM pragma_table_info('account') WHERE name = 'recovery_rotated_at'",
+        ),
+    ];
+    for (edit, missing) in cases {
+        let c = start();
+        create(&c);
+        let (config, dir) = {
+            let Connect { relay, .. } = c;
+            relay.stop_keep()
+        };
+        let open = || {
+            let conn = rusqlite::Connection::open(config.directory_path()).unwrap();
+            conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+                .unwrap();
+            conn
+        };
+        open().execute_batch(edit).unwrap();
+        let refused = Directory::open(&config).err().expect(edit);
+        assert!(
+            refused.message.contains("earlier, unreleased build"),
+            "{edit}: {}",
+            refused.message
+        );
+        // Nothing was migrated or filled in: the file is as the edit left it.
+        let conn = open();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(count(missing), 0, "{edit}");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pragma_table_info('account_list') WHERE name = 'name'"),
+            1
+        );
+        assert_eq!(count("PRAGMA user_version"), DIRECTORY_VERSION, "{edit}");
+        assert_eq!(count("SELECT COUNT(*) FROM account"), 1, "{edit}");
+        drop(conn);
+        drop(dir);
+    }
+}

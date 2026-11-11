@@ -44,6 +44,8 @@ pub const ACCOUNT_LIST_DOMAIN: &str = "apassy-connect device-list v1";
 /// without a link.
 pub const LIST_NONE: &str = "-";
 pub const ACCOUNT_RECOVER_DOMAIN: &str = "apassy-connect recover v1";
+/// A live device replaces the account's recovery key (`POST /v1/account/recovery`).
+pub const ACCOUNT_RECOVERY_ROTATE_DOMAIN: &str = "apassy-connect recovery-rotate v1";
 /// The bouncer brain's sign-in (plan 0035 A). Connect never accepts it.
 pub const BRAIN_SIGN_IN_DOMAIN: &str = "apassy-bouncer sign-in v1";
 /// The hashes of Connect that are not signatures (section 5).
@@ -206,6 +208,27 @@ pub fn account_recover_message(
         origin.trim_end_matches('/'),
         account,
         public_key_b64,
+        recovery_key_b64,
+    ])
+}
+
+/// `"apassy-connect recovery-rotate v1" 0x00 origin 0x00 account 0x00 public_key_b64 0x00
+/// previous_b64 0x00 recovery_key_b64` (`POST /v1/account/recovery`): signed by a live
+/// device of the account; it names the recovery key that Connect holds now and the new
+/// one that replaces it.
+pub fn account_recovery_rotate_message(
+    origin: &str,
+    account: &str,
+    public_key_b64: &str,
+    previous_b64: &str,
+    recovery_key_b64: &str,
+) -> Vec<u8> {
+    joined(&[
+        ACCOUNT_RECOVERY_ROTATE_DOMAIN,
+        origin.trim_end_matches('/'),
+        account,
+        public_key_b64,
+        previous_b64,
         recovery_key_b64,
     ])
 }
@@ -741,6 +764,10 @@ mod tests {
         assert_eq!(
             account_recover_message("https://c.test", "acc_a", "PK", "RK"),
             b"apassy-connect recover v1\0https://c.test\0acc_a\0PK\0RK".to_vec()
+        );
+        assert_eq!(
+            account_recovery_rotate_message("https://c.test/", "acc_a", "PK", "R1", "R2"),
+            b"apassy-connect recovery-rotate v1\0https://c.test\0acc_a\0PK\0R1\0R2".to_vec()
         );
         // The fingerprint of a link: raw keys joined, the first 16 bytes of the hash.
         let root: Vec<u8> = std::iter::once(4u8).chain([1u8; 64]).collect();
