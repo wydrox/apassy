@@ -305,6 +305,36 @@ fn new_id(prefix: &str) -> RelayResult<String> {
     Ok(text)
 }
 
+/// The node id of an account device (contract 2: one node for each account device,
+/// stable): `node_` and 10 characters of `a-z2-7` from the first 50 bits of SHA-256 over
+/// a label, the account id, and the device id. A registration after Connect deleted the
+/// node's row (a removal, the data deletion of an ended plan) gives the same id again, so
+/// the node's check of the id that it kept for this device holds, and so does the public
+/// name of the id.
+pub fn node_id_of(account: &str, device: &str) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    for part in [
+        b"apassy-connect-tunnel-node-v1".as_slice(),
+        account.as_bytes(),
+    ] {
+        context.update(part);
+        context.update(&[0]);
+    }
+    context.update(device.as_bytes());
+    let digest = context.finish();
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest.as_ref()[..8]);
+    let bits = u64::from_be_bytes(first);
+    let mut id = String::with_capacity(15);
+    id.push_str("node_");
+    for index in 0..10 {
+        let group = (bits >> (59 - 5 * index)) & 31;
+        id.push(char::from(ALPHABET[group as usize]));
+    }
+    id
+}
+
 /// A node name: 1 to 64 bytes of UTF-8 without a control character, trimmed.
 fn checked_name(text: &str) -> RelayResult<String> {
     let text = text.trim();
@@ -417,8 +447,8 @@ fn node_view(broker: &Broker, row: NodeRow) -> TunnelNodeView {
 }
 
 /// `POST /v1/tunnel/nodes`: the node of the calling device, new or with a new name and
-/// pin. One stable node for each account device; at most `nodes_per_account` for the
-/// account (403 `account_limit`).
+/// pin. One stable node for each account device ([`node_id_of`], also after its row was
+/// deleted); at most `nodes_per_account` for the account (403 `account_limit`).
 fn register(
     hub: &Hub,
     broker: &Broker,
@@ -465,7 +495,18 @@ fn register(
                         format!("This account has {limit} nodes."),
                     ));
                 }
-                let node_id = free_id(tx, "tunnel_node", "node_")?;
+                let node_id = node_id_of(&caller.account, &caller.device);
+                let taken: bool = tx
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM tunnel_node WHERE id = ?1)",
+                        params![node_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(db)?;
+                if taken {
+                    // Another device's id (a 50-bit collision): never give one node to two.
+                    return Err(RelayError::internal("No free node id."));
+                }
                 tx.execute(
                     "INSERT INTO tunnel_node (id, account_id, device_id, name, pin, created_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1130,6 +1171,17 @@ pub fn start(hub: &Arc<Hub>) -> RelayResult<Option<TunnelRuntime>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_node_id_of_an_account_device_is_stable_and_its_own() {
+        let id = node_id_of("acc_aaaaaaaaaa", "dev_aaaaaaaaaa");
+        assert!(tunnel::valid_node_id(&id), "{id}");
+        assert_eq!(id, node_id_of("acc_aaaaaaaaaa", "dev_aaaaaaaaaa"));
+        assert_ne!(id, node_id_of("acc_aaaaaaaaaa", "dev_bbbbbbbbbb"));
+        assert_ne!(id, node_id_of("acc_bbbbbbbbbb", "dev_aaaaaaaaaa"));
+        // The parts are kept apart: no other split of the same text gives the same id.
+        assert_ne!(node_id_of("acc_a", "adev_a"), node_id_of("acc_aa", "dev_a"));
+    }
 
     #[test]
     fn thirteen_months_of_usage_stay() {
