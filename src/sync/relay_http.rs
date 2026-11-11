@@ -346,7 +346,7 @@ impl KeptState {
 
     /// Take out the connections that waited too long or whose pipe ended. The caller
     /// drops them outside the lock (a drop ends the dial).
-    fn expired(&mut self, now: Instant) -> Vec<Box<TunnelTls>> {
+    fn expired(&mut self, now: Instant) -> Vec<(Box<TunnelTls>, Instant)> {
         let idle = self.idle();
         let mut gone = Vec::new();
         for (key, (tls, since)) in &mut self.entries {
@@ -356,7 +356,6 @@ impl KeptState {
         }
         gone.iter()
             .filter_map(|key| self.entries.remove(key))
-            .map(|(tls, _)| tls)
             .collect()
     }
 }
